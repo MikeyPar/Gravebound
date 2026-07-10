@@ -3,11 +3,15 @@
 //! This crate is the sole owner of authoritative time, entity allocation, random streams, and
 //! canonical foundation-state hashing. It intentionally has no Bevy or platform dependency.
 
+mod arena;
 mod clock;
 mod entity;
 mod rng;
 mod trace;
 
+pub use arena::{
+    ArenaAnchor, ArenaGeometry, ArenaGeometryError, MILLI_TILES_PER_TILE, TilePoint, TileRectangle,
+};
 pub use clock::{FixedStepClock, TICK_RATE_HZ, Tick, duration_ms_to_ticks_ceil};
 pub use entity::{EntityId, EntityIdAllocator};
 pub use rng::{DeterministicRng, RngError, derive_stream_seed};
