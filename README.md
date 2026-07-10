@@ -4,7 +4,7 @@ Gravebound is a server-authoritative, permanent-death, 2D dark-fantasy bullet-he
 
 Every character life is temporary. The account remembers what happened, and exceptional deaths can return as personalized Fallen Hero Echo encounters. The design emphasizes readable combat, rapid recovery, fair monetization, solo viability, and long-term replayability without permanent account-level combat power.
 
-> **Project status:** Pre-production. The implementation target is a 10-working-day local First Playable, followed by a gate-based path to a networked Vertical Slice and commercial Early Access.
+> **Project status:** M00 Foundation complete. Development is entering the 10-working-day local First Playable, followed by a gate-based path to a networked Vertical Slice and commercial Early Access.
 
 ![Bell Sepulcher gameplay concept](Concept%20Art/01-bell-sepulcher-gameplay.png)
 
@@ -16,6 +16,7 @@ Every character life is temporary. The account remembers what happened, and exce
 | [Content Production Specification](Gravebound_Content_Production_Spec_v1.md) | Exact IDs, formulas, encounters, rooms, loot tables, boss schedules, manifests, cosmetics, localization, and validation rules |
 | [Development Roadmap](Gravebound_Development_Roadmap_v1.md) | Gate-based delivery plan from First Playable through Early Access and Version 1.0 |
 | [Original Ashen Veil GDD](Gravebound_Ashen_Veil_GDD.html) | Preserved source design used to produce the canonical package |
+| [M00 Completion Audit](docs/milestones/GB-M00-audit.md) | Reproducibility, validation, deterministic trace, clean CI, and Windows release evidence |
 
 The canonical GDD defines intent and product rules. The content specification is the executable authority for exact gameplay data. The roadmap controls sequencing and promotion gates.
 
@@ -91,4 +92,4 @@ Concept images establish mood, hierarchy, and visual language. They are not fina
 
 ## Current next step
 
-Complete `GB-M00-04` and the M00 exit audit: run the full CI matrix, verify a clean Windows release build and LocalLab launch, and prove two clean-cache CI passes. The deterministic foundation and strict First Playable content package now validate locally.
+Start `GB-M01-01A`: implement the Bevy camera, one-tile/one-simulation-unit mapping, and exact `32 × 24` northwest-origin Bell Laboratory shell, pillars, spawns, and debug anchors from `CONT-FP-002`. Acceptance: the authored arena renders at stable scale and its presentation coordinates map exactly to validated simulation geometry.
