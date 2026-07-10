@@ -105,18 +105,20 @@ pub struct IdError {
 fn validate_identifier(value: &str, feature: bool) -> Result<(), IdError> {
     let valid = if feature {
         let parts: Vec<_> = value.split('-').collect();
-        parts.len() >= 3
+        let milestone = parts.get(1).copied().unwrap_or_default();
+        let task = parts.get(2).copied().unwrap_or_default();
+        let task_bytes = task.as_bytes();
+        parts.len() == 3
             && parts[0] == "GB"
-            && parts[1].starts_with('M')
-            && parts[1][1..]
+            && milestone.len() == 3
+            && milestone.starts_with('M')
+            && milestone[1..]
                 .chars()
                 .all(|character| character.is_ascii_digit())
-            && parts[2..].iter().all(|part| {
-                !part.is_empty()
-                    && part.chars().all(|character| {
-                        character.is_ascii_uppercase() || character.is_ascii_digit()
-                    })
-            })
+            && (task == "GATE"
+                || ((task_bytes.len() == 2 || task_bytes.len() == 3)
+                    && task_bytes[..2].iter().all(u8::is_ascii_digit)
+                    && task_bytes[2..].iter().all(u8::is_ascii_uppercase)))
     } else {
         value.len() <= 128
             && value.split('.').count() >= 2
@@ -534,6 +536,9 @@ mod tests {
         assert!(FeatureId::parse("GB-M00-07").is_ok());
         assert!(FeatureId::parse("GB-M01-01A").is_ok());
         assert!(FeatureId::parse("gb-m00-07").is_err());
+        assert!(FeatureId::parse("GB-M-01").is_err());
+        assert!(FeatureId::parse("GB-M1-01").is_err());
+        assert!(FeatureId::parse("GB-M01-001").is_err());
     }
 
     #[test]
