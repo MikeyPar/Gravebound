@@ -1,0 +1,9 @@
+[alias]
+gb-format = "fmt --all -- --check"
+gb-lint = "clippy --workspace --all-targets -- -D warnings"
+gb-test = "test --workspace"
+gb-release = "build --release -p client_bevy"
+
+[build]
+incremental = true
+

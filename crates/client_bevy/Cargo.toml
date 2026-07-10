@@ -1,0 +1,16 @@
+[package]
+name = "client_bevy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+bevy.workspace = true
+sim_core = { path = "../sim_core" }
+
+[lints]
+workspace = true
+

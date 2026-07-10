@@ -91,5 +91,4 @@ Concept images establish mood, hierarchy, and visual language. They are not fina
 
 ## Current next step
 
-Execute roadmap milestone `GB-M00`: lock the toolchain, create the workspace, establish deterministic simulation boundaries, add content-schema validation, and make clean-clone build/test/run reproducible before beginning the First Playable.
-
+Complete `GB-M00-05` and `GB-M00-08`: implement the deterministic 30 Hz simulation clock, named RNG streams, fixed-input trace runner, and selected-tick golden state hashes described by ADR-001. Workspace/toolchain work is in place; content schemas and semantic validation follow immediately afterward.

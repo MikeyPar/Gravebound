@@ -1,0 +1,20 @@
+[package]
+name = "tools_content"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+clap.workspace = true
+content_schema = { path = "../content_schema" }
+sim_content = { path = "../sim_content" }
+sim_core = { path = "../sim_core" }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true
+
