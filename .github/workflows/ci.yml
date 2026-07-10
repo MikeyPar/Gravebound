@@ -31,7 +31,9 @@ jobs:
       - name: Validate First Playable content
         run: cargo run --locked -p tools_content -- validate
       - name: Verify deterministic trace
-        run: cargo run --locked -p tools_content -- trace tests/deterministic/m00_smoke.json
+        run: |
+          cargo run --locked -p tools_content -- trace tests/deterministic/m00_smoke.json
+          cargo run --locked -p tools_content -- trace tests/deterministic/m00_smoke.json
       - name: Verify generated schemas are current
         shell: bash
         run: |

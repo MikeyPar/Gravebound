@@ -111,9 +111,11 @@ fn run_trace_command(
 }
 
 fn default_golden_path(fixture_path: &std::path::Path) -> PathBuf {
-    let mut name = fixture_path.as_os_str().to_os_string();
-    name.push(".golden.json");
-    PathBuf::from(name)
+    let stem = fixture_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("trace");
+    fixture_path.with_file_name(format!("{stem}.golden.json"))
 }
 
 fn validate_content_command(root: &std::path::Path) -> Result<()> {

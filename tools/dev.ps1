@@ -40,6 +40,7 @@ try {
             Invoke-Cargo -Arguments @('test', '--workspace', '--locked')
             Invoke-Cargo -Arguments @('run', '--locked', '-p', 'tools_content', '--', 'validate')
             Invoke-Cargo -Arguments @('run', '--locked', '-p', 'tools_content', '--', 'trace', 'tests/deterministic/m00_smoke.json')
+            Invoke-Cargo -Arguments @('run', '--locked', '-p', 'tools_content', '--', 'trace', 'tests/deterministic/m00_smoke.json')
         }
     }
 }

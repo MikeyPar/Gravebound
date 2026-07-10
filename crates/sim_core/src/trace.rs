@@ -276,7 +276,9 @@ mod tests {
             }],
         };
 
-        assert_eq!(run_trace(&fixture), run_trace(&fixture));
+        let mut reordered = fixture.clone();
+        reordered.entities.reverse();
+        assert_eq!(run_trace(&fixture), run_trace(&reordered));
     }
 
     #[test]

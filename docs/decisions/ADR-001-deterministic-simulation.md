@@ -14,7 +14,7 @@ LocalLab, future authoritative servers, headless tests, and replay playback must
 ## Decision
 
 1. `sim_core` is a renderer-independent Rust library. It cannot depend on Bevy, platform APIs, databases, or wall-clock time.
-2. The authoritative clock is an integer `Tick(u64)` at exactly 30 Hz. One simulation step is `33,333,333` nanoseconds for scheduling/accumulation, but authored durations compile to ticks under CONT-010 before gameplay execution.
+2. The authoritative clock is an integer `Tick(u64)` at exactly 30 Hz. Presentation accumulation stores `elapsed_nanoseconds × 30` and consumes each complete `1,000,000,000` unit, avoiding drift from a rounded nanosecond step. Authored durations compile to ticks under CONT-010 before gameplay execution.
 3. Simulation inputs are associated with an explicit target tick. A step consumes one immutable input frame per controlled entity in stable entity-ID order.
 4. Runtime entities use monotonic nonzero `EntityId(u64)` values allocated by simulation state. Content uses validated lowercase dot-separated `ContentId` strings. Neither depends on Bevy ECS entity values.
 5. Canonical state hashes use BLAKE3 1.8.3 over an explicitly ordered, little-endian byte encoding. Serialization formats and debug text are not hash inputs.
@@ -52,4 +52,3 @@ LocalLab, future authoritative servers, headless tests, and replay playback must
 - `tests/deterministic/m00_smoke.golden.json`: selected-tick state hashes.
 - Unit fixtures cover tick conversion, seed construction, bounded rejection, stream separation, stable entity allocation, and canonical hash ordering.
 - CI runs the trace twice in separate processes and compares exact output bytes.
-
