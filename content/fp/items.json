@@ -1,0 +1,97 @@
+[
+  {
+    "id": "item.prototype.weapon.pine_crossbow", "schema_version": 1, "content_version": "fp.1.0.0", "enabled": true, "release_stage": "fp",
+    "localization_name_key": "item.prototype.weapon.pine_crossbow.name", "localization_description_key": "item.prototype.weapon.pine_crossbow.description",
+    "asset_ids": ["icon.item.prototype.weapon.pine_crossbow"], "tags": ["item", "slot.weapon", "rarity.worn"], "source_document_feature_id": "CONT-FP-006",
+    "numeric_payload": {"item_kind": "equipment", "slot": "weapon", "rarity": "worn", "effects": [
+      {"stat": "primary_damage", "operation": "set", "value": 20}, {"stat": "attack_interval_ms", "operation": "set", "value": 455},
+      {"stat": "range_milli_tiles", "operation": "set", "value": 9500}, {"stat": "projectile_speed_milli_tiles_per_second", "operation": "set", "value": 12000},
+      {"stat": "projectile_radius_milli_tiles", "operation": "set", "value": 100}, {"stat": "projectile_count", "operation": "set", "value": 1}, {"stat": "pierce", "operation": "set", "value": 0}
+    ]}
+  },
+  {
+    "id": "item.prototype.weapon.grave_repeater", "schema_version": 1, "content_version": "fp.1.0.0", "enabled": true, "release_stage": "fp",
+    "localization_name_key": "item.prototype.weapon.grave_repeater.name", "localization_description_key": "item.prototype.weapon.grave_repeater.description",
+    "asset_ids": ["icon.item.prototype.weapon.grave_repeater"], "tags": ["item", "slot.weapon", "rarity.forged"], "source_document_feature_id": "CONT-FP-006",
+    "numeric_payload": {"item_kind": "equipment", "slot": "weapon", "rarity": "forged", "effects": [
+      {"stat": "primary_damage", "operation": "set", "value": 17}, {"stat": "attack_interval_ms", "operation": "set", "value": 360},
+      {"stat": "range_milli_tiles", "operation": "set", "value": 8500}, {"stat": "projectile_speed_milli_tiles_per_second", "operation": "set", "value": 11000},
+      {"stat": "projectile_radius_milli_tiles", "operation": "set", "value": 100}, {"stat": "projectile_count", "operation": "set", "value": 1}, {"stat": "pierce", "operation": "set", "value": 0}
+    ]}
+  },
+  {
+    "id": "item.prototype.weapon.longbolt_crossbow", "schema_version": 1, "content_version": "fp.1.0.0", "enabled": true, "release_stage": "fp",
+    "localization_name_key": "item.prototype.weapon.longbolt_crossbow.name", "localization_description_key": "item.prototype.weapon.longbolt_crossbow.description",
+    "asset_ids": ["icon.item.prototype.weapon.longbolt_crossbow"], "tags": ["item", "slot.weapon", "rarity.oathed"], "source_document_feature_id": "CONT-FP-006",
+    "numeric_payload": {"item_kind": "equipment", "slot": "weapon", "rarity": "oathed", "effects": [
+      {"stat": "primary_damage", "operation": "set", "value": 28}, {"stat": "attack_interval_ms", "operation": "set", "value": 600},
+      {"stat": "range_milli_tiles", "operation": "set", "value": 12000}, {"stat": "projectile_speed_milli_tiles_per_second", "operation": "set", "value": 15000},
+      {"stat": "projectile_radius_milli_tiles", "operation": "set", "value": 90}, {"stat": "projectile_count", "operation": "set", "value": 1}, {"stat": "pierce", "operation": "set", "value": 0}
+    ]}
+  },
+  {
+    "id": "item.prototype.weapon.scatterbow", "schema_version": 1, "content_version": "fp.1.0.0", "enabled": true, "release_stage": "fp",
+    "localization_name_key": "item.prototype.weapon.scatterbow.name", "localization_description_key": "item.prototype.weapon.scatterbow.description",
+    "asset_ids": ["icon.item.prototype.weapon.scatterbow"], "tags": ["item", "slot.weapon", "rarity.relic"], "source_document_feature_id": "CONT-FP-006",
+    "numeric_payload": {"item_kind": "equipment", "slot": "weapon", "rarity": "relic", "effects": [
+      {"stat": "primary_damage_per_bolt", "operation": "set", "value": 12}, {"stat": "attack_interval_ms", "operation": "set", "value": 520},
+      {"stat": "range_milli_tiles", "operation": "set", "value": 8000}, {"stat": "projectile_speed_milli_tiles_per_second", "operation": "set", "value": 10500},
+      {"stat": "projectile_radius_milli_tiles", "operation": "set", "value": 100}, {"stat": "projectile_count", "operation": "set", "value": 3},
+      {"stat": "spread_degrees", "operation": "set", "value": 8}, {"stat": "max_bolts_per_target", "operation": "set", "value": 2}
+    ]}
+  },
+  {
+    "id": "item.prototype.relic.dented_scope", "schema_version": 1, "content_version": "fp.1.0.0", "enabled": true, "release_stage": "fp",
+    "localization_name_key": "item.prototype.relic.dented_scope.name", "localization_description_key": "item.prototype.relic.dented_scope.description",
+    "asset_ids": ["icon.item.prototype.relic.dented_scope"], "tags": ["item", "slot.relic", "rarity.worn"], "source_document_feature_id": "CONT-FP-006",
+    "numeric_payload": {"item_kind": "equipment", "slot": "relic", "rarity": "worn", "effects": [{"stat": "grave_mark_range_milli_tiles", "operation": "set", "value": 12000}]}
+  },
+  {
+    "id": "item.prototype.relic.mark_lens", "schema_version": 1, "content_version": "fp.1.0.0", "enabled": true, "release_stage": "fp",
+    "localization_name_key": "item.prototype.relic.mark_lens.name", "localization_description_key": "item.prototype.relic.mark_lens.description",
+    "asset_ids": ["icon.item.prototype.relic.mark_lens"], "tags": ["item", "slot.relic", "rarity.oathed"], "source_document_feature_id": "CONT-FP-006",
+    "numeric_payload": {"item_kind": "equipment", "slot": "relic", "rarity": "oathed", "effects": [{"stat": "grave_mark_duration_ms", "operation": "set", "value": 6000}, {"stat": "grave_mark_primary_bonus_basis_points", "operation": "set", "value": 1200}]}
+  },
+  {
+    "id": "item.prototype.relic.slip_clasp", "schema_version": 1, "content_version": "fp.1.0.0", "enabled": true, "release_stage": "fp",
+    "localization_name_key": "item.prototype.relic.slip_clasp.name", "localization_description_key": "item.prototype.relic.slip_clasp.description",
+    "asset_ids": ["icon.item.prototype.relic.slip_clasp"], "tags": ["item", "slot.relic", "rarity.oathed"], "source_document_feature_id": "CONT-FP-006",
+    "numeric_payload": {"item_kind": "equipment", "slot": "relic", "rarity": "oathed", "effects": [{"stat": "slipstep_cooldown_ms", "operation": "set", "value": 7000}, {"stat": "slipstep_empowered_window_ms", "operation": "set", "value": 1000}]}
+  },
+  {
+    "id": "item.prototype.armor.reedcloth_wraps", "schema_version": 1, "content_version": "fp.1.0.0", "enabled": true, "release_stage": "fp",
+    "localization_name_key": "item.prototype.armor.reedcloth_wraps.name", "localization_description_key": "item.prototype.armor.reedcloth_wraps.description",
+    "asset_ids": ["icon.item.prototype.armor.reedcloth_wraps"], "tags": ["item", "slot.armor", "rarity.worn"], "source_document_feature_id": "CONT-FP-006",
+    "numeric_payload": {"item_kind": "equipment", "slot": "armor", "rarity": "worn", "effects": [{"stat": "max_health", "operation": "add", "value": 8}]}
+  },
+  {
+    "id": "item.prototype.armor.parish_leather", "schema_version": 1, "content_version": "fp.1.0.0", "enabled": true, "release_stage": "fp",
+    "localization_name_key": "item.prototype.armor.parish_leather.name", "localization_description_key": "item.prototype.armor.parish_leather.description",
+    "asset_ids": ["icon.item.prototype.armor.parish_leather"], "tags": ["item", "slot.armor", "rarity.forged"], "source_document_feature_id": "CONT-FP-006",
+    "numeric_payload": {"item_kind": "equipment", "slot": "armor", "rarity": "forged", "effects": [{"stat": "max_health", "operation": "add", "value": 20}, {"stat": "armor", "operation": "add", "value": 2}, {"stat": "movement_speed", "operation": "multiply_basis_points", "value": 9800}]}
+  },
+  {
+    "id": "item.prototype.armor.saltglass_coat", "schema_version": 1, "content_version": "fp.1.0.0", "enabled": true, "release_stage": "fp",
+    "localization_name_key": "item.prototype.armor.saltglass_coat.name", "localization_description_key": "item.prototype.armor.saltglass_coat.description",
+    "asset_ids": ["icon.item.prototype.armor.saltglass_coat"], "tags": ["item", "slot.armor", "rarity.oathed"], "source_document_feature_id": "CONT-FP-006",
+    "numeric_payload": {"item_kind": "equipment", "slot": "armor", "rarity": "oathed", "effects": [{"stat": "max_health", "operation": "multiply_basis_points", "value": 9200}, {"stat": "armor", "operation": "add", "value": 1}, {"stat": "veil_resistance_basis_points", "operation": "add", "value": 1200}]}
+  },
+  {
+    "id": "item.prototype.charm.still_eye", "schema_version": 1, "content_version": "fp.1.0.0", "enabled": true, "release_stage": "fp",
+    "localization_name_key": "item.prototype.charm.still_eye.name", "localization_description_key": "item.prototype.charm.still_eye.description",
+    "asset_ids": ["icon.item.prototype.charm.still_eye"], "tags": ["item", "slot.charm", "rarity.oathed"], "source_document_feature_id": "CONT-FP-006",
+    "numeric_payload": {"item_kind": "equipment", "slot": "charm", "rarity": "oathed", "effects": [{"stat": "stillness_activation_ms", "operation": "set", "value": 400}, {"stat": "focused_primary_damage_bonus_basis_points", "operation": "set", "value": 600}]}
+  },
+  {
+    "id": "item.prototype.charm.undertaker_knot", "schema_version": 1, "content_version": "fp.1.0.0", "enabled": true, "release_stage": "fp",
+    "localization_name_key": "item.prototype.charm.undertaker_knot.name", "localization_description_key": "item.prototype.charm.undertaker_knot.description",
+    "asset_ids": ["icon.item.prototype.charm.undertaker_knot"], "tags": ["item", "slot.charm", "rarity.oathed"], "source_document_feature_id": "CONT-FP-006",
+    "numeric_payload": {"item_kind": "equipment", "slot": "charm", "rarity": "oathed", "effects": [{"stat": "red_tonic_restore_basis_points", "operation": "set", "value": 3500}, {"stat": "shared_potion_cooldown_ms", "operation": "set", "value": 2500}]}
+  },
+  {
+    "id": "consumable.red_tonic", "schema_version": 1, "content_version": "fp.1.0.0", "enabled": true, "release_stage": "fp",
+    "localization_name_key": "consumable.red_tonic.name", "localization_description_key": "consumable.red_tonic.description",
+    "asset_ids": ["icon.consumable.red_tonic"], "tags": ["item", "consumable", "belt"], "source_document_feature_id": "CONT-FP-007",
+    "numeric_payload": {"item_kind": "consumable", "belt_stack_cap": 6, "restore_max_health_basis_points": 3000, "restore_duration_ms": 400, "shared_cooldown_ms": 2000, "damage_interrupts_restore": false, "consumed_on_use": true}
+  }
+]

@@ -1,0 +1,44 @@
+[
+  {
+    "id": "arena.prototype.bell_laboratory_01",
+    "schema_version": 1,
+    "content_version": "fp.1.0.0",
+    "enabled": true,
+    "release_stage": "fp",
+    "localization_name_key": "arena.prototype.bell_laboratory_01.name",
+    "localization_description_key": "arena.prototype.bell_laboratory_01.description",
+    "asset_ids": ["tilemap.arena.prototype.bell_laboratory_01"],
+    "tags": ["arena", "prototype", "local_lab"],
+    "source_document_feature_id": "CONT-FP-002",
+    "numeric_payload": {
+      "width_tiles": 32,
+      "height_tiles": 24,
+      "shell_thickness_tiles": 1,
+      "player_spawn": {"x_milli_tiles": 4000, "y_milli_tiles": 12000},
+      "boss_spawn": {"x_milli_tiles": 24000, "y_milli_tiles": 12000},
+      "pillars": [
+        {"x_milli_tiles": 10000, "y_milli_tiles": 5000, "width_milli_tiles": 2000, "height_milli_tiles": 3000},
+        {"x_milli_tiles": 10000, "y_milli_tiles": 16000, "width_milli_tiles": 2000, "height_milli_tiles": 3000},
+        {"x_milli_tiles": 20000, "y_milli_tiles": 5000, "width_milli_tiles": 2000, "height_milli_tiles": 3000},
+        {"x_milli_tiles": 20000, "y_milli_tiles": 16000, "width_milli_tiles": 2000, "height_milli_tiles": 3000}
+      ],
+      "anchors": [
+        {"id": "N1", "point": {"x_milli_tiles": 8000, "y_milli_tiles": 3000}},
+        {"id": "N2", "point": {"x_milli_tiles": 16000, "y_milli_tiles": 3000}},
+        {"id": "N3", "point": {"x_milli_tiles": 24000, "y_milli_tiles": 3000}},
+        {"id": "S1", "point": {"x_milli_tiles": 8000, "y_milli_tiles": 21000}},
+        {"id": "S2", "point": {"x_milli_tiles": 16000, "y_milli_tiles": 21000}},
+        {"id": "S3", "point": {"x_milli_tiles": 24000, "y_milli_tiles": 21000}},
+        {"id": "E1", "point": {"x_milli_tiles": 29000, "y_milli_tiles": 8000}},
+        {"id": "E2", "point": {"x_milli_tiles": 29000, "y_milli_tiles": 16000}},
+        {"id": "W1", "point": {"x_milli_tiles": 3000, "y_milli_tiles": 8000}},
+        {"id": "W2", "point": {"x_milli_tiles": 3000, "y_milli_tiles": 16000}},
+        {"id": "C", "point": {"x_milli_tiles": 16000, "y_milli_tiles": 12000}},
+        {"id": "reward_pedestal", "point": {"x_milli_tiles": 4000, "y_milli_tiles": 4000}},
+        {"id": "tonic_refill", "point": {"x_milli_tiles": 4000, "y_milli_tiles": 20000}}
+      ],
+      "allowed_enemy_ids": ["enemy.drowned_pilgrim", "enemy.bell_reed", "enemy.chain_sentry"],
+      "allowed_reward_table_ids": ["reward.prototype.normal_enemy", "reward.prototype.wave_1", "reward.prototype.wave_2", "reward.prototype.wave_3", "reward.prototype.boss"]
+    }
+  }
+]

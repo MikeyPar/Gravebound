@@ -1,0 +1,232 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Array_of_PatternRecord",
+  "type": "array",
+  "items": {
+    "$ref": "#/$defs/PatternRecord"
+  },
+  "$defs": {
+    "ContentId": {
+      "description": "Stable dot-separated content identifier.",
+      "type": "string"
+    },
+    "DamageBand": {
+      "type": "string",
+      "enum": [
+        "chip",
+        "pressure",
+        "major"
+      ]
+    },
+    "DamageType": {
+      "type": "string",
+      "enum": [
+        "physical",
+        "veil"
+      ]
+    },
+    "PatternKind": {
+      "type": "string",
+      "enum": [
+        "aimed_fan",
+        "gap_ring",
+        "cross_lanes"
+      ]
+    },
+    "PatternPayload": {
+      "type": "object",
+      "properties": {
+        "active_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "audio_cue_id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "counterplay": {
+          "type": "string"
+        },
+        "cycle_ms": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "damage_band": {
+          "$ref": "#/$defs/DamageBand"
+        },
+        "damage_type": {
+          "$ref": "#/$defs/DamageType"
+        },
+        "echo_memory_family": {
+          "type": "string"
+        },
+        "first_telegraph_ms": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "lane_width_milli_tiles": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "maximum_active_instances": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "pattern_kind": {
+          "$ref": "#/$defs/PatternKind"
+        },
+        "projectile_count": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "projectile_disposition": {
+          "type": "string"
+        },
+        "projectile_lifetime_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "projectile_radius_milli_tiles": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "projectile_speed_milli_tiles_per_second": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "raw_damage": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "repeated_telegraph_ms": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "telegraph_id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "threat_cost": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "pattern_kind",
+        "cycle_ms",
+        "first_telegraph_ms",
+        "repeated_telegraph_ms",
+        "projectile_count",
+        "raw_damage",
+        "damage_type",
+        "damage_band",
+        "threat_cost",
+        "echo_memory_family",
+        "counterplay",
+        "projectile_disposition",
+        "telegraph_id",
+        "audio_cue_id",
+        "maximum_active_instances"
+      ]
+    },
+    "PatternRecord": {
+      "description": "Hostile attack contract used by the deterministic scheduler.",
+      "type": "object",
+      "properties": {
+        "asset_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContentId"
+          }
+        },
+        "content_version": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "localization_description_key": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "localization_name_key": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "numeric_payload": {
+          "$ref": "#/$defs/PatternPayload"
+        },
+        "release_stage": {
+          "$ref": "#/$defs/ReleaseStage"
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "source_document_feature_id": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "schema_version",
+        "content_version",
+        "enabled",
+        "release_stage",
+        "localization_name_key",
+        "localization_description_key",
+        "asset_ids",
+        "tags",
+        "source_document_feature_id",
+        "numeric_payload"
+      ]
+    },
+    "ReleaseStage": {
+      "description": "Earliest release stage that may enable a record.",
+      "type": "string",
+      "enum": [
+        "fp",
+        "core",
+        "slice",
+        "alpha",
+        "playtest",
+        "ea"
+      ]
+    }
+  }
+}

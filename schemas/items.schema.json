@@ -1,0 +1,212 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Array_of_ItemRecord",
+  "type": "array",
+  "items": {
+    "$ref": "#/$defs/ItemRecord"
+  },
+  "$defs": {
+    "ContentId": {
+      "description": "Stable dot-separated content identifier.",
+      "type": "string"
+    },
+    "EffectOperation": {
+      "type": "string",
+      "enum": [
+        "set",
+        "add",
+        "multiply_basis_points"
+      ]
+    },
+    "EquipmentSlot": {
+      "type": "string",
+      "enum": [
+        "weapon",
+        "relic",
+        "armor",
+        "charm"
+      ]
+    },
+    "ItemEffect": {
+      "description": "Explicit fixed-point behavior modification. No display-text parsing occurs at runtime.",
+      "type": "object",
+      "properties": {
+        "operation": {
+          "$ref": "#/$defs/EffectOperation"
+        },
+        "stat": {
+          "type": "string"
+        },
+        "value": {
+          "type": "integer",
+          "format": "int32"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "stat",
+        "operation",
+        "value"
+      ]
+    },
+    "ItemPayload": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "effects": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ItemEffect"
+              }
+            },
+            "item_kind": {
+              "type": "string",
+              "const": "equipment"
+            },
+            "rarity": {
+              "$ref": "#/$defs/ItemRarity"
+            },
+            "slot": {
+              "$ref": "#/$defs/EquipmentSlot"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "item_kind",
+            "slot",
+            "rarity",
+            "effects"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "belt_stack_cap": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "consumed_on_use": {
+              "type": "boolean"
+            },
+            "damage_interrupts_restore": {
+              "type": "boolean"
+            },
+            "item_kind": {
+              "type": "string",
+              "const": "consumable"
+            },
+            "restore_duration_ms": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "restore_max_health_basis_points": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "shared_cooldown_ms": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "item_kind",
+            "belt_stack_cap",
+            "restore_max_health_basis_points",
+            "restore_duration_ms",
+            "shared_cooldown_ms",
+            "damage_interrupts_restore",
+            "consumed_on_use"
+          ]
+        }
+      ]
+    },
+    "ItemRarity": {
+      "type": "string",
+      "enum": [
+        "worn",
+        "forged",
+        "oathed",
+        "relic"
+      ]
+    },
+    "ItemRecord": {
+      "description": "Prototype equipment or production consumable definition.",
+      "type": "object",
+      "properties": {
+        "asset_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContentId"
+          }
+        },
+        "content_version": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "localization_description_key": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "localization_name_key": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "numeric_payload": {
+          "$ref": "#/$defs/ItemPayload"
+        },
+        "release_stage": {
+          "$ref": "#/$defs/ReleaseStage"
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "source_document_feature_id": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "schema_version",
+        "content_version",
+        "enabled",
+        "release_stage",
+        "localization_name_key",
+        "localization_description_key",
+        "asset_ids",
+        "tags",
+        "source_document_feature_id",
+        "numeric_payload"
+      ]
+    },
+    "ReleaseStage": {
+      "description": "Earliest release stage that may enable a record.",
+      "type": "string",
+      "enum": [
+        "fp",
+        "core",
+        "slice",
+        "alpha",
+        "playtest",
+        "ea"
+      ]
+    }
+  }
+}

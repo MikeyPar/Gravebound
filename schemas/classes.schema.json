@@ -1,0 +1,147 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Array_of_ClassRecord",
+  "type": "array",
+  "items": {
+    "$ref": "#/$defs/ClassRecord"
+  },
+  "$defs": {
+    "ClassPayload": {
+      "type": "object",
+      "properties": {
+        "active_ability_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContentId"
+          }
+        },
+        "armor_growth_levels": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          }
+        },
+        "health_per_level": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "movement_speed_milli_tiles_per_second": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "passive_ability_id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "primary_ability_id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "starting_armor": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "starting_max_health": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "weapon_family": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "starting_max_health",
+        "health_per_level",
+        "starting_armor",
+        "armor_growth_levels",
+        "movement_speed_milli_tiles_per_second",
+        "weapon_family",
+        "primary_ability_id",
+        "active_ability_ids",
+        "passive_ability_id"
+      ]
+    },
+    "ClassRecord": {
+      "description": "Class definition and its stable gameplay references.",
+      "type": "object",
+      "properties": {
+        "asset_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContentId"
+          }
+        },
+        "content_version": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "localization_description_key": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "localization_name_key": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "numeric_payload": {
+          "$ref": "#/$defs/ClassPayload"
+        },
+        "release_stage": {
+          "$ref": "#/$defs/ReleaseStage"
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "source_document_feature_id": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "schema_version",
+        "content_version",
+        "enabled",
+        "release_stage",
+        "localization_name_key",
+        "localization_description_key",
+        "asset_ids",
+        "tags",
+        "source_document_feature_id",
+        "numeric_payload"
+      ]
+    },
+    "ContentId": {
+      "description": "Stable dot-separated content identifier.",
+      "type": "string"
+    },
+    "ReleaseStage": {
+      "description": "Earliest release stage that may enable a record.",
+      "type": "string",
+      "enum": [
+        "fp",
+        "core",
+        "slice",
+        "alpha",
+        "playtest",
+        "ea"
+      ]
+    }
+  }
+}

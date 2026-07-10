@@ -1,0 +1,97 @@
+[
+  {
+    "id": "enemy.drowned_pilgrim",
+    "schema_version": 1,
+    "content_version": "fp.1.0.0",
+    "enabled": true,
+    "release_stage": "fp",
+    "localization_name_key": "enemy.drowned_pilgrim.name",
+    "localization_description_key": "enemy.drowned_pilgrim.description",
+    "asset_ids": ["sprite.enemy.drowned_pilgrim", "portrait.enemy.drowned_pilgrim"],
+    "tags": ["enemy", "fodder"],
+    "source_document_feature_id": "CONT-FP-004",
+    "numeric_payload": {
+      "role": "fodder",
+      "health": 85,
+      "armor": 0,
+      "hurtbox_radius_milli_tiles": 340,
+      "movement_speed_milli_tiles_per_second": 2200,
+      "aggro_radius_milli_tiles": 10000,
+      "leash_radius_milli_tiles": 12000,
+      "spawn_telegraph_ms": 900,
+      "state_machine": [
+        {"state": "spawn_telegraph", "duration_ms": 900},
+        {"state": "acquire", "duration_ms": null},
+        {"state": "approach_until_distance_5", "duration_ms": null},
+        {"state": "attack_windup", "duration_ms": 300},
+        {"state": "fire_fan", "duration_ms": null},
+        {"state": "recover", "duration_ms": 1900}
+      ],
+      "pattern_ids": ["pattern.enemy.drowned_pilgrim.fan"],
+      "reward_table_id": "reward.prototype.normal_enemy"
+    }
+  },
+  {
+    "id": "enemy.bell_reed",
+    "schema_version": 1,
+    "content_version": "fp.1.0.0",
+    "enabled": true,
+    "release_stage": "fp",
+    "localization_name_key": "enemy.bell_reed.name",
+    "localization_description_key": "enemy.bell_reed.description",
+    "asset_ids": ["sprite.enemy.bell_reed", "portrait.enemy.bell_reed"],
+    "tags": ["enemy", "pressure"],
+    "source_document_feature_id": "CONT-FP-004",
+    "numeric_payload": {
+      "role": "pressure",
+      "health": 130,
+      "armor": 2,
+      "hurtbox_radius_milli_tiles": 420,
+      "movement_speed_milli_tiles_per_second": 0,
+      "aggro_radius_milli_tiles": 11000,
+      "leash_radius_milli_tiles": 12000,
+      "spawn_telegraph_ms": 900,
+      "state_machine": [
+        {"state": "spawn_telegraph", "duration_ms": 900},
+        {"state": "dormant", "duration_ms": 500},
+        {"state": "ring_telegraph", "duration_ms": null},
+        {"state": "fire_gap_ring", "duration_ms": null},
+        {"state": "recover_until_cycle", "duration_ms": 3000}
+      ],
+      "pattern_ids": ["pattern.enemy.bell_reed.gap_ring"],
+      "reward_table_id": "reward.prototype.normal_enemy"
+    }
+  },
+  {
+    "id": "enemy.chain_sentry",
+    "schema_version": 1,
+    "content_version": "fp.1.0.0",
+    "enabled": true,
+    "release_stage": "fp",
+    "localization_name_key": "enemy.chain_sentry.name",
+    "localization_description_key": "enemy.chain_sentry.description",
+    "asset_ids": ["sprite.enemy.chain_sentry", "portrait.enemy.chain_sentry"],
+    "tags": ["enemy", "anchor"],
+    "source_document_feature_id": "CONT-FP-004",
+    "numeric_payload": {
+      "role": "anchor",
+      "health": 300,
+      "armor": 5,
+      "hurtbox_radius_milli_tiles": 550,
+      "movement_speed_milli_tiles_per_second": 0,
+      "aggro_radius_milli_tiles": 13000,
+      "leash_radius_milli_tiles": 13000,
+      "spawn_telegraph_ms": 900,
+      "state_machine": [
+        {"state": "spawn_telegraph", "duration_ms": 900},
+        {"state": "dormant", "duration_ms": 700},
+        {"state": "lane_telegraph", "duration_ms": null},
+        {"state": "lane_impact", "duration_ms": 350},
+        {"state": "recover_until_cycle", "duration_ms": 4500},
+        {"state": "toggle_orientation", "duration_ms": null}
+      ],
+      "pattern_ids": ["pattern.enemy.chain_sentry.cross_lanes"],
+      "reward_table_id": "reward.prototype.normal_enemy"
+    }
+  }
+]

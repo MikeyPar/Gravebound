@@ -91,4 +91,4 @@ Concept images establish mood, hierarchy, and visual language. They are not fina
 
 ## Current next step
 
-Complete `GB-M00-06` and `GB-M00-07`: add stable content IDs, the feature registry, minimum versioned content schemas, and strict cross-reference validation for the M01 prototype bundle. The deterministic 30 Hz trace and golden state hashes are now in place.
+Complete `GB-M00-04` and the M00 exit audit: run the full CI matrix, verify a clean Windows release build and LocalLab launch, and prove two clean-cache CI passes. The deterministic foundation and strict First Playable content package now validate locally.

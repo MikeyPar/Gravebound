@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ReleaseManifest",
+  "description": "Checked-in release manifest defining the only records enabled together.",
+  "type": "object",
+  "properties": {
+    "content_version": {
+      "type": "string"
+    },
+    "release_stage": {
+      "$ref": "#/$defs/ReleaseStage"
+    },
+    "required_content_ids": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ContentId"
+      }
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "content_version",
+    "release_stage",
+    "required_content_ids"
+  ],
+  "$defs": {
+    "ContentId": {
+      "description": "Stable dot-separated content identifier.",
+      "type": "string"
+    },
+    "ReleaseStage": {
+      "description": "Earliest release stage that may enable a record.",
+      "type": "string",
+      "enum": [
+        "fp",
+        "core",
+        "slice",
+        "alpha",
+        "playtest",
+        "ea"
+      ]
+    }
+  }
+}

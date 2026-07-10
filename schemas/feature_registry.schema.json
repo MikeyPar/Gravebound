@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "FeatureRegistry",
+  "description": "Traceability registry. Every implementation task must have explicit acceptance criteria.",
+  "type": "object",
+  "properties": {
+    "features": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/FeatureEntry"
+      }
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "features"
+  ],
+  "$defs": {
+    "FeatureEntry": {
+      "type": "object",
+      "properties": {
+        "acceptance_criteria": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "depends_on": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FeatureId"
+          }
+        },
+        "feature_id": {
+          "$ref": "#/$defs/FeatureId"
+        },
+        "milestone": {
+          "type": "string"
+        },
+        "source_document_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "feature_id",
+        "title",
+        "milestone",
+        "depends_on",
+        "acceptance_criteria",
+        "source_document_ids"
+      ]
+    },
+    "FeatureId": {
+      "description": "Stable roadmap feature identifier, for example `GB-M00-07`.",
+      "type": "string"
+    }
+  }
+}

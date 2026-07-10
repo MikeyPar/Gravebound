@@ -1,0 +1,213 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Array_of_ArenaRecord",
+  "type": "array",
+  "items": {
+    "$ref": "#/$defs/ArenaRecord"
+  },
+  "$defs": {
+    "ArenaPayload": {
+      "type": "object",
+      "properties": {
+        "allowed_enemy_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContentId"
+          }
+        },
+        "allowed_reward_table_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContentId"
+          }
+        },
+        "anchors": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NamedPoint"
+          }
+        },
+        "boss_spawn": {
+          "$ref": "#/$defs/Point"
+        },
+        "height_tiles": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "pillars": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Rectangle"
+          }
+        },
+        "player_spawn": {
+          "$ref": "#/$defs/Point"
+        },
+        "shell_thickness_tiles": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "width_tiles": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "width_tiles",
+        "height_tiles",
+        "shell_thickness_tiles",
+        "player_spawn",
+        "boss_spawn",
+        "pillars",
+        "anchors",
+        "allowed_enemy_ids",
+        "allowed_reward_table_ids"
+      ]
+    },
+    "ArenaRecord": {
+      "description": "First Playable arena geometry and encounter references.",
+      "type": "object",
+      "properties": {
+        "asset_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContentId"
+          }
+        },
+        "content_version": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "localization_description_key": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "localization_name_key": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "numeric_payload": {
+          "$ref": "#/$defs/ArenaPayload"
+        },
+        "release_stage": {
+          "$ref": "#/$defs/ReleaseStage"
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "source_document_feature_id": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "schema_version",
+        "content_version",
+        "enabled",
+        "release_stage",
+        "localization_name_key",
+        "localization_description_key",
+        "asset_ids",
+        "tags",
+        "source_document_feature_id",
+        "numeric_payload"
+      ]
+    },
+    "ContentId": {
+      "description": "Stable dot-separated content identifier.",
+      "type": "string"
+    },
+    "NamedPoint": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "point": {
+          "$ref": "#/$defs/Point"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "point"
+      ]
+    },
+    "Point": {
+      "type": "object",
+      "properties": {
+        "x_milli_tiles": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "y_milli_tiles": {
+          "type": "integer",
+          "format": "int32"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "x_milli_tiles",
+        "y_milli_tiles"
+      ]
+    },
+    "Rectangle": {
+      "type": "object",
+      "properties": {
+        "height_milli_tiles": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "width_milli_tiles": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "x_milli_tiles": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "y_milli_tiles": {
+          "type": "integer",
+          "format": "int32"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "x_milli_tiles",
+        "y_milli_tiles",
+        "width_milli_tiles",
+        "height_milli_tiles"
+      ]
+    },
+    "ReleaseStage": {
+      "description": "Earliest release stage that may enable a record.",
+      "type": "string",
+      "enum": [
+        "fp",
+        "core",
+        "slice",
+        "alpha",
+        "playtest",
+        "ea"
+      ]
+    }
+  }
+}

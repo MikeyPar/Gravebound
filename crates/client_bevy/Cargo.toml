@@ -11,6 +11,11 @@ repository.workspace = true
 bevy.workspace = true
 sim_core = { path = "../sim_core" }
 
+[[bin]]
+name = "client_bevy"
+path = "src/main.rs"
+test = false
+bench = false
+
 [lints]
 workspace = true
-

@@ -1,0 +1,87 @@
+[
+  {
+    "id": "ability.arbalist.primary_crossbow",
+    "schema_version": 1,
+    "content_version": "fp.1.0.0",
+    "enabled": true,
+    "release_stage": "fp",
+    "localization_name_key": "ability.arbalist.primary_crossbow.name",
+    "localization_description_key": "ability.arbalist.primary_crossbow.description",
+    "asset_ids": ["vfx.ability.arbalist.primary_crossbow", "audio.ability.arbalist.primary_crossbow"],
+    "tags": ["primary", "projectile", "crossbow"],
+    "source_document_feature_id": "CLS-020",
+    "numeric_payload": {
+      "ability_kind": "primary",
+      "range_milli_tiles": 9500,
+      "attacks_per_second_basis_points": 22000,
+      "projectile_radius_milli_tiles": 100,
+      "stops_on_first_enemy": true
+    }
+  },
+  {
+    "id": "ability.arbalist.grave_mark",
+    "schema_version": 1,
+    "content_version": "fp.1.0.0",
+    "enabled": true,
+    "release_stage": "fp",
+    "localization_name_key": "ability.arbalist.grave_mark.name",
+    "localization_description_key": "ability.arbalist.grave_mark.description",
+    "asset_ids": ["vfx.ability.arbalist.grave_mark", "audio.ability.arbalist.grave_mark"],
+    "tags": ["active", "projectile", "mark"],
+    "source_document_feature_id": "CLS-020",
+    "numeric_payload": {
+      "ability_kind": "grave_mark",
+      "cooldown_ms": 5000,
+      "projectile_speed_milli_tiles_per_second": 12000,
+      "range_milli_tiles": 11000,
+      "weapon_damage_multiplier_basis_points": 18000,
+      "duration_ms": 4000,
+      "marked_primary_bonus_basis_points": 1500,
+      "maximum_marked_targets": 1
+    }
+  },
+  {
+    "id": "ability.arbalist.slipstep",
+    "schema_version": 1,
+    "content_version": "fp.1.0.0",
+    "enabled": true,
+    "release_stage": "fp",
+    "localization_name_key": "ability.arbalist.slipstep.name",
+    "localization_description_key": "ability.arbalist.slipstep.description",
+    "asset_ids": ["vfx.ability.arbalist.slipstep", "audio.ability.arbalist.slipstep"],
+    "tags": ["active", "movement", "empower"],
+    "source_document_feature_id": "CLS-020",
+    "numeric_payload": {
+      "ability_kind": "slipstep",
+      "cooldown_ms": 8000,
+      "travel_milli_tiles": 2000,
+      "travel_ms": 180,
+      "direct_damage_reduction_basis_points": 2500,
+      "empowered_window_ms": 1500,
+      "projectile_speed_bonus_basis_points": 3000,
+      "pierce_bonus": 1,
+      "exhaustion_ms": 1500
+    }
+  },
+  {
+    "id": "ability.arbalist.stillness",
+    "schema_version": 1,
+    "content_version": "fp.1.0.0",
+    "enabled": true,
+    "release_stage": "fp",
+    "localization_name_key": "ability.arbalist.stillness.name",
+    "localization_description_key": "ability.arbalist.stillness.description",
+    "asset_ids": ["vfx.ability.arbalist.stillness", "audio.ability.arbalist.stillness"],
+    "tags": ["passive", "focused"],
+    "source_document_feature_id": "CLS-020",
+    "numeric_payload": {
+      "ability_kind": "stillness",
+      "activation_ms": 600,
+      "movement_threshold_basis_points": 2000,
+      "projectile_speed_bonus_basis_points": 1000,
+      "primary_damage_bonus_basis_points": 800,
+      "break_on_damage": true,
+      "break_on_slipstep": true
+    }
+  }
+]

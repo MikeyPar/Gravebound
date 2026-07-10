@@ -16,8 +16,8 @@ No database, container runtime, Steam SDK, or external service is required for G
 ```powershell
 git clone https://github.com/MikeyPar/Gravebound.git
 Set-Location Gravebound
-.\tools\dev.ps1 bootstrap
-.\tools\dev.ps1 ci
+.\tools\dev.cmd bootstrap
+.\tools\dev.cmd ci
 ```
 
 `Cargo.lock` is committed. Use `--locked` for reproducible automation and do not update dependencies incidentally.
@@ -26,14 +26,15 @@ Set-Location Gravebound
 
 | Purpose | Command |
 |---|---|
-| Format check | `.\tools\dev.ps1 format` |
-| Clippy with warnings denied | `.\tools\dev.ps1 lint` |
-| Unit and integration tests | `.\tools\dev.ps1 test` |
-| Content schema and semantic validation | `.\tools\dev.ps1 validate` |
-| Deterministic headless trace | `.\tools\dev.ps1 headless` |
-| LocalLab client | `.\tools\dev.ps1 local-lab` |
-| Windows release build | `.\tools\dev.ps1 release` |
-| Full local CI equivalent | `.\tools\dev.ps1 ci` |
+| Format check | `.\tools\dev.cmd format` |
+| Clippy with warnings denied | `.\tools\dev.cmd lint` |
+| Unit and integration tests | `.\tools\dev.cmd test` |
+| Content schema and semantic validation | `.\tools\dev.cmd validate` |
+| Regenerate checked-in JSON schemas | `cargo run --locked -p tools_content -- generate-schemas` |
+| Deterministic headless trace | `.\tools\dev.cmd headless` |
+| LocalLab client | `.\tools\dev.cmd local-lab` |
+| Windows release build | `.\tools\dev.cmd release` |
+| Full local CI equivalent | `.\tools\dev.cmd ci` |
 
 Direct Cargo aliases are also available: `cargo gb-format`, `cargo gb-lint`, `cargo gb-test`, and `cargo gb-release`.
 
@@ -41,9 +42,10 @@ Direct Cargo aliases are also available: `cargo gb-format`, `cargo gb-lint`, `ca
 
 - **LocalLab:** available in M00; `client_bevy` and `sim_core` share one process with ephemeral state.
 - **Headless/Replay:** `cargo run -p tools_content -- trace tests/deterministic/m00_smoke.json`.
-- **LocalStack:** intentionally unavailable until `server_app` arrives in M02 and PostgreSQL persistence arrives in M03. `.\tools\dev.ps1 local-stack` fails explicitly rather than running a behaviorally false substitute.
+- **LocalStack:** intentionally unavailable until `server_app` arrives in M02 and PostgreSQL persistence arrives in M03. `.\tools\dev.cmd local-stack` fails explicitly rather than running a behaviorally false substitute.
 
 Gameplay rules must live in `sim_core` or validated content. `client_bevy` owns presentation only.
+Generated files in `schemas/` are committed contracts; regenerate and review them whenever a Rust content type changes.
 
 ## Logging
 

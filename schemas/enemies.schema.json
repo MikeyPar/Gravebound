@@ -1,0 +1,188 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Array_of_EnemyRecord",
+  "type": "array",
+  "items": {
+    "$ref": "#/$defs/EnemyRecord"
+  },
+  "$defs": {
+    "ContentId": {
+      "description": "Stable dot-separated content identifier.",
+      "type": "string"
+    },
+    "EnemyPayload": {
+      "type": "object",
+      "properties": {
+        "aggro_radius_milli_tiles": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "armor": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "health": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "hurtbox_radius_milli_tiles": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "leash_radius_milli_tiles": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "movement_speed_milli_tiles_per_second": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "pattern_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContentId"
+          }
+        },
+        "reward_table_id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "role": {
+          "$ref": "#/$defs/EnemyRole"
+        },
+        "spawn_telegraph_ms": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "state_machine": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/StateStep"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "role",
+        "health",
+        "armor",
+        "hurtbox_radius_milli_tiles",
+        "movement_speed_milli_tiles_per_second",
+        "aggro_radius_milli_tiles",
+        "leash_radius_milli_tiles",
+        "spawn_telegraph_ms",
+        "state_machine",
+        "pattern_ids",
+        "reward_table_id"
+      ]
+    },
+    "EnemyRecord": {
+      "description": "Enemy definition. Detailed attack geometry is owned by referenced pattern records.",
+      "type": "object",
+      "properties": {
+        "asset_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContentId"
+          }
+        },
+        "content_version": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "localization_description_key": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "localization_name_key": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "numeric_payload": {
+          "$ref": "#/$defs/EnemyPayload"
+        },
+        "release_stage": {
+          "$ref": "#/$defs/ReleaseStage"
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "source_document_feature_id": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "schema_version",
+        "content_version",
+        "enabled",
+        "release_stage",
+        "localization_name_key",
+        "localization_description_key",
+        "asset_ids",
+        "tags",
+        "source_document_feature_id",
+        "numeric_payload"
+      ]
+    },
+    "EnemyRole": {
+      "type": "string",
+      "enum": [
+        "fodder",
+        "pressure",
+        "anchor",
+        "boss"
+      ]
+    },
+    "ReleaseStage": {
+      "description": "Earliest release stage that may enable a record.",
+      "type": "string",
+      "enum": [
+        "fp",
+        "core",
+        "slice",
+        "alpha",
+        "playtest",
+        "ea"
+      ]
+    },
+    "StateStep": {
+      "type": "object",
+      "properties": {
+        "duration_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "state": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "state"
+      ]
+    }
+  }
+}

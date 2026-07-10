@@ -8,8 +8,11 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+anyhow.workspace = true
 content_schema = { path = "../content_schema" }
+serde.workspace = true
+serde_json.workspace = true
+blake3.workspace = true
 
 [lints]
 workspace = true
-

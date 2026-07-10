@@ -32,6 +32,18 @@ enum Command {
         #[arg(long)]
         no_verify: bool,
     },
+    /// Validate schemas, references, release combinations, assets, and localization.
+    Validate {
+        /// Content root containing fp, manifests, localization, and features.
+        #[arg(long, default_value = "content")]
+        root: PathBuf,
+    },
+    /// Regenerate checked-in JSON Schema contracts.
+    GenerateSchemas {
+        /// Destination directory for generated schemas.
+        #[arg(long, default_value = "schemas")]
+        output: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -56,6 +68,8 @@ fn main() -> Result<()> {
             golden,
             no_verify,
         } => run_trace_command(&fixture, golden, no_verify)?,
+        Command::Validate { root } => validate_content_command(&root)?,
+        Command::GenerateSchemas { output } => generate_schemas_command(&output)?,
     }
 
     Ok(())
@@ -100,4 +114,39 @@ fn default_golden_path(fixture_path: &std::path::Path) -> PathBuf {
     let mut name = fixture_path.as_os_str().to_os_string();
     name.push(".golden.json");
     PathBuf::from(name)
+}
+
+fn validate_content_command(root: &std::path::Path) -> Result<()> {
+    let (_, report) = sim_content::load_and_validate(root)?;
+    info!(
+        content_version = report.content_version,
+        records = report.record_count,
+        features = report.feature_count,
+        package_hash_blake3 = report.package_hash_blake3,
+        "content package is valid"
+    );
+    Ok(())
+}
+
+fn generate_schemas_command(output: &std::path::Path) -> Result<()> {
+    fs::create_dir_all(output)
+        .with_context(|| format!("failed to create schema directory {}", output.display()))?;
+    write_schema::<Vec<content_schema::ClassRecord>>(output, "classes.schema.json")?;
+    write_schema::<Vec<content_schema::AbilityRecord>>(output, "abilities.schema.json")?;
+    write_schema::<Vec<content_schema::EnemyRecord>>(output, "enemies.schema.json")?;
+    write_schema::<Vec<content_schema::PatternRecord>>(output, "patterns.schema.json")?;
+    write_schema::<Vec<content_schema::ArenaRecord>>(output, "arenas.schema.json")?;
+    write_schema::<Vec<content_schema::ItemRecord>>(output, "items.schema.json")?;
+    write_schema::<Vec<content_schema::DropTableRecord>>(output, "drop_tables.schema.json")?;
+    write_schema::<content_schema::ReleaseManifest>(output, "release_manifest.schema.json")?;
+    write_schema::<content_schema::FeatureRegistry>(output, "feature_registry.schema.json")?;
+    write_schema::<content_schema::AssetManifest>(output, "asset_manifest.schema.json")?;
+    info!(output = %output.display(), "JSON schemas generated");
+    Ok(())
+}
+
+fn write_schema<T: schemars::JsonSchema>(output: &std::path::Path, name: &str) -> Result<()> {
+    let schema = schemars::schema_for!(T);
+    let text = format!("{}\n", serde_json::to_string_pretty(&schema)?);
+    fs::write(output.join(name), text).with_context(|| format!("failed to write schema {name}"))
 }

@@ -1,0 +1,77 @@
+[
+  {
+    "id": "reward.prototype.normal_enemy", "schema_version": 1, "content_version": "fp.1.0.0", "enabled": true, "release_stage": "fp",
+    "localization_name_key": "reward.prototype.normal_enemy.name", "localization_description_key": "reward.prototype.normal_enemy.description",
+    "asset_ids": ["ui.reward.prototype.normal_enemy"], "tags": ["reward", "prototype", "enemy_drop"], "source_document_feature_id": "CONT-FP-008",
+    "numeric_payload": {"roll_groups": [
+      {"group_id": "global_equipment", "presence_basis_points": 800, "selections": 1, "without_replacement": false, "outcomes": [
+        {"item_id": "item.prototype.weapon.pine_crossbow", "weight": 12}, {"item_id": "item.prototype.weapon.grave_repeater", "weight": 10},
+        {"item_id": "item.prototype.weapon.longbolt_crossbow", "weight": 6}, {"item_id": "item.prototype.weapon.scatterbow", "weight": 6},
+        {"item_id": "item.prototype.relic.dented_scope", "weight": 12}, {"item_id": "item.prototype.relic.mark_lens", "weight": 8},
+        {"item_id": "item.prototype.relic.slip_clasp", "weight": 8}, {"item_id": "item.prototype.armor.reedcloth_wraps", "weight": 12},
+        {"item_id": "item.prototype.armor.parish_leather", "weight": 10}, {"item_id": "item.prototype.armor.saltglass_coat", "weight": 6},
+        {"item_id": "item.prototype.charm.still_eye", "weight": 6}, {"item_id": "item.prototype.charm.undertaker_knot", "weight": 4}
+      ]},
+      {"group_id": "red_tonic", "presence_basis_points": 1000, "selections": 1, "without_replacement": false, "outcomes": [{"item_id": "consumable.red_tonic", "weight": 1}]}
+    ]}
+  },
+  {
+    "id": "reward.prototype.wave_1", "schema_version": 1, "content_version": "fp.1.0.0", "enabled": true, "release_stage": "fp",
+    "localization_name_key": "reward.prototype.wave_1.name", "localization_description_key": "reward.prototype.wave_1.description",
+    "asset_ids": ["ui.reward.prototype.wave_1"], "tags": ["reward", "prototype", "wave"], "source_document_feature_id": "CONT-FP-008",
+    "numeric_payload": {"roll_groups": [
+      {"group_id": "weapon", "presence_basis_points": 10000, "selections": 1, "without_replacement": false, "outcomes": [
+        {"item_id": "item.prototype.weapon.pine_crossbow", "weight": 35}, {"item_id": "item.prototype.weapon.grave_repeater", "weight": 30},
+        {"item_id": "item.prototype.weapon.longbolt_crossbow", "weight": 20}, {"item_id": "item.prototype.weapon.scatterbow", "weight": 15}
+      ]},
+      {"group_id": "tonic", "presence_basis_points": 10000, "selections": 1, "without_replacement": false, "outcomes": [{"item_id": "consumable.red_tonic", "weight": 1}]}
+    ]}
+  },
+  {
+    "id": "reward.prototype.wave_2", "schema_version": 1, "content_version": "fp.1.0.0", "enabled": true, "release_stage": "fp",
+    "localization_name_key": "reward.prototype.wave_2.name", "localization_description_key": "reward.prototype.wave_2.description",
+    "asset_ids": ["ui.reward.prototype.wave_2"], "tags": ["reward", "prototype", "wave"], "source_document_feature_id": "CONT-FP-008",
+    "numeric_payload": {"roll_groups": [
+      {"group_id": "relic", "presence_basis_points": 10000, "selections": 1, "without_replacement": false, "outcomes": [
+        {"item_id": "item.prototype.relic.dented_scope", "weight": 40}, {"item_id": "item.prototype.relic.mark_lens", "weight": 30}, {"item_id": "item.prototype.relic.slip_clasp", "weight": 30}
+      ]},
+      {"group_id": "armor", "presence_basis_points": 10000, "selections": 1, "without_replacement": false, "outcomes": [
+        {"item_id": "item.prototype.armor.reedcloth_wraps", "weight": 40}, {"item_id": "item.prototype.armor.parish_leather", "weight": 35}, {"item_id": "item.prototype.armor.saltglass_coat", "weight": 25}
+      ]}
+    ]}
+  },
+  {
+    "id": "reward.prototype.wave_3", "schema_version": 1, "content_version": "fp.1.0.0", "enabled": true, "release_stage": "fp",
+    "localization_name_key": "reward.prototype.wave_3.name", "localization_description_key": "reward.prototype.wave_3.description",
+    "asset_ids": ["ui.reward.prototype.wave_3"], "tags": ["reward", "prototype", "wave"], "source_document_feature_id": "CONT-FP-008",
+    "numeric_payload": {"roll_groups": [
+      {"group_id": "charm", "presence_basis_points": 10000, "selections": 1, "without_replacement": false, "outcomes": [
+        {"item_id": "item.prototype.charm.still_eye", "weight": 60}, {"item_id": "item.prototype.charm.undertaker_knot", "weight": 40}
+      ]},
+      {"group_id": "global_equipment", "presence_basis_points": 10000, "selections": 1, "without_replacement": true, "outcomes": [
+        {"item_id": "item.prototype.weapon.pine_crossbow", "weight": 12}, {"item_id": "item.prototype.weapon.grave_repeater", "weight": 10},
+        {"item_id": "item.prototype.weapon.longbolt_crossbow", "weight": 6}, {"item_id": "item.prototype.weapon.scatterbow", "weight": 6},
+        {"item_id": "item.prototype.relic.dented_scope", "weight": 12}, {"item_id": "item.prototype.relic.mark_lens", "weight": 8},
+        {"item_id": "item.prototype.relic.slip_clasp", "weight": 8}, {"item_id": "item.prototype.armor.reedcloth_wraps", "weight": 12},
+        {"item_id": "item.prototype.armor.parish_leather", "weight": 10}, {"item_id": "item.prototype.armor.saltglass_coat", "weight": 6},
+        {"item_id": "item.prototype.charm.still_eye", "weight": 6}, {"item_id": "item.prototype.charm.undertaker_knot", "weight": 4}
+      ]}
+    ]}
+  },
+  {
+    "id": "reward.prototype.boss", "schema_version": 1, "content_version": "fp.1.0.0", "enabled": true, "release_stage": "fp",
+    "localization_name_key": "reward.prototype.boss.name", "localization_description_key": "reward.prototype.boss.description",
+    "asset_ids": ["ui.reward.prototype.boss"], "tags": ["reward", "prototype", "boss"], "source_document_feature_id": "CONT-FP-008",
+    "numeric_payload": {"roll_groups": [
+      {"group_id": "global_equipment", "presence_basis_points": 10000, "selections": 3, "without_replacement": true, "outcomes": [
+        {"item_id": "item.prototype.weapon.pine_crossbow", "weight": 12}, {"item_id": "item.prototype.weapon.grave_repeater", "weight": 10},
+        {"item_id": "item.prototype.weapon.longbolt_crossbow", "weight": 6}, {"item_id": "item.prototype.weapon.scatterbow", "weight": 6},
+        {"item_id": "item.prototype.relic.dented_scope", "weight": 12}, {"item_id": "item.prototype.relic.mark_lens", "weight": 8},
+        {"item_id": "item.prototype.relic.slip_clasp", "weight": 8}, {"item_id": "item.prototype.armor.reedcloth_wraps", "weight": 12},
+        {"item_id": "item.prototype.armor.parish_leather", "weight": 10}, {"item_id": "item.prototype.armor.saltglass_coat", "weight": 6},
+        {"item_id": "item.prototype.charm.still_eye", "weight": 6}, {"item_id": "item.prototype.charm.undertaker_knot", "weight": 4}
+      ]},
+      {"group_id": "tonics", "presence_basis_points": 10000, "selections": 2, "without_replacement": false, "outcomes": [{"item_id": "consumable.red_tonic", "weight": 1}]}
+    ]}
+  }
+]

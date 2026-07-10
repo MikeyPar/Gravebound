@@ -21,27 +21,28 @@ try {
     switch ($Command) {
         'bootstrap' {
             rustup show active-toolchain
-            Invoke-Cargo fetch --locked
-            Invoke-Cargo run --locked -p tools_content -- doctor
+            Invoke-Cargo -Arguments @('fetch', '--locked')
+            Invoke-Cargo -Arguments @('run', '--locked', '-p', 'tools_content', '--', 'doctor')
         }
-        'format' { Invoke-Cargo fmt --all -- --check }
-        'lint' { Invoke-Cargo clippy --workspace --all-targets -- -D warnings }
-        'test' { Invoke-Cargo test --workspace }
-        'validate' { Invoke-Cargo run --locked -p tools_content -- validate }
-        'headless' { Invoke-Cargo run --locked -p tools_content -- trace --fixture tests/deterministic/m00_smoke.json }
-        'local-lab' { Invoke-Cargo run --locked -p client_bevy }
+        'format' { Invoke-Cargo -Arguments @('fmt', '--all', '--', '--check') }
+        'lint' { Invoke-Cargo -Arguments @('clippy', '--workspace', '--all-targets', '--', '-D', 'warnings') }
+        'test' { Invoke-Cargo -Arguments @('test', '--workspace', '--locked') }
+        'validate' { Invoke-Cargo -Arguments @('run', '--locked', '-p', 'tools_content', '--', 'validate') }
+        'headless' { Invoke-Cargo -Arguments @('run', '--locked', '-p', 'tools_content', '--', 'trace', 'tests/deterministic/m00_smoke.json') }
+        'local-lab' { Invoke-Cargo -Arguments @('run', '--locked', '-p', 'client_bevy') }
         'local-stack' {
             throw 'LocalStack becomes runnable with GB-M02-00 (server_app) and GB-M03-02 (PostgreSQL). M00 intentionally provides no substitute server.'
         }
-        'release' { Invoke-Cargo build --locked --release -p client_bevy }
+        'release' { Invoke-Cargo -Arguments @('build', '--locked', '--release', '-p', 'client_bevy') }
         'ci' {
-            Invoke-Cargo fmt --all -- --check
-            Invoke-Cargo clippy --workspace --all-targets -- -D warnings
-            Invoke-Cargo test --workspace
+            Invoke-Cargo -Arguments @('fmt', '--all', '--', '--check')
+            Invoke-Cargo -Arguments @('clippy', '--workspace', '--all-targets', '--', '-D', 'warnings')
+            Invoke-Cargo -Arguments @('test', '--workspace', '--locked')
+            Invoke-Cargo -Arguments @('run', '--locked', '-p', 'tools_content', '--', 'validate')
+            Invoke-Cargo -Arguments @('run', '--locked', '-p', 'tools_content', '--', 'trace', 'tests/deterministic/m00_smoke.json')
         }
     }
 }
 finally {
     Pop-Location
 }
-

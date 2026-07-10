@@ -1,0 +1,155 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Array_of_DropTableRecord",
+  "type": "array",
+  "items": {
+    "$ref": "#/$defs/DropTableRecord"
+  },
+  "$defs": {
+    "ContentId": {
+      "description": "Stable dot-separated content identifier.",
+      "type": "string"
+    },
+    "DropRollGroup": {
+      "type": "object",
+      "properties": {
+        "group_id": {
+          "type": "string"
+        },
+        "outcomes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WeightedOutcome"
+          }
+        },
+        "presence_basis_points": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "selections": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "without_replacement": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "group_id",
+        "presence_basis_points",
+        "selections",
+        "without_replacement",
+        "outcomes"
+      ]
+    },
+    "DropTablePayload": {
+      "type": "object",
+      "properties": {
+        "roll_groups": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DropRollGroup"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "roll_groups"
+      ]
+    },
+    "DropTableRecord": {
+      "description": "Deterministic reward table made of ordered independent or guaranteed roll groups.",
+      "type": "object",
+      "properties": {
+        "asset_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContentId"
+          }
+        },
+        "content_version": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "localization_description_key": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "localization_name_key": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "numeric_payload": {
+          "$ref": "#/$defs/DropTablePayload"
+        },
+        "release_stage": {
+          "$ref": "#/$defs/ReleaseStage"
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "source_document_feature_id": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "schema_version",
+        "content_version",
+        "enabled",
+        "release_stage",
+        "localization_name_key",
+        "localization_description_key",
+        "asset_ids",
+        "tags",
+        "source_document_feature_id",
+        "numeric_payload"
+      ]
+    },
+    "ReleaseStage": {
+      "description": "Earliest release stage that may enable a record.",
+      "type": "string",
+      "enum": [
+        "fp",
+        "core",
+        "slice",
+        "alpha",
+        "playtest",
+        "ea"
+      ]
+    },
+    "WeightedOutcome": {
+      "type": "object",
+      "properties": {
+        "item_id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "weight": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "item_id",
+        "weight"
+      ]
+    }
+  }
+}

@@ -1,0 +1,15 @@
+# Content implementation contract
+
+The checked-in `fp.1.0.0` package is the machine-readable First Playable contract derived from the canonical GDD (`CLS-020`) and Content Production Specification (`CONT-001` through `CONT-FP-010`). The roadmap controls implementation order through `content/features/registry.json`.
+
+Runtime code must deserialize these records through `content_schema` and consume only a package accepted by `sim_content`. Do not parse display strings, infer omitted defaults, rename stable IDs, or load an unlisted record. Numeric gameplay values use the fixed-point units named by each field: milliseconds, milli-tiles, milli-tiles per second, or basis points.
+
+Implementation order for each consuming feature is:
+
+1. Select its stable `GB-*` entry and acceptance criteria from the feature registry.
+2. Read the cited GDD, content-specification, and roadmap sections together.
+3. Consume the checked-in typed record; do not duplicate its numeric values in presentation code.
+4. Add deterministic unit or trace coverage before enabling the behavior.
+5. Run `cargo run --locked -p tools_content -- validate`, the golden trace, and the full workspace tests.
+
+`manifests/fp.1.0.0.json` is an exact allowlist. `assets.fp.json` and `localization/en-US.json` are reference manifests for foundation validation; placeholder presentation assets may satisfy these IDs during M01, but unresolved IDs may never ship.

@@ -1,0 +1,287 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Array_of_AbilityRecord",
+  "type": "array",
+  "items": {
+    "$ref": "#/$defs/AbilityRecord"
+  },
+  "$defs": {
+    "AbilityPayload": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "ability_kind": {
+              "type": "string",
+              "const": "primary"
+            },
+            "attacks_per_second_basis_points": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "projectile_radius_milli_tiles": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "range_milli_tiles": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "stops_on_first_enemy": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "ability_kind",
+            "range_milli_tiles",
+            "attacks_per_second_basis_points",
+            "projectile_radius_milli_tiles",
+            "stops_on_first_enemy"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "ability_kind": {
+              "type": "string",
+              "const": "grave_mark"
+            },
+            "cooldown_ms": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "duration_ms": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "marked_primary_bonus_basis_points": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "maximum_marked_targets": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "projectile_speed_milli_tiles_per_second": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "range_milli_tiles": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "weapon_damage_multiplier_basis_points": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "ability_kind",
+            "cooldown_ms",
+            "projectile_speed_milli_tiles_per_second",
+            "range_milli_tiles",
+            "weapon_damage_multiplier_basis_points",
+            "duration_ms",
+            "marked_primary_bonus_basis_points",
+            "maximum_marked_targets"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "ability_kind": {
+              "type": "string",
+              "const": "slipstep"
+            },
+            "cooldown_ms": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "direct_damage_reduction_basis_points": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "empowered_window_ms": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "exhaustion_ms": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "pierce_bonus": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "projectile_speed_bonus_basis_points": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "travel_milli_tiles": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "travel_ms": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "ability_kind",
+            "cooldown_ms",
+            "travel_milli_tiles",
+            "travel_ms",
+            "direct_damage_reduction_basis_points",
+            "empowered_window_ms",
+            "projectile_speed_bonus_basis_points",
+            "pierce_bonus",
+            "exhaustion_ms"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "ability_kind": {
+              "type": "string",
+              "const": "stillness"
+            },
+            "activation_ms": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "break_on_damage": {
+              "type": "boolean"
+            },
+            "break_on_slipstep": {
+              "type": "boolean"
+            },
+            "movement_threshold_basis_points": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "primary_damage_bonus_basis_points": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "projectile_speed_bonus_basis_points": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "ability_kind",
+            "activation_ms",
+            "movement_threshold_basis_points",
+            "projectile_speed_bonus_basis_points",
+            "primary_damage_bonus_basis_points",
+            "break_on_damage",
+            "break_on_slipstep"
+          ]
+        }
+      ]
+    },
+    "AbilityRecord": {
+      "description": "Ability definition with a fully materialized type-specific payload.",
+      "type": "object",
+      "properties": {
+        "asset_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContentId"
+          }
+        },
+        "content_version": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "localization_description_key": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "localization_name_key": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "numeric_payload": {
+          "$ref": "#/$defs/AbilityPayload"
+        },
+        "release_stage": {
+          "$ref": "#/$defs/ReleaseStage"
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "source_document_feature_id": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "schema_version",
+        "content_version",
+        "enabled",
+        "release_stage",
+        "localization_name_key",
+        "localization_description_key",
+        "asset_ids",
+        "tags",
+        "source_document_feature_id",
+        "numeric_payload"
+      ]
+    },
+    "ContentId": {
+      "description": "Stable dot-separated content identifier.",
+      "type": "string"
+    },
+    "ReleaseStage": {
+      "description": "Earliest release stage that may enable a record.",
+      "type": "string",
+      "enum": [
+        "fp",
+        "core",
+        "slice",
+        "alpha",
+        "playtest",
+        "ea"
+      ]
+    }
+  }
+}
