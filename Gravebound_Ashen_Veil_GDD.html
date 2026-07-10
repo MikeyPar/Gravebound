@@ -1,0 +1,3031 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gravebound: The Ashen Veil - Game Design Document</title>
+  <style>
+    :root {
+      --ink: #181514;
+      --ink-soft: #3a3431;
+      --muted: #6e6560;
+      --paper: #f6f0e7;
+      --paper-2: #eee4d5;
+      --panel: #fffaf1;
+      --line: #d4c6b2;
+      --line-strong: #9d896e;
+      --blood: #8d262b;
+      --blood-dark: #5d171b;
+      --moss: #51624b;
+      --brass: #9a7440;
+      --violet: #40334e;
+      --steel: #48525a;
+      --success: #396845;
+      --warning: #a46a1d;
+      --danger: #9a242a;
+      --radius: 8px;
+      --space-1: 4px;
+      --space-2: 8px;
+      --space-3: 12px;
+      --space-4: 16px;
+      --space-5: 24px;
+      --space-6: 32px;
+      --space-7: 48px;
+      --space-8: 64px;
+      --shadow: 0 12px 34px rgba(54, 40, 28, 0.12);
+      --mono: "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
+      --sans: Aptos, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+      --serif: "Palatino Linotype", Palatino, Georgia, serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: var(--paper);
+      font-family: var(--sans);
+      font-size: 16px;
+      line-height: 1.62;
+      text-rendering: optimizeLegibility;
+    }
+
+    a {
+      color: var(--blood-dark);
+      text-decoration-thickness: 1px;
+      text-underline-offset: 3px;
+    }
+
+    a:hover {
+      color: var(--blood);
+    }
+
+    .shell {
+      display: grid;
+      grid-template-columns: 300px minmax(0, 1fr);
+      min-height: 100vh;
+    }
+
+    .sidebar {
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      overflow: auto;
+      padding: var(--space-5);
+      background: #221d1b;
+      color: #f3eadb;
+      border-right: 1px solid #3d342f;
+    }
+
+    .brand {
+      padding-bottom: var(--space-5);
+      border-bottom: 1px solid rgba(243, 234, 219, 0.18);
+      margin-bottom: var(--space-5);
+    }
+
+    .brand .kicker,
+    .section-kicker {
+      margin: 0 0 var(--space-2);
+      color: #c8a973;
+      font-family: var(--mono);
+      font-size: 11px;
+      line-height: 1.4;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .brand h1 {
+      margin: 0;
+      color: #fff6e8;
+      font-family: var(--serif);
+      font-size: 30px;
+      line-height: 1.05;
+      letter-spacing: 0;
+    }
+
+    .brand p {
+      margin: var(--space-3) 0 0;
+      color: #d8cebd;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    .meta {
+      display: grid;
+      gap: var(--space-2);
+      margin-bottom: var(--space-5);
+      color: #d8cebd;
+      font-size: 13px;
+    }
+
+    .meta span {
+      display: block;
+    }
+
+    .nav-title {
+      margin: 0 0 var(--space-2);
+      color: #f3eadb;
+      font-family: var(--mono);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .toc {
+      display: grid;
+      gap: 2px;
+      padding: 0;
+      margin: 0;
+      list-style: none;
+    }
+
+    .toc a {
+      display: block;
+      padding: 7px 8px;
+      border-radius: 6px;
+      color: #e6dac7;
+      text-decoration: none;
+      font-size: 13px;
+      line-height: 1.3;
+    }
+
+    .toc a:hover,
+    .toc a:focus-visible {
+      background: rgba(200, 169, 115, 0.14);
+      color: #fff9ec;
+      outline: 0;
+    }
+
+    .doc {
+      min-width: 0;
+    }
+
+    .hero {
+      min-height: 82vh;
+      display: grid;
+      align-content: end;
+      padding: clamp(40px, 7vw, 96px);
+      background:
+        linear-gradient(rgba(24, 21, 20, 0.72), rgba(24, 21, 20, 0.62)),
+        repeating-linear-gradient(135deg, #2a2522, #2a2522 10px, #302923 10px, #302923 20px);
+      color: #fff8ec;
+      border-bottom: 1px solid var(--line-strong);
+    }
+
+    .hero-inner {
+      max-width: 980px;
+    }
+
+    .hero h2 {
+      max-width: 880px;
+      margin: 0 0 var(--space-4);
+      font-family: var(--serif);
+      font-size: clamp(48px, 8vw, 96px);
+      line-height: 0.95;
+      letter-spacing: 0;
+    }
+
+    .hero .subtitle {
+      max-width: 780px;
+      margin: 0 0 var(--space-5);
+      color: #eadbc3;
+      font-size: clamp(18px, 2.1vw, 25px);
+      line-height: 1.42;
+    }
+
+    .hero-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: var(--space-3);
+      max-width: 960px;
+    }
+
+    .stat {
+      border: 1px solid rgba(243, 234, 219, 0.24);
+      background: rgba(255, 250, 241, 0.08);
+      border-radius: var(--radius);
+      padding: var(--space-4);
+    }
+
+    .stat strong {
+      display: block;
+      color: #fff8ec;
+      font-family: var(--serif);
+      font-size: 22px;
+      line-height: 1.1;
+      letter-spacing: 0;
+    }
+
+    .stat span {
+      display: block;
+      margin-top: var(--space-1);
+      color: #d8cebd;
+      font-size: 12px;
+      line-height: 1.35;
+    }
+
+    .content {
+      max-width: 1180px;
+      padding: var(--space-7) clamp(24px, 6vw, 88px) var(--space-8);
+    }
+
+    section {
+      scroll-margin-top: 28px;
+      margin-bottom: var(--space-8);
+    }
+
+    h2,
+    h3,
+    h4 {
+      color: var(--ink);
+      letter-spacing: 0;
+    }
+
+    h2 {
+      margin: 0 0 var(--space-5);
+      font-family: var(--serif);
+      font-size: clamp(32px, 4vw, 52px);
+      line-height: 1.05;
+    }
+
+    h3 {
+      margin: var(--space-6) 0 var(--space-3);
+      font-size: 24px;
+      line-height: 1.2;
+    }
+
+    h4 {
+      margin: var(--space-5) 0 var(--space-2);
+      font-size: 18px;
+      line-height: 1.3;
+    }
+
+    p {
+      margin: 0 0 var(--space-4);
+      max-width: 900px;
+    }
+
+    ul,
+    ol {
+      max-width: 940px;
+      padding-left: 22px;
+      margin: 0 0 var(--space-5);
+    }
+
+    li {
+      margin-bottom: var(--space-2);
+    }
+
+    .lead {
+      max-width: 980px;
+      color: var(--ink-soft);
+      font-size: 19px;
+      line-height: 1.58;
+    }
+
+    .callout,
+    .decision,
+    .warning,
+    .principle,
+    .quote-panel {
+      max-width: 980px;
+      margin: var(--space-5) 0;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel);
+      box-shadow: var(--shadow);
+      padding: var(--space-5);
+    }
+
+    .decision {
+      border-color: rgba(141, 38, 43, 0.4);
+    }
+
+    .warning {
+      border-color: rgba(164, 106, 29, 0.45);
+      background: #fff3dc;
+    }
+
+    .principle {
+      background: #f0e8da;
+      box-shadow: none;
+    }
+
+    .quote-panel {
+      background: #221d1b;
+      color: #f3eadb;
+    }
+
+    .quote-panel p {
+      color: #f3eadb;
+    }
+
+    .quote-panel strong {
+      color: #d2ad69;
+    }
+
+    .grid-2,
+    .grid-3,
+    .grid-4 {
+      display: grid;
+      gap: var(--space-4);
+      margin: var(--space-4) 0 var(--space-5);
+    }
+
+    .grid-2 {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .grid-3 {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .grid-4 {
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+
+    .tile {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel);
+      padding: var(--space-4);
+    }
+
+    .tile h4 {
+      margin-top: 0;
+    }
+
+    .tile p,
+    .tile li {
+      color: var(--ink-soft);
+      font-size: 14px;
+      line-height: 1.55;
+    }
+
+    .pill-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: var(--space-2);
+      margin: var(--space-3) 0 var(--space-5);
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      min-height: 30px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--panel);
+      padding: 4px 10px;
+      color: var(--ink-soft);
+      font-family: var(--mono);
+      font-size: 12px;
+      line-height: 1.2;
+    }
+
+    table {
+      width: 100%;
+      max-width: 1080px;
+      border-collapse: collapse;
+      margin: var(--space-4) 0 var(--space-6);
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      overflow: hidden;
+      font-size: 14px;
+    }
+
+    th,
+    td {
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+      text-align: left;
+    }
+
+    th {
+      background: #eadfcd;
+      color: var(--ink);
+      font-family: var(--mono);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    tr:last-child td {
+      border-bottom: 0;
+    }
+
+    code,
+    pre {
+      font-family: var(--mono);
+    }
+
+    code {
+      background: #eadfcd;
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      padding: 1px 5px;
+      font-size: 0.92em;
+    }
+
+    pre {
+      max-width: 1080px;
+      overflow: auto;
+      margin: var(--space-4) 0 var(--space-6);
+      padding: var(--space-4);
+      border: 1px solid #3b332e;
+      border-radius: var(--radius);
+      background: #201c1a;
+      color: #f0e3cf;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: var(--space-3);
+      margin: var(--space-4) 0 var(--space-6);
+      max-width: 1080px;
+    }
+
+    .flow > div {
+      position: relative;
+      min-height: 118px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel);
+      padding: var(--space-4);
+    }
+
+    .flow b {
+      display: block;
+      margin-bottom: var(--space-2);
+      font-family: var(--serif);
+      font-size: 20px;
+      line-height: 1.1;
+    }
+
+    .flow span {
+      color: var(--ink-soft);
+      font-size: 13px;
+      line-height: 1.4;
+    }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      border-radius: 4px;
+      padding: 2px 8px;
+      color: #fff8ec;
+      background: var(--steel);
+      font-family: var(--mono);
+      font-size: 11px;
+      line-height: 1.2;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .tag.core { background: var(--blood-dark); }
+    .tag.meta { background: var(--moss); }
+    .tag.ops { background: var(--brass); }
+    .tag.tech { background: var(--violet); }
+
+    .checklist {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: var(--space-3);
+      max-width: 1080px;
+      margin: var(--space-4) 0 var(--space-6);
+    }
+
+    .checklist div {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel);
+      padding: var(--space-4);
+    }
+
+    .checklist strong {
+      display: block;
+      margin-bottom: var(--space-1);
+    }
+
+    .checklist span {
+      color: var(--ink-soft);
+      font-size: 14px;
+    }
+
+    .small {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .divider {
+      height: 1px;
+      max-width: 1080px;
+      margin: var(--space-7) 0;
+      background: var(--line);
+    }
+
+    .print-note {
+      display: none;
+    }
+
+    @media (max-width: 1120px) {
+      .shell {
+        grid-template-columns: 1fr;
+      }
+
+      .sidebar {
+        position: relative;
+        height: auto;
+      }
+
+      .toc {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+    }
+
+    @media (max-width: 780px) {
+      .hero {
+        min-height: auto;
+        padding: 44px 22px;
+      }
+
+      .hero-grid,
+      .grid-2,
+      .grid-3,
+      .grid-4,
+      .flow,
+      .checklist {
+        grid-template-columns: 1fr;
+      }
+
+      .content {
+        padding: 40px 20px 64px;
+      }
+
+      .toc {
+        grid-template-columns: 1fr;
+      }
+
+      table {
+        display: block;
+        overflow-x: auto;
+        white-space: nowrap;
+      }
+    }
+
+    @media print {
+      body {
+        background: white;
+        color: #111;
+        font-size: 11pt;
+      }
+
+      .shell {
+        display: block;
+      }
+
+      .sidebar,
+      .hero {
+        display: none;
+      }
+
+      .content {
+        max-width: none;
+        padding: 0;
+      }
+
+      section {
+        break-inside: avoid;
+        margin-bottom: 28pt;
+      }
+
+      h2 {
+        font-size: 24pt;
+      }
+
+      h3 {
+        font-size: 16pt;
+      }
+
+      .callout,
+      .decision,
+      .warning,
+      .principle,
+      .tile,
+      table,
+      pre {
+        box-shadow: none;
+      }
+
+      .print-note {
+        display: block;
+        margin: 0 0 20pt;
+        font-size: 10pt;
+        color: #444;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar" aria-label="Document navigation">
+      <div class="brand">
+        <p class="kicker">Commercial GDD / v0.1</p>
+        <h1>Gravebound: The Ashen Veil</h1>
+        <p>Original dark-fantasy permadeath MMO bullet hell for browser and PC, built in Rust with Bevy.</p>
+      </div>
+
+      <div class="meta" aria-label="Document metadata">
+        <span><strong>Audience:</strong> Developers, designers, artists, economy, backend, live ops, production.</span>
+        <span><strong>Architecture:</strong> Large-scale from day one, 10k concurrent player target.</span>
+        <span><strong>Monetization:</strong> Cosmetics and convenience only. No paid power.</span>
+      </div>
+
+      <p class="nav-title">Contents</p>
+      <ol class="toc">
+        <li><a href="#assumptions">0. Assumptions</a></li>
+        <li><a href="#summary">1. Executive Summary</a></li>
+        <li><a href="#pillars">2. Pillars</a></li>
+        <li><a href="#audience">3. Audience and Platforms</a></li>
+        <li><a href="#world">4. World and IP</a></li>
+        <li><a href="#loop">5. Core Loop</a></li>
+        <li><a href="#combat">6. Combat</a></li>
+        <li><a href="#classes">7. Classes</a></li>
+        <li><a href="#open-world">8. Open World</a></li>
+        <li><a href="#dungeons">9. Dungeons</a></li>
+        <li><a href="#bosses">10. Bosses and Enemies</a></li>
+        <li><a href="#loot">11. Loot</a></li>
+        <li><a href="#progression">12. Progression</a></li>
+        <li><a href="#economy">13. Economy</a></li>
+        <li><a href="#social">14. Social</a></li>
+        <li><a href="#monetization">15. Monetization</a></li>
+        <li><a href="#frontend">16. Frontend Client</a></li>
+        <li><a href="#backend">17. Backend</a></li>
+        <li><a href="#networking">18. Networking</a></li>
+        <li><a href="#scale">19. 10k CCU Scale</a></li>
+        <li><a href="#security">20. Security</a></li>
+        <li><a href="#data">21. Data and Tools</a></li>
+        <li><a href="#art-audio">22. Art and Audio</a></li>
+        <li><a href="#ux">23. UX and Accessibility</a></li>
+        <li><a href="#liveops">24. Live Ops</a></li>
+        <li><a href="#roadmap">25. Roadmap</a></li>
+        <li><a href="#risks">26. Risks</a></li>
+        <li><a href="#appendix">27. Appendix</a></li>
+      </ol>
+    </aside>
+
+    <main class="doc">
+      <header class="hero">
+        <div class="hero-inner">
+          <p class="section-kicker">Game Design Document</p>
+          <h2>Die, descend, rebuild, and return to a cursed world that never stops opening.</h2>
+          <p class="subtitle">
+            A production-ready design for an original 2D pixel art MMO bullet hell with permadeath,
+            open-world danger, procedural dungeon crawling, Diablo-style loot, and a fair business model.
+          </p>
+          <div class="hero-grid" aria-label="Key game facts">
+            <div class="stat"><strong>Rust + Bevy</strong><span>Native PC client and WASM/browser client from shared gameplay crates.</span></div>
+            <div class="stat"><strong>10k CCU</strong><span>Authoritative regional backend designed for large concurrency from day one.</span></div>
+            <div class="stat"><strong>Permadeath</strong><span>Characters die permanently, accounts grow through legacy, skill, and collection.</span></div>
+            <div class="stat"><strong>No P2W</strong><span>Cosmetics, character slots, storage, profile expression, and convenience.</span></div>
+          </div>
+        </div>
+      </header>
+
+      <div class="content">
+        <p class="print-note">Gravebound: The Ashen Veil GDD. Browser and PC. Rust + Bevy. v0.1.</p>
+
+        <section id="assumptions">
+          <p class="section-kicker">0. Read First</p>
+          <h2>Assumptions and Design Contract</h2>
+          <p class="lead">
+            This document answers the provided brief as a complete starting point for a commercially viable game.
+            It treats "similar to Realm of the Mad God" as genre inspiration only: a fast top-down MMO bullet hell,
+            not a copy of names, art, maps, classes, enemies, items, UI, lore, or proprietary progression.
+          </p>
+
+          <div class="decision">
+            <h3>Primary Decisions</h3>
+            <ul>
+              <li><strong>Working title:</strong> <em>Gravebound: The Ashen Veil</em>. The title is original and can be replaced later without changing systems.</li>
+              <li><strong>Genre:</strong> 2D pixel art MMO action RPG, bullet hell, open-world events, instanced dungeon crawling, permadeath, and loot-driven builds.</li>
+              <li><strong>Engine and language:</strong> Rust with Bevy for client gameplay, rendering, UI integration, tooling previews, and shared ECS-compatible gameplay modules.</li>
+              <li><strong>Platforms:</strong> Browser and PC at launch. PC is the high-fidelity path; browser is a full-featured path with tuned asset and networking budgets.</li>
+              <li><strong>Backend posture:</strong> Authoritative, horizontally scalable, service-separated, region-aware, and designed for 10k concurrent players from day one.</li>
+              <li><strong>Business rule:</strong> Never sell combat stats, drop-rate boosts, death protection, resurrection, leaderboard advantage, trade advantage, or power acceleration.</li>
+            </ul>
+          </div>
+
+          <h3>Non-Goals</h3>
+          <ul>
+            <li>No direct recreation of another game's world, gods, class kit names, item names, map layout, art style details, boss patterns, UI, or monetization implementation.</li>
+            <li>No "pay to recover death" mechanic. Death must stay meaningful and trusted.</li>
+            <li>No client-authoritative combat. Every hit, death, drop, trade, and inventory mutation is server-owned.</li>
+            <li>No single-machine MMO prototype architecture. Local development can be simple, but production assumptions must not collapse under scale.</li>
+          </ul>
+
+          <h3>Definition of Fun</h3>
+          <p>
+            The game is fun when a player can read a dangerous screen, make a skillful escape, earn a memorable drop,
+            die with a story worth telling, and start another run within seconds because the next character already has
+            a tempting build path. Addiction comes from mastery and discovery, not manipulation: clear odds, recoverable
+            momentum, social ritual, collection, seasonal goals, and combat that is fair even when it is brutal.
+          </p>
+        </section>
+
+        <section id="summary">
+          <p class="section-kicker">1. Product Overview</p>
+          <h2>Executive Summary</h2>
+          <p class="lead">
+            <em>Gravebound: The Ashen Veil</em> is a dark-fantasy MMO action RPG where players create mortal champions
+            sworn to a ruined order, fight through a corrupted open world, dive into dangerous dungeons, and chase
+            build-defining loot. Characters are disposable, stories are permanent, and the account becomes a chapel of
+            dead heroes, trophies, unlocks, cosmetics, crafting knowledge, and seasonal prestige.
+          </p>
+
+          <div class="flow" aria-label="Core player loop">
+            <div><b>Create</b><span>Pick class, oath, starting kit, cosmetics, and risk profile.</span></div>
+            <div><b>Hunt</b><span>Explore the open world, join events, gather keys, and find portals.</span></div>
+            <div><b>Delve</b><span>Clear dungeons, dodge patterns, defeat bosses, and extract loot.</span></div>
+            <div><b>Build</b><span>Equip affixes, craft, store, trade, specialize, and push deeper.</span></div>
+            <div><b>Fall</b><span>Die permanently, preserve legacy value, then reroll faster and wiser.</span></div>
+          </div>
+
+          <h3>Commercial Promise</h3>
+          <p>
+            The commercial opportunity is a live-service MMO that is cheaper to content-scale than a 3D MMO, mechanically
+            expressive enough for streamable mastery, and endlessly replayable through seasonal resets, rare item hunting,
+            procedural dungeons, guild objectives, world events, cosmetics, and account collection. The game should feel
+            intense in five minutes, meaningful in one hour, and still dangerous after one thousand hours.
+          </p>
+
+          <table>
+            <thead>
+              <tr>
+                <th>Area</th>
+                <th>Target</th>
+                <th>Design Standard</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Session length</td>
+                <td>5 to 45 minutes, with marathon viability</td>
+                <td>Players can meaningfully progress in short sessions while long sessions create social and loot stories.</td>
+              </tr>
+              <tr>
+                <td>Difficulty</td>
+                <td>Fair, lethal, readable</td>
+                <td>Deaths should be attributable to risk, greed, panic, poor preparation, or learning, not invisible damage or network confusion.</td>
+              </tr>
+              <tr>
+                <td>Retention</td>
+                <td>Daily, weekly, seasonal, evergreen</td>
+                <td>Layered goals: build chase, dungeon mastery, social contracts, account collection, events, cosmetics, leaderboards.</td>
+              </tr>
+              <tr>
+                <td>Monetization</td>
+                <td>Fair but profitable</td>
+                <td>Sell expression and convenience. Provide earnable equivalents for basic account utility. No paid advantage in combat, loot, trade, or rankings.</td>
+              </tr>
+              <tr>
+                <td>Scale</td>
+                <td>10k concurrent players</td>
+                <td>Authoritative Rust backend, interest-managed networking, sharded realms, pooled dungeon instances, region gateways, observability.</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section id="pillars">
+          <p class="section-kicker">2. Creative and System Pillars</p>
+          <h2>Design Pillars</h2>
+
+          <div class="grid-2">
+            <div class="tile">
+              <span class="tag core">Pillar 1</span>
+              <h4>Every Death Has a Reason</h4>
+              <p>Permadeath is only acceptable if players trust the rules. Damage must be readable, boss patterns must be learnable, latency must be communicated, and disconnect recovery must be explicit.</p>
+            </div>
+            <div class="tile">
+              <span class="tag core">Pillar 2</span>
+              <h4>Loot Changes How You Play</h4>
+              <p>Rare items are not just higher numbers. They alter ranges, projectile shapes, ability charges, risk rewards, proc conditions, class roles, and dungeon decisions.</p>
+            </div>
+            <div class="tile">
+              <span class="tag core">Pillar 3</span>
+              <h4>The World Is Shared Pressure</h4>
+              <p>Open-world events create spontaneous cooperation. Other players can save you, lure danger, trigger portals, coordinate events, or inspire greed.</p>
+            </div>
+            <div class="tile">
+              <span class="tag core">Pillar 4</span>
+              <h4>Fast Back to Fun</h4>
+              <p>Death hurts, but restart friction is low. Character creation, gearing from vault, class presets, training dungeons, and group rejoin flows must be fast.</p>
+            </div>
+            <div class="tile">
+              <span class="tag meta">Pillar 5</span>
+              <h4>Account Legacy Without Paid Power</h4>
+              <p>Long-term progress lives in cosmetics, collection, crafting recipes, titles, achievements, guild projects, and quality-of-life unlocks rather than permanent combat stat creep.</p>
+            </div>
+            <div class="tile">
+              <span class="tag tech">Pillar 6</span>
+              <h4>Server Truth, Client Grace</h4>
+              <p>The server is authoritative, but the client feels immediate through prediction, deterministic pattern rendering, rollback hints, and clear latency UI.</p>
+            </div>
+          </div>
+
+          <h3>Design Red Lines</h3>
+          <ul>
+            <li>No random unavoidable deaths. If a bullet is lethal, it must be visually distinct and spatially fair.</li>
+            <li>No paid resurrection, paid stat boost, paid drop boost, paid dungeon completion, paid equipment, or paid leaderboard skip.</li>
+            <li>No mandatory daily chores that punish absence. Daily goals should invite, not threaten.</li>
+            <li>No trading system that lets real-money buyers dominate the economy. Account security, trade limits, logging, and fraud controls are part of the design.</li>
+            <li>No procedural generation that produces unreadable bullet hell arenas, blocked exits, or dead-end dungeon objectives.</li>
+          </ul>
+        </section>
+
+        <section id="audience">
+          <p class="section-kicker">3. Players and Platforms</p>
+          <h2>Audience and Platform Strategy</h2>
+          <p class="lead">
+            The primary audience is action RPG players who enjoy high-risk loot, MMO social energy, and skill-based combat.
+            The game should also attract bullet hell fans, roguelike players, stream viewers, and players who want an MMO
+            without the time burden of traditional tab-target raids.
+          </p>
+
+          <table>
+            <thead>
+              <tr>
+                <th>Persona</th>
+                <th>Motivation</th>
+                <th>Must Serve</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Loot optimizer</td>
+                <td>Buildcraft, affixes, rare drops, trading, min-maxing</td>
+                <td>Deep itemization, transparent ranges, meaningful stat interactions, searchable stash, market tools.</td>
+              </tr>
+              <tr>
+                <td>Skill climber</td>
+                <td>Dodging, solo clears, boss mastery, speed records</td>
+                <td>Readable attack language, practice arenas, replays, leaderboards, no paid advantage.</td>
+              </tr>
+              <tr>
+                <td>Social wanderer</td>
+                <td>Shared events, guild identity, helping friends, voice-chat nights</td>
+                <td>Easy grouping, low-friction teleport rules, guild halls, pings, assist rewards.</td>
+              </tr>
+              <tr>
+                <td>Collector</td>
+                <td>Cosmetics, titles, pets as cosmetics, lore, trophies, account museum</td>
+                <td>Collection UI, seasonal catalogs, earnable prestige, cosmetic previews.</td>
+              </tr>
+              <tr>
+                <td>Short-session player</td>
+                <td>Action within minutes, progress without scheduling</td>
+                <td>Fast login, fast reroll, short dungeons, event timers, saved presets.</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>Platform Requirements</h3>
+          <div class="grid-2">
+            <div class="tile">
+              <h4>PC Native</h4>
+              <ul>
+                <li>Primary competitive and high-fidelity client.</li>
+                <li>Supports high refresh rates, lower input latency, larger texture budget, richer effects, better capture tools.</li>
+                <li>Distribution: Steam plus direct launcher as optional future path.</li>
+                <li>Networking: QUIC transport with WebTransport-compatible protocol framing.</li>
+              </ul>
+            </div>
+            <div class="tile">
+              <h4>Browser</h4>
+              <ul>
+                <li>Full gameplay path, not a demo, using Bevy WASM build.</li>
+                <li>Asset bundles split by biome and dungeon family.</li>
+                <li>Transport: WebTransport first where supported, secure WebSocket fallback.</li>
+                <li>Input: keyboard and mouse baseline, controller where browser APIs allow.</li>
+              </ul>
+            </div>
+          </div>
+
+          <h3>Content Rating and Safety</h3>
+          <p>
+            Target teen-friendly dark fantasy. Visuals can be grim, haunted, and bloody in tone, but must avoid graphic
+            gore that narrows platform access. Chat, guild names, character names, and trade messages require moderation,
+            reporting, mute, block, and automated filters at launch.
+          </p>
+        </section>
+
+        <section id="world">
+          <p class="section-kicker">4. Original IP</p>
+          <h2>World, Tone, and Fantasy</h2>
+          <p class="lead">
+            The world of Erem is sealed beneath the Ashen Veil, a supernatural dusk created when the last dynasty tried
+            to bind death itself. The attempt broke the cycle of dying. Souls now return as echoes, saints rot into
+            tyrants, cathedrals sink into the earth, and mortal champions join the Gravebound: an order that burns its
+            own names from history so the living can keep fighting.
+          </p>
+
+          <div class="quote-panel">
+            <p><strong>Fantasy statement:</strong> You are not the chosen one. You are one more candle carried into a storm. The account is the order. The character is the flame.</p>
+          </div>
+
+          <h3>World Premise</h3>
+          <ul>
+            <li><strong>The Ashen Veil:</strong> A metaphysical barrier that keeps souls from passing on and lets dead kingdoms overlap the living world.</li>
+            <li><strong>The Gravebound:</strong> A vow-bound order of mortal adventurers who die permanently, but leave relics, maps, rites, and warnings for successors.</li>
+            <li><strong>The Hollow Crown:</strong> The broken royal power source that fuels world events, dungeon openings, and seasonal invasions.</li>
+            <li><strong>The Black Reliquaries:</strong> Deep dungeons where cursed saints, oathbreakers, and ancient engines guard forbidden loot.</li>
+            <li><strong>The Lantern Halls:</strong> Account hub, social space, guild access, vault, crafting, memorials, cosmetics, and seasonal board.</li>
+          </ul>
+
+          <h3>Tone Rules</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Do</th>
+                <th>Do Not</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Use mournful, dangerous, ritualistic fantasy language.</td>
+                <td>Use parody names, modern slang in lore, or joke-first item names for core content.</td>
+              </tr>
+              <tr>
+                <td>Make death part of the world fiction: graves, oaths, bells, relics, ash, candles.</td>
+                <td>Frame death as a monetization opportunity or a cheap punishment.</td>
+              </tr>
+              <tr>
+                <td>Let light be precious: lanterns, moonlit fog, saint-gold, fire, pale magic.</td>
+                <td>Overuse neon readability colors outside combat language.</td>
+              </tr>
+              <tr>
+                <td>Use corrupted nobility, old churches, plague gardens, bone mines, drowned libraries.</td>
+                <td>Copy any existing MMO realm structure, deity roster, class names, or signature item set.</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>Regions</h3>
+          <div class="grid-3">
+            <div class="tile">
+              <h4>Mire of Bells</h4>
+              <p>Low-to-mid danger wetland of sunken chapels, ringing reeds, drowned pilgrims, and bell-tower events that open early dungeons.</p>
+            </div>
+            <div class="tile">
+              <h4>The Cinder March</h4>
+              <p>A battlefield of ash storms, buried siege engines, elite patrols, and timed caravan defense events.</p>
+            </div>
+            <div class="tile">
+              <h4>Veyr's Orchard</h4>
+              <p>A diseased noble garden where trees grow funeral masks, poison patterns dominate, and rare crafting materials spawn.</p>
+            </div>
+            <div class="tile">
+              <h4>Glasscrypt Expanse</h4>
+              <p>High-end desert of mirror tombs, refraction bullets, illusion elites, and hidden dungeon doors.</p>
+            </div>
+            <div class="tile">
+              <h4>The Salt Cathedral</h4>
+              <p>Endgame coastline where tides reveal raid portals, enemy density is high, and extraction decisions matter.</p>
+            </div>
+            <div class="tile">
+              <h4>Lantern Halls</h4>
+              <p>Non-combat account hub with vaults, wardrobe, guild wings, memorial wall, merchants, crafting, training, and seasonal portals.</p>
+            </div>
+          </div>
+        </section>
+
+        <section id="loop">
+          <p class="section-kicker">5. Game Loop</p>
+          <h2>Core Loop and Retention Loops</h2>
+
+          <h3>Moment-to-Moment Loop</h3>
+          <ol>
+            <li>Move through a dense top-down field while reading enemy telegraphs and projectile lanes.</li>
+            <li>Fire basic attacks manually or with held-fire assist, aim abilities, reposition, and manage cooldowns.</li>
+            <li>Identify safe pockets, greed windows, ally heals, enemy tells, and exit routes.</li>
+            <li>Kill enemies, trigger events, collect loot, and choose whether to continue, extract, trade, or delve.</li>
+          </ol>
+
+          <h3>Run Loop</h3>
+          <ol>
+            <li>Create or load a character from account roster.</li>
+            <li>Select realm, guild rally, or dungeon key.</li>
+            <li>Gain levels quickly through open-world combat and events.</li>
+            <li>Acquire basic gear, then chase build-defining loot through dungeons and bosses.</li>
+            <li>Risk increasingly dangerous content for rare drops, cosmetics, crafting recipes, and seasonal score.</li>
+            <li>Extract to vault or die and convert character history into legacy value.</li>
+          </ol>
+
+          <h3>Account Loop</h3>
+          <div class="grid-3">
+            <div class="tile">
+              <h4>Legacy</h4>
+              <p>Dead characters contribute memorial score, class mastery, cosmetic title tracks, and unlock visibility. They do not grant permanent combat stats.</p>
+            </div>
+            <div class="tile">
+              <h4>Collection</h4>
+              <p>Players fill an account codex with enemies, bosses, item appearances, lore pages, dungeon badges, and seasonal trophies.</p>
+            </div>
+            <div class="tile">
+              <h4>Mastery</h4>
+              <p>Practice mode, replays, pattern trainer, and class challenges make skill growth visible without making characters immortal.</p>
+            </div>
+          </div>
+
+          <h3>Endless Replayability Sources</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Layer</th>
+                <th>System</th>
+                <th>Why It Lasts</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Mechanical</td>
+                <td>Bullet patterns, class kits, bosses, dodge mastery</td>
+                <td>Players improve personally, not just numerically.</td>
+              </tr>
+              <tr>
+                <td>Loot</td>
+                <td>Affixes, rarity, uniques, crafting, build tags</td>
+                <td>Items create build experiments and social trading stories.</td>
+              </tr>
+              <tr>
+                <td>World</td>
+                <td>Dynamic events, rotating threats, realm corruption</td>
+                <td>Shared spaces change enough to create daily uncertainty.</td>
+              </tr>
+              <tr>
+                <td>Dungeons</td>
+                <td>Procedural layouts, modifiers, keys, bosses, secrets</td>
+                <td>Players can farm known goals but still encounter surprise.</td>
+              </tr>
+              <tr>
+                <td>Social</td>
+                <td>Guild halls, rallies, trading, rescues, seasonal pushes</td>
+                <td>Other players are content multipliers.</td>
+              </tr>
+              <tr>
+                <td>Live Ops</td>
+                <td>Seasons, events, challenge ladders, cosmetics</td>
+                <td>Fresh constraints and rewards renew the game without wiping identity.</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section id="combat">
+          <p class="section-kicker">6. Action Design</p>
+          <h2>Combat System</h2>
+          <p class="lead">
+            Combat is top-down, real-time, projectile-heavy, and server-authoritative. Skill is expressed through
+            movement, aim, pattern reading, cooldown timing, positioning around allies, and the willingness to stop
+            attacking to survive.
+          </p>
+
+          <h3>Core Controls</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Action</th>
+                <th>Keyboard and Mouse</th>
+                <th>Controller</th>
+                <th>Design Notes</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Move</td>
+                <td>WASD</td>
+                <td>Left stick</td>
+                <td>Eight-direction movement with analog smoothing on controller. Movement speed is a primary balance stat.</td>
+              </tr>
+              <tr>
+                <td>Aim</td>
+                <td>Mouse cursor</td>
+                <td>Right stick</td>
+                <td>Separate aim and movement are mandatory for skill expression.</td>
+              </tr>
+              <tr>
+                <td>Primary fire</td>
+                <td>Hold left mouse</td>
+                <td>Right trigger</td>
+                <td>Held-fire is allowed. Precision weapons still reward aim.</td>
+              </tr>
+              <tr>
+                <td>Ability 1</td>
+                <td>Right mouse</td>
+                <td>Left trigger</td>
+                <td>Class-defining skill. Cooldown, charges, resource, or positioning cost.</td>
+              </tr>
+              <tr>
+                <td>Ability 2</td>
+                <td>Space</td>
+                <td>Left bumper</td>
+                <td>Defensive, movement, support, or risk skill depending on class.</td>
+              </tr>
+              <tr>
+                <td>Consumable</td>
+                <td>Q/E/R</td>
+                <td>Face buttons</td>
+                <td>Limited belts. Panic use cannot become pay-to-win.</td>
+              </tr>
+              <tr>
+                <td>Extract / Nexus</td>
+                <td>F or dedicated button</td>
+                <td>Menu button hold</td>
+                <td>Emergency exit requires a deliberate input and short lockout rules to prevent abuse.</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>Combat Model</h3>
+          <ul>
+            <li><strong>Server tick:</strong> 30 Hz authoritative simulation for movement, collision, health, statuses, enemy AI, and loot eligibility.</li>
+            <li><strong>Client render:</strong> 60+ FPS with interpolation, predicted own movement, local aim, and deterministic pattern visualization.</li>
+            <li><strong>Projectiles:</strong> Enemy bullets are server-authored pattern events with deterministic seeds where possible, reducing bandwidth and improving replay accuracy.</li>
+            <li><strong>Hit detection:</strong> Server validates collision using capsule or circle hitboxes, latency grace windows, and cheat-resistant movement reconciliation.</li>
+            <li><strong>Damage clarity:</strong> Incoming damage types have stable color, shape, sound, and impact feedback.</li>
+            <li><strong>Risk resource:</strong> High-output abilities create self-exposure through immobility, recoil, health cost, delayed recovery, threat generation, or pattern commitment.</li>
+          </ul>
+
+          <h3>Bullet Hell Language</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Pattern Type</th>
+                <th>Purpose</th>
+                <th>Readable Form</th>
+                <th>Counterplay</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Rings</td>
+                <td>Force distance management</td>
+                <td>Uniform circular spread with visible gaps</td>
+                <td>Pre-position, step through gap, use terrain.</td>
+              </tr>
+              <tr>
+                <td>Rotors</td>
+                <td>Test sustained movement rhythm</td>
+                <td>Rotating arms with consistent angular velocity</td>
+                <td>Orbit boss, reverse at safe timings, coordinate group position.</td>
+              </tr>
+              <tr>
+                <td>Lanes</td>
+                <td>Control arena zones</td>
+                <td>Long telegraphed strips or volleys</td>
+                <td>Identify lanes, cross only during cooldown, avoid tunnel vision.</td>
+              </tr>
+              <tr>
+                <td>Needles</td>
+                <td>Reward precision dodging</td>
+                <td>Thin fast shots with strong contrast and sound</td>
+                <td>Micrododge, stop firing, use defensive ability.</td>
+              </tr>
+              <tr>
+                <td>Bloom</td>
+                <td>Create panic and retreat pressure</td>
+                <td>Projectile cluster that expands after delay</td>
+                <td>Read seed point, move early, avoid greedy melee windows.</td>
+              </tr>
+              <tr>
+                <td>Memory</td>
+                <td>Reward boss knowledge</td>
+                <td>Sequential safe spots, repeated with variations</td>
+                <td>Learn order, call positions, use map markers.</td>
+              </tr>
+              <tr>
+                <td>Personal marks</td>
+                <td>Break group stacking</td>
+                <td>Telegraph attached to selected players</td>
+                <td>Spread, cleanse, bait away, protect low-health allies.</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>Status Effects</h3>
+          <p>
+            Status effects must be few enough to read and strong enough to matter. Each needs a visual icon, sound,
+            color family, accessibility-safe secondary signal, tooltip, and server-side duration.
+          </p>
+          <div class="grid-4">
+            <div class="tile"><h4>Bleed</h4><p>Damage over time. Mitigated by bandages, guard skills, and vitality affixes.</p></div>
+            <div class="tile"><h4>Frostbind</h4><p>Reduced movement and turn acceleration. Dangerous but never full control loss in lethal contexts.</p></div>
+            <div class="tile"><h4>Silence</h4><p>Disables abilities, not movement or extraction. Used sparingly.</p></div>
+            <div class="tile"><h4>Hex</h4><p>Increases incoming curse damage and alters healing received. Core dark magic debuff.</p></div>
+            <div class="tile"><h4>Guardbreak</h4><p>Temporary defense reduction after blocking or shield failure.</p></div>
+            <div class="tile"><h4>Radiance</h4><p>Positive effect that increases healing received and cleanses minor decay.</p></div>
+            <div class="tile"><h4>Exhaustion</h4><p>Prevents repeated dash or escape chains. Prevents degenerate invulnerability loops.</p></div>
+            <div class="tile"><h4>Marked</h4><p>Boss targets player with personal pattern. Clear icon plus ground ring.</p></div>
+          </div>
+        </section>
+
+        <section id="classes">
+          <p class="section-kicker">7. Character Design</p>
+          <h2>Classes, Oaths, and Build Roles</h2>
+          <p class="lead">
+            Classes define the player's verbs, not their permanent account identity. Each class has a primary weapon
+            family, two active abilities, a passive, and several oath variants that shift risk and role. Launch should
+            include eight classes, then expand to twelve after core balance stabilizes.
+          </p>
+
+          <h3>Launch Classes</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Class</th>
+                <th>Combat Role</th>
+                <th>Weapons</th>
+                <th>Ability Identity</th>
+                <th>Skill Hook</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Ashen Vanguard</td>
+                <td>Frontline bruiser</td>
+                <td>Swords, cleavers, shields</td>
+                <td>Guard arc, short charge, retaliation burst</td>
+                <td>Survive close range without body-blocking allies.</td>
+              </tr>
+              <tr>
+                <td>Grave Arbalist</td>
+                <td>Precision ranged</td>
+                <td>Crossbows, repeaters</td>
+                <td>Marked shot, trap nail, piercing line</td>
+                <td>Hold narrow aim lanes under pressure.</td>
+              </tr>
+              <tr>
+                <td>Veil Witch</td>
+                <td>Area control caster</td>
+                <td>Hex foci, bone charms</td>
+                <td>Curse zones, delayed blooms, enemy weakening</td>
+                <td>Pre-place damage without trapping allies in danger.</td>
+              </tr>
+              <tr>
+                <td>Lantern Saint</td>
+                <td>Support healer</td>
+                <td>Censers, bells</td>
+                <td>Healing pulse, cleanse, light barrier</td>
+                <td>Time support while dodging and avoiding overstacking.</td>
+              </tr>
+              <tr>
+                <td>Bloodbound Duelist</td>
+                <td>High-risk assassin</td>
+                <td>Rapiers, knives</td>
+                <td>Dash strike, bleed finisher, health-for-damage</td>
+                <td>Enter lethal space and exit before patterns close.</td>
+              </tr>
+              <tr>
+                <td>Relic Mason</td>
+                <td>Summon and utility</td>
+                <td>Hammers, sigil stones</td>
+                <td>Temporary walls, sentry relics, repair wards</td>
+                <td>Shape battlefield without griefing movement.</td>
+              </tr>
+              <tr>
+                <td>Mournblade</td>
+                <td>Mid-range lifesteal caster</td>
+                <td>Greatblades, shadow brands</td>
+                <td>Wave slashes, self-heal windows, curse detonations</td>
+                <td>Balance sustain greed against lethal burst risk.</td>
+              </tr>
+              <tr>
+                <td>Glass Oracle</td>
+                <td>Pattern manipulation</td>
+                <td>Mirrors, prisms</td>
+                <td>Reflect arcs, decoy image, refracted shots</td>
+                <td>Understand angles and reposition allies safely.</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>Class Kit Rules</h3>
+          <ul>
+            <li>Every class has at least one low-cooldown expression tool and one high-impact commitment tool.</li>
+            <li>No class owns a mandatory MMO role. Support helps, but groups cannot require one specific class for normal dungeons.</li>
+            <li>Solo viability is mandatory for leveling and standard dungeons. High-end challenge content can reward specialization.</li>
+            <li>Class power comes from positioning, timing, and item synergy. Passive stat sticks are avoided.</li>
+            <li>Death statistics by class must be monitored to prevent hidden newbie traps.</li>
+          </ul>
+
+          <h3>Oaths</h3>
+          <p>
+            Oaths are class-specific specializations chosen at level thresholds or via gear. They alter abilities without
+            creating permanent account power. Oaths can be respecced with in-game resources, never premium currency only.
+          </p>
+          <div class="grid-3">
+            <div class="tile">
+              <h4>Oath of Cinders</h4>
+              <p>Damage-forward variant. Adds burn, recoil, or delayed detonation. Higher output, lower safety.</p>
+            </div>
+            <div class="tile">
+              <h4>Oath of Lanterns</h4>
+              <p>Survivability or support variant. Adds shielding, cleanse, or healing tradeoffs. Lower burst.</p>
+            </div>
+            <div class="tile">
+              <h4>Oath of Glass</h4>
+              <p>Technical variant. Adds precision, reflections, cooldown resets, or positioning tricks. High mastery ceiling.</p>
+            </div>
+          </div>
+        </section>
+
+        <section id="open-world">
+          <p class="section-kicker">8. Shared World</p>
+          <h2>Open World Design</h2>
+          <p class="lead">
+            The open world is not a static leveling map. It is a shared pressure field where events, elite patrols,
+            resource nodes, portals, and world state changes pull players into spontaneous cooperation.
+          </p>
+
+          <h3>Realm Structure</h3>
+          <ul>
+            <li><strong>Realm capacity:</strong> 80 to 120 active players per realm instance depending on region load, event density, and performance telemetry.</li>
+            <li><strong>Realm duration:</strong> 2 to 6 hours before climax event and soft reset, with player-triggered acceleration.</li>
+            <li><strong>Safe zone:</strong> Lantern Hall is separate. Realms have minor camps but no full safety outside guarded entrances.</li>
+            <li><strong>Danger bands:</strong> Outer roads for leveling, midlands for events, deep zones for elite farming, corrupted heartlands for endgame portals.</li>
+            <li><strong>Extraction:</strong> Players can return to Lantern Hall with a deliberate input, but certain high-end mechanics impose brief extraction locks after taking major damage or entering boss arenas.</li>
+          </ul>
+
+          <h3>World State</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>State Variable</th>
+                <th>Source</th>
+                <th>Gameplay Effect</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Veil Pressure</td>
+                <td>Time, failed events, elite survival</td>
+                <td>Increases enemy density, improves rare portal chance, raises death risk.</td>
+              </tr>
+              <tr>
+                <td>Bell Tolls</td>
+                <td>Major boss kills and realm rituals</td>
+                <td>Announces map-wide events and unlocks timed windows.</td>
+              </tr>
+              <tr>
+                <td>Faction Scars</td>
+                <td>Which enemies dominate region events</td>
+                <td>Changes patrols, affix materials, dungeon keys, and hazards.</td>
+              </tr>
+              <tr>
+                <td>Grave Heat</td>
+                <td>Player deaths in zone</td>
+                <td>Creates temporary memorial hazards and revenge events.</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>Open-World Event Types</h3>
+          <div class="grid-3">
+            <div class="tile">
+              <h4>Ritual Interrupt</h4>
+              <p>Enemies channel at multiple sigils. Players split, clear bullet waves, then converge for a miniboss. Rewards dungeon key fragments.</p>
+            </div>
+            <div class="tile">
+              <h4>Funeral Caravan</h4>
+              <p>Escort event with moving safe zones, ambushes, and risk-reward side shrines that spawn stronger waves.</p>
+            </div>
+            <div class="tile">
+              <h4>Bell Tower Siege</h4>
+              <p>Map landmark event. Players climb layers of danger, ring bells in sequence, and open a regional dungeon portal.</p>
+            </div>
+            <div class="tile">
+              <h4>Wound in the Veil</h4>
+              <p>Short server-wide anomaly with strange projectile rules and unique materials. Designed for streamable surprise.</p>
+            </div>
+            <div class="tile">
+              <h4>Executioner Patrol</h4>
+              <p>Roaming elite enemy that chases high-density player groups. Prevents static farming and creates rescue moments.</p>
+            </div>
+            <div class="tile">
+              <h4>Fallen Hero Echo</h4>
+              <p>A dead player's memorial can spawn a corrupted echo miniboss using class-themed patterns and carrying partial loot echoes.</p>
+            </div>
+          </div>
+        </section>
+
+        <section id="dungeons">
+          <p class="section-kicker">9. Dungeon Crawling</p>
+          <h2>Dungeon System</h2>
+          <p class="lead">
+            Dungeons are instanced, dangerous, and loot-focused. They provide the strongest Diablo-style progression,
+            but they must preserve bullet hell readability: arenas need room, telegraphs need contrast, and procedural
+            layouts need strict validation.
+          </p>
+
+          <h3>Dungeon Access</h3>
+          <ul>
+            <li><strong>World portals:</strong> Spawn from events, elites, boss kills, and region states.</li>
+            <li><strong>Keys:</strong> Earned through play, crafted, traded, dropped, or occasionally granted through live events. Premium sales of power-relevant keys are not allowed.</li>
+            <li><strong>Guild openings:</strong> Guilds can spend earned resources to open scheduled group portals.</li>
+            <li><strong>Practice versions:</strong> Low-reward training variants let players learn patterns without risking high-value gear.</li>
+          </ul>
+
+          <h3>Dungeon Tiers</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Tier</th>
+                <th>Player Count</th>
+                <th>Time</th>
+                <th>Risk</th>
+                <th>Reward Role</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Tier I: Crypts</td>
+                <td>1 to 10</td>
+                <td>5 to 8 min</td>
+                <td>Low</td>
+                <td>Leveling gear, first affixes, class basics.</td>
+              </tr>
+              <tr>
+                <td>Tier II: Reliquaries</td>
+                <td>2 to 20</td>
+                <td>8 to 14 min</td>
+                <td>Medium</td>
+                <td>Rare affixes, crafting mats, first uniques.</td>
+              </tr>
+              <tr>
+                <td>Tier III: Black Vaults</td>
+                <td>4 to 30</td>
+                <td>12 to 20 min</td>
+                <td>High</td>
+                <td>Endgame gear, build-defining uniques, cosmetics.</td>
+              </tr>
+              <tr>
+                <td>Tier IV: Oathbreak Depths</td>
+                <td>8 to 40</td>
+                <td>18 to 30 min</td>
+                <td>Extreme</td>
+                <td>Seasonal prestige, mythic crafting, titles, chase cosmetics.</td>
+              </tr>
+              <tr>
+                <td>Challenge Echoes</td>
+                <td>Solo or fixed group</td>
+                <td>3 to 15 min</td>
+                <td>Variable</td>
+                <td>Leaderboards, mastery cosmetics, no tradable power rewards.</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>Procedural Generation Requirements</h3>
+          <ul>
+            <li>Layout generator uses authored room templates, connection rules, enemy budget, hazard budget, and boss arena requirements.</li>
+            <li>Every generated dungeon must pass server validation: reachable path, minimum arena sizes, no unavoidable hazard overlaps, spawn safety, exit safety, objective consistency.</li>
+            <li>Room templates are tagged by movement demand: open dodge, lane control, split party, obstacle weave, miniboss, shrine risk, loot rest, lore, secret.</li>
+            <li>Boss arenas are authored, not freeform generated, except for controlled hazard and modifier slots.</li>
+            <li>Dungeon modifiers cannot combine into unfair lethal states. A modifier compatibility matrix is required.</li>
+          </ul>
+
+          <h3>Dungeon Modifiers</h3>
+          <div class="grid-3">
+            <div class="tile">
+              <h4>Fevered Veil</h4>
+              <p>Enemy patterns gain one extra delayed projectile wave. Reward: higher curse material chance.</p>
+            </div>
+            <div class="tile">
+              <h4>Candleless</h4>
+              <p>Reduced minimap visibility and darker rooms. Reward: increased secret room chance.</p>
+            </div>
+            <div class="tile">
+              <h4>Glass Floor</h4>
+              <p>Movement inertia slightly increases. Reward: precision affix materials.</p>
+            </div>
+            <div class="tile">
+              <h4>Saint's Debt</h4>
+              <p>Healing pulses are reduced during boss phases. Reward: support-oriented unique chance.</p>
+            </div>
+            <div class="tile">
+              <h4>Oathfire</h4>
+              <p>Players deal and receive slightly more damage. Reward: faster clear score and extra loot roll.</p>
+            </div>
+            <div class="tile">
+              <h4>Restless Dead</h4>
+              <p>Elite enemies can spawn echo adds at low health. Reward: legacy shard drops.</p>
+            </div>
+          </div>
+        </section>
+
+        <section id="bosses">
+          <p class="section-kicker">10. Encounters</p>
+          <h2>Bosses, Enemies, and Encounter Design</h2>
+
+          <h3>Enemy Roles</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Role</th>
+                <th>Function</th>
+                <th>Readability Requirement</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Fodder</td>
+                <td>Die quickly, create pacing, fill world</td>
+                <td>Simple bullets, low damage, clear silhouettes.</td>
+              </tr>
+              <tr>
+                <td>Pressure</td>
+                <td>Force movement and break static farming</td>
+                <td>Obvious windup, moderate damage, stable pattern.</td>
+              </tr>
+              <tr>
+                <td>Disruptor</td>
+                <td>Change priorities with debuffs or terrain</td>
+                <td>Unique iconography, limited count, counterplay.</td>
+              </tr>
+              <tr>
+                <td>Anchor</td>
+                <td>High-health objective in events</td>
+                <td>Large silhouette, phase markers, map icon.</td>
+              </tr>
+              <tr>
+                <td>Elite</td>
+                <td>Mini encounter with affixes and loot</td>
+                <td>Nameplate, affix icons, dangerous but avoidable attacks.</td>
+              </tr>
+              <tr>
+                <td>Boss</td>
+                <td>Multi-phase mastery fight</td>
+                <td>Music shift, phase transitions, arena language, wipe conditions.</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>Boss Design Template</h3>
+          <ol>
+            <li><strong>Identity:</strong> Name, lore role, visual silhouette, arena, music, reward family.</li>
+            <li><strong>Learning phase:</strong> Introduce primary pattern at survivable density.</li>
+            <li><strong>Pressure phase:</strong> Combine primary with movement or add management.</li>
+            <li><strong>Break phase:</strong> Reward damage, healing, or positioning after a successful survival check.</li>
+            <li><strong>Desperation phase:</strong> Faster tempo but no new visual language in the last 20 percent.</li>
+            <li><strong>Loot moment:</strong> Drops are readable, instanced where appropriate, and protected from griefing.</li>
+          </ol>
+
+          <h3>Sample Launch Bosses</h3>
+          <div class="grid-2">
+            <div class="tile">
+              <h4>Mother Veyr, the Orchard Saint</h4>
+              <p><strong>Dungeon:</strong> Veyr's Orchard / Tier II.</p>
+              <p><strong>Patterns:</strong> Root lanes, poison blooms, mask adds, rotating safe harvest rows.</p>
+              <p><strong>Loot:</strong> Poison and healing affixes, Veil Witch focus, garden-themed cosmetics.</p>
+            </div>
+            <div class="tile">
+              <h4>Sir Caldus, Bell-Bound Knight</h4>
+              <p><strong>Dungeon:</strong> Bell Tower Sepulcher / Tier I-II.</p>
+              <p><strong>Patterns:</strong> Shield arcs, ringing shockwaves, charge lanes, bell timing memory test.</p>
+              <p><strong>Loot:</strong> Guard affixes, Vanguard shields, bell relics, early support items.</p>
+            </div>
+            <div class="tile">
+              <h4>The Salt Confessor</h4>
+              <p><strong>Dungeon:</strong> Tidal Reliquary / Tier III.</p>
+              <p><strong>Patterns:</strong> Tide pushes, confession marks, split stacks, delayed crystal needles.</p>
+              <p><strong>Loot:</strong> Frostbind, cleanse, waterlogged uniques, high-end support gear.</p>
+            </div>
+            <div class="tile">
+              <h4>Dynast Morcant, Hollow Crown</h4>
+              <p><strong>Dungeon:</strong> Oathbreak Depth / Tier IV.</p>
+              <p><strong>Patterns:</strong> Crown beams, throne lanes, personal verdicts, memory rings, final oath check.</p>
+              <p><strong>Loot:</strong> Mythic cosmetics, pinnacle unique weapons, seasonal titles, crafting apex materials.</p>
+            </div>
+          </div>
+        </section>
+
+        <section id="loot">
+          <p class="section-kicker">11. Itemization</p>
+          <h2>Diablo-Style Loot System</h2>
+          <p class="lead">
+            Loot is the engine of replayability. The item system must support fast readability for action play and deep
+            enough affix math for long-term buildcraft. The guiding rule: items should create decisions, not merely
+            inflate numbers.
+          </p>
+
+          <h3>Equipment Slots</h3>
+          <div class="grid-4">
+            <div class="tile"><h4>Weapon</h4><p>Defines attack pattern, range, cadence, projectile count, and scaling tags.</p></div>
+            <div class="tile"><h4>Offhand</h4><p>Shield, charm, focus, quiver, relic, or class-specific tool.</p></div>
+            <div class="tile"><h4>Armor</h4><p>Defense, mobility tradeoffs, resistances, set hooks.</p></div>
+            <div class="tile"><h4>Amulet</h4><p>Build-defining passive, resource, or utility affixes.</p></div>
+            <div class="tile"><h4>Ring 1</h4><p>Stat and utility specialization.</p></div>
+            <div class="tile"><h4>Ring 2</h4><p>Stat and utility specialization with duplicate restrictions.</p></div>
+            <div class="tile"><h4>Belt</h4><p>Consumable slots, potion behavior, emergency tradeoffs.</p></div>
+            <div class="tile"><h4>Oath Relic</h4><p>Class variant modifier, late-game build identity.</p></div>
+          </div>
+
+          <h3>Rarity Ladder</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Rarity</th>
+                <th>Color Role</th>
+                <th>Affix Model</th>
+                <th>Use Case</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Worn</td>
+                <td>Gray</td>
+                <td>Base stats only</td>
+                <td>Starting, tutorial, salvage.</td>
+              </tr>
+              <tr>
+                <td>Forged</td>
+                <td>White or iron</td>
+                <td>Base stats plus implicit</td>
+                <td>Readable baseline gear.</td>
+              </tr>
+              <tr>
+                <td>Oathed</td>
+                <td>Green</td>
+                <td>1 to 2 affixes</td>
+                <td>Early builds, leveling drops.</td>
+              </tr>
+              <tr>
+                <td>Relic</td>
+                <td>Blue</td>
+                <td>3 to 4 affixes</td>
+                <td>Main endgame rares, trade backbone.</td>
+              </tr>
+              <tr>
+                <td>Sainted</td>
+                <td>Gold</td>
+                <td>5 affixes or strong implicit</td>
+                <td>Best rare items, crafting targets.</td>
+              </tr>
+              <tr>
+                <td>Black Unique</td>
+                <td>Deep violet</td>
+                <td>Fixed identity, variable rolls</td>
+                <td>Build-defining special mechanics.</td>
+              </tr>
+              <tr>
+                <td>Mythic Echo</td>
+                <td>Blood-brass</td>
+                <td>Extremely rare, seasonal chase</td>
+                <td>Prestige, unique mechanics, limited equip rules.</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>Affix Families</h3>
+          <div class="grid-3">
+            <div class="tile">
+              <h4>Offense</h4>
+              <p>Damage, attack cadence, crit window, projectile shape, piercing, area, status application, boss damage with caps.</p>
+            </div>
+            <div class="tile">
+              <h4>Defense</h4>
+              <p>Max health, armor, guard, resistances, damage smoothing, emergency barrier, status duration reduction.</p>
+            </div>
+            <div class="tile">
+              <h4>Mobility</h4>
+              <p>Movement speed, turn acceleration, dash cooldown, slow resistance, recoil reduction, terrain penalty reduction.</p>
+            </div>
+            <div class="tile">
+              <h4>Ability</h4>
+              <p>Cooldown, charges, radius, duration, conditional resets, resource cost changes, oath-specific modifiers.</p>
+            </div>
+            <div class="tile">
+              <h4>Utility</h4>
+              <p>Pickup radius, reveal secrets, potion behavior, extraction channel protection, crafting material yield. No combat pay edge.</p>
+            </div>
+            <div class="tile">
+              <h4>Risk</h4>
+              <p>Stronger effects that impose health cost, defense loss, delayed self-damage, aggro increase, or movement constraints.</p>
+            </div>
+          </div>
+
+          <h3>Item Tags</h3>
+          <p>
+            Every weapon, ability, affix, enemy resistance, and crafting material uses tags so the balance team can reason
+            about synergies. Example tags: <code>physical</code>, <code>bleed</code>, <code>curse</code>, <code>radiant</code>,
+            <code>frost</code>, <code>poison</code>, <code>projectile</code>, <code>area</code>, <code>channel</code>,
+            <code>summon</code>, <code>dash</code>, <code>guard</code>, <code>support</code>, <code>boss</code>.
+          </p>
+
+          <h3>Loot Drop Rules</h3>
+          <ul>
+            <li>Loot eligibility is based on participation, proximity, encounter contribution, anti-leech checks, and support contribution.</li>
+            <li>Most significant drops are personal or party-instanced to avoid click theft and griefing.</li>
+            <li>Rare tradeable drops are exciting, but key progression cannot require a single impossible market item.</li>
+            <li>Magic find as a paid stat is forbidden. In-game reward quantity modifiers must come from risk modifiers, not store purchases.</li>
+            <li>Drop odds for chase items are visible as rarity bands, with exact rates available where required by platform or regulation.</li>
+          </ul>
+
+          <h3>Sample Items</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Item</th>
+                <th>Type</th>
+                <th>Identity</th>
+                <th>Build Impact</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Bell-Cleaver of Caldus</td>
+                <td>Black Unique sword</td>
+                <td>Heavy arcs emit delayed bell shockwaves after guarded hits.</td>
+                <td>Creates a Vanguard counterattack build with slower movement and high timing demand.</td>
+              </tr>
+              <tr>
+                <td>Mask of Veyr's Last Spring</td>
+                <td>Sainted amulet</td>
+                <td>Poison blooms heal allies for a fraction of damage if they expire naturally.</td>
+                <td>Turns damage zones into support windows but punishes premature detonations.</td>
+              </tr>
+              <tr>
+                <td>Saltglass Prism</td>
+                <td>Black Unique offhand</td>
+                <td>Reflected projectiles split once and lose damage with each bounce.</td>
+                <td>Technical Oracle build that rewards precise angle control.</td>
+              </tr>
+              <tr>
+                <td>Threadbare Saint's Belt</td>
+                <td>Relic belt</td>
+                <td>First potion below 25 percent health also cleanses minor Hex, once per dungeon.</td>
+                <td>Emergency utility without preventing death or replacing skill.</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section id="progression">
+          <p class="section-kicker">12. Progression</p>
+          <h2>Character, Account, and Endgame Progression</h2>
+
+          <h3>Character Progression</h3>
+          <ul>
+            <li><strong>Level range:</strong> 1 to 30 at launch. Leveling is fast: 60 to 120 minutes for experienced players, longer for new players.</li>
+            <li><strong>Stat growth:</strong> Base class stats grow predictably. Endgame power is primarily gear, skill, and build synergy.</li>
+            <li><strong>Ability unlocks:</strong> Core kit by level 10, advanced oath choice by level 20, full build expression by level 30.</li>
+            <li><strong>Death:</strong> Character, equipped gear, inventory, active consumables, and unbanked materials are lost or partially converted according to clear rules.</li>
+            <li><strong>Protected items:</strong> Account vault items are safe. Equipped cosmetics are account-bound appearances and are not lost.</li>
+          </ul>
+
+          <h3>Permadeath Rules</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>State</th>
+                <th>Result on Death</th>
+                <th>Reason</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Character level and stats</td>
+                <td>Lost</td>
+                <td>Permadeath stakes.</td>
+              </tr>
+              <tr>
+                <td>Equipped combat gear</td>
+                <td>Lost, with small memorial salvage chance by item type</td>
+                <td>Risk tension and economy sink.</td>
+              </tr>
+              <tr>
+                <td>Inventory loot</td>
+                <td>Lost if not extracted or banked</td>
+                <td>Creates extraction decisions.</td>
+              </tr>
+              <tr>
+                <td>Account vault</td>
+                <td>Safe</td>
+                <td>Allows long-term loot chase and recovery.</td>
+              </tr>
+              <tr>
+                <td>Cosmetics</td>
+                <td>Safe</td>
+                <td>Purchased and earned identity must persist.</td>
+              </tr>
+              <tr>
+                <td>Achievements and codex</td>
+                <td>Safe</td>
+                <td>Account legacy, not combat power.</td>
+              </tr>
+              <tr>
+                <td>Season score</td>
+                <td>Recorded at death</td>
+                <td>Death should close a story, not erase recognition.</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>Account Progression</h3>
+          <div class="grid-2">
+            <div class="tile">
+              <h4>Memorial Wall</h4>
+              <p>Every level 10+ dead character receives a memorial entry. High-level deaths add epitaph templates, title progress, class mastery banners, and optional replay link.</p>
+            </div>
+            <div class="tile">
+              <h4>Codex</h4>
+              <p>Tracks enemies, bosses, lore pages, dungeon completions, item appearances, affix discoveries, and seasonal artifacts.</p>
+            </div>
+            <div class="tile">
+              <h4>Crafting Knowledge</h4>
+              <p>Recipes and discovered affix families stay account-wide. Materials remain inventory/vault items and are lost if carried on death.</p>
+            </div>
+            <div class="tile">
+              <h4>Cosmetic Wardrobe</h4>
+              <p>Earned and purchased skins, projectile cosmetics, graves, nameplates, guild banners, and hub decorations persist.</p>
+            </div>
+          </div>
+
+          <h3>Endgame Ladders</h3>
+          <ul>
+            <li><strong>Dungeon mastery:</strong> Clear badges by dungeon, class, modifier, group size, and seasonal rule set.</li>
+            <li><strong>Survival records:</strong> Longest life, deepest dungeon tier, boss kills, solo clears, no-hit achievements.</li>
+            <li><strong>Build discovery:</strong> Seasonal spotlight rewards for using underplayed affix families and unusual class combinations.</li>
+            <li><strong>Guild progression:</strong> Group projects unlock cosmetics, hall wings, banners, and event scheduling tools.</li>
+            <li><strong>Challenge Echoes:</strong> Fixed-loadout skill tests where paid storage, gear wealth, and market power do not apply.</li>
+          </ul>
+        </section>
+
+        <section id="economy">
+          <p class="section-kicker">13. Economy</p>
+          <h2>Economy, Trading, Crafting, and Sinks</h2>
+
+          <h3>Economy Goals</h3>
+          <ul>
+            <li>Make found loot exciting even when not personally usable.</li>
+            <li>Support trade without letting the market replace play.</li>
+            <li>Preserve item value through permadeath, crafting sinks, seasonal resets, and binding rules.</li>
+            <li>Limit fraud, botting, real-money trading, price manipulation, and new-player exploitation.</li>
+            <li>Never sell currency, tradeable power, or market advantage for cash.</li>
+          </ul>
+
+          <h3>Currencies</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Currency</th>
+                <th>Earned From</th>
+                <th>Spent On</th>
+                <th>Tradeable</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Ash Shards</td>
+                <td>Salvage, events, dungeons</td>
+                <td>Basic crafting, repairs in non-combat hub, recipe attempts</td>
+                <td>Limited</td>
+              </tr>
+              <tr>
+                <td>Reliquary Seals</td>
+                <td>Bosses, weekly goals</td>
+                <td>Targeted dungeon keys, high-tier crafting</td>
+                <td>No</td>
+              </tr>
+              <tr>
+                <td>Guild Tithe</td>
+                <td>Guild activities and contributions</td>
+                <td>Guild hall cosmetics, scheduled portals, social tools</td>
+                <td>No</td>
+              </tr>
+              <tr>
+                <td>Crowns</td>
+                <td>Real-money purchase</td>
+                <td>Cosmetics, character slots, vault pages, season pass</td>
+                <td>No</td>
+              </tr>
+              <tr>
+                <td>Earned Crowns</td>
+                <td>Seasonal free track, achievements, promotions</td>
+                <td>Selected store items and convenience unlocks</td>
+                <td>No</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>Crafting</h3>
+          <p>
+            Crafting gives players direction without trivializing drops. It should reduce frustration, let players
+            pursue build goals, and remove items and materials from the economy. Crafting cannot require premium currency.
+          </p>
+          <ol>
+            <li><strong>Salvage:</strong> Convert unwanted gear into shards, tag materials, and rare echoes.</li>
+            <li><strong>Imprint:</strong> Save the appearance of found gear into wardrobe if eligible.</li>
+            <li><strong>Refine:</strong> Improve a roll within its tier using matching materials and a cost curve.</li>
+            <li><strong>Bind:</strong> Lock an affix and reroll another at high cost. Creates item sink and chase.</li>
+            <li><strong>Consecrate:</strong> Add a risk affix to an item. Stronger reward, added danger or binding.</li>
+            <li><strong>Reforge:</strong> Full reroll. Expensive, risky, never guaranteed perfect.</li>
+          </ol>
+
+          <h3>Trading</h3>
+          <ul>
+            <li>Use secure asynchronous market listings plus direct party trade for social exchange.</li>
+            <li>High-risk items can be tradeable, account-bound, season-bound, or bind-on-equip depending on economy role.</li>
+            <li>New accounts have trade limits until trust score increases through playtime, verification, and clean behavior.</li>
+            <li>Market tax, listing fee, crafting sinks, and permadeath item loss regulate inflation.</li>
+            <li>Trade logs are immutable event records for fraud investigation and rollback tooling.</li>
+          </ul>
+        </section>
+
+        <section id="social">
+          <p class="section-kicker">14. MMO Systems</p>
+          <h2>Social, Guild, and Community Design</h2>
+
+          <h3>Social Goals</h3>
+          <p>
+            Players should feel surrounded by danger and opportunity, not forced into rigid schedules. The social design
+            should make help visible, let groups form quickly, and give guilds reasons to care about each member's deaths
+            without turning the game into homework.
+          </p>
+
+          <div class="grid-3">
+            <div class="tile">
+              <h4>Parties</h4>
+              <p>Up to 8 players. Shared pings, health panel, ready check, dungeon join, role tags, and reconnect support.</p>
+            </div>
+            <div class="tile">
+              <h4>Raid Bands</h4>
+              <p>Temporary groups up to 40 for world events and Tier IV dungeons. Reduced loot entitlement abuse through participation scoring.</p>
+            </div>
+            <div class="tile">
+              <h4>Guilds</h4>
+              <p>Up to 150 members at launch. Halls, scheduled events, banners, permissions, logs, projects, and memorial room.</p>
+            </div>
+          </div>
+
+          <h3>Communication</h3>
+          <ul>
+            <li>Text chat: local, party, guild, whisper, trade, system, moderation channel.</li>
+            <li>Context pings: danger, heal here, portal, boss phase, loot, retreat, group here.</li>
+            <li>Emotes: cosmetic and social only. No combat advantage.</li>
+            <li>Optional voice is not launch-critical; integrate platform voice or partner solution later if moderation is ready.</li>
+            <li>Chat must include mute, block, report, profanity filters, spam control, rate limits, and evidence capture.</li>
+          </ul>
+
+          <h3>Guild Projects</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Project</th>
+                <th>Contribution</th>
+                <th>Reward</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Lantern Wing</td>
+                <td>Guild activity, materials, seasonal objectives</td>
+                <td>Social hall expansion and decoration slots.</td>
+              </tr>
+              <tr>
+                <td>Bell Charter</td>
+                <td>World event completions</td>
+                <td>Scheduled guild portal openings with earned keys.</td>
+              </tr>
+              <tr>
+                <td>Memorial Archive</td>
+                <td>Member deaths above level thresholds</td>
+                <td>Guild history displays, titles, and remembrance cosmetics.</td>
+              </tr>
+              <tr>
+                <td>Banner Forge</td>
+                <td>Dungeon clears and crafting materials</td>
+                <td>Guild banner cosmetics, profile frames, and hall trophies.</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section id="monetization">
+          <p class="section-kicker">15. Business Model</p>
+          <h2>Fair Monetization</h2>
+          <p class="lead">
+            The monetization model must be profitable without corrupting trust. The store sells expression, identity,
+            account convenience, optional passes, and social cosmetics. It never sells combat stats, drop boosts,
+            dungeon completion, resurrection, leaderboard advantage, or tradeable power.
+          </p>
+
+          <div class="warning">
+            <h3>Hard Rule</h3>
+            <p>
+              If a purchase makes a character stronger in combat, increases expected loot value, prevents death, improves
+              leaderboard performance, or changes market access in a competitive season, it is not allowed.
+            </p>
+          </div>
+
+          <h3>Store Categories</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Category</th>
+                <th>Examples</th>
+                <th>Fairness Guardrail</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Character cosmetics</td>
+                <td>Skins, armor dyes, cloak shapes, death markers, idle poses</td>
+                <td>No hitbox changes, no bullet readability issues, no disguised enemy silhouettes.</td>
+              </tr>
+              <tr>
+                <td>Projectile cosmetics</td>
+                <td>Alternate shot visuals and sounds for owned weapons</td>
+                <td>Only local or readability-approved variants; cannot obscure enemy bullets.</td>
+              </tr>
+              <tr>
+                <td>Character slots</td>
+                <td>Additional roster slots</td>
+                <td>Baseline includes enough slots for multiple classes. Slots are convenience, and some are earnable.</td>
+              </tr>
+              <tr>
+                <td>Vault storage</td>
+                <td>Extra pages, material tabs, loadout tabs</td>
+                <td>Baseline storage must be humane. Seasonal competitive rules equalize key storage where needed.</td>
+              </tr>
+              <tr>
+                <td>Wardrobe and profile</td>
+                <td>Nameplates, banners, memorial frames, grave markers</td>
+                <td>Pure expression and status display.</td>
+              </tr>
+              <tr>
+                <td>Guild cosmetics</td>
+                <td>Hall decoration packs, banner patterns, trophy plinths</td>
+                <td>Cosmetic only. Guild utility remains earned in game.</td>
+              </tr>
+              <tr>
+                <td>Season pass</td>
+                <td>Free and paid cosmetic tracks, earned currency, convenience tokens</td>
+                <td>No paid power. Paid track grants cosmetics and account expression; free track remains rewarding.</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>Pricing Principles</h3>
+          <ul>
+            <li>Use transparent prices. Avoid manipulative bundle math and intentionally confusing currency leftovers.</li>
+            <li>Offer direct purchase for major cosmetics instead of relying on randomized loot boxes.</li>
+            <li>Provide earnable store currency through free seasonal tracks and major achievements.</li>
+            <li>Make starter convenience generous enough that non-paying players are welcome community members.</li>
+            <li>Never sell limited-time power FOMO. Cosmetic FOMO must be moderate, with archive rotations over time.</li>
+          </ul>
+
+          <h3>Recommended Launch Offering</h3>
+          <div class="grid-2">
+            <div class="tile">
+              <h4>Free Account Baseline</h4>
+              <ul>
+                <li>4 character slots.</li>
+                <li>Enough vault for normal early and midgame play.</li>
+                <li>Material storage starter tab.</li>
+                <li>Full access to all classes, world content, dungeons, trade, guilds, and seasonal play.</li>
+              </ul>
+            </div>
+            <div class="tile">
+              <h4>Paid Convenience</h4>
+              <ul>
+                <li>Additional character slots.</li>
+                <li>Vault pages and loadout tabs.</li>
+                <li>Cosmetic presets and wardrobe organization.</li>
+                <li>Guild hall decoration capacity.</li>
+              </ul>
+            </div>
+          </div>
+        </section>
+
+        <section id="frontend">
+          <p class="section-kicker">16. Client Architecture</p>
+          <h2>Frontend Client: Rust and Bevy</h2>
+          <p class="lead">
+            The client is a Bevy application targeting native PC and WASM/browser. It owns rendering, input, audio,
+            prediction, interpolation, UI presentation, asset streaming, and local accessibility settings. It does not
+            own authoritative combat, inventory, loot, death, trade, or progression.
+          </p>
+
+          <h3>Bevy Client Boundaries</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Layer</th>
+                <th>Owns</th>
+                <th>Does Not Own</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Input</td>
+                <td>Physical input mapping, rebinding, action buffering, controller support</td>
+                <td>Server acceptance of movement or actions.</td>
+              </tr>
+              <tr>
+                <td>Presentation ECS</td>
+                <td>Sprites, animation, camera, particles, audio cues, damage numbers, local effects</td>
+                <td>Truth of entity health, position, drops, or collision results.</td>
+              </tr>
+              <tr>
+                <td>Prediction</td>
+                <td>Own movement, local shot feel, ability start feedback</td>
+                <td>Final hit results or death outcome.</td>
+              </tr>
+              <tr>
+                <td>UI</td>
+                <td>HUD, menus, inventory display, store display, accessibility settings</td>
+                <td>Inventory mutation, purchase grant, trade completion.</td>
+              </tr>
+              <tr>
+                <td>Asset Management</td>
+                <td>Manifest loading, bundles, atlases, shader variants, fallback assets</td>
+                <td>Server content rules or drop tables.</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>Client Crates</h3>
+          <pre><code>gravebound/
+  crates/
+    shared_protocol/       // wire messages, schema versions, compression helpers
+    shared_gameplay/       // deterministic formulas, tags, item definitions, pattern descriptors
+    shared_content/        // content ids, manifest structs, localization keys
+    client_bevy/           // Bevy app, rendering, input, UI, audio, prediction
+    client_net/            // WebTransport, QUIC, WebSocket fallback, snapshot handling
+    tools_content/         // validators, converters, item and encounter editors
+    server_gateway/        // auth session, connection routing, rate limits
+    server_realm/          // open-world realm simulation processes
+    server_instance/       // dungeon instance simulation processes
+    server_account/        // account, characters, vault, purchases
+    server_social/         // guilds, chat, parties, moderation hooks
+    server_economy/        // trades, market, crafting, audit ledger
+    ops_admin/             // web admin, live ops tools, support views</code></pre>
+
+          <h3>Rendering and UI</h3>
+          <ul>
+            <li>Use Bevy's 2D renderer for sprites, projectiles, tilemaps, particles, lighting masks, and camera effects.</li>
+            <li>Use Bevy UI or a Bevy-compatible UI layer for HUD and menus in native PC. Browser shell can host account pages, patch notes, and store pages around the WASM canvas.</li>
+            <li>Maintain strict separation between game HUD and account/store surfaces to reduce performance impact during combat.</li>
+            <li>Sprite atlas budgets must be tiered for browser. High-end PC can use richer animation frames and extra particles.</li>
+            <li>Combat readability wins over visual flourish. Enemy projectiles always render above friendly effects.</li>
+          </ul>
+
+          <h3>Client State Machine</h3>
+          <pre><code>Boot
+  -> PatchCheck
+  -> Auth
+  -> CharacterSelect
+  -> QueueOrJoin
+  -> LoadingShard
+  -> InGame
+       -> Realm
+       -> Dungeon
+       -> Hub
+       -> Reconnect
+  -> DeathSummary
+  -> Memorial
+  -> CharacterSelect</code></pre>
+
+          <h3>Asset Pipeline</h3>
+          <ul>
+            <li>Pixel art authored at canonical tile and sprite sizes, then packed into deterministic atlases.</li>
+            <li>Manifest keys are stable IDs, not filenames: <code>enemy.salt_confessor.phase_2</code>, <code>item.weapon.bell_cleaver</code>.</li>
+            <li>Content bundles are grouped by hub, base realm biomes, dungeon families, classes, cosmetics, audio, and seasonal content.</li>
+            <li>WASM/browser build streams required bundles before join and optional cosmetic bundles after gameplay is stable.</li>
+            <li>Every asset has collision metadata where needed, palette/readability tags, localization references, and memory budget annotations.</li>
+          </ul>
+        </section>
+
+        <section id="backend">
+          <p class="section-kicker">17. Server Architecture</p>
+          <h2>Backend Design</h2>
+          <p class="lead">
+            The backend is an authoritative Rust service ecosystem. Gameplay simulation runs in shardable realm and
+            dungeon processes. Account, inventory, trade, social, and live-ops systems are separated from real-time
+            simulation so each can scale, deploy, observe, and fail independently.
+          </p>
+
+          <h3>Service Overview</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Service</th>
+                <th>Responsibilities</th>
+                <th>State Model</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Gateway</td>
+                <td>Client connections, session validation, routing, rate limits, protocol negotiation, DDoS edge integration</td>
+                <td>Ephemeral with Redis/session cache.</td>
+              </tr>
+              <tr>
+                <td>Realm Server</td>
+                <td>Open-world simulation, events, enemies, loot eligibility, portals, deaths</td>
+                <td>Authoritative in-memory simulation with event journal.</td>
+              </tr>
+              <tr>
+                <td>Instance Server</td>
+                <td>Dungeons, challenge echoes, boss fights, generated layouts, rewards</td>
+                <td>Authoritative in-memory simulation; durable results at completion/death.</td>
+              </tr>
+              <tr>
+                <td>Account Service</td>
+                <td>Accounts, characters, vault, cosmetics, entitlements, purchases, death records</td>
+                <td>PostgreSQL primary, cache for hot reads.</td>
+              </tr>
+              <tr>
+                <td>Economy Service</td>
+                <td>Market, trade, crafting, currency ledger, item audit, fraud controls</td>
+                <td>PostgreSQL ledger plus event stream.</td>
+              </tr>
+              <tr>
+                <td>Social Service</td>
+                <td>Guilds, parties, chat, friends, block lists, reports, moderation</td>
+                <td>PostgreSQL plus Redis/NATS for presence.</td>
+              </tr>
+              <tr>
+                <td>Matchmaker</td>
+                <td>Realm assignment, dungeon placement, queues, region preference, load balancing</td>
+                <td>Ephemeral plus cluster state.</td>
+              </tr>
+              <tr>
+                <td>Live Ops Service</td>
+                <td>Feature flags, event schedules, store catalog, season config, announcements</td>
+                <td>Versioned config store with audit.</td>
+              </tr>
+              <tr>
+                <td>Telemetry Pipeline</td>
+                <td>Metrics, logs, traces, gameplay events, economy events, anti-cheat signals</td>
+                <td>Stream to warehouse and observability stack.</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>Authoritative Simulation</h3>
+          <ul>
+            <li>Server owns entity positions, hitpoints, status effects, projectiles, AI, loot rolls, inventory mutations, death, and instance completion.</li>
+            <li>Client sends input intents, not final positions or hit claims.</li>
+            <li>Simulation uses deterministic formulas in shared crates where helpful, but server result is final.</li>
+            <li>All item grants, trades, purchases, deaths, and vault changes are durable events with idempotency keys.</li>
+            <li>Crash recovery favors consistency over preserving a live fight. Players should not receive duplicated loot or avoid legitimate deaths through process failure.</li>
+          </ul>
+
+          <h3>Recommended Backend Stack</h3>
+          <div class="grid-2">
+            <div class="tile">
+              <h4>Rust Runtime</h4>
+              <ul>
+                <li>Tokio for async services.</li>
+                <li>Axum or tonic for HTTP/gRPC internal APIs.</li>
+                <li>bevy_ecs or a headless Bevy schedule for simulation modules where ECS is useful.</li>
+                <li>Quinn or WebTransport-compatible stack for QUIC paths.</li>
+                <li>Serde, postcard, bitcode, or custom binary protocol for compact messages.</li>
+              </ul>
+            </div>
+            <div class="tile">
+              <h4>Infrastructure</h4>
+              <ul>
+                <li>Kubernetes for services; game server orchestration with Agones or equivalent fleet manager.</li>
+                <li>PostgreSQL for accounts, ledger, inventory, entitlements, and audit records.</li>
+                <li>Redis for ephemeral presence, matchmaking cache, rate limits, and locks where appropriate.</li>
+                <li>NATS or Kafka for service events, telemetry, economy audit, and live-ops fanout.</li>
+                <li>Object storage and CDN for patches, assets, replays, and logs.</li>
+              </ul>
+            </div>
+          </div>
+        </section>
+
+        <section id="networking">
+          <p class="section-kicker">18. Realtime Systems</p>
+          <h2>Networking Model</h2>
+          <p class="lead">
+            Networking must preserve bullet hell fairness under browser constraints. The design minimizes per-projectile
+            bandwidth by sending deterministic pattern events, compact snapshots, and interest-managed entity updates.
+          </p>
+
+          <h3>Transport</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Client</th>
+                <th>Preferred</th>
+                <th>Fallback</th>
+                <th>Notes</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>PC Native</td>
+                <td>QUIC over UDP</td>
+                <td>Secure WebSocket if network blocks UDP</td>
+                <td>Use unreliable datagrams for snapshots where possible, reliable streams for inventory and chat.</td>
+              </tr>
+              <tr>
+                <td>Browser</td>
+                <td>WebTransport over HTTP/3</td>
+                <td>Secure WebSocket</td>
+                <td>Feature-detect at launch. Fallback reduces update rates if needed.</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>Message Channels</h3>
+          <ul>
+            <li><strong>Input channel:</strong> Client to server, sequence-numbered, high priority, compact action states.</li>
+            <li><strong>Snapshot channel:</strong> Server to client, unreliable or latest-only, delta-compressed entity states.</li>
+            <li><strong>Event channel:</strong> Reliable ordered events for damage, death, loot, phase changes, chat, inventory confirmation.</li>
+            <li><strong>Pattern channel:</strong> Deterministic bullet pattern descriptors with seed, origin, timing, owner, and rules.</li>
+            <li><strong>Control channel:</strong> Login, handoff, reconnect, instance join, feature flags, time sync.</li>
+          </ul>
+
+          <h3>Projectile Bandwidth Strategy</h3>
+          <p>
+            Enemy bullet hell can bankrupt bandwidth if each bullet is synchronized as an entity. The server instead
+            emits pattern commands such as "spawn ring pattern at time T with seed S, speed V, radius R, gap pattern G."
+            Clients render bullets deterministically. Server maintains the authoritative collision model and validates
+            hits from the same pattern description.
+          </p>
+          <pre><code>PatternEvent {
+  server_tick: 1829401,
+  pattern_id: "boss.morcant.crown_rotor.03",
+  caster_entity: 7719,
+  origin: Vec2,
+  target_hint: OptionalEntity,
+  seed: u64,
+  params_hash: u32,
+  duration_ticks: 180
+}</code></pre>
+
+          <h3>Latency and Reconnect</h3>
+          <ul>
+            <li>Show player ping and packet health in a compact HUD indicator, with expanded diagnostics in settings.</li>
+            <li>Support short reconnect windows. Character remains vulnerable for a strict grace policy that prevents disconnect abuse.</li>
+            <li>On disconnect in non-boss realm play, the server attempts safe extraction after a short timeout if the character is not recently damaged or in combat lock.</li>
+            <li>In boss or high-risk locked arenas, disconnect policy must be explicit before entry. Avoid hidden "gotcha" rules.</li>
+            <li>Client records local replay buffer for the last 60 seconds to help support investigate disputed deaths.</li>
+          </ul>
+        </section>
+
+        <section id="scale">
+          <p class="section-kicker">19. Scale Plan</p>
+          <h2>10k Concurrent Player Architecture</h2>
+          <p class="lead">
+            The 10k concurrent target is treated as a launch architecture requirement, not a future refactor. The system
+            should comfortably handle 10k concurrent players in a major region cluster with headroom, plus multi-region
+            expansion for latency and resilience.
+          </p>
+
+          <h3>Capacity Model</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Population Slice</th>
+                <th>Assumption at 10k CCU</th>
+                <th>Server Shape</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Open realms</td>
+                <td>5,500 to 6,500 players</td>
+                <td>60 to 80 realm processes at 80 to 120 players each, with N+1 capacity.</td>
+              </tr>
+              <tr>
+                <td>Dungeons</td>
+                <td>2,500 to 3,500 players</td>
+                <td>Instance servers hosting multiple small dungeon simulations per process, capped by CPU and memory budgets.</td>
+              </tr>
+              <tr>
+                <td>Hub and social</td>
+                <td>500 to 1,200 players</td>
+                <td>Low-combat hub instances with larger capacity, separate from combat simulation.</td>
+              </tr>
+              <tr>
+                <td>Queue, login, patching</td>
+                <td>Bursty during events and launches</td>
+                <td>Autoscaled gateways, CDN assets, login queue, backpressure and status page.</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>Performance Budgets</h3>
+          <div class="grid-2">
+            <div class="tile">
+              <h4>Realm Process</h4>
+              <ul>
+                <li>Target 30 Hz simulation.</li>
+                <li>80 to 120 players plus enemies and projectiles.</li>
+                <li>Interest grid for entity relevance.</li>
+                <li>Pattern commands over projectile spam.</li>
+                <li>CPU budget alert at 65 percent sustained.</li>
+              </ul>
+            </div>
+            <div class="tile">
+              <h4>Bandwidth</h4>
+              <ul>
+                <li>Average target: 6 to 15 KB/s downstream per player during normal play.</li>
+                <li>Spike budget: 25 to 40 KB/s during major boss phases.</li>
+                <li>Upstream target: under 2 KB/s per player.</li>
+                <li>Compression: delta snapshots, entity ID compaction, quantized positions.</li>
+              </ul>
+            </div>
+          </div>
+
+          <h3>Scalability Requirements</h3>
+          <ul>
+            <li>Realm and dungeon processes are stateless enough to be replaced, but authoritative while alive.</li>
+            <li>Matchmaker places players by region, party, guild rally, realm population, skill bracket for training modes, and server health.</li>
+            <li>Hot shard migration is not required for launch; clean realm retirement and replacement is required.</li>
+            <li>Internal APIs use idempotency and durable event journals for inventory, currency, purchases, deaths, and trades.</li>
+            <li>Backpressure exists at login, matchmaking, dungeon creation, market requests, chat, and asset patching.</li>
+            <li>Load tests must simulate combat patterns, not just idle sockets.</li>
+          </ul>
+
+          <h3>Regional Deployment</h3>
+          <pre><code>Region Cluster
+  Edge / CDN / DDoS
+  Gateway Pool
+  Matchmaker
+  Realm Fleet
+  Dungeon Fleet
+  Hub Fleet
+  Account API
+  Economy API
+  Social API
+  Live Ops Config
+  Redis / NATS
+  PostgreSQL primary or regional writer
+  Observability collectors</code></pre>
+        </section>
+
+        <section id="security">
+          <p class="section-kicker">20. Trust</p>
+          <h2>Security, Anti-Cheat, and Abuse Prevention</h2>
+
+          <h3>Anti-Cheat Philosophy</h3>
+          <p>
+            The most important anti-cheat decision is architectural: the server is authoritative. Client anti-cheat can
+            add signals on native PC, but the design cannot depend on a client being honest, especially with browser play.
+          </p>
+
+          <table>
+            <thead>
+              <tr>
+                <th>Threat</th>
+                <th>Mitigation</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Speed hacks</td>
+                <td>Server movement validation, acceleration caps, sequence checks, anomaly scoring.</td>
+              </tr>
+              <tr>
+                <td>Aim automation</td>
+                <td>Server cannot fully prevent aim assist, so design uses movement mastery, pattern reading, and anomaly review for impossible tracking.</td>
+              </tr>
+              <tr>
+                <td>Packet manipulation</td>
+                <td>Authenticated sessions, message schemas, sequence numbers, rate limits, server-side state validation.</td>
+              </tr>
+              <tr>
+                <td>Inventory duplication</td>
+                <td>Ledger-based item events, idempotency keys, transactional grants, single-writer inventory rules.</td>
+              </tr>
+              <tr>
+                <td>Real-money trading</td>
+                <td>Trade limits, market monitoring, graph analysis, delayed settlement for risky accounts, enforcement tools.</td>
+              </tr>
+              <tr>
+                <td>Bot farming</td>
+                <td>Behavior models, path anomaly detection, captcha only out-of-game if absolutely necessary, reward throttles for suspicious loops.</td>
+              </tr>
+              <tr>
+                <td>Chat abuse</td>
+                <td>Filters, rate limits, report tools, mute/block, moderator console, evidence snapshots.</td>
+              </tr>
+              <tr>
+                <td>Payment fraud</td>
+                <td>Entitlement ledger, chargeback handling, delayed high-risk gifting, purchase audit, provider risk signals.</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>Death Dispute Handling</h3>
+          <ul>
+            <li>Death events log server tick, position, recent damage, status effects, boss pattern events, latency, packet loss, and disconnect state.</li>
+            <li>Support can view a compact replay reconstruction for the final seconds.</li>
+            <li>Automated restoration is rare and limited to verified server faults, rollback events, or documented exploits.</li>
+            <li>Never sell death reversal. Trust in permadeath is a core product asset.</li>
+          </ul>
+        </section>
+
+        <section id="data">
+          <p class="section-kicker">21. Production Data</p>
+          <h2>Data Model, Tools, and Content Pipeline</h2>
+
+          <h3>Core Data Entities</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Entity</th>
+                <th>Stored In</th>
+                <th>Notes</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Account</td>
+                <td>PostgreSQL</td>
+                <td>Identity, entitlements, settings, moderation state, region preferences.</td>
+              </tr>
+              <tr>
+                <td>Character</td>
+                <td>PostgreSQL plus live server memory</td>
+                <td>Class, level, stats, equipment, inventory, location, death state.</td>
+              </tr>
+              <tr>
+                <td>Item Instance</td>
+                <td>PostgreSQL ledger</td>
+                <td>Unique item ID, template ID, affixes, rolls, binding, owner, history.</td>
+              </tr>
+              <tr>
+                <td>Vault</td>
+                <td>PostgreSQL</td>
+                <td>Account storage pages, material tabs, constraints, sorting metadata.</td>
+              </tr>
+              <tr>
+                <td>Market Listing</td>
+                <td>PostgreSQL and cache</td>
+                <td>Listing ID, item ID, seller, price, expiration, settlement state.</td>
+              </tr>
+              <tr>
+                <td>Guild</td>
+                <td>PostgreSQL</td>
+                <td>Roster, roles, hall progress, projects, logs, settings.</td>
+              </tr>
+              <tr>
+                <td>Telemetry Event</td>
+                <td>Stream and warehouse</td>
+                <td>Combat, death, economy, progression, session, and performance events.</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>Content Authoring Tools</h3>
+          <div class="grid-2">
+            <div class="tile">
+              <h4>Encounter Editor</h4>
+              <p>Author bullet patterns, boss phases, arena hazards, telegraphs, rewards, and difficulty budgets. Exports versioned content data and preview clips.</p>
+            </div>
+            <div class="tile">
+              <h4>Item Editor</h4>
+              <p>Defines item templates, affix pools, roll ranges, tags, rarity, drop sources, crafting behavior, and trade rules.</p>
+            </div>
+            <div class="tile">
+              <h4>Dungeon Builder</h4>
+              <p>Room templates, connection rules, modifier compatibility, enemy budgets, secret rules, validation passes, and seed replay.</p>
+            </div>
+            <div class="tile">
+              <h4>Live Ops Console</h4>
+              <p>Schedules events, rotates store, configures seasons, sends announcements, watches health, and rolls back bad config.</p>
+            </div>
+          </div>
+
+          <h3>Validation Gates</h3>
+          <div class="checklist">
+            <div><strong>Content schema validation</strong><span>Every content file must pass type, range, reference, localization, and tag validation.</span></div>
+            <div><strong>Pattern fairness test</strong><span>Automated checks for unavoidable projectile overlaps under expected speed ranges.</span></div>
+            <div><strong>Dungeon reachability test</strong><span>Every generated seed must have valid start, objective, boss, loot, and exit paths.</span></div>
+            <div><strong>Economy simulation</strong><span>Drop rates, sinks, death loss, crafting, and trade are modeled before release.</span></div>
+            <div><strong>Readability review</strong><span>Projectile, enemy, friendly FX, and loot colors are tested for contrast and colorblind clarity.</span></div>
+            <div><strong>Load test</strong><span>Combat-heavy simulations run before content is approved for live events.</span></div>
+          </div>
+        </section>
+
+        <section id="art-audio">
+          <p class="section-kicker">22. Presentation</p>
+          <h2>Art, Animation, VFX, and Audio Direction</h2>
+
+          <h3>Pixel Art Direction</h3>
+          <p>
+            The art style is readable dark fantasy pixel art with restrained palettes, strong silhouettes, and high
+            contrast for combat-critical elements. The world can be grim and textured, but gameplay objects must remain
+            unmistakable at speed.
+          </p>
+
+          <table>
+            <thead>
+              <tr>
+                <th>Asset</th>
+                <th>Guideline</th>
+                <th>Budget Target</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Player sprites</td>
+                <td>Distinct class silhouettes with readable weapon profiles and cosmetic attachment rules.</td>
+                <td>32x32 or 48x48 base with modular overlays.</td>
+              </tr>
+              <tr>
+                <td>Enemies</td>
+                <td>Size communicates threat. Elites need immediate silhouette and affix readability.</td>
+                <td>32x32 to 128x128 depending on role.</td>
+              </tr>
+              <tr>
+                <td>Bosses</td>
+                <td>Large silhouettes, clear phase animations, readable attack origins.</td>
+                <td>128x128 to 256x256 sprite footprint.</td>
+              </tr>
+              <tr>
+                <td>Projectiles</td>
+                <td>Enemy bullets outrank friendly VFX. Shape and color indicate damage family.</td>
+                <td>Small sprite set with shader tinting and accessibility variants.</td>
+              </tr>
+              <tr>
+                <td>Environments</td>
+                <td>Atmospheric but lower contrast than bullets, enemies, pickups, and exits.</td>
+                <td>Tile chunks and prop atlases per biome.</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>Combat Readability Palette</h3>
+          <ul>
+            <li><strong>Enemy lethal:</strong> Bone white, blood red, cold violet, and high-contrast gold depending on damage family.</li>
+            <li><strong>Friendly attacks:</strong> Lower brightness and thinner shapes than enemy bullets.</li>
+            <li><strong>Healing and safe zones:</strong> Lantern gold with icon and ring patterns, not color alone.</li>
+            <li><strong>Poison and curse:</strong> Distinct shapes and icons; avoid relying only on green vs red.</li>
+            <li><strong>Loot beams:</strong> Rarity color plus shape and sound cue for accessibility.</li>
+          </ul>
+
+          <h3>Audio Direction</h3>
+          <ul>
+            <li>Music: mournful strings, low drums, chapel bells, distorted choirs, tense percussion during boss phases.</li>
+            <li>Projectile audio: quiet enough to avoid fatigue, but lethal attacks get distinct pre-impact or telegraph sounds.</li>
+            <li>Loot audio: rarity-specific stingers, with volume control and accessibility captions for important drops.</li>
+            <li>Death audio: solemn, immediate, not comedic. Death summary follows quickly.</li>
+            <li>Mix priority: lethal telegraphs, low health, boss phase, party alerts, loot, ambience.</li>
+          </ul>
+        </section>
+
+        <section id="ux">
+          <p class="section-kicker">23. Interface</p>
+          <h2>UX, HUD, Accessibility, and Onboarding</h2>
+
+          <h3>HUD Priorities</h3>
+          <ol>
+            <li>Own position, health, danger, and bullets.</li>
+            <li>Ability cooldowns and status effects.</li>
+            <li>Boss phase and arena objectives.</li>
+            <li>Party health and emergency calls.</li>
+            <li>Loot and inventory state.</li>
+            <li>Chat and social context.</li>
+          </ol>
+
+          <h3>HUD Elements</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Element</th>
+                <th>Behavior</th>
+                <th>Notes</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Health frame</td>
+                <td>Large, stable, low-health pulse, damage direction hints</td>
+                <td>Must never be obscured by chat or loot.</td>
+              </tr>
+              <tr>
+                <td>Ability bar</td>
+                <td>Cooldown sweep, charges, disabled state, key labels</td>
+                <td>Supports controller glyphs.</td>
+              </tr>
+              <tr>
+                <td>Status tray</td>
+                <td>Icon, duration ring, severity border, tooltip</td>
+                <td>Color plus shape for accessibility.</td>
+              </tr>
+              <tr>
+                <td>Minimap</td>
+                <td>Threat zones, party, portals, events, objective markers</td>
+                <td>Can collapse in boss fights if arena demands space.</td>
+              </tr>
+              <tr>
+                <td>Loot feed</td>
+                <td>Compact, filterable, rarity sound, pin option</td>
+                <td>Does not steal focus during lethal moments.</td>
+              </tr>
+              <tr>
+                <td>Latency indicator</td>
+                <td>Small icon with expandable details</td>
+                <td>Critical for permadeath trust.</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>Accessibility Requirements</h3>
+          <ul>
+            <li>Colorblind-safe projectile themes with shape, outline, motion, and sound alternatives.</li>
+            <li>Projectile contrast slider and friendly-effect opacity slider.</li>
+            <li>Screen shake intensity, flash reduction, and reduced motion settings.</li>
+            <li>Rebindable keyboard, mouse, and controller controls.</li>
+            <li>Readable text scaling for UI, tooltips, inventory, and chat.</li>
+            <li>Chat filters, font size controls, and speech-to-text compatibility as future enhancement.</li>
+            <li>Practice arenas for dangerous boss mechanics with no loot and no permadeath.</li>
+          </ul>
+
+          <h3>Onboarding</h3>
+          <ol>
+            <li><strong>First launch:</strong> Pick display name, region, accessibility baseline, and input preset.</li>
+            <li><strong>Training crypt:</strong> Learn movement, aim, firing, ability, potion, extraction, and death rules.</li>
+            <li><strong>First character:</strong> Choose one of three beginner-friendly classes with simple descriptions.</li>
+            <li><strong>First realm:</strong> Guided entry with map pings to early events and safe extraction reminder.</li>
+            <li><strong>First death:</strong> Clear memorial summary, what was lost, what persisted, and one-click reroll.</li>
+            <li><strong>First dungeon:</strong> Low-tier portal with visible group join, boss telegraph tutorial, and loot explanation.</li>
+          </ol>
+        </section>
+
+        <section id="liveops">
+          <p class="section-kicker">24. Live Service</p>
+          <h2>Seasons, Events, and Operations</h2>
+
+          <h3>Season Structure</h3>
+          <ul>
+            <li><strong>Length:</strong> 10 to 12 weeks.</li>
+            <li><strong>Theme:</strong> One world modifier, one dungeon family variant, one new boss or major encounter, cosmetics, challenge ladder, balance refresh.</li>
+            <li><strong>Seasonal characters:</strong> Optional but prominent. Seasonal vault rules must preserve fairness and avoid paid advantage.</li>
+            <li><strong>Non-seasonal:</strong> Permanent realm remains active for collectors, casual players, and long-term accounts.</li>
+            <li><strong>End of season:</strong> Characters and vault migrate according to published rules. Seasonal trophies and cosmetics persist.</li>
+          </ul>
+
+          <h3>Live Ops Cadence</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Cadence</th>
+                <th>Content</th>
+                <th>Purpose</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Daily</td>
+                <td>Rotating dungeon favor, world anomaly, market spotlight</td>
+                <td>Gentle reason to log in without punishing absence.</td>
+              </tr>
+              <tr>
+                <td>Weekly</td>
+                <td>Challenge Echo, guild objective, boss bounty, cosmetic store refresh</td>
+                <td>Social coordination and mastery goals.</td>
+              </tr>
+              <tr>
+                <td>Monthly</td>
+                <td>Balance patch, new modifiers, event chain, economy report</td>
+                <td>Keep meta healthy and transparent.</td>
+              </tr>
+              <tr>
+                <td>Seasonal</td>
+                <td>New theme, boss, cosmetics, ladder, story beat</td>
+                <td>Renewal and acquisition beat.</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>Key Metrics</h3>
+          <div class="grid-3">
+            <div class="tile"><h4>Retention</h4><p>D1, D7, D30, season return, post-death reroll rate, session length, party return.</p></div>
+            <div class="tile"><h4>Fairness</h4><p>Death cause distribution, latency at death, class death rates, boss phase death spikes, disputed deaths.</p></div>
+            <div class="tile"><h4>Economy</h4><p>Item creation/destruction, trade velocity, currency inflation, crafting sinks, market concentration.</p></div>
+            <div class="tile"><h4>Monetization</h4><p>Conversion, ARPDAU, cosmetic attach, storage attach, pass completion, payer retention.</p></div>
+            <div class="tile"><h4>Performance</h4><p>Tick time, snapshot size, packet loss, region latency, crash rate, WASM memory.</p></div>
+            <div class="tile"><h4>Community</h4><p>Guild participation, reports, mutes, chat health, event attendance, creator moments.</p></div>
+          </div>
+        </section>
+
+        <section id="roadmap">
+          <p class="section-kicker">25. Production</p>
+          <h2>Roadmap and Milestones</h2>
+
+          <h3>Phase 0: Prototype Foundation</h3>
+          <ul>
+            <li>Bevy client movement, aim, basic projectiles, enemy patterns, and death flow.</li>
+            <li>Headless Rust simulation prototype with server-authoritative movement and collision.</li>
+            <li>One class, one biome test arena, one boss pattern, one item drop loop.</li>
+            <li>Networking spike for PC QUIC and browser WebTransport/WebSocket fallback.</li>
+            <li>Content schema and asset manifest proof.</li>
+          </ul>
+
+          <h3>Phase 1: Vertical Slice</h3>
+          <ul>
+            <li>Three classes, one open-world region, two dungeon tiers, two bosses, initial loot affix system.</li>
+            <li>Character select, vault, death memorial, basic crafting, party, chat, and guild shell.</li>
+            <li>Scalable service skeleton: gateway, account, realm, instance, telemetry, live config.</li>
+            <li>Load test to 1,000 simulated players with combat behavior.</li>
+            <li>Internal playtest with death analytics and economy simulation.</li>
+          </ul>
+
+          <h3>Phase 2: Alpha</h3>
+          <ul>
+            <li>Six classes, three regions, eight dungeons, first season rules, market, guild projects.</li>
+            <li>Browser WASM optimization, asset streaming, reconnect, accessibility baseline.</li>
+            <li>Anti-cheat telemetry, moderation console, support tools, death replay reconstruction.</li>
+            <li>Load test to 5,000 simulated players and 1,000 real closed-alpha players.</li>
+            <li>Monetization store sandbox with cosmetics and convenience only.</li>
+          </ul>
+
+          <h3>Phase 3: Beta</h3>
+          <ul>
+            <li>Eight launch classes, five regions, 16+ dungeons, 20+ bosses/minibosses, full loot economy.</li>
+            <li>Season pass, free track, paid cosmetic track, store, purchase ledger, platform integration.</li>
+            <li>10k CCU load test, chaos testing, regional failover drills, content rollback tools.</li>
+            <li>Creator-friendly settings, replay sharing, public ladder, community events.</li>
+            <li>Balance lock, onboarding polish, accessibility review, localization pipeline.</li>
+          </ul>
+
+          <h3>Launch Content Target</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Content Type</th>
+                <th>Minimum</th>
+                <th>Healthy Target</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>Classes</td><td>8</td><td>8 polished, 2 in post-launch pipeline</td></tr>
+              <tr><td>Open regions</td><td>4</td><td>5 plus seasonal overlays</td></tr>
+              <tr><td>Dungeons</td><td>12</td><td>16 to 20 across tiers</td></tr>
+              <tr><td>Major bosses</td><td>8</td><td>12 plus miniboss pool</td></tr>
+              <tr><td>Item templates</td><td>350</td><td>600+ including rares and uniques</td></tr>
+              <tr><td>Affixes</td><td>100</td><td>180+ with controlled pools</td></tr>
+              <tr><td>Cosmetic sets</td><td>40</td><td>80+ earnable and paid</td></tr>
+              <tr><td>Season content</td><td>1 complete season</td><td>Season 2 ready before launch</td></tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section id="risks">
+          <p class="section-kicker">26. Risk Register</p>
+          <h2>Risks and Mitigations</h2>
+
+          <table>
+            <thead>
+              <tr>
+                <th>Risk</th>
+                <th>Impact</th>
+                <th>Mitigation</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Permadeath feels unfair due to latency</td>
+                <td>Loss of trust and retention</td>
+                <td>Server logs, latency UI, reconnect rules, regional routing, defensive grace only where abuse-safe, robust support tooling.</td>
+              </tr>
+              <tr>
+                <td>Loot complexity overwhelms new players</td>
+                <td>Onboarding failure</td>
+                <td>Tiered tooltips, recommended tags, build templates, hide advanced comparisons until relevant.</td>
+              </tr>
+              <tr>
+                <td>Storage monetization is perceived as pay-to-win</td>
+                <td>Community backlash</td>
+                <td>Generous free baseline, earnable storage, seasonal competitive equalizers, clear no-power policy.</td>
+              </tr>
+              <tr>
+                <td>Bullet patterns overload browser performance</td>
+                <td>Unplayable fights</td>
+                <td>Pattern events, sprite pooling, effect budgets, browser-specific density tuning, adaptive friendly FX opacity.</td>
+              </tr>
+              <tr>
+                <td>Economy inflation</td>
+                <td>Loot loses value</td>
+                <td>Permadeath loss, crafting sinks, market tax, seasonal resets, binding rules, telemetry-driven drop tuning.</td>
+              </tr>
+              <tr>
+                <td>Content pipeline cannot keep up</td>
+                <td>Live-service fatigue</td>
+                <td>Authoring tools, reusable pattern vocabulary, seasonal modifiers, scalable item tags, validated procedural content.</td>
+              </tr>
+              <tr>
+                <td>Cheating or RMT dominates</td>
+                <td>Competitive and economic collapse</td>
+                <td>Server authority, trade graph analytics, trust scoring, moderation tools, enforcement cadence, limited new-account trade.</td>
+              </tr>
+              <tr>
+                <td>Rust/Bevy browser path hits maturity issues</td>
+                <td>Delay or browser compromise</td>
+                <td>Early WASM spike, conservative renderer features, PC-first fallback, isolate platform-specific code, maintain performance gates.</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section id="appendix">
+          <p class="section-kicker">27. Appendix</p>
+          <h2>Implementation Appendix</h2>
+
+          <h3>Shared Protocol Examples</h3>
+          <pre><code>ClientInput {
+  client_tick: u32,
+  last_received_server_tick: u32,
+  move_x: i8,        // quantized -127..127
+  move_y: i8,
+  aim_angle: u16,    // quantized radians
+  buttons: u32,      // bitfield
+  selected_target: Option&lt;EntityId&gt;
+}
+
+ServerSnapshot {
+  server_tick: u32,
+  baseline_tick: u32,
+  player_state: PlayerStateDelta,
+  entities: Vec&lt;EntityDelta&gt;,
+  removed_entities: Vec&lt;EntityId&gt;,
+  pattern_events: Vec&lt;PatternEvent&gt;,
+  reliable_event_acks: Vec&lt;EventId&gt;
+}</code></pre>
+
+          <h3>Item Instance Example</h3>
+          <pre><code>ItemInstance {
+  item_uid: Uuid,
+  template_id: "weapon.sword.bell_cleaver",
+  owner_account_id: Uuid,
+  location: Equipped(CharacterId, Slot::Weapon),
+  rarity: BlackUnique,
+  item_level: 82,
+  affixes: [
+    { id: "damage.physical.percent", roll: 0.17, tier: 5 },
+    { id: "guard.retaliation.radius", roll: 0.09, tier: 4 },
+    { id: "risk.move_speed_down", roll: -0.05, tier: 3 }
+  ],
+  bind_state: BindOnEquip,
+  created_at: Timestamp,
+  source: Drop { dungeon: "bell_tower_sepulcher", boss: "caldus" },
+  audit_version: 12
+}</code></pre>
+
+          <h3>Launch Acceptance Checklist</h3>
+          <div class="checklist">
+            <div><strong>Permadeath trust</strong><span>Death logs, reconnect policy, latency UI, and support tools are live.</span></div>
+            <div><strong>No paid power</strong><span>Store catalog reviewed against monetization red lines.</span></div>
+            <div><strong>10k load test</strong><span>Combat-heavy simulation reaches target with headroom.</span></div>
+            <div><strong>Browser performance</strong><span>WASM client meets memory, FPS, and load-time budgets on target hardware.</span></div>
+            <div><strong>Content validation</strong><span>Dungeon seeds, boss patterns, items, and drop tables pass automated checks.</span></div>
+            <div><strong>Economy health</strong><span>Item sinks, currency sinks, trade limits, and telemetry dashboards are operating.</span></div>
+            <div><strong>Accessibility baseline</strong><span>Rebinding, colorblind aids, effect opacity, text scale, and motion settings are implemented.</span></div>
+            <div><strong>Live ops safety</strong><span>Feature flags, config rollback, store audit, and event scheduling are tested.</span></div>
+          </div>
+
+          <h3>Immediate Next Design Documents</h3>
+          <ol>
+            <li><a href="Gravebound_Production_Design_Document_Suite.html#tdd">Technical Design Document</a> for Rust/Bevy client and service architecture.</li>
+            <li><a href="Gravebound_Production_Design_Document_Suite.html#combat-guide">Combat readability guide</a> with projectile shape language and colorblind variants.</li>
+            <li><a href="Gravebound_Production_Design_Document_Suite.html#itemization">Itemization spreadsheet schema</a> and affix balance model.</li>
+            <li><a href="Gravebound_Production_Design_Document_Suite.html#protocol">Backend protocol specification</a> and load-test plan.</li>
+            <li><a href="Gravebound_Production_Design_Document_Suite.html#vertical-slice">First vertical-slice content bible</a>: one region, three classes, two dungeons, two bosses, 100 items.</li>
+            <li><a href="Gravebound_Production_Design_Document_Suite.html#monetization">Monetization policy document</a> with store approval checklist.</li>
+          </ol>
+
+          <div class="divider"></div>
+
+          <p class="small">
+            End of v0.1. This document is intentionally broad enough for all production disciplines and specific enough
+            to begin technical design, prototype planning, content pipeline setup, and commercial validation.
+          </p>
+        </section>
+      </div>
+    </main>
+  </div>
+</body>
+</html>

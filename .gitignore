@@ -1,0 +1,25 @@
+# Rust / Bevy
+/target/
+*.pdb
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Operating system
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Temporary and generated local files
+/tmp/
+*.log
+*.bak
+
