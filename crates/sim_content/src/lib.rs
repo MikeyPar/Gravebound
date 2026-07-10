@@ -12,6 +12,10 @@ use content_schema::{
     DropTableRecord, EnemyRecord, FIRST_PLAYABLE_CONTENT_VERSION, FeatureRegistry, ItemRecord,
     PatternRecord, ReleaseManifest, ReleaseStage, SCHEMA_VERSION,
 };
+use sim_core::{ArenaAnchor, ArenaGeometry, MILLI_TILES_PER_TILE, TilePoint, TileRectangle};
+
+/// Stable First Playable arena ID from `CONT-FP-001` and `CONT-FP-002`.
+pub const FIRST_PLAYABLE_ARENA_ID: &str = "arena.prototype.bell_laboratory_01";
 
 /// Exact record counts for the M01 prototype bundle defined by `CONT-FP-001` through `CONT-FP-008`.
 pub const FIRST_PLAYABLE_DOMAIN_COUNTS: [(&str, usize); 7] = [
@@ -92,7 +96,166 @@ fn validate_package(package: &ContentPackage) -> Result<()> {
     validate_features(&package.feature_registry)?;
     validate_references(package)?;
     validate_fp_combination(package)?;
+    validate_first_playable_arena(package)?;
     Ok(())
+}
+
+/// Returns the exact validated First Playable arena in simulation-owned units.
+pub fn first_playable_arena(package: &ContentPackage) -> Result<ArenaGeometry> {
+    let record = package
+        .arenas
+        .iter()
+        .find(|record| record.header.id.as_str() == FIRST_PLAYABLE_ARENA_ID)
+        .context("First Playable arena record is missing")?;
+    compile_arena_geometry(record)
+}
+
+/// Compiles one strict content record into renderer-independent simulation geometry.
+pub fn compile_arena_geometry(record: &ArenaRecord) -> Result<ArenaGeometry> {
+    let payload = &record.numeric_payload;
+    let mut pillars = payload
+        .pillars
+        .iter()
+        .map(|rectangle| {
+            Ok(TileRectangle::new(
+                rectangle.x_milli_tiles,
+                rectangle.y_milli_tiles,
+                u32_to_i32(rectangle.width_milli_tiles, "pillar width")?,
+                u32_to_i32(rectangle.height_milli_tiles, "pillar height")?,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    pillars.sort_by_key(|rectangle| {
+        (
+            rectangle.y_milli_tiles,
+            rectangle.x_milli_tiles,
+            rectangle.width_milli_tiles,
+            rectangle.height_milli_tiles,
+        )
+    });
+
+    let mut anchors: Vec<_> = payload
+        .anchors
+        .iter()
+        .map(|anchor| ArenaAnchor {
+            id: anchor.id.clone(),
+            point: content_point(anchor.point),
+        })
+        .collect();
+    anchors.sort_by(|first, second| first.id.as_bytes().cmp(second.id.as_bytes()));
+
+    ArenaGeometry {
+        id: record.header.id.to_string(),
+        width_milli_tiles: whole_tiles_to_milli(payload.width_tiles, "arena width")?,
+        height_milli_tiles: whole_tiles_to_milli(payload.height_tiles, "arena height")?,
+        shell_thickness_milli_tiles: whole_tiles_to_milli(
+            payload.shell_thickness_tiles,
+            "shell thickness",
+        )?,
+        player_spawn: content_point(payload.player_spawn),
+        boss_spawn: content_point(payload.boss_spawn),
+        pillars,
+        anchors,
+    }
+    .validated()
+    .context("arena geometry invariants failed")
+}
+
+fn content_point(point: content_schema::Point) -> TilePoint {
+    TilePoint::new(point.x_milli_tiles, point.y_milli_tiles)
+}
+
+fn whole_tiles_to_milli(tiles: u32, field: &str) -> Result<i32> {
+    let tiles = u32_to_i32(tiles, field)?;
+    tiles
+        .checked_mul(MILLI_TILES_PER_TILE)
+        .with_context(|| format!("{field} exceeds fixed-point range"))
+}
+
+fn u32_to_i32(value: u32, field: &str) -> Result<i32> {
+    i32::try_from(value).with_context(|| format!("{field} exceeds signed geometry range"))
+}
+
+fn validate_first_playable_arena(package: &ContentPackage) -> Result<()> {
+    let actual = first_playable_arena(package)?;
+    let expected = expected_first_playable_arena()?;
+    if actual != expected {
+        bail!("{FIRST_PLAYABLE_ARENA_ID} does not exactly match CONT-FP-002 geometry");
+    }
+    Ok(())
+}
+
+fn expected_first_playable_arena() -> Result<ArenaGeometry> {
+    ArenaGeometry {
+        id: FIRST_PLAYABLE_ARENA_ID.to_owned(),
+        width_milli_tiles: 32_000,
+        height_milli_tiles: 24_000,
+        shell_thickness_milli_tiles: 1_000,
+        player_spawn: TilePoint::new(4_000, 12_000),
+        boss_spawn: TilePoint::new(24_000, 12_000),
+        pillars: vec![
+            TileRectangle::new(10_000, 5_000, 2_000, 3_000),
+            TileRectangle::new(20_000, 5_000, 2_000, 3_000),
+            TileRectangle::new(10_000, 16_000, 2_000, 3_000),
+            TileRectangle::new(20_000, 16_000, 2_000, 3_000),
+        ],
+        anchors: vec![
+            ArenaAnchor {
+                id: "C".to_owned(),
+                point: TilePoint::new(16_000, 12_000),
+            },
+            ArenaAnchor {
+                id: "E1".to_owned(),
+                point: TilePoint::new(29_000, 8_000),
+            },
+            ArenaAnchor {
+                id: "E2".to_owned(),
+                point: TilePoint::new(29_000, 16_000),
+            },
+            ArenaAnchor {
+                id: "N1".to_owned(),
+                point: TilePoint::new(8_000, 3_000),
+            },
+            ArenaAnchor {
+                id: "N2".to_owned(),
+                point: TilePoint::new(16_000, 3_000),
+            },
+            ArenaAnchor {
+                id: "N3".to_owned(),
+                point: TilePoint::new(24_000, 3_000),
+            },
+            ArenaAnchor {
+                id: "S1".to_owned(),
+                point: TilePoint::new(8_000, 21_000),
+            },
+            ArenaAnchor {
+                id: "S2".to_owned(),
+                point: TilePoint::new(16_000, 21_000),
+            },
+            ArenaAnchor {
+                id: "S3".to_owned(),
+                point: TilePoint::new(24_000, 21_000),
+            },
+            ArenaAnchor {
+                id: "W1".to_owned(),
+                point: TilePoint::new(3_000, 8_000),
+            },
+            ArenaAnchor {
+                id: "W2".to_owned(),
+                point: TilePoint::new(3_000, 16_000),
+            },
+            ArenaAnchor {
+                id: "reward_pedestal".to_owned(),
+                point: TilePoint::new(4_000, 4_000),
+            },
+            ArenaAnchor {
+                id: "tonic_refill".to_owned(),
+                point: TilePoint::new(4_000, 20_000),
+            },
+        ],
+    }
+    .validated()
+    .context("built-in CONT-FP-002 fixture is invalid")
 }
 
 fn validate_manifest(package: &ContentPackage) -> Result<()> {
@@ -565,5 +728,24 @@ mod tests {
         package.drop_tables[0].numeric_payload.roll_groups[0].outcomes[0].weight += 1;
         let error = validate_references(&package).expect_err("invalid sum must fail");
         assert!(error.to_string().contains("total exactly 100"));
+    }
+
+    #[test]
+    fn first_playable_arena_compiles_exactly_and_order_independently() {
+        let mut package = valid_package();
+        let expected = expected_first_playable_arena().expect("fixture");
+        assert_eq!(first_playable_arena(&package).expect("compiled"), expected);
+
+        package.arenas[0].numeric_payload.pillars.reverse();
+        package.arenas[0].numeric_payload.anchors.reverse();
+        assert_eq!(first_playable_arena(&package).expect("reordered"), expected);
+    }
+
+    #[test]
+    fn first_playable_arena_mismatch_fails_content_validation() {
+        let mut package = valid_package();
+        package.arenas[0].numeric_payload.player_spawn.x_milli_tiles += 1;
+        let error = validate_first_playable_arena(&package).expect_err("mismatch must fail");
+        assert!(error.to_string().contains("CONT-FP-002"));
     }
 }
