@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "feature_id": "GB-M00-08",
+  "content_version": "fp.1.0.0",
+  "root_seed": 6840227782638526189,
+  "tick_hashes": [
+    {
+      "tick": 1,
+      "state_hash_blake3": "e27ddc41d519f78b28807afd794608daed67e19706342cfcb61c225317c791da"
+    },
+    {
+      "tick": 30,
+      "state_hash_blake3": "7ce4d9bcfc869f718edc911f200e7411715e1246490f651a3ca6f3e1c3b3a684"
+    },
+    {
+      "tick": 60,
+      "state_hash_blake3": "267ef483a3a3c825e56b2c6dfca02f3132e486dbb636cf17458ca5fe2bea639b"
+    },
+    {
+      "tick": 90,
+      "state_hash_blake3": "bceaed0964299ec133a45e29d934cf2e4b8de54be5fdaf9001b8282cef4c726e"
+    },
+    {
+      "tick": 120,
+      "state_hash_blake3": "9ce920644c159188524bfd8b3d64b0499cdef35ef6b184168701039554797ffa"
+    }
+  ]
+}

@@ -91,4 +91,4 @@ Concept images establish mood, hierarchy, and visual language. They are not fina
 
 ## Current next step
 
-Complete `GB-M00-05` and `GB-M00-08`: implement the deterministic 30 Hz simulation clock, named RNG streams, fixed-input trace runner, and selected-tick golden state hashes described by ADR-001. Workspace/toolchain work is in place; content schemas and semantic validation follow immediately afterward.
+Complete `GB-M00-06` and `GB-M00-07`: add stable content IDs, the feature registry, minimum versioned content schemas, and strict cross-reference validation for the M01 prototype bundle. The deterministic 30 Hz trace and golden state hashes are now in place.

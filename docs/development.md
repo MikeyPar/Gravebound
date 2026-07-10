@@ -40,7 +40,7 @@ Direct Cargo aliases are also available: `cargo gb-format`, `cargo gb-lint`, `ca
 ## Runtime modes
 
 - **LocalLab:** available in M00; `client_bevy` and `sim_core` share one process with ephemeral state.
-- **Headless/Replay:** available through `tools_content trace` after `GB-M00-08`.
+- **Headless/Replay:** `cargo run -p tools_content -- trace tests/deterministic/m00_smoke.json`.
 - **LocalStack:** intentionally unavailable until `server_app` arrives in M02 and PostgreSQL persistence arrives in M03. `.\tools\dev.ps1 local-stack` fails explicitly rather than running a behaviorally false substitute.
 
 Gameplay rules must live in `sim_core` or validated content. `client_bevy` owns presentation only.
@@ -54,4 +54,3 @@ $env:RUST_LOG = 'info,client_bevy=debug,sim_core=debug,sim_content=debug'
 ```
 
 Never log credentials, authentication tickets, account tokens, or future commerce secrets.
-

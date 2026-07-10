@@ -8,7 +8,11 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+blake3.workspace = true
+rand_chacha.workspace = true
+rand_core.workspace = true
+serde.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true
-

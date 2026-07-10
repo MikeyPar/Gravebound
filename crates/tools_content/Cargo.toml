@@ -8,8 +8,10 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+anyhow.workspace = true
 clap.workspace = true
 content_schema = { path = "../content_schema" }
+serde_json.workspace = true
 sim_content = { path = "../sim_content" }
 sim_core = { path = "../sim_core" }
 tracing.workspace = true
@@ -17,4 +19,3 @@ tracing-subscriber.workspace = true
 
 [lints]
 workspace = true
-

@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "feature_id": "GB-M00-08",
+  "content_version": "fp.1.0.0",
+  "root_seed": 6840227782638526189,
+  "total_ticks": 120,
+  "selected_ticks": [1, 30, 60, 90, 120],
+  "entities": [
+    {
+      "entity_id": 101,
+      "position_x_milli": 0,
+      "position_y_milli": 0,
+      "health": 1000
+    },
+    {
+      "entity_id": 202,
+      "position_x_milli": 4500,
+      "position_y_milli": -2250,
+      "health": 375
+    }
+  ],
+  "inputs": [
+    {
+      "tick": 1,
+      "entity_id": 101,
+      "delta_x_milli": 250,
+      "delta_y_milli": 0,
+      "damage": 0
+    },
+    {
+      "tick": 30,
+      "entity_id": 202,
+      "delta_x_milli": -125,
+      "delta_y_milli": 375,
+      "damage": 25
+    },
+    {
+      "tick": 60,
+      "entity_id": 101,
+      "delta_x_milli": 0,
+      "delta_y_milli": -500,
+      "damage": 64
+    },
+    {
+      "tick": 90,
+      "entity_id": 202,
+      "delta_x_milli": 1000,
+      "delta_y_milli": 1000,
+      "damage": 400
+    },
+    {
+      "tick": 120,
+      "entity_id": 101,
+      "delta_x_milli": -250,
+      "delta_y_milli": 500,
+      "damage": 0
+    }
+  ]
+}
