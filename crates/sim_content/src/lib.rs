@@ -935,6 +935,42 @@ mod tests {
             .operation = EffectOperation::Add;
         let error = first_playable_weapon(&package).expect_err("wrong operation must fail");
         assert!(error.to_string().contains("must use the `set` operation"));
+
+        let mut package = valid_package();
+        let ItemPayload::Equipment { effects, .. } = &mut package
+            .items
+            .iter_mut()
+            .find(|record| record.header.id.as_str() == FIRST_PLAYABLE_WEAPON_ID)
+            .expect("pine crossbow")
+            .numeric_payload
+        else {
+            panic!("pine crossbow must be equipment");
+        };
+        effects.retain(|effect| effect.stat != "projectile_count");
+        let error = first_playable_weapon(&package).expect_err("missing effect must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("missing required `projectile_count`")
+        );
+
+        let mut package = valid_package();
+        let ItemPayload::Equipment { effects, .. } = &mut package
+            .items
+            .iter_mut()
+            .find(|record| record.header.id.as_str() == FIRST_PLAYABLE_WEAPON_ID)
+            .expect("pine crossbow")
+            .numeric_payload
+        else {
+            panic!("pine crossbow must be equipment");
+        };
+        effects
+            .iter_mut()
+            .find(|effect| effect.stat == "primary_damage")
+            .expect("damage effect")
+            .value = -1;
+        let error = first_playable_weapon(&package).expect_err("negative effect must fail");
+        assert!(error.to_string().contains("must be nonnegative"));
     }
 
     #[test]
@@ -954,5 +990,39 @@ mod tests {
         *range_milli_tiles += 1;
         let error = first_playable_weapon(&package).expect_err("mismatch must fail");
         assert!(error.to_string().contains("disagree"));
+    }
+
+    #[test]
+    fn consistently_mutated_weapon_still_fails_exact_fp_contract() {
+        let mut package = valid_package();
+        let primary = package
+            .abilities
+            .iter_mut()
+            .find(|record| record.header.id.as_str() == FIRST_PLAYABLE_PRIMARY_ID)
+            .expect("primary");
+        let AbilityPayload::Primary {
+            range_milli_tiles, ..
+        } = &mut primary.numeric_payload
+        else {
+            panic!("primary payload");
+        };
+        *range_milli_tiles += 1;
+        let ItemPayload::Equipment { effects, .. } = &mut package
+            .items
+            .iter_mut()
+            .find(|record| record.header.id.as_str() == FIRST_PLAYABLE_WEAPON_ID)
+            .expect("pine crossbow")
+            .numeric_payload
+        else {
+            panic!("pine crossbow must be equipment");
+        };
+        effects
+            .iter_mut()
+            .find(|effect| effect.stat == "range_milli_tiles")
+            .expect("range effect")
+            .value += 1;
+        let error =
+            validate_first_playable_weapon(&package).expect_err("exact fixture must reject change");
+        assert!(error.to_string().contains("CONT-FP-006"));
     }
 }
