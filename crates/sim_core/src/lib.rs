@@ -5,6 +5,7 @@
 
 mod arena;
 mod clock;
+mod combat;
 mod entity;
 mod movement;
 mod rng;
@@ -16,6 +17,10 @@ pub use arena::{
 };
 pub use clock::{
     FixedStepClock, TICK_RATE_HZ, Tick, duration_ms_to_ticks_ceil, duration_ms_to_ticks_nearest,
+};
+pub use combat::{
+    AimDirection, AimDirectionError, CombatAction, CombatError, CombatStep, FriendlyProjectile,
+    PlayerCombatState, ProjectileExpired, ShotEvent,
 };
 pub use entity::{EntityId, EntityIdAllocator};
 pub use movement::{
