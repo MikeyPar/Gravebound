@@ -120,11 +120,18 @@ fn sample_movement_action(
     bindings: Res<MovementBindings>,
     mut latest: ResMut<LatestMovementAction>,
 ) {
+    latest.0 = movement_action_from_keyboard(&keyboard, *bindings);
+}
+
+fn movement_action_from_keyboard(
+    keyboard: &ButtonInput<KeyCode>,
+    bindings: MovementBindings,
+) -> MovementAction {
     let horizontal =
         i8::from(keyboard.pressed(bindings.right)) - i8::from(keyboard.pressed(bindings.left));
     let vertical =
         i8::from(keyboard.pressed(bindings.down)) - i8::from(keyboard.pressed(bindings.up));
-    latest.0 = MovementAction::new(horizontal, vertical);
+    MovementAction::new(horizontal, vertical)
 }
 
 #[allow(clippy::needless_pass_by_value)] // Bevy system parameters are wrapper values.
@@ -232,6 +239,37 @@ mod tests {
             right: KeyCode::ArrowRight,
         };
         assert_ne!(defaults, rebound);
+
+        let mut keyboard = ButtonInput::default();
+        keyboard.press(KeyCode::KeyW);
+        keyboard.press(KeyCode::KeyD);
+        assert_eq!(
+            movement_action_from_keyboard(&keyboard, defaults).normalized_vector(),
+            MovementAction::new(1, -1).normalized_vector()
+        );
+        assert_eq!(
+            movement_action_from_keyboard(&keyboard, rebound),
+            MovementAction::default()
+        );
+        keyboard.clear();
+        keyboard.press(KeyCode::ArrowLeft);
+        assert_eq!(
+            movement_action_from_keyboard(&keyboard, rebound),
+            MovementAction::new(-1, 0)
+        );
+    }
+
+    #[test]
+    fn opposing_bound_keys_cancel_per_axis() {
+        let bindings = MovementBindings::default();
+        let mut keyboard = ButtonInput::default();
+        keyboard.press(KeyCode::KeyA);
+        keyboard.press(KeyCode::KeyD);
+        keyboard.press(KeyCode::KeyW);
+        assert_eq!(
+            movement_action_from_keyboard(&keyboard, bindings),
+            MovementAction::new(0, -1)
+        );
     }
 
     #[test]
