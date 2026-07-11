@@ -4,7 +4,7 @@ Gravebound is a server-authoritative, permanent-death, 2D dark-fantasy bullet-he
 
 Every character life is temporary. The account remembers what happened, and exceptional deaths can return as personalized Fallen Hero Echo encounters. The design emphasizes readable combat, rapid recovery, fair monetization, solo viability, and long-term replayability without permanent account-level combat power.
 
-> **Project status:** M00 Foundation complete. Development is entering the 10-working-day local First Playable, followed by a gate-based path to a networked Vertical Slice and commercial Early Access.
+> **Project status:** M01 First Playable in development. `GB-M01-01A` (validated Bell Laboratory camera and geometry) is complete; the gate-based path continues toward a networked Vertical Slice and commercial Early Access.
 
 ![Bell Sepulcher gameplay concept](Concept%20Art/01-bell-sepulcher-gameplay.png)
 
@@ -60,6 +60,12 @@ The 10-day First Playable contains:
 
 Development proceeds only when the milestone's playability, fairness, reliability, and retention gates pass. See the [Development Roadmap](Gravebound_Development_Roadmap_v1.md) for the complete sequence.
 
+### Current implementation
+
+![GB-M01-01A Bell Laboratory runtime evidence](docs/evidence/GB-M01-01A.png)
+
+`GB-M01-01A` loads the strict `fp.1.0.0` package, compiles exact simulation-owned arena geometry, and renders it through a `24 × 13.5` player-centered orthographic view. See the [completion audit](docs/milestones/GB-M01-01A-audit.md).
+
 ## Technical direction
 
 - Rust stable and Bevy 0.19.
@@ -92,4 +98,4 @@ Concept images establish mood, hierarchy, and visual language. They are not fina
 
 ## Current next step
 
-Start `GB-M01-01A`: implement the Bevy camera, one-tile/one-simulation-unit mapping, and exact `32 × 24` northwest-origin Bell Laboratory shell, pillars, spawns, and debug anchors from `CONT-FP-002`. Acceptance: the authored arena renders at stable scale and its presentation coordinates map exactly to validated simulation geometry.
+Start `GB-M01-01B`: implement the rebind-ready movement action, a fixed-step Grave Arbalist player, normalized WASD input at exactly `5.1 tiles/second`, `60 ms` direction-response smoothing, solid-arena collision, and the camera's `80 ms` critically damped follow from `SIM-002` through `SIM-005`. Acceptance: cardinal and diagonal travel match over equal tick counts, the player cannot enter shell/pillars, and camera behavior never changes authoritative position.

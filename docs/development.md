@@ -47,6 +47,17 @@ Direct Cargo aliases are also available: `cargo gb-format`, `cargo gb-lint`, `ca
 Gameplay rules must live in `sim_core` or validated content. `client_bevy` owns presentation only.
 Generated files in `schemas/` are committed contracts; regenerate and review them whenever a Rust content type changes.
 
+LocalLab resolves `GRAVEBOUND_CONTENT_ROOT` first, then `content/` under the working directory, then `content/` beside an ancestor of the executable. Invalid or missing content prevents the window from starting.
+
+For a deterministic visual-review frame, set an unused output path before launching and close the window after the PNG appears:
+
+```powershell
+$env:GRAVEBOUND_SCREENSHOT_PATH = (Join-Path $PWD 'tmp\local-lab.png')
+.\tools\dev.cmd local-lab
+```
+
+The capture is scheduled after ten rendered frames and includes world and UI layers. Committed representative evidence lives under `docs/evidence/`; generated files under `tmp/` remain ignored.
+
 ## Logging
 
 Copy `.env.example` only when a future launcher requires a local environment file. For current commands, set `RUST_LOG` in the shell when needed:
