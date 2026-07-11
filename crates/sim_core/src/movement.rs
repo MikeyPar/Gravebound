@@ -506,7 +506,12 @@ mod tests {
                 state.velocity().y.to_bits(),
             ]
         };
-        assert_eq!(run(), run());
+        let first = run();
+        assert_eq!(first, run());
+        assert_eq!(
+            first,
+            [1_102_371_517, 1_105_337_698, 3_205_476_002, 1_070_197_224]
+        );
     }
 
     #[test]
