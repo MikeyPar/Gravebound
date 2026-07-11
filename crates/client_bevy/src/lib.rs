@@ -28,7 +28,8 @@ pub use player::{CAMERA_RESPONSE_SECONDS, MovementBindings, critically_damped_st
 
 const WINDOW_TITLE: &str = "Gravebound - LocalLab";
 const DEFAULT_CONTENT_ROOT: &str = "content";
-const EVIDENCE_CAPTURE_RENDER_FRAMES: u8 = 60;
+const DEFAULT_EVIDENCE_CAPTURE_RENDER_FRAMES: u8 = 60;
+const EVIDENCE_SETTLE_RENDER_FRAMES: u8 = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, SystemSet)]
 enum FixedSimulationSet {
@@ -83,7 +84,9 @@ pub fn run_local_lab() -> Result<()> {
         .context("failed to construct the Grave Arbalist movement state")?;
     let combat_state = PlayerCombatState::new(weapon)
         .context("failed to construct the Grave Arbalist combat state")?;
-    let collision_world = ProjectileCollisionWorld::new(&arena, vec![])
+    let debug_hurtboxes = combat::first_playable_debug_hurtboxes()
+        .context("failed to construct LocalLab debug enemy hurtboxes")?;
+    let collision_world = ProjectileCollisionWorld::new(&arena, debug_hurtboxes)
         .context("failed to construct the LocalLab projectile collision world")?;
 
     let screenshot_request = env::var_os("GRAVEBOUND_SCREENSHOT_PATH").map(PathBuf::from);
@@ -127,7 +130,10 @@ pub fn run_local_lab() -> Result<()> {
                 .chain(),
         )
         .add_systems(Startup, arena_view::spawn_arena_view)
-        .add_systems(Update, capture_requested_screenshot);
+        .add_systems(
+            Update,
+            capture_requested_screenshot.after(FrameSet::Presentation),
+        );
     player::configure(&mut app);
     combat::configure(&mut app);
     if let Some(path) = screenshot_request {
@@ -141,13 +147,29 @@ pub fn run_local_lab() -> Result<()> {
 fn capture_requested_screenshot(
     mut commands: Commands,
     request: Option<Res<ScreenshotRequest>>,
+    scenario: Res<combat::EvidenceScenario>,
+    collision_diagnostics: Res<combat::CollisionDiagnostics>,
     mut rendered_frames: Local<u8>,
+    mut ready_frames: Local<u8>,
+    mut capture_queued: Local<bool>,
 ) {
     let Some(request) = request else {
         return;
     };
+    if *capture_queued {
+        return;
+    }
     *rendered_frames = rendered_frames.saturating_add(1);
-    if *rendered_frames == EVIDENCE_CAPTURE_RENDER_FRAMES {
+    let ready = if *scenario == combat::EvidenceScenario::CollisionShowcase {
+        collision_diagnostics.showcase_ready()
+    } else {
+        *rendered_frames >= DEFAULT_EVIDENCE_CAPTURE_RENDER_FRAMES
+    };
+    if ready {
+        *ready_frames = ready_frames.saturating_add(1);
+    }
+    if *ready_frames >= EVIDENCE_SETTLE_RENDER_FRAMES {
+        *capture_queued = true;
         commands
             .spawn(Screenshot::primary_window())
             .observe(save_screenshot_atomically(request.0.clone()));

@@ -3,8 +3,8 @@ use std::env;
 use anyhow::{Result, bail};
 use bevy::{log::info, prelude::*, window::PrimaryWindow};
 use sim_core::{
-    AimDirection, CombatAction, EntityId, PlayerCombatState, ProjectileCollisionWorld,
-    SimulationVector,
+    AimDirection, CollisionTarget, CombatAction, EnemyHurtbox, EntityId, HurtboxError,
+    MILLI_TILES_PER_TILE, PlayerCombatState, ProjectileCollisionWorld, SimulationVector,
 };
 use thiserror::Error;
 
@@ -16,10 +16,19 @@ use crate::{
 
 const EVIDENCE_SCENARIO_ENV: &str = "GRAVEBOUND_EVIDENCE_SCENARIO";
 const PRIMARY_FIRE_EAST_SCENARIO: &str = "primary_fire_east";
+const COLLISION_SHOWCASE_SCENARIO: &str = "collision_showcase";
 const FRIENDLY_PROJECTILE_Z: f32 = 6.0;
 const AIM_PRESENTATION_Z: f32 = 8.3;
 const RETICLE_FALLBACK_DISTANCE_TILES: f32 = 4.0;
 const MUZZLE_OFFSET_TILES: f32 = 0.38;
+const DEBUG_TARGET_Z: f32 = 5.0;
+const CONTACT_EFFECT_SECONDS: f32 = 1.5;
+
+const DEBUG_TARGETS: [(u64, f32, f32, f32); 3] = [
+    (10_001, 8.0, 12.0, 0.34),
+    (10_002, 13.5, 6.5, 0.42),
+    (10_003, 18.0, 12.0, 0.55),
+];
 
 /// Replaceable binding for `primary_fire`; simulation code never reads mouse buttons.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Resource)]
@@ -45,6 +54,7 @@ pub struct CombatInputGate {
 pub(crate) enum EvidenceScenario {
     None,
     PrimaryFireEast,
+    CollisionShowcase,
 }
 
 impl EvidenceScenario {
@@ -57,7 +67,10 @@ impl EvidenceScenario {
         match value {
             None => Ok(Self::None),
             Some(PRIMARY_FIRE_EAST_SCENARIO) if screenshot_requested => Ok(Self::PrimaryFireEast),
-            Some(PRIMARY_FIRE_EAST_SCENARIO) => {
+            Some(COLLISION_SHOWCASE_SCENARIO) if screenshot_requested => {
+                Ok(Self::CollisionShowcase)
+            }
+            Some(PRIMARY_FIRE_EAST_SCENARIO | COLLISION_SHOWCASE_SCENARIO) => {
                 bail!("{EVIDENCE_SCENARIO_ENV} requires GRAVEBOUND_SCREENSHOT_PATH")
             }
             Some(other) => bail!("unknown {EVIDENCE_SCENARIO_ENV} value `{other}`"),
@@ -81,6 +94,19 @@ impl CombatCollisionWorld {
     pub(crate) fn new(world: ProjectileCollisionWorld) -> Self {
         Self(world)
     }
+}
+
+pub(crate) fn first_playable_debug_hurtboxes() -> Result<Vec<EnemyHurtbox>, HurtboxError> {
+    DEBUG_TARGETS
+        .into_iter()
+        .map(|(id, x, y, radius)| {
+            EnemyHurtbox::new(
+                EntityId::new(id).expect("debug target IDs are nonzero"),
+                SimulationVector::new(x, y),
+                radius,
+            )
+        })
+        .collect()
 }
 
 #[derive(Debug, Default, Resource)]
@@ -107,7 +133,23 @@ struct AimReticle;
 struct ProjectilePresentation(EntityId);
 
 #[derive(Debug, Component)]
+struct DebugTargetPresentation;
+
+#[derive(Debug, Component)]
 struct CombatDiagnostics;
+
+#[derive(Debug, Default, Resource)]
+pub(crate) struct CollisionDiagnostics {
+    enemy_hits: u64,
+    solid_blocks: u64,
+    last_target: Option<CollisionTarget>,
+}
+
+impl CollisionDiagnostics {
+    pub(crate) const fn showcase_ready(&self) -> bool {
+        self.enemy_hits > 0 && self.solid_blocks > 0
+    }
+}
 
 #[derive(Debug, Component)]
 struct TransientEffect {
@@ -126,6 +168,7 @@ pub(crate) fn configure(app: &mut App) {
         .insert_resource(CombatInputGate::default())
         .insert_resource(CombatInputSampler::default())
         .insert_resource(AimPresentation::default())
+        .insert_resource(CollisionDiagnostics::default())
         .add_systems(Startup, spawn_combat_presentation)
         .add_systems(
             FixedUpdate,
@@ -139,6 +182,7 @@ pub(crate) fn configure(app: &mut App) {
                     update_aim_presentation,
                     update_combat_diagnostics,
                     update_transient_effects,
+                    draw_collision_debug,
                 )
                     .in_set(FrameSet::Presentation),
             ),
@@ -151,6 +195,7 @@ fn spawn_combat_presentation(
     arena: Res<LoadedArena>,
     player: Res<PlayerSimulation>,
     combat: Res<CombatSimulation>,
+    collision_world: Res<CombatCollisionWorld>,
 ) {
     let player_render = simulation_point_to_render(player.state().position(), &arena.0);
     let east = Vec2::X;
@@ -164,6 +209,30 @@ fn spawn_combat_presentation(
             AIM_PRESENTATION_Z,
         ),
     ));
+    for hurtbox in collision_world.0.enemies() {
+        let render = simulation_point_to_render(hurtbox.center(), &arena.0);
+        commands
+            .spawn((
+                Name::new(format!("Debug enemy target {}", hurtbox.id())),
+                DebugTargetPresentation,
+                Sprite::from_color(
+                    Color::srgba_u8(42, 167, 148, 95),
+                    Vec2::splat(hurtbox.radius_tiles() * 1.4),
+                ),
+                Transform::from_xyz(render.x, render.y, DEBUG_TARGET_Z)
+                    .with_rotation(Quat::from_rotation_z(std::f32::consts::FRAC_PI_4)),
+            ))
+            .with_children(|parent| {
+                parent.spawn((
+                    Sprite::from_color(
+                        Color::srgb_u8(211, 241, 224),
+                        Vec2::new(hurtbox.radius_tiles() * 1.4, 0.035),
+                    ),
+                    Transform::from_xyz(0.0, 0.0, 0.1)
+                        .with_rotation(Quat::from_rotation_z(-std::f32::consts::FRAC_PI_4)),
+                ));
+            });
+    }
     commands.spawn((
         Name::new("Aim guide"),
         AimGuide,
@@ -180,6 +249,7 @@ fn spawn_combat_presentation(
             Name::new("Aim reticle"),
             AimReticle,
             Transform::from_xyz(reticle_position.x, reticle_position.y, AIM_PRESENTATION_Z),
+            Visibility::default(),
         ))
         .with_children(|parent| {
             parent.spawn((
@@ -211,7 +281,7 @@ fn spawn_combat_presentation(
 
     let weapon = combat.0.weapon();
     info!(
-        feature_id = "GB-M01-02A",
+        feature_id = "GB-M01-02B",
         weapon_id = weapon.content_id(),
         damage = weapon.raw_damage(),
         interval_ticks = weapon.attack_interval_ticks(),
@@ -219,7 +289,8 @@ fn spawn_combat_presentation(
         range_tiles = weapon.range_tiles(),
         speed_tiles_per_second = weapon.projectile_speed_tiles_per_second(),
         radius_tiles = weapon.projectile_radius_tiles(),
-        "Pine Crossbow combat presentation initialized"
+        debug_hurtboxes = collision_world.0.enemies().len(),
+        "Pine Crossbow collision presentation initialized"
     );
 }
 
@@ -231,19 +302,29 @@ fn sample_combat_input(
     scenario: Res<EvidenceScenario>,
     arena: Res<LoadedArena>,
     player: Res<PlayerSimulation>,
+    combat: Res<CombatSimulation>,
     camera: Single<(&Camera, &GlobalTransform), With<CameraFollow>>,
     window: Single<&Window, With<PrimaryWindow>>,
     mut sampler: ResMut<CombatInputSampler>,
     mut presentation: ResMut<AimPresentation>,
 ) {
-    if *scenario == EvidenceScenario::PrimaryFireEast {
-        sampler.latest.aim = AimDirection::east();
+    if matches!(
+        *scenario,
+        EvidenceScenario::PrimaryFireEast | EvidenceScenario::CollisionShowcase
+    ) {
+        let showcase_west = *scenario == EvidenceScenario::CollisionShowcase
+            && (combat.0.tick().0 < 14 || combat.0.tick().0 >= 28);
+        let aim = if showcase_west {
+            AimDirection::new(SimulationVector::new(-1.0, 0.0)).expect("west aim")
+        } else {
+            AimDirection::east()
+        };
+        sampler.latest.aim = aim;
         sampler.latest.primary_held = true;
         if sampler.latest.primary_press_sequence == 0 {
             sampler.latest.primary_press_sequence = 1;
         }
-        let target = player.state().position()
-            + AimDirection::east().vector() * RETICLE_FALLBACK_DISTANCE_TILES;
+        let target = player.state().position() + aim.vector() * RETICLE_FALLBACK_DISTANCE_TILES;
         presentation.cursor_render_world = Some(simulation_point_to_render(target, &arena.0));
         return;
     }
@@ -296,7 +377,7 @@ fn aim_from_simulation_points(
     AimDirection::new(target - player)
 }
 
-#[allow(clippy::needless_pass_by_value)] // Bevy system parameters are wrapper values.
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)] // Bevy system parameters are wrapper values.
 fn simulate_combat(
     mut commands: Commands,
     mut combat: ResMut<CombatSimulation>,
@@ -305,11 +386,45 @@ fn simulate_combat(
     player: Res<PlayerSimulation>,
     arena: Res<LoadedArena>,
     mut visuals: Query<(Entity, &ProjectilePresentation, &mut Transform)>,
+    mut collision_diagnostics: ResMut<CollisionDiagnostics>,
 ) {
     let step = combat
         .0
         .step(input.latest, player.state().position(), &collision_world.0)
         .expect("validated LocalLab combat input must remain legal");
+    for collision in &step.collisions {
+        if let Some((entity, _, _)) = visuals
+            .iter_mut()
+            .find(|(_, visual, _)| visual.0 == collision.projectile_id)
+        {
+            commands.entity(entity).despawn();
+        }
+        let (name, color, size) = match collision.target {
+            CollisionTarget::Solid(_) => {
+                collision_diagnostics.solid_blocks =
+                    collision_diagnostics.solid_blocks.saturating_add(1);
+                ("Solid block", Color::srgb_u8(240, 184, 92), 0.36)
+            }
+            CollisionTarget::Enemy(_) => {
+                collision_diagnostics.enemy_hits =
+                    collision_diagnostics.enemy_hits.saturating_add(1);
+                ("Enemy hit", Color::srgb_u8(82, 211, 178), 0.48)
+            }
+        };
+        collision_diagnostics.last_target = Some(collision.target);
+        let position = simulation_point_to_render(collision.final_position, &arena.0);
+        spawn_contact_transient(&mut commands, name, position, color, size, collision.target);
+        info!(
+            feature_id = "GB-M01-02B",
+            tick = collision.tick.0,
+            projectile_id = collision.projectile_id.get(),
+            target = %collision.target,
+            position_x = collision.final_position.x,
+            position_y = collision.final_position.y,
+            distance_tiles = collision.distance_travelled_tiles,
+            "primary bolt collision"
+        );
+    }
     for expiration in &step.expirations {
         if let Some((entity, _, _)) = visuals
             .iter_mut()
@@ -340,7 +455,7 @@ fn simulate_combat(
             0.07,
         );
         info!(
-            feature_id = "GB-M01-02A",
+            feature_id = "GB-M01-02B",
             tick = shot.tick.0,
             press_sequence = shot.press_sequence,
             projectile_id = shot.projectile.id().get(),
@@ -361,6 +476,47 @@ fn simulate_combat(
             *transform = projectile_transform(projectile, &arena.0);
         }
     }
+}
+
+fn spawn_contact_transient(
+    commands: &mut Commands,
+    name: &str,
+    position: Vec2,
+    color: Color,
+    size: f32,
+    target: CollisionTarget,
+) {
+    let entity = commands
+        .spawn((
+            Name::new(name.to_owned()),
+            TransientEffect {
+                remaining_seconds: CONTACT_EFFECT_SECONDS,
+                total_seconds: CONTACT_EFFECT_SECONDS,
+            },
+            Transform::from_xyz(position.x, position.y, FRIENDLY_PROJECTILE_Z + 0.4),
+            Visibility::default(),
+        ))
+        .id();
+    commands
+        .entity(entity)
+        .with_children(|parent| match target {
+            CollisionTarget::Solid(_) => {
+                for rotation in [0.0, std::f32::consts::FRAC_PI_2] {
+                    parent.spawn((
+                        Sprite::from_color(color, Vec2::new(size, 0.07)),
+                        Transform::from_rotation(Quat::from_rotation_z(rotation)),
+                    ));
+                }
+            }
+            CollisionTarget::Enemy(_) => {
+                for rotation in [std::f32::consts::FRAC_PI_4, -std::f32::consts::FRAC_PI_4] {
+                    parent.spawn((
+                        Sprite::from_color(color, Vec2::new(size, 0.07)),
+                        Transform::from_rotation(Quat::from_rotation_z(rotation)),
+                    ));
+                }
+            }
+        });
 }
 
 fn spawn_projectile(
@@ -472,9 +628,14 @@ fn update_combat_diagnostics(
     combat: Res<CombatSimulation>,
     input: Res<CombatInputSampler>,
     gate: Res<CombatInputGate>,
+    collision_diagnostics: Res<CollisionDiagnostics>,
     mut diagnostics: Single<&mut Text, With<CombatDiagnostics>>,
 ) {
-    if !combat.is_changed() && !input.is_changed() && !gate.is_changed() {
+    if !combat.is_changed()
+        && !input.is_changed()
+        && !gate.is_changed()
+        && !collision_diagnostics.is_changed()
+    {
         return;
     }
     let state = &combat.0;
@@ -487,10 +648,75 @@ fn update_combat_diagnostics(
     };
     let aim = input.latest.aim.vector();
     let angle = aim.y.atan2(aim.x).to_degrees().rem_euclid(360.0);
+    let last = collision_diagnostics
+        .last_target
+        .map_or_else(|| "NONE".to_owned(), |target| target.to_string());
     diagnostics.0 = format!(
-        "PRIMARY: LMB  |  PINE CROSSBOW 20 DMG  14T  9.5 RNG  12 SPD  |  {status}  |  AIM {angle:>5.1} DEG  |  BOLTS {}  |  COLLISION: NEXT TICKET",
-        state.projectiles().len()
+        "PRIMARY: LMB  |  PINE CROSSBOW 20 DMG  14T  9.5 RNG  12 SPD  |  {status}  |  AIM {angle:>5.1} DEG  |  BOLTS {}\nCOLLISION ACTIVE  |  ENEMY HITS {}  |  SOLID BLOCKS {}  |  LAST {last}  |  DAMAGE DEFERRED",
+        state.projectiles().len(),
+        collision_diagnostics.enemy_hits,
+        collision_diagnostics.solid_blocks
     );
+}
+
+#[allow(clippy::cast_precision_loss, clippy::needless_pass_by_value)]
+fn draw_collision_debug(
+    mut gizmos: Gizmos,
+    arena: Res<LoadedArena>,
+    collision_world: Res<CombatCollisionWorld>,
+    combat: Res<CombatSimulation>,
+    targets: Query<&DebugTargetPresentation>,
+) {
+    let weapon_radius = combat.0.weapon().projectile_radius_tiles();
+    let width = arena.0.width_milli_tiles as f32 / MILLI_TILES_PER_TILE as f32;
+    let height = arena.0.height_milli_tiles as f32 / MILLI_TILES_PER_TILE as f32;
+    gizmos.rect_2d(
+        Isometry2d::from_translation(Vec2::ZERO),
+        Vec2::new(width - weapon_radius * 2.0, height - weapon_radius * 2.0),
+        Color::srgba_u8(240, 184, 92, 180),
+    );
+    for pillar in &arena.0.pillars {
+        let width = pillar.width_milli_tiles as f32 / MILLI_TILES_PER_TILE as f32;
+        let height = pillar.height_milli_tiles as f32 / MILLI_TILES_PER_TILE as f32;
+        let center = SimulationVector::new(
+            (pillar.x_milli_tiles + pillar.width_milli_tiles / 2) as f32
+                / MILLI_TILES_PER_TILE as f32,
+            (pillar.y_milli_tiles + pillar.height_milli_tiles / 2) as f32
+                / MILLI_TILES_PER_TILE as f32,
+        );
+        gizmos
+            .rounded_rect_2d(
+                Isometry2d::from_translation(simulation_point_to_render(center, &arena.0)),
+                Vec2::new(width + weapon_radius * 2.0, height + weapon_radius * 2.0),
+                Color::srgba_u8(240, 184, 92, 200),
+            )
+            .corner_radius(weapon_radius);
+    }
+    for hurtbox in collision_world.0.enemies() {
+        gizmos
+            .circle_2d(
+                Isometry2d::from_translation(simulation_point_to_render(
+                    hurtbox.center(),
+                    &arena.0,
+                )),
+                hurtbox.radius_tiles(),
+                Color::srgb_u8(82, 211, 178),
+            )
+            .resolution(32);
+    }
+    for projectile in combat.0.projectiles() {
+        gizmos
+            .circle_2d(
+                Isometry2d::from_translation(simulation_point_to_render(
+                    projectile.position(),
+                    &arena.0,
+                )),
+                projectile.radius_tiles(),
+                Color::srgb_u8(231, 224, 199),
+            )
+            .resolution(16);
+    }
+    debug_assert_eq!(targets.iter().count(), collision_world.0.enemies().len());
 }
 
 #[allow(clippy::needless_pass_by_value)] // Bevy system parameters are wrapper values.
@@ -616,6 +842,11 @@ mod tests {
         assert_eq!(
             EvidenceScenario::from_value(Some(PRIMARY_FIRE_EAST_SCENARIO), true).expect("scenario"),
             EvidenceScenario::PrimaryFireEast
+        );
+        assert_eq!(
+            EvidenceScenario::from_value(Some(COLLISION_SHOWCASE_SCENARIO), true)
+                .expect("collision scenario"),
+            EvidenceScenario::CollisionShowcase
         );
         assert!(EvidenceScenario::from_value(Some("unknown"), true).is_err());
     }

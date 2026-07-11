@@ -234,7 +234,7 @@ pub(crate) fn spawn_arena_view(
     spawn_hud(&mut commands, &arena.0, &diagnostics);
 
     info!(
-        feature_id = "GB-M01-02A",
+        feature_id = "GB-M01-02B",
         arena_id = %arena.0.id,
         content_version = %diagnostics.content_version,
         content_hash = %diagnostics.package_hash_blake3,
@@ -373,7 +373,7 @@ fn spawn_hud(commands: &mut Commands, arena: &ArenaGeometry, diagnostics: &Packa
     commands.spawn((
         Name::new("Foundation diagnostics"),
         Text::new(format!(
-            "GRAVEBOUND  /  LOCAL LAB\nGB-M01-02A  |  {}\n{}  |  {} Hz  |  content {}  |  {} records  |  hash {}",
+            "GRAVEBOUND  /  LOCAL LAB\nGB-M01-02B  |  {}\n{}  |  {} Hz  |  content {}  |  {} records  |  hash {}",
             arena.id,
             "24 x 13.5 TILE ORTHOGRAPHIC VIEW",
             sim_core::TICKS_PER_SECOND,
