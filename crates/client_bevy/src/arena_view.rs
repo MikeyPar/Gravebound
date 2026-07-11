@@ -1,9 +1,15 @@
 use std::f32::consts::FRAC_PI_4;
 
 use bevy::{camera::ScalingMode, log::info, prelude::*, sprite::Anchor};
-use sim_core::{ArenaGeometry, ArenaGeometryError, MILLI_TILES_PER_TILE, TilePoint, TileRectangle};
+use sim_core::{
+    ArenaGeometry, ArenaGeometryError, MILLI_TILES_PER_TILE, SimulationVector, TilePoint,
+    TileRectangle,
+};
 
-use crate::{LoadedArena, PackageDiagnostics};
+use crate::{
+    LoadedArena, PackageDiagnostics,
+    player::{CameraFollow, MovementDiagnostics},
+};
 
 /// `SIM-002` default vertical camera extent.
 pub const DEFAULT_VIEW_HEIGHT_TILES: f32 = 13.5;
@@ -60,6 +66,14 @@ pub fn authored_point_to_render(point: TilePoint, arena: &ArenaGeometry) -> Vec2
         milli_to_tiles(point.x_milli_tiles) - half_width,
         half_height - milli_to_tiles(point.y_milli_tiles),
     )
+}
+
+/// Converts a simulation-memory point to centered Bevy world space.
+#[must_use]
+pub fn simulation_point_to_render(point: SimulationVector, arena: &ArenaGeometry) -> Vec2 {
+    let half_width = milli_to_tiles(arena.width_milli_tiles) * 0.5;
+    let half_height = milli_to_tiles(arena.height_milli_tiles) * 0.5;
+    Vec2::new(point.x - half_width, half_height - point.y)
 }
 
 fn authored_rectangle_to_render(
@@ -133,6 +147,7 @@ pub(crate) fn spawn_arena_view(
     let plan = build_render_plan(&arena.0).expect("validated arena must produce a render plan");
     commands.spawn((
         Name::new("LocalLab Camera"),
+        CameraFollow::default(),
         Camera2d,
         Projection::Orthographic(OrthographicProjection {
             scaling_mode: ScalingMode::FixedVertical {
@@ -179,7 +194,7 @@ pub(crate) fn spawn_arena_view(
         "PLAYER SPAWN",
         plan.player_spawn,
         Color::srgb_u8(82, 211, 178),
-        0.58,
+        0.22,
         FRAC_PI_4,
         ArenaVisual::PlayerSpawn,
     );
@@ -211,7 +226,7 @@ pub(crate) fn spawn_arena_view(
     spawn_hud(&mut commands, &arena.0, &diagnostics);
 
     info!(
-        feature_id = "GB-M01-01A",
+        feature_id = "GB-M01-01B",
         arena_id = %arena.0.id,
         content_version = %diagnostics.content_version,
         content_hash = %diagnostics.package_hash_blake3,
@@ -350,7 +365,7 @@ fn spawn_hud(commands: &mut Commands, arena: &ArenaGeometry, diagnostics: &Packa
     commands.spawn((
         Name::new("Foundation diagnostics"),
         Text::new(format!(
-            "GRAVEBOUND  /  LOCAL LAB\nGB-M01-01A  |  {}\n{}  |  {} Hz  |  content {}  |  {} records  |  hash {}",
+            "GRAVEBOUND  /  LOCAL LAB\nGB-M01-01B  |  {}\n{}  |  {} Hz  |  content {}  |  {} records  |  hash {}",
             arena.id,
             "24 x 13.5 TILE ORTHOGRAPHIC VIEW",
             sim_core::TICKS_PER_SECOND,
@@ -386,6 +401,23 @@ fn spawn_hud(commands: &mut Commands, arena: &ArenaGeometry, diagnostics: &Packa
         },
         BackgroundColor(Color::srgba_u8(8, 12, 16, 220)),
         BorderColor::all(Color::srgba_u8(109, 125, 126, 140)),
+    ));
+    commands.spawn((
+        Name::new("Movement diagnostics"),
+        MovementDiagnostics,
+        Text::new("MOVE: WASD (REBIND-READY)"),
+        TextFont::from_font_size(13.0),
+        TextColor(Color::srgb_u8(211, 241, 224)),
+        Node {
+            position_type: PositionType::Absolute,
+            top: px(103),
+            left: px(14),
+            border: UiRect::all(px(1)),
+            padding: UiRect::all(px(7)),
+            ..default()
+        },
+        BackgroundColor(Color::srgba_u8(8, 12, 16, 220)),
+        BorderColor::all(Color::srgba_u8(42, 167, 148, 170)),
     ));
 }
 
@@ -425,6 +457,10 @@ mod tests {
         );
         assert_eq!(
             authored_point_to_render(arena.player_spawn, &arena),
+            Vec2::new(-12.0, 0.0)
+        );
+        assert_eq!(
+            simulation_point_to_render(SimulationVector::new(4.0, 12.0), &arena),
             Vec2::new(-12.0, 0.0)
         );
     }

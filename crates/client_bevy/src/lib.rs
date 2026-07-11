@@ -1,6 +1,7 @@
 //! Gravebound native client presentation boundary.
 
 mod arena_view;
+mod player;
 
 use std::{env, path::PathBuf};
 
@@ -11,12 +12,13 @@ use bevy::{
     window::WindowResolution,
 };
 use sim_content::{ValidationReport, first_playable_arena, load_and_validate};
-use sim_core::ArenaGeometry;
+use sim_core::{ArenaGeometry, PlayerMovementState};
 
 pub use arena_view::{
     ArenaRenderPlan, DEFAULT_VIEW_HEIGHT_TILES, DEFAULT_VIEW_WIDTH_AT_16_9_TILES, RenderRectangle,
     authored_point_to_render, build_render_plan, visible_width_for_aspect,
 };
+pub use player::{CAMERA_RESPONSE_SECONDS, MovementBindings, critically_damped_step};
 
 const WINDOW_TITLE: &str = "Gravebound - LocalLab";
 const DEFAULT_CONTENT_ROOT: &str = "content";
@@ -56,11 +58,17 @@ pub fn run_local_lab() -> Result<()> {
         )
     })?;
     let arena = first_playable_arena(&package).context("failed to compile Bell Laboratory")?;
+    let player_state = PlayerMovementState::at_arena_spawn(&arena)
+        .context("failed to construct the Grave Arbalist movement state")?;
 
     let screenshot_request = env::var_os("GRAVEBOUND_SCREENSHOT_PATH").map(PathBuf::from);
     let mut app = App::new();
     app.insert_resource(ClearColor(Color::srgb_u8(7, 10, 14)))
         .insert_resource(LoadedArena(arena))
+        .insert_resource(player::PlayerSimulation::new(player_state))
+        .insert_resource(Time::<Fixed>::from_hz(f64::from(
+            sim_core::TICKS_PER_SECOND,
+        )))
         .insert_resource(PackageDiagnostics::from_report(report, content_root))
         .add_plugins(
             DefaultPlugins
@@ -77,6 +85,7 @@ pub fn run_local_lab() -> Result<()> {
         )
         .add_systems(Startup, arena_view::spawn_arena_view)
         .add_systems(Update, capture_requested_screenshot);
+    player::configure(&mut app);
     if let Some(path) = screenshot_request {
         app.insert_resource(ScreenshotRequest(path));
     }
