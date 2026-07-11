@@ -751,6 +751,58 @@ mod tests {
     }
 
     #[test]
+    fn same_tick_collision_events_are_emitted_in_projectile_id_order() {
+        let first_target = EnemyHurtbox::new(
+            EntityId::new(100).expect("first target ID"),
+            SimulationVector::new(10.24, 12.0),
+            0.15,
+        )
+        .expect("first target");
+        let second_target = EnemyHurtbox::new(
+            EntityId::new(101).expect("second target ID"),
+            SimulationVector::new(20.6, 12.0),
+            0.15,
+        )
+        .expect("second target");
+        let world = world_with(vec![], vec![second_target, first_target]);
+        let mut combat = PlayerCombatState::new(pine_crossbow()).expect("combat");
+        for index in 0..15 {
+            let action = if index == 0 {
+                held(1, AimDirection::east())
+            } else if index == 14 {
+                held(2, AimDirection::east())
+            } else {
+                released(1, AimDirection::east())
+            };
+            let position = if index == 14 {
+                SimulationVector::new(20.0, 12.0)
+            } else {
+                SimulationVector::new(4.0, 12.0)
+            };
+            combat.step(action, position, &world).expect("setup step");
+        }
+        let terminal = combat
+            .step(
+                released(2, AimDirection::east()),
+                SimulationVector::new(20.0, 12.0),
+                &world,
+            )
+            .expect("shared terminal tick");
+        assert_eq!(terminal.tick, Tick(16));
+        assert_eq!(terminal.collisions.len(), 2);
+        assert_eq!(terminal.collisions[0].projectile_id.get(), 1);
+        assert_eq!(terminal.collisions[1].projectile_id.get(), 2);
+        assert_eq!(
+            terminal.collisions[0].target,
+            CollisionTarget::Enemy(first_target.id())
+        );
+        assert_eq!(
+            terminal.collisions[1].target,
+            CollisionTarget::Enemy(second_target.id())
+        );
+    }
+
+    #[test]
     fn projectile_locks_release_aim_and_origin_while_player_moves() {
         let mut combat = PlayerCombatState::new(pine_crossbow()).expect("combat");
         let world = empty_world();
