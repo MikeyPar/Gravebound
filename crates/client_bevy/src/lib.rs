@@ -4,12 +4,13 @@ mod arena_view;
 mod combat;
 mod player;
 
-use std::{env, path::PathBuf};
+use std::{env, fs, path::PathBuf};
 
 use anyhow::{Context, Result, bail};
 use bevy::{
+    log::{error, info},
     prelude::*,
-    render::view::screenshot::{Screenshot, save_to_disk},
+    render::view::screenshot::{Screenshot, ScreenshotCaptured, save_to_disk},
     window::WindowResolution,
 };
 use sim_content::{
@@ -27,6 +28,7 @@ pub use player::{CAMERA_RESPONSE_SECONDS, MovementBindings, critically_damped_st
 
 const WINDOW_TITLE: &str = "Gravebound - LocalLab";
 const DEFAULT_CONTENT_ROOT: &str = "content";
+const EVIDENCE_CAPTURE_RENDER_FRAMES: u8 = 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, SystemSet)]
 enum FixedSimulationSet {
@@ -142,11 +144,56 @@ fn capture_requested_screenshot(
         return;
     };
     *rendered_frames = rendered_frames.saturating_add(1);
-    if *rendered_frames == 10 {
+    if *rendered_frames == EVIDENCE_CAPTURE_RENDER_FRAMES {
         commands
             .spawn(Screenshot::primary_window())
-            .observe(save_to_disk(request.0.clone()));
+            .observe(save_screenshot_atomically(request.0.clone()));
     }
+}
+
+fn save_screenshot_atomically(path: PathBuf) -> impl FnMut(On<ScreenshotCaptured>) {
+    let temporary_path = temporary_screenshot_path(&path);
+    let mut save_temporary = save_to_disk(temporary_path.clone());
+    move |captured| {
+        save_temporary(captured);
+        if !temporary_path.is_file() {
+            error!(
+                "Screenshot temporary file was not created at {}",
+                temporary_path.display()
+            );
+            return;
+        }
+        let sync_result = fs::OpenOptions::new()
+            .write(true)
+            .open(&temporary_path)
+            .and_then(|file| file.sync_all());
+        if let Err(error) = sync_result {
+            error!(
+                "Cannot flush screenshot temporary file {}: {error}",
+                temporary_path.display()
+            );
+            return;
+        }
+        match fs::rename(&temporary_path, &path) {
+            Ok(()) => info!("Screenshot atomically published to {}", path.display()),
+            Err(error) => error!(
+                "Cannot atomically publish screenshot {}: {error}",
+                path.display()
+            ),
+        }
+    }
+}
+
+fn temporary_screenshot_path(path: &std::path::Path) -> PathBuf {
+    let extension = path
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .unwrap_or("png");
+    let stem = path
+        .file_stem()
+        .and_then(std::ffi::OsStr::to_str)
+        .unwrap_or("gravebound-screenshot");
+    path.with_file_name(format!("{stem}.partial.{extension}"))
 }
 
 fn resolve_content_root() -> Result<PathBuf> {
@@ -174,4 +221,21 @@ fn resolve_content_root() -> Result<PathBuf> {
 
 fn is_content_root(path: &std::path::Path) -> bool {
     path.join("manifests/fp.1.0.0.json").is_file()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn screenshot_temporary_path_preserves_image_format() {
+        assert_eq!(
+            temporary_screenshot_path(std::path::Path::new("tmp/evidence.png")),
+            PathBuf::from("tmp/evidence.partial.png")
+        );
+        assert_eq!(
+            temporary_screenshot_path(std::path::Path::new("tmp/evidence.jpg")),
+            PathBuf::from("tmp/evidence.partial.jpg")
+        );
+    }
 }

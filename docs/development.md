@@ -56,7 +56,7 @@ $env:GRAVEBOUND_SCREENSHOT_PATH = (Join-Path $PWD 'tmp\local-lab.png')
 .\tools\dev.cmd local-lab
 ```
 
-The capture is scheduled after ten rendered frames and includes world and UI layers. Committed representative evidence lives under `docs/evidence/`; generated files under `tmp/` remain ignored.
+The capture is scheduled after sixty rendered frames and includes world and UI layers. It is encoded to a same-directory `*.partial.<format>` file, flushed to disk, and renamed only after the synchronous write finishes, so appearance of the requested path is the completion signal and the client can then be closed safely. Use an unused output path; an existing destination is not overwritten by the atomic publish. Committed representative evidence lives under `docs/evidence/`; generated files under `tmp/` remain ignored.
 
 `GB-M01-02A` also provides one strict visual-evidence scenario. It is accepted only when a screenshot path is configured, injects held eastward primary fire without changing movement, and is not a gameplay mode:
 
