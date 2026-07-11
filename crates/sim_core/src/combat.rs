@@ -681,6 +681,76 @@ mod tests {
     }
 
     #[test]
+    fn fixed_collision_trace_is_bit_identical_and_pins_terminal_snapshot() {
+        let run = || {
+            let target_id = EntityId::new(100).expect("target ID");
+            let target = EnemyHurtbox::new(target_id, SimulationVector::new(4.6, 12.0), 0.15)
+                .expect("target");
+            let world = world_with(
+                vec![TileRectangle::new(10_000, 5_000, 2_000, 3_000)],
+                vec![target],
+            );
+            let mut combat = PlayerCombatState::new(pine_crossbow()).expect("combat");
+            let mut snapshot = Vec::new();
+            for index in 0..16 {
+                let (action, position) = match index {
+                    0 => (
+                        held(1, AimDirection::east()),
+                        SimulationVector::new(4.0, 12.0),
+                    ),
+                    14 => (
+                        held(2, AimDirection::east()),
+                        SimulationVector::new(9.5, 6.5),
+                    ),
+                    _ if index < 14 => (
+                        released(1, AimDirection::east()),
+                        SimulationVector::new(4.0, 12.0),
+                    ),
+                    _ => (
+                        released(2, AimDirection::east()),
+                        SimulationVector::new(9.5, 6.5),
+                    ),
+                };
+                let step = combat.step(action, position, &world).expect("trace step");
+                snapshot.extend(step.collisions.into_iter().map(|collision| {
+                    (
+                        collision.tick.0,
+                        collision.projectile_id.get(),
+                        collision.target,
+                        collision.final_position.x.to_bits(),
+                        collision.final_position.y.to_bits(),
+                        collision.distance_travelled_tiles.to_bits(),
+                    )
+                }));
+            }
+            snapshot
+        };
+        let first = run();
+        assert_eq!(first, run());
+        assert_eq!(
+            first,
+            vec![
+                (
+                    2,
+                    1,
+                    CollisionTarget::Enemy(EntityId::new(100).expect("target ID")),
+                    1_082_864_435,
+                    1_094_713_344,
+                    1_051_931_441,
+                ),
+                (
+                    16,
+                    2,
+                    CollisionTarget::Solid(crate::SolidColliderId::Pillar(0)),
+                    1_092_511_334,
+                    1_087_373_312,
+                    1_053_609_152,
+                ),
+            ]
+        );
+    }
+
+    #[test]
     fn projectile_locks_release_aim_and_origin_while_player_moves() {
         let mut combat = PlayerCombatState::new(pine_crossbow()).expect("combat");
         let world = empty_world();
