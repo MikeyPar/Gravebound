@@ -6,6 +6,7 @@
 mod arena;
 mod clock;
 mod entity;
+mod movement;
 mod rng;
 mod trace;
 
@@ -14,6 +15,11 @@ pub use arena::{
 };
 pub use clock::{FixedStepClock, TICK_RATE_HZ, Tick, duration_ms_to_ticks_ceil};
 pub use entity::{EntityId, EntityIdAllocator};
+pub use movement::{
+    GRAVE_ARBALIST_SPEED_TILES_PER_SECOND, MOVEMENT_RESPONSE_TICKS, MovementAction, MovementError,
+    MovementStep, PLAYER_COLLISION_RADIUS_TILES, PlayerMovementConfig, PlayerMovementState,
+    SimulationVector, tile_point_to_simulation,
+};
 pub use rng::{DeterministicRng, RngError, derive_stream_seed};
 pub use trace::{
     FoundationEntity, FoundationSimulation, InputFrame, TickHash, TraceError, TraceFixture,
