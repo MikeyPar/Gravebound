@@ -8,14 +8,21 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use content_schema::{
-    AbilityRecord, ArenaRecord, AssetManifest, ClassRecord, CommonHeader, ContentId,
-    DropTableRecord, EnemyRecord, FIRST_PLAYABLE_CONTENT_VERSION, FeatureRegistry, ItemRecord,
+    AbilityPayload, AbilityRecord, ArenaRecord, AssetManifest, ClassRecord, CommonHeader,
+    ContentId, DropTableRecord, EffectOperation, EnemyRecord, EquipmentSlot,
+    FIRST_PLAYABLE_CONTENT_VERSION, FeatureRegistry, ItemEffect, ItemPayload, ItemRecord,
     PatternRecord, ReleaseManifest, ReleaseStage, SCHEMA_VERSION,
 };
-use sim_core::{ArenaAnchor, ArenaGeometry, MILLI_TILES_PER_TILE, TilePoint, TileRectangle};
+use sim_core::{
+    ArenaAnchor, ArenaGeometry, MILLI_TILES_PER_TILE, TilePoint, TileRectangle, WeaponDefinition,
+    WeaponDefinitionParameters, duration_ms_to_ticks_nearest,
+};
 
 /// Stable First Playable arena ID from `CONT-FP-001` and `CONT-FP-002`.
 pub const FIRST_PLAYABLE_ARENA_ID: &str = "arena.prototype.bell_laboratory_01";
+pub const FIRST_PLAYABLE_CLASS_ID: &str = "class.grave_arbalist";
+pub const FIRST_PLAYABLE_PRIMARY_ID: &str = "ability.arbalist.primary_crossbow";
+pub const FIRST_PLAYABLE_WEAPON_ID: &str = "item.prototype.weapon.pine_crossbow";
 
 /// Exact record counts for the M01 prototype bundle defined by `CONT-FP-001` through `CONT-FP-008`.
 pub const FIRST_PLAYABLE_DOMAIN_COUNTS: [(&str, usize); 7] = [
@@ -97,6 +104,7 @@ fn validate_package(package: &ContentPackage) -> Result<()> {
     validate_references(package)?;
     validate_fp_combination(package)?;
     validate_first_playable_arena(package)?;
+    validate_first_playable_weapon(package)?;
     Ok(())
 }
 
@@ -108,6 +116,110 @@ pub fn first_playable_arena(package: &ContentPackage) -> Result<ArenaGeometry> {
         .find(|record| record.header.id.as_str() == FIRST_PLAYABLE_ARENA_ID)
         .context("First Playable arena record is missing")?;
     compile_arena_geometry(record)
+}
+
+/// Returns the exact validated Pine Crossbow used by the First Playable Grave Arbalist.
+pub fn first_playable_weapon(package: &ContentPackage) -> Result<WeaponDefinition> {
+    let class = package
+        .classes
+        .iter()
+        .find(|record| record.header.id.as_str() == FIRST_PLAYABLE_CLASS_ID)
+        .context("First Playable Grave Arbalist class record is missing")?;
+    if class.numeric_payload.weapon_family != "crossbow"
+        || class.numeric_payload.primary_ability_id.as_str() != FIRST_PLAYABLE_PRIMARY_ID
+    {
+        bail!("First Playable class does not equip the required crossbow primary grammar");
+    }
+    let primary = package
+        .abilities
+        .iter()
+        .find(|record| record.header.id == class.numeric_payload.primary_ability_id)
+        .context("First Playable primary ability record is missing")?;
+    let item = package
+        .items
+        .iter()
+        .find(|record| record.header.id.as_str() == FIRST_PLAYABLE_WEAPON_ID)
+        .context("First Playable Pine Crossbow item record is missing")?;
+    compile_primary_weapon(item, primary)
+}
+
+/// Compiles one strict weapon item and its class-primary grammar into simulation values.
+pub fn compile_primary_weapon(
+    item: &ItemRecord,
+    primary: &AbilityRecord,
+) -> Result<WeaponDefinition> {
+    let ItemPayload::Equipment { slot, effects, .. } = &item.numeric_payload else {
+        bail!("{} is not equipment", item.header.id);
+    };
+    if *slot != EquipmentSlot::Weapon {
+        bail!("{} is not a weapon", item.header.id);
+    }
+    let AbilityPayload::Primary {
+        range_milli_tiles: primary_range,
+        attacks_per_second_basis_points,
+        projectile_radius_milli_tiles: primary_radius,
+        stops_on_first_enemy,
+    } = &primary.numeric_payload
+    else {
+        bail!("{} is not a primary ability", primary.header.id);
+    };
+
+    let raw_damage = required_set_effect(effects, "primary_damage")?;
+    let attack_interval_ms = required_set_effect(effects, "attack_interval_ms")?;
+    let range_milli_tiles = required_set_effect(effects, "range_milli_tiles")?;
+    let projectile_speed_milli_tiles_per_second =
+        required_set_effect(effects, "projectile_speed_milli_tiles_per_second")?;
+    let projectile_radius_milli_tiles =
+        required_set_effect(effects, "projectile_radius_milli_tiles")?;
+    let projectile_count = required_set_effect(effects, "projectile_count")?;
+    let pierce = required_set_effect(effects, "pierce")?;
+
+    if *attacks_per_second_basis_points == 0 {
+        bail!("{} primary attack rate must be positive", primary.header.id);
+    }
+    let derived_interval_ms = 10_000_000_u64
+        .checked_add(u64::from(*attacks_per_second_basis_points) / 2)
+        .context("primary interval rounding overflowed")?
+        / u64::from(*attacks_per_second_basis_points);
+    if u64::from(attack_interval_ms) != derived_interval_ms
+        || range_milli_tiles != *primary_range
+        || projectile_radius_milli_tiles != *primary_radius
+    {
+        bail!(
+            "{} item values disagree with {} primary grammar",
+            item.header.id,
+            primary.header.id
+        );
+    }
+    let attack_interval_ticks =
+        u32::try_from(duration_ms_to_ticks_nearest(u64::from(attack_interval_ms)))
+            .context("compiled attack interval exceeds u32 ticks")?;
+    WeaponDefinition::new(WeaponDefinitionParameters {
+        content_id: item.header.id.to_string(),
+        raw_damage,
+        attack_interval_ticks,
+        range_milli_tiles,
+        projectile_speed_milli_tiles_per_second,
+        projectile_radius_milli_tiles,
+        projectile_count,
+        pierce,
+        stops_on_first_enemy: *stops_on_first_enemy,
+    })
+    .with_context(|| format!("{} failed simulation weapon validation", item.header.id))
+}
+
+fn required_set_effect(effects: &[ItemEffect], stat: &str) -> Result<u32> {
+    let mut matching = effects.iter().filter(|effect| effect.stat == stat);
+    let effect = matching
+        .next()
+        .with_context(|| format!("weapon is missing required `{stat}` effect"))?;
+    if matching.next().is_some() {
+        bail!("weapon contains duplicate `{stat}` effects");
+    }
+    if effect.operation != EffectOperation::Set {
+        bail!("weapon `{stat}` effect must use the `set` operation");
+    }
+    u32::try_from(effect.value).with_context(|| format!("weapon `{stat}` must be nonnegative"))
 }
 
 /// Compiles one strict content record into renderer-independent simulation geometry.
@@ -256,6 +368,30 @@ fn expected_first_playable_arena() -> Result<ArenaGeometry> {
     }
     .validated()
     .context("built-in CONT-FP-002 fixture is invalid")
+}
+
+fn validate_first_playable_weapon(package: &ContentPackage) -> Result<()> {
+    let actual = first_playable_weapon(package)?;
+    let expected = expected_first_playable_weapon()?;
+    if actual != expected {
+        bail!("{FIRST_PLAYABLE_WEAPON_ID} does not exactly match CONT-FP-006 values");
+    }
+    Ok(())
+}
+
+fn expected_first_playable_weapon() -> Result<WeaponDefinition> {
+    WeaponDefinition::new(WeaponDefinitionParameters {
+        content_id: FIRST_PLAYABLE_WEAPON_ID.to_owned(),
+        raw_damage: 20,
+        attack_interval_ticks: 14,
+        range_milli_tiles: 9_500,
+        projectile_speed_milli_tiles_per_second: 12_000,
+        projectile_radius_milli_tiles: 100,
+        projectile_count: 1,
+        pierce: 0,
+        stops_on_first_enemy: true,
+    })
+    .context("built-in CONT-FP-006 Pine Crossbow fixture is invalid")
 }
 
 fn validate_manifest(package: &ContentPackage) -> Result<()> {
@@ -747,5 +883,76 @@ mod tests {
         package.arenas[0].numeric_payload.player_spawn.x_milli_tiles += 1;
         let error = validate_first_playable_arena(&package).expect_err("mismatch must fail");
         assert!(error.to_string().contains("CONT-FP-002"));
+    }
+
+    #[test]
+    fn first_playable_pine_crossbow_compiles_exactly() {
+        let package = valid_package();
+        let weapon = first_playable_weapon(&package).expect("compiled weapon");
+        assert_eq!(
+            weapon,
+            expected_first_playable_weapon().expect("weapon fixture")
+        );
+        assert_eq!(weapon.projectile_lifetime_ticks(), 24);
+    }
+
+    #[test]
+    fn malformed_weapon_effects_fail_closed() {
+        let mut package = valid_package();
+        let ItemPayload::Equipment { effects, .. } = &mut package
+            .items
+            .iter_mut()
+            .find(|record| record.header.id.as_str() == FIRST_PLAYABLE_WEAPON_ID)
+            .expect("pine crossbow")
+            .numeric_payload
+        else {
+            panic!("pine crossbow must be equipment");
+        };
+        effects.push(
+            effects
+                .iter()
+                .find(|effect| effect.stat == "primary_damage")
+                .expect("damage effect")
+                .clone(),
+        );
+        let error = first_playable_weapon(&package).expect_err("duplicate must fail");
+        assert!(error.to_string().contains("duplicate `primary_damage`"));
+
+        let mut package = valid_package();
+        let ItemPayload::Equipment { effects, .. } = &mut package
+            .items
+            .iter_mut()
+            .find(|record| record.header.id.as_str() == FIRST_PLAYABLE_WEAPON_ID)
+            .expect("pine crossbow")
+            .numeric_payload
+        else {
+            panic!("pine crossbow must be equipment");
+        };
+        effects
+            .iter_mut()
+            .find(|effect| effect.stat == "attack_interval_ms")
+            .expect("interval effect")
+            .operation = EffectOperation::Add;
+        let error = first_playable_weapon(&package).expect_err("wrong operation must fail");
+        assert!(error.to_string().contains("must use the `set` operation"));
+    }
+
+    #[test]
+    fn item_and_primary_grammar_mismatch_fails_closed() {
+        let mut package = valid_package();
+        let primary = package
+            .abilities
+            .iter_mut()
+            .find(|record| record.header.id.as_str() == FIRST_PLAYABLE_PRIMARY_ID)
+            .expect("primary");
+        let AbilityPayload::Primary {
+            range_milli_tiles, ..
+        } = &mut primary.numeric_payload
+        else {
+            panic!("primary payload");
+        };
+        *range_milli_tiles += 1;
+        let error = first_playable_weapon(&package).expect_err("mismatch must fail");
+        assert!(error.to_string().contains("disagree"));
     }
 }

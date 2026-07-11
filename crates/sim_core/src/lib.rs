@@ -9,11 +9,14 @@ mod entity;
 mod movement;
 mod rng;
 mod trace;
+mod weapon;
 
 pub use arena::{
     ArenaAnchor, ArenaGeometry, ArenaGeometryError, MILLI_TILES_PER_TILE, TilePoint, TileRectangle,
 };
-pub use clock::{FixedStepClock, TICK_RATE_HZ, Tick, duration_ms_to_ticks_ceil};
+pub use clock::{
+    FixedStepClock, TICK_RATE_HZ, Tick, duration_ms_to_ticks_ceil, duration_ms_to_ticks_nearest,
+};
 pub use entity::{EntityId, EntityIdAllocator};
 pub use movement::{
     GRAVE_ARBALIST_SPEED_TILES_PER_SECOND, MOVEMENT_RESPONSE_TICKS, MovementAction, MovementError,
@@ -25,6 +28,7 @@ pub use trace::{
     FoundationEntity, FoundationSimulation, InputFrame, TickHash, TraceError, TraceFixture,
     TraceReport, run_trace,
 };
+pub use weapon::{WeaponDefinition, WeaponDefinitionError, WeaponDefinitionParameters};
 
 /// Authoritative simulation frequency required by `TECH-070` and `GB-M00-05`.
 pub const TICKS_PER_SECOND: u32 = TICK_RATE_HZ;

@@ -37,6 +37,15 @@ pub const fn duration_ms_to_ticks_ceil(milliseconds: u64) -> u64 {
     scaled.div_ceil(1_000)
 }
 
+/// Converts an ordinary authored duration to simulation ticks using nonnegative half-up rounding.
+#[must_use]
+pub const fn duration_ms_to_ticks_nearest(milliseconds: u64) -> u64 {
+    milliseconds
+        .saturating_mul(TICK_RATE_HZ as u64)
+        .saturating_add(500)
+        / 1_000
+}
+
 /// Render-loop accumulator that yields an exact average of 30 authoritative steps per second.
 ///
 /// The accumulator stores `elapsed_nanoseconds * 30`, avoiding the drift caused by pretending a
@@ -91,6 +100,15 @@ mod tests {
         assert_eq!(duration_ms_to_ticks_ceil(33), 1);
         assert_eq!(duration_ms_to_ticks_ceil(34), 2);
         assert_eq!(duration_ms_to_ticks_ceil(1_000), 30);
+    }
+
+    #[test]
+    fn ordinary_durations_round_to_nearest_tick_half_up() {
+        assert_eq!(duration_ms_to_ticks_nearest(0), 0);
+        assert_eq!(duration_ms_to_ticks_nearest(16), 0);
+        assert_eq!(duration_ms_to_ticks_nearest(17), 1);
+        assert_eq!(duration_ms_to_ticks_nearest(455), 14);
+        assert_eq!(duration_ms_to_ticks_nearest(1_000), 30);
     }
 
     #[test]
