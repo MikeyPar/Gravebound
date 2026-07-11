@@ -4,7 +4,7 @@ use sim_core::{
     PLAYER_COLLISION_RADIUS_TILES, PlayerMovementState,
 };
 
-use crate::{LoadedArena, arena_view::simulation_point_to_render};
+use crate::{FixedSimulationSet, FrameSet, LoadedArena, arena_view::simulation_point_to_render};
 
 pub const CAMERA_RESPONSE_SECONDS: f32 = 0.080;
 const PLAYER_BODY_SIZE_TILES: f32 = 0.54;
@@ -65,13 +65,16 @@ pub(crate) fn configure(app: &mut App) {
     app.insert_resource(MovementBindings::default())
         .insert_resource(LatestMovementAction::default())
         .add_systems(Startup, spawn_player)
-        .add_systems(FixedUpdate, simulate_player)
+        .add_systems(
+            FixedUpdate,
+            simulate_player.in_set(FixedSimulationSet::Movement),
+        )
         .add_systems(
             Update,
             (
-                sample_movement_action,
-                follow_player_camera,
-                update_movement_diagnostics,
+                sample_movement_action.in_set(FrameSet::InputSample),
+                follow_player_camera.in_set(FrameSet::CameraFollow),
+                update_movement_diagnostics.in_set(FrameSet::Presentation),
             ),
         );
 }

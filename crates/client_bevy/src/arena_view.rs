@@ -76,6 +76,14 @@ pub fn simulation_point_to_render(point: SimulationVector, arena: &ArenaGeometry
     Vec2::new(point.x - half_width, half_height - point.y)
 }
 
+/// Converts a centered Bevy world point back into northwest simulation coordinates.
+#[must_use]
+pub fn render_point_to_simulation(point: Vec2, arena: &ArenaGeometry) -> SimulationVector {
+    let half_width = milli_to_tiles(arena.width_milli_tiles) * 0.5;
+    let half_height = milli_to_tiles(arena.height_milli_tiles) * 0.5;
+    SimulationVector::new(point.x + half_width, half_height - point.y)
+}
+
 fn authored_rectangle_to_render(
     rectangle: TileRectangle,
     arena: &ArenaGeometry,
@@ -226,7 +234,7 @@ pub(crate) fn spawn_arena_view(
     spawn_hud(&mut commands, &arena.0, &diagnostics);
 
     info!(
-        feature_id = "GB-M01-01B",
+        feature_id = "GB-M01-02A",
         arena_id = %arena.0.id,
         content_version = %diagnostics.content_version,
         content_hash = %diagnostics.package_hash_blake3,
@@ -365,7 +373,7 @@ fn spawn_hud(commands: &mut Commands, arena: &ArenaGeometry, diagnostics: &Packa
     commands.spawn((
         Name::new("Foundation diagnostics"),
         Text::new(format!(
-            "GRAVEBOUND  /  LOCAL LAB\nGB-M01-01B  |  {}\n{}  |  {} Hz  |  content {}  |  {} records  |  hash {}",
+            "GRAVEBOUND  /  LOCAL LAB\nGB-M01-02A  |  {}\n{}  |  {} Hz  |  content {}  |  {} records  |  hash {}",
             arena.id,
             "24 x 13.5 TILE ORTHOGRAPHIC VIEW",
             sim_core::TICKS_PER_SECOND,
@@ -388,7 +396,7 @@ fn spawn_hud(commands: &mut Commands, arena: &ArenaGeometry, diagnostics: &Packa
     ));
     commands.spawn((
         Name::new("Arena legend"),
-        Text::new("[P] PLAYER   [B] BOSS   [W] WAVE   [R] GOLD REWARD   [T] BLUE TONIC\nNW AUTHORED ORIGIN  /  +X EAST  /  +Y SOUTH  /  1 TILE = 1 WORLD UNIT"),
+        Text::new("WASD MOVE   /   MOUSE AIM   /   HOLD LMB PRIMARY   /   [P] PLAYER  [B] BOSS  [W] WAVE  [R] REWARD  [T] TONIC\nNW AUTHORED ORIGIN  /  +X EAST  /  +Y SOUTH  /  1 TILE = 1 WORLD UNIT"),
         TextFont::from_font_size(13.0),
         TextColor(Color::srgb_u8(197, 203, 196)),
         Node {
@@ -462,6 +470,10 @@ mod tests {
         assert_eq!(
             simulation_point_to_render(SimulationVector::new(4.0, 12.0), &arena),
             Vec2::new(-12.0, 0.0)
+        );
+        assert_eq!(
+            render_point_to_simulation(Vec2::new(-12.0, 0.0), &arena),
+            SimulationVector::new(4.0, 12.0)
         );
     }
 

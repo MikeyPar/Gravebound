@@ -1979,6 +1979,7 @@ dependencies = [
  "bevy",
  "sim_content",
  "sim_core",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
