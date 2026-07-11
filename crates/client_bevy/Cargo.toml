@@ -8,7 +8,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+anyhow.workspace = true
 bevy.workspace = true
+sim_content = { path = "../sim_content" }
 sim_core = { path = "../sim_core" }
 
 [[bin]]
