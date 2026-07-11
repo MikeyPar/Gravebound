@@ -18,12 +18,14 @@ jobs:
     name: Format, lint, and unit tests
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      RUSTFLAGS: -C link-arg=-fuse-ld=lld
     steps:
       - uses: actions/checkout@v5
       - name: Install Linux window dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends --yes libudev-dev libwayland-dev libxkbcommon-dev
+          sudo apt-get install --no-install-recommends --yes clang lld libudev-dev libwayland-dev libxkbcommon-dev
       - name: Install pinned Rust toolchain
         run: rustup show active-toolchain
       - name: Check formatting
