@@ -58,6 +58,16 @@ $env:GRAVEBOUND_SCREENSHOT_PATH = (Join-Path $PWD 'tmp\local-lab.png')
 
 The capture is scheduled after ten rendered frames and includes world and UI layers. Committed representative evidence lives under `docs/evidence/`; generated files under `tmp/` remain ignored.
 
+`GB-M01-02A` also provides one strict visual-evidence scenario. It is accepted only when a screenshot path is configured, injects held eastward primary fire without changing movement, and is not a gameplay mode:
+
+```powershell
+$env:GRAVEBOUND_SCREENSHOT_PATH = (Join-Path $PWD 'tmp\primary-fire.png')
+$env:GRAVEBOUND_EVIDENCE_SCENARIO = 'primary_fire_east'
+.\tools\dev.cmd local-lab
+```
+
+Unknown scenario names and scenario use without `GRAVEBOUND_SCREENSHOT_PATH` fail at startup.
+
 ## Logging
 
 Copy `.env.example` only when a future launcher requires a local environment file. For current commands, set `RUST_LOG` in the shell when needed:

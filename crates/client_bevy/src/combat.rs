@@ -2,9 +2,7 @@ use std::env;
 
 use anyhow::{Result, bail};
 use bevy::{log::info, prelude::*, window::PrimaryWindow};
-use sim_core::{
-    AimDirection, CombatAction, CombatStep, EntityId, PlayerCombatState, SimulationVector,
-};
+use sim_core::{AimDirection, CombatAction, EntityId, PlayerCombatState, SimulationVector};
 use thiserror::Error;
 
 use crate::{
@@ -84,9 +82,6 @@ struct AimPresentation {
     cursor_render_world: Option<Vec2>,
 }
 
-#[derive(Debug, Default, Resource)]
-struct LastCombatStep(CombatStep);
-
 #[derive(Debug, Component)]
 struct CrossbowPresentation;
 
@@ -119,7 +114,6 @@ pub(crate) fn configure(app: &mut App) {
         .insert_resource(CombatInputGate::default())
         .insert_resource(CombatInputSampler::default())
         .insert_resource(AimPresentation::default())
-        .insert_resource(LastCombatStep::default())
         .add_systems(Startup, spawn_combat_presentation)
         .add_systems(
             FixedUpdate,
@@ -298,7 +292,6 @@ fn simulate_combat(
     player: Res<PlayerSimulation>,
     arena: Res<LoadedArena>,
     mut visuals: Query<(Entity, &ProjectilePresentation, &mut Transform)>,
-    mut last_step: ResMut<LastCombatStep>,
 ) {
     let step = combat
         .0
@@ -355,7 +348,6 @@ fn simulate_combat(
             *transform = projectile_transform(projectile, &arena.0);
         }
     }
-    last_step.0 = step;
 }
 
 fn spawn_projectile(
