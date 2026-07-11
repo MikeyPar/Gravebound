@@ -5,6 +5,7 @@
 
 mod arena;
 mod clock;
+mod collision;
 mod combat;
 mod entity;
 mod movement;
@@ -18,9 +19,13 @@ pub use arena::{
 pub use clock::{
     FixedStepClock, TICK_RATE_HZ, Tick, duration_ms_to_ticks_ceil, duration_ms_to_ticks_nearest,
 };
+pub use collision::{
+    CollisionError, CollisionTarget, EnemyHurtbox, HurtboxError, ProjectileCollisionWorld,
+    ShellSide, SolidColliderId, SweepHit,
+};
 pub use combat::{
     AimDirection, AimDirectionError, CombatAction, CombatError, CombatStep, FriendlyProjectile,
-    PlayerCombatState, ProjectileExpired, ShotEvent,
+    PlayerCombatState, ProjectileCollision, ProjectileExpired, ShotEvent,
 };
 pub use entity::{EntityId, EntityIdAllocator};
 pub use movement::{

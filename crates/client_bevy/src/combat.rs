@@ -2,7 +2,10 @@ use std::env;
 
 use anyhow::{Result, bail};
 use bevy::{log::info, prelude::*, window::PrimaryWindow};
-use sim_core::{AimDirection, CombatAction, EntityId, PlayerCombatState, SimulationVector};
+use sim_core::{
+    AimDirection, CombatAction, EntityId, PlayerCombatState, ProjectileCollisionWorld,
+    SimulationVector,
+};
 use thiserror::Error;
 
 use crate::{
@@ -68,6 +71,15 @@ pub(crate) struct CombatSimulation(PlayerCombatState);
 impl CombatSimulation {
     pub(crate) fn new(state: PlayerCombatState) -> Self {
         Self(state)
+    }
+}
+
+#[derive(Debug, Resource)]
+pub(crate) struct CombatCollisionWorld(ProjectileCollisionWorld);
+
+impl CombatCollisionWorld {
+    pub(crate) fn new(world: ProjectileCollisionWorld) -> Self {
+        Self(world)
     }
 }
 
@@ -288,6 +300,7 @@ fn aim_from_simulation_points(
 fn simulate_combat(
     mut commands: Commands,
     mut combat: ResMut<CombatSimulation>,
+    collision_world: Res<CombatCollisionWorld>,
     input: Res<CombatInputSampler>,
     player: Res<PlayerSimulation>,
     arena: Res<LoadedArena>,
@@ -295,7 +308,7 @@ fn simulate_combat(
 ) {
     let step = combat
         .0
-        .step(input.latest, player.state().position())
+        .step(input.latest, player.state().position(), &collision_world.0)
         .expect("validated LocalLab combat input must remain legal");
     for expiration in &step.expirations {
         if let Some((entity, _, _)) = visuals

@@ -16,7 +16,7 @@ use bevy::{
 use sim_content::{
     ValidationReport, first_playable_arena, first_playable_weapon, load_and_validate,
 };
-use sim_core::{ArenaGeometry, PlayerCombatState, PlayerMovementState};
+use sim_core::{ArenaGeometry, PlayerCombatState, PlayerMovementState, ProjectileCollisionWorld};
 
 pub use arena_view::{
     ArenaRenderPlan, DEFAULT_VIEW_HEIGHT_TILES, DEFAULT_VIEW_WIDTH_AT_16_9_TILES, RenderRectangle,
@@ -83,6 +83,8 @@ pub fn run_local_lab() -> Result<()> {
         .context("failed to construct the Grave Arbalist movement state")?;
     let combat_state = PlayerCombatState::new(weapon)
         .context("failed to construct the Grave Arbalist combat state")?;
+    let collision_world = ProjectileCollisionWorld::new(&arena, vec![])
+        .context("failed to construct the LocalLab projectile collision world")?;
 
     let screenshot_request = env::var_os("GRAVEBOUND_SCREENSHOT_PATH").map(PathBuf::from);
     let evidence_scenario =
@@ -92,6 +94,7 @@ pub fn run_local_lab() -> Result<()> {
         .insert_resource(LoadedArena(arena))
         .insert_resource(player::PlayerSimulation::new(player_state))
         .insert_resource(combat::CombatSimulation::new(combat_state))
+        .insert_resource(combat::CombatCollisionWorld::new(collision_world))
         .insert_resource(evidence_scenario)
         .insert_resource(Time::<Fixed>::from_hz(f64::from(
             sim_core::TICKS_PER_SECOND,

@@ -1,7 +1,8 @@
 use thiserror::Error;
 
 use crate::{
-    EntityId, EntityIdAllocator, SimulationVector, TICKS_PER_SECOND, Tick, WeaponDefinition,
+    CollisionError, CollisionTarget, EntityId, EntityIdAllocator, ProjectileCollisionWorld,
+    SimulationVector, TICKS_PER_SECOND, Tick, WeaponDefinition,
 };
 
 const AIM_EPSILON_SQUARED: f32 = 1.0e-12;
@@ -148,11 +149,22 @@ pub struct ProjectileExpired {
     pub distance_travelled_tiles: f32,
 }
 
+/// One authoritative projectile terminal contact. `(tick, projectile_id)` is run-locally unique.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ProjectileCollision {
+    pub tick: Tick,
+    pub projectile_id: EntityId,
+    pub target: CollisionTarget,
+    pub final_position: SimulationVector,
+    pub distance_travelled_tiles: f32,
+}
+
 /// Events and state summary produced by one fixed combat tick.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct CombatStep {
     pub tick: Tick,
     pub shots: Vec<ShotEvent>,
+    pub collisions: Vec<ProjectileCollision>,
     pub expirations: Vec<ProjectileExpired>,
 }
 
@@ -228,9 +240,10 @@ impl PlayerCombatState {
         &mut self,
         action: CombatAction,
         player_position: SimulationVector,
+        collision_world: &ProjectileCollisionWorld,
     ) -> Result<CombatStep, CombatError> {
         let mut next = self.clone();
-        let result = next.step_inner(action, player_position)?;
+        let result = next.step_inner(action, player_position, collision_world)?;
         *self = next;
         Ok(result)
     }
@@ -239,6 +252,7 @@ impl PlayerCombatState {
         &mut self,
         action: CombatAction,
         player_position: SimulationVector,
+        collision_world: &ProjectileCollisionWorld,
     ) -> Result<CombatStep, CombatError> {
         if !player_position.is_finite() {
             return Err(CombatError::NonFinitePlayerPosition);
@@ -249,7 +263,7 @@ impl PlayerCombatState {
             tick: self.tick,
             ..CombatStep::default()
         };
-        self.advance_projectiles(&mut step.expirations);
+        self.advance_projectiles(collision_world, &mut step.collisions, &mut step.expirations)?;
         self.interval_remaining_ticks = self.interval_remaining_ticks.saturating_sub(1);
 
         let new_press = action.primary_press_sequence > self.last_press_sequence;
@@ -302,13 +316,41 @@ impl PlayerCombatState {
         Ok(())
     }
 
-    fn advance_projectiles(&mut self, expirations: &mut Vec<ProjectileExpired>) {
+    fn advance_projectiles(
+        &mut self,
+        collision_world: &ProjectileCollisionWorld,
+        collisions: &mut Vec<ProjectileCollision>,
+        expirations: &mut Vec<ProjectileExpired>,
+    ) -> Result<(), CombatError> {
         for projectile in &mut self.projectiles {
             let remaining = projectile.range_tiles - projectile.distance_travelled_tiles;
             debug_assert_eq!(TICKS_PER_SECOND, 30);
             let full_step = projectile.speed_tiles_per_second / TICKS_PER_SECOND_F32;
             let travel = full_step.min(remaining.max(0.0));
-            projectile.position = projectile.position + projectile.direction.vector() * travel;
+            let displacement = projectile.direction.vector() * travel;
+            if let Some(hit) = collision_world.sweep_circle(
+                projectile.position,
+                displacement,
+                projectile.radius_tiles,
+            )? {
+                let realized_travel = travel * hit.fraction;
+                projectile.position = projectile.position + displacement * hit.fraction;
+                projectile.distance_travelled_tiles += realized_travel;
+                if !projectile.position.is_finite()
+                    || !projectile.distance_travelled_tiles.is_finite()
+                {
+                    return Err(CombatError::NonFiniteCollisionResult);
+                }
+                collisions.push(ProjectileCollision {
+                    tick: self.tick,
+                    projectile_id: projectile.id,
+                    target: hit.target,
+                    final_position: projectile.position,
+                    distance_travelled_tiles: projectile.distance_travelled_tiles,
+                });
+                continue;
+            }
+            projectile.position = projectile.position + displacement;
             projectile.distance_travelled_tiles += travel;
             if remaining <= full_step + RANGE_EPSILON {
                 projectile.distance_travelled_tiles = projectile.range_tiles;
@@ -320,13 +362,17 @@ impl PlayerCombatState {
                 });
             }
         }
-        if !expirations.is_empty() {
+        if !collisions.is_empty() || !expirations.is_empty() {
             self.projectiles.retain(|projectile| {
-                expirations
+                collisions
                     .iter()
-                    .all(|expiration| expiration.projectile_id != projectile.id)
+                    .all(|collision| collision.projectile_id != projectile.id)
+                    && expirations
+                        .iter()
+                        .all(|expiration| expiration.projectile_id != projectile.id)
             });
         }
+        Ok(())
     }
 }
 
@@ -344,6 +390,10 @@ pub enum CombatError {
     StalePressSequence { received: u32, last: u32 },
     #[error("rising primary edge reused press sequence {sequence}")]
     MissingPressSequence { sequence: u32 },
+    #[error("projectile collision failed: {0}")]
+    Collision(#[from] CollisionError),
+    #[error("projectile collision produced non-finite terminal state")]
+    NonFiniteCollisionResult,
 }
 
 #[cfg(test)]
@@ -351,7 +401,10 @@ mod tests {
     use std::num::NonZeroU64;
 
     use super::*;
-    use crate::{WeaponDefinition, WeaponDefinitionParameters};
+    use crate::{
+        ArenaGeometry, EnemyHurtbox, TilePoint, TileRectangle, WeaponDefinition,
+        WeaponDefinitionParameters,
+    };
 
     fn pine_crossbow() -> WeaponDefinition {
         WeaponDefinition::new(WeaponDefinitionParameters {
@@ -366,6 +419,41 @@ mod tests {
             stops_on_first_enemy: true,
         })
         .expect("Pine Crossbow")
+    }
+
+    fn empty_world() -> ProjectileCollisionWorld {
+        let arena = ArenaGeometry {
+            id: "arena.combat_test".to_owned(),
+            width_milli_tiles: 100_000,
+            height_milli_tiles: 100_000,
+            shell_thickness_milli_tiles: 1_000,
+            player_spawn: TilePoint::new(4_000, 12_000),
+            boss_spawn: TilePoint::new(80_000, 80_000),
+            pillars: vec![],
+            anchors: vec![],
+        }
+        .validated()
+        .expect("arena");
+        ProjectileCollisionWorld::new(&arena, vec![]).expect("collision world")
+    }
+
+    fn world_with(
+        pillars: Vec<TileRectangle>,
+        enemies: Vec<EnemyHurtbox>,
+    ) -> ProjectileCollisionWorld {
+        let arena = ArenaGeometry {
+            id: "arena.combat_collision_test".to_owned(),
+            width_milli_tiles: 100_000,
+            height_milli_tiles: 100_000,
+            shell_thickness_milli_tiles: 1_000,
+            player_spawn: TilePoint::new(4_000, 12_000),
+            boss_spawn: TilePoint::new(80_000, 80_000),
+            pillars,
+            anchors: vec![],
+        }
+        .validated()
+        .expect("arena");
+        ProjectileCollisionWorld::new(&arena, enemies).expect("collision world")
     }
 
     fn held(sequence: u32, aim: AimDirection) -> CombatAction {
@@ -401,12 +489,14 @@ mod tests {
     #[test]
     fn held_fire_is_immediate_then_exactly_fourteen_ticks_apart() {
         let mut combat = PlayerCombatState::new(pine_crossbow()).expect("combat");
+        let world = empty_world();
         let mut shot_ticks = Vec::new();
         for _ in 0..30 {
             let step = combat
                 .step(
                     held(1, AimDirection::east()),
                     SimulationVector::new(4.0, 12.0),
+                    &world,
                 )
                 .expect("step");
             shot_ticks.extend(step.shots.into_iter().map(|shot| shot.tick.0));
@@ -418,36 +508,37 @@ mod tests {
     #[test]
     fn release_does_not_reset_interval_and_new_ready_press_fires() {
         let mut combat = PlayerCombatState::new(pine_crossbow()).expect("combat");
+        let world = empty_world();
         let position = SimulationVector::new(4.0, 12.0);
         assert_eq!(
             combat
-                .step(held(1, AimDirection::east()), position)
+                .step(held(1, AimDirection::east()), position, &world)
                 .expect("fire")
                 .shots
                 .len(),
             1
         );
         combat
-            .step(released(1, AimDirection::east()), position)
+            .step(released(1, AimDirection::east()), position, &world)
             .expect("release");
         assert!(
             combat
-                .step(held(2, AimDirection::east()), position)
+                .step(held(2, AimDirection::east()), position, &world)
                 .expect("early press")
                 .shots
                 .is_empty()
         );
         combat
-            .step(released(2, AimDirection::east()), position)
+            .step(released(2, AimDirection::east()), position, &world)
             .expect("release");
         while combat.interval_remaining_ticks() > 0 {
             combat
-                .step(released(2, AimDirection::east()), position)
+                .step(released(2, AimDirection::east()), position, &world)
                 .expect("cooldown");
         }
         assert_eq!(
             combat
-                .step(held(3, AimDirection::east()), position)
+                .step(held(3, AimDirection::east()), position, &world)
                 .expect("ready press")
                 .shots
                 .len(),
@@ -458,10 +549,12 @@ mod tests {
     #[test]
     fn short_press_sequence_fires_even_when_latest_state_is_released() {
         let mut combat = PlayerCombatState::new(pine_crossbow()).expect("combat");
+        let world = empty_world();
         let step = combat
             .step(
                 released(1, AimDirection::east()),
                 SimulationVector::new(4.0, 12.0),
+                &world,
             )
             .expect("tap");
         assert_eq!(step.shots.len(), 1);
@@ -471,21 +564,22 @@ mod tests {
     #[test]
     fn sequence_failures_are_transactional() {
         let mut combat = PlayerCombatState::new(pine_crossbow()).expect("combat");
+        let world = empty_world();
         let position = SimulationVector::new(4.0, 12.0);
         combat
-            .step(held(1, AimDirection::east()), position)
+            .step(held(1, AimDirection::east()), position, &world)
             .expect("press");
         combat
-            .step(released(1, AimDirection::east()), position)
+            .step(released(1, AimDirection::east()), position, &world)
             .expect("release");
         let before = combat.clone();
         assert_eq!(
-            combat.step(held(1, AimDirection::east()), position),
+            combat.step(held(1, AimDirection::east()), position, &world),
             Err(CombatError::MissingPressSequence { sequence: 1 })
         );
         assert_eq!(combat, before);
         assert_eq!(
-            combat.step(released(0, AimDirection::east()), position),
+            combat.step(released(0, AimDirection::east()), position, &world),
             Err(CombatError::StalePressSequence {
                 received: 0,
                 last: 1
@@ -497,12 +591,13 @@ mod tests {
     #[test]
     fn projectile_moves_point_four_and_expires_at_exact_range() {
         let mut combat = PlayerCombatState::new(pine_crossbow()).expect("combat");
+        let world = empty_world();
         let origin = SimulationVector::new(4.0, 12.0);
         combat
-            .step(held(1, AimDirection::east()), origin)
+            .step(held(1, AimDirection::east()), origin, &world)
             .expect("fire");
         let step = combat
-            .step(released(1, AimDirection::east()), origin)
+            .step(released(1, AimDirection::east()), origin, &world)
             .expect("travel 1");
         assert!(step.expirations.is_empty());
         assert!((combat.projectiles()[0].position().x - 4.4).abs() < 1.0e-6);
@@ -510,12 +605,12 @@ mod tests {
 
         for _ in 0..22 {
             combat
-                .step(released(1, AimDirection::east()), origin)
+                .step(released(1, AimDirection::east()), origin, &world)
                 .expect("full travel");
         }
         assert!((combat.projectiles()[0].distance_travelled_tiles() - 9.2).abs() < 1.0e-5);
         let terminal = combat
-            .step(released(1, AimDirection::east()), origin)
+            .step(released(1, AimDirection::east()), origin, &world)
             .expect("terminal travel");
         assert!(combat.projectiles().is_empty());
         assert_eq!(terminal.expirations.len(), 1);
@@ -524,16 +619,80 @@ mod tests {
     }
 
     #[test]
+    fn zero_pierce_enemy_contact_emits_one_terminal_event_without_damage_mutation() {
+        let target_id = EntityId::new(100).expect("target ID");
+        let target =
+            EnemyHurtbox::new(target_id, SimulationVector::new(4.6, 12.0), 0.15).expect("target");
+        let world = world_with(vec![], vec![target]);
+        let mut combat = PlayerCombatState::new(pine_crossbow()).expect("combat");
+        let origin = SimulationVector::new(4.0, 12.0);
+        combat
+            .step(held(1, AimDirection::east()), origin, &world)
+            .expect("fire");
+        let terminal = combat
+            .step(released(1, AimDirection::east()), origin, &world)
+            .expect("contact");
+        assert!(combat.projectiles().is_empty());
+        assert!(terminal.expirations.is_empty());
+        assert_eq!(terminal.collisions.len(), 1);
+        let collision = terminal.collisions[0];
+        assert_eq!(collision.tick, Tick(2));
+        assert_eq!(collision.projectile_id.get(), 1);
+        assert_eq!(collision.target, CollisionTarget::Enemy(target_id));
+        assert!((collision.final_position.x - 4.35).abs() < 1.0e-5);
+        assert!((collision.final_position.y - 12.0).abs() < f32::EPSILON);
+        assert!((collision.distance_travelled_tiles - 0.35).abs() < 1.0e-5);
+    }
+
+    #[test]
+    fn solid_contact_wins_over_range_expiry_and_preserves_projectile_order() {
+        let world = world_with(
+            vec![TileRectangle::new(10_000, 5_000, 2_000, 3_000)],
+            vec![],
+        );
+        let mut combat = PlayerCombatState::new(pine_crossbow()).expect("combat");
+        let origin = SimulationVector::new(9.5, 6.5);
+        combat
+            .step(held(1, AimDirection::east()), origin, &world)
+            .expect("fire first");
+        for _ in 0..13 {
+            combat
+                .step(released(1, AimDirection::east()), origin, &world)
+                .expect("cooldown");
+        }
+        combat
+            .step(held(2, AimDirection::east()), origin, &world)
+            .expect("fire second");
+        let terminal = combat
+            .step(released(2, AimDirection::east()), origin, &world)
+            .expect("contacts");
+        let ids: Vec<_> = terminal
+            .collisions
+            .iter()
+            .map(|collision| collision.projectile_id.get())
+            .collect();
+        assert_eq!(ids, [2]);
+        assert_eq!(
+            terminal.collisions[0].target,
+            CollisionTarget::Solid(crate::SolidColliderId::Pillar(0))
+        );
+        assert!((terminal.collisions[0].final_position.x - 9.9).abs() < 1.0e-5);
+        assert!(terminal.expirations.is_empty());
+    }
+
+    #[test]
     fn projectile_locks_release_aim_and_origin_while_player_moves() {
         let mut combat = PlayerCombatState::new(pine_crossbow()).expect("combat");
+        let world = empty_world();
         let south = AimDirection::new(SimulationVector::new(0.0, 1.0)).expect("south");
         combat
-            .step(held(1, south), SimulationVector::new(4.0, 12.0))
+            .step(held(1, south), SimulationVector::new(4.0, 12.0), &world)
             .expect("fire");
         combat
             .step(
                 released(1, AimDirection::east()),
                 SimulationVector::new(8.0, 8.0),
+                &world,
             )
             .expect("move");
         let projectile = &combat.projectiles()[0];
@@ -548,10 +707,12 @@ mod tests {
         let mut combat = PlayerCombatState::with_projectile_allocator(pine_crossbow(), allocator)
             .expect("combat");
         let before = combat.clone();
+        let world = empty_world();
         assert_eq!(
             combat.step(
                 held(1, AimDirection::east()),
-                SimulationVector::new(4.0, 12.0)
+                SimulationVector::new(4.0, 12.0),
+                &world,
             ),
             Err(CombatError::ProjectileIdExhausted)
         );
@@ -561,11 +722,16 @@ mod tests {
     #[test]
     fn fixed_fire_trace_has_exact_stable_snapshot() {
         let mut combat = PlayerCombatState::new(pine_crossbow()).expect("combat");
+        let world = empty_world();
         let northeast = AimDirection::new(SimulationVector::new(1.0, -1.0)).expect("aim");
         let mut shot_ticks = Vec::new();
         for _ in 0..35 {
             let step = combat
-                .step(held(1, northeast), SimulationVector::new(20.0, 20.0))
+                .step(
+                    held(1, northeast),
+                    SimulationVector::new(20.0, 20.0),
+                    &world,
+                )
                 .expect("trace step");
             shot_ticks.extend(step.shots.into_iter().map(|shot| shot.tick.0));
         }
