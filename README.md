@@ -4,7 +4,7 @@ Gravebound is a server-authoritative, permanent-death, 2D dark-fantasy bullet-he
 
 Every character life is temporary. The account remembers what happened, and exceptional deaths can return as personalized Fallen Hero Echo encounters. The design emphasizes readable combat, rapid recovery, fair monetization, solo viability, and long-term replayability without permanent account-level combat power.
 
-> **Project status:** M01 First Playable in development. `GB-M01-01A` (validated Bell Laboratory camera and geometry) is complete; the gate-based path continues toward a networked Vertical Slice and commercial Early Access.
+> **Project status:** M01 First Playable in development. `GB-M01-01B` (fixed-step movement, solid collision, rebind-ready input, and camera follow) is complete; the gate-based path continues toward a networked Vertical Slice and commercial Early Access.
 
 ![Bell Sepulcher gameplay concept](Concept%20Art/01-bell-sepulcher-gameplay.png)
 
@@ -62,9 +62,9 @@ Development proceeds only when the milestone's playability, fairness, reliabilit
 
 ### Current implementation
 
-![GB-M01-01A Bell Laboratory runtime evidence](docs/evidence/GB-M01-01A.png)
+![GB-M01-01B Grave Arbalist movement runtime evidence](docs/evidence/GB-M01-01B.png)
 
-`GB-M01-01A` loads the strict `fp.1.0.0` package, compiles exact simulation-owned arena geometry, and renders it through a `24 × 13.5` player-centered orthographic view. See the [completion audit](docs/milestones/GB-M01-01A-audit.md).
+`GB-M01-01B` adds a simulation-owned Grave Arbalist with normalized, two-tick-response movement at `5.1 tiles/second`, exact circle-versus-arena collision, replaceable WASD bindings, live diagnostics, and a presentation-only `80 ms` critically damped camera. See the [completion audit](docs/milestones/GB-M01-01B-audit.md).
 
 ## Technical direction
 
@@ -98,4 +98,4 @@ Concept images establish mood, hierarchy, and visual language. They are not fina
 
 ## Current next step
 
-Start `GB-M01-01B`: implement the rebind-ready movement action, a fixed-step Grave Arbalist player, normalized WASD input at exactly `5.1 tiles/second`, `60 ms` direction-response smoothing, solid-arena collision, and the camera's `80 ms` critically damped follow from `SIM-002` through `SIM-005`. Acceptance: cardinal and diagonal travel match over equal tick counts, the player cannot enter shell/pillars, and camera behavior never changes authoritative position.
+Start `GB-M01-02A`: implement independent mouse aim and held `primary_fire` from `SIM-003`/`SIM-004`, driven by the equipped `item.prototype.weapon.pine_crossbow`. Compile the Content Production Specification's exact `455 ms` interval, `20` fixed damage, `9.5 tile` range, `12 tiles/second` projectile speed, `0.10 tile` radius, one-bolt/no-pierce values into simulation-owned weapon state. The Roadmap assigns projectile/hitbox collision to `GB-M01-02B`, so this step must prove cursor-to-world aim, held-fire cadence, sequence-stable fire actions, muzzle/debug projectile presentation, and aim behavior independent of movement without prematurely inventing enemy-hit rules.
