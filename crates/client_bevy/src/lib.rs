@@ -29,7 +29,7 @@ pub use player::{CAMERA_RESPONSE_SECONDS, MovementBindings, critically_damped_st
 const WINDOW_TITLE: &str = "Gravebound - LocalLab";
 const DEFAULT_CONTENT_ROOT: &str = "content";
 const DEFAULT_EVIDENCE_CAPTURE_RENDER_FRAMES: u8 = 60;
-const EVIDENCE_SETTLE_RENDER_FRAMES: u8 = 10;
+const EVIDENCE_SETTLE_RENDER_FRAMES: u8 = 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, SystemSet)]
 enum FixedSimulationSet {
