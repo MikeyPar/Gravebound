@@ -4,7 +4,7 @@ Gravebound is a server-authoritative, permanent-death, 2D dark-fantasy bullet-he
 
 Every character life is temporary. The account remembers what happened, and exceptional deaths can return as personalized Fallen Hero Echo encounters. The design emphasizes readable combat, rapid recovery, fair monetization, solo viability, and long-term replayability without permanent account-level combat power.
 
-> **Project status:** M01 First Playable in development. `GB-M01-02A` (independent mouse aim, sequenced held fire, and deterministic Pine Crossbow bolts) is complete; the gate-based path continues toward a networked Vertical Slice and commercial Early Access.
+> **Project status:** M01 First Playable in development. `GB-M01-02B` (deterministic swept projectile collision against exact arena solids and stable enemy hurtboxes) is complete; the gate-based path continues toward a networked Vertical Slice and commercial Early Access.
 
 ![Bell Sepulcher gameplay concept](Concept%20Art/01-bell-sepulcher-gameplay.png)
 
@@ -62,9 +62,9 @@ Development proceeds only when the milestone's playability, fairness, reliabilit
 
 ### Current implementation
 
-![GB-M01-02A Grave Arbalist primary-fire runtime evidence](docs/evidence/GB-M01-02A.png)
+![GB-M01-02B deterministic projectile-collision runtime evidence](docs/evidence/GB-M01-02B.png)
 
-`GB-M01-02A` compiles the exact Pine Crossbow from validated content and adds simulation-owned sequenced held fire, independent camera-aware mouse aim, stable-ID 12-tiles/second bolts, exact 9.5-tile range expiry, rebind-ready input, and readable debug presentation. See the [completion audit](docs/milestones/GB-M01-02A-audit.md).
+`GB-M01-02B` continuously sweeps the Pine Crossbow's `0.10`-tile circle against the compiled Bell Laboratory shell and rounded pillar boundaries plus simulation-owned stable-ID enemy hurtboxes. Earliest contact, exact ties, terminal positions, event order, and range precedence are deterministic; LocalLab visibly distinguishes enemy hits from solid blocks without pulling health/damage ahead of the roadmap. See the [completion audit](docs/milestones/GB-M01-02B-audit.md).
 
 ## Technical direction
 
@@ -98,4 +98,4 @@ Concept images establish mood, hierarchy, and visual language. They are not fina
 
 ## Current next step
 
-Start `GB-M01-02B`: implement deterministic swept collision for the Pine Crossbow's `0.10 tile` projectile circle against the compiled `CONT-FP-002` shell/pillars and simulation-owned enemy hurtboxes. Under `CLS-020` and `COM-001`, the zero-pierce bolt must terminate on its first valid enemy or solid contact and emit one stable-ID collision event; the Roadmap assigns health/damage order to `GB-M01-05A`, so this ticket must use debug targets and hit/blocked presentation without prematurely mutating health. Acceptance requires no tunneling at 12 tiles/second, deterministic earliest-contact/tie ordering, exact terminal positions, adversarial corner/tangent/overlap fixtures, and visible projectile/hurtbox debug geometry.
+Prepare `GB-M01-02C`: implement Grave Mark from `ability.arbalist.grave_mark` and `CLS-020` with rebind-ready right-mouse sequencing, a `5.0 second` cooldown, one `12 tiles/second` bolt with `11 tile` range, a `1.8W` raw-damage intent, one owner-specific `graveled_mark` lasting `4.0 seconds`, and `+15%` owner primary-hit intent against that target; applying a new Mark removes the old one. Health mutation remains deferred to `GB-M01-05A`. Before implementation, resolve and record the design package's missing Grave Mark projectile radius and solid-impact disposition—those values must not be silently inferred from the primary bolt.

@@ -68,6 +68,16 @@ $env:GRAVEBOUND_EVIDENCE_SCENARIO = 'primary_fire_east'
 
 Unknown scenario names and scenario use without `GRAVEBOUND_SCREENSHOT_PATH` fail at startup.
 
+`GB-M01-02B` adds a deterministic collision showcase. It fires first toward the west shell and then toward the nearest nondamageable debug enemy. Capture is not requested until authoritative diagnostics have recorded at least one solid block and one enemy hit; the renderer then settles for 60 complete presentation frames before atomic publication:
+
+```powershell
+$env:GRAVEBOUND_SCREENSHOT_PATH = (Join-Path $PWD 'tmp\collision-showcase.png')
+$env:GRAVEBOUND_EVIDENCE_SCENARIO = 'collision_showcase'
+.\tools\dev.cmd local-lab
+```
+
+The accepted frame must show `ENEMY HITS 1` or greater, `SOLID BLOCKS 1` or greater, the stable last target, circular hurtbox geometry, distinct enemy/solid contact shapes, and `DAMAGE DEFERRED`. This scenario does not apply damage or create a production enemy.
+
 ## Logging
 
 Copy `.env.example` only when a future launcher requires a local environment file. For current commands, set `RUST_LOG` in the shell when needed:
