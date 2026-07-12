@@ -102,7 +102,7 @@ Concept images establish mood, hierarchy, and visual language. They are not fina
 
 ## Current Next Step
 
-Finish `GB-M03-04A` with the progression restore provider, native HUD, disposable-PostgreSQL award/crash-restore evidence, full gates, ADR, and completion audit; exact content/simulation, durable replay-first awards, and authoritative QUIC projection are complete. Continue approved `GB-M03-04B` and `GB-M03-05A`–`05C`. Resolve `SPEC-CONFLICT-010` before the dormant `GB-M03-03B` coordinator and `SPEC-CONFLICT-009` before permanent death; pull the minimal `GB-M03-12` Ash wallet forward before `GB-M03-05D`. Keep the normal player route and affected Hall stations fail-closed until items, Oaths/Bargains, death, extraction, and Recall all pass.
+Finish `GB-M03-04A` by resolving the restore-point binding for post-entry XP/first-clear revocation, implementing its progression restore provider, and completing disposable-PostgreSQL evidence, full gates, ADR, and audit; exact content/simulation, durable replay-first awards, authoritative QUIC projection, and the accessible native HUD are complete. Continue approved `GB-M03-04B` and `GB-M03-05A`–`05C`. Resolve `SPEC-CONFLICT-010` before the dormant `GB-M03-03B` coordinator and `SPEC-CONFLICT-009` before permanent death; pull the minimal `GB-M03-12` Ash wallet forward before `GB-M03-05D`. Keep the normal player route and affected Hall stations fail-closed until items, Oaths/Bargains, death, extraction, and Recall all pass.
 
 ## Resolved prior handoff
 
