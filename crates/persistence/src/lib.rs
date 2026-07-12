@@ -12,9 +12,17 @@ use sqlx::{
 use thiserror::Error;
 
 mod identity;
+mod progression;
 mod world_flow;
 
 pub use identity::{StoredCharacter, StoredIdentityAggregate, StoredMutation};
+pub use progression::{
+    ProgressionAwardTransaction, ProgressionAwardTransactionState, StoredBossFirstClear,
+    StoredBossFirstClearState, StoredEncounterLifeState, StoredEncounterRecallState,
+    StoredEncounterTrustState, StoredEncounterXpEvidence, StoredLockedProgressionCharacter,
+    StoredOrdinaryXpEvidence, StoredProgression, StoredProgressionContract, StoredXpAwardResult,
+    StoredXpEligibilityEvidence,
+};
 pub use world_flow::{
     StoredSafeArrival, StoredWorldLocation, StoredWorldTransferReceipt, WorldFlowTransactionState,
 };
@@ -145,6 +153,12 @@ pub enum PersistenceError {
     CorruptStoredWorldFlow,
     #[error("world-flow character does not exist for the authenticated account")]
     WorldFlowCharacterNotFound,
+    #[error("progression character does not exist for the authenticated account")]
+    ProgressionCharacterNotFound,
+    #[error("stored progression or XP award violates the approved schema")]
+    CorruptStoredProgression,
+    #[error("a fresh progression award transaction must append one typed result")]
+    ProgressionAwardResultRequired,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
