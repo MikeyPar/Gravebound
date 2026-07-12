@@ -13,3 +13,7 @@ Implementation order for each consuming feature is:
 5. Run `cargo run --locked -p tools_content -- validate`, the golden trace, and the full workspace tests.
 
 `manifests/fp.1.0.0.json` is an exact allowlist. `assets.fp.json` and `localization/en-US.json` are reference manifests for foundation validation; placeholder presentation assets may satisfy these IDs during M01, but unresolved IDs may never ship.
+
+## Unpromoted Core development
+
+`core_dev/identity.json` is a strict internal compiler descriptor for `GB-M03-01A`. It reuses the immutable `fp.1.0.0` Grave Arbalist class, four abilities, and base sprite without copying or relabeling their records. It is not a release manifest, cannot name promotion metadata, and rejects item, arena, reward, or prototype IDs. Formal `core.1.0.0` packaging remains prohibited until the complete Core manifest passes `CONT-VALID-003`.

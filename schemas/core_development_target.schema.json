@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CoreDevelopmentTarget",
+  "description": "Strict input contract for the unpromoted Core identity compiler.\n\nThis is deliberately not a [`ReleaseManifest`]: it has no bundle ID, release stage,\npromotion metadata, or output package path. `SPEC-CONFLICT-004` reserves `core.1.0.0`\nuntil every Core record and promotion gate is complete.",
+  "type": "object",
+  "properties": {
+    "presentation_asset_ids": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ContentId"
+      }
+    },
+    "required_ability_ids": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ContentId"
+      }
+    },
+    "required_class_ids": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ContentId"
+      }
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "source_content_version": {
+      "type": "string"
+    },
+    "target_kind": {
+      "$ref": "#/$defs/CoreDevelopmentTargetKind"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "target_kind",
+    "source_content_version",
+    "required_class_ids",
+    "required_ability_ids",
+    "presentation_asset_ids"
+  ],
+  "$defs": {
+    "ContentId": {
+      "description": "Stable dot-separated content identifier.",
+      "type": "string"
+    },
+    "CoreDevelopmentTargetKind": {
+      "description": "Identifies a compiler input that is intentionally outside the release/promotion pipeline.",
+      "oneOf": [
+        {
+          "const": "unpromoted_identity_subset",
+          "description": "A narrow internal-only subset used while the complete Core manifest is still authored.",
+          "type": "string"
+        }
+      ]
+    }
+  }
+}

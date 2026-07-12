@@ -579,6 +579,30 @@ pub struct ReleaseManifest {
     pub required_content_ids: Vec<ContentId>,
 }
 
+/// Identifies a compiler input that is intentionally outside the release/promotion pipeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CoreDevelopmentTargetKind {
+    /// A narrow internal-only subset used while the complete Core manifest is still authored.
+    UnpromotedIdentitySubset,
+}
+
+/// Strict input contract for the unpromoted Core identity compiler.
+///
+/// This is deliberately not a [`ReleaseManifest`]: it has no bundle ID, release stage,
+/// promotion metadata, or output package path. `SPEC-CONFLICT-004` reserves `core.1.0.0`
+/// until every Core record and promotion gate is complete.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CoreDevelopmentTarget {
+    pub schema_version: u32,
+    pub target_kind: CoreDevelopmentTargetKind,
+    pub source_content_version: String,
+    pub required_class_ids: Vec<ContentId>,
+    pub required_ability_ids: Vec<ContentId>,
+    pub presentation_asset_ids: Vec<ContentId>,
+}
+
 /// Traceability registry. Every implementation task must have explicit acceptance criteria.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -608,6 +632,8 @@ pub struct AssetManifest {
 
 #[cfg(test)]
 mod tests {
+    use std::{fs, path::Path};
+
     use super::*;
 
     #[test]
@@ -639,5 +665,49 @@ mod tests {
         }"#;
         let error = serde_json::from_str::<ReleaseManifest>(text).expect_err("unknown field");
         assert!(error.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn core_development_target_cannot_describe_a_release_or_promotion() {
+        let base = serde_json::json!({
+            "schema_version": 1,
+            "target_kind": "unpromoted_identity_subset",
+            "source_content_version": "fp.1.0.0",
+            "required_class_ids": ["class.grave_arbalist"],
+            "required_ability_ids": [],
+            "presentation_asset_ids": ["sprite.class.grave_arbalist"]
+        });
+        for (field, value) in [
+            ("bundle_id", serde_json::json!("core.1.0.0")),
+            ("release_stage", serde_json::json!("core")),
+            ("promotion", serde_json::json!({"approved": true})),
+            ("output_package", serde_json::json!("core.1.0.0.zip")),
+        ] {
+            let mut changed = base.clone();
+            changed
+                .as_object_mut()
+                .expect("test target is an object")
+                .insert(field.to_owned(), value);
+            let error = serde_json::from_value::<CoreDevelopmentTarget>(changed)
+                .expect_err("release metadata must not cross the development boundary");
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("unknown field `{field}`")),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn checked_in_core_development_schema_matches_the_rust_contract() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../schemas/core_development_target.schema.json");
+        let checked_in: serde_json::Value =
+            serde_json::from_slice(&fs::read(path).expect("checked-in Core development schema"))
+                .expect("valid JSON Schema");
+        let generated = serde_json::to_value(schemars::schema_for!(CoreDevelopmentTarget))
+            .expect("serializable generated schema");
+        assert_eq!(checked_in, generated);
     }
 }

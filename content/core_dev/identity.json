@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "target_kind": "unpromoted_identity_subset",
+  "source_content_version": "fp.1.0.0",
+  "required_class_ids": [
+    "class.grave_arbalist"
+  ],
+  "required_ability_ids": [
+    "ability.arbalist.primary_crossbow",
+    "ability.arbalist.grave_mark",
+    "ability.arbalist.slipstep",
+    "ability.arbalist.stillness"
+  ],
+  "presentation_asset_ids": [
+    "sprite.class.grave_arbalist"
+  ]
+}

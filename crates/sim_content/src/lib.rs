@@ -1,7 +1,9 @@
 //! Immutable, strict content loading and semantic validation for simulation consumers.
 
+mod core_dev;
 mod prototype;
 
+pub use core_dev::*;
 pub use prototype::*;
 
 use std::{
