@@ -41,7 +41,7 @@ M01 PASS
 | `GB-M02-05` | Deterministic latency, jitter, loss, duplication, reordering, and outage harness. | PASS |
 | `GB-M02-06` | Reject teleport, speed, fire-rate, forged hit, duplicate pickup, stale/replayed input, and mutation misuse. | PASS |
 | `GB-M02-07` | Headless bot moves, aims, fights, picks up, dies, Recalls, and reconnects only through the real protocol. | PASS |
-| `GB-M02-08` | Realm/arena instance lifecycle, ownership, scheduler, tick diagnostics, and clean teardown. | PENDING |
+| `GB-M02-08` | Realm/arena instance lifecycle, ownership, scheduler, tick diagnostics, and clean teardown. | PASS |
 
 ## Exit gate
 
@@ -54,3 +54,9 @@ All are conjunctive:
 - Every malicious/mutation test passes.
 
 Failure holds the project in M02 authority/network work. It does not authorize persistence or content expansion.
+
+## Current gate status
+
+- Automated packages and gates: PASS through `GB-M02-08`, including the explicit release-profile sixteen-bot/two-hour soak.
+- Four-human concurrent combat completion: PENDING. The M01 owner assumption explicitly waived no later milestone.
+- Overall `GB-M02`: PENDING until the human gate is recorded; M03 remains unauthorized.

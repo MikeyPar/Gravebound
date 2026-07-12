@@ -43,7 +43,7 @@ Protocol minor `1.2` added authoritative entity velocity plus friendly-projectil
 - Join, leave, timeout, three-second `LinkLost`, reconnect, duplicate-session handoff, and shutdown: `GB-M02-04`.
 - Deterministic latency, jitter, loss, duplication, reordering, and outage injection: `GB-M02-05`.
 - Comprehensive malicious input and mutation rejection was completed by `GB-M02-06`; this audit retains its original deferral as historical scope evidence.
-- Full journey bot and instance lifecycle: `GB-M02-07`/`GB-M02-08`.
+- The full journey bot and instance lifecycle were completed by `GB-M02-07`/`GB-M02-08`; this audit retains their original deferral as historical scope evidence.
 - Four-human, sixteen-bot, impairment-playability, and server tick percentile gates: full M02 exit gate.
 
 ## Handoff

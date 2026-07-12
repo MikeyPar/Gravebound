@@ -159,10 +159,11 @@ pub use pattern::{
 };
 pub use performance::{
     BOSS_RELIABILITY_RUN_COUNT, BOSS_REPLAY_TICKS, BossReliabilityReport, EffectMode,
-    FrameSampleKind, MemoryAssessment, MemorySample, PerformanceAcceptance,
-    PerformanceEvidenceInput, PerformanceEvidenceReport, PerformanceReportError, StressFixture,
-    StressFixtureConfig, StressFixtureSnapshot, TARGET_ENEMY_COUNT,
-    TARGET_HOSTILE_PROJECTILE_COUNT, TargetHardware, run_bell_proctor_reliability_fixture,
+    FrameSampleKind, MONOTONIC_GROWTH_FLOOR_BYTES, MemoryAssessment, MemorySample,
+    PerformanceAcceptance, PerformanceEvidenceInput, PerformanceEvidenceReport,
+    PerformanceReportError, StressFixture, StressFixtureConfig, StressFixtureSnapshot,
+    TARGET_ENEMY_COUNT, TARGET_HOSTILE_PROJECTILE_COUNT, TargetHardware,
+    run_bell_proctor_reliability_fixture,
 };
 pub use readability::{
     CombatEffectLayer, GrayscaleSignature, HostileReadabilityManifest, HostileReadabilityProfile,

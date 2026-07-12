@@ -130,8 +130,12 @@ struct CachedMutation {
 
 impl AuthoritativeSession {
     pub fn from_content_root(content_root: &Path) -> Result<Self, SessionError> {
-        Self::from_content_root_with_eligibility(
-            content_root,
+        let (package, _) = sim_content::load_and_validate(content_root)
+            .map_err(|error| SessionError::Content(error.to_string()))?;
+        let content = sim_content::first_playable_authority_combat_test(&package)
+            .map_err(|error| SessionError::Content(error.to_string()))?;
+        Self::from_compiled_content_with_eligibility(
+            &content,
             PickupEligibility {
                 valid_session: true,
                 reward_eligible: true,
@@ -139,22 +143,30 @@ impl AuthoritativeSession {
         )
     }
 
-    fn from_content_root_with_eligibility(
-        content_root: &Path,
+    pub fn from_compiled_content(
+        content: &sim_content::AuthorityCombatTestContent,
+    ) -> Result<Self, SessionError> {
+        Self::from_compiled_content_with_eligibility(
+            content,
+            PickupEligibility {
+                valid_session: true,
+                reward_eligible: true,
+            },
+        )
+    }
+
+    fn from_compiled_content_with_eligibility(
+        content: &sim_content::AuthorityCombatTestContent,
         eligibility: PickupEligibility,
     ) -> Result<Self, SessionError> {
-        let (package, _) = sim_content::load_and_validate(content_root)
-            .map_err(|error| SessionError::Content(error.to_string()))?;
-        let content = sim_content::first_playable_authority_combat_test(&package)
-            .map_err(|error| SessionError::Content(error.to_string()))?;
         let player_entity_id =
             sim_core::EntityId::new(PLAYER_ENTITY_ID).ok_or(SessionError::InvalidPlayerIdentity)?;
         let arena = AuthoritativeArena::new(
-            content.definitions,
+            content.definitions.clone(),
             player_entity_id,
-            content.spawns,
+            content.spawns.clone(),
             eligibility,
-            content.hostile_projectile_ids,
+            content.hostile_projectile_ids.clone(),
         )?;
         Ok(Self {
             arena,
@@ -1218,8 +1230,10 @@ mod tests {
 
     #[test]
     fn ineligible_pickup_request_is_nonmutating_and_idempotent() {
-        let mut session = AuthoritativeSession::from_content_root_with_eligibility(
-            &content_root(),
+        let (package, _) = sim_content::load_and_validate(&content_root()).unwrap();
+        let content = sim_content::first_playable_authority_combat_test(&package).unwrap();
+        let mut session = AuthoritativeSession::from_compiled_content_with_eligibility(
+            &content,
             PickupEligibility {
                 valid_session: true,
                 reward_eligible: false,

@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('bootstrap', 'format', 'lint', 'test', 'validate', 'headless', 'local-lab', 'server-doctor', 'bot-doctor', 'network-ci', 'local-stack', 'ci', 'release')]
+    [ValidateSet('bootstrap', 'format', 'lint', 'test', 'validate', 'headless', 'local-lab', 'server-doctor', 'bot-doctor', 'network-ci', 'm02-soak', 'local-stack', 'ci', 'release')]
     [string]$Command = 'ci'
 )
 
@@ -38,8 +38,11 @@ try {
             Invoke-Cargo -Arguments @('run', '--locked', '-p', 'server_app', '--', 'doctor')
             Invoke-Cargo -Arguments @('run', '--locked', '-p', 'bot_client', '--', 'doctor')
         }
+        'm02-soak' {
+            Invoke-Cargo -Arguments @('test', '--locked', '--release', '-p', 'server_app', '--test', 'm02_soak', 'm02_sixteen_bot_two_hour_soak', '--', '--ignored', '--nocapture', '--test-threads=1')
+        }
         'local-stack' {
-            throw 'LocalStack becomes runnable with GB-M02-00 (server_app) and GB-M03-02 (PostgreSQL). M00 intentionally provides no substitute server.'
+            throw 'The M02 authoritative loop is verified by network-ci and m02-soak. Runnable LocalStack remains blocked on GB-M03-02 PostgreSQL and its approved persistence boundary.'
         }
         'release' { Invoke-Cargo -Arguments @('build', '--locked', '--release', '-p', 'client_bevy') }
         'ci' {

@@ -44,7 +44,7 @@ Protocol minor `1.4` requires zero legacy ability sequences on Input and adds ty
 ## Deferred without waiver
 
 - Full real-protocol journey bot and the two-hour sixteen-bot soak: `GB-M02-07` and the M02 exit gate.
-- Realm/arena scheduler lifecycle, server tick percentiles, and clean multi-instance teardown: `GB-M02-08`.
+- Realm/arena scheduler lifecycle, server tick percentiles, and clean multi-instance teardown were completed by `GB-M02-08`; this audit retains their original deferral as historical scope evidence.
 - Edge DDoS/connection quotas, durable security evidence, platform anti-tamper, staff review, and sanctions: M06.
 - Four-human impaired playability approval remains a conjunctive full M02 exit gate and is not replaced by automated abuse coverage.
 

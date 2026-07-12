@@ -25,6 +25,9 @@ client_bevy = { path = "../client_bevy" }
 network_harness = { path = "../network_harness" }
 rcgen.workspace = true
 rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sysinfo.workspace = true
 
 [lints]
 workspace = true

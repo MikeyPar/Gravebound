@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "feature_id": "GB-M02-08",
+  "content_version": "fp.1.0.0",
+  "command": ".\\tools\\dev.cmd m02-soak",
+  "profile": "release",
+  "bot_count": 16,
+  "scheduler_frames": 216000,
+  "simulated_seconds": 7200,
+  "session_generations": 7588,
+  "inputs": 3456000,
+  "snapshot_chunks": 1728000,
+  "accepted_mutations": 5684,
+  "recalls": 5684,
+  "deaths": 1888,
+  "reconnects": 128,
+  "maximum_instances": 1,
+  "maximum_owners": 16,
+  "allocated_instances": 119,
+  "closed_instances": 119,
+  "retired_sessions": 7572,
+  "invalid_states": 0,
+  "simulation_stalls": 0,
+  "state_divergences": 0,
+  "mean_tick_micros": 124,
+  "p95_tick_micros": 179,
+  "p99_tick_micros": 218,
+  "maximum_tick_micros": 2920,
+  "mean_headroom_basis_points": 9962,
+  "resident_memory_samples": [
+    {
+      "simulated_tick": 0,
+      "resident_bytes": 7225344
+    },
+    {
+      "simulated_tick": 54000,
+      "resident_bytes": 8376320
+    },
+    {
+      "simulated_tick": 108000,
+      "resident_bytes": 8855552
+    },
+    {
+      "simulated_tick": 162000,
+      "resident_bytes": 9166848
+    },
+    {
+      "simulated_tick": 216000,
+      "resident_bytes": 9601024
+    }
+  ],
+  "post_warmup_growth_bytes": 1224704,
+  "monotonic_growth_floor_bytes": 8388608,
+  "monotonic_post_warmup_leak": false,
+  "zero_residue_after_shutdown": true
+}

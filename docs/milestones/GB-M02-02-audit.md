@@ -46,7 +46,7 @@ PASS. The live-instance server is final for every gameplay category named by the
 - Prediction/interpolation/reconciliation and correction telemetry were completed by `GB-M02-03`; this audit retains their original deferral as historical scope evidence.
 - Recall, LinkLost, reconnect, duplicate-session handoff, and shutdown: `GB-M02-04`.
 - Impairment and comprehensive malicious input/mutation matrices were completed by `GB-M02-05`/`GB-M02-06`; this audit retains their original deferral as historical scope evidence.
-- Full journey bot and instance lifecycle: `GB-M02-07`/`GB-M02-08`.
+- The full journey bot and instance lifecycle were completed by `GB-M02-07`/`GB-M02-08`; this audit retains their original deferral as historical scope evidence.
 - Durable account, item, and death transactions: M03.
 
 ## Handoff

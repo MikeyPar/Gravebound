@@ -20,7 +20,7 @@ pub const BOSS_REPLAY_TICKS: u64 = TICKS_PER_SECOND as u64 * 60;
 pub const BOSS_RELIABILITY_RUN_COUNT: usize = 20;
 const TARGET_MEMORY_BYTES: u64 = 1_500_000_000;
 const REQUIRED_MEMORY_DURATION_MS: u64 = 30 * 60 * 1_000;
-const MONOTONIC_GROWTH_FLOOR_BYTES: u64 = 8 * 1024 * 1024;
+pub const MONOTONIC_GROWTH_FLOOR_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

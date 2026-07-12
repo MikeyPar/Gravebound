@@ -67,6 +67,14 @@ impl SessionPhase {
     const fn simulation_active(self) -> bool {
         matches!(self, Self::Connected | Self::LinkLost { .. })
     }
+
+    #[must_use]
+    pub const fn is_resolved(self) -> bool {
+        matches!(
+            self,
+            Self::Recalled { .. } | Self::Dead { .. } | Self::Closed
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,6 +133,11 @@ impl ManagedSession {
             Some(binding) => Some(binding.id),
             None => None,
         }
+    }
+
+    #[must_use]
+    pub const fn is_simulation_active(&self) -> bool {
+        self.phase.simulation_active()
     }
 
     #[must_use]
@@ -373,6 +386,14 @@ pub struct LifecycleResponse {
 }
 
 #[derive(Debug)]
+pub struct DirectoryTickOutput {
+    pub owner: SessionOwnerId,
+    pub before_tick: u64,
+    pub after_tick: u64,
+    pub snapshots: Vec<protocol::SnapshotChunk>,
+}
+
+#[derive(Debug)]
 pub struct SessionDirectory {
     sessions: BTreeMap<SessionOwnerId, ManagedSession>,
     next_session_id: u64,
@@ -414,6 +435,61 @@ impl SessionDirectory {
         self.sessions.get_mut(&owner)
     }
 
+    #[must_use]
+    pub fn owner_ids(&self) -> Vec<SessionOwnerId> {
+        self.sessions.keys().copied().collect()
+    }
+
+    /// Advances every simulation-active logical session exactly once in stable owner order.
+    pub fn tick_simulation_active(&mut self) -> Result<Vec<DirectoryTickOutput>, LifecycleError> {
+        let mut outputs = Vec::new();
+        for (owner, session) in &mut self.sessions {
+            if !session.is_simulation_active() {
+                continue;
+            }
+            let before_tick = session.server_tick();
+            let snapshots = session.tick()?;
+            outputs.push(DirectoryTickOutput {
+                owner: *owner,
+                before_tick,
+                after_tick: session.server_tick(),
+                snapshots,
+            });
+        }
+        Ok(outputs)
+    }
+
+    /// Removes terminal logical sessions after their final protocol evidence has been delivered.
+    pub fn retire_resolved(&mut self) -> Vec<SessionOwnerId> {
+        let resolved = self.resolved_owner_ids();
+        for owner in &resolved {
+            let removed = self.remove_resolved(*owner);
+            debug_assert!(removed);
+        }
+        resolved
+    }
+
+    #[must_use]
+    pub fn resolved_owner_ids(&self) -> Vec<SessionOwnerId> {
+        self.sessions
+            .iter()
+            .filter_map(|(owner, session)| session.phase().is_resolved().then_some(*owner))
+            .collect()
+    }
+
+    pub fn remove_resolved(&mut self, owner: SessionOwnerId) -> bool {
+        if self
+            .sessions
+            .get(&owner)
+            .is_some_and(|session| session.phase().is_resolved())
+        {
+            self.sessions.remove(&owner);
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn handle_control(
         &mut self,
         owner: SessionOwnerId,
@@ -422,6 +498,35 @@ impl SessionDirectory {
         content_root: &Path,
         server_monotonic_micros: u64,
     ) -> Result<LifecycleResponse, LifecycleError> {
+        self.handle_control_with_authority(owner, transport, frame, server_monotonic_micros, || {
+            AuthoritativeSession::from_content_root(content_root)
+        })
+    }
+
+    pub fn handle_control_with_compiled_content(
+        &mut self,
+        owner: SessionOwnerId,
+        transport: TransportId,
+        frame: &SessionControlFrame,
+        content: &sim_content::AuthorityCombatTestContent,
+        server_monotonic_micros: u64,
+    ) -> Result<LifecycleResponse, LifecycleError> {
+        self.handle_control_with_authority(owner, transport, frame, server_monotonic_micros, || {
+            AuthoritativeSession::from_compiled_content(content)
+        })
+    }
+
+    fn handle_control_with_authority<F>(
+        &mut self,
+        owner: SessionOwnerId,
+        transport: TransportId,
+        frame: &SessionControlFrame,
+        server_monotonic_micros: u64,
+        authority_factory: F,
+    ) -> Result<LifecycleResponse, LifecycleError>
+    where
+        F: FnOnce() -> Result<AuthoritativeSession, crate::SessionError>,
+    {
         frame
             .validate()
             .map_err(|_| LifecycleError::InvalidControlFrame)?;
@@ -438,8 +543,8 @@ impl SessionDirectory {
                 owner,
                 transport,
                 frame.sequence,
-                content_root,
                 server_monotonic_micros,
+                authority_factory,
             ),
             SessionControlRequest::Reconnect { prior_session_id } => self.reconnect(
                 owner,
@@ -507,8 +612,8 @@ impl SessionDirectory {
         owner: SessionOwnerId,
         transport: TransportId,
         sequence: u32,
-        content_root: &Path,
         server_monotonic_micros: u64,
+        authority_factory: impl FnOnce() -> Result<AuthoritativeSession, crate::SessionError>,
     ) -> Result<LifecycleResponse, LifecycleError> {
         if let Some(session) = self.sessions.get_mut(&owner) {
             let invalidated = session.prepare_reconnect(owner, transport, sequence)?;
@@ -530,7 +635,7 @@ impl SessionDirectory {
             .next_session_id
             .checked_add(1)
             .ok_or(LifecycleError::SessionIdExhausted)?;
-        let authority = AuthoritativeSession::from_content_root(content_root)?;
+        let authority = authority_factory()?;
         let mut session = ManagedSession::new(id, owner, transport, sequence, authority);
         let result = session.result(
             sequence,

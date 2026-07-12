@@ -51,8 +51,8 @@ The second journey uses the same policy in passive-death mode. It continues send
 
 ## Deferred without waiver
 
-- Realm/arena instance ownership, scheduler, bounded admission, tick percentile diagnostics, and clean multi-instance teardown: `GB-M02-08`.
-- Sixteen bots for two simulated hours without crash, memory growth, invalid state, or simulation stall: full M02 gate after `GB-M02-08`.
+- Realm/arena instance ownership, scheduler, bounded admission, tick percentile diagnostics, and clean multi-instance teardown were completed by `GB-M02-08`; this audit retains their original deferral as historical scope evidence.
+- The sixteen-bot/two-simulated-hour automated gate was completed by `GB-M02-08`; four-human concurrent combat remains the only open M02 exit item.
 - Four-human impaired playability approval remains a conjunctive M02 gate and is not replaced by bot automation.
 - Accounts, durable reconnect/character/item/death state, PostgreSQL, and production identity/certificates remain later milestones.
 

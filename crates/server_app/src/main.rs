@@ -34,6 +34,7 @@ async fn main() -> Result<()> {
                 snapshot_hz = report.snapshot_hz,
                 database_enabled = report.database_enabled,
                 transport_enabled = report.transport_enabled,
+                instance_scheduler_enabled = report.instance_scheduler_enabled,
                 "GB-M02 server foundation is valid"
             );
         }

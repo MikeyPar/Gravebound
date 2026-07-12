@@ -4,12 +4,20 @@
 //! `sim_core`. It must not own rendering, client settings, gameplay rules, or persistence logic.
 //! M02 deliberately has no database dependency.
 
+mod instance;
 mod lifecycle;
 mod session;
 
+pub use instance::{
+    ArenaInstancePhase, HostedInstanceId, InstanceControlResponse, InstanceDiagnostics,
+    InstanceError, InstanceKind, InstanceScheduler, M02_ARENA_CAPACITY, M02_SOAK_BOT_COUNT,
+    M02_SOAK_DURATION_TICKS, SERVER_TICK_BUDGET_MICROS, SchedulerFrame, SchedulerSnapshotBatch,
+    TickTimingReport,
+};
+
 pub use lifecycle::{
-    LINK_LOST_TICKS, LifecycleError, LifecycleResponse, LogicalSessionId, ManagedSession,
-    SessionDirectory, SessionOwnerId, SessionPhase, TransportId,
+    DirectoryTickOutput, LINK_LOST_TICKS, LifecycleError, LifecycleResponse, LogicalSessionId,
+    ManagedSession, SessionDirectory, SessionOwnerId, SessionPhase, TransportId,
 };
 pub use session::{
     AuthoritativeSession, IngressAnomaly, IngressAnomalyKind, IngressDiagnostics, InputDisposition,
@@ -66,6 +74,7 @@ pub struct ServerDoctorReport {
     pub snapshot_hz: u16,
     pub database_enabled: bool,
     pub transport_enabled: bool,
+    pub instance_scheduler_enabled: bool,
 }
 
 pub async fn run_doctor() -> Result<ServerDoctorReport, ServerFoundationError> {
@@ -78,6 +87,7 @@ pub async fn run_doctor() -> Result<ServerDoctorReport, ServerFoundationError> {
         snapshot_hz: SNAPSHOT_HZ,
         database_enabled: false,
         transport_enabled: true,
+        instance_scheduler_enabled: true,
     })
 }
 
@@ -395,6 +405,7 @@ mod tests {
         assert_eq!(report.snapshot_hz, 15);
         assert!(!report.database_enabled);
         assert!(report.transport_enabled);
+        assert!(report.instance_scheduler_enabled);
     }
 
     #[test]
