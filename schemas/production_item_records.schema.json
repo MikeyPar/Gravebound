@@ -1,0 +1,1201 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ProductionItemRecords",
+  "type": "object",
+  "properties": {
+    "items": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ProductionItemTemplateRecord"
+      }
+    },
+    "material_pools": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ProductionMaterialPoolRecord"
+      }
+    },
+    "rarity_profiles": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ProductionRarityProfileRecord"
+      }
+    },
+    "reward_tables": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ProductionRewardTableRecord"
+      }
+    },
+    "stage_policies": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ProductionItemStagePolicyRecord"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "items",
+    "rarity_profiles",
+    "reward_tables",
+    "material_pools",
+    "stage_policies"
+  ],
+  "$defs": {
+    "ArbalistMarkReplacement": {
+      "type": "object",
+      "properties": {
+        "direct_damage_coefficient_basis_points": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "duration_millis": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "primary_bonus_basis_points": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "projectile_speed_milli_tiles_per_second": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "range_milli_tiles": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "ArbalistSlipstepReplacement": {
+      "type": "object",
+      "properties": {
+        "cooldown_millis": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "damage_reduction_basis_points": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "distance_milli_tiles": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "duration_millis": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "ArbalistStillnessReplacement": {
+      "type": "object",
+      "properties": {
+        "activation_millis": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "primary_damage_bonus_basis_points": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "projectile_speed_bonus_basis_points": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "ContentId": {
+      "description": "Stable dot-separated content identifier.",
+      "type": "string"
+    },
+    "EquipmentSlot": {
+      "type": "string",
+      "enum": [
+        "weapon",
+        "relic",
+        "armor",
+        "charm"
+      ]
+    },
+    "ProductionArmorFamily": {
+      "type": "string",
+      "enum": [
+        "ashplate",
+        "gravehide",
+        "saltglass",
+        "pilgrim",
+        "rootweave",
+        "bellguard"
+      ]
+    },
+    "ProductionCharmEffect": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "bonus_basis_points": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            },
+            "consumed_on_release": {
+              "type": "boolean"
+            },
+            "effect_kind": {
+              "type": "string",
+              "const": "rested_primary_damage"
+            },
+            "idle_millis": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "effect_kind",
+            "idle_millis",
+            "bonus_basis_points",
+            "consumed_on_release"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "bonus_basis_points": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            },
+            "effect_kind": {
+              "type": "string",
+              "const": "potion_healing"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "effect_kind",
+            "bonus_basis_points"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "effect_kind": {
+              "type": "string",
+              "const": "named_negative_status_duration"
+            },
+            "reduction_basis_points": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "effect_kind",
+            "reduction_basis_points"
+          ]
+        }
+      ]
+    },
+    "ProductionConsumableBehavior": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "consumed_on_use": {
+              "type": "boolean"
+            },
+            "damage_interrupts_restore": {
+              "type": "boolean"
+            },
+            "effect_kind": {
+              "type": "string",
+              "const": "red_tonic"
+            },
+            "restore_duration_millis": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "restore_maximum_health_basis_points": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            },
+            "shared_cooldown_millis": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "effect_kind",
+            "restore_maximum_health_basis_points",
+            "restore_duration_millis",
+            "shared_cooldown_millis",
+            "damage_interrupts_restore",
+            "consumed_on_use"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "consumed_on_use": {
+              "type": "boolean"
+            },
+            "effect_kind": {
+              "type": "string",
+              "const": "purifying_salt"
+            },
+            "removes_bleed": {
+              "type": "boolean"
+            },
+            "removes_hex": {
+              "type": "boolean"
+            },
+            "restore_maximum_health_basis_points": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            },
+            "shared_cooldown_millis": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "effect_kind",
+            "removes_bleed",
+            "removes_hex",
+            "restore_maximum_health_basis_points",
+            "shared_cooldown_millis",
+            "consumed_on_use"
+          ]
+        }
+      ]
+    },
+    "ProductionEquipmentBehavior": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "attack_interval_micros": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "behavior_kind": {
+              "type": "string",
+              "const": "crossbow"
+            },
+            "bolt_angles_milli_degrees": {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "format": "int32"
+              }
+            },
+            "maximum_hits_per_target_per_release": {
+              "type": "integer",
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0
+            },
+            "pierce_count": {
+              "type": "integer",
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0
+            },
+            "projectile_radius_milli_tiles": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            },
+            "projectile_speed_milli_tiles_per_second": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "range_milli_tiles": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "second_target_damage_basis_points": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            },
+            "template_damage_scalar_basis_points": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "behavior_kind",
+            "template_damage_scalar_basis_points",
+            "attack_interval_micros",
+            "range_milli_tiles",
+            "projectile_speed_milli_tiles_per_second",
+            "projectile_radius_milli_tiles",
+            "bolt_angles_milli_degrees",
+            "maximum_hits_per_target_per_release",
+            "pierce_count"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "behavior_kind": {
+              "type": "string",
+              "const": "arbalist_relic"
+            },
+            "mark": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ArbalistMarkReplacement"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "slipstep": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ArbalistSlipstepReplacement"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "stillness": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ArbalistStillnessReplacement"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "behavior_kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "behavior_kind": {
+              "type": "string",
+              "const": "armor"
+            },
+            "family": {
+              "$ref": "#/$defs/ProductionArmorFamily"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "behavior_kind",
+            "family"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "behavior_kind": {
+              "type": "string",
+              "const": "charm"
+            },
+            "effect": {
+              "$ref": "#/$defs/ProductionCharmEffect"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "behavior_kind",
+            "effect"
+          ]
+        }
+      ]
+    },
+    "ProductionEquipmentFamily": {
+      "type": "string",
+      "enum": [
+        "sword",
+        "crossbow",
+        "hex_focus",
+        "vanguard_relic",
+        "arbalist_relic",
+        "witch_relic",
+        "ashplate",
+        "gravehide",
+        "saltglass",
+        "pilgrim",
+        "rootweave",
+        "bellguard",
+        "charm"
+      ]
+    },
+    "ProductionItemRarity": {
+      "type": "string",
+      "enum": [
+        "worn",
+        "forged",
+        "oathed",
+        "relic",
+        "sainted",
+        "black_unique"
+      ]
+    },
+    "ProductionItemStagePolicyRecord": {
+      "description": "Required metadata present on every runtime definition under `CONT-001`.",
+      "type": "object",
+      "properties": {
+        "affix_manifest_id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "armor_within_universal_basis_points": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "asset_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContentId"
+          }
+        },
+        "content_version": {
+          "type": "string"
+        },
+        "current_class_weapon_relic_basis_points": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "enabled_cosmetic_checks": {
+          "type": "boolean"
+        },
+        "enabled_family_fragment_checks": {
+          "type": "boolean"
+        },
+        "fixed_rarity_profile_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContentId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "localization_description_key": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "localization_name_key": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "other_class_weapon_relic_basis_points": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "release_stage": {
+          "$ref": "#/$defs/ReleaseStage"
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "source_document_feature_id": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "universal_armor_charm_basis_points": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "weapon_within_class_basis_points": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "schema_version",
+        "content_version",
+        "enabled",
+        "release_stage",
+        "localization_name_key",
+        "localization_description_key",
+        "asset_ids",
+        "tags",
+        "source_document_feature_id",
+        "current_class_weapon_relic_basis_points",
+        "other_class_weapon_relic_basis_points",
+        "universal_armor_charm_basis_points",
+        "weapon_within_class_basis_points",
+        "armor_within_universal_basis_points",
+        "affix_manifest_id",
+        "enabled_family_fragment_checks",
+        "enabled_cosmetic_checks"
+      ]
+    },
+    "ProductionItemTemplatePayload": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "affix_exclusion_ids": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ContentId"
+              }
+            },
+            "behavior": {
+              "$ref": "#/$defs/ProductionEquipmentBehavior"
+            },
+            "capability_tags": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "class_id": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ContentId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "core_maximum_item_level_override": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0
+            },
+            "family": {
+              "$ref": "#/$defs/ProductionEquipmentFamily"
+            },
+            "item_kind": {
+              "type": "string",
+              "const": "equipment"
+            },
+            "maximum_item_level": {
+              "type": "integer",
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0
+            },
+            "minimum_item_level": {
+              "type": "integer",
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0
+            },
+            "slot": {
+              "$ref": "#/$defs/EquipmentSlot"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "item_kind",
+            "slot",
+            "family",
+            "minimum_item_level",
+            "maximum_item_level",
+            "capability_tags",
+            "affix_exclusion_ids",
+            "behavior"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "behavior": {
+              "$ref": "#/$defs/ProductionConsumableBehavior"
+            },
+            "item_kind": {
+              "type": "string",
+              "const": "consumable"
+            },
+            "stack_cap": {
+              "type": "integer",
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "item_kind",
+            "stack_cap",
+            "behavior"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "item_kind": {
+              "type": "string",
+              "const": "material"
+            },
+            "pouch_stack_cap": {
+              "type": "integer",
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0
+            },
+            "reward_tags": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "wallet_cap": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "item_kind",
+            "wallet_cap",
+            "pouch_stack_cap",
+            "reward_tags"
+          ]
+        }
+      ]
+    },
+    "ProductionItemTemplateRecord": {
+      "description": "Required metadata present on every runtime definition under `CONT-001`.",
+      "type": "object",
+      "properties": {
+        "asset_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContentId"
+          }
+        },
+        "content_version": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "localization_description_key": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "localization_name_key": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "payload": {
+          "$ref": "#/$defs/ProductionItemTemplatePayload"
+        },
+        "release_stage": {
+          "$ref": "#/$defs/ReleaseStage"
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "source_document_feature_id": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "schema_version",
+        "content_version",
+        "enabled",
+        "release_stage",
+        "localization_name_key",
+        "localization_description_key",
+        "asset_ids",
+        "tags",
+        "source_document_feature_id",
+        "payload"
+      ]
+    },
+    "ProductionMaterialPoolOutcome": {
+      "type": "object",
+      "properties": {
+        "item_id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "quantity": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "weight": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "item_id",
+        "quantity",
+        "weight"
+      ]
+    },
+    "ProductionMaterialPoolRecord": {
+      "description": "Required metadata present on every runtime definition under `CONT-001`.",
+      "type": "object",
+      "properties": {
+        "asset_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContentId"
+          }
+        },
+        "content_version": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "localization_description_key": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "localization_name_key": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "ordered_outcomes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProductionMaterialPoolOutcome"
+          }
+        },
+        "release_stage": {
+          "$ref": "#/$defs/ReleaseStage"
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "source_document_feature_id": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "schema_version",
+        "content_version",
+        "enabled",
+        "release_stage",
+        "localization_name_key",
+        "localization_description_key",
+        "asset_ids",
+        "tags",
+        "source_document_feature_id",
+        "ordered_outcomes"
+      ]
+    },
+    "ProductionRarityProfileRecord": {
+      "description": "Required metadata present on every runtime definition under `CONT-001`.",
+      "type": "object",
+      "properties": {
+        "asset_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContentId"
+          }
+        },
+        "content_version": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "localization_description_key": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "localization_name_key": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "maximum_item_level": {
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        },
+        "minimum_item_level": {
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        },
+        "ordered_weights": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProductionRarityWeight"
+          }
+        },
+        "release_stage": {
+          "$ref": "#/$defs/ReleaseStage"
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "source_document_feature_id": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "schema_version",
+        "content_version",
+        "enabled",
+        "release_stage",
+        "localization_name_key",
+        "localization_description_key",
+        "asset_ids",
+        "tags",
+        "source_document_feature_id",
+        "minimum_item_level",
+        "maximum_item_level",
+        "ordered_weights"
+      ]
+    },
+    "ProductionRarityWeight": {
+      "type": "object",
+      "properties": {
+        "rarity": {
+          "$ref": "#/$defs/ProductionItemRarity"
+        },
+        "weight_basis_points": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "rarity",
+        "weight_basis_points"
+      ]
+    },
+    "ProductionRewardRoll": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "count": {
+              "type": "integer",
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0
+            },
+            "presence_basis_points": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            },
+            "rarity_profile_id": {
+              "$ref": "#/$defs/ContentId"
+            },
+            "roll_kind": {
+              "type": "string",
+              "const": "equipment"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "roll_kind",
+            "presence_basis_points",
+            "count",
+            "rarity_profile_id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "count": {
+              "type": "integer",
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0
+            },
+            "presence_basis_points": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            },
+            "rarity_profile_id": {
+              "$ref": "#/$defs/ContentId"
+            },
+            "roll_kind": {
+              "type": "string",
+              "const": "universal_item"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "roll_kind",
+            "presence_basis_points",
+            "count",
+            "rarity_profile_id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "count": {
+              "type": "integer",
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0
+            },
+            "material_pool_id": {
+              "$ref": "#/$defs/ContentId"
+            },
+            "presence_basis_points": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            },
+            "roll_kind": {
+              "type": "string",
+              "const": "material"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "roll_kind",
+            "presence_basis_points",
+            "count",
+            "material_pool_id"
+          ]
+        }
+      ]
+    },
+    "ProductionRewardTableRecord": {
+      "description": "Required metadata present on every runtime definition under `CONT-001`.",
+      "type": "object",
+      "properties": {
+        "asset_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContentId"
+          }
+        },
+        "content_version": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "localization_description_key": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "localization_name_key": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "ordered_rolls": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProductionRewardRoll"
+          }
+        },
+        "release_stage": {
+          "$ref": "#/$defs/ReleaseStage"
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "source_document_feature_id": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "schema_version",
+        "content_version",
+        "enabled",
+        "release_stage",
+        "localization_name_key",
+        "localization_description_key",
+        "asset_ids",
+        "tags",
+        "source_document_feature_id",
+        "ordered_rolls"
+      ]
+    },
+    "ReleaseStage": {
+      "description": "Earliest release stage that may enable a record.",
+      "type": "string",
+      "enum": [
+        "fp",
+        "core",
+        "slice",
+        "alpha",
+        "playtest",
+        "ea"
+      ]
+    }
+  }
+}

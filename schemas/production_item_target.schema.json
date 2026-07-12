@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ProductionItemDevelopmentTarget",
+  "type": "object",
+  "properties": {
+    "expected_assets_blake3": {
+      "type": "string"
+    },
+    "expected_localization_blake3": {
+      "type": "string"
+    },
+    "expected_manifest_blake3": {
+      "description": "Exact lowercase BLAKE3 digest of the complete item/reward manifest bytes.",
+      "type": "string"
+    },
+    "expected_records_blake3": {
+      "type": "string"
+    },
+    "required_item_ids": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ContentId"
+      }
+    },
+    "required_material_pool_ids": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ContentId"
+      }
+    },
+    "required_rarity_profile_ids": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ContentId"
+      }
+    },
+    "required_reward_table_ids": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ContentId"
+      }
+    },
+    "required_stage_policy_ids": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ContentId"
+      }
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "target_kind": {
+      "$ref": "#/$defs/ProductionItemTargetKind"
+    },
+    "target_name": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "target_kind",
+    "target_name",
+    "required_item_ids",
+    "required_rarity_profile_ids",
+    "required_reward_table_ids",
+    "required_material_pool_ids",
+    "required_stage_policy_ids",
+    "expected_manifest_blake3",
+    "expected_records_blake3",
+    "expected_assets_blake3",
+    "expected_localization_blake3"
+  ],
+  "$defs": {
+    "ContentId": {
+      "description": "Stable dot-separated content identifier.",
+      "type": "string"
+    },
+    "ProductionItemTargetKind": {
+      "type": "string",
+      "enum": [
+        "unpromoted_item_reward_subset"
+      ]
+    }
+  }
+}

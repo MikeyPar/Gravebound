@@ -211,6 +211,14 @@ fn generate_schemas_command(output: &std::path::Path) -> Result<()> {
         output,
         "core_progression_records.schema.json",
     )?;
+    write_schema::<content_schema::ProductionItemDevelopmentTarget>(
+        output,
+        "production_item_target.schema.json",
+    )?;
+    write_schema::<content_schema::ProductionItemRecords>(
+        output,
+        "production_item_records.schema.json",
+    )?;
     info!(output = %output.display(), "JSON schemas generated");
     Ok(())
 }

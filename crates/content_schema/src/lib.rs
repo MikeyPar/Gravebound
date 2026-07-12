@@ -6,6 +6,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+mod production_item;
+pub use production_item::*;
+
 /// Initial schema version named by `CONT-001`.
 pub const SCHEMA_VERSION: u32 = 1;
 /// Exact First Playable content bundle from `CONT-FP-001`.
@@ -1140,6 +1143,47 @@ mod tests {
                 serde_json::from_str(&text).expect("valid checked-in schema");
             assert_eq!(checked_in, generated, "schema drift in {name}");
         }
+    }
+
+    #[test]
+    fn checked_in_production_item_schemas_match_parallel_strict_contracts() {
+        let schema_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../schemas");
+        let cases = [
+            (
+                "production_item_target.schema.json",
+                serde_json::to_value(schemars::schema_for!(ProductionItemDevelopmentTarget))
+                    .expect("serializable item target schema"),
+            ),
+            (
+                "production_item_records.schema.json",
+                serde_json::to_value(schemars::schema_for!(ProductionItemRecords))
+                    .expect("serializable item records schema"),
+            ),
+        ];
+        for (name, generated) in cases {
+            let text = fs::read_to_string(schema_root.join(name)).expect("checked-in schema");
+            let checked_in: serde_json::Value =
+                serde_json::from_str(&text).expect("valid checked-in schema");
+            assert_eq!(checked_in, generated, "schema drift in {name}");
+        }
+
+        let prototype = serde_json::json!({
+            "id": "item.prototype.weapon.pine_crossbow",
+            "schema_version": 1,
+            "content_version": "fp.1.0.0",
+            "enabled": true,
+            "release_stage": "fp",
+            "localization_name_key": "item.prototype.weapon.pine_crossbow.name",
+            "localization_description_key": "item.prototype.weapon.pine_crossbow.description",
+            "asset_ids": ["icon.item.prototype.weapon.pine_crossbow"],
+            "tags": ["item"],
+            "source_document_feature_id": "CONT-FP-006",
+            "numeric_payload": {"item_kind": "equipment", "slot": "weapon", "rarity": "worn", "effects": []}
+        });
+        assert!(
+            serde_json::from_value::<ProductionItemTemplateRecord>(prototype).is_err(),
+            "First Playable item payload must not deserialize as a production template"
+        );
     }
 
     #[test]
