@@ -426,13 +426,26 @@ impl InstanceScheduler {
                 .instances
                 .get_mut(&instance_id)
                 .ok_or(InstanceError::OwnerIndexDrift)?;
-            let lifecycle = instance.directory.handle_control_with_compiled_content(
+            let mut lifecycle = instance.directory.handle_control_with_compiled_content(
                 owner,
                 transport,
                 frame,
                 &instance.content,
                 server_monotonic_micros,
             )?;
+            if let Some(authority) = &instance.shared_authority {
+                let server_tick = authority.wave().tick().0.saturating_sub(1);
+                let state_version = authority.state_version();
+                instance
+                    .directory
+                    .session_mut(owner)
+                    .ok_or(InstanceError::OwnerIndexDrift)?
+                    .synchronize_shared_control_response(
+                        &mut lifecycle.event,
+                        server_tick,
+                        state_version,
+                    )?;
+            }
             if control_code(&lifecycle.event)? == SessionControlResultCode::Reattached {
                 InstanceDiagnostics::increment(&mut self.diagnostics.reconnects)?;
             }
@@ -772,6 +785,16 @@ fn control_code(event: &ReliableEventFrame) -> Result<SessionControlResultCode, 
     Ok(result.code)
 }
 
+#[cfg(test)]
+fn control_result(
+    event: &ReliableEventFrame,
+) -> Result<&protocol::SessionControlResult, InstanceError> {
+    let ReliableEvent::Control(ControlEvent::SessionResult(result)) = &event.event else {
+        return Err(InstanceError::UnexpectedControlResult);
+    };
+    Ok(result)
+}
+
 fn require_joined(event: &ReliableEventFrame) -> Result<(), InstanceError> {
     if control_code(event)? != SessionControlResultCode::Joined {
         return Err(InstanceError::UnexpectedControlResult);
@@ -954,6 +977,17 @@ mod tests {
             control_code(&reattached.lifecycle.event).unwrap(),
             SessionControlResultCode::Reattached
         );
+        let result = control_result(&reattached.lifecycle.event).unwrap();
+        assert_eq!(reattached.lifecycle.event.server_tick, 1);
+        assert_eq!(result.server_tick, 1);
+        assert_eq!(
+            result.state_version,
+            scheduler.instances[&initial.instance_id]
+                .shared_authority
+                .as_ref()
+                .unwrap()
+                .state_version()
+        );
         assert_eq!(scheduler.diagnostics().reconnects, 1);
         scheduler
             .submit_input(owner(1), transport(2), &input(2))
@@ -965,6 +999,51 @@ mod tests {
         assert_eq!(second.snapshot_batches[0].owner, owner(1));
         assert_eq!(second.snapshot_batches[0].snapshots[0].server_tick, 2);
         assert_eq!(scheduler.diagnostics().simulation_stalls, 0);
+
+        let action = scheduler
+            .handle_gameplay_reliable(
+                owner(1),
+                transport(2),
+                WireMessage::ActionFrame(ActionFrame {
+                    sequence: 1,
+                    client_tick: 2,
+                    action: ActionKind::RecallStart,
+                }),
+            )
+            .unwrap();
+        let WireMessage::ReliableEvent(action) = action else {
+            panic!("shared action must return one reliable event");
+        };
+        assert_eq!(action.server_tick, 2);
+
+        let leave = scheduler
+            .admit_or_route_control(
+                owner(1),
+                transport(2),
+                &SessionControlFrame {
+                    sequence: 3,
+                    client_tick: 2,
+                    client_monotonic_micros: 3,
+                    request: SessionControlRequest::Leave,
+                },
+                &root,
+                3,
+            )
+            .unwrap();
+        let result = control_result(&leave.lifecycle.event).unwrap();
+        assert_eq!(leave.lifecycle.event.server_tick, 2);
+        assert_eq!(result.server_tick, 2);
+        assert!(matches!(
+            scheduler.instances[&initial.instance_id]
+                .directory
+                .session(owner(1))
+                .unwrap()
+                .phase(),
+            crate::SessionPhase::LinkLost {
+                lost_tick: 2,
+                recall_tick: 92
+            }
+        ));
     }
 
     #[test]

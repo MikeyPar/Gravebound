@@ -251,6 +251,14 @@ impl AuthoritativeSession {
         &mut self,
         frame: &ActionFrame,
     ) -> Result<ReliableEventFrame, SessionError> {
+        self.submit_action_at(frame, self.arena.player().combat.tick().0)
+    }
+
+    pub(crate) fn submit_action_at(
+        &mut self,
+        frame: &ActionFrame,
+        server_tick: u64,
+    ) -> Result<ReliableEventFrame, SessionError> {
         frame
             .validate()
             .map_err(|_| SessionError::InvalidProtocolMessage)?;
@@ -260,10 +268,13 @@ impl AuthoritativeSession {
                 .stale_reliable_actions
                 .saturating_add(1);
             self.record_anomaly(IngressAnomalyKind::StaleReliableAction);
-            return self.reliable_event(ReliableEvent::ActionResult {
-                action_sequence: frame.sequence,
-                code: ActionResultCode::StaleSequence,
-            });
+            return self.reliable_event_at(
+                ReliableEvent::ActionResult {
+                    action_sequence: frame.sequence,
+                    code: ActionResultCode::StaleSequence,
+                },
+                server_tick,
+            );
         }
         self.last_action_sequence = frame.sequence;
         let code = if matches!(self.arena.phase(), AuthorityPhase::Alive) {
@@ -308,10 +319,13 @@ impl AuthoritativeSession {
         } else {
             ActionResultCode::InvalidState
         };
-        self.reliable_event(ReliableEvent::ActionResult {
-            action_sequence: frame.sequence,
-            code,
-        })
+        self.reliable_event_at(
+            ReliableEvent::ActionResult {
+                action_sequence: frame.sequence,
+                code,
+            },
+            server_tick,
+        )
     }
 
     pub(crate) fn take_shared_authority_input(&mut self) -> Result<AuthorityInput, SessionError> {
@@ -518,6 +532,7 @@ impl AuthoritativeSession {
         request: &MutationRequest,
         arena: &mut sim_core::SharedAuthoritativeArena,
         player_id: sim_core::EntityId,
+        server_tick: u64,
     ) -> Result<ReliableEventFrame, SessionError> {
         request
             .validate()
@@ -587,7 +602,7 @@ impl AuthoritativeSession {
             );
             result
         };
-        self.reliable_event(ReliableEvent::MutationResult(result))
+        self.reliable_event_at(ReliableEvent::MutationResult(result), server_tick)
     }
 
     pub fn handle_reliable(&mut self, message: WireMessage) -> Result<WireMessage, SessionError> {
@@ -600,13 +615,21 @@ impl AuthoritativeSession {
     }
 
     fn reliable_event(&mut self, event: ReliableEvent) -> Result<ReliableEventFrame, SessionError> {
+        self.reliable_event_at(event, self.arena.player().combat.tick().0)
+    }
+
+    pub(crate) fn reliable_event_at(
+        &mut self,
+        event: ReliableEvent,
+        server_tick: u64,
+    ) -> Result<ReliableEventFrame, SessionError> {
         self.reliable_sequence = self
             .reliable_sequence
             .checked_add(1)
             .ok_or(SessionError::SequenceExhausted)?;
         Ok(ReliableEventFrame {
             sequence: self.reliable_sequence,
-            server_tick: self.arena.player().combat.tick().0,
+            server_tick,
             event,
         })
     }

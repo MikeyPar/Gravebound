@@ -250,15 +250,44 @@ impl ManagedSession {
         if !matches!(self.phase, SessionPhase::Connected) {
             return Err(LifecycleError::IngressUnavailable);
         }
+        let server_tick = arena.wave().tick().0.saturating_sub(1);
         let response = match message {
-            WireMessage::ActionFrame(frame) => self.authority.submit_action(&frame)?,
-            WireMessage::MutationRequest(request) => {
-                self.authority
-                    .submit_shared_mutation(&request, arena, self.shared_player_id()?)?
+            WireMessage::ActionFrame(frame) => {
+                self.authority.submit_action_at(&frame, server_tick)?
             }
+            WireMessage::MutationRequest(request) => self.authority.submit_shared_mutation(
+                &request,
+                arena,
+                self.shared_player_id()?,
+                server_tick,
+            )?,
             _ => return Err(SessionError::UnexpectedReliableMessage.into()),
         };
         Ok(WireMessage::ReliableEvent(response))
+    }
+
+    pub(crate) fn synchronize_shared_control_response(
+        &mut self,
+        event: &mut ReliableEventFrame,
+        server_tick: u64,
+        state_version: u64,
+    ) -> Result<(), LifecycleError> {
+        event.server_tick = server_tick;
+        let ReliableEvent::Control(ControlEvent::SessionResult(result)) = &mut event.event else {
+            return Err(LifecycleError::InvalidControlFrame);
+        };
+        result.server_tick = server_tick;
+        result.state_version = state_version;
+        if result.code == SessionControlResultCode::LeaveAccepted {
+            let recall_tick = server_tick
+                .checked_add(LINK_LOST_TICKS)
+                .ok_or(LifecycleError::TickExhausted)?;
+            self.phase = SessionPhase::LinkLost {
+                lost_tick: server_tick,
+                recall_tick,
+            };
+        }
+        Ok(())
     }
 
     /// Advances authoritative gameplay before resolving the `LinkLost` deadline. This ordering
