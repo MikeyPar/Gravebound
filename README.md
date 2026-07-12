@@ -4,7 +4,7 @@ Gravebound is a server-authoritative, permanent-death, 2D dark-fantasy bullet-he
 
 Every character life is temporary. The account remembers what happened, and exceptional deaths can return as personalized Fallen Hero Echo encounters. The design emphasizes readable combat, rapid recovery, fair monetization, solo viability, and long-term replayability without permanent account-level combat power.
 
-> **Project status:** M01 and M02 are closed under their recorded gates. `GB-M03-01` now passes as a wipeable, server-authoritative Core identity and native Grave Arbalist creation/select slice. M03 persistence, world routing, progression, permanent death, recovery, telemetry, and operations packages remain open.
+> **Project status:** M01 and M02 are closed under their recorded gates. `GB-M03-01`, `GB-M03-02A`, `GB-M03-02B`, and `GB-M03-11` now pass: the Core Grave Arbalist identity is native, server-authoritative, and durable in the explicitly wipeable PostgreSQL namespace. Parent `GB-M03-02` remains open for item/vault, memorial/death, and ledger aggregates; world routing, progression, permanent death, recovery, telemetry, and operations packages also remain open.
 
 ![Bell Sepulcher gameplay concept](Concept%20Art/01-bell-sepulcher-gameplay.png)
 
@@ -102,7 +102,7 @@ Concept images establish mood, hierarchy, and visual language. They are not fina
 
 ## Current Next Step
 
-Implement `GB-M03-02A`: add the `persistence` crate, pinned PostgreSQL access layer, forward migrations, wipeable namespace, readiness/schema checks, Docker Compose or `TEST_DATABASE_URL` test route, and mandatory PostgreSQL CI service. Then implement `GB-M03-02B` by replacing the `GB-M03-01` in-memory adapter with transactional durable identity while leaving item/vault, memorial/death, and ledger schemas with their owning reviewed M03 packages. Neither SQLite nor a silently skipped database suite can satisfy this gate.
+Resolve the five world-flow decisions in `docs/spec-conflicts/SPEC-CONFLICT-006-m03-world-flow-contract.md` and the seven progression/item decisions in `docs/spec-conflicts/SPEC-CONFLICT-007-m03-progression-items.md`. Once approved, begin `GB-M03-03A`/`03B` and `GB-M03-04A`/`04B` under their reviewed boundaries. Keep the normal player route and affected Core Hall stations fail-closed until `GB-M03-04`, `05`, `06`, and `08` supply their owning item, oath/Bargain, death, extraction, and Recall semantics.
 
 ## Resolved prior handoff
 
