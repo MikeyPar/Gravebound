@@ -102,7 +102,7 @@ Concept images establish mood, hierarchy, and visual language. They are not fina
 
 ## Current Next Step
 
-Implement `GB-M03-02` by first accepting the M03 PostgreSQL ADR required by the roadmap: access layer, transaction boundaries, migration discipline, ephemeral test-database policy, wipeable namespace, and rollback behavior. Then add the `persistence` crate and ephemeral PostgreSQL stack from `GB-M03-11`, and replace the `GB-M03-01` in-memory repository adapter without moving domain validation into SQL. Do not pull Hall routing, items, memorials, ledgers, or formal `core.1.0.0` promotion into the infrastructure slice; each aggregate is wired only under its owning reviewed package.
+Resolve [`SPEC-CONFLICT-005`](docs/spec-conflicts/SPEC-CONFLICT-005-m03-persistence-order.md): approve or amend the proposed `GB-M03-02`/`GB-M03-11` split and real-PostgreSQL verification policy. Once approved, accept [`ADR-029`](docs/decisions/ADR-029-postgresql-persistence-boundary.md), implement the `persistence` foundation plus durable `GB-M03-01` identity adapter, and leave item/vault, memorial/death, and ledger schemas with their owning reviewed M03 packages. Neither SQLite nor a silently skipped database suite can satisfy this gate.
 
 ## Resolved prior handoff
 
