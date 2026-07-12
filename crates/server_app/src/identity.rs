@@ -10,6 +10,9 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use persistence::{
+    PersistenceError, PostgresPersistence, StoredCharacter, StoredIdentityAggregate, StoredMutation,
+};
 use protocol::{
     AccountBootstrapFrame, AccountBootstrapResult, AccountErrorCode, AccountNamespace,
     AccountSnapshot, CHARACTER_ID_BYTES, CORE_CHARACTER_SLOT_CAPACITY, CharacterLifeState,
@@ -31,6 +34,10 @@ impl AccountId {
         } else {
             Some(Self(bytes))
         }
+    }
+
+    pub const fn as_bytes(self) -> [u8; 16] {
+        self.0
     }
 }
 
@@ -128,16 +135,18 @@ pub enum AccountRepositoryError {
 }
 
 /// Single-writer aggregate interface. The operation executes under one account writer lock.
+#[allow(async_fn_in_trait)] // Repositories are static generic parameters; no dyn dispatch is needed.
 pub trait AccountRepository: Send + Sync {
-    fn transact<T, F>(
+    async fn transact<T, F>(
         &self,
         account_id: AccountId,
         operation: F,
     ) -> Result<T, AccountRepositoryError>
     where
-        F: FnOnce(&mut AccountAggregate) -> T;
+        T: Send,
+        F: FnOnce(&mut AccountAggregate) -> T + Send;
 
-    fn character_owner(
+    async fn character_owner(
         &self,
         character_id: [u8; CHARACTER_ID_BYTES],
     ) -> Result<Option<AccountId>, AccountRepositoryError>;
@@ -150,13 +159,14 @@ pub struct InMemoryAccountRepository {
 }
 
 impl AccountRepository for InMemoryAccountRepository {
-    fn transact<T, F>(
+    async fn transact<T, F>(
         &self,
         account_id: AccountId,
         operation: F,
     ) -> Result<T, AccountRepositoryError>
     where
-        F: FnOnce(&mut AccountAggregate) -> T,
+        T: Send,
+        F: FnOnce(&mut AccountAggregate) -> T + Send,
     {
         let mut accounts = self
             .accounts
@@ -168,7 +178,7 @@ impl AccountRepository for InMemoryAccountRepository {
         Ok(operation(aggregate))
     }
 
-    fn character_owner(
+    async fn character_owner(
         &self,
         character_id: [u8; CHARACTER_ID_BYTES],
     ) -> Result<Option<AccountId>, AccountRepositoryError> {
@@ -183,6 +193,162 @@ impl AccountRepository for InMemoryAccountRepository {
                 .any(|character| character.id == character_id)
                 .then_some(*account_id)
         }))
+    }
+}
+
+/// Durable adapter backed by the `persistence` crate's serializable identity transaction.
+#[derive(Debug, Clone)]
+pub struct PostgresAccountRepository {
+    persistence: PostgresPersistence,
+}
+
+impl PostgresAccountRepository {
+    pub const fn new(persistence: PostgresPersistence) -> Self {
+        Self { persistence }
+    }
+}
+
+impl AccountRepository for PostgresAccountRepository {
+    async fn transact<T, F>(
+        &self,
+        account_id: AccountId,
+        operation: F,
+    ) -> Result<T, AccountRepositoryError>
+    where
+        T: Send,
+        F: FnOnce(&mut AccountAggregate) -> T + Send,
+    {
+        self.persistence
+            .transact_identity(
+                account_id.as_bytes(),
+                1,
+                i16::from(CORE_CHARACTER_SLOT_CAPACITY),
+                |stored| {
+                    let mut aggregate = AccountAggregate::try_from_stored(stored)?;
+                    let result = operation(&mut aggregate);
+                    *stored = aggregate.into_stored()?;
+                    Ok(result)
+                },
+            )
+            .await
+            .map_err(|_| AccountRepositoryError::Unavailable)
+    }
+
+    async fn character_owner(
+        &self,
+        character_id: [u8; CHARACTER_ID_BYTES],
+    ) -> Result<Option<AccountId>, AccountRepositoryError> {
+        self.persistence
+            .identity_character_owner(character_id)
+            .await
+            .map(|owner| owner.and_then(AccountId::new))
+            .map_err(|_| AccountRepositoryError::Unavailable)
+    }
+}
+
+impl AccountAggregate {
+    fn try_from_stored(stored: &StoredIdentityAggregate) -> Result<Self, PersistenceError> {
+        let version = u64::try_from(stored.state_version)
+            .map_err(|_| PersistenceError::CorruptStoredIdentity)?;
+        if stored.slot_capacity != i16::from(CORE_CHARACTER_SLOT_CAPACITY) {
+            return Err(PersistenceError::CorruptStoredIdentity);
+        }
+        let characters = stored
+            .characters
+            .iter()
+            .map(CharacterRecord::try_from_stored)
+            .collect::<Result<Vec<_>, _>>()?;
+        let mutations = stored
+            .mutations
+            .iter()
+            .map(|stored| {
+                let result: CharacterMutationResult = postcard::from_bytes(&stored.result_payload)
+                    .map_err(|_| PersistenceError::CorruptStoredIdentity)?;
+                if result.mutation_id != stored.mutation_id || result.validate().is_err() {
+                    return Err(PersistenceError::CorruptStoredIdentity);
+                }
+                Ok(CachedMutation {
+                    mutation_id: stored.mutation_id,
+                    payload_hash: stored.payload_hash,
+                    result,
+                })
+            })
+            .collect::<Result<VecDeque<_>, _>>()?;
+        let aggregate = Self {
+            version,
+            characters,
+            selected_character_id: stored.selected_character_id,
+            mutations,
+        };
+        aggregate
+            .snapshot()
+            .validate()
+            .map_err(|_| PersistenceError::CorruptStoredIdentity)?;
+        Ok(aggregate)
+    }
+
+    fn into_stored(self) -> Result<StoredIdentityAggregate, PersistenceError> {
+        Ok(StoredIdentityAggregate {
+            state_version: i64::try_from(self.version)
+                .map_err(|_| PersistenceError::CorruptStoredIdentity)?,
+            slot_capacity: i16::from(CORE_CHARACTER_SLOT_CAPACITY),
+            selected_character_id: self.selected_character_id,
+            characters: self
+                .characters
+                .into_iter()
+                .map(CharacterRecord::into_stored)
+                .collect(),
+            mutations: self
+                .mutations
+                .into_iter()
+                .map(|cached| {
+                    let result_payload = postcard::to_stdvec(&cached.result)
+                        .map_err(|_| PersistenceError::CorruptStoredIdentity)?;
+                    Ok(StoredMutation {
+                        mutation_id: cached.mutation_id,
+                        payload_hash: cached.payload_hash,
+                        result_payload,
+                    })
+                })
+                .collect::<Result<Vec<_>, PersistenceError>>()?,
+        })
+    }
+}
+
+impl CharacterRecord {
+    fn try_from_stored(stored: &StoredCharacter) -> Result<Self, PersistenceError> {
+        if stored.life_state != 0 || stored.security_state != 0 {
+            return Err(PersistenceError::CorruptStoredIdentity);
+        }
+        Ok(Self {
+            id: stored.character_id,
+            roster_ordinal: u8::try_from(stored.roster_ordinal)
+                .map_err(|_| PersistenceError::CorruptStoredIdentity)?,
+            class_id: WireText::new(&stored.class_id)
+                .map_err(|_| PersistenceError::CorruptStoredIdentity)?,
+            level: u16::try_from(stored.level)
+                .map_err(|_| PersistenceError::CorruptStoredIdentity)?,
+            oath_id: stored
+                .oath_id
+                .as_deref()
+                .map(WireText::new)
+                .transpose()
+                .map_err(|_| PersistenceError::CorruptStoredIdentity)?,
+            life_state: CharacterLifeState::Living,
+            security_state: CharacterSecurityState::SafeCharacterSelect,
+        })
+    }
+
+    fn into_stored(self) -> StoredCharacter {
+        StoredCharacter {
+            character_id: self.id,
+            roster_ordinal: i16::from(self.roster_ordinal),
+            class_id: self.class_id.as_str().to_owned(),
+            level: i32::from(self.level),
+            oath_id: self.oath_id.map(|oath| oath.as_str().to_owned()),
+            life_state: 0,
+            security_state: 0,
+        }
     }
 }
 
@@ -244,7 +410,7 @@ where
         }
     }
 
-    pub fn bootstrap(
+    pub async fn bootstrap(
         &self,
         authenticated: Option<AuthenticatedAccount>,
         frame: &AccountBootstrapFrame,
@@ -262,6 +428,7 @@ where
         match self
             .repository
             .transact(account.account_id, |aggregate| aggregate.snapshot())
+            .await
         {
             Ok(snapshot) => {
                 self.events.record(IdentityEvent::AccountBootstrapped);
@@ -271,7 +438,7 @@ where
         }
     }
 
-    pub fn mutate(
+    pub async fn mutate(
         &self,
         authenticated: Option<AuthenticatedAccount>,
         frame: &CharacterMutationFrame,
@@ -298,7 +465,7 @@ where
 
         let foreign_owner = match frame.payload {
             CharacterMutationPayload::Select { character_id } => {
-                match self.repository.character_owner(character_id) {
+                match self.repository.character_owner(character_id).await {
                     Ok(owner) => owner.filter(|owner| *owner != account.account_id),
                     Err(_) => {
                         return result_without_snapshot(
@@ -311,9 +478,12 @@ where
             CharacterMutationPayload::Create { .. } => None,
         };
 
-        let result = self.repository.transact(account.account_id, |aggregate| {
-            self.apply_mutation(aggregate, frame, foreign_owner.is_some())
-        });
+        let result = self
+            .repository
+            .transact(account.account_id, |aggregate| {
+                self.apply_mutation(aggregate, frame, foreign_owner.is_some())
+            })
+            .await;
         result.unwrap_or_else(|_| {
             result_without_snapshot(frame.mutation_id, AccountErrorCode::ServiceUnavailable)
         })
@@ -597,27 +767,39 @@ mod tests {
         snapshot
     }
 
-    #[test]
-    fn bootstrap_is_wipeable_isolated_and_privacy_safe() {
+    #[tokio::test]
+    async fn bootstrap_is_wipeable_isolated_and_privacy_safe() {
         let first_process = service();
-        let created = first_process.mutate(Some(account(1)), &create(1, 1));
+        let created = first_process.mutate(Some(account(1)), &create(1, 1)).await;
         assert!(created.accepted);
         assert_eq!(
-            snapshot(&first_process.bootstrap(Some(account(1)), &bootstrap_frame()))
-                .characters
-                .len(),
+            snapshot(
+                &first_process
+                    .bootstrap(Some(account(1)), &bootstrap_frame())
+                    .await,
+            )
+            .characters
+            .len(),
             1
         );
         assert!(
-            snapshot(&first_process.bootstrap(Some(account(2)), &bootstrap_frame()))
-                .characters
-                .is_empty()
+            snapshot(
+                &first_process
+                    .bootstrap(Some(account(2)), &bootstrap_frame())
+                    .await,
+            )
+            .characters
+            .is_empty()
         );
         let restarted_process = service();
         assert!(
-            snapshot(&restarted_process.bootstrap(Some(account(1)), &bootstrap_frame()))
-                .characters
-                .is_empty()
+            snapshot(
+                &restarted_process
+                    .bootstrap(Some(account(1)), &bootstrap_frame())
+                    .await,
+            )
+            .characters
+            .is_empty()
         );
         assert_eq!(
             format!("{:?}", account(1).account_id),
@@ -625,10 +807,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn create_has_exact_defaults_two_slots_and_deterministic_ids() {
+    #[tokio::test]
+    async fn create_has_exact_defaults_two_slots_and_deterministic_ids() {
         let service = service();
-        let first = service.mutate(Some(account(1)), &create(1, 1));
+        let first = service.mutate(Some(account(1)), &create(1, 1)).await;
         let first_snapshot = first.snapshot.as_ref().unwrap();
         assert_eq!(first_snapshot.account_version, 2);
         assert_eq!(first_snapshot.characters[0].character_id, [1; 16]);
@@ -643,18 +825,23 @@ mod tests {
             first_snapshot.characters[0].security_state,
             CharacterSecurityState::SafeCharacterSelect
         );
-        assert!(service.mutate(Some(account(1)), &create(2, 2)).accepted);
-        let full = service.mutate(Some(account(1)), &create(3, 3));
+        assert!(
+            service
+                .mutate(Some(account(1)), &create(2, 2))
+                .await
+                .accepted
+        );
+        let full = service.mutate(Some(account(1)), &create(3, 3)).await;
         assert_eq!(full.error, Some(AccountErrorCode::CharacterSlotFull));
         assert_eq!(full.snapshot.unwrap().account_version, 3);
     }
 
-    #[test]
-    fn create_and_select_are_versioned_retry_safe_and_account_bound() {
+    #[tokio::test]
+    async fn create_and_select_are_versioned_retry_safe_and_account_bound() {
         let service = service();
         let create_frame = create(1, 1);
-        let first = service.mutate(Some(account(1)), &create_frame);
-        let repeated = service.mutate(Some(account(1)), &create_frame);
+        let first = service.mutate(Some(account(1)), &create_frame).await;
+        let repeated = service.mutate(Some(account(1)), &create_frame).await;
         assert_eq!(first, repeated);
         assert_eq!(first.snapshot.as_ref().unwrap().characters.len(), 1);
 
@@ -664,12 +851,12 @@ mod tests {
         };
         conflicting.payload_hash = conflicting.payload.canonical_hash();
         assert_eq!(
-            service.mutate(Some(account(1)), &conflicting).error,
+            service.mutate(Some(account(1)), &conflicting).await.error,
             Some(AccountErrorCode::IdempotencyConflict)
         );
 
         let stale = create(2, 1);
-        let stale_result = service.mutate(Some(account(1)), &stale);
+        let stale_result = service.mutate(Some(account(1)), &stale).await;
         assert_eq!(
             stale_result.error,
             Some(AccountErrorCode::StateVersionMismatch)
@@ -679,11 +866,11 @@ mod tests {
         let character_id = first.snapshot.unwrap().characters[0].character_id;
         let forged = mutation(3, 1, CharacterMutationPayload::Select { character_id });
         assert_eq!(
-            service.mutate(Some(account(2)), &forged).error,
+            service.mutate(Some(account(2)), &forged).await.error,
             Some(AccountErrorCode::CharacterNotOwned)
         );
         let select = mutation(4, 2, CharacterMutationPayload::Select { character_id });
-        let selected = service.mutate(Some(account(1)), &select);
+        let selected = service.mutate(Some(account(1)), &select).await;
         assert!(selected.accepted);
         assert_eq!(
             selected.snapshot.unwrap().selected_character_id,
@@ -691,19 +878,19 @@ mod tests {
         );
     }
 
-    #[test]
-    fn malformed_hash_time_class_and_namespace_fail_closed() {
+    #[tokio::test]
+    async fn malformed_hash_time_class_and_namespace_fail_closed() {
         let service = service();
         let mut bad_hash = create(1, 1);
         bad_hash.payload_hash = [9; 32];
         assert_eq!(
-            service.mutate(Some(account(1)), &bad_hash).error,
+            service.mutate(Some(account(1)), &bad_hash).await.error,
             Some(AccountErrorCode::PayloadHashMismatch)
         );
         let mut future = create(2, 1);
         future.issued_at_unix_millis = 10_001;
         assert_eq!(
-            service.mutate(Some(account(1)), &future).error,
+            service.mutate(Some(account(1)), &future).await.error,
             Some(AccountErrorCode::IssuedAtInvalid)
         );
         let disabled = mutation(
@@ -714,7 +901,7 @@ mod tests {
             },
         );
         assert_eq!(
-            service.mutate(Some(account(1)), &disabled).error,
+            service.mutate(Some(account(1)), &disabled).await.error,
             Some(AccountErrorCode::ClassDisabled)
         );
         let production = AuthenticatedAccount {
@@ -722,33 +909,35 @@ mod tests {
             namespace: AuthenticatedNamespace::Production,
         };
         assert_eq!(
-            service.mutate(Some(production), &create(4, 1)).error,
+            service.mutate(Some(production), &create(4, 1)).await.error,
             Some(AccountErrorCode::ProductionNamespaceForbidden)
         );
         assert_eq!(
-            service.mutate(None, &create(5, 1)).error,
+            service.mutate(None, &create(5, 1)).await.error,
             Some(AccountErrorCode::Unauthenticated)
         );
     }
 
-    #[test]
-    fn concurrent_stale_creates_commit_exactly_once() {
+    #[tokio::test]
+    async fn concurrent_stale_creates_commit_exactly_once() {
         let service = Arc::new(service());
-        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
         let mut workers = Vec::new();
         for mutation_id in [1, 2] {
             let service = Arc::clone(&service);
             let barrier = Arc::clone(&barrier);
-            workers.push(std::thread::spawn(move || {
-                barrier.wait();
-                service.mutate(Some(account(1)), &create(mutation_id, 1))
+            workers.push(tokio::spawn(async move {
+                barrier.wait().await;
+                service
+                    .mutate(Some(account(1)), &create(mutation_id, 1))
+                    .await
             }));
         }
-        barrier.wait();
-        let results = workers
-            .into_iter()
-            .map(|worker| worker.join().unwrap())
-            .collect::<Vec<_>>();
+        barrier.wait().await;
+        let mut results = Vec::with_capacity(workers.len());
+        for worker in workers {
+            results.push(worker.await.unwrap());
+        }
         assert_eq!(results.iter().filter(|result| result.accepted).count(), 1);
         assert_eq!(
             results
@@ -758,41 +947,49 @@ mod tests {
             1
         );
         assert_eq!(
-            snapshot(&service.bootstrap(Some(account(1)), &bootstrap_frame()))
-                .characters
-                .len(),
+            snapshot(
+                &service
+                    .bootstrap(Some(account(1)), &bootstrap_frame())
+                    .await,
+            )
+            .characters
+            .len(),
             1
         );
     }
 
-    #[test]
-    fn mutation_ledger_is_bounded_without_eviction() {
+    #[tokio::test]
+    async fn mutation_ledger_is_bounded_without_eviction() {
         let service = service();
-        let created = service.mutate(Some(account(1)), &create(1, 1));
+        let created = service.mutate(Some(account(1)), &create(1, 1)).await;
         let character_id = created.snapshot.unwrap().characters[0].character_id;
         let mut version = 2;
         for mutation_id in 2..=u8::try_from(MAX_ACCOUNT_MUTATION_RESULTS).unwrap() {
-            let result = service.mutate(
-                Some(account(1)),
-                &mutation(
-                    mutation_id,
-                    version,
-                    CharacterMutationPayload::Select { character_id },
-                ),
-            );
+            let result = service
+                .mutate(
+                    Some(account(1)),
+                    &mutation(
+                        mutation_id,
+                        version,
+                        CharacterMutationPayload::Select { character_id },
+                    ),
+                )
+                .await;
             assert!(result.accepted);
             version += 1;
         }
-        let overflow = service.mutate(
-            Some(account(1)),
-            &mutation(
-                250,
-                version,
-                CharacterMutationPayload::Select { character_id },
-            ),
-        );
+        let overflow = service
+            .mutate(
+                Some(account(1)),
+                &mutation(
+                    250,
+                    version,
+                    CharacterMutationPayload::Select { character_id },
+                ),
+            )
+            .await;
         assert_eq!(overflow.error, Some(AccountErrorCode::RateLimited));
-        let repeated_first = service.mutate(Some(account(1)), &create(1, 1));
+        let repeated_first = service.mutate(Some(account(1)), &create(1, 1)).await;
         assert!(repeated_first.accepted);
         assert_eq!(repeated_first.snapshot.unwrap().characters.len(), 1);
     }

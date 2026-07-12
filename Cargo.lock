@@ -5317,6 +5317,8 @@ dependencies = [
  "clap",
  "client_bevy",
  "network_harness",
+ "persistence",
+ "postcard",
  "protocol",
  "quinn",
  "rcgen",

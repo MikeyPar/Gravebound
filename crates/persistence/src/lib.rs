@@ -220,6 +220,18 @@ impl PostgresPersistence {
         Ok(())
     }
 
+    /// Clears the approved identity tables only after the destructive-test guard passes.
+    pub async fn reset_disposable_identity_data(&self) -> Result<(), PersistenceError> {
+        self.verify_disposable_test_database().await?;
+        let mut transaction = self.begin_transaction().await?;
+        sqlx::query("DELETE FROM accounts WHERE namespace_id = $1")
+            .bind(WIPEABLE_CORE_NAMESPACE)
+            .execute(transaction.connection())
+            .await
+            .map_err(PersistenceError::Database)?;
+        transaction.commit().await
+    }
+
     /// Begins a transaction with the isolation required for durable aggregate mutation.
     pub async fn begin_transaction(&self) -> Result<PersistenceTransaction<'_>, PersistenceError> {
         let mut inner = self

@@ -14,7 +14,7 @@ pub use identity::{
     AccountAggregate, AccountId, AccountRepository, AccountRepositoryError, AuthenticatedAccount,
     AuthenticatedNamespace, CharacterIdGenerator, IdentityClock, IdentityEvent, IdentityEventSink,
     IdentityService, InMemoryAccountRepository, MAX_ACCOUNT_MUTATION_RESULTS,
-    NoopIdentityEventSink,
+    NoopIdentityEventSink, PostgresAccountRepository,
 };
 pub use instance::{
     ArenaInstancePhase, HostedInstanceId, InstanceControlResponse, InstanceDiagnostics,
@@ -368,11 +368,13 @@ where
     let event = match decode_frame(&request)? {
         WireMessage::AccountBootstrapFrame(frame) => {
             protocol::ReliableEvent::AccountBootstrapResult(
-                service.bootstrap(authenticated, &frame),
+                service.bootstrap(authenticated, &frame).await,
             )
         }
         WireMessage::CharacterMutationFrame(frame) => {
-            protocol::ReliableEvent::CharacterMutationResult(service.mutate(authenticated, &frame))
+            protocol::ReliableEvent::CharacterMutationResult(
+                service.mutate(authenticated, &frame).await,
+            )
         }
         _ => return Err(ServerTransportError::UnexpectedMessage),
     };
