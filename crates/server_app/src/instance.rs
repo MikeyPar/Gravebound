@@ -23,7 +23,10 @@ pub const SERVER_TICK_BUDGET_MICROS: u64 = 33_333;
 const M02_P95_LIMIT_MICROS: u64 = 20_000;
 const M02_P99_LIMIT_MICROS: u64 = 30_000;
 const REQUIRED_HEADROOM_BASIS_POINTS: u16 = 3_000;
-const M02_FORMATION_TICKS: u8 = 30;
+// DNG-005 gives other participants eight seconds to cross an activation boundary. The M02
+// combat laboratory uses the same authored participant-lock allowance and still activates early
+// when all four seats are filled.
+const M02_FORMATION_TICKS: u16 = 8 * 30;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct HostedInstanceId(NonZeroU64);
@@ -63,7 +66,7 @@ struct HostedInstance {
     phase: ArenaInstancePhase,
     directory: SessionDirectory,
     shared_authority: Option<sim_core::SharedAuthoritativeArena>,
-    formation_ticks_remaining: u8,
+    formation_ticks_remaining: u16,
 }
 
 impl HostedInstance {
@@ -960,6 +963,77 @@ mod tests {
         );
         assert_eq!(scheduler.diagnostics().allocated_instances, 2);
         assert_eq!(scheduler.diagnostics().admissions, 5);
+    }
+
+    #[test]
+    fn individually_started_clients_share_the_authored_eight_second_lock_window() {
+        let root = content_root();
+        let mut scheduler = InstanceScheduler::default();
+        let first = scheduler
+            .admit_or_route_control(owner(1), transport(1), &join(1), &root, 1)
+            .unwrap();
+        for _ in 0..(M02_FORMATION_TICKS - 1) {
+            let frame = scheduler.tick().unwrap();
+            assert_eq!(frame.session_steps, 0);
+        }
+        for value in 2..=4 {
+            let admitted = scheduler
+                .admit_or_route_control(owner(value), transport(value), &join(1), &root, value)
+                .unwrap();
+            assert_eq!(admitted.instance_id, first.instance_id);
+        }
+        let active = scheduler.tick().unwrap();
+        assert_eq!(active.session_steps, 4);
+        assert_eq!(scheduler.instance_count(), 1);
+    }
+
+    #[test]
+    fn fresh_join_with_same_owner_reattaches_to_shared_world_and_resumes_movement() {
+        let root = content_root();
+        let mut scheduler = InstanceScheduler::default();
+        let mut instance_id = None;
+        for value in 1..=4 {
+            let admitted = scheduler
+                .admit_or_route_control(owner(value), transport(value), &join(1), &root, value)
+                .unwrap();
+            instance_id = Some(admitted.instance_id);
+        }
+        scheduler.tick().unwrap();
+        scheduler.transport_lost(owner(1), transport(1)).unwrap();
+        for _ in 0..10 {
+            scheduler.tick().unwrap();
+        }
+        let reattached = scheduler
+            .admit_or_route_control(owner(1), transport(5), &join(2), &root, 20)
+            .unwrap();
+        assert_eq!(Some(reattached.instance_id), instance_id);
+        assert_eq!(
+            control_code(&reattached.lifecycle.event).unwrap(),
+            SessionControlResultCode::Reattached
+        );
+        let result = control_result(&reattached.lifecycle.event).unwrap();
+        assert_eq!(result.controlled_entity_id, Some(10_000));
+        let mut east = input(2);
+        east.movement_x_milli = 1_000;
+        scheduler
+            .submit_input(owner(1), transport(5), &east)
+            .unwrap();
+        let before = scheduler.instances[&reattached.instance_id]
+            .shared_authority
+            .as_ref()
+            .unwrap()
+            .players()[&sim_core::EntityId::new(10_000).unwrap()]
+            .movement()
+            .position();
+        scheduler.tick().unwrap();
+        let after = scheduler.instances[&reattached.instance_id]
+            .shared_authority
+            .as_ref()
+            .unwrap()
+            .players()[&sim_core::EntityId::new(10_000).unwrap()]
+            .movement()
+            .position();
+        assert!(after.x > before.x);
     }
 
     #[test]

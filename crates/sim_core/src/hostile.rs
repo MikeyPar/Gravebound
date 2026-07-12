@@ -1228,12 +1228,31 @@ impl EnemyActor {
             milli_to_tiles(self.hurtbox_radius_milli_tiles),
         )?;
         let fraction = hit.map_or(1.0, |contact| contact.fraction);
-        let applied_x = scale_milli_by_fraction(move_x, fraction)?;
-        let applied_y = scale_milli_by_fraction(move_y, fraction)?;
-        self.x_milli_tiles = i32::try_from(i64::from(self.x_milli_tiles) + applied_x)
+        let mut applied_x = scale_milli_by_fraction(move_x, fraction)?;
+        let mut applied_y = scale_milli_by_fraction(move_y, fraction)?;
+        if hit.is_some() && (applied_x != 0 || applied_y != 0) {
+            // Closed-segment contact is tangent-safe in float space. Back off one authored
+            // millitile before integer commit so rounding can never place the hurtbox inside a
+            // shell or pillar on the following tick.
+            applied_x = applied_x.saturating_sub(move_x.signum());
+            applied_y = applied_y.saturating_sub(move_y.signum());
+        }
+        let next_x = i32::try_from(i64::from(self.x_milli_tiles) + applied_x)
             .map_err(|_| HostileError::ActorArithmeticOverflow)?;
-        self.y_milli_tiles = i32::try_from(i64::from(self.y_milli_tiles) + applied_y)
+        let next_y = i32::try_from(i64::from(self.y_milli_tiles) + applied_y)
             .map_err(|_| HostileError::ActorArithmeticOverflow)?;
+        let next_position =
+            SimulationVector::new(signed_milli_to_tiles(next_x), signed_milli_to_tiles(next_y));
+        ProjectileCollisionWorld::new(
+            arena,
+            vec![EnemyHurtbox::new(
+                self.entity_id,
+                next_position,
+                milli_to_tiles(self.hurtbox_radius_milli_tiles),
+            )?],
+        )?;
+        self.x_milli_tiles = next_x;
+        self.y_milli_tiles = next_y;
         if hit.is_some() {
             self.x_remainder_micro = 0;
             self.y_remainder_micro = 0;
@@ -2288,6 +2307,35 @@ mod tests {
             reed.apply_event(&arena(), &event),
             Err(HostileError::FixedEnemyReceivedMovement)
         ));
+    }
+
+    #[test]
+    fn pilgrim_millitile_commit_remains_tangent_safe_against_pillar_forever() {
+        let combat_arena = arena();
+        let mut actor = EnemyActor::new(id(50), EnemyActorKind::DrownedPilgrim, 9_000, 6_500, 340)
+            .expect("actor");
+        let event = EnemyEvent::ApproachIntent {
+            speed_milli_tiles_per_second: 2_200,
+            target_delta: AimVector { x: 10_000, y: 0 },
+            stop_distance_milli_tiles: 5_000,
+        };
+        let mut blocked = false;
+        for _ in 0..10_000 {
+            let movement = actor
+                .apply_event(&combat_arena, &event)
+                .expect("solid-safe movement");
+            blocked |= movement.is_some_and(|movement| movement.blocked_by.is_some());
+            ProjectileCollisionWorld::new(
+                &combat_arena,
+                vec![
+                    EnemyHurtbox::new(id(50), actor.position(), 0.340)
+                        .expect("valid actor hurtbox"),
+                ],
+            )
+            .expect("committed actor never overlaps a solid");
+        }
+        assert!(blocked);
+        assert!(actor.position().x <= 9.660);
     }
 
     #[test]

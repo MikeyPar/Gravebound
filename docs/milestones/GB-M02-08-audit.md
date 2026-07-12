@@ -21,6 +21,8 @@ PASS, amended by `GB-M02-09`. The modular monolith has bounded instance ownershi
 | Exactly-once simulation | One scheduler frame advances each shared arena once. Per-owner endpoint input is frozen into a stable player-ID map before the transaction. |
 | Immutable content | Allocation validates `fp.1.0.0`, compiles the authority fixture, and rejects alternate versions. |
 | Player-local lifecycle | LinkLost neutralizes only one player's input; exact 90-tick automatic Recall, death-before-Recall ordering, retirement, retained tombstones, and survivor continuity are active tests. |
+| Participant lock | A forming arena accepts individually launched clients for the authored eight-second DNG-005 participant-lock allowance and activates immediately when all four seats fill. |
+| Solid-safe enemies | Every committed enemy hurtbox is validated against arena solids; collision contact backs off one millitile before integer commit to preserve tangent safety. |
 | Fixed diagnostics | Tick timing uses a preallocated rolling 216,000-frame window with nearest-rank p95/p99 and explicit headroom. |
 | Teardown | Retirement validates owner-index consistency before mutation. Empty arenas close; shutdown drains sessions, routes, instances, and tasks to zero. |
 
@@ -34,17 +36,17 @@ The checked-in [`GB-M02-08-soak.json`](../evidence/GB-M02-08-soak.json) records 
 | Inputs / snapshot chunks | 3,456,000 / 1,728,000 | non-idle protocol traffic |
 | Reconnects | 128 | exercised |
 | Invalid states / stalls / divergences | 0 / 0 / 0 | zero |
-| Tick mean / p95 / p99 / max | 57 / 75 / 103 / 787 microseconds | p95 <= 20 ms; p99 <= 30 ms |
-| Mean CPU headroom | 99.82% | >= 30% |
-| Post-warmup resident growth | 1,249,280 bytes | no monotonic leak |
+| Tick mean / p95 / p99 / max | 77 / 126 / 206 / 3,846 microseconds | p95 <= 20 ms; p99 <= 30 ms |
+| Mean CPU headroom | 99.76% | >= 30% |
+| Post-warmup resident growth | 1,290,240 bytes | no monotonic leak |
 | Final instance/session/index residue | 0 | zero |
 
 Death and automatic-Recall ordering are covered by deterministic focused tests rather than forced churn in the long performance soak. This keeps the soak a stable shared-world timing/memory measurement while retaining exact lifecycle proof elsewhere.
 
 ## Final verification
 
-- Networking CI: 69 active tests PASS; one explicit long soak omitted from ordinary CI.
-- Full workspace CI: 395 active tests PASS; one explicit long soak omitted from ordinary CI.
+- Networking CI: 71 active tests PASS; one explicit long soak omitted from ordinary CI.
+- Full workspace CI: 399 active tests PASS; one explicit long soak omitted from ordinary CI.
 - Strict workspace Clippy, content validation, two identical deterministic traces, release build, package hashes, real-QUIC shared smoke, and packaged process smoke: PASS.
 - Human row: OWNER-ASSUMED PASS in [`GB-M02-owner-assumed-session-record.md`](../playtests/GB-M02-owner-assumed-session-record.md); no individual telemetry is fabricated.
 

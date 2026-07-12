@@ -5,18 +5,18 @@
   "content_version": "fp.1.0.0",
   "server_executable": {
     "file": "server_app.exe",
-    "bytes": 5961728,
-    "sha256": "0843BE465D1EF6EDFDB08E6FDFB0C0FE8DE67F0085620591F060A5D7E0EA0DCF"
+    "bytes": 5962240,
+    "sha256": "CCDF75DDCA9BBCDC6518B059780F8DE3CA8269C73727C68523E7D2D7B3F09856"
   },
   "client_executable": {
     "file": "client_bevy.exe",
-    "bytes": 66813440,
-    "sha256": "971E4FD91E66A347A206D5A5174C3B9C9DAA2384485547644A4126C1ECC42CF6"
+    "bytes": 66813952,
+    "sha256": "88002A9331807264E66B4443C752CF9A735CFF1687C831DF62A50A18FE447DF6"
   },
-  "networking_tests_passed": 69,
-  "networking_tests_enumerated": 70,
-  "workspace_tests_passed": 395,
-  "workspace_tests_enumerated": 396,
+  "networking_tests_passed": 71,
+  "networking_tests_enumerated": 72,
+  "workspace_tests_passed": 399,
+  "workspace_tests_enumerated": 400,
   "ordinary_ci_ignored_tests": 1,
   "four_client_shared_world_smoke": true,
   "packaged_four_client_process_smoke": true,

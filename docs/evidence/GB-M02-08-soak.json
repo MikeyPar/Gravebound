@@ -22,34 +22,34 @@
   "invalid_states": 0,
   "simulation_stalls": 0,
   "state_divergences": 0,
-  "mean_tick_micros": 57,
-  "p95_tick_micros": 75,
-  "p99_tick_micros": 103,
-  "maximum_tick_micros": 787,
-  "mean_headroom_basis_points": 9982,
+  "mean_tick_micros": 77,
+  "p95_tick_micros": 126,
+  "p99_tick_micros": 206,
+  "maximum_tick_micros": 3846,
+  "mean_headroom_basis_points": 9976,
   "resident_memory_samples": [
     {
       "simulated_tick": 0,
-      "resident_bytes": 7573504
+      "resident_bytes": 7602176
     },
     {
       "simulated_tick": 54000,
-      "resident_bytes": 8601600
+      "resident_bytes": 8589312
     },
     {
       "simulated_tick": 108000,
-      "resident_bytes": 8994816
+      "resident_bytes": 9048064
     },
     {
       "simulated_tick": 162000,
-      "resident_bytes": 9453568
+      "resident_bytes": 9506816
     },
     {
       "simulated_tick": 216000,
-      "resident_bytes": 9850880
+      "resident_bytes": 9879552
     }
   ],
-  "post_warmup_growth_bytes": 1249280,
+  "post_warmup_growth_bytes": 1290240,
   "monotonic_growth_floor_bytes": 8388608,
   "monotonic_post_warmup_leak": false,
   "zero_residue_after_shutdown": true

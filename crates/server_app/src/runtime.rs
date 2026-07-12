@@ -679,11 +679,11 @@ mod tests {
         )
         .unwrap();
         let snapshot = tokio::time::timeout(
-            Duration::from_secs(2),
+            Duration::from_secs(10),
             bot_client::receive_snapshot_datagram(&connection),
         )
         .await
-        .expect("server emitted a snapshot before timeout")
+        .expect("server emitted a snapshot after the participant-lock window")
         .unwrap();
         assert_eq!(snapshot.acknowledged_input_sequence, 1);
         assert!(

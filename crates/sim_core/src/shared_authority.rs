@@ -828,6 +828,74 @@ mod tests {
     }
 
     #[test]
+    fn personal_pickup_copies_remain_independently_collectible_and_recipient_local() {
+        let mut arena = arena();
+        for (ordinal, player_id) in [id(10_000), id(10_001)].into_iter().enumerate() {
+            let pickup_id = FieldPickupId::new(
+                player_id.get() * SHARED_PICKUP_ID_STRIDE + u64::try_from(ordinal + 1).unwrap(),
+            )
+            .unwrap();
+            let item_id =
+                crate::ItemInstanceId::new(900 + u64::try_from(ordinal).unwrap()).unwrap();
+            let position = arena.players[&player_id].movement.position();
+            arena.players.get_mut(&player_id).unwrap().pickups.push(
+                FieldPickup::new(
+                    pickup_id,
+                    InventoryStack::red_tonic(item_id, 1).unwrap(),
+                    position,
+                    Tick(1),
+                )
+                .unwrap(),
+            );
+        }
+        let first_id = arena.players[&id(10_000)].pickups[0].pickup_id();
+        let second_id = arena.players[&id(10_001)].pickups[0].pickup_id();
+        assert_ne!(first_id, second_id);
+        assert!(
+            arena
+                .snapshots_for(id(10_000))
+                .unwrap()
+                .iter()
+                .any(|snapshot| snapshot.entity_id == first_id.get())
+        );
+        assert!(
+            !arena
+                .snapshots_for(id(10_000))
+                .unwrap()
+                .iter()
+                .any(|snapshot| snapshot.entity_id == second_id.get())
+        );
+
+        arena
+            .apply_pickup(id(10_000), first_id, PlacementChoice::Take)
+            .unwrap();
+        assert!(
+            !arena
+                .snapshots_for(id(10_000))
+                .unwrap()
+                .iter()
+                .any(|snapshot| snapshot.entity_id == first_id.get() && snapshot.alive)
+        );
+        assert!(
+            arena
+                .snapshots_for(id(10_001))
+                .unwrap()
+                .iter()
+                .any(|snapshot| snapshot.entity_id == second_id.get() && snapshot.alive)
+        );
+        arena
+            .apply_pickup(id(10_001), second_id, PlacementChoice::Take)
+            .unwrap();
+        assert!(
+            !arena
+                .snapshots_for(id(10_001))
+                .unwrap()
+                .iter()
+                .any(|snapshot| snapshot.entity_id == second_id.get() && snapshot.alive)
+        );
+    }
+
+    #[test]
     fn construction_rejects_duplicate_empty_and_over_capacity_rosters() {
         let make = |ids| {
             SharedAuthoritativeArena::new(

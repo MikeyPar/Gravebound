@@ -102,7 +102,7 @@ Concept images establish mood, hierarchy, and visual language. They are not fina
 
 ## Current Next Step
 
-Begin `GB-M03-01`: wipeable test identity plus Arbalist character creation/select, using the existing protocol/session boundary and without pulling PostgreSQL (`GB-M03-02`) forward. M02 is closed: its automated authority, impairment, abuse, soak, deterministic, package, and four-client process gates are measured PASS; the human row is an explicitly labeled owner-assumed PASS under ADR-025 and is not represented as measured cohort telemetry. Keep `fp.1.0.0` immutable while defining the M03 content/version cutover before implementation.
+Retest the corrected M02 package in `dist/Gravebound-M02-Playtest`: start all four clients within the authored eight-second participant-lock window, verify each personal pickup copy can be collected independently, and reconnect the same numbered client within the exact three-second LinkLost deadline. After that focused owner retest passes, begin `GB-M03-01` (wipeable test identity plus Arbalist character creation/select) without pulling PostgreSQL (`GB-M03-02`) forward. Keep `fp.1.0.0` immutable while defining the M03 content/version cutover before implementation.
 
 ## Resolved prior handoff
 
