@@ -4,6 +4,8 @@
 //! This module owns the atomic ordering of movement, combat, enemy/hostile resolution, rewards,
 //! inventory pickup, eligibility, and live-instance death finality.
 
+use std::collections::BTreeMap;
+
 use thiserror::Error;
 
 use crate::{
@@ -84,6 +86,10 @@ pub struct AuthorityEntitySnapshot {
     pub kind: AuthorityEntityKind,
     pub x_milli_tiles: i32,
     pub y_milli_tiles: i32,
+    pub velocity_x_milli_tiles_per_second: i32,
+    pub velocity_y_milli_tiles_per_second: i32,
+    pub source_input_sequence: u32,
+    pub source_projectile_ordinal: u16,
     pub current_health: u32,
     pub maximum_health: u32,
     pub alive: bool,
@@ -103,6 +109,7 @@ pub struct AuthoritativeArena {
     phase: AuthorityPhase,
     state_version: u64,
     reward_drop_ordinal: u64,
+    friendly_projectile_sequences: BTreeMap<EntityId, (u32, u16)>,
 }
 
 impl AuthoritativeArena {
@@ -150,6 +157,7 @@ impl AuthoritativeArena {
             phase: AuthorityPhase::Alive,
             state_version: 1,
             reward_drop_ordinal: 1,
+            friendly_projectile_sequences: BTreeMap::new(),
         })
     }
 
@@ -210,12 +218,30 @@ impl AuthoritativeArena {
             &self.arena,
             &collision_world,
         )?;
+        let mut shot_ordinals = BTreeMap::<u32, u16>::new();
+        for shot in &combat.shots {
+            let ordinal = shot_ordinals.entry(shot.press_sequence).or_default();
+            self.friendly_projectile_sequences
+                .insert(shot.projectile.id(), (shot.press_sequence, *ordinal));
+            *ordinal = ordinal
+                .checked_add(1)
+                .ok_or(AuthorityError::ProjectileOrdinalExhausted)?;
+        }
         self.wave
             .player_mut()
             .consumables
             .step(ConsumableAction::default())?;
         self.wave.player_mut().target.position = self.movement.position();
         let wave = self.wave.step(&combat)?;
+        self.friendly_projectile_sequences
+            .retain(|projectile_id, _| {
+                self.wave
+                    .player()
+                    .combat
+                    .projectiles()
+                    .iter()
+                    .any(|projectile| projectile.id() == *projectile_id)
+            });
         let spawned_pickups = self.materialize_due_rewards(&wave)?;
         let tick = wave.tick;
         let death_committed = self.wave.player().consumables.vitals().current_health() == 0;
@@ -225,6 +251,7 @@ impl AuthoritativeArena {
                 .combat
                 .clear_projectiles_for_local_death();
             self.wave.clear_hostiles_for_player_death();
+            self.friendly_projectile_sequences.clear();
             self.inventory.clear_for_restart();
             self.pickups.clear();
             self.eligibility.reward_eligible = false;
@@ -312,6 +339,9 @@ impl AuthoritativeArena {
             self.wave.player().target.entity_id.get(),
             AuthorityEntityKind::Player,
             self.movement.position(),
+            self.movement.velocity(),
+            0,
+            0,
             SnapshotState {
                 current_health: player_vitals.current_health(),
                 maximum_health: player_vitals.maximum_health(),
@@ -327,6 +357,10 @@ impl AuthoritativeArena {
             snapshots.push(projectile_snapshot(
                 projectile,
                 AuthorityEntityKind::FriendlyProjectile,
+                self.friendly_projectile_sequences
+                    .get(&projectile.id())
+                    .copied()
+                    .ok_or(AuthorityError::MissingProjectileSourceSequence)?,
             )?);
         }
         for projectile in self.wave.hostile_projectiles() {
@@ -337,6 +371,9 @@ impl AuthoritativeArena {
                 pickup.pickup_id().get(),
                 AuthorityEntityKind::PersonalPickup,
                 pickup.position(),
+                SimulationVector::default(),
+                0,
+                0,
                 SnapshotState {
                     current_health: 0,
                     maximum_health: 0,
@@ -358,6 +395,9 @@ fn enemy_snapshot(
         enemy.entity_id.get(),
         AuthorityEntityKind::Enemy,
         milli_position(enemy.position_milli_tiles),
+        SimulationVector::default(),
+        0,
+        0,
         SnapshotState {
             current_health: enemy.health.current_health,
             maximum_health: enemy.health.max_health,
@@ -371,11 +411,15 @@ fn enemy_snapshot(
 fn projectile_snapshot(
     projectile: &FriendlyProjectile,
     kind: AuthorityEntityKind,
+    source: (u32, u16),
 ) -> Result<AuthorityEntitySnapshot, AuthorityError> {
     snapshot(
         projectile.id().get(),
         kind,
         projectile.position(),
+        projectile.direction().vector() * projectile.speed_tiles_per_second(),
+        source.0,
+        source.1,
         SnapshotState::active_non_health(),
     )
 }
@@ -387,6 +431,9 @@ fn hostile_projectile_snapshot(
         projectile.id().get(),
         AuthorityEntityKind::HostileProjectile,
         projectile.position(),
+        projectile.direction().vector() * projectile.speed_tiles_per_second(),
+        0,
+        0,
         SnapshotState::active_non_health(),
     )
 }
@@ -416,6 +463,9 @@ fn snapshot(
     entity_id: u64,
     kind: AuthorityEntityKind,
     position: SimulationVector,
+    velocity: SimulationVector,
+    source_input_sequence: u32,
+    source_projectile_ordinal: u16,
     state: SnapshotState,
 ) -> Result<AuthorityEntitySnapshot, AuthorityError> {
     Ok(AuthorityEntitySnapshot {
@@ -423,6 +473,10 @@ fn snapshot(
         kind,
         x_milli_tiles: tiles_to_milli(position.x)?,
         y_milli_tiles: tiles_to_milli(position.y)?,
+        velocity_x_milli_tiles_per_second: tiles_to_milli(velocity.x)?,
+        velocity_y_milli_tiles_per_second: tiles_to_milli(velocity.y)?,
+        source_input_sequence,
+        source_projectile_ordinal,
         current_health: state.current_health,
         maximum_health: state.maximum_health,
         alive: state.alive,
@@ -465,6 +519,10 @@ pub enum AuthorityError {
     NonFiniteSnapshot,
     #[error("snapshot position exceeds fixed-point range")]
     SnapshotOutOfRange,
+    #[error("friendly projectile is missing its source input sequence")]
+    MissingProjectileSourceSequence,
+    #[error("friendly projectile ordinal exhausted")]
+    ProjectileOrdinalExhausted,
     #[error(transparent)]
     Movement(#[from] MovementError),
     #[error(transparent)]

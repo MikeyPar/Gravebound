@@ -11,6 +11,7 @@ mod encounter;
 mod enemies;
 mod inventory;
 mod item_showcase;
+mod network_prediction;
 mod player;
 mod stress_benchmark;
 mod telemetry;
@@ -43,6 +44,12 @@ pub use arena_view::{
 };
 pub use combat::AbilityTwoBindings;
 pub use combat::{AbilityOneBindings, CombatInputGate, PrimaryFireBindings};
+pub use network_prediction::{
+    CompleteSnapshot, CorrectionClass, CorrectionSignal, DeterministicProjectilePresentation,
+    InterpolatedEntity, NativeNetworkPresentation, NetworkCorrectionDiagnostics,
+    NetworkPredictionError, PredictedMovementInput, ReconciliationEvent, RemoteClientRuntime,
+    RemoteSnapshotInbox, SnapshotApplication, SnapshotAssembler,
+};
 pub use player::{CAMERA_RESPONSE_SECONDS, MovementBindings, critically_damped_step};
 
 const WINDOW_TITLE: &str = "Gravebound - LocalLab";
@@ -299,6 +306,7 @@ pub fn run_local_lab() -> Result<()> {
             capture_requested_screenshot.after(FrameSet::Presentation),
         );
     player::configure(&mut app);
+    network_prediction::configure(&mut app);
     accessibility::configure(&mut app);
     enemies::configure(&mut app);
     combat::configure(&mut app);

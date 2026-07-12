@@ -4,7 +4,7 @@ Gravebound is a server-authoritative, permanent-death, 2D dark-fantasy bullet-he
 
 Every character life is temporary. The account remembers what happened, and exceptional deaths can return as personalized Fallen Hero Echo encounters. The design emphasizes readable combat, rapid recovery, fair monetization, solo viability, and long-term replayability without permanent account-level combat power.
 
-> **Project status:** M01 First Playable is closed under the owner's explicit successful-playtest assumption. M02 now has the versioned QUIC handshake and a deterministic server-authoritative combat session through `GB-M02-02`; prediction, reconciliation, reconnect, impairment, abuse, journey-bot, instance-lifecycle, and full M02 population/performance gates remain.
+> **Project status:** M01 First Playable is closed under the owner's explicit successful-playtest assumption. M02 now has the versioned QUIC handshake, deterministic server-authoritative combat, and native-client prediction/reconciliation/presentation through `GB-M02-03`; connection lifecycle, impairment, abuse, journey-bot, instance-lifecycle, and full M02 population/performance gates remain.
 
 ![Bell Sepulcher gameplay concept](Concept%20Art/01-bell-sepulcher-gameplay.png)
 
@@ -102,7 +102,7 @@ Concept images establish mood, hierarchy, and visual language. They are not fina
 
 ## Current Next Step
 
-Implement `GB-M02-03`: add local movement prediction, remote interpolation, correction thresholds/telemetry, and deterministic projectile presentation against protocol `1.1` snapshots without giving the client authority over position, health, hits, death, eligibility, or item grants. `GB-M02-02` passes with immutable-content compilation, a transactionally stepped `sim_core` authority aggregate, 30 Hz input/15 Hz snapshots, reliable idempotent pickup, deterministic replay, real hostile death, and QUIC datagram/stream integration. `GB-M01` remains closed under the explicit owner-assumed human gate recorded in `docs/playtests/GB-M01-owner-assumed-gate.md`.
+Implement `GB-M02-04`: add join, leave, timeout, the exact three-second `LinkLost` transition, reconnect, duplicate-session handoff, and clean shutdown against protocol `1.2`. `GB-M02-03` passes with bounded snapshot assembly, local movement prediction, authoritative reset plus input replay, exact correction thresholds and diagnostics, three-tick remote interpolation without gameplay extrapolation, deterministic local projectile presentation, and Bevy presentation integration. See the [completion audit](docs/milestones/GB-M02-03-audit.md). `GB-M01` remains closed under the explicit owner-assumed human gate recorded in `docs/playtests/GB-M01-owner-assumed-gate.md`.
 
 ## Resolved prior handoff
 

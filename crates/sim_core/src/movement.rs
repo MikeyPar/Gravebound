@@ -163,6 +163,25 @@ impl PlayerMovementState {
         Ok(state)
     }
 
+    /// Restores a server-authenticated movement state before client-side input replay.
+    pub fn from_authoritative_snapshot(
+        position: SimulationVector,
+        velocity: SimulationVector,
+        config: PlayerMovementConfig,
+        arena: &ArenaGeometry,
+    ) -> Result<Self, MovementError> {
+        let state = Self {
+            position,
+            velocity,
+            config,
+        };
+        state.validate(arena)?;
+        if velocity.length() > config.final_speed_tiles_per_second + CONTACT_EPSILON {
+            return Err(MovementError::VelocityExceedsMaximum);
+        }
+        Ok(state)
+    }
+
     #[must_use]
     pub const fn position(self) -> SimulationVector {
         self.position
@@ -335,6 +354,8 @@ pub enum MovementError {
     NonFiniteState,
     #[error("movement configuration is invalid")]
     InvalidConfig,
+    #[error("authoritative movement velocity exceeds configured final speed")]
+    VelocityExceedsMaximum,
     #[error("player position intersects the arena shell or a solid pillar")]
     IllegalPosition,
     #[error(transparent)]

@@ -57,6 +57,9 @@ impl InputFrame {
         if self.aim_x_milli == 0 && self.aim_y_milli == 0 {
             return Err(MessageValidationError::ZeroAim);
         }
+        if self.held_primary && self.primary_sequence == 0 {
+            return Err(MessageValidationError::HeldPrimaryWithoutSequence);
+        }
         Ok(())
     }
 }
@@ -106,6 +109,10 @@ pub struct EntitySnapshot {
     pub kind: EntityKind,
     pub x_milli_tiles: i32,
     pub y_milli_tiles: i32,
+    pub velocity_x_milli_tiles_per_second: i32,
+    pub velocity_y_milli_tiles_per_second: i32,
+    pub source_input_sequence: u32,
+    pub source_projectile_ordinal: u16,
     pub current_health: u32,
     pub maximum_health: u32,
     pub state_flags: u32,
@@ -127,6 +134,21 @@ impl EntitySnapshot {
                 return Err(MessageValidationError::UnexpectedHealth);
             }
             _ => {}
+        }
+        match self.kind {
+            EntityKind::FriendlyProjectile if self.source_input_sequence == 0 => {
+                return Err(MessageValidationError::MissingProjectileSourceSequence);
+            }
+            EntityKind::FriendlyProjectile => {}
+            _ if self.source_input_sequence != 0 => {
+                return Err(MessageValidationError::UnexpectedProjectileSourceSequence);
+            }
+            _ => {}
+        }
+        if !matches!(self.kind, EntityKind::FriendlyProjectile)
+            && self.source_projectile_ordinal != 0
+        {
+            return Err(MessageValidationError::UnexpectedProjectileOrdinal);
         }
         Ok(())
     }
@@ -398,12 +420,20 @@ pub enum MessageValidationError {
     VectorComponent,
     #[error("aim vector cannot be zero")]
     ZeroAim,
+    #[error("held primary input requires a nonzero primary sequence")]
+    HeldPrimaryWithoutSequence,
     #[error("entity ID must be nonzero")]
     ZeroEntityId,
     #[error("entity health is invalid")]
     InvalidHealth,
     #[error("non-health entity must carry zero current and maximum health")]
     UnexpectedHealth,
+    #[error("friendly projectile requires a nonzero source input sequence")]
+    MissingProjectileSourceSequence,
+    #[error("non-friendly-projectile entity cannot carry a source input sequence")]
+    UnexpectedProjectileSourceSequence,
+    #[error("non-friendly-projectile entity cannot carry a projectile ordinal")]
+    UnexpectedProjectileOrdinal,
     #[error("snapshot chunk index/count is invalid")]
     InvalidSnapshotChunk,
     #[error("snapshot exceeds {MAX_SNAPSHOT_ENTITIES_PER_CHUNK} entities per chunk")]
@@ -464,6 +494,13 @@ mod tests {
             .validate(),
             Err(MessageValidationError::ZeroSequence)
         );
+        input.movement_x_milli = 0;
+        input.held_primary = true;
+        input.primary_sequence = 0;
+        assert_eq!(
+            input.validate(),
+            Err(MessageValidationError::HeldPrimaryWithoutSequence)
+        );
     }
 
     #[test]
@@ -473,6 +510,10 @@ mod tests {
             kind: EntityKind::Player,
             x_milli_tiles: 4_000,
             y_milli_tiles: 12_000,
+            velocity_x_milli_tiles_per_second: 0,
+            velocity_y_milli_tiles_per_second: 0,
+            source_input_sequence: 0,
+            source_projectile_ordinal: 0,
             current_health: 128,
             maximum_health: 128,
             state_flags: 0,
@@ -491,6 +532,25 @@ mod tests {
         assert_eq!(
             chunk.validate(),
             Err(MessageValidationError::DuplicateEntityId)
+        );
+
+        let mut projectile = chunk.entities[0].clone();
+        projectile.entity_id = 2;
+        projectile.kind = EntityKind::FriendlyProjectile;
+        projectile.current_health = 0;
+        projectile.maximum_health = 0;
+        assert_eq!(
+            projectile.validate(),
+            Err(MessageValidationError::MissingProjectileSourceSequence)
+        );
+        projectile.source_input_sequence = 1;
+        assert_eq!(projectile.validate(), Ok(()));
+        projectile.kind = EntityKind::HostileProjectile;
+        projectile.source_input_sequence = 0;
+        projectile.source_projectile_ordinal = 1;
+        assert_eq!(
+            projectile.validate(),
+            Err(MessageValidationError::UnexpectedProjectileOrdinal)
         );
     }
 

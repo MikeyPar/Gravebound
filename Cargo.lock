@@ -2127,6 +2127,7 @@ dependencies = [
  "anyhow",
  "bevy",
  "blake3",
+ "protocol",
  "rodio",
  "serde_json",
  "sim_content",

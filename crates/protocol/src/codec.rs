@@ -153,7 +153,7 @@ mod tests {
         assert_eq!(decode_frame(&frame).unwrap(), input_message());
         assert_eq!(
             blake3::hash(&frame).to_hex().to_string(),
-            "370610a6cd10fbff52dcc5d34a1da68c531edf96f0c37df7b0120eec50de1183"
+            "ac4f6afd917999ca42d12985eeb9db1d9e53cb67c54cbfa1e619c4c53fabb5b6"
         );
     }
 
