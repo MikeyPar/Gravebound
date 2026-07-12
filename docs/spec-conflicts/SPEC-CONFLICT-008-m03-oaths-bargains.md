@@ -1,6 +1,6 @@
 # SPEC-CONFLICT-008 — M03 Oath and Bargain contract
 
-**Status:** Awaiting owner decision
+**Status:** Approved by owner on 2026-07-12
 
 **Raised:** 2026-07-12
 
@@ -86,3 +86,7 @@ Later Oath swapping and Bargain purging remain fail-closed until their full Ash-
 ## Approval requested
 
 Approve all five recommended resolutions, or provide amendments. Approval allows `GB-M03-05A`–`05C` to proceed and makes the Ash-wallet dependency explicit; Bargain triggering and the shrine remain stage-disabled until that dependency passes.
+
+## Decision
+
+The owner approved all five recommended resolutions on 2026-07-12 without amendment.

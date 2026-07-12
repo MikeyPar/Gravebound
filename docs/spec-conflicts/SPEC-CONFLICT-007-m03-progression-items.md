@@ -1,6 +1,6 @@
 # SPEC-CONFLICT-007 — M03 progression, item, and Vault contract
 
-**Status:** Awaiting owner decision
+**Status:** Approved by owner on 2026-07-12
 
 **Raised:** 2026-07-12
 
@@ -96,3 +96,7 @@ The normal route remains gated under `SPEC-CONFLICT-006` until oath, death, extr
 ## Approval requested
 
 Approve all seven recommended resolutions, or provide amendments. Once approved, `GB-M03-04A` and `04B` can proceed in parallel with the approved early world-flow subpackages without weakening the later route gate.
+
+## Decision
+
+The owner approved all seven recommended resolutions on 2026-07-12 without amendment.

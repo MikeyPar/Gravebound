@@ -1,6 +1,6 @@
 # SPEC-CONFLICT-006 — M03 world-flow content and enablement contract
 
-**Status:** Awaiting owner decision
+**Status:** Approved by owner on 2026-07-12
 
 **Raised:** 2026-07-12
 
@@ -79,3 +79,7 @@ Before the owning packages pass, the normal Core runtime keeps Character Select 
 ## Approval requested
 
 Approve all five recommended resolutions, or provide amendments. Once approved, implementation can begin with `GB-M03-03A` and `03B` while the parent remains visibly open through the later M03 integrations.
+
+## Decision
+
+The owner approved all five recommended resolutions on 2026-07-12 without amendment.
