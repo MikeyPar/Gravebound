@@ -16,6 +16,7 @@ mod identity;
 pub use identity::{StoredCharacter, StoredIdentityAggregate, StoredMutation};
 
 pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
+pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
 pub const EXPECTED_SCHEMA_VERSION: i64 = 1;
@@ -65,6 +66,14 @@ pub struct PersistenceConfig {
 }
 
 impl PersistenceConfig {
+    pub fn from_runtime_environment() -> Result<Self, PersistenceConfigError> {
+        let database_url = std::env::var(RUNTIME_DATABASE_URL_ENV)
+            .map_err(|_| PersistenceConfigError::MissingRuntimeDatabaseUrl)?;
+        Ok(Self::with_database_url(SecretDatabaseUrl::new(
+            database_url,
+        )?))
+    }
+
     pub fn from_test_environment() -> Result<Self, PersistenceConfigError> {
         let database_url = std::env::var(TEST_DATABASE_URL_ENV)
             .map_err(|_| PersistenceConfigError::MissingTestDatabaseUrl)?;
@@ -96,6 +105,8 @@ impl PersistenceConfig {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum PersistenceConfigError {
+    #[error("GRAVEBOUND_DATABASE_URL is required for durable server mode")]
+    MissingRuntimeDatabaseUrl,
     #[error("TEST_DATABASE_URL is required for real PostgreSQL integration tests")]
     MissingTestDatabaseUrl,
     #[error("PostgreSQL database URL cannot be empty")]

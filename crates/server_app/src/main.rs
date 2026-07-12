@@ -37,6 +37,15 @@ enum Command {
         #[arg(long, default_value = "target/gravebound-core-dev/server-cert.der")]
         certificate_out: PathBuf,
     },
+    /// Run the previous process-local Core identity endpoint for explicit regression testing.
+    ServeCoreIdentityEphemeral {
+        #[arg(long, default_value = "127.0.0.1:50002")]
+        bind: SocketAddr,
+        #[arg(long, default_value = "content")]
+        content_root: PathBuf,
+        #[arg(long, default_value = "target/gravebound-core-dev/ephemeral-cert.der")]
+        certificate_out: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -77,7 +86,14 @@ async fn run_command(command: Command) -> Result<()> {
             content_root,
             certificate_out,
         } => {
-            serve_core_identity(bind, content_root, certificate_out).await?;
+            serve_core_identity_persistent(bind, content_root, certificate_out).await?;
+        }
+        Command::ServeCoreIdentityEphemeral {
+            bind,
+            content_root,
+            certificate_out,
+        } => {
+            serve_core_identity_ephemeral(bind, content_root, certificate_out).await?;
         }
     }
     Ok(())
@@ -111,7 +127,48 @@ async fn serve_local(
     Ok(())
 }
 
-async fn serve_core_identity(
+async fn serve_core_identity_persistent(
+    bind: SocketAddr,
+    content_root: PathBuf,
+    certificate_out: PathBuf,
+) -> Result<()> {
+    let persistence = persistence::PostgresPersistence::connect(
+        &persistence::PersistenceConfig::from_runtime_environment()?,
+    )
+    .await?;
+    persistence.migrate().await?;
+    let readiness = persistence.readiness().await?;
+    let server = server_app::BoundCoreIdentityServer::bind_persistent(
+        &server_app::CoreIdentityServerConfig {
+            bind_address: bind,
+            content_root,
+        },
+        server_app::PostgresAccountRepository::new(persistence.clone()),
+    )?;
+    write_certificate(&certificate_out, server.certificate_der(), "Core identity")?;
+    info!(
+        address = %server.local_address(),
+        certificate = %certificate_out.display(),
+        build_id = server_app::CORE_IDENTITY_BUILD_ID,
+        content_target = server_app::CORE_IDENTITY_CONTENT_TARGET,
+        schema_version = readiness.schema_version,
+        namespace = readiness.namespace,
+        wipeable = readiness.wipeable,
+        "GB-M03-02B durable Core identity server is ready"
+    );
+    let report = server.serve_until(shutdown_signal()).await?;
+    info!(
+        accepted_connections = report.accepted_connections,
+        rejected_connections = report.rejected_connections,
+        combat_sessions_admitted = report.combat_sessions_admitted,
+        persistence_enabled = report.persistence_enabled,
+        "GB-M03-02B durable Core identity server stopped cleanly"
+    );
+    persistence.close().await;
+    Ok(())
+}
+
+async fn serve_core_identity_ephemeral(
     bind: SocketAddr,
     content_root: PathBuf,
     certificate_out: PathBuf,
@@ -121,21 +178,21 @@ async fn serve_core_identity(
             bind_address: bind,
             content_root,
         })?;
-    write_certificate(&certificate_out, server.certificate_der(), "Core identity")?;
+    write_certificate(
+        &certificate_out,
+        server.certificate_der(),
+        "ephemeral Core identity",
+    )?;
     info!(
         address = %server.local_address(),
         certificate = %certificate_out.display(),
-        build_id = server_app::CORE_IDENTITY_BUILD_ID,
-        content_target = server_app::CORE_IDENTITY_CONTENT_TARGET,
-        "GB-M03-01B Core identity server is ready"
+        "explicit process-local Core identity regression server is ready"
     );
     let report = server.serve_until(shutdown_signal()).await?;
     info!(
         accepted_connections = report.accepted_connections,
-        rejected_connections = report.rejected_connections,
-        combat_sessions_admitted = report.combat_sessions_admitted,
         persistence_enabled = report.persistence_enabled,
-        "GB-M03-01B Core identity server stopped cleanly"
+        "ephemeral Core identity regression server stopped cleanly"
     );
     Ok(())
 }

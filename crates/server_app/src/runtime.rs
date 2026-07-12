@@ -30,11 +30,11 @@ use tokio::{sync::Mutex, task::JoinSet, time::MissedTickBehavior};
 use tracing::{debug, info, warn};
 
 use crate::{
-    AccountId, AdmissionState, AuthenticatedAccount, AuthenticatedNamespace,
+    AccountId, AccountRepository, AdmissionState, AuthenticatedAccount, AuthenticatedNamespace,
     AuthenticationDecision, CharacterIdGenerator, HandshakePolicy, IdentityClock, IdentityService,
     InMemoryAccountRepository, InstanceError, InstanceScheduler, NoopIdentityEventSink,
-    SERVER_SHUTDOWN_CLOSE_CODE, SessionOwnerId, TransportId, close_transport,
-    serve_identity_reliable,
+    PostgresAccountRepository, SERVER_SHUTDOWN_CLOSE_CODE, SessionOwnerId, TransportId,
+    close_transport, serve_identity_reliable,
 };
 
 pub const LOCAL_BUILD_ID: &str = M02_LOCAL_BUILD_ID;
@@ -488,24 +488,21 @@ pub struct CoreIdentityServerReport {
     pub persistence_enabled: bool,
 }
 
-type CoreIdentityAuthority = IdentityService<
-    InMemoryAccountRepository,
-    SystemIdentityClock,
-    ProcessCharacterIds,
-    NoopIdentityEventSink,
->;
+type CoreIdentityAuthority<R> =
+    IdentityService<R, SystemIdentityClock, ProcessCharacterIds, NoopIdentityEventSink>;
 
 /// Explicit Core-development endpoint. It never creates an [`InstanceScheduler`] and therefore
 /// cannot silently route identity clients into the M02 combat laboratory.
-pub struct BoundCoreIdentityServer {
+pub struct BoundCoreIdentityServer<R = InMemoryAccountRepository> {
     endpoint: quinn::Endpoint,
     certificate: CertificateDer<'static>,
     local_address: SocketAddr,
     policy: HandshakePolicy,
-    authority: Arc<CoreIdentityAuthority>,
+    authority: Arc<CoreIdentityAuthority<R>>,
+    persistence_enabled: bool,
 }
 
-impl fmt::Debug for BoundCoreIdentityServer {
+impl<R> fmt::Debug for BoundCoreIdentityServer<R> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("BoundCoreIdentityServer")
@@ -517,6 +514,28 @@ impl fmt::Debug for BoundCoreIdentityServer {
 
 impl BoundCoreIdentityServer {
     pub fn bind(config: &CoreIdentityServerConfig) -> Result<Self, LocalServerRuntimeError> {
+        Self::bind_with_repository(config, InMemoryAccountRepository::default(), false)
+    }
+}
+
+impl BoundCoreIdentityServer<PostgresAccountRepository> {
+    pub fn bind_persistent(
+        config: &CoreIdentityServerConfig,
+        repository: PostgresAccountRepository,
+    ) -> Result<Self, LocalServerRuntimeError> {
+        Self::bind_with_repository(config, repository, true)
+    }
+}
+
+impl<R> BoundCoreIdentityServer<R>
+where
+    R: AccountRepository + 'static,
+{
+    fn bind_with_repository(
+        config: &CoreIdentityServerConfig,
+        repository: R,
+        persistence_enabled: bool,
+    ) -> Result<Self, LocalServerRuntimeError> {
         sim_content::load_core_development_identity(&config.content_root)
             .map_err(|error| LocalServerRuntimeError::Content(error.to_string()))?;
         let (_, source_report) = sim_content::load_and_validate(&config.content_root)
@@ -540,7 +559,7 @@ impl BoundCoreIdentityServer {
             admission: AdmissionState::Available,
         };
         let authority = Arc::new(IdentityService::new(
-            InMemoryAccountRepository::default(),
+            repository,
             SystemIdentityClock,
             ProcessCharacterIds::default(),
             NoopIdentityEventSink,
@@ -552,6 +571,7 @@ impl BoundCoreIdentityServer {
             local_address,
             policy,
             authority,
+            persistence_enabled,
         })
     }
 
@@ -574,8 +594,9 @@ impl BoundCoreIdentityServer {
     {
         info!(
             address = %self.local_address,
-            feature_id = "GB-M03-01B",
-            "wipeable Core identity server ready"
+            feature_id = if self.persistence_enabled { "GB-M03-02B" } else { "GB-M03-01B" },
+            persistence_enabled = self.persistence_enabled,
+            "Core identity server ready"
         );
         let accepted = Arc::new(AtomicU64::new(0));
         let rejected = Arc::new(AtomicU64::new(0));
@@ -616,16 +637,19 @@ impl BoundCoreIdentityServer {
             accepted_connections: accepted.load(Ordering::Relaxed),
             rejected_connections: rejected.load(Ordering::Relaxed),
             combat_sessions_admitted: 0,
-            persistence_enabled: false,
+            persistence_enabled: self.persistence_enabled,
         })
     }
 }
 
-async fn serve_core_identity_connection(
+async fn serve_core_identity_connection<R>(
     incoming: quinn::Incoming,
     policy: HandshakePolicy,
-    authority: Arc<CoreIdentityAuthority>,
-) -> Result<bool, LocalServerRuntimeError> {
+    authority: Arc<CoreIdentityAuthority<R>>,
+) -> Result<bool, LocalServerRuntimeError>
+where
+    R: AccountRepository,
+{
     let connection = incoming.await?;
     let (mut send, mut receive) = connection.accept_bi().await?;
     let request = receive.read_to_end(RELIABLE_FRAME_LIMIT).await?;

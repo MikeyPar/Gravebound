@@ -7,6 +7,7 @@
 use std::{
     collections::{BTreeMap, VecDeque},
     fmt,
+    future::Future,
     sync::{Arc, Mutex},
 };
 
@@ -135,21 +136,20 @@ pub enum AccountRepositoryError {
 }
 
 /// Single-writer aggregate interface. The operation executes under one account writer lock.
-#[allow(async_fn_in_trait)] // Repositories are static generic parameters; no dyn dispatch is needed.
 pub trait AccountRepository: Send + Sync {
-    async fn transact<T, F>(
+    fn transact<T, F>(
         &self,
         account_id: AccountId,
         operation: F,
-    ) -> Result<T, AccountRepositoryError>
+    ) -> impl Future<Output = Result<T, AccountRepositoryError>> + Send
     where
         T: Send,
         F: FnOnce(&mut AccountAggregate) -> T + Send;
 
-    async fn character_owner(
+    fn character_owner(
         &self,
         character_id: [u8; CHARACTER_ID_BYTES],
-    ) -> Result<Option<AccountId>, AccountRepositoryError>;
+    ) -> impl Future<Output = Result<Option<AccountId>, AccountRepositoryError>> + Send;
 }
 
 /// Wipeable adapter. Dropping this value (or restarting the process) destroys every aggregate.
