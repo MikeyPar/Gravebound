@@ -10,6 +10,7 @@ mod lifecycle;
 mod restore_point;
 mod runtime;
 mod session;
+mod world_flow_gate;
 
 pub use identity::{
     AccountAggregate, AccountId, AccountRepository, AccountRepositoryError, AuthenticatedAccount,
@@ -43,6 +44,10 @@ pub use session::{
     AuthoritativeSession, IngressAnomaly, IngressAnomalyKind, IngressDiagnostics, InputDisposition,
     InputRejection, MAX_CACHED_MUTATIONS, MAX_NEW_MUTATIONS_PER_TICK, MAX_RECENT_INGRESS_ANOMALIES,
     SessionError,
+};
+pub use world_flow_gate::{
+    PostgresWorldFlowLocationRepository, WorldFlowGateService, WorldFlowLocationRepository,
+    WorldFlowRepositoryError,
 };
 
 use protocol::{

@@ -69,6 +69,25 @@ pub struct WorldFlowTransactionState {
 }
 
 impl PostgresPersistence {
+    pub async fn world_flow_selected_character(
+        &self,
+        account_id: [u8; ID_BYTES],
+    ) -> Result<Option<[u8; ID_BYTES]>, PersistenceError> {
+        let mut transaction = self.begin_transaction().await?;
+        let selected: Option<Vec<u8>> = sqlx::query_scalar(
+            "SELECT selected_character_id FROM accounts \
+             WHERE namespace_id = $1 AND account_id = $2",
+        )
+        .bind(WIPEABLE_CORE_NAMESPACE)
+        .bind(account_id.as_slice())
+        .fetch_optional(transaction.connection())
+        .await
+        .map_err(PersistenceError::Database)?
+        .flatten();
+        transaction.rollback().await?;
+        selected.map(fixed_bytes).transpose()
+    }
+
     pub async fn world_location(
         &self,
         account_id: [u8; ID_BYTES],
