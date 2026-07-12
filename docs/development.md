@@ -58,6 +58,7 @@ Set-Location Gravebound
 | Core identity focused tests | `.\tools\dev.cmd m03-identity-smoke` |
 | Wipeable Core identity server | `.\tools\dev.cmd m03-identity-server` |
 | Native Core character select (`GRAVEBOUND_TEST_IDENTITY` chooses the opaque token) | `.\tools\dev.cmd m03-identity-client` |
+| Mandatory PostgreSQL migration/integration gate | `.\tools\dev.cmd persistence-ci` |
 | Windows release build | `.\tools\dev.cmd release` |
 | Full local CI equivalent | `.\tools\dev.cmd ci` |
 
@@ -69,6 +70,7 @@ Direct Cargo aliases are also available: `cargo gb-format`, `cargo gb-lint`, `ca
 - **Headless/Replay:** `cargo run -p tools_content -- trace tests/deterministic/m00_smoke.json`.
 - **M02 Network Playtest:** `.\tools\dev.cmd m02-package` produces `dist\Gravebound-M02-Playtest` with one authoritative server, four uniquely credentialed native client launchers, immutable `fp.1.0.0`, and the human runbook. This mode is nonpersistent and uses an explicitly trusted per-launch loopback certificate.
 - **M03 Core Identity:** start `.\tools\dev.cmd m03-identity-server`, then run `.\tools\dev.cmd m03-identity-client`. The separate `core-dev` endpoint validates immutable FP source plus the unpromoted identity/copy descriptors, exposes only the wipeable character-select authority, admits zero combat sessions, and loses every roster on server restart. PostgreSQL and formal `core.1.0.0` promotion remain disabled.
+- **M03 PostgreSQL tests:** install Docker Desktop, or set both `TEST_DATABASE_URL` to a dedicated database named `gravebound_test`/`gravebound_test_*` and `GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS=1`, then run `.\tools\dev.cmd persistence-ci`. With Docker, the command generates an isolated Compose project, ephemeral port/password, runs the mandatory ignored-by-default integration target, and removes the container/volume. Without an explicitly safe route it fails; SQLite and a skipped suite are never accepted.
 - **LocalStack:** intentionally unavailable until M03 supplies PostgreSQL persistence. The runnable M02 network playtest is not mislabeled LocalStack because it has no durable database.
 - **Server foundation:** `.\tools\dev.cmd server-doctor` validates the M02 crate boundary, shared 30 Hz simulation contract, canonical protocol rates, real transport, and scheduler.
 - **Bot foundation:** `.\tools\dev.cmd bot-doctor` validates the headless client boundary, shared cadence, real transport, and protocol-visible journey execution.

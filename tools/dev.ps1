@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('bootstrap', 'format', 'lint', 'test', 'validate', 'headless', 'local-lab', 'server-doctor', 'bot-doctor', 'network-ci', 'm02-network-smoke', 'm02-soak', 'm02-server', 'm02-client', 'm02-package', 'm03-identity-smoke', 'm03-identity-server', 'm03-identity-client', 'local-stack', 'ci', 'release')]
+    [ValidateSet('bootstrap', 'format', 'lint', 'test', 'validate', 'headless', 'local-lab', 'server-doctor', 'bot-doctor', 'network-ci', 'm02-network-smoke', 'm02-soak', 'm02-server', 'm02-client', 'm02-package', 'm03-identity-smoke', 'm03-identity-server', 'm03-identity-client', 'persistence-ci', 'local-stack', 'ci', 'release')]
     [string]$Command = 'ci'
 )
 
@@ -69,6 +69,12 @@ try {
             $identity = if ($env:GRAVEBOUND_TEST_IDENTITY) { $env:GRAVEBOUND_TEST_IDENTITY } else { 'local-identity-1' }
             Invoke-Cargo -Arguments @('run', '--locked', '-p', 'client_bevy', '--', 'core-identity', '--identity', $identity)
         }
+        'persistence-ci' {
+            & (Join-Path $PSScriptRoot 'persistence-test.ps1')
+            if ($LASTEXITCODE -ne 0) {
+                throw "PostgreSQL persistence gate failed with exit code $LASTEXITCODE"
+            }
+        }
         'local-stack' {
             throw 'The M02 authoritative loop is verified by network-ci and m02-soak. Runnable LocalStack remains blocked on GB-M03-02 PostgreSQL and its approved persistence boundary.'
         }
@@ -80,6 +86,10 @@ try {
             Invoke-Cargo -Arguments @('run', '--locked', '-p', 'tools_content', '--', 'validate')
             Invoke-Cargo -Arguments @('run', '--locked', '-p', 'tools_content', '--', 'trace', 'tests/deterministic/m00_smoke.json')
             Invoke-Cargo -Arguments @('run', '--locked', '-p', 'tools_content', '--', 'trace', 'tests/deterministic/m00_smoke.json')
+            & (Join-Path $PSScriptRoot 'persistence-test.ps1')
+            if ($LASTEXITCODE -ne 0) {
+                throw "PostgreSQL persistence gate failed with exit code $LASTEXITCODE"
+            }
         }
     }
 }

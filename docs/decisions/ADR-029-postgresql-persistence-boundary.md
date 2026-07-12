@@ -13,15 +13,15 @@ The canonical GDD requires one authoritative modular-monolith server backed by P
 ## Proposed decision
 
 - Add one workspace `persistence` crate with PostgreSQL connection management, embedded forward migrations, transaction helpers, readiness diagnostics, and typed infrastructure errors.
-- Use an asynchronous Tokio-compatible PostgreSQL access layer; server request tasks never block on synchronous database I/O.
+- Pin SQLx `0.9.0` with only its Tokio, rustls-ring/web-PKI, PostgreSQL, migration, and macro features. Server request tasks never block on synchronous database I/O.
 - Keep aggregate reducers and validation in their authoritative server/domain modules. The database adapter loads and locks approved records, invokes the domain transition, persists its result and idempotency record, and commits as one transaction.
 - Acquire multi-aggregate locks in stable binary account/character/item order. Use database constraints as invariant backstops, not as the primary product-rule implementation.
 - Store explicit relational columns and bounded serialized result payloads only where exact replay requires them. Do not add a generic mutable account JSON document or speculative later-domain schema.
 - Use checked-in migrations and a schema-version table. Production migration rollback is an explicit reviewed procedure or compensating forward migration; application rollback must reject an incompatible schema rather than reinterpret it.
-- Use actual PostgreSQL for integration tests through Docker Compose or `TEST_DATABASE_URL`, with a pinned PostgreSQL service in CI. Never substitute SQLite or silently skip the suite.
+- Use actual PostgreSQL 17.10 through the official `postgres:17.10-alpine3.23` image or `TEST_DATABASE_URL`, with the same pinned service in CI. Never substitute SQLite or silently skip the suite.
 - Retain an explicit wipeable test namespace through the pre-Early-Access rehearsals required by `TECH-030`.
 
-The exact Rust access-layer crate/version is selected and pinned during implementation after compatibility and maintenance review; this ADR does not fabricate that dependency decision.
+SQLx 0.9.0 requires Rust 1.94 and is compatible with the workspace's pinned Rust 1.95. PostgreSQL 17 remains supported through November 2029; pinning its current 17.10 minor follows PostgreSQL's recommendation to run the current minor while retaining a mature major.
 
 ## Rejected options
 

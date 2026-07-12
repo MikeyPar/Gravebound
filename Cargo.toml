@@ -4,6 +4,7 @@ members = [
     "crates/client_bevy",
     "crates/content_schema",
     "crates/network_harness",
+    "crates/persistence",
     "crates/protocol",
     "crates/server_app",
     "crates/sim_content",
@@ -37,6 +38,7 @@ sysinfo = "=0.38.4"
 schemars = { version = "=1.2.1", features = ["derive"] }
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.149"
+sqlx = { version = "=0.9.0", default-features = false, features = ["macros", "migrate", "postgres", "runtime-tokio", "tls-rustls-ring-webpki"] }
 thiserror = "=2.0.18"
 tokio = { version = "=1.52.3", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tracing = "=0.1.44"
