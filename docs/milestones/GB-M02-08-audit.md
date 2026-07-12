@@ -37,9 +37,9 @@ The explicit command `.\tools\dev.cmd m02-soak` runs the ignored gate test alone
 | Invalid states / stalls / divergences | 0 / 0 / 0 | zero |
 | Maximum instances / owners | 1 / 16 | bounded |
 | Retired sessions / allocated and closed instances | 7,572 / 119 and 119 | balanced before final 16-session shutdown |
-| Tick mean / p95 / p99 / max | 0.124 / 0.179 / 0.218 / 2.920 ms | p95 <=20 ms; p99 <=30 ms |
-| Mean CPU headroom | 99.62% | >=30% |
-| Post-warmup resident growth | 1,224,704 bytes | below existing 8 MiB monotonic-leak floor |
+| Tick mean / p95 / p99 / max | 0.129 / 0.191 / 0.228 / 2.991 ms | p95 <=20 ms; p99 <=30 ms |
+| Mean CPU headroom | 99.61% | >=30% |
+| Post-warmup resident growth | 1,232,896 bytes | below existing 8 MiB monotonic-leak floor |
 | Final instance/session/index residue | 0 | zero |
 
 The first soak correctly exposed that a growing diagnostics vector made the evidence collector itself grow memory. Tick storage now allocates and touches its exact 216,000-sample bound before measurement and overwrites fixed slots. A second run showed 1.25 MiB allocator high-water growth; the final rule reuses the already-approved 8 MiB performance-compiler floor while retaining zero tolerance for logical-count growth.
@@ -58,10 +58,10 @@ The first soak correctly exposed that a growing diagnostics vector made the evid
 ## Deferred without waiver
 
 - Four humans completing the combat test concurrently remains the only open M02 exit item. No tester telemetry is fabricated.
-- Runnable local network server/native-client orchestration needed to execute that human gate is `GB-M02-GATE`.
+- Runnable local network server/native-client orchestration was subsequently completed by `GB-M02-GATE`; four-human evidence and `SPEC-CONFLICT-003` remain open.
 - M03 Lantern Halls, micro-realm, dungeon, persistence, transfers, durable crash restore, and PostgreSQL remain prohibited until M02 closes.
 - M04+ shared encounter/party scaling and production realm/dungeon lifecycle remain later roadmap scope.
 
 ## Handoff
 
-`GB-M02-GATE` must expose the existing protocol, managed lifecycle, and instance scheduler through a runnable native local network build, then record four humans completing the combat test concurrently. The prior owner-assumed gate explicitly applies only to M01, so automated evidence alone cannot authorize M03.
+`GB-M02-GATE` subsequently exposed the existing protocol, managed lifecycle, and instance scheduler through a runnable native local network build. It must still record four humans and resolve the shared-vs-isolated “together” ambiguity. The prior owner-assumed gate explicitly applies only to M01, so automated evidence alone cannot authorize M03.

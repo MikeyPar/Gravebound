@@ -26,6 +26,7 @@ M01 PASS
   -> 06 malicious input/mutation rejection
   -> 07 headless journey bot
   -> 08 instance lifecycle/diagnostics
+  -> GATE runnable native server/client and human evidence
   -> M02 gate
 ```
 
@@ -42,6 +43,7 @@ M01 PASS
 | `GB-M02-06` | Reject teleport, speed, fire-rate, forged hit, duplicate pickup, stale/replayed input, and mutation misuse. | PASS |
 | `GB-M02-07` | Headless bot moves, aims, fights, picks up, dies, Recalls, and reconnects only through the real protocol. | PASS |
 | `GB-M02-08` | Realm/arena instance lifecycle, ownership, scheduler, tick diagnostics, and clean teardown. | PASS |
+| `GB-M02-GATE` | Runnable native QUIC server/client, bounded orchestration, four-client routing smoke, package/runbook, and four-human evidence. | IMPLEMENTATION PASS; HUMAN/SPEC PENDING |
 
 ## Exit gate
 
@@ -58,5 +60,7 @@ Failure holds the project in M02 authority/network work. It does not authorize p
 ## Current gate status
 
 - Automated packages and gates: PASS through `GB-M02-08`, including the explicit release-profile sixteen-bot/two-hour soak.
-- Four-human concurrent combat completion: PENDING. The M01 owner assumption explicitly waived no later milestone.
+- Runnable local server/client, bounded transport, four-client isolated-authority routing smoke, and package: PASS.
+- Four-human recorded combat completion: PENDING. The M01 owner assumption explicitly waived no later milestone.
+- The meaning of “together” and the `fp.1.0.0` manual Recall contradiction remain open in `SPEC-CONFLICT-003`; isolated concurrency is not relabeled shared combat.
 - Overall `GB-M02`: PENDING until the human gate is recorded; M03 remains unauthorized.

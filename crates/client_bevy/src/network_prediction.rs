@@ -542,6 +542,7 @@ pub struct NativeNetworkPresentation {
     runtime: RemoteClientRuntime,
     estimated_server_tick_milli: u64,
     presentation_time_ms: u64,
+    latest_snapshot: Option<CompleteSnapshot>,
 }
 
 impl NativeNetworkPresentation {
@@ -551,6 +552,7 @@ impl NativeNetworkPresentation {
             runtime,
             estimated_server_tick_milli: 0,
             presentation_time_ms: 0,
+            latest_snapshot: None,
         }
     }
 
@@ -561,6 +563,11 @@ impl NativeNetworkPresentation {
 
     pub const fn runtime_mut(&mut self) -> &mut RemoteClientRuntime {
         &mut self.runtime
+    }
+
+    #[must_use]
+    pub const fn latest_snapshot(&self) -> Option<&CompleteSnapshot> {
+        self.latest_snapshot.as_ref()
     }
 }
 
@@ -663,6 +670,7 @@ fn process_snapshot_inbox(
             &application.snapshot,
             presentation.runtime.local_entity_id,
         );
+        presentation.latest_snapshot = Some(application.snapshot);
     }
 }
 

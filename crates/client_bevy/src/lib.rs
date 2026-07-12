@@ -11,8 +11,10 @@ mod encounter;
 mod enemies;
 mod inventory;
 mod item_showcase;
+mod network_play;
 mod network_prediction;
 mod network_session;
+mod network_transport;
 mod player;
 mod stress_benchmark;
 mod telemetry;
@@ -45,6 +47,7 @@ pub use arena_view::{
 };
 pub use combat::AbilityTwoBindings;
 pub use combat::{AbilityOneBindings, CombatInputGate, PrimaryFireBindings};
+pub use network_play::{NetworkPlayConfig, run_network_playtest};
 pub use network_prediction::{
     CompleteSnapshot, CorrectionClass, CorrectionSignal, DeterministicProjectilePresentation,
     InterpolatedEntity, NativeNetworkPresentation, NetworkCorrectionDiagnostics,
@@ -101,6 +104,8 @@ struct PackageDiagnostics {
     record_count: usize,
     package_hash_blake3: String,
     content_root: PathBuf,
+    runtime_label: &'static str,
+    milestone_label: &'static str,
 }
 
 #[derive(Resource)]
@@ -121,6 +126,8 @@ impl PackageDiagnostics {
             record_count: report.record_count,
             package_hash_blake3: report.package_hash_blake3,
             content_root,
+            runtime_label: "LOCAL LAB",
+            milestone_label: "GB-M01 FIRST PLAYABLE",
         }
     }
 }

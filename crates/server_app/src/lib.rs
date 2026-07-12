@@ -6,6 +6,7 @@
 
 mod instance;
 mod lifecycle;
+mod runtime;
 mod session;
 
 pub use instance::{
@@ -18,6 +19,10 @@ pub use instance::{
 pub use lifecycle::{
     DirectoryTickOutput, LINK_LOST_TICKS, LifecycleError, LifecycleResponse, LogicalSessionId,
     ManagedSession, SessionDirectory, SessionOwnerId, SessionPhase, TransportId,
+};
+pub use runtime::{
+    BoundLocalServer, LOCAL_BUILD_ID, LOCAL_REGION_ID, LOCAL_SERVER_NAME, LocalServerConfig,
+    LocalServerReport, LocalServerRuntimeError,
 };
 pub use session::{
     AuthoritativeSession, IngressAnomaly, IngressAnomalyKind, IngressDiagnostics, InputDisposition,

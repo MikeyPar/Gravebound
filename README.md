@@ -4,7 +4,7 @@ Gravebound is a server-authoritative, permanent-death, 2D dark-fantasy bullet-he
 
 Every character life is temporary. The account remembers what happened, and exceptional deaths can return as personalized Fallen Hero Echo encounters. The design emphasizes readable combat, rapid recovery, fair monetization, solo viability, and long-term replayability without permanent account-level combat power.
 
-> **Project status:** M01 First Playable is closed under the owner's explicit successful-playtest assumption. Every automated M02 package through `GB-M02-08` now passes: authority, QUIC, prediction, lifecycle, impairment, hostile ingress, real-protocol journeys, instance scheduling, diagnostics, teardown, and the sixteen-bot/two-hour soak. Overall M02 remains held at its required four-human network combat gate; M03 persistence/content expansion is not yet authorized.
+> **Project status:** M01 First Playable is closed under the owner's explicit successful-playtest assumption. Every automated M02 package through `GB-M02-08` passes, and `GB-M02-GATE` now has a runnable local QUIC server, native network client, bounded transport, four-client routing smoke, and packaged playtest launchers. Overall M02 remains held on recorded four-human completion and `SPEC-CONFLICT-003`; M03 persistence/content expansion is not yet authorized.
 
 ![Bell Sepulcher gameplay concept](Concept%20Art/01-bell-sepulcher-gameplay.png)
 
@@ -102,7 +102,7 @@ Concept images establish mood, hierarchy, and visual language. They are not fina
 
 ## Current Next Step
 
-Complete `GB-M02-GATE`: expose the finished authoritative instance loop as a runnable local network server/native-client build and record four humans completing the combat test concurrently. Automated M02 evidence already passes: the release-profile sixteen-bot run covers exactly 216,000 frames with zero invalid states, stalls, divergences, or teardown residue; tick p95/p99 are 0.179/0.218 ms; the 100/20/1 impairment death trace and all malicious/mutation suites remain green. Networking CI passes 66 tests, full workspace CI passes 375 tests, and the Windows release build succeeds. See the [`GB-M02-08` audit](docs/milestones/GB-M02-08-audit.md), [automated gate audit](docs/milestones/GB-M02-gate-audit.md), and [soak evidence](docs/evidence/GB-M02-08-soak.json). Do not begin M03 until the remaining human gate passes.
+Execute the packaged [`GB-M02` native network runbook](docs/playtests/GB-M02-network-gate-runbook.md) with four humans and resolve [`SPEC-CONFLICT-003`](docs/spec-conflicts/SPEC-CONFLICT-003-m02-together-and-fp-recall.md). The runnable server/client seam and four-client isolated routing smoke now pass; automated soak, impairment, malicious/mutation, teardown, and performance evidence remain green. Do not label isolated concurrent sessions as shared party combat, fabricate human evidence, or begin M03 until the gate audit is fully resolved. See the [`GB-M02-GATE` implementation audit](docs/milestones/GB-M02-runtime-audit.md) and [exit-gate audit](docs/milestones/GB-M02-gate-audit.md).
 
 ## Resolved prior handoff
 

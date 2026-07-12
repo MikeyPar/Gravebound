@@ -392,8 +392,10 @@ fn spawn_hud(commands: &mut Commands, arena: &ArenaGeometry, diagnostics: &Packa
     commands.spawn((
         Name::new("Foundation diagnostics"),
         Text::new(format!(
-            "GRAVEBOUND  /  LOCAL LAB  |  build {}\nGB-M01 FIRST PLAYABLE  |  {}\n{}  |  {} Hz  |  content {}  |  {} records  |  hash {}",
+            "GRAVEBOUND  /  {}  |  build {}\n{}  |  {}\n{}  |  {} Hz  |  content {}  |  {} records  |  hash {}",
+            diagnostics.runtime_label,
             short_build,
+            diagnostics.milestone_label,
             arena.id,
             "24 x 13.5 TILE ORTHOGRAPHIC VIEW",
             sim_core::TICKS_PER_SECOND,

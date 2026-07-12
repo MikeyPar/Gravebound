@@ -1,4 +1,6 @@
-use anyhow::Result;
+use std::{net::SocketAddr, path::PathBuf};
+
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -7,13 +9,25 @@ use tracing_subscriber::EnvFilter;
 #[command(name = "server_app", about = "Gravebound authoritative server")]
 struct Cli {
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Validate the M02 server/runtime and handshake-transport boundaries.
     Doctor,
+    /// Run the local M02 QUIC playtest server until Ctrl+C.
+    Serve {
+        /// QUIC listen address. Loopback is the safe default for local playtests.
+        #[arg(long, default_value = "127.0.0.1:50000")]
+        bind: SocketAddr,
+        /// Validated content package root.
+        #[arg(long, default_value = "content")]
+        content_root: PathBuf,
+        /// DER certificate written for local native clients.
+        #[arg(long, default_value = "target/gravebound-local/server-cert.der")]
+        certificate_out: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -24,7 +38,8 @@ async fn main() -> Result<()> {
         )
         .with_target(false)
         .init();
-    match Cli::parse().command {
+    let command = Cli::parse().command.unwrap_or_else(default_serve_command);
+    match command {
         Command::Doctor => {
             let report = server_app::run_doctor().await?;
             info!(
@@ -38,6 +53,72 @@ async fn main() -> Result<()> {
                 "GB-M02 server foundation is valid"
             );
         }
+        Command::Serve {
+            bind,
+            content_root,
+            certificate_out,
+        } => {
+            let server = server_app::BoundLocalServer::bind(server_app::LocalServerConfig {
+                bind_address: bind,
+                content_root,
+            })?;
+            if let Some(parent) = certificate_out.parent() {
+                std::fs::create_dir_all(parent).with_context(|| {
+                    format!(
+                        "failed to create certificate directory {}",
+                        parent.display()
+                    )
+                })?;
+            }
+            std::fs::write(&certificate_out, server.certificate_der()).with_context(|| {
+                format!(
+                    "failed to write local certificate {}",
+                    certificate_out.display()
+                )
+            })?;
+            info!(
+                address = %server.local_address(),
+                certificate = %certificate_out.display(),
+                build_id = server_app::LOCAL_BUILD_ID,
+                "GB-M02 local playtest server is ready"
+            );
+            let report = server
+                .serve_until(async {
+                    if let Err(error) = tokio::signal::ctrl_c().await {
+                        tracing::error!(%error, "failed to listen for Ctrl+C");
+                    }
+                })
+                .await?;
+            info!(
+                accepted_connections = report.accepted_connections,
+                admitted_sessions = report.admitted_sessions,
+                scheduler_frames = report.scheduler_frames,
+                dropped_snapshots = report.dropped_snapshots,
+                zero_residue = report.zero_residue,
+                "GB-M02 local playtest server stopped cleanly"
+            );
+        }
     }
     Ok(())
+}
+
+fn default_serve_command() -> Command {
+    let executable_root = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(PathBuf::from));
+    let packaged_content = executable_root
+        .as_ref()
+        .map(|root| root.join("content"))
+        .filter(|path| path.is_dir());
+    let certificate_out = executable_root.map_or_else(
+        || PathBuf::from("server-cert.der"),
+        |root| root.join("server-cert.der"),
+    );
+    Command::Serve {
+        bind: "127.0.0.1:50000"
+            .parse()
+            .expect("default server bind address is valid"),
+        content_root: packaged_content.unwrap_or_else(|| PathBuf::from("content")),
+        certificate_out,
+    }
 }

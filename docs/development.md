@@ -51,6 +51,10 @@ Set-Location Gravebound
 | M02 server foundation diagnostics | `.\tools\dev.cmd server-doctor` |
 | M02 bot foundation diagnostics | `.\tools\dev.cmd bot-doctor` |
 | M02 protocol/server/bot focused gate | `.\tools\dev.cmd network-ci` |
+| M02 runnable server/client smoke | `.\tools\dev.cmd m02-network-smoke` |
+| M02 local QUIC server | `.\tools\dev.cmd m02-server` |
+| M02 native client (`GRAVEBOUND_LOCAL_PLAYER` selects the opaque token) | `.\tools\dev.cmd m02-client` |
+| Package one server plus four native client launchers | `.\tools\dev.cmd m02-package` |
 | Windows release build | `.\tools\dev.cmd release` |
 | Full local CI equivalent | `.\tools\dev.cmd ci` |
 
@@ -60,9 +64,10 @@ Direct Cargo aliases are also available: `cargo gb-format`, `cargo gb-lint`, `ca
 
 - **LocalLab:** available in M00; `client_bevy` and `sim_core` share one process with ephemeral state.
 - **Headless/Replay:** `cargo run -p tools_content -- trace tests/deterministic/m00_smoke.json`.
-- **LocalStack:** intentionally unavailable until M02 completes real transport/session/authority and M03 supplies PostgreSQL persistence. `.\tools\dev.cmd local-stack` fails explicitly rather than running a behaviorally false substitute.
-- **Server foundation:** `.\tools\dev.cmd server-doctor` validates the M02 crate boundary, shared 30 Hz simulation contract, and canonical protocol rates. It reports transport and database as disabled until their owning packages are complete.
-- **Bot foundation:** `.\tools\dev.cmd bot-doctor` validates the headless client boundary and shared protocol/simulation cadence. It reports transport and journey execution as disabled until `GB-M02-01` and `GB-M02-07` respectively.
+- **M02 Network Playtest:** `.\tools\dev.cmd m02-package` produces `dist\Gravebound-M02-Playtest` with one authoritative server, four uniquely credentialed native client launchers, immutable `fp.1.0.0`, and the human runbook. This mode is nonpersistent and uses an explicitly trusted per-launch loopback certificate.
+- **LocalStack:** intentionally unavailable until M03 supplies PostgreSQL persistence. The runnable M02 network playtest is not mislabeled LocalStack because it has no durable database.
+- **Server foundation:** `.\tools\dev.cmd server-doctor` validates the M02 crate boundary, shared 30 Hz simulation contract, canonical protocol rates, real transport, and scheduler.
+- **Bot foundation:** `.\tools\dev.cmd bot-doctor` validates the headless client boundary, shared cadence, real transport, and protocol-visible journey execution.
 
 Gameplay rules must live in `sim_core` or validated content. `client_bevy` owns presentation only.
 Generated files in `schemas/` are committed contracts; regenerate and review them whenever a Rust content type changes.

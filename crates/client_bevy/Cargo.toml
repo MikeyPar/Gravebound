@@ -11,13 +11,17 @@ repository.workspace = true
 anyhow.workspace = true
 bevy.workspace = true
 blake3.workspace = true
+clap.workspace = true
+quinn.workspace = true
 rodio.workspace = true
 protocol = { path = "../protocol" }
+rustls.workspace = true
 sim_content = { path = "../sim_content" }
 sim_core = { path = "../sim_core" }
 serde_json.workspace = true
 sysinfo.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 
 [[bin]]
 name = "client_bevy"

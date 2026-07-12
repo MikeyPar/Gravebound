@@ -15,7 +15,7 @@ use sim_core::{
 };
 use thiserror::Error;
 
-const PLAYER_ENTITY_ID: u64 = 10_000;
+const PLAYER_ENTITY_ID: u64 = protocol::M02_ISOLATED_PLAYER_ENTITY_ID;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputDisposition {

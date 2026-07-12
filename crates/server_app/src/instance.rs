@@ -1,6 +1,6 @@
 //! Bounded authoritative instance ownership and scheduler diagnostics for `GB-M02-08`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU64;
 use std::path::Path;
 use std::time::Instant;
@@ -475,10 +475,26 @@ impl InstanceScheduler {
 
     /// Retires terminal sessions only after callers have delivered the frame's final snapshots.
     pub fn retire_resolved(&mut self) -> Result<Vec<SessionOwnerId>, InstanceError> {
+        self.retire_resolved_excluding(&BTreeSet::new())
+    }
+
+    /// Retains selected terminal owners while a runtime still needs their reconnect tombstone.
+    pub fn retire_resolved_excluding(
+        &mut self,
+        retained_owners: &BTreeSet<SessionOwnerId>,
+    ) -> Result<Vec<SessionOwnerId>, InstanceError> {
         let retirement_plan: Vec<_> = self
             .instances
             .iter()
-            .map(|(instance_id, instance)| (*instance_id, instance.directory.resolved_owner_ids()))
+            .map(|(instance_id, instance)| {
+                let owners: Vec<_> = instance
+                    .directory
+                    .resolved_owner_ids()
+                    .into_iter()
+                    .filter(|owner| !retained_owners.contains(owner))
+                    .collect();
+                (*instance_id, owners)
+            })
             .filter(|(_, owners)| !owners.is_empty())
             .collect();
 
@@ -890,6 +906,40 @@ mod tests {
         assert_eq!(scheduler.diagnostics().retired_sessions, 0);
         assert_eq!(scheduler.diagnostics().closed_instances, 0);
         assert_eq!(scheduler.diagnostics().invalid_states, 1);
+    }
+
+    #[test]
+    fn resolved_retirement_can_retain_a_routable_terminal_tombstone() {
+        let root = content_root();
+        let mut scheduler = InstanceScheduler::default();
+        scheduler
+            .admit_or_route_control(owner(1), transport(1), &join(1), &root, 1)
+            .unwrap();
+        scheduler
+            .handle_gameplay_reliable(
+                owner(1),
+                transport(1),
+                WireMessage::ActionFrame(ActionFrame {
+                    sequence: 1,
+                    client_tick: 0,
+                    action: ActionKind::RecallStart,
+                }),
+            )
+            .unwrap();
+        for _ in 0..sim_core::EMERGENCY_RECALL_CHANNEL_TICKS {
+            scheduler.tick().unwrap();
+        }
+
+        let retained = BTreeSet::from([owner(1)]);
+        assert!(
+            scheduler
+                .retire_resolved_excluding(&retained)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(scheduler.owner_count(), 1);
+        assert_eq!(scheduler.retire_resolved().unwrap(), vec![owner(1)]);
+        assert_eq!(scheduler.owner_count(), 0);
     }
 
     #[test]

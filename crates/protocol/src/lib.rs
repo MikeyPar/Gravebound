@@ -48,6 +48,15 @@ pub const TIME_SYNC_INTERVAL_MS: u16 = 5_000;
 pub const INTEREST_CELL_TILES: u16 = 8;
 /// Camera interest safety margin from GDD `TECH-013`.
 pub const INTEREST_SAFETY_MARGIN_TILES: u16 = 4;
+/// Exact executable build ID for the nonpersistent M02 local network gate.
+pub const M02_LOCAL_BUILD_ID: &str = "m02-local-1";
+/// TLS server name used by the generated loopback certificate.
+pub const M02_LOCAL_SERVER_NAME: &str = "localhost";
+/// Region label reported by the nonpersistent M02 local server.
+pub const M02_LOCAL_REGION_ID: &str = "local-playtest";
+/// Controlled player identity in the isolated M02 combat-session protocol.
+/// Shared-world authority must replace this implicit identity with an explicit binding.
+pub const M02_ISOLATED_PLAYER_ENTITY_ID: u64 = 10_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ProtocolVersion {

@@ -9,9 +9,12 @@ repository.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+blake3.workspace = true
 clap.workspace = true
 protocol = { path = "../protocol" }
 quinn.workspace = true
+rcgen.workspace = true
+rustls.workspace = true
 sim_core = { path = "../sim_core" }
 sim_content = { path = "../sim_content" }
 thiserror.workspace = true
@@ -23,8 +26,6 @@ tracing-subscriber.workspace = true
 bot_client = { path = "../bot_client" }
 client_bevy = { path = "../client_bevy" }
 network_harness = { path = "../network_harness" }
-rcgen.workspace = true
-rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sysinfo.workspace = true

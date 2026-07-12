@@ -2127,13 +2127,17 @@ dependencies = [
  "anyhow",
  "bevy",
  "blake3",
+ "clap",
  "protocol",
+ "quinn",
  "rodio",
+ "rustls",
  "serde_json",
  "sim_content",
  "sim_core",
  "sysinfo",
  "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]
@@ -5038,6 +5042,7 @@ name = "server_app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "blake3",
  "bot_client",
  "clap",
  "client_bevy",

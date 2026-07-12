@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "feature_id": "GB-M02-GATE",
+  "build_id": "m02-local-1",
+  "content_version": "fp.1.0.0",
+  "server_executable": {
+    "file": "server_app.exe",
+    "bytes": 5851648,
+    "sha256": "69CA5616D95945FF481046825A5B77163E6182AEF484C0C518E9E4C13E479175"
+  },
+  "client_executable": {
+    "file": "client_bevy.exe",
+    "bytes": 66683392,
+    "sha256": "DD4F67CF6223E9162A9AAEC70DB27C28281EED1C499BA2A5CBE73BB37FAC504C"
+  },
+  "networking_tests_passed": 69,
+  "workspace_tests_passed": 381,
+  "ordinary_ci_ignored_tests": 1,
+  "four_client_route_smoke": true,
+  "zero_server_residue": true,
+  "native_server_launched": true,
+  "native_client_window_title": "Gravebound - M02 Network Playtest",
+  "visual_capture_available": false,
+  "visual_capture_error": "0x80004002: No such interface supported",
+  "human_gate_complete": false,
+  "spec_conflict_resolved": false
+}
