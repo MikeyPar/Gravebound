@@ -4,7 +4,7 @@ Gravebound is a server-authoritative, permanent-death, 2D dark-fantasy bullet-he
 
 Every character life is temporary. The account remembers what happened, and exceptional deaths can return as personalized Fallen Hero Echo encounters. The design emphasizes readable combat, rapid recovery, fair monetization, solo viability, and long-term replayability without permanent account-level combat power.
 
-> **Project status:** M01 and M02 are closed under their recorded gates. `GB-M03-01`, `GB-M03-02A`, `GB-M03-02B`, and `GB-M03-11` now pass: the Core Grave Arbalist identity is native, server-authoritative, and durable in the explicitly wipeable PostgreSQL namespace. Parent `GB-M03-02` remains open for item/vault, memorial/death, and ledger aggregates; world routing, progression, permanent death, recovery, telemetry, and operations packages also remain open.
+> **Project status:** M01 and M02 are closed under their recorded gates. `GB-M03-01`, `GB-M03-02A`, `GB-M03-02B`, `GB-M03-03A`, and `GB-M03-11` now pass: the Core Grave Arbalist identity is native, server-authoritative, and durable, and exact Hall/private-microrealm content compiles in the explicitly wipeable, unpromoted namespace. Parent `GB-M03-02` remains open for item/vault, memorial/death, and ledger aggregates; world routing, progression, permanent death, recovery, telemetry, and operations packages also remain open.
 
 ![Bell Sepulcher gameplay concept](Concept%20Art/01-bell-sepulcher-gameplay.png)
 
@@ -102,7 +102,7 @@ Concept images establish mood, hierarchy, and visual language. They are not fina
 
 ## Current Next Step
 
-Implement the approved `GB-M03-03A`/`03B`, `GB-M03-04A`/`04B`, and `GB-M03-05A`–`05C` contracts recorded in `SPEC-CONFLICT-006` through `008`. Pull the minimal `GB-M03-12` Ash wallet forward before `GB-M03-05D`. Continue the three-authority audits for `GB-M03-06` onward, and keep the normal player route and affected Core Hall stations fail-closed until `GB-M03-04`, `05`, `06`, and `08` supply their owning item, Oath/Bargain, death, extraction, and Recall semantics.
+Implement the approved `GB-M03-03B`, `GB-M03-04A`/`04B`, and `GB-M03-05A`–`05C` contracts recorded in `SPEC-CONFLICT-006` through `008`. Pull the minimal `GB-M03-12` Ash wallet forward before `GB-M03-05D`. Keep the normal player route and affected Core Hall stations fail-closed until `GB-M03-04`, `05`, `06`, and `08` supply their owning item, Oath/Bargain, death, extraction, and Recall semantics.
 
 ## Resolved prior handoff
 
