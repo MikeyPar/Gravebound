@@ -7,11 +7,11 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use persistence::{PersistenceConfig, PostgresPersistence};
+use persistence::{PersistenceConfig, PostgresPersistence, WIPEABLE_CORE_NAMESPACE};
 use protocol::{
-    AccountBootstrapFrame, AccountBootstrapRequest, AccountBootstrapResult, AuthTicket,
-    CharacterMutationFrame, CharacterMutationPayload, ClientHello, Compression, HandshakeResponse,
-    ManifestHash, Platform, ProtocolVersion, WireText,
+    AccountBootstrapFrame, AccountBootstrapRequest, AccountBootstrapResult, AccountErrorCode,
+    AuthTicket, CharacterMutationFrame, CharacterMutationPayload, ClientHello, Compression,
+    HandshakeResponse, ManifestHash, Platform, ProtocolVersion, WireText,
 };
 use server_app::{
     AccountId, AuthenticatedAccount, AuthenticatedNamespace, BoundCoreIdentityServer,
@@ -61,6 +61,9 @@ fn service(
         manifest(),
     )
 }
+
+type TestIdentityService =
+    IdentityService<PostgresAccountRepository, FixedClock, SequentialIds, NoopIdentityEventSink>;
 
 fn bootstrap() -> AccountBootstrapFrame {
     AccountBootstrapFrame {
@@ -155,6 +158,72 @@ fn start_server(
     (address, certificate, shutdown_send, task)
 }
 
+async fn assert_concurrent_stale_writer(persistence: &PostgresPersistence) {
+    let concurrent_first = service(persistence.clone());
+    let concurrent_second = service(persistence.clone());
+    let AccountBootstrapResult::Snapshot(empty) = concurrent_first
+        .bootstrap(Some(account(93)), &bootstrap())
+        .await
+    else {
+        panic!("concurrency fixture account expected")
+    };
+    assert_eq!(empty.account_version, 1);
+    let concurrent_payload = CharacterMutationPayload::Create {
+        class_id: WireText::new(protocol::GRAVE_ARBALIST_CLASS_ID).unwrap(),
+    };
+    let first_frame = mutation(11, 1, concurrent_payload.clone());
+    let second_frame = mutation(12, 1, concurrent_payload);
+    let (first_result, second_result) = tokio::join!(
+        concurrent_first.mutate(Some(account(93)), &first_frame),
+        concurrent_second.mutate(Some(account(93)), &second_frame),
+    );
+    assert_eq!(
+        usize::from(first_result.accepted) + usize::from(second_result.accepted),
+        1
+    );
+    let rejected = if first_result.accepted {
+        &second_result
+    } else {
+        &first_result
+    };
+    assert!(matches!(
+        rejected.error,
+        Some(AccountErrorCode::StateVersionMismatch | AccountErrorCode::ServiceUnavailable)
+    ));
+    let AccountBootstrapResult::Snapshot(committed) = concurrent_first
+        .bootstrap(Some(account(93)), &bootstrap())
+        .await
+    else {
+        panic!("concurrent commit snapshot expected")
+    };
+    assert_eq!(committed.account_version, 2);
+    assert_eq!(committed.characters.len(), 1);
+}
+
+async fn assert_corrupt_result_fails_closed(
+    persistence: &PostgresPersistence,
+    identity: &TestIdentityService,
+) {
+    let mut corruption = persistence.begin_transaction().await.unwrap();
+    let corrupted_rows = sqlx::query(
+        "UPDATE account_mutation_results SET result_payload = $1 \
+         WHERE namespace_id = $2 AND account_id = $3",
+    )
+    .bind(vec![0_u8])
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind([91_u8; 16].as_slice())
+    .execute(corruption.connection())
+    .await
+    .unwrap()
+    .rows_affected();
+    assert_eq!(corrupted_rows, 2);
+    corruption.commit().await.unwrap();
+    assert_eq!(
+        identity.bootstrap(Some(account(91)), &bootstrap()).await,
+        AccountBootstrapResult::Error(AccountErrorCode::ServiceUnavailable)
+    );
+}
+
 #[tokio::test]
 #[ignore = "requires explicitly authorized disposable PostgreSQL"]
 async fn postgres_identity_survives_service_restart_and_replays_exactly_once() {
@@ -185,6 +254,7 @@ async fn postgres_identity_survives_service_restart_and_replays_exactly_once() {
         )
         .await;
     assert!(selected.accepted);
+    assert_concurrent_stale_writer(&persistence).await;
     drop(first_process);
     persistence.close().await;
 
@@ -204,6 +274,7 @@ async fn postgres_identity_survives_service_restart_and_replays_exactly_once() {
         panic!("isolated account snapshot expected")
     };
     assert!(isolated.characters.is_empty());
+    assert_corrupt_result_fails_closed(&restarted_persistence, &restarted).await;
     restarted_persistence.close().await;
 }
 

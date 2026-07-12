@@ -5327,6 +5327,7 @@ dependencies = [
  "serde_json",
  "sim_content",
  "sim_core",
+ "sqlx",
  "sysinfo",
  "thiserror 2.0.18",
  "tokio",

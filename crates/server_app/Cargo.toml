@@ -30,6 +30,7 @@ client_bevy = { path = "../client_bevy" }
 network_harness = { path = "../network_harness" }
 serde.workspace = true
 serde_json.workspace = true
+sqlx.workspace = true
 sysinfo.workspace = true
 
 [lints]
