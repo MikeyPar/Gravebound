@@ -144,6 +144,22 @@ fn generate_schemas_command(output: &std::path::Path) -> Result<()> {
     write_schema::<content_schema::ReleaseManifest>(output, "release_manifest.schema.json")?;
     write_schema::<content_schema::FeatureRegistry>(output, "feature_registry.schema.json")?;
     write_schema::<content_schema::AssetManifest>(output, "asset_manifest.schema.json")?;
+    write_schema::<content_schema::CoreWorldFlowDevelopmentTarget>(
+        output,
+        "core_world_flow_target.schema.json",
+    )?;
+    write_schema::<content_schema::CoreWorldFlowRecords>(
+        output,
+        "core_world_flow_records.schema.json",
+    )?;
+    write_schema::<content_schema::CoreGrayboxAssetManifest>(
+        output,
+        "core_graybox_assets.schema.json",
+    )?;
+    write_schema::<content_schema::CoreWorldFlowCopyFile>(
+        output,
+        "core_world_flow_copy.schema.json",
+    )?;
     info!(output = %output.display(), "JSON schemas generated");
     Ok(())
 }

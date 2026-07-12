@@ -603,6 +603,245 @@ pub struct CoreDevelopmentTarget {
     pub presentation_asset_ids: Vec<ContentId>,
 }
 
+/// Identifies a world-flow compiler input that cannot be promoted or loaded as a release bundle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CoreWorldFlowTargetKind {
+    UnpromotedWorldFlowSubset,
+}
+
+/// Ordered allowlists for the independently reviewed `GB-M03-03A` development target.
+///
+/// This descriptor intentionally has no content version, release stage, package ID, or
+/// promotion metadata. Formal Core packaging remains owned by `CONT-VALID-003`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CoreWorldFlowDevelopmentTarget {
+    pub schema_version: u32,
+    pub target_kind: CoreWorldFlowTargetKind,
+    pub target_name: String,
+    pub required_hub_ids: Vec<ContentId>,
+    pub required_world_ids: Vec<ContentId>,
+    pub required_object_ids: Vec<ContentId>,
+    pub required_asset_ids: Vec<ContentId>,
+    pub required_localization_keys: Vec<ContentId>,
+    pub expected_records_blake3: String,
+    pub expected_assets_blake3: String,
+    pub expected_localization_blake3: String,
+}
+
+/// Metadata shared by unpromoted Core world-flow records.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CoreDevelopmentHeader {
+    pub id: ContentId,
+    pub schema_version: u32,
+    pub enabled: bool,
+    pub earliest_release_stage: ReleaseStage,
+    pub localization_name_key: ContentId,
+    pub localization_description_key: ContentId,
+    pub asset_ids: Vec<ContentId>,
+    pub tags: Vec<String>,
+    pub source_document_feature_id: String,
+}
+
+/// Exact fixed-point point in milli-tiles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MilliTilePoint {
+    pub x: i32,
+    pub y: i32,
+}
+
+/// Exact fixed-point axis-aligned rectangle in milli-tiles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MilliTileRectangle {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Exact fixed-point circle in milli-tiles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MilliTileCircle {
+    pub center: MilliTilePoint,
+    pub radius: u32,
+}
+
+/// One authored polyline. Consecutive points form axis-aligned road segments.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CoreRoadPolyline {
+    pub width_milli_tiles: u32,
+    pub points: Vec<MilliTilePoint>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CoreMapOrigin {
+    Northwest,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CoreProhibitedCreation {
+    Hostile,
+    Damage,
+    Projectile,
+    Pickup,
+    Drop,
+}
+
+/// Strict Lantern Halls geometry record for the unpromoted Core target.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CoreHubRecord {
+    #[serde(flatten)]
+    pub header: CoreDevelopmentHeader,
+    pub width_tiles: u32,
+    pub height_tiles: u32,
+    pub origin: CoreMapOrigin,
+    pub solid_shell_tiles: u32,
+    pub player_radius_milli_tiles: u32,
+    pub minimum_aisle_width_milli_tiles: u32,
+    pub safe_noncombat: bool,
+    pub default_spawn: MilliTilePoint,
+    pub character_select_return: MilliTilePoint,
+    pub solid_rectangles: Vec<MilliTileRectangle>,
+    pub prohibited_creation: Vec<CoreProhibitedCreation>,
+    pub object_ids: Vec<ContentId>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CoreWorldTerrain {
+    ClearMud,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CoreDisabledWorldSystem {
+    MacroScheduler,
+    RealmCycle,
+    Siege,
+    Retirement,
+}
+
+/// Strict M03 private micro-realm geometry record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CoreWorldRecord {
+    #[serde(flatten)]
+    pub header: CoreDevelopmentHeader,
+    pub width_tiles: u32,
+    pub height_tiles: u32,
+    pub origin: CoreMapOrigin,
+    pub solid_shell_tiles: u32,
+    pub base_terrain: CoreWorldTerrain,
+    pub capacity: u32,
+    pub disabled_systems: Vec<CoreDisabledWorldSystem>,
+    pub realm_gate: MilliTileRectangle,
+    pub player_spawn: MilliTilePoint,
+    pub lantern_fork_safe_area: MilliTileCircle,
+    pub bell_portal_area: MilliTileCircle,
+    pub roads: Vec<CoreRoadPolyline>,
+    pub candidate_spawn_anchors: Vec<MilliTilePoint>,
+    pub intentionally_excluded_anchor: MilliTilePoint,
+    pub enabled_spawn_anchor_count: u32,
+    pub object_ids: Vec<ContentId>,
+}
+
+/// Semantic spatial representation for one hub/world child. The closed variants prevent illegal
+/// combinations such as a station without a clear radius or a spawn anchor with interaction area.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "object_kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CoreWorldObjectGeometry {
+    PointInteractable {
+        point: MilliTilePoint,
+        clear_radius_milli_tiles: u32,
+    },
+    RectangleLandmark {
+        rectangle: MilliTileRectangle,
+    },
+    CircleLandmark {
+        circle: MilliTileCircle,
+    },
+    CirclePortal {
+        circle: MilliTileCircle,
+    },
+    RectanglePortal {
+        rectangle: MilliTileRectangle,
+    },
+    SpawnAnchor {
+        point: MilliTilePoint,
+    },
+}
+
+/// Typed child record with explicit parent ownership and player-route integration gate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CoreWorldObjectRecord {
+    #[serde(flatten)]
+    pub header: CoreDevelopmentHeader,
+    pub parent_id: ContentId,
+    pub geometry: CoreWorldObjectGeometry,
+    pub authored_core_enabled: bool,
+    pub integration_gate: Option<String>,
+}
+
+/// Complete strict source set for `GB-M03-03A`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CoreWorldFlowRecords {
+    pub schema_version: u32,
+    pub hubs: Vec<CoreHubRecord>,
+    pub worlds: Vec<CoreWorldRecord>,
+    pub objects: Vec<CoreWorldObjectRecord>,
+}
+
+/// Resolution kind for a symbolic graybox asset reference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CoreGrayboxAssetKind {
+    GeneratedCollisionTilemap,
+    GrayboxMarker,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CoreGrayboxAsset {
+    pub asset_id: ContentId,
+    pub source_record_id: ContentId,
+    pub kind: CoreGrayboxAssetKind,
+}
+
+/// Asset-reference closure for the world-flow development target.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CoreGrayboxAssetManifest {
+    pub schema_version: u32,
+    pub assets: Vec<CoreGrayboxAsset>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CoreLocalizedCopyEntry {
+    pub key: ContentId,
+    pub value: String,
+}
+
+/// Exact localized labels resolved by the world-flow development target.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CoreWorldFlowCopyFile {
+    pub schema_version: u32,
+    pub locale: String,
+    pub entries: Vec<CoreLocalizedCopyEntry>,
+}
+
 /// Required labels for every safe Core identity screen state in `GB-M03-01`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -752,6 +991,39 @@ mod tests {
         let generated = serde_json::to_value(schemars::schema_for!(CoreDevelopmentTarget))
             .expect("serializable generated schema");
         assert_eq!(checked_in, generated);
+    }
+
+    #[test]
+    fn checked_in_core_world_flow_schemas_match_the_rust_contracts() {
+        let schema_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../schemas");
+        let cases = [
+            (
+                "core_world_flow_target.schema.json",
+                serde_json::to_value(schemars::schema_for!(CoreWorldFlowDevelopmentTarget))
+                    .expect("serializable target schema"),
+            ),
+            (
+                "core_world_flow_records.schema.json",
+                serde_json::to_value(schemars::schema_for!(CoreWorldFlowRecords))
+                    .expect("serializable records schema"),
+            ),
+            (
+                "core_graybox_assets.schema.json",
+                serde_json::to_value(schemars::schema_for!(CoreGrayboxAssetManifest))
+                    .expect("serializable asset schema"),
+            ),
+            (
+                "core_world_flow_copy.schema.json",
+                serde_json::to_value(schemars::schema_for!(CoreWorldFlowCopyFile))
+                    .expect("serializable copy schema"),
+            ),
+        ];
+        for (name, generated) in cases {
+            let text = fs::read_to_string(schema_root.join(name)).expect("checked-in schema");
+            let checked_in: serde_json::Value =
+                serde_json::from_str(&text).expect("valid checked-in schema");
+            assert_eq!(checked_in, generated, "schema drift in {name}");
+        }
     }
 
     #[test]

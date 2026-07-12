@@ -1,0 +1,621 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CoreWorldFlowRecords",
+  "description": "Complete strict source set for `GB-M03-03A`.",
+  "type": "object",
+  "properties": {
+    "hubs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CoreHubRecord"
+      }
+    },
+    "objects": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CoreWorldObjectRecord"
+      }
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "worlds": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CoreWorldRecord"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "hubs",
+    "worlds",
+    "objects"
+  ],
+  "$defs": {
+    "ContentId": {
+      "description": "Stable dot-separated content identifier.",
+      "type": "string"
+    },
+    "CoreDisabledWorldSystem": {
+      "type": "string",
+      "enum": [
+        "macro_scheduler",
+        "realm_cycle",
+        "siege",
+        "retirement"
+      ]
+    },
+    "CoreHubRecord": {
+      "description": "Strict Lantern Halls geometry record for the unpromoted Core target.",
+      "type": "object",
+      "properties": {
+        "asset_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContentId"
+          }
+        },
+        "character_select_return": {
+          "$ref": "#/$defs/MilliTilePoint"
+        },
+        "default_spawn": {
+          "$ref": "#/$defs/MilliTilePoint"
+        },
+        "earliest_release_stage": {
+          "$ref": "#/$defs/ReleaseStage"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "height_tiles": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "localization_description_key": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "localization_name_key": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "minimum_aisle_width_milli_tiles": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "object_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContentId"
+          }
+        },
+        "origin": {
+          "$ref": "#/$defs/CoreMapOrigin"
+        },
+        "player_radius_milli_tiles": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "prohibited_creation": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CoreProhibitedCreation"
+          }
+        },
+        "safe_noncombat": {
+          "type": "boolean"
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "solid_rectangles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MilliTileRectangle"
+          }
+        },
+        "solid_shell_tiles": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "source_document_feature_id": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "width_tiles": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "schema_version",
+        "enabled",
+        "earliest_release_stage",
+        "localization_name_key",
+        "localization_description_key",
+        "asset_ids",
+        "tags",
+        "source_document_feature_id",
+        "width_tiles",
+        "height_tiles",
+        "origin",
+        "solid_shell_tiles",
+        "player_radius_milli_tiles",
+        "minimum_aisle_width_milli_tiles",
+        "safe_noncombat",
+        "default_spawn",
+        "character_select_return",
+        "solid_rectangles",
+        "prohibited_creation",
+        "object_ids"
+      ]
+    },
+    "CoreMapOrigin": {
+      "type": "string",
+      "enum": [
+        "northwest"
+      ]
+    },
+    "CoreProhibitedCreation": {
+      "type": "string",
+      "enum": [
+        "hostile",
+        "damage",
+        "projectile",
+        "pickup",
+        "drop"
+      ]
+    },
+    "CoreRoadPolyline": {
+      "description": "One authored polyline. Consecutive points form axis-aligned road segments.",
+      "type": "object",
+      "properties": {
+        "points": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MilliTilePoint"
+          }
+        },
+        "width_milli_tiles": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "width_milli_tiles",
+        "points"
+      ]
+    },
+    "CoreWorldObjectGeometry": {
+      "description": "Semantic spatial representation for one hub/world child. The closed variants prevent illegal\ncombinations such as a station without a clear radius or a spawn anchor with interaction area.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "clear_radius_milli_tiles": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "object_kind": {
+              "type": "string",
+              "const": "point_interactable"
+            },
+            "point": {
+              "$ref": "#/$defs/MilliTilePoint"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "object_kind",
+            "point",
+            "clear_radius_milli_tiles"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "object_kind": {
+              "type": "string",
+              "const": "rectangle_landmark"
+            },
+            "rectangle": {
+              "$ref": "#/$defs/MilliTileRectangle"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "object_kind",
+            "rectangle"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "circle": {
+              "$ref": "#/$defs/MilliTileCircle"
+            },
+            "object_kind": {
+              "type": "string",
+              "const": "circle_landmark"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "object_kind",
+            "circle"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "circle": {
+              "$ref": "#/$defs/MilliTileCircle"
+            },
+            "object_kind": {
+              "type": "string",
+              "const": "circle_portal"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "object_kind",
+            "circle"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "object_kind": {
+              "type": "string",
+              "const": "rectangle_portal"
+            },
+            "rectangle": {
+              "$ref": "#/$defs/MilliTileRectangle"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "object_kind",
+            "rectangle"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "object_kind": {
+              "type": "string",
+              "const": "spawn_anchor"
+            },
+            "point": {
+              "$ref": "#/$defs/MilliTilePoint"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "object_kind",
+            "point"
+          ]
+        }
+      ]
+    },
+    "CoreWorldObjectRecord": {
+      "description": "Typed child record with explicit parent ownership and player-route integration gate.",
+      "type": "object",
+      "properties": {
+        "asset_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContentId"
+          }
+        },
+        "authored_core_enabled": {
+          "type": "boolean"
+        },
+        "earliest_release_stage": {
+          "$ref": "#/$defs/ReleaseStage"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "geometry": {
+          "$ref": "#/$defs/CoreWorldObjectGeometry"
+        },
+        "id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "integration_gate": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "localization_description_key": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "localization_name_key": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "parent_id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "source_document_feature_id": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "schema_version",
+        "enabled",
+        "earliest_release_stage",
+        "localization_name_key",
+        "localization_description_key",
+        "asset_ids",
+        "tags",
+        "source_document_feature_id",
+        "parent_id",
+        "geometry",
+        "authored_core_enabled"
+      ]
+    },
+    "CoreWorldRecord": {
+      "description": "Strict M03 private micro-realm geometry record.",
+      "type": "object",
+      "properties": {
+        "asset_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContentId"
+          }
+        },
+        "base_terrain": {
+          "$ref": "#/$defs/CoreWorldTerrain"
+        },
+        "bell_portal_area": {
+          "$ref": "#/$defs/MilliTileCircle"
+        },
+        "candidate_spawn_anchors": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MilliTilePoint"
+          }
+        },
+        "capacity": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "disabled_systems": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CoreDisabledWorldSystem"
+          }
+        },
+        "earliest_release_stage": {
+          "$ref": "#/$defs/ReleaseStage"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "enabled_spawn_anchor_count": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "height_tiles": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "intentionally_excluded_anchor": {
+          "$ref": "#/$defs/MilliTilePoint"
+        },
+        "lantern_fork_safe_area": {
+          "$ref": "#/$defs/MilliTileCircle"
+        },
+        "localization_description_key": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "localization_name_key": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "object_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContentId"
+          }
+        },
+        "origin": {
+          "$ref": "#/$defs/CoreMapOrigin"
+        },
+        "player_spawn": {
+          "$ref": "#/$defs/MilliTilePoint"
+        },
+        "realm_gate": {
+          "$ref": "#/$defs/MilliTileRectangle"
+        },
+        "roads": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CoreRoadPolyline"
+          }
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "solid_shell_tiles": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "source_document_feature_id": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "width_tiles": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "schema_version",
+        "enabled",
+        "earliest_release_stage",
+        "localization_name_key",
+        "localization_description_key",
+        "asset_ids",
+        "tags",
+        "source_document_feature_id",
+        "width_tiles",
+        "height_tiles",
+        "origin",
+        "solid_shell_tiles",
+        "base_terrain",
+        "capacity",
+        "disabled_systems",
+        "realm_gate",
+        "player_spawn",
+        "lantern_fork_safe_area",
+        "bell_portal_area",
+        "roads",
+        "candidate_spawn_anchors",
+        "intentionally_excluded_anchor",
+        "enabled_spawn_anchor_count",
+        "object_ids"
+      ]
+    },
+    "CoreWorldTerrain": {
+      "type": "string",
+      "enum": [
+        "clear_mud"
+      ]
+    },
+    "MilliTileCircle": {
+      "description": "Exact fixed-point circle in milli-tiles.",
+      "type": "object",
+      "properties": {
+        "center": {
+          "$ref": "#/$defs/MilliTilePoint"
+        },
+        "radius": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "center",
+        "radius"
+      ]
+    },
+    "MilliTilePoint": {
+      "description": "Exact fixed-point point in milli-tiles.",
+      "type": "object",
+      "properties": {
+        "x": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "y": {
+          "type": "integer",
+          "format": "int32"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "x",
+        "y"
+      ]
+    },
+    "MilliTileRectangle": {
+      "description": "Exact fixed-point axis-aligned rectangle in milli-tiles.",
+      "type": "object",
+      "properties": {
+        "height": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "width": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "x": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "y": {
+          "type": "integer",
+          "format": "int32"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "x",
+        "y",
+        "width",
+        "height"
+      ]
+    },
+    "ReleaseStage": {
+      "description": "Earliest release stage that may enable a record.",
+      "type": "string",
+      "enum": [
+        "fp",
+        "core",
+        "slice",
+        "alpha",
+        "playtest",
+        "ea"
+      ]
+    }
+  }
+}

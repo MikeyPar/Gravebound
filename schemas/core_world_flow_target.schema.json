@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CoreWorldFlowDevelopmentTarget",
+  "description": "Ordered allowlists for the independently reviewed `GB-M03-03A` development target.\n\nThis descriptor intentionally has no content version, release stage, package ID, or\npromotion metadata. Formal Core packaging remains owned by `CONT-VALID-003`.",
+  "type": "object",
+  "properties": {
+    "expected_assets_blake3": {
+      "type": "string"
+    },
+    "expected_localization_blake3": {
+      "type": "string"
+    },
+    "expected_records_blake3": {
+      "type": "string"
+    },
+    "required_asset_ids": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ContentId"
+      }
+    },
+    "required_hub_ids": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ContentId"
+      }
+    },
+    "required_localization_keys": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ContentId"
+      }
+    },
+    "required_object_ids": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ContentId"
+      }
+    },
+    "required_world_ids": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ContentId"
+      }
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "target_kind": {
+      "$ref": "#/$defs/CoreWorldFlowTargetKind"
+    },
+    "target_name": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "target_kind",
+    "target_name",
+    "required_hub_ids",
+    "required_world_ids",
+    "required_object_ids",
+    "required_asset_ids",
+    "required_localization_keys",
+    "expected_records_blake3",
+    "expected_assets_blake3",
+    "expected_localization_blake3"
+  ],
+  "$defs": {
+    "ContentId": {
+      "description": "Stable dot-separated content identifier.",
+      "type": "string"
+    },
+    "CoreWorldFlowTargetKind": {
+      "description": "Identifies a world-flow compiler input that cannot be promoted or loaded as a release bundle.",
+      "type": "string",
+      "enum": [
+        "unpromoted_world_flow_subset"
+      ]
+    }
+  }
+}

@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CoreGrayboxAssetManifest",
+  "description": "Asset-reference closure for the world-flow development target.",
+  "type": "object",
+  "properties": {
+    "assets": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CoreGrayboxAsset"
+      }
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "assets"
+  ],
+  "$defs": {
+    "ContentId": {
+      "description": "Stable dot-separated content identifier.",
+      "type": "string"
+    },
+    "CoreGrayboxAsset": {
+      "type": "object",
+      "properties": {
+        "asset_id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "kind": {
+          "$ref": "#/$defs/CoreGrayboxAssetKind"
+        },
+        "source_record_id": {
+          "$ref": "#/$defs/ContentId"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "asset_id",
+        "source_record_id",
+        "kind"
+      ]
+    },
+    "CoreGrayboxAssetKind": {
+      "description": "Resolution kind for a symbolic graybox asset reference.",
+      "type": "string",
+      "enum": [
+        "generated_collision_tilemap",
+        "graybox_marker"
+      ]
+    }
+  }
+}
