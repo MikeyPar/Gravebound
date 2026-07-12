@@ -8,11 +8,12 @@ use std::{collections::BTreeMap, num::NonZeroU64};
 use thiserror::Error;
 
 use crate::{
-    AuthorityDefinitions, AuthorityInput, AuthorityPhase, CombatAction, CombatStep,
-    ConsumableAction, EnemyLabPlayer, EntityId, EntityIdAllocator, FieldPickup, FieldPickupId,
+    AuthorityDefinitions, AuthorityEntityKind, AuthorityEntitySnapshot, AuthorityInput,
+    AuthorityPhase, AuthorityRecallCommit, CombatAction, CombatStep, ConsumableAction,
+    EnemyLabPlayer, EntityId, EntityIdAllocator, FieldPickup, FieldPickupAccess, FieldPickupId,
     InventoryStack, MovementStep, NormalWaveSimulation, NormalWaveSpawn, NormalWaveStep,
-    PickupEligibility, PlayerCombatState, PlayerMovementState, PlayerVitals, PrototypeInventory,
-    RedTonicSimulation, Tick, TonicBelt,
+    PickupEligibility, PickupOutcome, PlacementChoice, PlayerCombatState, PlayerMovementState,
+    PlayerVitals, PrototypeInventory, RedTonicSimulation, SimulationVector, Tick, TonicBelt,
 };
 
 pub const SHARED_ARENA_MAX_PLAYERS: usize = 4;
@@ -184,6 +185,195 @@ impl SharedAuthoritativeArena {
         &self.players
     }
 
+    pub fn apply_pickup(
+        &mut self,
+        player_id: EntityId,
+        pickup_id: FieldPickupId,
+        placement: PlacementChoice,
+    ) -> Result<PickupOutcome, SharedAuthorityError> {
+        let player = self
+            .players
+            .get_mut(&player_id)
+            .ok_or(SharedAuthorityError::UnknownPlayer(player_id))?;
+        if !matches!(player.phase, AuthorityPhase::Alive) || !player.eligibility.eligible() {
+            return Err(SharedAuthorityError::PlayerUnavailable(player_id));
+        }
+        let pickup = player
+            .pickups
+            .iter_mut()
+            .find(|pickup| pickup.pickup_id() == pickup_id)
+            .ok_or(SharedAuthorityError::PickupNotFound(pickup_id))?;
+        let outcome = player.inventory.apply_field_pickup(
+            pickup,
+            placement,
+            player.movement.position(),
+            FieldPickupAccess::Interact,
+            self.wave.tick(),
+        )?;
+        self.state_version = self
+            .state_version
+            .checked_add(1)
+            .ok_or(SharedAuthorityError::StateVersionExhausted)?;
+        Ok(outcome)
+    }
+
+    /// Commits only the selected player's automatic `LinkLost` Recall. Shared enemies, hostile
+    /// projectiles, lanes, rewards, and surviving players remain untouched.
+    pub fn commit_automatic_recall(
+        &mut self,
+        player_id: EntityId,
+    ) -> Result<AuthorityRecallCommit, SharedAuthorityError> {
+        let mut next = self.clone();
+        let player = next
+            .players
+            .get_mut(&player_id)
+            .ok_or(SharedAuthorityError::UnknownPlayer(player_id))?;
+        if !matches!(player.phase, AuthorityPhase::Alive) {
+            return Err(SharedAuthorityError::PlayerUnavailable(player_id));
+        }
+        let wave_player = next
+            .wave
+            .players_mut()
+            .get_mut(&player_id)
+            .ok_or(SharedAuthorityError::PlayerInvariant)?;
+        wave_player.combat.clear_projectiles_for_local_death();
+        wave_player.target.target_is_immune = true;
+        player.friendly_projectile_sequences.clear();
+        let inventory = player.inventory.clear_pending_for_recall();
+        let cleared_ground_pickups = player.pickups.len();
+        player.pickups.clear();
+        player.eligibility.reward_eligible = false;
+        let committed_at = next.wave.tick();
+        player.phase = AuthorityPhase::Recalled { committed_at };
+        next.state_version = next
+            .state_version
+            .checked_add(1)
+            .ok_or(SharedAuthorityError::StateVersionExhausted)?;
+        *self = next;
+        Ok(AuthorityRecallCommit {
+            committed_at,
+            inventory,
+            cleared_ground_pickups,
+        })
+    }
+
+    /// Produces one stable shared-world snapshot while exposing only the recipient's personal
+    /// pickups. Every friendly projectile carries its owning player entity.
+    #[allow(clippy::cast_precision_loss, clippy::too_many_lines)] // Millitile source values are bounded; one ordered encoder is audit-friendly.
+    pub fn snapshots_for(
+        &self,
+        recipient: EntityId,
+    ) -> Result<Vec<AuthorityEntitySnapshot>, SharedAuthorityError> {
+        if !self.players.contains_key(&recipient) {
+            return Err(SharedAuthorityError::UnknownPlayer(recipient));
+        }
+        let mut snapshots = Vec::new();
+        for (player_id, player) in &self.players {
+            let wave_player = self
+                .wave
+                .players()
+                .get(player_id)
+                .ok_or(SharedAuthorityError::PlayerInvariant)?;
+            let vitals = wave_player.consumables.vitals();
+            snapshots.push(shared_snapshot(
+                player_id.get(),
+                AuthorityEntityKind::Player,
+                player.movement.position(),
+                player.movement.velocity(),
+                0,
+                0,
+                0,
+                vitals.current_health(),
+                vitals.maximum_health(),
+                matches!(player.phase, AuthorityPhase::Alive),
+                player.eligibility.eligible(),
+                false,
+            )?);
+        }
+        for enemy in self.wave.snapshots() {
+            snapshots.push(shared_snapshot(
+                enemy.entity_id.get(),
+                AuthorityEntityKind::Enemy,
+                SimulationVector::new(
+                    enemy.position_milli_tiles.0 as f32 / 1_000.0,
+                    enemy.position_milli_tiles.1 as f32 / 1_000.0,
+                ),
+                SimulationVector::default(),
+                0,
+                0,
+                0,
+                enemy.health.current_health,
+                enemy.health.max_health,
+                enemy.health.alive,
+                false,
+                false,
+            )?);
+        }
+        for (player_id, player) in &self.players {
+            let wave_player = self
+                .wave
+                .players()
+                .get(player_id)
+                .ok_or(SharedAuthorityError::PlayerInvariant)?;
+            for projectile in wave_player.combat.projectiles() {
+                let source = player
+                    .friendly_projectile_sequences
+                    .get(&projectile.id())
+                    .copied()
+                    .ok_or(SharedAuthorityError::MissingProjectileProvenance)?;
+                snapshots.push(shared_snapshot(
+                    projectile.id().get(),
+                    AuthorityEntityKind::FriendlyProjectile,
+                    projectile.position(),
+                    projectile.direction().vector() * projectile.speed_tiles_per_second(),
+                    player_id.get(),
+                    source.0,
+                    source.1,
+                    0,
+                    0,
+                    true,
+                    false,
+                    false,
+                )?);
+            }
+        }
+        for projectile in self.wave.hostile_projectiles() {
+            snapshots.push(shared_snapshot(
+                projectile.id().get(),
+                AuthorityEntityKind::HostileProjectile,
+                projectile.position(),
+                projectile.direction().vector() * projectile.speed_tiles_per_second(),
+                0,
+                0,
+                0,
+                0,
+                0,
+                true,
+                false,
+                false,
+            )?);
+        }
+        let recipient_player = &self.players[&recipient];
+        for pickup in &recipient_player.pickups {
+            snapshots.push(shared_snapshot(
+                pickup.pickup_id().get(),
+                AuthorityEntityKind::PersonalPickup,
+                pickup.position(),
+                SimulationVector::default(),
+                0,
+                0,
+                0,
+                0,
+                0,
+                !pickup.is_collected(),
+                recipient_player.eligibility.eligible(),
+                pickup.is_collected(),
+            )?);
+        }
+        snapshots.sort_by_key(|snapshot| snapshot.entity_id);
+        Ok(snapshots)
+    }
+
     pub fn step(
         &mut self,
         inputs: &BTreeMap<EntityId, AuthorityInput>,
@@ -341,6 +531,16 @@ pub enum SharedAuthorityError {
     IncompleteInputSet,
     #[error("shared arena player stores diverged")]
     PlayerInvariant,
+    #[error("shared arena does not contain player {0}")]
+    UnknownPlayer(EntityId),
+    #[error("shared arena player {0} is terminal or ineligible")]
+    PlayerUnavailable(EntityId),
+    #[error("personal pickup {0:?} does not belong to this player")]
+    PickupNotFound(FieldPickupId),
+    #[error("friendly projectile is missing owner-qualified input provenance")]
+    MissingProjectileProvenance,
+    #[error("shared snapshot value is non-finite or outside millitile range")]
+    SnapshotOutOfRange,
     #[error("friendly projectile ordinal exhausted")]
     ProjectileOrdinalExhausted,
     #[error("shared state version exhausted")]
@@ -359,6 +559,51 @@ pub enum SharedAuthorityError {
     NormalWave(#[from] crate::NormalWaveError),
     #[error(transparent)]
     Collision(#[from] crate::CollisionError),
+}
+
+#[allow(clippy::too_many_arguments)]
+fn shared_snapshot(
+    entity_id: u64,
+    kind: AuthorityEntityKind,
+    position: SimulationVector,
+    velocity: SimulationVector,
+    source_entity_id: u64,
+    source_input_sequence: u32,
+    source_projectile_ordinal: u16,
+    current_health: u32,
+    maximum_health: u32,
+    alive: bool,
+    eligible: bool,
+    collected: bool,
+) -> Result<AuthorityEntitySnapshot, SharedAuthorityError> {
+    Ok(AuthorityEntitySnapshot {
+        entity_id,
+        kind,
+        x_milli_tiles: shared_tiles_to_milli(position.x)?,
+        y_milli_tiles: shared_tiles_to_milli(position.y)?,
+        velocity_x_milli_tiles_per_second: shared_tiles_to_milli(velocity.x)?,
+        velocity_y_milli_tiles_per_second: shared_tiles_to_milli(velocity.y)?,
+        source_entity_id,
+        source_input_sequence,
+        source_projectile_ordinal,
+        current_health,
+        maximum_health,
+        alive,
+        eligible,
+        collected,
+    })
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn shared_tiles_to_milli(value: f32) -> Result<i32, SharedAuthorityError> {
+    if !value.is_finite() {
+        return Err(SharedAuthorityError::SnapshotOutOfRange);
+    }
+    let scaled = (f64::from(value) * 1_000.0).round();
+    if scaled < f64::from(i32::MIN) || scaled > f64::from(i32::MAX) {
+        return Err(SharedAuthorityError::SnapshotOutOfRange);
+    }
+    Ok(scaled as i32)
 }
 
 #[cfg(test)]
@@ -524,6 +769,55 @@ mod tests {
             Err(SharedAuthorityError::IncompleteInputSet)
         ));
         assert_eq!(arena, before);
+    }
+
+    #[test]
+    fn snapshots_are_owner_qualified_and_recall_is_strictly_player_local() {
+        let mut arena = arena();
+        arena
+            .step(&BTreeMap::from([
+                (id(10_000), input(0, 1)),
+                (id(10_001), input(0, 1)),
+            ]))
+            .unwrap();
+        let before = arena.snapshots_for(id(10_001)).unwrap();
+        let projectile_owners = before
+            .iter()
+            .filter(|snapshot| snapshot.kind == AuthorityEntityKind::FriendlyProjectile)
+            .map(|snapshot| snapshot.source_entity_id)
+            .collect::<Vec<_>>();
+        assert_eq!(projectile_owners, vec![10_000, 10_001]);
+
+        let recall = arena.commit_automatic_recall(id(10_000)).unwrap();
+        assert_eq!(recall.committed_at, Tick(2));
+        assert!(matches!(
+            arena.players()[&id(10_000)].phase(),
+            AuthorityPhase::Recalled { .. }
+        ));
+        assert!(matches!(
+            arena.players()[&id(10_001)].phase(),
+            AuthorityPhase::Alive
+        ));
+        let after = arena.snapshots_for(id(10_001)).unwrap();
+        let recalled = after
+            .iter()
+            .find(|snapshot| snapshot.entity_id == 10_000)
+            .unwrap();
+        assert!(!recalled.alive);
+        assert!(after.iter().any(|snapshot| {
+            snapshot.kind == AuthorityEntityKind::FriendlyProjectile
+                && snapshot.source_entity_id == 10_001
+        }));
+        assert!(!after.iter().any(|snapshot| {
+            snapshot.kind == AuthorityEntityKind::FriendlyProjectile
+                && snapshot.source_entity_id == 10_000
+        }));
+
+        let mut released = input(0, 1);
+        released.primary_held = false;
+        arena
+            .step(&BTreeMap::from([(id(10_001), released)]))
+            .unwrap();
     }
 
     #[test]

@@ -118,6 +118,7 @@ pub struct AuthorityEntitySnapshot {
     pub y_milli_tiles: i32,
     pub velocity_x_milli_tiles_per_second: i32,
     pub velocity_y_milli_tiles_per_second: i32,
+    pub source_entity_id: u64,
     pub source_input_sequence: u32,
     pub source_projectile_ordinal: u16,
     pub current_health: u32,
@@ -506,6 +507,7 @@ impl AuthoritativeArena {
             snapshots.push(projectile_snapshot(
                 projectile,
                 AuthorityEntityKind::FriendlyProjectile,
+                self.wave.player().target.entity_id,
                 self.friendly_projectile_sequences
                     .get(&projectile.id())
                     .copied()
@@ -560,9 +562,10 @@ fn enemy_snapshot(
 fn projectile_snapshot(
     projectile: &FriendlyProjectile,
     kind: AuthorityEntityKind,
+    source_entity_id: EntityId,
     source: (u32, u16),
 ) -> Result<AuthorityEntitySnapshot, AuthorityError> {
-    snapshot(
+    let mut result = snapshot(
         projectile.id().get(),
         kind,
         projectile.position(),
@@ -570,7 +573,9 @@ fn projectile_snapshot(
         source.0,
         source.1,
         SnapshotState::active_non_health(),
-    )
+    )?;
+    result.source_entity_id = source_entity_id.get();
+    Ok(result)
 }
 
 fn hostile_projectile_snapshot(
@@ -624,6 +629,7 @@ fn snapshot(
         y_milli_tiles: tiles_to_milli(position.y)?,
         velocity_x_milli_tiles_per_second: tiles_to_milli(velocity.x)?,
         velocity_y_milli_tiles_per_second: tiles_to_milli(velocity.y)?,
+        source_entity_id: 0,
         source_input_sequence,
         source_projectile_ordinal,
         current_health: state.current_health,

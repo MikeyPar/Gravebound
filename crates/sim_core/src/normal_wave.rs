@@ -652,7 +652,10 @@ impl NormalWaveSimulation {
             let target = self
                 .players
                 .values()
-                .filter(|player| player.consumables.vitals().current_health() > 0)
+                .filter(|player| {
+                    player.consumables.vitals().current_health() > 0
+                        && !player.target.target_is_immune
+                })
                 .min_by(|left, right| {
                     let left_delta = left.target.position - actor.actor.position();
                     let right_delta = right.target.position - actor.actor.position();
@@ -727,6 +730,7 @@ impl NormalWaveSimulation {
                 .iter()
                 .filter(|(_, player)| {
                     player.consumables.vitals().current_health() > 0
+                        && !player.target.target_is_immune
                         && lane.geometry.contacts_player(player.target.position)
                 })
                 .map(|(id, _)| *id)

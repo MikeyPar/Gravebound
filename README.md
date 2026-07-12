@@ -102,7 +102,7 @@ Concept images establish mood, hierarchy, and visual language. They are not fina
 
 ## Current Next Step
 
-Continue [`GB-M02-09`](docs/tasks/GB-M02-09.md) by moving gameplay authority from each `ManagedSession` into its `HostedInstance`, producing recipient-specific snapshots from the implemented `SharedAuthoritativeArena`, and preserving player-local LinkLost/death/Recall outcomes. Multi-target hostile projectiles, per-player grace, shared lane contacts, globally ordered friendly damage, disjoint projectile identities, protocol identity/provenance, and `fp.1.0.0` manual-Recall rejection are complete. Then replace the isolated four-client smoke with shared enemy-health/death assertions, rerun every gate, and rebuild the four-human package. Do not begin M03 until M02 closes.
+Continue [`GB-M02-09`](docs/tasks/GB-M02-09.md) by moving gameplay authority from each `ManagedSession` into its `HostedInstance` and binding endpoint input/lifecycle/mutations to the implemented `SharedAuthoritativeArena`. Multi-target combat, player-local automatic Recall, recipient-only pickup snapshots, owner-qualified projectiles, protocol identity/provenance, and `fp.1.0.0` manual-Recall rejection are complete. Then replace the isolated four-client smoke with shared enemy-health/death assertions, rerun every gate, and rebuild the four-human package. Do not begin M03 until M02 closes.
 
 ## Resolved prior handoff
 

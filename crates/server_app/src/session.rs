@@ -342,7 +342,6 @@ impl AuthoritativeSession {
             .snapshot_sequence
             .checked_add(1)
             .ok_or(SessionError::SequenceExhausted)?;
-        let controlled_entity_id = self.arena.player().target.entity_id.get();
         let entities = self
             .arena
             .snapshots()?
@@ -360,12 +359,7 @@ impl AuthoritativeSession {
                 y_milli_tiles: entity.y_milli_tiles,
                 velocity_x_milli_tiles_per_second: entity.velocity_x_milli_tiles_per_second,
                 velocity_y_milli_tiles_per_second: entity.velocity_y_milli_tiles_per_second,
-                source_entity_id: if matches!(entity.kind, AuthorityEntityKind::FriendlyProjectile)
-                {
-                    controlled_entity_id
-                } else {
-                    0
-                },
+                source_entity_id: entity.source_entity_id,
                 source_input_sequence: entity.source_input_sequence,
                 source_projectile_ordinal: entity.source_projectile_ordinal,
                 current_health: entity.current_health,

@@ -531,7 +531,10 @@ impl HostileProjectileSimulation {
             arena,
             players
                 .values()
-                .filter(|player| player.consumables.vitals().current_health() > 0)
+                .filter(|player| {
+                    player.consumables.vitals().current_health() > 0
+                        && !player.target.target_is_immune
+                })
                 .map(|player| {
                     EnemyHurtbox::new(
                         player.target.entity_id,
