@@ -1,6 +1,6 @@
 # ADR-029 — PostgreSQL persistence boundary
 
-**Status:** Proposed; blocked on `SPEC-CONFLICT-005`
+**Status:** Accepted on 2026-07-12 under the owner's approval of all three `SPEC-CONFLICT-005` resolutions
 
 **Owner:** Backend/tools
 
@@ -21,7 +21,7 @@ The canonical GDD requires one authoritative modular-monolith server backed by P
 - Use actual PostgreSQL for integration tests through Docker Compose or `TEST_DATABASE_URL`, with a pinned PostgreSQL service in CI. Never substitute SQLite or silently skip the suite.
 - Retain an explicit wipeable test namespace through the pre-Early-Access rehearsals required by `TECH-030`.
 
-The exact Rust access-layer crate/version is selected and pinned during implementation after compatibility and maintenance review; this proposed ADR does not fabricate that dependency decision.
+The exact Rust access-layer crate/version is selected and pinned during implementation after compatibility and maintenance review; this ADR does not fabricate that dependency decision.
 
 ## Rejected options
 

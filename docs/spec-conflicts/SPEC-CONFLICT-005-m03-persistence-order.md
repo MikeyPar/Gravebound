@@ -1,10 +1,10 @@
 # SPEC-CONFLICT-005 — M03 persistence dependency and verification order
 
-**Status:** Open — owner decision required
+**Status:** Resolved — all three recommended resolutions approved
 
 **Raised:** 2026-07-12
 
-**Blocks:** PostgreSQL implementation in `GB-M03-02` and `GB-M03-11`
+**Blocks:** None
 
 **Authorities reviewed:** canonical GDD, Content Production Specification v1, Development Roadmap v1
 
@@ -53,3 +53,7 @@ The parent `GB-M03-02` remains open until every named durable aggregate passes; 
 ## Approval requested
 
 Approve all three recommended resolutions, or provide an amended ordering/test policy. Implementation remains blocked until the package dependency is explicit. A local Docker installation is recommended for fast iteration, but a disposable PostgreSQL URL is an equivalent authorized verification route.
+
+## Approval record
+
+On 2026-07-12, the project owner approved all three recommended resolutions without amendment. The incremental parent-package split, domain-owned migration contents, and real-PostgreSQL verification policy are authoritative for M03 unless a later reviewed specification change replaces them.
