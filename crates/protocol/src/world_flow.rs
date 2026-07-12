@@ -10,36 +10,35 @@ pub const WORLD_FLOW_ID_MAX_BYTES: usize = 96;
 pub const INSTANCE_LINEAGE_ID_BYTES: usize = 16;
 pub const TRANSFER_ID_BYTES: usize = 16;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum CharacterWorldLocation {
+pub enum SafeArrival {
+    HallDefault,
+    SpawnAnchor {
+        spawn_id: WireText<WORLD_FLOW_ID_MAX_BYTES>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CharacterLocation {
     CharacterSelect,
-    LanternHalls,
-    CoreMicrorealm,
-    BellSepulcher,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HallSpawnKind {
-    Default,
-    CharacterSelectReturn,
-}
-
-impl CharacterWorldLocation {
-    #[must_use]
-    pub const fn is_danger(self) -> bool {
-        matches!(self, Self::CoreMicrorealm | Self::BellSepulcher)
-    }
+    Safe {
+        location_id: WireText<WORLD_FLOW_ID_MAX_BYTES>,
+        arrival: SafeArrival,
+    },
+    Danger {
+        location_id: WireText<WORLD_FLOW_ID_MAX_BYTES>,
+        instance_lineage_id: [u8; INSTANCE_LINEAGE_ID_BYTES],
+        entry_restore_point_id: [u8; TRANSFER_ID_BYTES],
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CharacterLocationSnapshot {
     pub character_id: [u8; CHARACTER_ID_BYTES],
     pub character_version: u64,
-    pub location: CharacterWorldLocation,
-    pub instance_lineage_id: Option<[u8; INSTANCE_LINEAGE_ID_BYTES]>,
-    pub hall_spawn: Option<HallSpawnKind>,
+    pub location: CharacterLocation,
 }
 
 impl CharacterLocationSnapshot {
@@ -50,13 +49,33 @@ impl CharacterLocationSnapshot {
         if self.character_version == 0 {
             return Err(WorldFlowValidationError::ZeroCharacterVersion);
         }
-        if self.location.is_danger() != self.instance_lineage_id.is_some()
-            || self.instance_lineage_id.is_some_and(|id| all_zero(&id))
-        {
-            return Err(WorldFlowValidationError::InstanceLocationMismatch);
-        }
-        if (self.location == CharacterWorldLocation::LanternHalls) != self.hall_spawn.is_some() {
-            return Err(WorldFlowValidationError::HallSpawnMismatch);
+        match &self.location {
+            CharacterLocation::CharacterSelect => {}
+            CharacterLocation::Safe {
+                location_id,
+                arrival,
+            } => {
+                if !valid_stable_id(location_id.as_str()) {
+                    return Err(WorldFlowValidationError::InvalidLocationId);
+                }
+                if let SafeArrival::SpawnAnchor { spawn_id } = arrival
+                    && !valid_stable_id(spawn_id.as_str())
+                {
+                    return Err(WorldFlowValidationError::InvalidLocationId);
+                }
+            }
+            CharacterLocation::Danger {
+                location_id,
+                instance_lineage_id,
+                entry_restore_point_id,
+            } => {
+                if !valid_stable_id(location_id.as_str())
+                    || all_zero(instance_lineage_id)
+                    || all_zero(entry_restore_point_id)
+                {
+                    return Err(WorldFlowValidationError::InstanceLocationMismatch);
+                }
+            }
         }
         Ok(())
     }
@@ -66,6 +85,7 @@ impl CharacterLocationSnapshot {
 #[serde(rename_all = "snake_case")]
 pub enum WorldTransferCommand {
     EnterHallFromCharacterSelect,
+    ReturnToCharacterSelect,
     UsePortal {
         portal_id: WireText<WORLD_FLOW_ID_MAX_BYTES>,
     },
@@ -77,7 +97,9 @@ impl WorldTransferCommand {
             Self::UsePortal { portal_id } if !valid_stable_id(portal_id.as_str()) => {
                 Err(WorldFlowValidationError::UnknownTransferSource)
             }
-            Self::EnterHallFromCharacterSelect | Self::UsePortal { .. } => Ok(()),
+            Self::EnterHallFromCharacterSelect
+            | Self::ReturnToCharacterSelect
+            | Self::UsePortal { .. } => Ok(()),
         }
     }
 }
@@ -184,6 +206,7 @@ pub enum WorldTransferResultCode {
     InvalidSource,
     OutOfRange,
     ContentDisabled,
+    DestinationDisabled,
     TransferInProgress,
     ContentMismatch,
     IdempotencyConflict,
@@ -197,42 +220,20 @@ pub enum WorldTransferResultCode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorldTransferResult {
-    pub mutation_id: [u8; MUTATION_ID_BYTES],
-    pub accepted: bool,
-    pub code: WorldTransferResultCode,
-    pub snapshot: Option<CharacterLocationSnapshot>,
-    pub transfer_id: Option<[u8; TRANSFER_ID_BYTES]>,
-}
-
-impl WorldTransferResult {
-    pub fn validate(&self) -> Result<(), WorldFlowValidationError> {
-        if all_zero(&self.mutation_id) {
-            return Err(WorldFlowValidationError::ZeroMutationId);
-        }
-        if self.accepted != (self.code == WorldTransferResultCode::Accepted) {
-            return Err(WorldFlowValidationError::TransferResultMismatch);
-        }
-        if self.accepted && self.snapshot.is_none() {
-            return Err(WorldFlowValidationError::TransferResultMismatch);
-        }
-        if let Some(snapshot) = &self.snapshot {
-            snapshot.validate()?;
-        }
-        if self.transfer_id.is_some_and(|id| all_zero(&id))
-            || self.transfer_id.is_some() != self.accepted
-        {
-            return Err(WorldFlowValidationError::TransferIdentityMismatch);
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorldFlowResult {
-    Location(CharacterLocationSnapshot),
-    Transfer(WorldTransferResult),
+    Location {
+        request_sequence: u32,
+        snapshot: CharacterLocationSnapshot,
+    },
+    Transfer {
+        request_sequence: u32,
+        mutation_id: [u8; MUTATION_ID_BYTES],
+        accepted: bool,
+        code: WorldTransferResultCode,
+        snapshot: Option<CharacterLocationSnapshot>,
+        transfer_id: Option<[u8; TRANSFER_ID_BYTES]>,
+    },
     Error {
         request_sequence: u32,
         code: WorldTransferResultCode,
@@ -243,8 +244,43 @@ pub enum WorldFlowResult {
 impl WorldFlowResult {
     pub fn validate(&self) -> Result<(), WorldFlowValidationError> {
         match self {
-            Self::Location(snapshot) => snapshot.validate(),
-            Self::Transfer(result) => result.validate(),
+            Self::Location {
+                request_sequence,
+                snapshot,
+            } => {
+                if *request_sequence == 0 {
+                    return Err(WorldFlowValidationError::ZeroSequence);
+                }
+                snapshot.validate()
+            }
+            Self::Transfer {
+                request_sequence,
+                mutation_id,
+                accepted,
+                code,
+                snapshot,
+                transfer_id,
+            } => {
+                if *request_sequence == 0 {
+                    return Err(WorldFlowValidationError::ZeroSequence);
+                }
+                if all_zero(mutation_id) {
+                    return Err(WorldFlowValidationError::ZeroMutationId);
+                }
+                if *accepted != (*code == WorldTransferResultCode::Accepted)
+                    || (*accepted && snapshot.is_none())
+                {
+                    return Err(WorldFlowValidationError::TransferResultMismatch);
+                }
+                if let Some(snapshot) = snapshot {
+                    snapshot.validate()?;
+                }
+                if transfer_id.is_some_and(|id| all_zero(&id)) || transfer_id.is_some() != *accepted
+                {
+                    return Err(WorldFlowValidationError::TransferIdentityMismatch);
+                }
+                Ok(())
+            }
             Self::Error {
                 request_sequence,
                 code,
@@ -277,10 +313,10 @@ pub enum WorldFlowValidationError {
     ZeroPayloadHash,
     #[error("transfer source is not part of the approved Core route")]
     UnknownTransferSource,
-    #[error("danger location and instance lineage disagree")]
+    #[error("danger location, instance lineage, or restore-point identity is invalid")]
     InstanceLocationMismatch,
-    #[error("Hall location and spawn projection disagree")]
-    HallSpawnMismatch,
+    #[error("safe or danger location contains an invalid stable ID")]
+    InvalidLocationId,
     #[error("mutation payload hash does not match its canonical payload")]
     PayloadHashMismatch,
     #[error("transfer result acceptance, code, or snapshot disagree")]
@@ -365,11 +401,14 @@ mod tests {
         let danger = CharacterLocationSnapshot {
             character_id: [2; CHARACTER_ID_BYTES],
             character_version: 2,
-            location: CharacterWorldLocation::CoreMicrorealm,
-            instance_lineage_id: Some([3; INSTANCE_LINEAGE_ID_BYTES]),
-            hall_spawn: None,
+            location: CharacterLocation::Danger {
+                location_id: WireText::new("world.core_microrealm_01").unwrap(),
+                instance_lineage_id: [3; INSTANCE_LINEAGE_ID_BYTES],
+                entry_restore_point_id: [5; TRANSFER_ID_BYTES],
+            },
         };
-        let accepted = WorldTransferResult {
+        let accepted = WorldFlowResult::Transfer {
+            request_sequence: 1,
             mutation_id: [1; MUTATION_ID_BYTES],
             accepted: true,
             code: WorldTransferResultCode::Accepted,
@@ -378,7 +417,11 @@ mod tests {
         };
         assert_eq!(accepted.validate(), Ok(()));
         let mut invalid = danger;
-        invalid.instance_lineage_id = None;
+        invalid.location = CharacterLocation::Danger {
+            location_id: WireText::new("world.core_microrealm_01").unwrap(),
+            instance_lineage_id: [0; INSTANCE_LINEAGE_ID_BYTES],
+            entry_restore_point_id: [5; TRANSFER_ID_BYTES],
+        };
         assert_eq!(
             invalid.validate(),
             Err(WorldFlowValidationError::InstanceLocationMismatch)
@@ -387,16 +430,15 @@ mod tests {
 
     #[test]
     fn stage_disabled_result_is_explicit_and_nonaccepted() {
-        let result = WorldTransferResult {
+        let result = WorldFlowResult::Transfer {
+            request_sequence: 1,
             mutation_id: [1; MUTATION_ID_BYTES],
             accepted: false,
             code: WorldTransferResultCode::StageDisabled,
             snapshot: Some(CharacterLocationSnapshot {
                 character_id: [2; CHARACTER_ID_BYTES],
                 character_version: 1,
-                location: CharacterWorldLocation::CharacterSelect,
-                instance_lineage_id: None,
-                hall_spawn: None,
+                location: CharacterLocation::CharacterSelect,
             }),
             transfer_id: None,
         };

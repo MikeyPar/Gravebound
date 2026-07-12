@@ -36,10 +36,10 @@ pub use messages::{
     SocialPingKind, WireMessage,
 };
 pub use world_flow::{
-    CharacterLocationSnapshot, CharacterWorldLocation, HallSpawnKind, INSTANCE_LINEAGE_ID_BYTES,
+    CharacterLocation, CharacterLocationSnapshot, INSTANCE_LINEAGE_ID_BYTES, SafeArrival,
     TRANSFER_ID_BYTES, WORLD_FLOW_ID_MAX_BYTES, WorldFlowFrame, WorldFlowRequest, WorldFlowResult,
     WorldFlowValidationError, WorldTransferCommand, WorldTransferMutation, WorldTransferPayload,
-    WorldTransferResult, WorldTransferResultCode,
+    WorldTransferResultCode,
 };
 
 use serde::{Deserialize, Serialize};
