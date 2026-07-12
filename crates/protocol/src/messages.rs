@@ -23,6 +23,7 @@ pub enum MessageKind {
     SnapshotChunk,
     ReliableEvent,
     MutationRequest,
+    SessionControlFrame,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -266,6 +267,90 @@ pub struct MutationRequest {
     pub placement: PickupPlacement,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionControlRequest {
+    Join,
+    Reconnect { prior_session_id: WireText<64> },
+    Leave,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionControlFrame {
+    pub sequence: u32,
+    pub client_tick: u64,
+    pub client_monotonic_micros: u64,
+    pub request: SessionControlRequest,
+}
+
+impl SessionControlFrame {
+    pub const fn validate(&self) -> Result<(), MessageValidationError> {
+        if self.sequence == 0 {
+            return Err(MessageValidationError::ZeroSequence);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionDestination {
+    CombatInstance,
+    LanternHalls,
+    DeathFinal,
+    Closed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionControlResultCode {
+    Joined,
+    Reattached,
+    LeaveAccepted,
+    SessionNotFound,
+    Unauthorized,
+    StaleSequence,
+    SessionResolved,
+    ServerShuttingDown,
+}
+
+impl SessionControlResultCode {
+    #[must_use]
+    pub const fn is_accepted(self) -> bool {
+        matches!(self, Self::Joined | Self::Reattached | Self::LeaveAccepted)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionControlResult {
+    pub request_sequence: u32,
+    pub accepted: bool,
+    pub code: SessionControlResultCode,
+    pub session_id: WireText<64>,
+    pub destination: SessionDestination,
+    pub server_tick: u64,
+    pub state_version: u64,
+    pub server_monotonic_micros: u64,
+    pub replaced_previous_transport: bool,
+}
+
+impl SessionControlResult {
+    const fn validate(&self) -> Result<(), MessageValidationError> {
+        if self.request_sequence == 0 {
+            return Err(MessageValidationError::ZeroSequence);
+        }
+        if self.accepted != self.code.is_accepted() {
+            return Err(MessageValidationError::SessionControlResultMismatch);
+        }
+        if self.replaced_previous_transport
+            && !matches!(self.code, SessionControlResultCode::Reattached)
+        {
+            return Err(MessageValidationError::UnexpectedTransportReplacement);
+        }
+        Ok(())
+    }
+}
+
 impl MutationRequest {
     pub const fn validate(&self) -> Result<(), MessageValidationError> {
         if all_zero(&self.mutation_id) {
@@ -287,6 +372,7 @@ pub enum ControlEvent {
         server_monotonic_micros: u64,
     },
     ServerShuttingDown,
+    SessionResult(SessionControlResult),
     Error {
         code: WireText<64>,
     },
@@ -328,6 +414,7 @@ impl ReliableEvent {
                 action_sequence, ..
             } if *action_sequence == 0 => Err(MessageValidationError::ZeroSequence),
             Self::MutationResult(result) => result.validate(),
+            Self::Control(ControlEvent::SessionResult(result)) => result.validate(),
             Self::SocialPing { ping_sequence, .. } if *ping_sequence == 0 => {
                 Err(MessageValidationError::ZeroSequence)
             }
@@ -362,6 +449,7 @@ pub enum WireMessage {
     SnapshotChunk(SnapshotChunk),
     ReliableEvent(ReliableEventFrame),
     MutationRequest(MutationRequest),
+    SessionControlFrame(SessionControlFrame),
 }
 
 impl WireMessage {
@@ -375,13 +463,16 @@ impl WireMessage {
             Self::SnapshotChunk(_) => MessageKind::SnapshotChunk,
             Self::ReliableEvent(_) => MessageKind::ReliableEvent,
             Self::MutationRequest(_) => MessageKind::MutationRequest,
+            Self::SessionControlFrame(_) => MessageKind::SessionControlFrame,
         }
     }
 
     #[must_use]
     pub const fn channel(&self) -> NetworkChannel {
         match self {
-            Self::ClientHello(_) | Self::HandshakeResponse(_) => NetworkChannel::Control,
+            Self::ClientHello(_) | Self::HandshakeResponse(_) | Self::SessionControlFrame(_) => {
+                NetworkChannel::Control
+            }
             Self::InputFrame(_) => NetworkChannel::Input,
             Self::ActionFrame(_) => NetworkChannel::Action,
             Self::SnapshotChunk(_) => NetworkChannel::Snapshot,
@@ -408,6 +499,7 @@ impl WireMessage {
             Self::SnapshotChunk(value) => value.validate(),
             Self::ReliableEvent(value) => value.validate(),
             Self::MutationRequest(value) => value.validate(),
+            Self::SessionControlFrame(value) => value.validate(),
         }
     }
 }
@@ -446,6 +538,10 @@ pub enum MessageValidationError {
     ZeroPickupId,
     #[error("mutation accepted flag and result code disagree")]
     MutationResultMismatch,
+    #[error("session control accepted flag and result code disagree")]
+    SessionControlResultMismatch,
+    #[error("only a successful reattach may replace a previous transport")]
+    UnexpectedTransportReplacement,
     #[error("handshake payload failed semantic validation")]
     Handshake,
 }
@@ -586,6 +682,19 @@ mod tests {
         assert_eq!(mutation.channel(), NetworkChannel::Mutation);
         assert!(!mutation.uses_datagram());
         assert_eq!(mutation.validate(), Ok(()));
+
+        let control = WireMessage::SessionControlFrame(SessionControlFrame {
+            sequence: 1,
+            client_tick: 2,
+            client_monotonic_micros: 3,
+            request: SessionControlRequest::Reconnect {
+                prior_session_id: WireText::new("session-1").unwrap(),
+            },
+        });
+        assert_eq!(control.kind(), MessageKind::SessionControlFrame);
+        assert_eq!(control.channel(), NetworkChannel::Control);
+        assert!(!control.uses_datagram());
+        assert_eq!(control.validate(), Ok(()));
     }
 
     #[test]
@@ -618,5 +727,44 @@ mod tests {
             .validate(),
             Err(MessageValidationError::MutationResultMismatch)
         );
+    }
+
+    #[test]
+    fn session_control_is_bounded_typed_and_consistent() {
+        assert_eq!(
+            SessionControlFrame {
+                sequence: 0,
+                client_tick: 0,
+                client_monotonic_micros: 0,
+                request: SessionControlRequest::Join,
+            }
+            .validate(),
+            Err(MessageValidationError::ZeroSequence)
+        );
+        let mut result = SessionControlResult {
+            request_sequence: 1,
+            accepted: true,
+            code: SessionControlResultCode::Joined,
+            session_id: WireText::new("session-1").unwrap(),
+            destination: SessionDestination::CombatInstance,
+            server_tick: 1,
+            state_version: 1,
+            server_monotonic_micros: 1,
+            replaced_previous_transport: false,
+        };
+        assert_eq!(result.validate(), Ok(()));
+        result.accepted = false;
+        assert_eq!(
+            result.validate(),
+            Err(MessageValidationError::SessionControlResultMismatch)
+        );
+        result.accepted = true;
+        result.replaced_previous_transport = true;
+        assert_eq!(
+            result.validate(),
+            Err(MessageValidationError::UnexpectedTransportReplacement)
+        );
+        result.code = SessionControlResultCode::Reattached;
+        assert_eq!(result.validate(), Ok(()));
     }
 }

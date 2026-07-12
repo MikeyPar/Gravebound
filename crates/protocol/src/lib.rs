@@ -22,7 +22,9 @@ pub use messages::{
     ENTITY_STATE_COLLECTED, ENTITY_STATE_ELIGIBLE, EntityKind, EntitySnapshot, InputFrame,
     MAX_SNAPSHOT_CHUNKS, MAX_SNAPSHOT_ENTITIES_PER_CHUNK, MessageKind, MessageValidationError,
     MutationRequest, MutationResult, MutationResultCode, PatternDescriptor, PickupPlacement,
-    ReliableEvent, ReliableEventFrame, SnapshotChunk, SocialPingKind, WireMessage,
+    ReliableEvent, ReliableEventFrame, SessionControlFrame, SessionControlRequest,
+    SessionControlResult, SessionControlResultCode, SessionDestination, SnapshotChunk,
+    SocialPingKind, WireMessage,
 };
 
 use serde::{Deserialize, Serialize};
@@ -31,7 +33,7 @@ use thiserror::Error;
 /// First incompatible protocol generation.
 pub const PROTOCOL_MAJOR: u16 = 1;
 /// Backward-compatible feature generation within [`PROTOCOL_MAJOR`].
-pub const PROTOCOL_MINOR: u16 = 2;
+pub const PROTOCOL_MINOR: u16 = 3;
 /// Authoritative simulation and client-input cadence from GDD `TECH-012`.
 pub const SIMULATION_HZ: u16 = 30;
 /// Baseline world snapshot cadence from GDD `TECH-012`.

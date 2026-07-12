@@ -25,7 +25,7 @@ PASS. The live-instance server is final for every gameplay category named by the
 
 ## Protocol and transport evidence
 
-- Protocol advanced to `1.1` for M02-02 and then to `1.2` in M02-03 for authoritative velocity/projectile-presentation facts; exact minor match is required until a tested adapter exists.
+- Protocol advanced to `1.1` for M02-02, `1.2` in M02-03 for authoritative velocity/projectile-presentation facts, and `1.3` in M02-04 for lifecycle Control messages; exact minor match is required until a tested adapter exists.
 - Mutation request uses a nonzero 128-bit idempotency key, stable pickup ID, and closed placement enum.
 - Mutation result has a typed code whose accepted flag must agree with `Accepted`.
 - Snapshots carry state version and closed player/enemy/friendly-projectile/hostile-projectile/personal-pickup kinds.

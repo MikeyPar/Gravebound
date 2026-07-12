@@ -1,10 +1,11 @@
 use std::{collections::BTreeMap, path::Path};
 
 use protocol::{
-    ActionFrame, ActionKind, ActionResultCode, ENTITY_STATE_ALIVE, ENTITY_STATE_COLLECTED,
-    ENTITY_STATE_ELIGIBLE, EntityKind, EntitySnapshot, InputFrame, MAX_SNAPSHOT_ENTITIES_PER_CHUNK,
-    MutationRequest, MutationResult, MutationResultCode, PickupPlacement, ReliableEvent,
-    ReliableEventFrame, SnapshotChunk, WireMessage,
+    ActionFrame, ActionKind, ActionResultCode, ControlEvent, ENTITY_STATE_ALIVE,
+    ENTITY_STATE_COLLECTED, ENTITY_STATE_ELIGIBLE, EntityKind, EntitySnapshot, InputFrame,
+    MAX_SNAPSHOT_ENTITIES_PER_CHUNK, MutationRequest, MutationResult, MutationResultCode,
+    PickupPlacement, ReliableEvent, ReliableEventFrame, SessionControlResult, SnapshotChunk,
+    WireMessage,
 };
 use sim_core::{
     AimDirection, AuthoritativeArena, AuthorityEntityKind, AuthorityError, AuthorityInput,
@@ -103,6 +104,20 @@ impl AuthoritativeSession {
     #[must_use]
     pub const fn arena(&self) -> &AuthoritativeArena {
         &self.arena
+    }
+
+    /// Stops transport-carried continuous intent without changing authoritative gameplay state.
+    /// The server continues stepping the vulnerable character during `LinkLost`.
+    pub fn neutralize_transport_input(&mut self) {
+        self.latest_input.movement_x_milli = 0;
+        self.latest_input.movement_y_milli = 0;
+        self.latest_input.held_primary = false;
+    }
+
+    pub(crate) fn commit_emergency_recall(
+        &mut self,
+    ) -> Result<sim_core::AuthorityRecallCommit, SessionError> {
+        self.arena.commit_emergency_recall().map_err(Into::into)
     }
 
     pub fn submit_input(&mut self, frame: &InputFrame) -> Result<InputDisposition, SessionError> {
@@ -289,6 +304,17 @@ impl AuthoritativeSession {
             server_tick: self.arena.player().combat.tick().0,
             event,
         })
+    }
+
+    pub(crate) fn emit_control_result(
+        &mut self,
+        result: SessionControlResult,
+    ) -> Result<ReliableEventFrame, SessionError> {
+        self.reliable_event(ReliableEvent::Control(ControlEvent::SessionResult(result)))
+    }
+
+    pub(crate) fn emit_shutdown_event(&mut self) -> Result<ReliableEventFrame, SessionError> {
+        self.reliable_event(ReliableEvent::Control(ControlEvent::ServerShuttingDown))
     }
 }
 

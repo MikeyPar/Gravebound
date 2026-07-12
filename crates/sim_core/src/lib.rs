@@ -42,7 +42,8 @@ pub use arena::{
 };
 pub use authority::{
     AuthoritativeArena, AuthorityDefinitions, AuthorityEntityKind, AuthorityEntitySnapshot,
-    AuthorityError, AuthorityInput, AuthorityPhase, AuthorityStep, PickupEligibility,
+    AuthorityError, AuthorityInput, AuthorityPhase, AuthorityRecallCommit, AuthorityStep,
+    PickupEligibility,
 };
 pub use boss::{
     BELL_PROCTOR_CROSS_ID, BELL_PROCTOR_FAN_ID, BELL_PROCTOR_ID, BELL_PROCTOR_REWARD_ID,
@@ -131,7 +132,7 @@ pub use inventory::{
     FIELD_PICKUP_LIFETIME_TICKS, FieldPickup, FieldPickupAccess, FieldPickupId,
     INTERACT_PICKUP_RADIUS_TILES, InventoryError, InventoryStack, ItemContentId, ItemInstanceId,
     OwnedItemLocation, PROTOTYPE_BACKPACK_CAPACITY, PickupOutcome, PlacementChoice,
-    PrototypeInventory, RestartCleanup, RewardChoice, RewardOutcome,
+    PrototypeInventory, RecallCleanup, RestartCleanup, RewardChoice, RewardOutcome,
 };
 pub use movement::{
     ForcedMovementStep, GRAVE_ARBALIST_SPEED_TILES_PER_SECOND, MOVEMENT_RESPONSE_TICKS,

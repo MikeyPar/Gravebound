@@ -526,6 +526,15 @@ impl PrototypeInventory {
         }
     }
 
+    /// Applies the inventory portion of Emergency Recall: equipped gear and the belt remain,
+    /// while every unsecured backpack stack is destroyed.
+    pub fn clear_pending_for_recall(&mut self) -> RecallCleanup {
+        let removed_backpack_stacks = self.backpack.iter_mut().filter_map(Option::take).collect();
+        RecallCleanup {
+            removed_backpack_stacks,
+        }
+    }
+
     fn place_stack(
         &mut self,
         incoming: &mut InventoryStack,
@@ -791,6 +800,11 @@ pub enum RewardOutcome {
 pub struct RestartCleanup {
     pub removed_stacks: Vec<InventoryStack>,
     pub cleared_belt_tonics: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecallCleanup {
+    pub removed_backpack_stacks: Vec<InventoryStack>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -1530,6 +1544,21 @@ mod tests {
             inventory.belt().slots(),
             &[BeltSlot::Empty, BeltSlot::Empty]
         );
+    }
+
+    #[test]
+    fn emergency_recall_preserves_equipped_and_belt_but_destroys_backpack() {
+        let mut inventory = PrototypeInventory::first_playable_belt();
+        inventory.equipped[EquipmentSlot::Weapon.index()] =
+            equipment(1, EquipmentSlot::Weapon).equipment().cloned();
+        inventory.backpack[0] = Some(equipment(2, EquipmentSlot::Charm));
+        let equipped_before = inventory.equipped().clone();
+        let belt_before = *inventory.belt();
+        let cleanup = inventory.clear_pending_for_recall();
+        assert_eq!(cleanup.removed_backpack_stacks.len(), 1);
+        assert_eq!(inventory.equipped(), &equipped_before);
+        assert_eq!(inventory.belt(), &belt_before);
+        assert!(inventory.backpack().iter().all(Option::is_none));
     }
 
     #[test]

@@ -86,6 +86,7 @@ const fn message_kind_byte(kind: MessageKind) -> u8 {
         MessageKind::SnapshotChunk => 5,
         MessageKind::ReliableEvent => 6,
         MessageKind::MutationRequest => 7,
+        MessageKind::SessionControlFrame => 8,
     }
 }
 
@@ -98,6 +99,7 @@ const fn message_kind_from_byte(value: u8) -> Result<MessageKind, WireCodecError
         5 => Ok(MessageKind::SnapshotChunk),
         6 => Ok(MessageKind::ReliableEvent),
         7 => Ok(MessageKind::MutationRequest),
+        8 => Ok(MessageKind::SessionControlFrame),
         other => Err(WireCodecError::UnknownMessageKind(other)),
     }
 }
@@ -153,7 +155,7 @@ mod tests {
         assert_eq!(decode_frame(&frame).unwrap(), input_message());
         assert_eq!(
             blake3::hash(&frame).to_hex().to_string(),
-            "ac4f6afd917999ca42d12985eeb9db1d9e53cb67c54cbfa1e619c4c53fabb5b6"
+            "f184214e389ffdcf927673533a20b4bcda6454d1209a5fdf08da9dff148c9c87"
         );
     }
 

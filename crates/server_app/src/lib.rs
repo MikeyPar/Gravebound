@@ -4,8 +4,13 @@
 //! `sim_core`. It must not own rendering, client settings, gameplay rules, or persistence logic.
 //! M02 deliberately has no database dependency.
 
+mod lifecycle;
 mod session;
 
+pub use lifecycle::{
+    LINK_LOST_TICKS, LifecycleError, LifecycleResponse, LogicalSessionId, ManagedSession,
+    SessionDirectory, SessionOwnerId, SessionPhase, TransportId,
+};
 pub use session::{AuthoritativeSession, InputDisposition, SessionError};
 
 use protocol::{
@@ -14,6 +19,10 @@ use protocol::{
     WireText, decode_frame, encode_frame,
 };
 use thiserror::Error;
+
+pub const TRANSPORT_REPLACED_CLOSE_CODE: u32 = 0x100;
+pub const LEAVE_ACCEPTED_CLOSE_CODE: u32 = 0x101;
+pub const SERVER_SHUTDOWN_CLOSE_CODE: u32 = 0x102;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ServerFoundation {
@@ -224,6 +233,48 @@ pub async fn serve_gameplay_reliable(
     Ok(response)
 }
 
+/// Serves one bounded Control-channel lifecycle request. Authentication has already resolved the
+/// opaque owner ID; ticket bytes never enter the directory. The caller owns the transport table
+/// and closes `invalidated_transport` only after this response is committed.
+pub async fn serve_session_control(
+    connection: &quinn::Connection,
+    directory: &mut SessionDirectory,
+    owner: SessionOwnerId,
+    transport: TransportId,
+    content_root: &std::path::Path,
+    server_monotonic_micros: u64,
+) -> Result<LifecycleResponse, ServerTransportError> {
+    let (mut send, mut receive) = connection
+        .accept_bi()
+        .await
+        .map_err(|error| ServerTransportError::Quic(error.to_string()))?;
+    let request = receive
+        .read_to_end(RELIABLE_FRAME_LIMIT)
+        .await
+        .map_err(|error| ServerTransportError::Quic(error.to_string()))?;
+    let WireMessage::SessionControlFrame(frame) = decode_frame(&request)? else {
+        return Err(ServerTransportError::UnexpectedMessage);
+    };
+    let response = directory.handle_control(
+        owner,
+        transport,
+        &frame,
+        content_root,
+        server_monotonic_micros,
+    )?;
+    let wire = WireMessage::ReliableEvent(response.event.clone());
+    send.write_all(&encode_frame(&wire)?)
+        .await
+        .map_err(|error| ServerTransportError::Quic(error.to_string()))?;
+    send.finish()
+        .map_err(|error| ServerTransportError::Quic(error.to_string()))?;
+    Ok(response)
+}
+
+pub fn close_transport(connection: &quinn::Connection, close_code: u32, reason: &'static [u8]) {
+    connection.close(close_code.into(), reason);
+}
+
 pub fn send_gameplay_snapshots(
     connection: &quinn::Connection,
     snapshots: Vec<protocol::SnapshotChunk>,
@@ -247,6 +298,8 @@ pub enum ServerTransportError {
     UnexpectedMessage,
     #[error("authoritative session failed: {0}")]
     Session(#[from] SessionError),
+    #[error("logical session lifecycle failed: {0}")]
+    Lifecycle(#[from] LifecycleError),
 }
 
 #[cfg(test)]
@@ -486,6 +539,181 @@ mod tests {
         let (server_message, _server_connection) = server_task.await.unwrap();
         assert_eq!(server_message, WireMessage::ReliableEvent(event));
         connection.close(0_u32.into(), b"test complete");
+        client_endpoint.wait_idle().await;
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // Full two-connection QUIC handoff is clearer as one journey.
+    async fn real_quic_lifecycle_replaces_old_transport_then_accepts_clean_leave() {
+        let CertifiedKey { cert, signing_key } =
+            generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+        let certificate = cert.der().clone();
+        let private_key = PrivatePkcs8KeyDer::from(signing_key.serialize_der());
+        let server_config =
+            quinn::ServerConfig::with_single_cert(vec![certificate.clone()], private_key.into())
+                .unwrap();
+        let server_endpoint =
+            quinn::Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap()).unwrap();
+        let server_address = server_endpoint.local_addr().unwrap();
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(certificate).unwrap();
+        let client_config = quinn::ClientConfig::with_root_certificates(Arc::new(roots)).unwrap();
+        let mut client_endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+        client_endpoint.set_default_client_config(client_config);
+
+        let (drained_tx, drained_rx) = tokio::sync::oneshot::channel();
+        let server_task = tokio::spawn(async move {
+            let owner = SessionOwnerId::new(1).unwrap();
+            let first_transport = TransportId::new(1).unwrap();
+            let second_transport = TransportId::new(2).unwrap();
+            let content_root =
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content");
+            let mut directory = SessionDirectory::default();
+
+            let first = server_endpoint.accept().await.unwrap().await.unwrap();
+            serve_handshake(
+                &first,
+                &policy(),
+                AuthenticationDecision::Accepted,
+                WireText::new("session-provisional-1").unwrap(),
+            )
+            .await
+            .unwrap();
+            let joined = serve_session_control(
+                &first,
+                &mut directory,
+                owner,
+                first_transport,
+                &content_root,
+                100,
+            )
+            .await
+            .unwrap();
+            assert_eq!(joined.invalidated_transport, None);
+
+            let second = server_endpoint.accept().await.unwrap().await.unwrap();
+            serve_handshake(
+                &second,
+                &policy(),
+                AuthenticationDecision::Accepted,
+                WireText::new("session-provisional-2").unwrap(),
+            )
+            .await
+            .unwrap();
+            let replaced = serve_session_control(
+                &second,
+                &mut directory,
+                owner,
+                second_transport,
+                &content_root,
+                200,
+            )
+            .await
+            .unwrap();
+            assert_eq!(replaced.invalidated_transport, Some(first_transport));
+            close_transport(
+                &first,
+                TRANSPORT_REPLACED_CLOSE_CODE,
+                b"authoritative transport handoff",
+            );
+
+            let left = serve_session_control(
+                &second,
+                &mut directory,
+                owner,
+                second_transport,
+                &content_root,
+                300,
+            )
+            .await
+            .unwrap();
+            assert_eq!(left.invalidated_transport, Some(second_transport));
+            drained_rx.await.unwrap();
+            directory
+        });
+
+        let first = client_endpoint
+            .connect(server_address, "localhost")
+            .unwrap()
+            .await
+            .unwrap();
+        bot_client::perform_handshake(&first, client_hello())
+            .await
+            .unwrap();
+        let (_, joined) = bot_client::perform_session_control(
+            &first,
+            protocol::SessionControlFrame {
+                sequence: 1,
+                client_tick: 0,
+                client_monotonic_micros: 10,
+                request: protocol::SessionControlRequest::Join,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(joined.code, protocol::SessionControlResultCode::Joined);
+
+        let second = client_endpoint
+            .connect(server_address, "localhost")
+            .unwrap()
+            .await
+            .unwrap();
+        bot_client::perform_handshake(&second, client_hello())
+            .await
+            .unwrap();
+        let (_, reattached) = bot_client::perform_session_control(
+            &second,
+            protocol::SessionControlFrame {
+                sequence: 1,
+                client_tick: 0,
+                client_monotonic_micros: 20,
+                request: protocol::SessionControlRequest::Join,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            reattached.code,
+            protocol::SessionControlResultCode::Reattached
+        );
+        assert!(reattached.replaced_previous_transport);
+        assert!(matches!(
+            first.closed().await,
+            quinn::ConnectionError::ApplicationClosed(_)
+        ));
+
+        let (_, leave) = bot_client::perform_session_control(
+            &second,
+            protocol::SessionControlFrame {
+                sequence: 2,
+                client_tick: 0,
+                client_monotonic_micros: 30,
+                request: protocol::SessionControlRequest::Leave,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            leave.code,
+            protocol::SessionControlResultCode::LeaveAccepted
+        );
+        drained_tx.send(()).unwrap();
+        close_transport(&second, LEAVE_ACCEPTED_CLOSE_CODE, b"leave accepted");
+        assert!(matches!(
+            second.closed().await,
+            quinn::ConnectionError::LocallyClosed | quinn::ConnectionError::ApplicationClosed(_)
+        ));
+        let directory = server_task.await.unwrap();
+        assert!(matches!(
+            directory
+                .session(SessionOwnerId::new(1).unwrap())
+                .unwrap()
+                .phase(),
+            SessionPhase::LinkLost {
+                lost_tick: 0,
+                recall_tick: LINK_LOST_TICKS
+            }
+        ));
         client_endpoint.wait_idle().await;
     }
 }

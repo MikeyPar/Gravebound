@@ -27,7 +27,7 @@ PASS. The native client now predicts only local movement and immediate local pro
 
 ## Protocol decision
 
-Protocol minor `1.2` adds authoritative entity velocity plus friendly-projectile source input sequence and within-attack ordinal. Exact minor matching remains mandatory; no compatibility adapter is claimed. The canonical codec fixture is repinned for the intentional version change.
+Protocol minor `1.2` added authoritative entity velocity plus friendly-projectile source input sequence and within-attack ordinal. `GB-M02-04` subsequently advances the exact-match protocol to `1.3` for lifecycle Control messages. No compatibility adapter is claimed. The canonical codec fixture is repinned for each intentional version change.
 
 ## Verification
 
@@ -48,4 +48,4 @@ Protocol minor `1.2` adds authoritative entity velocity plus friendly-projectile
 
 ## Handoff
 
-`GB-M02-04` must build connection lifecycle around protocol `1.2` without converting presentation state into authority. The exact three-second `LinkLost` behavior, reconnect identity rules, duplicate-session handoff, and clean teardown require explicit deterministic tests before this plan advances again.
+`GB-M02-04` subsequently built connection lifecycle around exact-match protocol `1.3` without converting presentation state into authority. The exact three-second `LinkLost` behavior, reconnect identity rules, duplicate-session handoff, and clean teardown are covered by deterministic and real-QUIC tests.

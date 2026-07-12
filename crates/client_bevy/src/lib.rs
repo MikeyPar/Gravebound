@@ -12,6 +12,7 @@ mod enemies;
 mod inventory;
 mod item_showcase;
 mod network_prediction;
+mod network_session;
 mod player;
 mod stress_benchmark;
 mod telemetry;
@@ -49,6 +50,10 @@ pub use network_prediction::{
     InterpolatedEntity, NativeNetworkPresentation, NetworkCorrectionDiagnostics,
     NetworkPredictionError, PredictedMovementInput, ReconciliationEvent, RemoteClientRuntime,
     RemoteSnapshotInbox, SnapshotApplication, SnapshotAssembler,
+};
+pub use network_session::{
+    CLIENT_LINK_LOST_MS, ClientConnectionLifecycle, ClientConnectionPhase,
+    ClientSessionLifecycleError,
 };
 pub use player::{CAMERA_RESPONSE_SECONDS, MovementBindings, critically_damped_step};
 

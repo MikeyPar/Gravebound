@@ -15,7 +15,7 @@ use crate::{
     InventoryStack, MovementAction, MovementError, MovementStep, NormalWaveDefinitions,
     NormalWaveError, NormalWaveInstanceSnapshot, NormalWaveSimulation, NormalWaveSpawn,
     NormalWaveStep, PickupOutcome, PlacementChoice, PlayerCombatState, PlayerMovementState,
-    PlayerVitals, ProjectileCollisionWorld, PrototypeInventory, RedTonicDefinition,
+    PlayerVitals, ProjectileCollisionWorld, PrototypeInventory, RecallCleanup, RedTonicDefinition,
     RedTonicSimulation, SimulationVector, Tick, TilePoint, TonicBelt, tile_point_to_simulation,
 };
 
@@ -57,7 +57,15 @@ pub struct AuthorityInput {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthorityPhase {
     Alive,
+    Recalled { committed_at: Tick },
     Dead { committed_at: Tick },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthorityRecallCommit {
+    pub committed_at: Tick,
+    pub inventory: RecallCleanup,
+    pub cleared_ground_pickups: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -330,6 +338,38 @@ impl AuthoritativeArena {
             .checked_add(1)
             .ok_or(AuthorityError::StateVersionExhausted)?;
         Ok(result)
+    }
+
+    /// Commits Emergency Recall atomically. Durable transfer to Lantern Halls is a persistence
+    /// adapter concern, but live authority freezes combat and destroys unsecured backpack/ground
+    /// state while preserving equipped gear and belt consumables.
+    pub fn commit_emergency_recall(&mut self) -> Result<AuthorityRecallCommit, AuthorityError> {
+        if !matches!(self.phase, AuthorityPhase::Alive) {
+            return Err(AuthorityError::Dead);
+        }
+        let mut next = self.clone();
+        let committed_at = next.wave.player().combat.tick();
+        next.wave
+            .player_mut()
+            .combat
+            .clear_projectiles_for_local_death();
+        next.wave.clear_hostiles_for_player_death();
+        next.friendly_projectile_sequences.clear();
+        let inventory = next.inventory.clear_pending_for_recall();
+        let cleared_ground_pickups = next.pickups.len();
+        next.pickups.clear();
+        next.eligibility.reward_eligible = false;
+        next.phase = AuthorityPhase::Recalled { committed_at };
+        next.state_version = next
+            .state_version
+            .checked_add(1)
+            .ok_or(AuthorityError::StateVersionExhausted)?;
+        *self = next;
+        Ok(AuthorityRecallCommit {
+            committed_at,
+            inventory,
+            cleared_ground_pickups,
+        })
     }
 
     pub fn snapshots(&self) -> Result<Vec<AuthorityEntitySnapshot>, AuthorityError> {

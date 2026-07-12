@@ -4,8 +4,9 @@
 //! choose inputs, but it cannot author gameplay outcomes or bypass server authority.
 
 use protocol::{
-    ClientHello, HandshakeResponse, InputFrame, ProtocolVersion, RELIABLE_FRAME_LIMIT,
-    ReliableEventFrame, SIMULATION_HZ, SnapshotChunk, WireMessage, decode_frame, encode_frame,
+    ClientHello, ControlEvent, HandshakeResponse, InputFrame, ProtocolVersion,
+    RELIABLE_FRAME_LIMIT, ReliableEvent, ReliableEventFrame, SIMULATION_HZ, SessionControlFrame,
+    SessionControlResult, SnapshotChunk, WireMessage, decode_frame, encode_frame,
 };
 use thiserror::Error;
 
@@ -133,6 +134,33 @@ pub async fn perform_reliable_gameplay(
         WireMessage::ReliableEvent(event) => Ok(event),
         _ => Err(BotTransportError::UnexpectedMessage),
     }
+}
+
+pub async fn perform_session_control(
+    connection: &quinn::Connection,
+    frame: SessionControlFrame,
+) -> Result<(ReliableEventFrame, SessionControlResult), BotTransportError> {
+    let request = encode_frame(&WireMessage::SessionControlFrame(frame))?;
+    let (mut send, mut receive) = connection
+        .open_bi()
+        .await
+        .map_err(|error| BotTransportError::Quic(error.to_string()))?;
+    send.write_all(&request)
+        .await
+        .map_err(|error| BotTransportError::Quic(error.to_string()))?;
+    send.finish()
+        .map_err(|error| BotTransportError::Quic(error.to_string()))?;
+    let response = receive
+        .read_to_end(RELIABLE_FRAME_LIMIT)
+        .await
+        .map_err(|error| BotTransportError::Quic(error.to_string()))?;
+    let WireMessage::ReliableEvent(event) = decode_frame(&response)? else {
+        return Err(BotTransportError::UnexpectedMessage);
+    };
+    let ReliableEvent::Control(ControlEvent::SessionResult(result)) = &event.event else {
+        return Err(BotTransportError::UnexpectedMessage);
+    };
+    Ok((event.clone(), result.clone()))
 }
 
 #[derive(Debug, Error)]
