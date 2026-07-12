@@ -25,6 +25,18 @@ enum Command {
         #[arg(long, default_value = "content")]
         content_root: PathBuf,
     },
+    /// Open the wipeable GB-M03 Core identity and Grave Arbalist character-select surface.
+    CoreIdentity {
+        #[arg(long, default_value = "127.0.0.1:50001")]
+        server: SocketAddr,
+        #[arg(long, default_value = "target/gravebound-core-dev/server-cert.der")]
+        certificate: PathBuf,
+        /// Opaque wipeable test credential. It is never displayed or logged.
+        #[arg(long)]
+        identity: String,
+        #[arg(long, default_value = "content")]
+        content_root: PathBuf,
+    },
 }
 
 fn main() {
@@ -39,6 +51,17 @@ fn main() {
             server_address: server,
             certificate_path: certificate,
             player_token: player,
+            content_root,
+        }),
+        Command::CoreIdentity {
+            server,
+            certificate,
+            identity,
+            content_root,
+        } => client_bevy::run_core_identity(client_bevy::CoreIdentityConfig {
+            server_address: server,
+            certificate_path: certificate,
+            test_token: identity,
             content_root,
         }),
     };

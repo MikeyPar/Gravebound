@@ -27,7 +27,9 @@ use crate::{
     arena_view::render_point_to_simulation,
     combat::EvidenceScenario,
     network_session::{ClientConnectionLifecycle, ClientConnectionPhase},
-    network_transport::{NetworkTransportConfig, NetworkWorkerHandle, TransportEvent},
+    network_transport::{
+        NetworkStartup, NetworkTransportConfig, NetworkWorkerHandle, TransportEvent,
+    },
     player::{LatestMovementAction, PlayerSimulation},
 };
 
@@ -161,6 +163,7 @@ pub fn run_network_playtest(config: NetworkPlayConfig) -> Result<()> {
         server_name: M02_LOCAL_SERVER_NAME.to_owned(),
         certificate_der,
         hello,
+        startup: NetworkStartup::CombatSession,
     })?;
     let mut lifecycle = ClientConnectionLifecycle::default();
     lifecycle

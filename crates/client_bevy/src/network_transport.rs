@@ -12,9 +12,9 @@ use std::{
 };
 
 use protocol::{
-    ClientHello, ControlEvent, HandshakeResponse, RELIABLE_FRAME_LIMIT, ReliableEvent,
-    ReliableEventFrame, SessionControlFrame, SessionControlRequest, SnapshotChunk, WireMessage,
-    WireText, decode_frame, encode_frame,
+    AccountBootstrapFrame, AccountBootstrapRequest, ClientHello, ControlEvent, HandshakeResponse,
+    ManifestHash, RELIABLE_FRAME_LIMIT, ReliableEvent, ReliableEventFrame, SessionControlFrame,
+    SessionControlRequest, SnapshotChunk, WireMessage, WireText, decode_frame, encode_frame,
 };
 use rustls::pki_types::CertificateDer;
 use thiserror::Error;
@@ -32,6 +32,17 @@ pub struct NetworkTransportConfig {
     pub server_name: String,
     pub certificate_der: Vec<u8>,
     pub hello: ClientHello,
+    pub startup: NetworkStartup,
+}
+
+/// Selects the first reliable route after a successful transport handshake.
+///
+/// Core identity deliberately does not create an M02 combat session. Reconnect refreshes the
+/// process-local account projection instead of attempting vulnerable-combat reattachment.
+#[derive(Debug, Clone)]
+pub enum NetworkStartup {
+    CombatSession,
+    CoreIdentity { content_manifest_hash: ManifestHash },
 }
 
 #[derive(Debug, Clone)]
@@ -170,12 +181,16 @@ async fn run_worker(
 
     send_event(&events, TransportEvent::Connecting)?;
     let mut prior_session: Option<WireText<64>> = None;
+    let mut core_bootstrapped = false;
     let mut control_sequence = 1_u32;
     let mut reconnect_attempt = 0_usize;
     loop {
         let connection = match connect_and_handshake(&endpoint, &config).await {
             Ok(connection) => connection,
-            Err(error) if prior_session.is_some() && reconnect_attempt < RECONNECT_ATTEMPTS => {
+            Err(error)
+                if (prior_session.is_some() || core_bootstrapped)
+                    && reconnect_attempt < RECONNECT_ATTEMPTS =>
+            {
                 reconnect_attempt += 1;
                 send_event(
                     &events,
@@ -190,25 +205,51 @@ async fn run_worker(
             Err(error) => return Err(error),
         };
         send_event(&events, TransportEvent::HandshakeAccepted)?;
-        let request = match prior_session.clone() {
-            Some(prior_session_id) => SessionControlRequest::Reconnect { prior_session_id },
-            None => SessionControlRequest::Join,
+        let lifecycle_event = match &config.startup {
+            NetworkStartup::CombatSession => {
+                let request = match prior_session.clone() {
+                    Some(prior_session_id) => SessionControlRequest::Reconnect { prior_session_id },
+                    None => SessionControlRequest::Join,
+                };
+                perform_control(
+                    &connection,
+                    SessionControlFrame {
+                        sequence: control_sequence,
+                        client_tick: 0,
+                        client_monotonic_micros: 0,
+                        request,
+                    },
+                )
+                .await?
+            }
+            NetworkStartup::CoreIdentity {
+                content_manifest_hash,
+            } => {
+                perform_core_bootstrap(
+                    &connection,
+                    AccountBootstrapFrame {
+                        sequence: control_sequence,
+                        request: if core_bootstrapped {
+                            AccountBootstrapRequest::Refresh
+                        } else {
+                            AccountBootstrapRequest::Bootstrap
+                        },
+                        content_manifest_hash: content_manifest_hash.clone(),
+                    },
+                )
+                .await?
+            }
         };
-        let lifecycle_event = perform_control(
-            &connection,
-            SessionControlFrame {
-                sequence: control_sequence,
-                client_tick: 0,
-                client_monotonic_micros: 0,
-                request,
-            },
-        )
-        .await?;
         control_sequence = control_sequence
             .checked_add(1)
             .ok_or(NetworkTransportError::SequenceExhausted)?;
-        let session_id = session_id_from_event(&lifecycle_event)?;
-        prior_session = Some(session_id);
+        match &config.startup {
+            NetworkStartup::CombatSession => {
+                let session_id = session_id_from_event(&lifecycle_event)?;
+                prior_session = Some(session_id);
+            }
+            NetworkStartup::CoreIdentity { .. } => core_bootstrapped = true,
+        }
         send_event(&events, TransportEvent::Reliable(lifecycle_event))?;
 
         match run_connected(&connection, &mut input, &mut reliable, &events, &snapshots).await? {
@@ -324,6 +365,21 @@ async fn perform_control(
     };
     if !result.accepted {
         return Err(NetworkTransportError::SessionRejected(result.code));
+    }
+    Ok(event)
+}
+
+async fn perform_core_bootstrap(
+    connection: &quinn::Connection,
+    frame: AccountBootstrapFrame,
+) -> Result<ReliableEventFrame, NetworkTransportError> {
+    let request = encode_frame(&WireMessage::AccountBootstrapFrame(frame))?;
+    let response = exchange_reliable_bytes(connection, &request).await?;
+    let WireMessage::ReliableEvent(event) = decode_frame(&response)? else {
+        return Err(NetworkTransportError::UnexpectedMessage);
+    };
+    if !matches!(event.event, ReliableEvent::AccountBootstrapResult(_)) {
+        return Err(NetworkTransportError::UnexpectedMessage);
     }
     Ok(event)
 }

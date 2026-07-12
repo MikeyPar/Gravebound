@@ -4,6 +4,7 @@ mod accessibility;
 mod arena_view;
 mod combat;
 mod consumable;
+mod core_identity;
 mod death;
 mod debug_overlay;
 mod developer_tools;
@@ -47,6 +48,9 @@ pub use arena_view::{
 };
 pub use combat::AbilityTwoBindings;
 pub use combat::{AbilityOneBindings, CombatInputGate, PrimaryFireBindings};
+pub use core_identity::{
+    CoreIdentityConfig, CoreIdentityModel, CoreIdentityPhase, run_core_identity,
+};
 pub use network_play::{NetworkPlayConfig, run_network_playtest};
 pub use network_prediction::{
     CompleteSnapshot, CorrectionClass, CorrectionSignal, DeterministicProjectilePresentation,

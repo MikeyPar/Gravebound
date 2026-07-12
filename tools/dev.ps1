@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('bootstrap', 'format', 'lint', 'test', 'validate', 'headless', 'local-lab', 'server-doctor', 'bot-doctor', 'network-ci', 'm02-network-smoke', 'm02-soak', 'm02-server', 'm02-client', 'm02-package', 'local-stack', 'ci', 'release')]
+    [ValidateSet('bootstrap', 'format', 'lint', 'test', 'validate', 'headless', 'local-lab', 'server-doctor', 'bot-doctor', 'network-ci', 'm02-network-smoke', 'm02-soak', 'm02-server', 'm02-client', 'm02-package', 'm03-identity-smoke', 'm03-identity-server', 'm03-identity-client', 'local-stack', 'ci', 'release')]
     [string]$Command = 'ci'
 )
 
@@ -57,6 +57,17 @@ try {
             if ($LASTEXITCODE -ne 0) {
                 throw "M02 packaging failed with exit code $LASTEXITCODE"
             }
+        }
+        'm03-identity-smoke' {
+            Invoke-Cargo -Arguments @('test', '--locked', '-p', 'protocol')
+            Invoke-Cargo -Arguments @('test', '--locked', '-p', 'server_app', '-p', 'client_bevy', 'core_identity')
+        }
+        'm03-identity-server' {
+            Invoke-Cargo -Arguments @('run', '--locked', '-p', 'server_app', '--', 'serve-core-identity')
+        }
+        'm03-identity-client' {
+            $identity = if ($env:GRAVEBOUND_TEST_IDENTITY) { $env:GRAVEBOUND_TEST_IDENTITY } else { 'local-identity-1' }
+            Invoke-Cargo -Arguments @('run', '--locked', '-p', 'client_bevy', '--', 'core-identity', '--identity', $identity)
         }
         'local-stack' {
             throw 'The M02 authoritative loop is verified by network-ci and m02-soak. Runnable LocalStack remains blocked on GB-M03-02 PostgreSQL and its approved persistence boundary.'
