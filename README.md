@@ -102,7 +102,7 @@ Concept images establish mood, hierarchy, and visual language. They are not fina
 
 ## Current Next Step
 
-Resolve the five world-flow decisions in `docs/spec-conflicts/SPEC-CONFLICT-006-m03-world-flow-contract.md` and the seven progression/item decisions in `docs/spec-conflicts/SPEC-CONFLICT-007-m03-progression-items.md`. Once approved, begin `GB-M03-03A`/`03B` and `GB-M03-04A`/`04B` under their reviewed boundaries. Keep the normal player route and affected Core Hall stations fail-closed until `GB-M03-04`, `05`, `06`, and `08` supply their owning item, oath/Bargain, death, extraction, and Recall semantics.
+Resolve the five world-flow decisions in `docs/spec-conflicts/SPEC-CONFLICT-006-m03-world-flow-contract.md`, the seven progression/item decisions in `docs/spec-conflicts/SPEC-CONFLICT-007-m03-progression-items.md`, and the five Oath/Bargain decisions in `docs/spec-conflicts/SPEC-CONFLICT-008-m03-oaths-bargains.md`. Once approved, begin `GB-M03-03A`/`03B`, `GB-M03-04A`/`04B`, and `GB-M03-05A`–`05C` under their reviewed boundaries; pull the minimal `GB-M03-12` Ash wallet forward before `GB-M03-05D`. Keep the normal player route and affected Core Hall stations fail-closed until `GB-M03-04`, `05`, `06`, and `08` supply their owning item, Oath/Bargain, death, extraction, and Recall semantics.
 
 ## Resolved prior handoff
 
