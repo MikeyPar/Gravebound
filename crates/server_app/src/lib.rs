@@ -7,6 +7,7 @@
 mod identity;
 mod instance;
 mod lifecycle;
+mod progression_award;
 mod restore_point;
 mod runtime;
 mod session;
@@ -28,6 +29,11 @@ pub use instance::{
 pub use lifecycle::{
     DirectoryTickOutput, LINK_LOST_TICKS, LifecycleError, LifecycleResponse, LogicalSessionId,
     ManagedSession, SessionDirectory, SessionOwnerId, SessionPhase, TransportId,
+};
+pub use progression_award::{
+    CoreProgressionRules, ProgressionAwardCode, ProgressionAwardCommand, ProgressionAwardContext,
+    ProgressionAwardError, ProgressionAwardEvidence, ProgressionAwardOutcome,
+    ProgressionAwardPayload, ProgressionAwardPlan,
 };
 pub use restore_point::{
     BeltStackV1, CrashRestoreContext, DangerEntrySnapshotV1, EntryCaptureContext,

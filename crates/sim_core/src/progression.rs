@@ -4,6 +4,7 @@
 //! level reduction, stat growth, and health-rebuild behavior. It performs no content lookup,
 //! persistence, network I/O, or route activation.
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::TICK_RATE_HZ;
@@ -206,7 +207,7 @@ pub fn rebuild_current_health(
     Ok(current_health.min(new_maximum_health).max(1))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NormalXpEvidence {
     pub living_at_enemy_death: bool,
     pub delta_x_milli_tiles: i32,
@@ -216,7 +217,7 @@ pub struct NormalXpEvidence {
     pub effective_support_to_qualifying_player: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EncounterXpEvidence {
     pub active_ticks: u64,
     pub present_ticks: u64,
@@ -231,19 +232,19 @@ pub struct EncounterXpEvidence {
     pub trust_state: RewardTrustState,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RewardLifeState {
     Living,
     Dead,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RewardRecallState {
     Eligible,
     EmergencyRecallCompleted,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RewardTrustState {
     Valid,
     InvalidSession,

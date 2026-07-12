@@ -11,6 +11,7 @@ repository.workspace = true
 anyhow.workspace = true
 blake3.workspace = true
 clap.workspace = true
+content_schema = { path = "../content_schema" }
 persistence = { path = "../persistence" }
 postcard.workspace = true
 protocol = { path = "../protocol" }
