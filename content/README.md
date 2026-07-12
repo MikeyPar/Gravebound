@@ -17,3 +17,5 @@ Implementation order for each consuming feature is:
 ## Unpromoted Core development
 
 `core_dev/identity.json` is a strict internal compiler descriptor for `GB-M03-01A`. It reuses the immutable `fp.1.0.0` Grave Arbalist class, four abilities, and base sprite without copying or relabeling their records. It is not a release manifest, cannot name promotion metadata, and rejects item, arena, reward, or prototype IDs. Formal `core.1.0.0` packaging remains prohibited until the complete Core manifest passes `CONT-VALID-003`.
+
+`core_dev/world_flow.json` is the independent `GB-M03-03A` descriptor. It pins exact BLAKE3 hashes for the typed Lantern Halls, private microrealm, child-record, graybox-asset, and localization sources. Validate it with `cargo run --locked -p tools_content -- validate-core-world-flow`. The compiled view contains geometry only: it has no route destination, encounter, room, release manifest, promotion record, or runtime activation API. The `core_world_flow_integration` gate remains closed until the owning M03 item, Oath/Bargain, death, extraction, and Recall packages pass.

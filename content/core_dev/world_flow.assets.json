@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "assets": [
+    {"asset_id": "sprite.landmark.lantern_fork", "source_record_id": "landmark.lantern_fork", "kind": "graybox_marker"},
+    {"asset_id": "sprite.landmark.realm_gate", "source_record_id": "landmark.realm_gate", "kind": "graybox_marker"},
+    {"asset_id": "sprite.portal.dungeon.bell_sepulcher", "source_record_id": "portal.dungeon.bell_sepulcher", "kind": "graybox_marker"},
+    {"asset_id": "sprite.portal.return.lantern_halls", "source_record_id": "portal.return.lantern_halls", "kind": "graybox_marker"},
+    {"asset_id": "sprite.station.memorial_wall", "source_record_id": "station.memorial_wall", "kind": "graybox_marker"},
+    {"asset_id": "sprite.station.oath_shrine", "source_record_id": "station.oath_shrine", "kind": "graybox_marker"},
+    {"asset_id": "sprite.station.overflow", "source_record_id": "station.overflow", "kind": "graybox_marker"},
+    {"asset_id": "sprite.station.realm_gate", "source_record_id": "station.realm_gate", "kind": "graybox_marker"},
+    {"asset_id": "sprite.station.vault", "source_record_id": "station.vault", "kind": "graybox_marker"},
+    {"asset_id": "tilemap.hub.lantern_halls_01", "source_record_id": "hub.lantern_halls_01", "kind": "generated_collision_tilemap"},
+    {"asset_id": "tilemap.world.core_microrealm_01", "source_record_id": "world.core_microrealm_01", "kind": "generated_collision_tilemap"}
+  ]
+}

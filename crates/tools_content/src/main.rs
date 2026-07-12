@@ -38,6 +38,12 @@ enum Command {
         #[arg(long, default_value = "content")]
         root: PathBuf,
     },
+    /// Validate the independently hashed, non-promotable Core world-flow target.
+    ValidateCoreWorldFlow {
+        /// Content root containing the immutable FP source and `core_dev` files.
+        #[arg(long, default_value = "content")]
+        root: PathBuf,
+    },
     /// Regenerate checked-in JSON Schema contracts.
     GenerateSchemas {
         /// Destination directory for generated schemas.
@@ -69,9 +75,25 @@ fn main() -> Result<()> {
             no_verify,
         } => run_trace_command(&fixture, golden, no_verify)?,
         Command::Validate { root } => validate_content_command(&root)?,
+        Command::ValidateCoreWorldFlow { root } => validate_core_world_flow_command(&root)?,
         Command::GenerateSchemas { output } => generate_schemas_command(&output)?,
     }
 
+    Ok(())
+}
+
+fn validate_core_world_flow_command(root: &std::path::Path) -> Result<()> {
+    let compiled = sim_content::load_core_development_world_flow(root)?;
+    info!(
+        target = compiled.target_name(),
+        hubs = 1,
+        worlds = 1,
+        objects = compiled.objects().len(),
+        records_blake3 = compiled.hashes().records_blake3,
+        assets_blake3 = compiled.hashes().assets_blake3,
+        localization_blake3 = compiled.hashes().localization_blake3,
+        "unpromoted Core world-flow target is valid"
+    );
     Ok(())
 }
 

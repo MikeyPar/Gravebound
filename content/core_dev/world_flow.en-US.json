@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "locale": "en-US",
+  "entries": [
+    {"key": "hub.lantern_halls_01.description", "value": "A 64 by 48 safe, noncombat nexus with five enabled Core stations and no hostile, damage, projectile, pickup, or drop creation."},
+    {"key": "hub.lantern_halls_01.name", "value": "Lantern Halls"},
+    {"key": "landmark.lantern_fork.description", "value": "A safe five-tile-radius rest landmark on the Core microrealm road."},
+    {"key": "landmark.lantern_fork.name", "value": "Lantern Fork"},
+    {"key": "landmark.realm_gate.description", "value": "The walkable arrival landmark occupying x 4 through 13 and y 38 through 47."},
+    {"key": "landmark.realm_gate.name", "value": "Realm Gate"},
+    {"key": "portal.dungeon.bell_sepulcher.description", "value": "The Bell Sepulcher entrance, available only after the private microrealm reaches Cleared."},
+    {"key": "portal.dungeon.bell_sepulcher.name", "value": "Bell Sepulcher"},
+    {"key": "portal.return.lantern_halls.description", "value": "A safe-transfer return to Lantern Halls at the Core microrealm Realm Gate."},
+    {"key": "portal.return.lantern_halls.name", "value": "Lantern Halls"},
+    {"key": "spawn.hub.character_select_return.description", "value": "The nonvisual Lantern Halls return anchor used by a living safe character returning from character select."},
+    {"key": "spawn.hub.character_select_return.name", "value": "Character Select Return"},
+    {"key": "station.memorial_wall.description", "value": "The Core memorial station at 10, 10; its interaction remains integration-gated until permanent death is durable."},
+    {"key": "station.memorial_wall.name", "value": "Memorial Wall"},
+    {"key": "station.oath_shrine.description", "value": "The Core Oath station at 24, 18; its interaction remains integration-gated until Oath mutations are durable."},
+    {"key": "station.oath_shrine.name", "value": "Oath Shrine"},
+    {"key": "station.overflow.description", "value": "The Core Overflow station at 15, 38; its interaction remains integration-gated until item storage is durable."},
+    {"key": "station.overflow.name", "value": "Overflow"},
+    {"key": "station.realm_gate.description", "value": "The instant Core realm-entry station at 32, 3; admission remains integration-gated."},
+    {"key": "station.realm_gate.name", "value": "Realm Gate"},
+    {"key": "station.vault.description", "value": "The Core Vault station at 10, 38; its interaction remains integration-gated until item storage is durable."},
+    {"key": "station.vault.name", "value": "Vault"},
+    {"key": "world.core_microrealm_01.description", "value": "A private capacity-one 48 by 48 clear-mud microrealm whose road connects the Realm Gate, Lantern Fork, and Bell portal."},
+    {"key": "world.core_microrealm_01.name", "value": "Core Microrealm 01"}
+  ]
+}
