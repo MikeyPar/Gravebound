@@ -202,7 +202,11 @@ mod tests {
             y_milli_tiles: position.1,
             velocity_x_milli_tiles_per_second: 0,
             velocity_y_milli_tiles_per_second: 0,
-            source_entity_id: u64::from(kind == EntityKind::FriendlyProjectile),
+            source_entity_id: if kind == EntityKind::FriendlyProjectile {
+                protocol::M02_PLAYER_ENTITY_ID_BASE
+            } else {
+                0
+            },
             source_input_sequence: u32::from(kind == EntityKind::FriendlyProjectile),
             source_projectile_ordinal: 0,
             current_health: health.0,
@@ -226,6 +230,26 @@ mod tests {
             chunk_count,
             entities,
         }
+    }
+
+    fn bind_bot(bot: &mut JourneyBot) {
+        bot.apply_reliable_event(&ReliableEventFrame {
+            sequence: 1,
+            server_tick: 0,
+            event: ReliableEvent::Control(ControlEvent::SessionResult(SessionControlResult {
+                request_sequence: 1,
+                accepted: true,
+                code: SessionControlResultCode::Joined,
+                session_id: WireText::new("m02-session-test").unwrap(),
+                destination: SessionDestination::CombatInstance,
+                server_tick: 0,
+                state_version: 1,
+                server_monotonic_micros: 1,
+                replaced_previous_transport: false,
+                controlled_entity_id: Some(protocol::M02_PLAYER_ENTITY_ID_BASE),
+            })),
+        })
+        .unwrap();
     }
 
     #[test]
@@ -336,6 +360,7 @@ mod tests {
             ENTITY_STATE_ALIVE,
         );
         let mut bot = JourneyBot::default();
+        bind_bot(&mut bot);
         bot.ingest_snapshot(chunk(1, 0, 1, vec![player.clone(), enemy, projectile]))
             .unwrap();
         let combat = bot.next_input().unwrap();
@@ -428,6 +453,7 @@ mod tests {
     fn terminal_snapshot_finality_and_sequence_exhaustion_fail_closed() {
         let dead = entity(10_000, EntityKind::Player, (0, 0), (0, 120), 0);
         let mut bot = JourneyBot::default();
+        bind_bot(&mut bot);
         bot.ingest_snapshot(chunk(1, 0, 1, vec![dead])).unwrap();
         assert_eq!(bot.terminal_outcome(), BotTerminalOutcome::Dead);
         assert!(matches!(

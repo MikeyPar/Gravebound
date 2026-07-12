@@ -223,6 +223,14 @@ impl SharedAuthoritativeArena {
         &mut self,
         player_id: EntityId,
     ) -> Result<AuthorityRecallCommit, SharedAuthorityError> {
+        self.commit_automatic_recall_at(player_id, self.wave.tick())
+    }
+
+    pub fn commit_automatic_recall_at(
+        &mut self,
+        player_id: EntityId,
+        committed_at: Tick,
+    ) -> Result<AuthorityRecallCommit, SharedAuthorityError> {
         let mut next = self.clone();
         let player = next
             .players
@@ -243,7 +251,6 @@ impl SharedAuthoritativeArena {
         let cleared_ground_pickups = player.pickups.len();
         player.pickups.clear();
         player.eligibility.reward_eligible = false;
-        let committed_at = next.wave.tick();
         player.phase = AuthorityPhase::Recalled { committed_at };
         next.state_version = next
             .state_version

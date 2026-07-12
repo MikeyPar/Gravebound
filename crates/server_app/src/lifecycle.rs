@@ -10,7 +10,7 @@ use protocol::{
     SessionControlRequest, SessionControlResult, SessionControlResultCode, SessionDestination,
     WireMessage, WireText,
 };
-use sim_core::AuthorityPhase;
+use sim_core::{AuthorityInput, AuthorityPhase, EntityId, SharedAuthoritativeArena};
 use thiserror::Error;
 
 use crate::{AuthoritativeSession, InputDisposition, SessionError};
@@ -145,6 +145,67 @@ impl ManagedSession {
         &self.authority
     }
 
+    pub fn shared_player_id(&self) -> Result<EntityId, LifecycleError> {
+        protocol::M02_PLAYER_ENTITY_ID_BASE
+            .checked_add(self.id.get().saturating_sub(1))
+            .and_then(EntityId::new)
+            .ok_or(LifecycleError::PlayerIdentityExhausted)
+    }
+
+    pub(crate) fn take_shared_input(&mut self) -> Result<AuthorityInput, LifecycleError> {
+        if !self.phase.simulation_active() {
+            return Err(LifecycleError::IngressUnavailable);
+        }
+        self.authority
+            .take_shared_authority_input()
+            .map_err(Into::into)
+    }
+
+    pub(crate) fn encode_shared_snapshots(
+        &mut self,
+        arena: &SharedAuthoritativeArena,
+        server_tick: u64,
+    ) -> Result<Vec<protocol::SnapshotChunk>, LifecycleError> {
+        let player_id = self.shared_player_id()?;
+        self.authority
+            .encode_shared_snapshots(
+                server_tick,
+                arena.state_version(),
+                arena.snapshots_for(player_id)?,
+            )
+            .map_err(Into::into)
+    }
+
+    pub(crate) fn resolve_shared_post_simulation(
+        &mut self,
+        arena: &mut SharedAuthoritativeArena,
+        tick: u64,
+    ) -> Result<(), LifecycleError> {
+        let player_id = self.shared_player_id()?;
+        let shared_phase = arena
+            .players()
+            .get(&player_id)
+            .ok_or(LifecycleError::SharedPlayerMissing)?
+            .phase();
+        if matches!(shared_phase, AuthorityPhase::Dead { .. }) {
+            self.phase = SessionPhase::Dead {
+                committed_tick: tick,
+            };
+            self.transport = None;
+            return Ok(());
+        }
+        if let SessionPhase::LinkLost { recall_tick, .. } = self.phase
+            && tick >= recall_tick
+        {
+            let recall = arena.commit_automatic_recall_at(player_id, sim_core::Tick(tick))?;
+            self.phase = SessionPhase::Recalled {
+                committed_tick: recall.committed_at.0,
+            };
+            self.transport = None;
+        }
+        Ok(())
+    }
+
     #[must_use]
     pub fn server_tick(&self) -> u64 {
         self.authority.arena().player().combat.tick().0
@@ -177,6 +238,27 @@ impl ManagedSession {
             return Err(LifecycleError::IngressUnavailable);
         }
         self.authority.handle_reliable(message).map_err(Into::into)
+    }
+
+    pub(crate) fn handle_shared_gameplay_reliable(
+        &mut self,
+        transport: TransportId,
+        message: WireMessage,
+        arena: &mut SharedAuthoritativeArena,
+    ) -> Result<WireMessage, LifecycleError> {
+        self.require_active_transport(transport)?;
+        if !matches!(self.phase, SessionPhase::Connected) {
+            return Err(LifecycleError::IngressUnavailable);
+        }
+        let response = match message {
+            WireMessage::ActionFrame(frame) => self.authority.submit_action(&frame)?,
+            WireMessage::MutationRequest(request) => {
+                self.authority
+                    .submit_shared_mutation(&request, arena, self.shared_player_id()?)?
+            }
+            _ => return Err(SessionError::UnexpectedReliableMessage.into()),
+        };
+        Ok(WireMessage::ReliableEvent(response))
     }
 
     /// Advances authoritative gameplay before resolving the `LinkLost` deadline. This ordering
@@ -226,6 +308,27 @@ impl ManagedSession {
     pub fn transport_lost(&mut self, transport: TransportId) -> Result<(), LifecycleError> {
         self.require_active_transport(transport)?;
         self.enter_link_lost()
+    }
+
+    pub(crate) fn transport_lost_at_shared_tick(
+        &mut self,
+        transport: TransportId,
+        tick: u64,
+    ) -> Result<(), LifecycleError> {
+        self.require_active_transport(transport)?;
+        if !matches!(self.phase, SessionPhase::Connected) {
+            return Err(LifecycleError::IngressUnavailable);
+        }
+        let recall_tick = tick
+            .checked_add(LINK_LOST_TICKS)
+            .ok_or(LifecycleError::TickExhausted)?;
+        self.authority.neutralize_transport_input();
+        self.transport = None;
+        self.phase = SessionPhase::LinkLost {
+            lost_tick: tick,
+            recall_tick,
+        };
+        Ok(())
     }
 
     fn enter_link_lost(&mut self) -> Result<(), LifecycleError> {
@@ -769,6 +872,10 @@ pub enum LifecycleError {
     SessionIdEncoding,
     #[error("authoritative tick exhausted")]
     TickExhausted,
+    #[error("shared player identity exhausted")]
+    PlayerIdentityExhausted,
+    #[error("logical session has no player in the hosted shared arena")]
+    SharedPlayerMissing,
     #[error("logical session was not found")]
     SessionNotFound,
     #[error("authenticated owner does not own this session")]
@@ -787,6 +894,8 @@ pub enum LifecycleError {
     ShutdownNotStarted,
     #[error(transparent)]
     Session(#[from] SessionError),
+    #[error(transparent)]
+    SharedAuthority(#[from] sim_core::SharedAuthorityError),
 }
 
 #[cfg(test)]

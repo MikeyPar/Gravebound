@@ -16,13 +16,14 @@ use crate::{
     SessionDirectory, SessionOwnerId, TransportId,
 };
 
-pub const M02_ARENA_CAPACITY: usize = 16;
+pub const M02_ARENA_CAPACITY: usize = 4;
 pub const M02_SOAK_BOT_COUNT: usize = 16;
 pub const M02_SOAK_DURATION_TICKS: u64 = 2 * 60 * 60 * 30;
 pub const SERVER_TICK_BUDGET_MICROS: u64 = 33_333;
 const M02_P95_LIMIT_MICROS: u64 = 20_000;
 const M02_P99_LIMIT_MICROS: u64 = 30_000;
 const REQUIRED_HEADROOM_BASIS_POINTS: u16 = 3_000;
+const M02_FORMATION_TICKS: u8 = 30;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct HostedInstanceId(NonZeroU64);
@@ -61,6 +62,8 @@ struct HostedInstance {
     content: sim_content::AuthorityCombatTestContent,
     phase: ArenaInstancePhase,
     directory: SessionDirectory,
+    shared_authority: Option<sim_core::SharedAuthoritativeArena>,
+    formation_ticks_remaining: u8,
 }
 
 impl HostedInstance {
@@ -81,12 +84,104 @@ impl HostedInstance {
             content,
             phase: ArenaInstancePhase::Allocating,
             directory: SessionDirectory::default(),
+            shared_authority: None,
+            formation_ticks_remaining: M02_FORMATION_TICKS,
         })
     }
 
     fn has_capacity(&self) -> bool {
         matches!(self.phase, ArenaInstancePhase::Active)
+            && self.shared_authority.is_none()
             && self.directory.len() < M02_ARENA_CAPACITY
+    }
+
+    fn finalize_roster_if_due(&mut self) -> Result<bool, InstanceError> {
+        if self.shared_authority.is_some() {
+            return Ok(true);
+        }
+        if self.directory.is_empty() {
+            return Ok(false);
+        }
+        if self.directory.len() < M02_ARENA_CAPACITY && self.formation_ticks_remaining > 0 {
+            self.formation_ticks_remaining -= 1;
+            return Ok(false);
+        }
+        let player_ids = self
+            .directory
+            .owner_ids()
+            .into_iter()
+            .map(|owner| {
+                self.directory
+                    .session(owner)
+                    .ok_or(InstanceError::OwnerIndexDrift)?
+                    .shared_player_id()
+                    .map_err(InstanceError::from)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.shared_authority = Some(sim_core::SharedAuthoritativeArena::new(
+            self.content.definitions.clone(),
+            player_ids,
+            self.content.spawns.clone(),
+            sim_core::PickupEligibility {
+                valid_session: true,
+                reward_eligible: true,
+            },
+            self.content.hostile_projectile_ids.clone(),
+        )?);
+        Ok(true)
+    }
+
+    fn tick_shared(&mut self) -> Result<Vec<DirectoryTickOutput>, InstanceError> {
+        if !self.finalize_roster_if_due()? {
+            return Ok(Vec::new());
+        }
+        let owner_ids = self.directory.owner_ids();
+        let mut inputs = BTreeMap::new();
+        for owner in &owner_ids {
+            let session = self
+                .directory
+                .session_mut(*owner)
+                .ok_or(InstanceError::OwnerIndexDrift)?;
+            if session.is_simulation_active() {
+                inputs.insert(session.shared_player_id()?, session.take_shared_input()?);
+            }
+        }
+        let authority = self
+            .shared_authority
+            .as_mut()
+            .ok_or(InstanceError::SharedAuthorityMissing)?;
+        let step = authority.step(&inputs)?;
+        let before_tick = step.tick.0.saturating_sub(1);
+        let mut terminal_transition = false;
+        for owner in &owner_ids {
+            let session = self
+                .directory
+                .session_mut(*owner)
+                .ok_or(InstanceError::OwnerIndexDrift)?;
+            let phase_before = session.phase();
+            session.resolve_shared_post_simulation(authority, step.tick.0)?;
+            terminal_transition |= session.phase() != phase_before;
+        }
+        let snapshot_due = step.tick.0.is_multiple_of(2) || terminal_transition;
+        let mut outputs = Vec::with_capacity(owner_ids.len());
+        for owner in owner_ids {
+            let session = self
+                .directory
+                .session_mut(owner)
+                .ok_or(InstanceError::OwnerIndexDrift)?;
+            let snapshots = if snapshot_due {
+                session.encode_shared_snapshots(authority, step.tick.0)?
+            } else {
+                Vec::new()
+            };
+            outputs.push(DirectoryTickOutput {
+                owner,
+                before_tick,
+                after_tick: step.tick.0,
+                snapshots,
+            });
+        }
+        Ok(outputs)
     }
 }
 
@@ -416,9 +511,28 @@ impl InstanceScheduler {
         transport: TransportId,
         message: WireMessage,
     ) -> Result<WireMessage, InstanceError> {
-        self.session_mut(owner)?
-            .handle_gameplay_reliable(transport, message)
-            .map_err(Into::into)
+        let instance_id = self
+            .owner_index
+            .get(&owner)
+            .copied()
+            .ok_or(InstanceError::OwnerNotAssigned)?;
+        let instance = self
+            .instances
+            .get_mut(&instance_id)
+            .ok_or(InstanceError::OwnerIndexDrift)?;
+        let session = instance
+            .directory
+            .session_mut(owner)
+            .ok_or(InstanceError::OwnerIndexDrift)?;
+        if let Some(authority) = &mut instance.shared_authority {
+            session
+                .handle_shared_gameplay_reliable(transport, message, authority)
+                .map_err(Into::into)
+        } else {
+            session
+                .handle_gameplay_reliable(transport, message)
+                .map_err(Into::into)
+        }
     }
 
     pub fn transport_lost(
@@ -426,9 +540,29 @@ impl InstanceScheduler {
         owner: SessionOwnerId,
         transport: TransportId,
     ) -> Result<(), InstanceError> {
-        self.session_mut(owner)?
-            .transport_lost(transport)
-            .map_err(Into::into)
+        let instance_id = self
+            .owner_index
+            .get(&owner)
+            .copied()
+            .ok_or(InstanceError::OwnerNotAssigned)?;
+        let instance = self
+            .instances
+            .get_mut(&instance_id)
+            .ok_or(InstanceError::OwnerIndexDrift)?;
+        let session = instance
+            .directory
+            .session_mut(owner)
+            .ok_or(InstanceError::OwnerIndexDrift)?;
+        if let Some(authority) = &instance.shared_authority {
+            session
+                .transport_lost_at_shared_tick(
+                    transport,
+                    authority.wave().tick().0.saturating_sub(1),
+                )
+                .map_err(Into::into)
+        } else {
+            session.transport_lost(transport).map_err(Into::into)
+        }
     }
 
     pub fn tick(&mut self) -> Result<SchedulerFrame, InstanceError> {
@@ -446,7 +580,7 @@ impl InstanceScheduler {
             ) {
                 continue;
             }
-            for output in instance.directory.tick_simulation_active()? {
+            for output in instance.tick_shared()? {
                 validate_tick_step(&output, &mut self.diagnostics)?;
                 session_steps = session_steps
                     .checked_add(1)
@@ -658,6 +792,8 @@ pub enum InstanceError {
     InstanceIdentityExhausted,
     #[error("hosted instance was not found")]
     InstanceNotFound,
+    #[error("hosted instance shared authority was not initialized")]
+    SharedAuthorityMissing,
     #[error("session owner is not assigned to a hosted instance")]
     OwnerNotAssigned,
     #[error("owner-to-instance routing index disagrees with instance membership")]
@@ -692,6 +828,8 @@ pub enum InstanceError {
     },
     #[error(transparent)]
     Lifecycle(#[from] LifecycleError),
+    #[error(transparent)]
+    SharedAuthority(#[from] sim_core::SharedAuthorityError),
 }
 
 #[cfg(test)]
@@ -775,9 +913,9 @@ mod tests {
                 .as_str(),
             "fp.1.0.0"
         );
-        let overflow_owner = owner(17);
+        let overflow_owner = owner(5);
         let overflow = scheduler
-            .admit_or_route_control(overflow_owner, transport(17), &join(1), &root, 2)
+            .admit_or_route_control(overflow_owner, transport(5), &join(1), &root, 2)
             .unwrap();
         assert_ne!(overflow.instance_id, first_id);
         assert_eq!(scheduler.instance_count(), 2);
@@ -786,7 +924,7 @@ mod tests {
             Some(overflow.instance_id)
         );
         assert_eq!(scheduler.diagnostics().allocated_instances, 2);
-        assert_eq!(scheduler.diagnostics().admissions, 17);
+        assert_eq!(scheduler.diagnostics().admissions, 5);
     }
 
     #[test]
@@ -799,8 +937,13 @@ mod tests {
         scheduler
             .submit_input(owner(1), transport(1), &input(1))
             .unwrap();
+        for expected_tick in 1..=u64::from(M02_FORMATION_TICKS) {
+            let forming = scheduler.tick().unwrap();
+            assert_eq!(forming.scheduler_tick, expected_tick);
+            assert_eq!(forming.session_steps, 0);
+        }
         let first = scheduler.tick().unwrap();
-        assert_eq!(first.scheduler_tick, 1);
+        assert_eq!(first.scheduler_tick, u64::from(M02_FORMATION_TICKS) + 1);
         assert_eq!(first.session_steps, 1);
         assert!(first.snapshot_batches.is_empty());
         let reattached = scheduler
@@ -816,12 +959,59 @@ mod tests {
             .submit_input(owner(1), transport(2), &input(2))
             .unwrap();
         let second = scheduler.tick().unwrap();
-        assert_eq!(second.scheduler_tick, 2);
+        assert_eq!(second.scheduler_tick, u64::from(M02_FORMATION_TICKS) + 2);
         assert_eq!(second.session_steps, 1);
         assert_eq!(second.snapshot_batches.len(), 1);
         assert_eq!(second.snapshot_batches[0].owner, owner(1));
         assert_eq!(second.snapshot_batches[0].snapshots[0].server_tick, 2);
         assert_eq!(scheduler.diagnostics().simulation_stalls, 0);
+    }
+
+    #[test]
+    fn shared_link_lost_recall_is_player_local_and_survivors_keep_advancing() {
+        let root = content_root();
+        let mut scheduler = InstanceScheduler::default();
+        for value in 1..=4 {
+            scheduler
+                .admit_or_route_control(owner(value), transport(value), &join(1), &root, value)
+                .unwrap();
+        }
+        let first = scheduler.tick().unwrap();
+        assert_eq!(first.session_steps, 4);
+        scheduler.transport_lost(owner(1), transport(1)).unwrap();
+        for _ in 0..89 {
+            scheduler.tick().unwrap();
+        }
+        let instance_id = scheduler.instance_for_owner(owner(1)).unwrap();
+        let instance = scheduler.instances.get(&instance_id).unwrap();
+        assert!(matches!(
+            instance.directory.session(owner(1)).unwrap().phase(),
+            crate::SessionPhase::LinkLost {
+                recall_tick: 91,
+                ..
+            }
+        ));
+        let terminal = scheduler.tick().unwrap();
+        assert_eq!(terminal.session_steps, 4);
+        let instance = scheduler.instances.get(&instance_id).unwrap();
+        assert!(matches!(
+            instance.directory.session(owner(1)).unwrap().phase(),
+            crate::SessionPhase::Recalled { committed_tick: 91 }
+        ));
+        for value in 2..=4 {
+            assert!(matches!(
+                instance.directory.session(owner(value)).unwrap().phase(),
+                crate::SessionPhase::Connected
+            ));
+        }
+        let authority = instance.shared_authority.as_ref().unwrap();
+        assert!(matches!(
+            authority.players()[&sim_core::EntityId::new(10_000).unwrap()].phase(),
+            sim_core::AuthorityPhase::Recalled {
+                committed_at: sim_core::Tick(91)
+            }
+        ));
+        assert_eq!(authority.wave().tick(), sim_core::Tick(92));
     }
 
     #[test]

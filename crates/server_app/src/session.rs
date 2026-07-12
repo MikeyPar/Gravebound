@@ -314,8 +314,7 @@ impl AuthoritativeSession {
         })
     }
 
-    /// Advances one server-owned 30 Hz tick and returns a 15 Hz snapshot every second tick.
-    pub fn tick(&mut self) -> Result<Vec<SnapshotChunk>, SessionError> {
+    pub(crate) fn take_shared_authority_input(&mut self) -> Result<AuthorityInput, SessionError> {
         let movement = MovementAction::try_from_milli(
             self.latest_input.movement_x_milli,
             self.latest_input.movement_y_milli,
@@ -324,17 +323,62 @@ impl AuthoritativeSession {
             f32::from(self.latest_input.aim_x_milli),
             f32::from(self.latest_input.aim_y_milli),
         ))?;
-        let step = self.arena.step(AuthorityInput {
+        let input = AuthorityInput {
             movement,
             aim,
             primary_held: self.latest_input.held_primary,
             primary_sequence: self.latest_input.primary_sequence,
             ability_1_sequence: self.ability_1_sequence,
             ability_2_sequence: self.ability_2_sequence,
-        })?;
+        };
         self.ability_1_pending = false;
         self.ability_2_pending = false;
         self.new_mutations_this_tick = 0;
+        Ok(input)
+    }
+
+    pub(crate) fn encode_shared_snapshots(
+        &mut self,
+        server_tick: u64,
+        state_version: u64,
+        entities: Vec<sim_core::AuthorityEntitySnapshot>,
+    ) -> Result<Vec<SnapshotChunk>, SessionError> {
+        self.snapshot_sequence = self
+            .snapshot_sequence
+            .checked_add(1)
+            .ok_or(SessionError::SequenceExhausted)?;
+        let entities = entities
+            .into_iter()
+            .map(protocol_entity_snapshot)
+            .collect::<Vec<_>>();
+        let chunk_count = entities.len().div_ceil(MAX_SNAPSHOT_ENTITIES_PER_CHUNK);
+        let chunk_count = u16::try_from(chunk_count).map_err(|_| SessionError::SnapshotOverflow)?;
+        entities
+            .chunks(MAX_SNAPSHOT_ENTITIES_PER_CHUNK)
+            .enumerate()
+            .map(|(index, entities)| {
+                let chunk = SnapshotChunk {
+                    sequence: self.snapshot_sequence,
+                    server_tick,
+                    state_version,
+                    acknowledged_input_sequence: self.latest_input.sequence,
+                    chunk_index: u16::try_from(index)
+                        .map_err(|_| SessionError::SnapshotOverflow)?,
+                    chunk_count,
+                    entities: entities.to_vec(),
+                };
+                chunk
+                    .validate()
+                    .map_err(|_| SessionError::InvalidSnapshot)?;
+                Ok(chunk)
+            })
+            .collect()
+    }
+
+    /// Advances one server-owned 30 Hz tick and returns a 15 Hz snapshot every second tick.
+    pub fn tick(&mut self) -> Result<Vec<SnapshotChunk>, SessionError> {
+        let input = self.take_shared_authority_input()?;
+        let step = self.arena.step(input)?;
         if !step.tick.0.is_multiple_of(2) && !step.death_committed && !step.recall_committed {
             return Ok(Vec::new());
         }
@@ -469,6 +513,83 @@ impl AuthoritativeSession {
         self.reliable_event(ReliableEvent::MutationResult(result))
     }
 
+    pub(crate) fn submit_shared_mutation(
+        &mut self,
+        request: &MutationRequest,
+        arena: &mut sim_core::SharedAuthoritativeArena,
+        player_id: sim_core::EntityId,
+    ) -> Result<ReliableEventFrame, SessionError> {
+        request
+            .validate()
+            .map_err(|_| SessionError::InvalidProtocolMessage)?;
+        let result = if let Some(cached) = self.mutation_results.get(&request.mutation_id).cloned()
+        {
+            if cached.request == *request {
+                cached.result
+            } else {
+                self.ingress_diagnostics.idempotency_conflicts = self
+                    .ingress_diagnostics
+                    .idempotency_conflicts
+                    .saturating_add(1);
+                MutationResult {
+                    mutation_id: request.mutation_id,
+                    accepted: false,
+                    code: MutationResultCode::IdempotencyConflict,
+                    state_version: arena.state_version(),
+                }
+            }
+        } else if self.new_mutations_this_tick >= MAX_NEW_MUTATIONS_PER_TICK
+            || self.mutation_results.len() >= MAX_CACHED_MUTATIONS
+        {
+            self.ingress_diagnostics.rate_limited_mutations = self
+                .ingress_diagnostics
+                .rate_limited_mutations
+                .saturating_add(1);
+            MutationResult {
+                mutation_id: request.mutation_id,
+                accepted: false,
+                code: MutationResultCode::RateLimited,
+                state_version: arena.state_version(),
+            }
+        } else {
+            self.new_mutations_this_tick = self
+                .new_mutations_this_tick
+                .checked_add(1)
+                .ok_or(SessionError::SequenceExhausted)?;
+            let pickup_id = FieldPickupId::new(request.pickup_id)
+                .map_err(|_| SessionError::InvalidProtocolMessage)?;
+            let placement = match request.placement {
+                PickupPlacement::Take => PlacementChoice::Take,
+                PickupPlacement::Equip => PlacementChoice::Equip,
+            };
+            let (accepted, code) = match arena.apply_pickup(player_id, pickup_id, placement) {
+                Ok(_) => (true, MutationResultCode::Accepted),
+                Err(error) => (false, shared_mutation_error_code(&error)),
+            };
+            let result = MutationResult {
+                mutation_id: request.mutation_id,
+                accepted,
+                code,
+                state_version: arena.state_version(),
+            };
+            if !accepted {
+                self.ingress_diagnostics.rejected_mutations = self
+                    .ingress_diagnostics
+                    .rejected_mutations
+                    .saturating_add(1);
+            }
+            self.mutation_results.insert(
+                request.mutation_id,
+                CachedMutation {
+                    request: request.clone(),
+                    result: result.clone(),
+                },
+            );
+            result
+        };
+        self.reliable_event(ReliableEvent::MutationResult(result))
+    }
+
     pub fn handle_reliable(&mut self, message: WireMessage) -> Result<WireMessage, SessionError> {
         let response = match message {
             WireMessage::ActionFrame(frame) => self.submit_action(&frame)?,
@@ -521,6 +642,29 @@ fn entity_state_flags(alive: bool, eligible: bool, collected: bool) -> u32 {
     flags
 }
 
+fn protocol_entity_snapshot(entity: sim_core::AuthorityEntitySnapshot) -> EntitySnapshot {
+    EntitySnapshot {
+        entity_id: entity.entity_id,
+        kind: match entity.kind {
+            AuthorityEntityKind::Player => EntityKind::Player,
+            AuthorityEntityKind::Enemy => EntityKind::Enemy,
+            AuthorityEntityKind::FriendlyProjectile => EntityKind::FriendlyProjectile,
+            AuthorityEntityKind::HostileProjectile => EntityKind::HostileProjectile,
+            AuthorityEntityKind::PersonalPickup => EntityKind::PersonalPickup,
+        },
+        x_milli_tiles: entity.x_milli_tiles,
+        y_milli_tiles: entity.y_milli_tiles,
+        velocity_x_milli_tiles_per_second: entity.velocity_x_milli_tiles_per_second,
+        velocity_y_milli_tiles_per_second: entity.velocity_y_milli_tiles_per_second,
+        source_entity_id: entity.source_entity_id,
+        source_input_sequence: entity.source_input_sequence,
+        source_projectile_ordinal: entity.source_projectile_ordinal,
+        current_health: entity.current_health,
+        maximum_health: entity.maximum_health,
+        state_flags: entity_state_flags(entity.alive, entity.eligible, entity.collected),
+    }
+}
+
 fn mutation_error_code(error: &AuthorityError) -> MutationResultCode {
     match error {
         AuthorityError::Dead => MutationResultCode::Dead,
@@ -533,6 +677,21 @@ fn mutation_error_code(error: &AuthorityError) -> MutationResultCode {
             MutationResultCode::OutOfRange
         }
         AuthorityError::Inventory(InventoryError::PickupAlreadyCollected(_)) => {
+            MutationResultCode::AlreadyResolved
+        }
+        _ => MutationResultCode::InventoryRejected,
+    }
+}
+
+fn shared_mutation_error_code(error: &sim_core::SharedAuthorityError) -> MutationResultCode {
+    match error {
+        sim_core::SharedAuthorityError::UnknownPlayer(_)
+        | sim_core::SharedAuthorityError::PickupNotFound(_) => MutationResultCode::NotFound,
+        sim_core::SharedAuthorityError::PlayerUnavailable(_) => MutationResultCode::Ineligible,
+        sim_core::SharedAuthorityError::Inventory(InventoryError::PickupOutOfReach { .. }) => {
+            MutationResultCode::OutOfRange
+        }
+        sim_core::SharedAuthorityError::Inventory(InventoryError::PickupAlreadyCollected(_)) => {
             MutationResultCode::AlreadyResolved
         }
         _ => MutationResultCode::InventoryRejected,

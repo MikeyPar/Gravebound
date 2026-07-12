@@ -751,8 +751,8 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::too_many_lines)] // Four independent routes stay explicit for leakage review.
-    async fn four_concurrent_clients_receive_only_their_isolated_authority_streams() {
+    #[allow(clippy::too_many_lines)] // Four recipient routes stay explicit for shared-state review.
+    async fn four_concurrent_clients_share_one_authoritative_world() {
         let content_root = content_root();
         let server = BoundLocalServer::bind(LocalServerConfig {
             bind_address: "127.0.0.1:0".parse().unwrap(),
@@ -797,11 +797,16 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(joined.code, SessionControlResultCode::Joined);
-            clients.push(connection);
+            clients.push((
+                connection,
+                joined
+                    .controlled_entity_id
+                    .expect("controlled player binding"),
+            ));
         }
 
         let directions = [(1_000, 0), (-1_000, 0), (0, -1_000), (0, 1_000)];
-        for (connection, (x, y)) in clients.iter().zip(directions) {
+        for ((connection, _), (x, y)) in clients.iter().zip(directions) {
             bot_client::send_input_datagram(
                 connection,
                 InputFrame {
@@ -821,31 +826,52 @@ mod tests {
         }
 
         let mut positions = Vec::new();
-        for connection in &clients {
-            let player = tokio::time::timeout(Duration::from_secs(2), async {
-                loop {
-                    let snapshot = bot_client::receive_snapshot_datagram(connection)
-                        .await
-                        .unwrap();
-                    if snapshot.acknowledged_input_sequence == 1 {
-                        break snapshot
-                            .entities
-                            .into_iter()
-                            .find(|entity| {
-                                entity.entity_id == protocol::M02_ISOLATED_PLAYER_ENTITY_ID
-                            })
+        let mut shared_enemy_facts = Vec::new();
+        for (connection, controlled_entity_id) in &clients {
+            let (player, player_count, enemy_fact) =
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    loop {
+                        let snapshot = bot_client::receive_snapshot_datagram(connection)
+                            .await
                             .unwrap();
+                        if snapshot.acknowledged_input_sequence == 1 {
+                            let player_count = snapshot
+                                .entities
+                                .iter()
+                                .filter(|entity| entity.kind == protocol::EntityKind::Player)
+                                .count();
+                            let enemy_fact = snapshot
+                                .entities
+                                .iter()
+                                .find(|entity| entity.kind == protocol::EntityKind::Enemy)
+                                .map(|entity| {
+                                    (
+                                        entity.entity_id,
+                                        entity.current_health,
+                                        entity.maximum_health,
+                                    )
+                                })
+                                .expect("shared enemy snapshot");
+                            let player = snapshot
+                                .entities
+                                .into_iter()
+                                .find(|entity| entity.entity_id == *controlled_entity_id)
+                                .unwrap();
+                            break (player, player_count, enemy_fact);
+                        }
                     }
-                }
-            })
-            .await
-            .expect("each client received its routed snapshot");
+                })
+                .await
+                .expect("each client received its routed snapshot");
             positions.push((player.x_milli_tiles, player.y_milli_tiles));
+            assert_eq!(player_count, 4);
+            shared_enemy_facts.push(enemy_fact);
         }
         assert!(positions[0].0 > 4_000);
         assert!(positions[1].0 < 4_000);
         assert!(positions[2].1 < 12_000);
         assert!(positions[3].1 > 12_000);
+        assert!(shared_enemy_facts.windows(2).all(|pair| pair[0] == pair[1]));
 
         shutdown_send.send(()).unwrap();
         let report = server_task.await.unwrap().unwrap();

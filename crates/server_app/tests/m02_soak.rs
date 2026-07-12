@@ -24,7 +24,6 @@ fn protocol_round_trip(message: &WireMessage) -> WireMessage {
 #[derive(Debug)]
 struct SoakSlot {
     bot: JourneyBot,
-    behavior: BotBehavior,
     owner: SessionOwnerId,
     transport: TransportId,
     generation: u64,
@@ -43,7 +42,6 @@ impl SoakSlot {
         let behavior = Self::behavior(index, generation);
         Self {
             bot: JourneyBot::with_behavior(behavior),
-            behavior,
             owner: SessionOwnerId::new(identity).unwrap(),
             transport: TransportId::new(identity).unwrap(),
             generation,
@@ -231,19 +229,25 @@ fn run_soak(bot_count: usize, duration_ticks: u64) -> SoakEvidence {
         let frame = scheduler.tick().expect("scheduled authority frame");
         assert_eq!(frame.scheduler_tick, scheduler_tick);
         assert_eq!(frame.session_steps, bot_count);
-        let mut cohort_snapshots = BTreeMap::<(u8, u64, u16), Vec<u8>>::new();
+        let mut cohort_snapshots = BTreeMap::<(u64, u64, u16), Vec<u8>>::new();
         for batch in frame.snapshot_batches {
             let slot = slots
                 .iter_mut()
                 .find(|slot| slot.owner == batch.owner)
                 .expect("snapshot owner slot");
             for snapshot in batch.snapshots {
-                let behavior_code = match slot.behavior {
-                    BotBehavior::FightAndCollect => 0,
-                    BotBehavior::AwaitAuthoritativeDeath => 1,
-                };
-                let key = (behavior_code, snapshot.server_tick, snapshot.chunk_index);
-                let encoded = encode_frame(&WireMessage::SnapshotChunk(snapshot.clone()))
+                let key = (
+                    batch.instance_id.get(),
+                    snapshot.server_tick,
+                    snapshot.chunk_index,
+                );
+                let mut canonical = snapshot.clone();
+                canonical.sequence = 1;
+                canonical.acknowledged_input_sequence = 0;
+                canonical
+                    .entities
+                    .retain(|entity| entity.kind != protocol::EntityKind::PersonalPickup);
+                let encoded = encode_frame(&WireMessage::SnapshotChunk(canonical))
                     .expect("cohort snapshot encode");
                 if let Some(expected) = cohort_snapshots.get(&key) {
                     if expected != &encoded {

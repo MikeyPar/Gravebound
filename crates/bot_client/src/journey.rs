@@ -160,6 +160,7 @@ pub struct JourneyBot {
     pending_pickup: Option<u64>,
     resolved_pickups: BTreeSet<u64>,
     logical_session_id: Option<WireText<64>>,
+    controlled_entity_id: Option<u64>,
     terminal: BotTerminalOutcome,
     evidence: BotJourneyEvidence,
 }
@@ -181,6 +182,7 @@ impl Default for JourneyBot {
             pending_pickup: None,
             resolved_pickups: BTreeSet::new(),
             logical_session_id: None,
+            controlled_entity_id: None,
             terminal: BotTerminalOutcome::Active,
             evidence: BotJourneyEvidence::default(),
         }
@@ -228,11 +230,15 @@ impl JourneyBot {
         let Some(snapshot) = self.assembler.ingest(chunk)? else {
             return Ok(None);
         };
-        let saw_friendly_projectile = snapshot
-            .entities
-            .iter()
-            .any(|entity| entity.kind == EntityKind::FriendlyProjectile);
-        let observation = observation_from_snapshot(&snapshot)?;
+        let saw_friendly_projectile = snapshot.entities.iter().any(|entity| {
+            entity.kind == EntityKind::FriendlyProjectile
+                && Some(entity.source_entity_id) == self.controlled_entity_id
+        });
+        let observation = observation_from_snapshot(
+            &snapshot,
+            self.controlled_entity_id
+                .ok_or(BotJourneyError::ControlledEntityMissing)?,
+        )?;
         self.evidence.completed_snapshots = self.evidence.completed_snapshots.saturating_add(1);
         let position = (
             observation.player.x_milli_tiles,
@@ -448,6 +454,7 @@ impl JourneyBot {
             SessionControlResultCode::Joined | SessionControlResultCode::Reattached
         ) {
             self.logical_session_id = Some(result.session_id.clone());
+            self.controlled_entity_id = result.controlled_entity_id;
         }
         if result.code == SessionControlResultCode::Reattached {
             self.evidence.reconnects_accepted = self.evidence.reconnects_accepted.saturating_add(1);
@@ -462,16 +469,17 @@ impl JourneyBot {
     }
 }
 
-fn observation_from_snapshot(snapshot: &BotSnapshot) -> Result<BotObservation, BotJourneyError> {
-    let players = snapshot
+fn observation_from_snapshot(
+    snapshot: &BotSnapshot,
+    controlled_entity_id: u64,
+) -> Result<BotObservation, BotJourneyError> {
+    let player = snapshot
         .entities
         .iter()
-        .filter(|entity| entity.kind == EntityKind::Player)
-        .cloned()
-        .collect::<Vec<_>>();
-    let [player] = players.as_slice() else {
-        return Err(BotJourneyError::PlayerSnapshotCardinality);
-    };
+        .find(|entity| {
+            entity.kind == EntityKind::Player && entity.entity_id == controlled_entity_id
+        })
+        .ok_or(BotJourneyError::PlayerSnapshotCardinality)?;
     let nearest_enemy = nearest_entity(&snapshot.entities, player, |entity| {
         matches!(entity.kind, EntityKind::Enemy | EntityKind::Boss)
             && entity.state_flags & ENTITY_STATE_ALIVE != 0
@@ -530,6 +538,8 @@ fn checked_next(value: u32) -> Result<u32, BotJourneyError> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum BotJourneyError {
+    #[error("accepted session control did not bind a controlled player entity")]
+    ControlledEntityMissing,
     #[error("snapshot chunk failed canonical protocol validation")]
     InvalidSnapshotChunk,
     #[error("snapshot assembly state is missing")]
