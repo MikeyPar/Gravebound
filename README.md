@@ -102,7 +102,7 @@ Concept images establish mood, hierarchy, and visual language. They are not fina
 
 ## Current Next Step
 
-Approve or amend the seven Core identity decisions in [`SPEC-CONFLICT-004`](docs/spec-conflicts/SPEC-CONFLICT-004-m03-core-identity.md), then implement the three-slice [`GB-M03-01` contract](docs/tasks/GB-M03-01.md): immutable FP/Core-development boundary, wipeable server-authoritative test identity, and native Grave Arbalist creation/select. Do not pull PostgreSQL (`GB-M03-02`) forward or promote incomplete `core.1.0.0` bytes. The corrected M02 package launched one server and four native clients on 2026-07-12, but the focused visual/pickup/reconnect owner retest remains open because Windows Graphics Capture could not capture the Bevy windows (`0x80004002`); the already-recorded owner-assumed M02 gate remains the only human disposition.
+Implement `GB-M03-01A`, the immutable FP/Core-development content boundary from the approved [`GB-M03-01` contract](docs/tasks/GB-M03-01.md), then add the wipeable server-authoritative identity/protocol (`01B`) and native Grave Arbalist creation/select (`01C`). All seven Core identity decisions in [`SPEC-CONFLICT-004`](docs/spec-conflicts/SPEC-CONFLICT-004-m03-core-identity.md) are approved. Do not pull PostgreSQL (`GB-M03-02`) forward or promote incomplete `core.1.0.0` bytes. The focused M02 visual/pickup/reconnect owner retest remains an explicitly open follow-up and is not measured M03 evidence.
 
 ## Resolved prior handoff
 

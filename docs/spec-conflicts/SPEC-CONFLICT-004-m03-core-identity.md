@@ -1,10 +1,10 @@
 # SPEC-CONFLICT-004 — Core identity and character-select contract
 
-**Status:** Owner decision required
+**Status:** Resolved — all seven recommended resolutions approved
 
 **Raised:** 2026-07-12
 
-**Blocks:** `GB-M03-01`
+**Blocks:** None
 
 **Authorities reviewed:** canonical GDD, Content Production Specification v1, Development Roadmap v1
 
@@ -60,4 +60,4 @@ No implementation may invent the missing production rules. The decisions below k
 
 ## Approval record
 
-The owner may approve all recommended resolutions together or replace individual numbered decisions. Once approved, record the date and exact disposition here before implementation begins.
+On 2026-07-12, the project owner approved all seven recommended resolutions without amendment. They are authoritative for `GB-M03-01` and remain Core-only boundaries unless a later reviewed specification change replaces them.
