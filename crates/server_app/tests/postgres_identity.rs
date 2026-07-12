@@ -33,6 +33,13 @@ impl IdentityClock for FixedClock {
 #[derive(Debug, Default)]
 struct SequentialIds(AtomicU8);
 
+impl SequentialIds {
+    fn starting_at(next: u8) -> Self {
+        assert_ne!(next, 0, "test character IDs must be nonzero");
+        Self(AtomicU8::new(next - 1))
+    }
+}
+
 impl CharacterIdGenerator for SequentialIds {
     fn next_id(&self) -> [u8; 16] {
         [self.0.fetch_add(1, Ordering::Relaxed) + 1; 16]
@@ -53,10 +60,17 @@ fn account(value: u8) -> AuthenticatedAccount {
 fn service(
     persistence: PostgresPersistence,
 ) -> IdentityService<PostgresAccountRepository, FixedClock, SequentialIds, NoopIdentityEventSink> {
+    service_starting_at(persistence, 1)
+}
+
+fn service_starting_at(
+    persistence: PostgresPersistence,
+    next_character_id: u8,
+) -> IdentityService<PostgresAccountRepository, FixedClock, SequentialIds, NoopIdentityEventSink> {
     IdentityService::new(
         PostgresAccountRepository::new(persistence),
         FixedClock,
-        SequentialIds::default(),
+        SequentialIds::starting_at(next_character_id),
         NoopIdentityEventSink,
         manifest(),
     )
@@ -159,8 +173,8 @@ fn start_server(
 }
 
 async fn assert_concurrent_stale_writer(persistence: &PostgresPersistence) {
-    let concurrent_first = service(persistence.clone());
-    let concurrent_second = service(persistence.clone());
+    let concurrent_first = service_starting_at(persistence.clone(), 31);
+    let concurrent_second = service_starting_at(persistence.clone(), 32);
     let AccountBootstrapResult::Snapshot(empty) = concurrent_first
         .bootstrap(Some(account(93)), &bootstrap())
         .await
