@@ -9,6 +9,7 @@ mod bounded;
 mod codec;
 mod handshake;
 mod messages;
+mod progression;
 mod world_flow;
 
 pub use account::{
@@ -35,6 +36,10 @@ pub use messages::{
     SessionControlResult, SessionControlResultCode, SessionDestination, SnapshotChunk,
     SocialPingKind, WireMessage,
 };
+pub use progression::{
+    PROGRESSION_REWARD_EVENT_ID_BYTES, ProgressionCapState, ProgressionProjection,
+    ProgressionQueryFrame, ProgressionResult, ProgressionResultCode, ProgressionValidationError,
+};
 pub use world_flow::{
     CharacterLocation, CharacterLocationSnapshot, INSTANCE_LINEAGE_ID_BYTES, SafeArrival,
     TRANSFER_ID_BYTES, WORLD_FLOW_ID_MAX_BYTES, WorldFlowFrame, WorldFlowRequest, WorldFlowResult,
@@ -48,7 +53,9 @@ use thiserror::Error;
 /// First incompatible protocol generation.
 pub const PROTOCOL_MAJOR: u16 = 1;
 /// Backward-compatible feature generation within [`PROTOCOL_MAJOR`].
-pub const PROTOCOL_MINOR: u16 = 7;
+pub const PROTOCOL_MINOR: u16 = 8;
+/// Exact world-flow generation retained while progression projection is appended.
+pub const WORLD_FLOW_PROTOCOL_MINOR: u16 = 7;
 /// Exact Core identity wire generation retained while world-flow messages are appended.
 pub const CORE_IDENTITY_PROTOCOL_MINOR: u16 = 6;
 /// Exact final M02 wire generation retained for byte-for-byte compatibility fixtures.

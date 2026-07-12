@@ -20,6 +20,7 @@ pub fn encode_m02_compatibility_frame(message: &WireMessage) -> Result<Vec<u8>, 
         MessageKind::AccountBootstrapFrame
             | MessageKind::CharacterMutationFrame
             | MessageKind::WorldFlowFrame
+            | MessageKind::ProgressionQueryFrame
     ) {
         return Err(WireCodecError::MessageUnavailableAtVersion);
     }
@@ -116,6 +117,7 @@ const fn message_kind_byte(kind: MessageKind) -> u8 {
         MessageKind::AccountBootstrapFrame => 9,
         MessageKind::CharacterMutationFrame => 10,
         MessageKind::WorldFlowFrame => 11,
+        MessageKind::ProgressionQueryFrame => 12,
     }
 }
 
@@ -132,6 +134,7 @@ const fn message_kind_from_byte(value: u8) -> Result<MessageKind, WireCodecError
         9 => Ok(MessageKind::AccountBootstrapFrame),
         10 => Ok(MessageKind::CharacterMutationFrame),
         11 => Ok(MessageKind::WorldFlowFrame),
+        12 => Ok(MessageKind::ProgressionQueryFrame),
         other => Err(WireCodecError::UnknownMessageKind(other)),
     }
 }
@@ -193,7 +196,7 @@ mod tests {
         assert_eq!(decode_frame(&frame).unwrap(), input_message());
         assert_eq!(
             blake3::hash(&frame).to_hex().to_string(),
-            "8c3721561482eb0dd8f055ce1bf00072bcff805d1f4fa310b3a90d43fdb0ff6c"
+            "ece8840cb3fb69b07847973f8b50ff81c39c7e72c900db3845bfc9aee5c9634f"
         );
         let m02 = encode_m02_compatibility_frame(&input_message()).unwrap();
         assert_eq!(
@@ -278,6 +281,22 @@ mod tests {
         assert_eq!(decode_frame(&frame), Ok(flow.clone()));
         assert_eq!(
             encode_m02_compatibility_frame(&flow),
+            Err(WireCodecError::MessageUnavailableAtVersion)
+        );
+    }
+
+    #[test]
+    fn protocol_1_8_appends_read_only_progression_projection_query() {
+        let query = WireMessage::ProgressionQueryFrame(crate::ProgressionQueryFrame {
+            sequence: 9,
+            character_id: [2; 16],
+            progression_content_revision: ManifestHash::new("c".repeat(64)).unwrap(),
+        });
+        let frame = encode_frame(&query).unwrap();
+        assert_eq!(frame[8], 12);
+        assert_eq!(decode_frame(&frame), Ok(query.clone()));
+        assert_eq!(
+            encode_m02_compatibility_frame(&query),
             Err(WireCodecError::MessageUnavailableAtVersion)
         );
     }
