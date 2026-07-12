@@ -102,7 +102,7 @@ Concept images establish mood, hierarchy, and visual language. They are not fina
 
 ## Current Next Step
 
-Implement [`GB-M02-09`](docs/tasks/GB-M02-09.md): add owner-qualified friendly-projectile provenance, multi-target hostile/lane simulation, `SharedAuthoritativeArena`, and instance-owned shared authority while preserving one-player deterministic regressions. Protocol 1.5 controlled-player binding and exact `fp.1.0.0` manual-Recall rejection are complete. Replace the isolated four-client smoke with shared enemy-health/death assertions, then rerun all gates and package the four-human shared playtest. Do not begin M03 until M02 closes.
+Implement [`GB-M02-09`](docs/tasks/GB-M02-09.md): add multi-target hostile/lane simulation, `SharedAuthoritativeArena`, and instance-owned shared authority while preserving one-player deterministic regressions. Protocol 1.5 controlled-player binding, owner-qualified projectile provenance, and exact `fp.1.0.0` manual-Recall rejection are complete. Replace the isolated four-client smoke with shared enemy-health/death assertions, then rerun all gates and package the four-human shared playtest. Do not begin M03 until M02 closes.
 
 ## Resolved prior handoff
 

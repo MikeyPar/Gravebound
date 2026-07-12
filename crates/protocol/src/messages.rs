@@ -115,6 +115,8 @@ pub struct EntitySnapshot {
     pub y_milli_tiles: i32,
     pub velocity_x_milli_tiles_per_second: i32,
     pub velocity_y_milli_tiles_per_second: i32,
+    /// Player entity that authored a friendly projectile; zero for every other entity kind.
+    pub source_entity_id: u64,
     pub source_input_sequence: u32,
     pub source_projectile_ordinal: u16,
     pub current_health: u32,
@@ -140,11 +142,13 @@ impl EntitySnapshot {
             _ => {}
         }
         match self.kind {
-            EntityKind::FriendlyProjectile if self.source_input_sequence == 0 => {
+            EntityKind::FriendlyProjectile
+                if self.source_entity_id == 0 || self.source_input_sequence == 0 =>
+            {
                 return Err(MessageValidationError::MissingProjectileSourceSequence);
             }
             EntityKind::FriendlyProjectile => {}
-            _ if self.source_input_sequence != 0 => {
+            _ if self.source_entity_id != 0 || self.source_input_sequence != 0 => {
                 return Err(MessageValidationError::UnexpectedProjectileSourceSequence);
             }
             _ => {}
@@ -637,6 +641,7 @@ mod tests {
             y_milli_tiles: 12_000,
             velocity_x_milli_tiles_per_second: 0,
             velocity_y_milli_tiles_per_second: 0,
+            source_entity_id: 0,
             source_input_sequence: 0,
             source_projectile_ordinal: 0,
             current_health: 128,
@@ -668,9 +673,11 @@ mod tests {
             projectile.validate(),
             Err(MessageValidationError::MissingProjectileSourceSequence)
         );
+        projectile.source_entity_id = 1;
         projectile.source_input_sequence = 1;
         assert_eq!(projectile.validate(), Ok(()));
         projectile.kind = EntityKind::HostileProjectile;
+        projectile.source_entity_id = 0;
         projectile.source_input_sequence = 0;
         projectile.source_projectile_ordinal = 1;
         assert_eq!(

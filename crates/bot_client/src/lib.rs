@@ -202,6 +202,7 @@ mod tests {
             y_milli_tiles: position.1,
             velocity_x_milli_tiles_per_second: 0,
             velocity_y_milli_tiles_per_second: 0,
+            source_entity_id: u64::from(kind == EntityKind::FriendlyProjectile),
             source_input_sequence: u32::from(kind == EntityKind::FriendlyProjectile),
             source_projectile_ordinal: 0,
             current_health: health.0,

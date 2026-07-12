@@ -482,7 +482,7 @@ impl ProjectilePresentationSet {
         Ok(())
     }
 
-    fn ingest(&mut self, snapshot: &CompleteSnapshot) {
+    fn ingest(&mut self, snapshot: &CompleteSnapshot, local_entity_id: u64) {
         let authoritative = snapshot
             .entities
             .iter()
@@ -490,6 +490,9 @@ impl ProjectilePresentationSet {
             .map(|entity| (entity.entity_id, entity))
             .collect::<BTreeMap<_, _>>();
         for entity in authoritative.values() {
+            if entity.source_entity_id != local_entity_id {
+                continue;
+            }
             if let Some(track) = self.local.get_mut(&(
                 entity.source_input_sequence,
                 entity.source_projectile_ordinal,
@@ -941,7 +944,7 @@ impl RemoteClientRuntime {
         };
         let correction = self.local.reconcile(&snapshot)?;
         self.remote.ingest(&snapshot, self.local_entity_id);
-        self.projectiles.ingest(&snapshot);
+        self.projectiles.ingest(&snapshot, self.local_entity_id);
         Ok(Some(SnapshotApplication {
             snapshot,
             correction,
@@ -1142,6 +1145,7 @@ mod tests {
             y_milli_tiles: y,
             velocity_x_milli_tiles_per_second: vx,
             velocity_y_milli_tiles_per_second: vy,
+            source_entity_id: 0,
             source_input_sequence: 0,
             source_projectile_ordinal: 0,
             current_health: u32::from(alive) * 128,
@@ -1159,6 +1163,7 @@ mod tests {
             y_milli_tiles: y,
             velocity_x_milli_tiles_per_second: 0,
             velocity_y_milli_tiles_per_second: 0,
+            source_entity_id: 0,
             source_input_sequence: 0,
             source_projectile_ordinal: 0,
             current_health: if health_entity { 100 } else { 0 },
@@ -1181,6 +1186,7 @@ mod tests {
             y_milli_tiles: 10_000,
             velocity_x_milli_tiles_per_second: velocity_x,
             velocity_y_milli_tiles_per_second: 0,
+            source_entity_id: 1,
             source_input_sequence: source_sequence,
             source_projectile_ordinal: ordinal,
             current_health: 0,
@@ -1470,6 +1476,31 @@ mod tests {
             .ingest_snapshot_chunk(chunk(2, 4, 5, vec![player(1, 10_000, 10_000, 0, 0, true)]))
             .unwrap();
         assert!(runtime.local_projectiles_at(200).is_empty());
+    }
+
+    #[test]
+    fn remote_projectile_with_coincident_input_provenance_cannot_confirm_local_prediction() {
+        let mut runtime = runtime(1);
+        runtime
+            .start_local_projectile(5, 0, 0, (0, 10_000), (6_000, 0))
+            .unwrap();
+        let mut remote_projectile = friendly_projectile(50, 5, 0, 400, 6_000);
+        remote_projectile.source_entity_id = 2;
+        runtime
+            .ingest_snapshot_chunk(chunk(
+                1,
+                2,
+                4,
+                vec![
+                    player(1, 10_000, 10_000, 0, 0, true),
+                    player(2, 11_000, 10_000, 0, 0, true),
+                    remote_projectile,
+                ],
+            ))
+            .unwrap();
+        let local = runtime.local_projectiles_at(100);
+        assert_eq!(local.len(), 1);
+        assert_eq!(local[0].authoritative_entity_id, None);
     }
 
     #[test]
