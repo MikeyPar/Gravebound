@@ -590,8 +590,8 @@ mod tests {
     use std::{path::Path, sync::Arc};
 
     use protocol::{
-        ActionFrame, ActionKind, AuthTicket, Compression, ENTITY_STATE_ALIVE, InputFrame, Platform,
-        SessionControlFrame, SessionControlRequest, SessionDestination,
+        ActionFrame, ActionKind, AuthTicket, Compression, InputFrame, Platform,
+        SessionControlFrame, SessionControlRequest,
     };
     use tokio::sync::oneshot;
 
@@ -620,7 +620,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "fixture used superseded manual Recall; routing and teardown have separate coverage"]
     #[allow(clippy::too_many_lines)] // One lifecycle test keeps terminal routing evidence explicit.
     async fn runnable_server_routes_real_quic_and_shuts_down_without_residue() {
         let content_root = content_root();
@@ -707,38 +706,11 @@ mod tests {
         assert!(matches!(
             recall.event,
             ReliableEvent::ActionResult {
-                code: protocol::ActionResultCode::Accepted,
+                code: protocol::ActionResultCode::RecallUnavailableCombatLaboratory,
                 ..
             }
         ));
-        tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                let terminal = bot_client::receive_snapshot_datagram(&connection)
-                    .await
-                    .unwrap();
-                if terminal.entities.iter().any(|entity| {
-                    entity.entity_id == protocol::M02_ISOLATED_PLAYER_ENTITY_ID
-                        && entity.state_flags & ENTITY_STATE_ALIVE == 0
-                }) {
-                    break;
-                }
-            }
-        })
-        .await
-        .expect("terminal Recall snapshot arrived");
-        let (_, terminal) = bot_client::perform_session_control(
-            &connection,
-            SessionControlFrame {
-                sequence: 2,
-                client_tick: snapshot.server_tick,
-                client_monotonic_micros: 2,
-                request: SessionControlRequest::Join,
-            },
-        )
-        .await
-        .unwrap();
-        assert_eq!(terminal.code, SessionControlResultCode::Reattached);
-        assert_eq!(terminal.destination, SessionDestination::LanternHalls);
+        assert_eq!(recall.server_tick, snapshot.server_tick);
 
         shutdown_send.send(()).unwrap();
         let report = server_task.await.unwrap().unwrap();

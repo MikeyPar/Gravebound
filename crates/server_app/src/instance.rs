@@ -899,6 +899,18 @@ mod tests {
         }
     }
 
+    fn resolve_singleton_by_link_lost(scheduler: &mut InstanceScheduler) -> SchedulerFrame {
+        for _ in 0..=M02_FORMATION_TICKS {
+            scheduler.tick().unwrap();
+        }
+        scheduler.transport_lost(owner(1), transport(1)).unwrap();
+        let mut terminal = None;
+        for _ in 0..crate::LINK_LOST_TICKS {
+            terminal = Some(scheduler.tick().unwrap());
+        }
+        terminal.unwrap()
+    }
+
     #[test]
     fn identity_capacity_and_deterministic_oldest_instance_admission_are_exact() {
         assert!(matches!(
@@ -1094,44 +1106,15 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "fixture used superseded manual Recall; terminal retirement is lifecycle-covered"]
     fn resolved_retirement_closes_empty_instance_without_membership_residue() {
         let root = content_root();
         let mut scheduler = InstanceScheduler::default();
         let admitted = scheduler
             .admit_or_route_control(owner(1), transport(1), &join(1), &root, 1)
             .unwrap();
-        let recall = scheduler
-            .handle_gameplay_reliable(
-                owner(1),
-                transport(1),
-                WireMessage::ActionFrame(ActionFrame {
-                    sequence: 1,
-                    client_tick: 0,
-                    action: ActionKind::RecallStart,
-                }),
-            )
-            .unwrap();
-        assert!(matches!(
-            recall,
-            WireMessage::ReliableEvent(ReliableEventFrame {
-                event: ReliableEvent::ActionResult {
-                    code: protocol::ActionResultCode::Accepted,
-                    ..
-                },
-                ..
-            })
-        ));
-        let mut terminal = None;
-        for _ in 0..sim_core::EMERGENCY_RECALL_CHANNEL_TICKS {
-            terminal = Some(scheduler.tick().unwrap());
-        }
-        let terminal = terminal.unwrap();
+        let terminal = resolve_singleton_by_link_lost(&mut scheduler);
         assert_eq!(terminal.snapshot_batches.len(), 1);
-        assert_eq!(
-            terminal.snapshot_batches[0].snapshots[0].server_tick,
-            sim_core::EMERGENCY_RECALL_CHANNEL_TICKS
-        );
+        assert_eq!(terminal.snapshot_batches[0].snapshots[0].server_tick, 91);
         assert_eq!(
             scheduler.instance_phase(admitted.instance_id),
             Some(ArenaInstancePhase::Active)
@@ -1144,27 +1127,13 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "fixture used superseded manual Recall; invariant remains fail-closed"]
     fn resolved_retirement_rejects_index_drift_before_mutating_membership() {
         let root = content_root();
         let mut scheduler = InstanceScheduler::default();
         let admitted = scheduler
             .admit_or_route_control(owner(1), transport(1), &join(1), &root, 1)
             .unwrap();
-        scheduler
-            .handle_gameplay_reliable(
-                owner(1),
-                transport(1),
-                WireMessage::ActionFrame(ActionFrame {
-                    sequence: 1,
-                    client_tick: 0,
-                    action: ActionKind::RecallStart,
-                }),
-            )
-            .unwrap();
-        for _ in 0..sim_core::EMERGENCY_RECALL_CHANNEL_TICKS {
-            scheduler.tick().unwrap();
-        }
+        resolve_singleton_by_link_lost(&mut scheduler);
 
         scheduler.owner_index.remove(&owner(1));
         assert!(matches!(
@@ -1180,27 +1149,13 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "fixture used superseded manual Recall; reconnect covers tombstones"]
     fn resolved_retirement_can_retain_a_routable_terminal_tombstone() {
         let root = content_root();
         let mut scheduler = InstanceScheduler::default();
         scheduler
             .admit_or_route_control(owner(1), transport(1), &join(1), &root, 1)
             .unwrap();
-        scheduler
-            .handle_gameplay_reliable(
-                owner(1),
-                transport(1),
-                WireMessage::ActionFrame(ActionFrame {
-                    sequence: 1,
-                    client_tick: 0,
-                    action: ActionKind::RecallStart,
-                }),
-            )
-            .unwrap();
-        for _ in 0..sim_core::EMERGENCY_RECALL_CHANNEL_TICKS {
-            scheduler.tick().unwrap();
-        }
+        resolve_singleton_by_link_lost(&mut scheduler);
 
         let retained = BTreeSet::from([owner(1)]);
         assert!(

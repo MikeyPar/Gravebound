@@ -931,9 +931,7 @@ pub enum LifecycleError {
 mod tests {
     use std::path::PathBuf;
 
-    use protocol::{
-        ActionFrame, ActionKind, ControlEvent, ReliableEvent, SessionControlResultCode,
-    };
+    use protocol::{ControlEvent, ReliableEvent, SessionControlResultCode};
 
     use super::*;
 
@@ -1057,66 +1055,6 @@ mod tests {
             2
         );
         assert!(recalled.inventory().backpack().iter().all(Option::is_none));
-    }
-
-    #[test]
-    #[ignore = "superseded by CONT-FP-010 manual Recall prohibition"]
-    fn manual_recall_resolves_at_twelve_ticks_and_reconnect_routes_to_halls() {
-        let (mut directory, session_id) = joined_directory();
-        let response = directory
-            .session_mut(owner(1))
-            .unwrap()
-            .handle_gameplay_reliable(
-                transport(1),
-                WireMessage::ActionFrame(ActionFrame {
-                    sequence: 1,
-                    client_tick: 0,
-                    action: ActionKind::RecallStart,
-                }),
-            )
-            .unwrap();
-        assert!(matches!(
-            response,
-            WireMessage::ReliableEvent(ReliableEventFrame {
-                event: ReliableEvent::ActionResult {
-                    code: protocol::ActionResultCode::Accepted,
-                    ..
-                },
-                ..
-            })
-        ));
-        for _ in 0..11 {
-            directory.session_mut(owner(1)).unwrap().tick().unwrap();
-            assert_eq!(
-                directory.session(owner(1)).unwrap().phase(),
-                SessionPhase::Connected
-            );
-        }
-        let critical = directory.session_mut(owner(1)).unwrap().tick().unwrap();
-        assert!(!critical.is_empty());
-        assert_eq!(
-            directory.session(owner(1)).unwrap().phase(),
-            SessionPhase::Recalled { committed_tick: 12 }
-        );
-        assert_eq!(directory.session(owner(1)).unwrap().transport_id(), None);
-        let response = directory
-            .handle_control(
-                owner(1),
-                transport(2),
-                &control(
-                    1,
-                    SessionControlRequest::Reconnect {
-                        prior_session_id: session_id,
-                    },
-                ),
-                &content_root(),
-                500,
-            )
-            .unwrap();
-        assert_eq!(
-            result(&response.event).destination,
-            SessionDestination::LanternHalls
-        );
     }
 
     #[test]
