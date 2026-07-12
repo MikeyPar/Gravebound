@@ -102,7 +102,7 @@ Concept images establish mood, hierarchy, and visual language. They are not fina
 
 ## Current Next Step
 
-Resolve the three world-flow decisions in `docs/spec-conflicts/SPEC-CONFLICT-010-m03-world-flow-revision-and-arrival.md`, then finish the dormant `GB-M03-03B` idempotent coordinator and disposable PostgreSQL proof. Continue approved `GB-M03-04A`/`04B` and `GB-M03-05A`–`05C`; resolve the five permanent-death decisions in `SPEC-CONFLICT-009`; pull the minimal `GB-M03-12` Ash wallet forward before `GB-M03-05D`. Keep the normal player route and affected Core Hall stations fail-closed until `GB-M03-04`, `05`, `06`, and `08` supply their owning item, Oath/Bargain, death, extraction, and Recall semantics.
+Finish `GB-M03-04A` by implementing its replay-first XP award repository/service, authoritative protocol projection, progression restore provider, native HUD, and PostgreSQL/QUIC closure evidence; exact progression content, simulation math, and migration 0003 are complete. Continue approved `GB-M03-04B` and `GB-M03-05A`–`05C`. Resolve `SPEC-CONFLICT-010` before the dormant `GB-M03-03B` coordinator and `SPEC-CONFLICT-009` before permanent death; pull the minimal `GB-M03-12` Ash wallet forward before `GB-M03-05D`. Keep the normal player route and affected Hall stations fail-closed until items, Oaths/Bargains, death, extraction, and Recall all pass.
 
 ## Resolved prior handoff
 
