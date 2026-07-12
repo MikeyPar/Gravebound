@@ -1,0 +1,82 @@
+[
+  {
+    "id": "boss.prototype.bell_proctor",
+    "schema_version": 1,
+    "content_version": "fp.1.0.0",
+    "enabled": true,
+    "release_stage": "fp",
+    "localization_name_key": "boss.prototype.bell_proctor.name",
+    "localization_description_key": "boss.prototype.bell_proctor.description",
+    "asset_ids": [
+      "sprite.boss.prototype.bell_proctor",
+      "portrait.boss.prototype.bell_proctor",
+      "audio.boss.prototype.bell_proctor.introduction",
+      "audio.boss.prototype.bell_proctor.defeat"
+    ],
+    "tags": ["boss", "prototype", "benchmark", "stationary"],
+    "source_document_feature_id": "CONT-FP-005",
+    "numeric_payload": {
+      "health": 3000,
+      "armor": 4,
+      "hurtbox_radius_milli_tiles": 650,
+      "position": {"x_milli_tiles": 24000, "y_milli_tiles": 12000},
+      "movement_mode": "fixed",
+      "summons_enabled": false,
+      "status_effect_ids": [],
+      "target_solo_duration_min_ms": 75000,
+      "target_solo_duration_max_ms": 110000,
+      "soft_enrage_ms": 180000,
+      "introduction_ms": 2000,
+      "phase_break_ms": 3000,
+      "phase_break_received_damage_multiplier_basis_points": 12000,
+      "soft_enrage_downtime_multiplier_basis_points": 8500,
+      "phase_two_health_threshold_basis_points": 7000,
+      "phase_three_health_threshold_basis_points": 3500,
+      "low_health_restart_basis_points": 2000,
+      "phase_three_low_health_loop_ms": 9000,
+      "fan_offsets_degrees": [-20, -10, 0, 10, 20],
+      "ring_index_count": 16,
+      "ring_omitted_count": 4,
+      "ring_gap_advance": 5,
+      "phase_three_second_gap_advance": 4,
+      "ring_preview_ms": 500,
+      "cross_axis_sets_degrees": [[0, 90], [45, 135]],
+      "fan_pattern_id": "pattern.prototype.bell_proctor.aimed_fan",
+      "ring_pattern_id": "pattern.prototype.bell_proctor.gap_ring",
+      "cross_pattern_id": "pattern.prototype.bell_proctor.cross_lanes",
+      "phase_timelines": [
+        {
+          "phase": "phase1",
+          "loop_ms": 7200,
+          "cues": [
+            {"kind": "fan", "starts_at_ms": 0, "resolves_at_ms": 400},
+            {"kind": "fan", "starts_at_ms": 2400, "resolves_at_ms": 2800},
+            {"kind": "ring", "starts_at_ms": 5600, "resolves_at_ms": 6250}
+          ]
+        },
+        {
+          "phase": "phase2",
+          "loop_ms": 10000,
+          "cues": [
+            {"kind": "fan", "starts_at_ms": 0, "resolves_at_ms": 400},
+            {"kind": "fan", "starts_at_ms": 2400, "resolves_at_ms": 2800},
+            {"kind": "ring", "starts_at_ms": 4200, "resolves_at_ms": 4850},
+            {"kind": "cross", "starts_at_ms": 7000, "resolves_at_ms": 7900}
+          ]
+        },
+        {
+          "phase": "phase3",
+          "loop_ms": 10000,
+          "cues": [
+            {"kind": "ring_preview_a", "starts_at_ms": 0, "resolves_at_ms": 900},
+            {"kind": "ring_preview_b", "starts_at_ms": 1000, "resolves_at_ms": 1800},
+            {"kind": "fan", "starts_at_ms": 4000, "resolves_at_ms": 4400},
+            {"kind": "cross", "starts_at_ms": 6500, "resolves_at_ms": 7400},
+            {"kind": "fan", "starts_at_ms": 8400, "resolves_at_ms": 8800}
+          ]
+        }
+      ],
+      "reward_table_id": "reward.prototype.boss"
+    }
+  }
+]

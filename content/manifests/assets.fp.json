@@ -3,17 +3,24 @@
   "asset_ids": [
     "audio.ability.arbalist.grave_mark", "audio.ability.arbalist.primary_crossbow", "audio.ability.arbalist.slipstep", "audio.ability.arbalist.stillness",
     "audio.pattern.enemy.bell_reed.gap_ring", "audio.pattern.enemy.chain_sentry.cross_lanes", "audio.pattern.enemy.drowned_pilgrim.fan",
+    "audio.pattern.prototype.bell_proctor.aimed_fan", "audio.pattern.prototype.bell_proctor.cross_lanes", "audio.pattern.prototype.bell_proctor.gap_ring",
+    "audio.boss.prototype.bell_proctor.introduction", "audio.boss.prototype.bell_proctor.defeat",
     "icon.consumable.red_tonic", "icon.item.prototype.armor.parish_leather", "icon.item.prototype.armor.reedcloth_wraps", "icon.item.prototype.armor.saltglass_coat",
     "icon.item.prototype.charm.still_eye", "icon.item.prototype.charm.undertaker_knot", "icon.item.prototype.relic.dented_scope", "icon.item.prototype.relic.mark_lens", "icon.item.prototype.relic.slip_clasp",
     "icon.item.prototype.weapon.grave_repeater", "icon.item.prototype.weapon.longbolt_crossbow", "icon.item.prototype.weapon.pine_crossbow", "icon.item.prototype.weapon.scatterbow",
     "pattern.enemy.bell_reed.gap_ring.telegraph", "pattern.enemy.bell_reed.gap_ring.warning",
     "pattern.enemy.chain_sentry.cross_lanes.telegraph", "pattern.enemy.chain_sentry.cross_lanes.warning",
     "pattern.enemy.drowned_pilgrim.fan.telegraph", "pattern.enemy.drowned_pilgrim.fan.warning",
+    "pattern.prototype.bell_proctor.aimed_fan.telegraph", "pattern.prototype.bell_proctor.aimed_fan.warning",
+    "pattern.prototype.bell_proctor.cross_lanes.telegraph", "pattern.prototype.bell_proctor.cross_lanes.warning",
+    "pattern.prototype.bell_proctor.gap_ring.telegraph", "pattern.prototype.bell_proctor.gap_ring.warning",
+    "portrait.boss.prototype.bell_proctor", "sprite.boss.prototype.bell_proctor",
     "portrait.enemy.bell_reed", "portrait.enemy.chain_sentry", "portrait.enemy.drowned_pilgrim",
     "sprite.class.grave_arbalist", "sprite.enemy.bell_reed", "sprite.enemy.chain_sentry", "sprite.enemy.drowned_pilgrim",
     "tilemap.arena.prototype.bell_laboratory_01",
     "ui.reward.prototype.boss", "ui.reward.prototype.normal_enemy", "ui.reward.prototype.wave_1", "ui.reward.prototype.wave_2", "ui.reward.prototype.wave_3",
     "vfx.ability.arbalist.grave_mark", "vfx.ability.arbalist.primary_crossbow", "vfx.ability.arbalist.slipstep", "vfx.ability.arbalist.stillness",
     "vfx.pattern.enemy.bell_reed.gap_ring", "vfx.pattern.enemy.chain_sentry.cross_lanes", "vfx.pattern.enemy.drowned_pilgrim.fan"
+    , "vfx.pattern.prototype.bell_proctor.aimed_fan", "vfx.pattern.prototype.bell_proctor.cross_lanes", "vfx.pattern.prototype.bell_proctor.gap_ring"
   ]
 }

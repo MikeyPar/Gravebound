@@ -1,5 +1,7 @@
 # GB-M00 completion audit
 
+> **2026-07-11 amendment:** ADR-017 owner-authorized completion of the previously incomplete First Playable bundle adds Bell Proctor plus three boss patterns. Current strict `fp.1.0.0` therefore contains 34 records. The 30-record hash below remains the immutable historical M00 evidence identity; it is not the current playable package identity.
+
 - **Status:** Passed
 - **Audited:** 2026-07-10
 - **Authority reviewed together:** `Gravebound_Production_GDD_v1_Canonical.md`, `Gravebound_Content_Production_Spec_v1.md`, and `Gravebound_Development_Roadmap_v1.md`

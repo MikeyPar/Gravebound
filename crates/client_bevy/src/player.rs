@@ -1,10 +1,7 @@
 use bevy::{log::info, prelude::*};
-use sim_core::{
-    GRAVE_ARBALIST_SPEED_TILES_PER_SECOND, MOVEMENT_RESPONSE_TICKS, MovementAction,
-    PLAYER_COLLISION_RADIUS_TILES, PlayerMovementState,
-};
+use sim_core::{MOVEMENT_RESPONSE_TICKS, MovementAction, PlayerMovementState};
 
-use crate::{FixedSimulationSet, FrameSet, LoadedArena, arena_view::simulation_point_to_render};
+use crate::{FrameSet, LoadedArena, arena_view::simulation_point_to_render};
 
 pub const CAMERA_RESPONSE_SECONDS: f32 = 0.080;
 const PLAYER_BODY_SIZE_TILES: f32 = 0.54;
@@ -32,7 +29,7 @@ impl Default for MovementBindings {
 }
 
 #[derive(Debug, Default, Clone, Copy, Resource)]
-struct LatestMovementAction(MovementAction);
+pub(crate) struct LatestMovementAction(pub(crate) MovementAction);
 
 /// Simulation resource is the only client-side owner of authoritative player state.
 #[derive(Debug, Resource)]
@@ -45,6 +42,10 @@ impl PlayerSimulation {
 
     pub(crate) fn state(&self) -> PlayerMovementState {
         self.0
+    }
+
+    pub(crate) fn state_mut(&mut self) -> &mut PlayerMovementState {
+        &mut self.0
     }
 }
 
@@ -65,10 +66,6 @@ pub(crate) fn configure(app: &mut App) {
     app.insert_resource(MovementBindings::default())
         .insert_resource(LatestMovementAction::default())
         .add_systems(Startup, spawn_player)
-        .add_systems(
-            FixedUpdate,
-            simulate_player.in_set(FixedSimulationSet::Movement),
-        )
         .add_systems(
             Update,
             (
@@ -110,8 +107,8 @@ fn spawn_player(
         feature_id = "GB-M01-01B",
         spawn_x = simulation.0.position().x,
         spawn_y = simulation.0.position().y,
-        speed_tiles_per_second = GRAVE_ARBALIST_SPEED_TILES_PER_SECOND,
-        collision_radius_tiles = PLAYER_COLLISION_RADIUS_TILES,
+        speed_tiles_per_second = simulation.0.config().final_speed_tiles_per_second,
+        collision_radius_tiles = simulation.0.config().collision_radius_tiles,
         response_ticks = MOVEMENT_RESPONSE_TICKS,
         "fixed-step Grave Arbalist movement initialized"
     );
@@ -137,34 +134,44 @@ fn movement_action_from_keyboard(
     MovementAction::new(horizontal, vertical)
 }
 
-#[allow(clippy::needless_pass_by_value)] // Bevy system parameters are wrapper values.
-fn simulate_player(
-    mut simulation: ResMut<PlayerSimulation>,
-    latest: Res<LatestMovementAction>,
-    arena: Res<LoadedArena>,
-    mut player: Single<&mut Transform, With<LocalPlayer>>,
-) {
-    simulation
-        .0
-        .step(latest.0, &arena.0)
-        .expect("validated movement state must remain legal");
-    let render_position = simulation_point_to_render(simulation.0.position(), &arena.0);
-    player.translation.x = render_position.x;
-    player.translation.y = render_position.y;
-}
-
-#[allow(clippy::needless_pass_by_value)] // Bevy system parameters are wrapper values.
+#[allow(clippy::cast_precision_loss, clippy::needless_pass_by_value)] // Bevy wrapper parameters and bounded authored arena dimensions cross the presentation boundary.
 fn follow_player_camera(
     time: Res<Time>,
+    arena: Res<LoadedArena>,
+    scenario: Res<crate::combat::EvidenceScenario>,
+    accessibility: Res<crate::accessibility::AccessibilitySettings>,
     player: Single<&Transform, (With<LocalPlayer>, Without<CameraFollow>)>,
     mut camera: Single<(&mut Transform, &mut CameraFollow), Without<LocalPlayer>>,
 ) {
-    let target = player.translation.truncate();
+    let target = if matches!(
+        *scenario,
+        crate::combat::EvidenceScenario::DebugOverlayShowcase
+            | crate::combat::EvidenceScenario::BossShowcase
+            | crate::combat::EvidenceScenario::BossCompletionShowcase
+            | crate::combat::EvidenceScenario::StressFull
+            | crate::combat::EvidenceScenario::StressReduced
+    ) {
+        crate::arena_view::simulation_point_to_render(
+            sim_core::SimulationVector::new(
+                arena.0.width_milli_tiles as f32 / 2_000.0,
+                arena.0.height_milli_tiles as f32 / 2_000.0,
+            ),
+            &arena.0,
+        )
+    } else {
+        player.translation.truncate()
+    };
     if !camera.1.initialized {
         camera.0.translation.x = target.x;
         camera.0.translation.y = target.y;
         camera.1.velocity = Vec2::ZERO;
         camera.1.initialized = true;
+        return;
+    }
+    if accessibility.reduced_motion {
+        camera.0.translation.x = target.x;
+        camera.0.translation.y = target.y;
+        camera.1.velocity = Vec2::ZERO;
         return;
     }
     let current = camera.0.translation.truncate();
@@ -193,8 +200,8 @@ fn update_movement_diagnostics(
         state.position().x,
         state.position().y,
         state.velocity().length(),
-        GRAVE_ARBALIST_SPEED_TILES_PER_SECOND,
-        PLAYER_COLLISION_RADIUS_TILES
+        state.config().final_speed_tiles_per_second,
+        state.config().collision_radius_tiles
     );
 }
 

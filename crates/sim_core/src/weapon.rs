@@ -12,6 +12,8 @@ pub struct WeaponDefinitionParameters {
     pub projectile_speed_milli_tiles_per_second: u32,
     pub projectile_radius_milli_tiles: u32,
     pub projectile_count: u32,
+    pub projectile_directions_millionths: Vec<(i32, i32)>,
+    pub max_projectiles_per_target: u32,
     pub pierce: u32,
     pub stops_on_first_enemy: bool,
 }
@@ -45,6 +47,21 @@ impl WeaponDefinition {
         }
         if parameters.projectile_count == 0 {
             return Err(WeaponDefinitionError::ZeroProjectileCount);
+        }
+        if parameters.projectile_directions_millionths.len()
+            != usize::try_from(parameters.projectile_count)
+                .map_err(|_| WeaponDefinitionError::ProjectileCountOverflow)?
+            || parameters
+                .projectile_directions_millionths
+                .iter()
+                .any(|direction| direction.0 == 0 && direction.1 == 0)
+        {
+            return Err(WeaponDefinitionError::InvalidProjectileDirections);
+        }
+        if parameters.max_projectiles_per_target == 0
+            || parameters.max_projectiles_per_target > parameters.projectile_count
+        {
+            return Err(WeaponDefinitionError::InvalidPerTargetCap);
         }
         let scaled_range = u64::from(parameters.range_milli_tiles)
             .checked_mul(u64::from(TICKS_PER_SECOND))
@@ -99,6 +116,16 @@ impl WeaponDefinition {
     }
 
     #[must_use]
+    pub fn projectile_directions_millionths(&self) -> &[(i32, i32)] {
+        &self.parameters.projectile_directions_millionths
+    }
+
+    #[must_use]
+    pub const fn max_projectiles_per_target(&self) -> u32 {
+        self.parameters.max_projectiles_per_target
+    }
+
+    #[must_use]
     pub const fn pierce(&self) -> u32 {
         self.parameters.pierce
     }
@@ -145,6 +172,12 @@ pub enum WeaponDefinitionError {
     ZeroProjectileRadius,
     #[error("weapon projectile count must be positive")]
     ZeroProjectileCount,
+    #[error("weapon projectile count cannot be represented by this platform")]
+    ProjectileCountOverflow,
+    #[error("weapon projectile directions must be nonzero and match projectile count")]
+    InvalidProjectileDirections,
+    #[error("weapon per-target projectile cap must be within 1..=projectile count")]
+    InvalidPerTargetCap,
     #[error("weapon projectile lifetime must be at least one tick")]
     ZeroProjectileLifetime,
     #[error("weapon projectile lifetime arithmetic overflowed")]
@@ -169,6 +202,8 @@ mod tests {
             projectile_speed_milli_tiles_per_second: 12_000,
             projectile_radius_milli_tiles: 100,
             projectile_count: 1,
+            projectile_directions_millionths: vec![(1_000_000, 0)],
+            max_projectiles_per_target: 1,
             pierce: 0,
             stops_on_first_enemy: true,
         }

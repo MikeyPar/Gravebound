@@ -1,0 +1,34 @@
+[package]
+name = "server_app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+blake3.workspace = true
+clap.workspace = true
+protocol = { path = "../protocol" }
+quinn.workspace = true
+rcgen.workspace = true
+rustls.workspace = true
+sim_core = { path = "../sim_core" }
+sim_content = { path = "../sim_content" }
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+bot_client = { path = "../bot_client" }
+client_bevy = { path = "../client_bevy" }
+network_harness = { path = "../network_harness" }
+serde.workspace = true
+serde_json.workspace = true
+sysinfo.workspace = true
+
+[lints]
+workspace = true

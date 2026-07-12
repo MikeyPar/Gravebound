@@ -4,7 +4,7 @@ Gravebound is a server-authoritative, permanent-death, 2D dark-fantasy bullet-he
 
 Every character life is temporary. The account remembers what happened, and exceptional deaths can return as personalized Fallen Hero Echo encounters. The design emphasizes readable combat, rapid recovery, fair monetization, solo viability, and long-term replayability without permanent account-level combat power.
 
-> **Project status:** M01 First Playable in development. `GB-M01-02B` (deterministic swept projectile collision against exact arena solids and stable enemy hurtboxes) is complete; the gate-based path continues toward a networked Vertical Slice and commercial Early Access.
+> **Project status:** M01 First Playable is closed under the owner's explicit successful-playtest assumption. Automated M02 packages through `GB-M02-08` and the runnable native network package pass. `ADR-027` resolves the remaining scope decision: M02 now requires four clients in one genuine shared authoritative combat world, with `fp.1.0.0` manual Recall prohibited. `GB-M02-09` is in progress; M03 is not yet authorized.
 
 ![Bell Sepulcher gameplay concept](Concept%20Art/01-bell-sepulcher-gameplay.png)
 
@@ -62,9 +62,13 @@ Development proceeds only when the milestone's playability, fairness, reliabilit
 
 ### Current implementation
 
-![GB-M01-02B deterministic projectile-collision runtime evidence](docs/evidence/GB-M01-02B.png)
+![GB-M01-06A local death and fresh-run evidence](docs/evidence/GB-M01-06A.png)
 
-`GB-M01-02B` continuously sweeps the Pine Crossbow's `0.10`-tile circle against the compiled Bell Laboratory shell and rounded pillar boundaries plus simulation-owned stable-ID enemy hurtboxes. Earliest contact, exact ties, terminal positions, event order, and range precedence are deterministic; LocalLab visibly distinguishes enemy hits from solid blocks without pulling health/damage ahead of the roadmap. See the [completion audit](docs/milestones/GB-M01-02B-audit.md).
+`GB-M01-06A` makes local death a one-shot transaction: health zero freezes the old run, retains the lethal trace, destroys all run-owned entities/items/stacks, and rejects later actions. Explicit Run Again reconstructs a full-health successor from validated content with the default seed, exact starter loadout, two Tonics, and new run-qualified identities; measured control return is below three seconds. See the [completion audit](docs/milestones/GB-M01-06A-audit.md).
+
+![GB-M01 Bell Proctor Phase 1 evidence](docs/evidence/GB-M01-04B-04C.png)
+
+The complete local journey now advances through the three authored waves into the real Bell Proctor composite. Its content-authored scheduler drives live fan, rotating-gap ring, Cross lanes, phase breaks, damage, defeat, boss reward, completion summary, and atomic Run Again flow. See the [`04B`](docs/milestones/GB-M01-04B-audit.md), [`04C`](docs/milestones/GB-M01-04C-audit.md), and [`06B`](docs/milestones/GB-M01-06B-audit.md) audits.
 
 ## Technical direction
 
@@ -96,6 +100,10 @@ Concept images establish mood, hierarchy, and visual language. They are not fina
 - Version 1.0 content implementation remains blocked until an exact Content Production Specification v2 is approved.
 - Test progress is wipeable until the documented Early Access live-namespace cutover.
 
-## Current next step
+## Current Next Step
 
-Prepare `GB-M01-02C`: implement Grave Mark from `ability.arbalist.grave_mark` and `CLS-020` with rebind-ready right-mouse sequencing, a `5.0 second` cooldown, one `12 tiles/second` bolt with `11 tile` range, a `1.8W` raw-damage intent, one owner-specific `graveled_mark` lasting `4.0 seconds`, and `+15%` owner primary-hit intent against that target; applying a new Mark removes the old one. Health mutation remains deferred to `GB-M01-05A`. Before implementation, resolve and record the design package's missing Grave Mark projectile radius and solid-impact disposition—those values must not be silently inferred from the primary bolt.
+Retest the corrected M02 package in `dist/Gravebound-M02-Playtest`: start all four clients within the authored eight-second participant-lock window, verify each personal pickup copy can be collected independently, and reconnect the same numbered client within the exact three-second LinkLost deadline. After that focused owner retest passes, begin `GB-M03-01` (wipeable test identity plus Arbalist character creation/select) without pulling PostgreSQL (`GB-M03-02`) forward. Keep `fp.1.0.0` immutable while defining the M03 content/version cutover before implementation.
+
+## Resolved prior handoff
+
+The owner approved the in-place `fp.1.0.0` correction. The subsequent full reference-loadout audit corrected the earlier omitted-armor premise, retained the raw-12 fan as Chip, and closed both Bell specification conflicts. The resulting Bell, combat, summary, and debug tickets pass locally; this paragraph is retained only as the resolved decision record.

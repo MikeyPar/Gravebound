@@ -38,6 +38,7 @@
         {"id": "tonic_refill", "point": {"x_milli_tiles": 4000, "y_milli_tiles": 20000}}
       ],
       "allowed_enemy_ids": ["enemy.drowned_pilgrim", "enemy.bell_reed", "enemy.chain_sentry"],
+      "allowed_boss_ids": ["boss.prototype.bell_proctor"],
       "allowed_reward_table_ids": ["reward.prototype.normal_enemy", "reward.prototype.wave_1", "reward.prototype.wave_2", "reward.prototype.wave_3", "reward.prototype.boss"]
     }
   }

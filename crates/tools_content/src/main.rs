@@ -136,6 +136,7 @@ fn generate_schemas_command(output: &std::path::Path) -> Result<()> {
     write_schema::<Vec<content_schema::ClassRecord>>(output, "classes.schema.json")?;
     write_schema::<Vec<content_schema::AbilityRecord>>(output, "abilities.schema.json")?;
     write_schema::<Vec<content_schema::EnemyRecord>>(output, "enemies.schema.json")?;
+    write_schema::<Vec<content_schema::BossRecord>>(output, "bosses.schema.json")?;
     write_schema::<Vec<content_schema::PatternRecord>>(output, "patterns.schema.json")?;
     write_schema::<Vec<content_schema::ArenaRecord>>(output, "arenas.schema.json")?;
     write_schema::<Vec<content_schema::ItemRecord>>(output, "items.schema.json")?;

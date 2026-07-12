@@ -9,6 +9,12 @@
     "ArenaPayload": {
       "type": "object",
       "properties": {
+        "allowed_boss_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContentId"
+          }
+        },
         "allowed_enemy_ids": {
           "type": "array",
           "items": {
@@ -65,6 +71,7 @@
         "pillars",
         "anchors",
         "allowed_enemy_ids",
+        "allowed_boss_ids",
         "allowed_reward_table_ids"
       ]
     },

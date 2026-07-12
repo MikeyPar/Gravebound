@@ -1,0 +1,251 @@
+//! Versioned Gravebound network contracts.
+//!
+//! This crate owns wire-facing message primitives, protocol versions, channel semantics, and
+//! typed protocol errors. It never owns gameplay rules, rendering, transport sockets, sessions,
+//! or persistence. `GB-M02-01` supplies the bounded handshake, gameplay envelopes, and codec.
+
+mod bounded;
+mod codec;
+mod handshake;
+mod messages;
+
+pub use bounded::{AuthTicket, BoundedValueError, ManifestHash, WireText};
+pub use codec::{
+    DATAGRAM_FRAME_LIMIT, FRAME_HEADER_BYTES, RELIABLE_FRAME_LIMIT, WireCodecError, decode_frame,
+    encode_frame,
+};
+pub use handshake::{
+    ClientHello, Compression, HandshakeRejection, HandshakeResponse, Platform, ServerHello,
+};
+pub use messages::{
+    ActionFrame, ActionKind, ActionResultCode, ControlEvent, ENTITY_STATE_ALIVE,
+    ENTITY_STATE_COLLECTED, ENTITY_STATE_ELIGIBLE, EntityKind, EntitySnapshot, InputFrame,
+    MAX_SNAPSHOT_CHUNKS, MAX_SNAPSHOT_ENTITIES_PER_CHUNK, MessageKind, MessageValidationError,
+    MutationRequest, MutationResult, MutationResultCode, PatternDescriptor, PickupPlacement,
+    ReliableEvent, ReliableEventFrame, SessionControlFrame, SessionControlRequest,
+    SessionControlResult, SessionControlResultCode, SessionDestination, SnapshotChunk,
+    SocialPingKind, WireMessage,
+};
+
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+/// First incompatible protocol generation.
+pub const PROTOCOL_MAJOR: u16 = 1;
+/// Backward-compatible feature generation within [`PROTOCOL_MAJOR`].
+pub const PROTOCOL_MINOR: u16 = 5;
+/// Authoritative simulation and client-input cadence from GDD `TECH-012`.
+pub const SIMULATION_HZ: u16 = 30;
+/// Baseline world snapshot cadence from GDD `TECH-012`.
+pub const SNAPSHOT_HZ: u16 = 15;
+/// Optional local-critical snapshot ceiling from GDD `TECH-012`.
+pub const CRITICAL_SNAPSHOT_HZ: u16 = 20;
+/// Default remote interpolation delay from GDD `TECH-012`.
+pub const INTERPOLATION_DELAY_MS: u16 = 100;
+/// Time-sync refresh cadence from GDD `TECH-012`.
+pub const TIME_SYNC_INTERVAL_MS: u16 = 5_000;
+/// Realm interest-grid cell edge from GDD `TECH-013`.
+pub const INTEREST_CELL_TILES: u16 = 8;
+/// Camera interest safety margin from GDD `TECH-013`.
+pub const INTEREST_SAFETY_MARGIN_TILES: u16 = 4;
+/// Exact executable build ID for the nonpersistent M02 local network gate.
+pub const M02_LOCAL_BUILD_ID: &str = "m02-local-1";
+/// TLS server name used by the generated loopback certificate.
+pub const M02_LOCAL_SERVER_NAME: &str = "localhost";
+/// Region label reported by the nonpersistent M02 local server.
+pub const M02_LOCAL_REGION_ID: &str = "local-playtest";
+/// First entity ID in the M02 hosted-arena player namespace.
+pub const M02_PLAYER_ENTITY_ID_BASE: u64 = 10_000;
+/// Compatibility alias retained while the single-player authority facade remains under test.
+pub const M02_ISOLATED_PLAYER_ENTITY_ID: u64 = M02_PLAYER_ENTITY_ID_BASE;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ProtocolVersion {
+    pub major: u16,
+    pub minor: u16,
+}
+
+impl ProtocolVersion {
+    #[must_use]
+    pub const fn current() -> Self {
+        Self {
+            major: PROTOCOL_MAJOR,
+            minor: PROTOCOL_MINOR,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_compatible_with(self, required: Self) -> bool {
+        self.major == required.major && self.minor == required.minor
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkChannel {
+    Input,
+    Action,
+    Snapshot,
+    Pattern,
+    Mutation,
+    Control,
+    Social,
+}
+
+impl NetworkChannel {
+    pub const ALL: [Self; 7] = [
+        Self::Input,
+        Self::Action,
+        Self::Snapshot,
+        Self::Pattern,
+        Self::Mutation,
+        Self::Control,
+        Self::Social,
+    ];
+
+    #[must_use]
+    pub const fn reliability(self) -> ChannelReliability {
+        match self {
+            Self::Input => ChannelReliability::SequencedLatestStateDatagram,
+            Self::Snapshot => ChannelReliability::LatestStateDatagram,
+            Self::Action | Self::Pattern | Self::Mutation | Self::Control | Self::Social => {
+                ChannelReliability::ReliableOrdered
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelReliability {
+    SequencedLatestStateDatagram,
+    LatestStateDatagram,
+    ReliableOrdered,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateRates {
+    pub simulation_hz: u16,
+    pub input_hz: u16,
+    pub snapshot_hz: u16,
+    pub critical_snapshot_hz: u16,
+    pub interpolation_delay_ms: u16,
+    pub time_sync_interval_ms: u16,
+}
+
+impl UpdateRates {
+    #[must_use]
+    pub const fn canonical() -> Self {
+        Self {
+            simulation_hz: SIMULATION_HZ,
+            input_hz: SIMULATION_HZ,
+            snapshot_hz: SNAPSHOT_HZ,
+            critical_snapshot_hz: CRITICAL_SNAPSHOT_HZ,
+            interpolation_delay_ms: INTERPOLATION_DELAY_MS,
+            time_sync_interval_ms: TIME_SYNC_INTERVAL_MS,
+        }
+    }
+
+    pub const fn validate(self) -> Result<(), ProtocolFoundationError> {
+        if self.simulation_hz != SIMULATION_HZ || self.input_hz != SIMULATION_HZ {
+            return Err(ProtocolFoundationError::AuthoritativeCadence);
+        }
+        if self.snapshot_hz != SNAPSHOT_HZ || self.critical_snapshot_hz != CRITICAL_SNAPSHOT_HZ {
+            return Err(ProtocolFoundationError::SnapshotCadence);
+        }
+        if self.interpolation_delay_ms != INTERPOLATION_DELAY_MS
+            || self.time_sync_interval_ms != TIME_SYNC_INTERVAL_MS
+        {
+            return Err(ProtocolFoundationError::ClientTiming);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum ProtocolFoundationError {
+    #[error("simulation and input rates must remain at the authoritative 30 Hz cadence")]
+    AuthoritativeCadence,
+    #[error("snapshot rates must remain at the documented 15/20 Hz values")]
+    SnapshotCadence,
+    #[error("interpolation and time-sync timings must match TECH-012")]
+    ClientTiming,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn current_version_requires_exact_minor_until_an_adapter_exists() {
+        let current = ProtocolVersion::current();
+        assert!(current.is_compatible_with(current));
+        assert!(
+            !ProtocolVersion { major: 1, minor: 3 }
+                .is_compatible_with(ProtocolVersion { major: 1, minor: 2 })
+        );
+        assert!(
+            !ProtocolVersion { major: 1, minor: 0 }
+                .is_compatible_with(ProtocolVersion { major: 1, minor: 1 })
+        );
+        assert!(
+            ProtocolVersion { major: 1, minor: 3 }
+                .is_compatible_with(ProtocolVersion { major: 1, minor: 3 })
+        );
+        assert!(!ProtocolVersion { major: 2, minor: 0 }.is_compatible_with(current));
+        assert!(!current.is_compatible_with(ProtocolVersion { major: 1, minor: 0 }));
+    }
+
+    #[test]
+    fn every_tech_011_channel_has_exact_reliability() {
+        assert_eq!(NetworkChannel::ALL.len(), 7);
+        assert_eq!(
+            NetworkChannel::Input.reliability(),
+            ChannelReliability::SequencedLatestStateDatagram
+        );
+        assert_eq!(
+            NetworkChannel::Snapshot.reliability(),
+            ChannelReliability::LatestStateDatagram
+        );
+        for channel in [
+            NetworkChannel::Action,
+            NetworkChannel::Pattern,
+            NetworkChannel::Mutation,
+            NetworkChannel::Control,
+            NetworkChannel::Social,
+        ] {
+            assert_eq!(channel.reliability(), ChannelReliability::ReliableOrdered);
+        }
+    }
+
+    #[test]
+    fn canonical_rates_and_interest_constants_match_gdd() {
+        assert_eq!(UpdateRates::canonical().validate(), Ok(()));
+        assert_eq!(INTEREST_CELL_TILES, 8);
+        assert_eq!(INTEREST_SAFETY_MARGIN_TILES, 4);
+        assert_eq!(SIMULATION_HZ, 30);
+        assert_eq!(SNAPSHOT_HZ, 15);
+        assert_eq!(CRITICAL_SNAPSHOT_HZ, 20);
+        assert_eq!(INTERPOLATION_DELAY_MS, 100);
+        assert_eq!(TIME_SYNC_INTERVAL_MS, 5_000);
+    }
+
+    #[test]
+    fn timing_drift_fails_closed() {
+        let mut rates = UpdateRates::canonical();
+        rates.simulation_hz = 60;
+        assert_eq!(
+            rates.validate(),
+            Err(ProtocolFoundationError::AuthoritativeCadence)
+        );
+        let mut rates = UpdateRates::canonical();
+        rates.snapshot_hz = 10;
+        assert_eq!(
+            rates.validate(),
+            Err(ProtocolFoundationError::SnapshotCadence)
+        );
+        let mut rates = UpdateRates::canonical();
+        rates.interpolation_delay_ms = 80;
+        assert_eq!(rates.validate(), Err(ProtocolFoundationError::ClientTiming));
+    }
+}

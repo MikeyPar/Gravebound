@@ -1,8 +1,9 @@
-use std::f32::consts::FRAC_1_SQRT_2;
-
 use thiserror::Error;
 
-use crate::{ArenaGeometry, MILLI_TILES_PER_TILE, TICKS_PER_SECOND, TilePoint, TileRectangle};
+use crate::{
+    ArenaGeometry, CollisionError, CollisionTarget, MILLI_TILES_PER_TILE, ProjectileCollisionWorld,
+    TICKS_PER_SECOND, TilePoint, TileRectangle,
+};
 
 /// Grave Arbalist movement speed from `CLS-020`.
 pub const GRAVE_ARBALIST_SPEED_TILES_PER_SECOND: f32 = 5.1;
@@ -12,6 +13,7 @@ pub const PLAYER_COLLISION_RADIUS_TILES: f32 = 0.30;
 pub const MOVEMENT_RESPONSE_TICKS: u32 = 2;
 const COLLISION_PASSES: usize = 4;
 const CONTACT_EPSILON: f32 = 1.0e-6;
+const NETWORK_QUANTIZATION_CONTACT_TOLERANCE_TILES: f32 = 0.001;
 const TICKS_PER_SECOND_F32: f32 = 30.0;
 
 /// Renderer-independent vector in northwest-authored simulation coordinates.
@@ -74,27 +76,57 @@ impl std::ops::Mul<f32> for SimulationVector {
 /// Compact latest-state digital movement action. Opposing bindings cancel on their axis.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct MovementAction {
-    horizontal: i8,
-    vertical: i8,
+    horizontal_milli: i16,
+    vertical_milli: i16,
 }
 
 impl MovementAction {
     #[must_use]
     pub fn new(horizontal: i8, vertical: i8) -> Self {
         Self {
-            horizontal: horizontal.clamp(-1, 1),
-            vertical: vertical.clamp(-1, 1),
+            horizontal_milli: i16::from(horizontal.clamp(-1, 1)) * 1_000,
+            vertical_milli: i16::from(vertical.clamp(-1, 1)) * 1_000,
         }
+    }
+
+    /// Creates a bounded analog action from the shared network fixed-point scale.
+    pub fn try_from_milli(horizontal: i16, vertical: i16) -> Result<Self, MovementError> {
+        if !(-1_000..=1_000).contains(&horizontal) || !(-1_000..=1_000).contains(&vertical) {
+            return Err(MovementError::InputOutOfRange);
+        }
+        Ok(Self {
+            horizontal_milli: horizontal,
+            vertical_milli: vertical,
+        })
+    }
+
+    /// Scales bounded player intent without changing the configured movement speed. This is used
+    /// by authoritative state such as Emergency Recall, where the GDD permits a fixed fraction of
+    /// ordinary movement while leaving class/content movement facts unchanged.
+    pub fn scaled_basis_points(self, basis_points: u16) -> Result<Self, MovementError> {
+        if basis_points > 10_000 {
+            return Err(MovementError::ScaleOutOfRange);
+        }
+        let scale = i32::from(basis_points);
+        let horizontal = i32::from(self.horizontal_milli) * scale / 10_000;
+        let vertical = i32::from(self.vertical_milli) * scale / 10_000;
+        Self::try_from_milli(
+            i16::try_from(horizontal).map_err(|_| MovementError::InputOutOfRange)?,
+            i16::try_from(vertical).map_err(|_| MovementError::InputOutOfRange)?,
+        )
     }
 
     #[must_use]
     pub fn normalized_vector(self) -> SimulationVector {
-        let x = f32::from(self.horizontal);
-        let y = f32::from(self.vertical);
-        if self.horizontal != 0 && self.vertical != 0 {
-            SimulationVector::new(x * FRAC_1_SQRT_2, y * FRAC_1_SQRT_2)
+        let vector = SimulationVector::new(
+            f32::from(self.horizontal_milli) / 1_000.0,
+            f32::from(self.vertical_milli) / 1_000.0,
+        );
+        if vector.length_squared() > 1.0 {
+            let inverse_length = vector.length().recip();
+            vector * inverse_length
         } else {
-            SimulationVector::new(x, y)
+            vector
         }
     }
 }
@@ -131,11 +163,48 @@ impl PlayerMovementState {
     }
 
     pub fn new(position: SimulationVector, arena: &ArenaGeometry) -> Result<Self, MovementError> {
+        Self::new_with_config(position, PlayerMovementConfig::default(), arena)
+    }
+
+    pub fn new_with_config(
+        position: SimulationVector,
+        config: PlayerMovementConfig,
+        arena: &ArenaGeometry,
+    ) -> Result<Self, MovementError> {
         let state = Self {
             position,
             velocity: SimulationVector::default(),
-            config: PlayerMovementConfig::default(),
+            config,
         };
+        state.validate(arena)?;
+        Ok(state)
+    }
+
+    /// Restores a server-authenticated movement state before client-side input replay.
+    pub fn from_authoritative_snapshot(
+        position: SimulationVector,
+        velocity: SimulationVector,
+        config: PlayerMovementConfig,
+        arena: &ArenaGeometry,
+    ) -> Result<Self, MovementError> {
+        if !movement_config_is_valid(config) {
+            return Err(MovementError::InvalidConfig);
+        }
+        if velocity.length() > config.final_speed_tiles_per_second + CONTACT_EPSILON {
+            return Err(MovementError::VelocityExceedsMaximum);
+        }
+        let mut state = Self {
+            position,
+            velocity,
+            config,
+        };
+        if !state.position.is_finite() || !state.velocity.is_finite() {
+            return Err(MovementError::NonFiniteState);
+        }
+        state.resolve_solids(arena);
+        if (state.position - position).length() > NETWORK_QUANTIZATION_CONTACT_TOLERANCE_TILES {
+            return Err(MovementError::IllegalPosition);
+        }
         state.validate(arena)?;
         Ok(state)
     }
@@ -180,25 +249,7 @@ impl PlayerMovementState {
 
         for _ in 0..substep_count {
             self.position = self.position + substep;
-            collided |= self.resolve_shell(arena);
-            for _ in 0..COLLISION_PASSES {
-                let mut pass_collision = false;
-                for pillar in &arena.pillars {
-                    if let Some((normal, depth)) = circle_rectangle_contact(
-                        self.position,
-                        *pillar,
-                        self.config.collision_radius_tiles,
-                    ) {
-                        self.position = self.position + normal * (depth + CONTACT_EPSILON);
-                        remove_inward_velocity(&mut self.velocity, normal);
-                        pass_collision = true;
-                    }
-                }
-                collided |= pass_collision;
-                if !pass_collision {
-                    break;
-                }
-            }
+            collided |= self.resolve_solids(arena);
         }
 
         if !self.position.is_finite() || !self.velocity.is_finite() {
@@ -211,16 +262,43 @@ impl PlayerMovementState {
         })
     }
 
+    /// Applies one authoritative movement-ability segment, stopping exactly at the first solid.
+    pub fn apply_forced_displacement(
+        &mut self,
+        displacement: SimulationVector,
+        collision_world: &ProjectileCollisionWorld,
+        arena: &ArenaGeometry,
+    ) -> Result<ForcedMovementStep, MovementError> {
+        self.validate(arena)?;
+        if !displacement.is_finite() {
+            return Err(MovementError::NonFiniteState);
+        }
+        let hit = collision_world.sweep_solids(
+            self.position,
+            displacement,
+            self.config.collision_radius_tiles,
+        )?;
+        let (fraction, solid) = hit.map_or((1.0, None), |hit| {
+            let CollisionTarget::Solid(solid) = hit.target else {
+                unreachable!("solid-only sweep returned an enemy")
+            };
+            (hit.fraction, Some(solid))
+        });
+        self.position = self.position + displacement * fraction;
+        self.velocity = SimulationVector::default();
+        self.validate(arena)?;
+        Ok(ForcedMovementStep {
+            position: self.position,
+            travelled_tiles: displacement.length() * fraction,
+            solid,
+        })
+    }
+
     fn validate(self, arena: &ArenaGeometry) -> Result<(), MovementError> {
         if !self.position.is_finite() || !self.velocity.is_finite() {
             return Err(MovementError::NonFiniteState);
         }
-        if !self.config.final_speed_tiles_per_second.is_finite()
-            || self.config.final_speed_tiles_per_second <= 0.0
-            || self.config.response_ticks == 0
-            || !self.config.collision_radius_tiles.is_finite()
-            || self.config.collision_radius_tiles <= 0.0
-        {
+        if !movement_config_is_valid(self.config) {
             return Err(MovementError::InvalidConfig);
         }
         if !position_is_legal(self.position, self.config.collision_radius_tiles, arena) {
@@ -254,6 +332,37 @@ impl PlayerMovementState {
         }
         collided
     }
+
+    fn resolve_solids(&mut self, arena: &ArenaGeometry) -> bool {
+        let mut collided = self.resolve_shell(arena);
+        for _ in 0..COLLISION_PASSES {
+            let mut pass_collision = false;
+            for pillar in &arena.pillars {
+                if let Some((normal, depth)) = circle_rectangle_contact(
+                    self.position,
+                    *pillar,
+                    self.config.collision_radius_tiles,
+                ) {
+                    self.position = self.position + normal * (depth + CONTACT_EPSILON);
+                    remove_inward_velocity(&mut self.velocity, normal);
+                    pass_collision = true;
+                }
+            }
+            collided |= pass_collision;
+            if !pass_collision {
+                break;
+            }
+        }
+        collided
+    }
+}
+
+fn movement_config_is_valid(config: PlayerMovementConfig) -> bool {
+    config.final_speed_tiles_per_second.is_finite()
+        && config.final_speed_tiles_per_second > 0.0
+        && config.response_ticks != 0
+        && config.collision_radius_tiles.is_finite()
+        && config.collision_radius_tiles > 0.0
 }
 
 /// Observable result from one fixed movement tick.
@@ -264,14 +373,30 @@ pub struct MovementStep {
     pub collided: bool,
 }
 
+/// Result of a nonwalking movement segment such as Slipstep.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ForcedMovementStep {
+    pub position: SimulationVector,
+    pub travelled_tiles: f32,
+    pub solid: Option<crate::SolidColliderId>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum MovementError {
+    #[error("movement input components must remain within -1000..=1000")]
+    InputOutOfRange,
+    #[error("movement intent scale must remain within 0..=10000 basis points")]
+    ScaleOutOfRange,
     #[error("movement state contains a non-finite value")]
     NonFiniteState,
     #[error("movement configuration is invalid")]
     InvalidConfig,
+    #[error("authoritative movement velocity exceeds configured final speed")]
+    VelocityExceedsMaximum,
     #[error("player position intersects the arena shell or a solid pillar")]
     IllegalPosition,
+    #[error(transparent)]
+    Collision(#[from] CollisionError),
 }
 
 #[must_use]
@@ -393,6 +518,19 @@ mod tests {
         let diagonal = MovementAction::new(1, 1).normalized_vector();
         assert!((cardinal.length() - 1.0).abs() < f32::EPSILON);
         assert!((diagonal.length() - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn network_fixed_point_preserves_analog_magnitude_and_bounds() {
+        let half = MovementAction::try_from_milli(300, -400).expect("bounded analog input");
+        assert!((half.normalized_vector().length() - 0.5).abs() < f32::EPSILON);
+        let clamped_diagonal =
+            MovementAction::try_from_milli(1_000, 1_000).expect("bounded diagonal");
+        assert!((clamped_diagonal.normalized_vector().length() - 1.0).abs() < f32::EPSILON);
+        assert_eq!(
+            MovementAction::try_from_milli(1_001, 0),
+            Err(MovementError::InputOutOfRange)
+        );
     }
 
     #[test]
@@ -529,6 +667,29 @@ mod tests {
         assert_eq!(
             PlayerMovementState::new(SimulationVector::new(f32::NAN, 2.0), &arena),
             Err(MovementError::NonFiniteState)
+        );
+    }
+
+    #[test]
+    fn authoritative_millitile_contact_repairs_only_quantization_depth() {
+        let arena = arena(32_000, 24_000, TilePoint::new(4_000, 12_000), vec![]);
+        let repaired = PlayerMovementState::from_authoritative_snapshot(
+            SimulationVector::new(0.2995, 12.0),
+            SimulationVector::new(-1.0, 0.0),
+            PlayerMovementConfig::default(),
+            &arena,
+        )
+        .expect("sub-millitile shell contact");
+        assert!(repaired.position().x >= PLAYER_COLLISION_RADIUS_TILES);
+        assert!(repaired.velocity().x.abs() < CONTACT_EPSILON);
+        assert_eq!(
+            PlayerMovementState::from_authoritative_snapshot(
+                SimulationVector::new(0.29, 12.0),
+                SimulationVector::default(),
+                PlayerMovementConfig::default(),
+                &arena,
+            ),
+            Err(MovementError::IllegalPosition)
         );
     }
 }

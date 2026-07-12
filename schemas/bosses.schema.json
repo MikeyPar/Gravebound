@@ -1,0 +1,367 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Array_of_BossRecord",
+  "type": "array",
+  "items": {
+    "$ref": "#/$defs/BossRecord"
+  },
+  "$defs": {
+    "BossCueKind": {
+      "type": "string",
+      "enum": [
+        "fan",
+        "ring",
+        "ring_preview_a",
+        "ring_preview_b",
+        "cross"
+      ]
+    },
+    "BossMovementMode": {
+      "type": "string",
+      "enum": [
+        "fixed"
+      ]
+    },
+    "BossPayload": {
+      "type": "object",
+      "properties": {
+        "armor": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "cross_axis_sets_degrees": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            },
+            "maxItems": 2,
+            "minItems": 2
+          }
+        },
+        "cross_pattern_id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "fan_offsets_degrees": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "int16",
+            "maximum": 32767,
+            "minimum": -32768
+          }
+        },
+        "fan_pattern_id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "health": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "hurtbox_radius_milli_tiles": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "introduction_ms": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "low_health_restart_basis_points": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "movement_mode": {
+          "$ref": "#/$defs/BossMovementMode"
+        },
+        "phase_break_ms": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "phase_break_received_damage_multiplier_basis_points": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "phase_three_health_threshold_basis_points": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "phase_three_low_health_loop_ms": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "phase_three_second_gap_advance": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "phase_timelines": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BossPhaseTimeline"
+          }
+        },
+        "phase_two_health_threshold_basis_points": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "position": {
+          "$ref": "#/$defs/Point"
+        },
+        "reward_table_id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "ring_gap_advance": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "ring_index_count": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "ring_omitted_count": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "ring_pattern_id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "ring_preview_ms": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "soft_enrage_downtime_multiplier_basis_points": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "soft_enrage_ms": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "status_effect_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContentId"
+          }
+        },
+        "summons_enabled": {
+          "type": "boolean"
+        },
+        "target_solo_duration_max_ms": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "target_solo_duration_min_ms": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "health",
+        "armor",
+        "hurtbox_radius_milli_tiles",
+        "position",
+        "movement_mode",
+        "summons_enabled",
+        "status_effect_ids",
+        "target_solo_duration_min_ms",
+        "target_solo_duration_max_ms",
+        "soft_enrage_ms",
+        "introduction_ms",
+        "phase_break_ms",
+        "phase_break_received_damage_multiplier_basis_points",
+        "soft_enrage_downtime_multiplier_basis_points",
+        "phase_two_health_threshold_basis_points",
+        "phase_three_health_threshold_basis_points",
+        "low_health_restart_basis_points",
+        "phase_three_low_health_loop_ms",
+        "fan_offsets_degrees",
+        "ring_index_count",
+        "ring_omitted_count",
+        "ring_gap_advance",
+        "phase_three_second_gap_advance",
+        "ring_preview_ms",
+        "cross_axis_sets_degrees",
+        "fan_pattern_id",
+        "ring_pattern_id",
+        "cross_pattern_id",
+        "phase_timelines",
+        "reward_table_id"
+      ]
+    },
+    "BossPhase": {
+      "type": "string",
+      "enum": [
+        "phase1",
+        "phase2",
+        "phase3"
+      ]
+    },
+    "BossPhaseTimeline": {
+      "type": "object",
+      "properties": {
+        "cues": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BossTimelineCueRecord"
+          }
+        },
+        "loop_ms": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "phase": {
+          "$ref": "#/$defs/BossPhase"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "phase",
+        "loop_ms",
+        "cues"
+      ]
+    },
+    "BossRecord": {
+      "description": "Benchmark boss definition. Timelines remain authored data and compile into integer ticks.",
+      "type": "object",
+      "properties": {
+        "asset_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContentId"
+          }
+        },
+        "content_version": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "localization_description_key": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "localization_name_key": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "numeric_payload": {
+          "$ref": "#/$defs/BossPayload"
+        },
+        "release_stage": {
+          "$ref": "#/$defs/ReleaseStage"
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "source_document_feature_id": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "schema_version",
+        "content_version",
+        "enabled",
+        "release_stage",
+        "localization_name_key",
+        "localization_description_key",
+        "asset_ids",
+        "tags",
+        "source_document_feature_id",
+        "numeric_payload"
+      ]
+    },
+    "BossTimelineCueRecord": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/BossCueKind"
+        },
+        "resolves_at_ms": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "starts_at_ms": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "starts_at_ms",
+        "resolves_at_ms"
+      ]
+    },
+    "ContentId": {
+      "description": "Stable dot-separated content identifier.",
+      "type": "string"
+    },
+    "Point": {
+      "type": "object",
+      "properties": {
+        "x_milli_tiles": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "y_milli_tiles": {
+          "type": "integer",
+          "format": "int32"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "x_milli_tiles",
+        "y_milli_tiles"
+      ]
+    },
+    "ReleaseStage": {
+      "description": "Earliest release stage that may enable a record.",
+      "type": "string",
+      "enum": [
+        "fp",
+        "core",
+        "slice",
+        "alpha",
+        "playtest",
+        "ea"
+      ]
+    }
+  }
+}

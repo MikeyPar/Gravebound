@@ -1,0 +1,17 @@
+[package]
+name = "network_harness"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+protocol = { path = "../protocol" }
+rand_chacha.workspace = true
+rand_core.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
