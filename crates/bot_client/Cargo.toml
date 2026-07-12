@@ -11,6 +11,7 @@ repository.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 protocol = { path = "../protocol" }
+quinn.workspace = true
 sim_core = { path = "../sim_core" }
 thiserror.workspace = true
 tokio.workspace = true

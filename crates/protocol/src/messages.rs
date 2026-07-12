@@ -1,0 +1,440 @@
+use std::collections::BTreeSet;
+
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+use crate::{ClientHello, HandshakeResponse, NetworkChannel, WireText};
+
+pub const FIXED_VECTOR_SCALE: i16 = 1_000;
+pub const MAX_SNAPSHOT_ENTITIES_PER_CHUNK: usize = 32;
+pub const MAX_SNAPSHOT_CHUNKS: u16 = 64;
+pub const CONTENT_ID_MAX_BYTES: usize = 96;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageKind {
+    ClientHello,
+    HandshakeResponse,
+    InputFrame,
+    ActionFrame,
+    SnapshotChunk,
+    ReliableEvent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InputFrame {
+    pub sequence: u32,
+    pub client_tick: u64,
+    pub movement_x_milli: i16,
+    pub movement_y_milli: i16,
+    pub aim_x_milli: i16,
+    pub aim_y_milli: i16,
+    pub held_primary: bool,
+    pub primary_sequence: u32,
+    pub ability_1_sequence: u32,
+    pub ability_2_sequence: u32,
+}
+
+impl InputFrame {
+    pub fn validate(&self) -> Result<(), MessageValidationError> {
+        if self.sequence == 0 {
+            return Err(MessageValidationError::ZeroSequence);
+        }
+        for component in [
+            self.movement_x_milli,
+            self.movement_y_milli,
+            self.aim_x_milli,
+            self.aim_y_milli,
+        ] {
+            if !(-FIXED_VECTOR_SCALE..=FIXED_VECTOR_SCALE).contains(&component) {
+                return Err(MessageValidationError::VectorComponent);
+            }
+        }
+        if self.aim_x_milli == 0 && self.aim_y_milli == 0 {
+            return Err(MessageValidationError::ZeroAim);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionKind {
+    Ability1Press,
+    Ability2Press,
+    RecallStart,
+    RecallCancel,
+    Interact,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActionFrame {
+    pub sequence: u32,
+    pub client_tick: u64,
+    pub action: ActionKind,
+}
+
+impl ActionFrame {
+    pub const fn validate(&self) -> Result<(), MessageValidationError> {
+        if self.sequence == 0 {
+            return Err(MessageValidationError::ZeroSequence);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EntityKind {
+    Player,
+    Enemy,
+    Boss,
+    Loot,
+    Objective,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EntitySnapshot {
+    pub entity_id: u64,
+    pub kind: EntityKind,
+    pub x_milli_tiles: i32,
+    pub y_milli_tiles: i32,
+    pub current_health: u32,
+    pub maximum_health: u32,
+    pub state_flags: u32,
+}
+
+impl EntitySnapshot {
+    const fn validate(&self) -> Result<(), MessageValidationError> {
+        if self.entity_id == 0 {
+            return Err(MessageValidationError::ZeroEntityId);
+        }
+        if self.maximum_health == 0 || self.current_health > self.maximum_health {
+            return Err(MessageValidationError::InvalidHealth);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SnapshotChunk {
+    pub sequence: u32,
+    pub server_tick: u64,
+    pub acknowledged_input_sequence: u32,
+    pub chunk_index: u16,
+    pub chunk_count: u16,
+    pub entities: Vec<EntitySnapshot>,
+}
+
+impl SnapshotChunk {
+    pub fn validate(&self) -> Result<(), MessageValidationError> {
+        if self.sequence == 0 {
+            return Err(MessageValidationError::ZeroSequence);
+        }
+        if self.chunk_count == 0
+            || self.chunk_count > MAX_SNAPSHOT_CHUNKS
+            || self.chunk_index >= self.chunk_count
+        {
+            return Err(MessageValidationError::InvalidSnapshotChunk);
+        }
+        if self.entities.len() > MAX_SNAPSHOT_ENTITIES_PER_CHUNK {
+            return Err(MessageValidationError::SnapshotEntityCount);
+        }
+        let mut ids = BTreeSet::new();
+        for entity in &self.entities {
+            entity.validate()?;
+            if !ids.insert(entity.entity_id) {
+                return Err(MessageValidationError::DuplicateEntityId);
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionResultCode {
+    Accepted,
+    StaleSequence,
+    Cooldown,
+    InvalidState,
+    RateLimited,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SocialPingKind {
+    Danger,
+    Gather,
+    Loot,
+    Exit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PatternDescriptor {
+    pub pattern_id: WireText<CONTENT_ID_MAX_BYTES>,
+    pub content_version: WireText<32>,
+    pub start_tick: u64,
+    pub origin_x_milli_tiles: i32,
+    pub origin_y_milli_tiles: i32,
+    pub parameter_hash: u64,
+    pub seed: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MutationResult {
+    pub mutation_id: [u8; 16],
+    pub accepted: bool,
+    pub state_version: u64,
+}
+
+impl MutationResult {
+    fn validate(&self) -> Result<(), MessageValidationError> {
+        if self.mutation_id == [0; 16] {
+            return Err(MessageValidationError::ZeroMutationId);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlEvent {
+    TimeSync {
+        request_id: u32,
+        server_tick: u64,
+        server_monotonic_micros: u64,
+    },
+    ServerShuttingDown,
+    Error {
+        code: WireText<64>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReliableEvent {
+    ActionResult {
+        action_sequence: u32,
+        code: ActionResultCode,
+    },
+    PatternStarted(PatternDescriptor),
+    MutationResult(MutationResult),
+    Control(ControlEvent),
+    SocialPing {
+        ping_sequence: u32,
+        kind: SocialPingKind,
+        x_milli_tiles: i32,
+        y_milli_tiles: i32,
+    },
+}
+
+impl ReliableEvent {
+    #[must_use]
+    pub const fn channel(&self) -> NetworkChannel {
+        match self {
+            Self::ActionResult { .. } => NetworkChannel::Action,
+            Self::PatternStarted(_) => NetworkChannel::Pattern,
+            Self::MutationResult(_) => NetworkChannel::Mutation,
+            Self::Control(_) => NetworkChannel::Control,
+            Self::SocialPing { .. } => NetworkChannel::Social,
+        }
+    }
+
+    fn validate(&self) -> Result<(), MessageValidationError> {
+        match self {
+            Self::ActionResult {
+                action_sequence, ..
+            } if *action_sequence == 0 => Err(MessageValidationError::ZeroSequence),
+            Self::MutationResult(result) => result.validate(),
+            Self::SocialPing { ping_sequence, .. } if *ping_sequence == 0 => {
+                Err(MessageValidationError::ZeroSequence)
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReliableEventFrame {
+    pub sequence: u32,
+    pub server_tick: u64,
+    pub event: ReliableEvent,
+}
+
+impl ReliableEventFrame {
+    pub fn validate(&self) -> Result<(), MessageValidationError> {
+        if self.sequence == 0 {
+            return Err(MessageValidationError::ZeroSequence);
+        }
+        self.event.validate()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WireMessage {
+    ClientHello(ClientHello),
+    HandshakeResponse(HandshakeResponse),
+    InputFrame(InputFrame),
+    ActionFrame(ActionFrame),
+    SnapshotChunk(SnapshotChunk),
+    ReliableEvent(ReliableEventFrame),
+}
+
+impl WireMessage {
+    #[must_use]
+    pub const fn kind(&self) -> MessageKind {
+        match self {
+            Self::ClientHello(_) => MessageKind::ClientHello,
+            Self::HandshakeResponse(_) => MessageKind::HandshakeResponse,
+            Self::InputFrame(_) => MessageKind::InputFrame,
+            Self::ActionFrame(_) => MessageKind::ActionFrame,
+            Self::SnapshotChunk(_) => MessageKind::SnapshotChunk,
+            Self::ReliableEvent(_) => MessageKind::ReliableEvent,
+        }
+    }
+
+    #[must_use]
+    pub const fn channel(&self) -> NetworkChannel {
+        match self {
+            Self::ClientHello(_) | Self::HandshakeResponse(_) => NetworkChannel::Control,
+            Self::InputFrame(_) => NetworkChannel::Input,
+            Self::ActionFrame(_) => NetworkChannel::Action,
+            Self::SnapshotChunk(_) => NetworkChannel::Snapshot,
+            Self::ReliableEvent(frame) => frame.event.channel(),
+        }
+    }
+
+    #[must_use]
+    pub const fn uses_datagram(&self) -> bool {
+        matches!(self, Self::InputFrame(_) | Self::SnapshotChunk(_))
+    }
+
+    pub fn validate(&self) -> Result<(), MessageValidationError> {
+        match self {
+            Self::ClientHello(value) => value
+                .validate()
+                .map_err(|_| MessageValidationError::Handshake),
+            Self::HandshakeResponse(value) => value
+                .validate()
+                .map_err(|_| MessageValidationError::Handshake),
+            Self::InputFrame(value) => value.validate(),
+            Self::ActionFrame(value) => value.validate(),
+            Self::SnapshotChunk(value) => value.validate(),
+            Self::ReliableEvent(value) => value.validate(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum MessageValidationError {
+    #[error("message sequence must be nonzero")]
+    ZeroSequence,
+    #[error("fixed-point vector component must remain within -1000..=1000")]
+    VectorComponent,
+    #[error("aim vector cannot be zero")]
+    ZeroAim,
+    #[error("entity ID must be nonzero")]
+    ZeroEntityId,
+    #[error("entity health is invalid")]
+    InvalidHealth,
+    #[error("snapshot chunk index/count is invalid")]
+    InvalidSnapshotChunk,
+    #[error("snapshot exceeds {MAX_SNAPSHOT_ENTITIES_PER_CHUNK} entities per chunk")]
+    SnapshotEntityCount,
+    #[error("snapshot entity IDs must be unique inside one chunk")]
+    DuplicateEntityId,
+    #[error("mutation ID must be nonzero")]
+    ZeroMutationId,
+    #[error("handshake payload failed semantic validation")]
+    Handshake,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn input_bounds_and_action_sequences_fail_closed() {
+        let mut input = InputFrame {
+            sequence: 1,
+            client_tick: 7,
+            movement_x_milli: 1_000,
+            movement_y_milli: 0,
+            aim_x_milli: 0,
+            aim_y_milli: -1_000,
+            held_primary: true,
+            primary_sequence: 2,
+            ability_1_sequence: 0,
+            ability_2_sequence: 0,
+        };
+        assert_eq!(input.validate(), Ok(()));
+        input.movement_x_milli = 1_001;
+        assert_eq!(
+            input.validate(),
+            Err(MessageValidationError::VectorComponent)
+        );
+        assert_eq!(
+            ActionFrame {
+                sequence: 0,
+                client_tick: 1,
+                action: ActionKind::Interact
+            }
+            .validate(),
+            Err(MessageValidationError::ZeroSequence)
+        );
+    }
+
+    #[test]
+    fn snapshot_chunks_reject_invalid_counts_duplicates_and_health() {
+        let entity = EntitySnapshot {
+            entity_id: 1,
+            kind: EntityKind::Player,
+            x_milli_tiles: 4_000,
+            y_milli_tiles: 12_000,
+            current_health: 128,
+            maximum_health: 128,
+            state_flags: 0,
+        };
+        let mut chunk = SnapshotChunk {
+            sequence: 1,
+            server_tick: 2,
+            acknowledged_input_sequence: 1,
+            chunk_index: 0,
+            chunk_count: 1,
+            entities: vec![entity.clone()],
+        };
+        assert_eq!(chunk.validate(), Ok(()));
+        chunk.entities.push(entity);
+        assert_eq!(
+            chunk.validate(),
+            Err(MessageValidationError::DuplicateEntityId)
+        );
+    }
+
+    #[test]
+    fn every_wire_message_maps_to_its_authoritative_channel() {
+        let action = WireMessage::ActionFrame(ActionFrame {
+            sequence: 1,
+            client_tick: 2,
+            action: ActionKind::RecallStart,
+        });
+        assert_eq!(action.channel(), NetworkChannel::Action);
+        assert!(!action.uses_datagram());
+        let input = WireMessage::InputFrame(InputFrame {
+            sequence: 1,
+            client_tick: 2,
+            movement_x_milli: 0,
+            movement_y_milli: 0,
+            aim_x_milli: 1_000,
+            aim_y_milli: 0,
+            held_primary: false,
+            primary_sequence: 0,
+            ability_1_sequence: 0,
+            ability_2_sequence: 0,
+        });
+        assert_eq!(input.channel(), NetworkChannel::Input);
+        assert!(input.uses_datagram());
+    }
+}

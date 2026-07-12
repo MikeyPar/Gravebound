@@ -12,7 +12,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Validate the M02 bot boundary without pretending a journey transport exists.
+    /// Validate the M02 bot and handshake-transport boundaries.
     Doctor,
 }
 

@@ -11,11 +11,17 @@ repository.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 protocol = { path = "../protocol" }
+quinn.workspace = true
 sim_core = { path = "../sim_core" }
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[dev-dependencies]
+bot_client = { path = "../bot_client" }
+rcgen.workspace = true
+rustls.workspace = true
 
 [lints]
 workspace = true

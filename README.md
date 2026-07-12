@@ -102,7 +102,7 @@ Concept images establish mood, hierarchy, and visual language. They are not fina
 
 ## Current Next Step
 
-Implement `GB-M02-01`: define the exact versioned handshake/session, input-frame, snapshot, reliable-event, channel-envelope, and rejection contracts; pin strict size/rate/sequence limits and canonical serialization fixtures; then record ADR-003 for QUIC implementation, datagram fallback, message codec, and protocol-version policy before opening sockets. `GB-M02-00` passes with eight workspace crates, 302 local tests, strict Clippy/content/determinism gates, and honest server/bot doctor commands. `GB-M01` remains closed under the explicit owner-assumed human gate recorded in `docs/playtests/GB-M01-owner-assumed-gate.md`.
+Implement `GB-M02-02`: route movement, attacks, cooldowns, projectiles, collision, health, death, eligibility, and pickup through the authoritative server while retaining `sim_core` as the single gameplay-rule owner. `GB-M02-01` passes with bounded versioned wire contracts, canonical postcard fixtures, typed admission/rejection policy, and a real TLS-authenticated QUIC loopback handshake; the roadmap ADR-003 decision is preserved as repository `ADR-018` because `ADR-003` already names the M01 primary-fire decision. `GB-M01` remains closed under the explicit owner-assumed human gate recorded in `docs/playtests/GB-M01-owner-assumed-gate.md`.
 
 ## Resolved prior handoff
 

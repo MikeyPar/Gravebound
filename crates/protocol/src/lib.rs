@@ -2,7 +2,26 @@
 //!
 //! This crate owns wire-facing message primitives, protocol versions, channel semantics, and
 //! typed protocol errors. It never owns gameplay rules, rendering, transport sockets, sessions,
-//! or persistence. `GB-M02-01` will compose the first handshake/messages from this foundation.
+//! or persistence. `GB-M02-01` supplies the bounded handshake, gameplay envelopes, and codec.
+
+mod bounded;
+mod codec;
+mod handshake;
+mod messages;
+
+pub use bounded::{AuthTicket, BoundedValueError, ManifestHash, WireText};
+pub use codec::{
+    DATAGRAM_FRAME_LIMIT, FRAME_HEADER_BYTES, RELIABLE_FRAME_LIMIT, WireCodecError, decode_frame,
+    encode_frame,
+};
+pub use handshake::{
+    ClientHello, Compression, HandshakeRejection, HandshakeResponse, Platform, ServerHello,
+};
+pub use messages::{
+    ActionFrame, ActionKind, ActionResultCode, ControlEvent, EntityKind, EntitySnapshot,
+    InputFrame, MessageKind, MessageValidationError, MutationResult, PatternDescriptor,
+    ReliableEvent, ReliableEventFrame, SnapshotChunk, SocialPingKind, WireMessage,
+};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;

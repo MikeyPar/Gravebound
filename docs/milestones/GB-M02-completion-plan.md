@@ -34,7 +34,7 @@ M01 PASS
 | ID | Exact outcome | Status |
 |---|---|---|
 | `GB-M02-00` | Add `protocol`, `server_app`, and `bot_client` with pinned runtime dependencies, strict ownership boundaries, tests, doctor commands, and CI targets. | PASS |
-| `GB-M02-01` | Versioned hello/rejection/session, input frames, snapshots, reliable events, channel envelopes, error codes, schema/codec limits, and ADR-003 transport decision. | PENDING |
+| `GB-M02-01` | Versioned hello/rejection/session, input frames, snapshots, reliable events, channel envelopes, error codes, schema/codec limits, and the roadmap ADR-003 transport decision (recorded as repository `ADR-018`). | PASS |
 | `GB-M02-02` | Server authority for movement, attacks, cooldowns, projectiles, collision, health, death, eligibility, and pickup using shared `sim_core`. | PENDING |
 | `GB-M02-03` | Local movement prediction, remote interpolation, reconciliation thresholds, and deterministic projectile presentation. | PENDING |
 | `GB-M02-04` | Join/leave/timeout, three-second `LinkLost`, reconnect, duplicate-session handoff, and clean shutdown. | PENDING |

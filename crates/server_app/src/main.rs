@@ -12,7 +12,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Validate the M02 server/runtime boundary without pretending transport exists.
+    /// Validate the M02 server/runtime and handshake-transport boundaries.
     Doctor,
 }
 
