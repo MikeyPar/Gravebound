@@ -139,10 +139,11 @@ async fn load_characters(
     account_id: &[u8; ID_BYTES],
 ) -> Result<Vec<StoredCharacter>, PersistenceError> {
     let rows = sqlx::query(
-        "SELECT character_id, roster_ordinal, class_id, level, oath_id, \
+        "SELECT characters.character_id, roster_ordinal, class_id, \
+                characters.level AS identity_level, character_progression.level, oath_id, \
                 life_state, security_state, character_state_version \
-         FROM characters WHERE namespace_id = $1 AND account_id = $2 \
-         ORDER BY roster_ordinal",
+         FROM characters JOIN character_progression USING (namespace_id, account_id, character_id) \
+         WHERE namespace_id = $1 AND account_id = $2 ORDER BY roster_ordinal",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(account_id.as_slice())
@@ -151,6 +152,13 @@ async fn load_characters(
     .map_err(PersistenceError::Database)?;
     rows.into_iter()
         .map(|row| {
+            let level: i32 = row.try_get("level").map_err(PersistenceError::Database)?;
+            let identity_level: i32 = row
+                .try_get("identity_level")
+                .map_err(PersistenceError::Database)?;
+            if identity_level != level {
+                return Err(PersistenceError::CorruptStoredIdentity);
+            }
             Ok(StoredCharacter {
                 character_id: fixed_bytes(
                     row.try_get("character_id")
@@ -162,7 +170,7 @@ async fn load_characters(
                 class_id: row
                     .try_get("class_id")
                     .map_err(PersistenceError::Database)?,
-                level: row.try_get("level").map_err(PersistenceError::Database)?,
+                level,
                 oath_id: row.try_get("oath_id").map_err(PersistenceError::Database)?,
                 life_state: row
                     .try_get("life_state")
@@ -233,6 +241,18 @@ async fn persist_aggregate(
         .bind(character.life_state)
         .bind(character.security_state)
         .bind(character.character_state_version)
+        .execute(transaction.connection())
+        .await
+        .map_err(PersistenceError::Database)?;
+        sqlx::query(
+            "INSERT INTO character_progression \
+             (namespace_id, account_id, character_id, total_xp, level, current_health, \
+              progression_version) VALUES ($1, $2, $3, 0, 1, 120, 1) \
+             ON CONFLICT (namespace_id, account_id, character_id) DO NOTHING",
+        )
+        .bind(WIPEABLE_CORE_NAMESPACE)
+        .bind(account_id.as_slice())
+        .bind(character.character_id.as_slice())
         .execute(transaction.connection())
         .await
         .map_err(PersistenceError::Database)?;

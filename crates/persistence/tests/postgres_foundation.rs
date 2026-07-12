@@ -88,14 +88,18 @@ async fn migrations_are_idempotent_exact_and_ready() {
         tables,
         [
             "_sqlx_migrations",
+            "account_boss_first_clears",
             "account_mutation_results",
             "accounts",
             "character_danger_checkpoints",
             "character_entry_restore_points",
             "character_instance_lineages",
+            "character_progression",
             "character_world_locations",
             "character_world_transfer_results",
+            "character_xp_award_results",
             "characters",
+            "entry_restore_progression_v1",
             "gravebound_namespaces",
         ]
     );

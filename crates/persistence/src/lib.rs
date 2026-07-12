@@ -23,7 +23,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 2;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 3;
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -342,6 +342,27 @@ mod tests {
             assert!(
                 !migration.contains(prohibited),
                 "world-flow root migration leaked {prohibited}"
+            );
+        }
+    }
+
+    #[test]
+    fn progression_migration_is_normalized_bounded_and_restore_ready() {
+        let migration = include_str!("../../../migrations/0003_wipeable_core_progression.sql");
+        for required in [
+            "character_progression",
+            "character_xp_award_results",
+            "account_boss_first_clears",
+            "entry_restore_progression_v1",
+            "progression_level_xp_shape",
+            "requested_xp = applied_xp + discarded_xp",
+        ] {
+            assert!(migration.contains(required), "migration omitted {required}");
+        }
+        for prohibited in ["JSON", "JSONB", "FLOAT", "DOUBLE PRECISION", "core.1.0.0"] {
+            assert!(
+                !migration.contains(prohibited),
+                "progression migration leaked {prohibited}"
             );
         }
     }
