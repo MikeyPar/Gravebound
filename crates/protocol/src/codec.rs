@@ -17,7 +17,9 @@ pub fn encode_frame(message: &WireMessage) -> Result<Vec<u8>, WireCodecError> {
 pub fn encode_m02_compatibility_frame(message: &WireMessage) -> Result<Vec<u8>, WireCodecError> {
     if matches!(
         message.kind(),
-        MessageKind::AccountBootstrapFrame | MessageKind::CharacterMutationFrame
+        MessageKind::AccountBootstrapFrame
+            | MessageKind::CharacterMutationFrame
+            | MessageKind::WorldFlowFrame
     ) {
         return Err(WireCodecError::MessageUnavailableAtVersion);
     }
@@ -113,6 +115,7 @@ const fn message_kind_byte(kind: MessageKind) -> u8 {
         MessageKind::SessionControlFrame => 8,
         MessageKind::AccountBootstrapFrame => 9,
         MessageKind::CharacterMutationFrame => 10,
+        MessageKind::WorldFlowFrame => 11,
     }
 }
 
@@ -128,6 +131,7 @@ const fn message_kind_from_byte(value: u8) -> Result<MessageKind, WireCodecError
         8 => Ok(MessageKind::SessionControlFrame),
         9 => Ok(MessageKind::AccountBootstrapFrame),
         10 => Ok(MessageKind::CharacterMutationFrame),
+        11 => Ok(MessageKind::WorldFlowFrame),
         other => Err(WireCodecError::UnknownMessageKind(other)),
     }
 }
@@ -189,7 +193,7 @@ mod tests {
         assert_eq!(decode_frame(&frame).unwrap(), input_message());
         assert_eq!(
             blake3::hash(&frame).to_hex().to_string(),
-            "ca58394712de1d0bc954d7611f4c30a1e583b23c004932c42d547e2f68a000b7"
+            "8c3721561482eb0dd8f055ce1bf00072bcff805d1f4fa310b3a90d43fdb0ff6c"
         );
         let m02 = encode_m02_compatibility_frame(&input_message()).unwrap();
         assert_eq!(
@@ -256,6 +260,24 @@ mod tests {
         assert_eq!(decode_frame(&frame), Ok(mutation.clone()));
         assert_eq!(
             encode_m02_compatibility_frame(&mutation),
+            Err(WireCodecError::MessageUnavailableAtVersion)
+        );
+    }
+
+    #[test]
+    fn protocol_1_7_appends_bounded_world_flow_control() {
+        let flow = WireMessage::WorldFlowFrame(crate::WorldFlowFrame {
+            sequence: 1,
+            request: crate::WorldFlowRequest::Location {
+                character_id: [1; 16],
+                content_manifest_hash: ManifestHash::new("b".repeat(64)).unwrap(),
+            },
+        });
+        let frame = encode_frame(&flow).unwrap();
+        assert_eq!(frame[8], 11);
+        assert_eq!(decode_frame(&frame), Ok(flow.clone()));
+        assert_eq!(
+            encode_m02_compatibility_frame(&flow),
             Err(WireCodecError::MessageUnavailableAtVersion)
         );
     }

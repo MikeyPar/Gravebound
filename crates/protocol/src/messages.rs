@@ -5,7 +5,7 @@ use thiserror::Error;
 
 use crate::{
     AccountBootstrapFrame, AccountBootstrapResult, CharacterMutationFrame, CharacterMutationResult,
-    ClientHello, HandshakeResponse, NetworkChannel, WireText,
+    ClientHello, HandshakeResponse, NetworkChannel, WireText, WorldFlowFrame, WorldFlowResult,
 };
 
 pub const FIXED_VECTOR_SCALE: i16 = 1_000;
@@ -29,6 +29,7 @@ pub enum MessageKind {
     SessionControlFrame,
     AccountBootstrapFrame,
     CharacterMutationFrame,
+    WorldFlowFrame,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -424,6 +425,7 @@ pub enum ReliableEvent {
     },
     AccountBootstrapResult(AccountBootstrapResult),
     CharacterMutationResult(CharacterMutationResult),
+    WorldFlowResult(WorldFlowResult),
 }
 
 impl ReliableEvent {
@@ -433,7 +435,9 @@ impl ReliableEvent {
             Self::ActionResult { .. } => NetworkChannel::Action,
             Self::PatternStarted(_) => NetworkChannel::Pattern,
             Self::MutationResult(_) | Self::CharacterMutationResult(_) => NetworkChannel::Mutation,
-            Self::Control(_) | Self::AccountBootstrapResult(_) => NetworkChannel::Control,
+            Self::Control(_) | Self::AccountBootstrapResult(_) | Self::WorldFlowResult(_) => {
+                NetworkChannel::Control
+            }
             Self::SocialPing { .. } => NetworkChannel::Social,
         }
     }
@@ -454,6 +458,9 @@ impl ReliableEvent {
             Self::CharacterMutationResult(result) => result
                 .validate()
                 .map_err(|_| MessageValidationError::Account),
+            Self::WorldFlowResult(result) => result
+                .validate()
+                .map_err(|_| MessageValidationError::WorldFlow),
             _ => Ok(()),
         }
     }
@@ -488,6 +495,7 @@ pub enum WireMessage {
     SessionControlFrame(SessionControlFrame),
     AccountBootstrapFrame(AccountBootstrapFrame),
     CharacterMutationFrame(CharacterMutationFrame),
+    WorldFlowFrame(WorldFlowFrame),
 }
 
 impl WireMessage {
@@ -504,6 +512,7 @@ impl WireMessage {
             Self::SessionControlFrame(_) => MessageKind::SessionControlFrame,
             Self::AccountBootstrapFrame(_) => MessageKind::AccountBootstrapFrame,
             Self::CharacterMutationFrame(_) => MessageKind::CharacterMutationFrame,
+            Self::WorldFlowFrame(_) => MessageKind::WorldFlowFrame,
         }
     }
 
@@ -513,7 +522,8 @@ impl WireMessage {
             Self::ClientHello(_)
             | Self::HandshakeResponse(_)
             | Self::SessionControlFrame(_)
-            | Self::AccountBootstrapFrame(_) => NetworkChannel::Control,
+            | Self::AccountBootstrapFrame(_)
+            | Self::WorldFlowFrame(_) => NetworkChannel::Control,
             Self::InputFrame(_) => NetworkChannel::Input,
             Self::ActionFrame(_) => NetworkChannel::Action,
             Self::SnapshotChunk(_) => NetworkChannel::Snapshot,
@@ -547,6 +557,9 @@ impl WireMessage {
             Self::CharacterMutationFrame(value) => value
                 .validate()
                 .map_err(|_| MessageValidationError::Account),
+            Self::WorldFlowFrame(value) => value
+                .validate()
+                .map_err(|_| MessageValidationError::WorldFlow),
         }
     }
 }
@@ -555,6 +568,8 @@ impl WireMessage {
 pub enum MessageValidationError {
     #[error("account message failed semantic validation")]
     Account,
+    #[error("world-flow message failed semantic validation")]
+    WorldFlow,
     #[error("message sequence must be nonzero")]
     ZeroSequence,
     #[error("fixed-point vector component must remain within -1000..=1000")]

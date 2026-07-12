@@ -9,6 +9,7 @@ mod bounded;
 mod codec;
 mod handshake;
 mod messages;
+mod world_flow;
 
 pub use account::{
     AccountBootstrapFrame, AccountBootstrapRequest, AccountBootstrapResult, AccountErrorCode,
@@ -34,6 +35,12 @@ pub use messages::{
     SessionControlResult, SessionControlResultCode, SessionDestination, SnapshotChunk,
     SocialPingKind, WireMessage,
 };
+pub use world_flow::{
+    CharacterLocationSnapshot, CharacterWorldLocation, HallSpawnKind, INSTANCE_LINEAGE_ID_BYTES,
+    TRANSFER_ID_BYTES, WORLD_FLOW_ID_MAX_BYTES, WorldFlowFrame, WorldFlowRequest, WorldFlowResult,
+    WorldFlowValidationError, WorldTransferCommand, WorldTransferMutation, WorldTransferPayload,
+    WorldTransferResult, WorldTransferResultCode,
+};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -41,7 +48,9 @@ use thiserror::Error;
 /// First incompatible protocol generation.
 pub const PROTOCOL_MAJOR: u16 = 1;
 /// Backward-compatible feature generation within [`PROTOCOL_MAJOR`].
-pub const PROTOCOL_MINOR: u16 = 6;
+pub const PROTOCOL_MINOR: u16 = 7;
+/// Exact Core identity wire generation retained while world-flow messages are appended.
+pub const CORE_IDENTITY_PROTOCOL_MINOR: u16 = 6;
 /// Exact final M02 wire generation retained for byte-for-byte compatibility fixtures.
 pub const M02_PROTOCOL_MINOR: u16 = 5;
 /// Authoritative simulation and client-input cadence from GDD `TECH-012`.
@@ -66,6 +75,8 @@ pub const M02_LOCAL_SERVER_NAME: &str = "localhost";
 pub const M02_LOCAL_REGION_ID: &str = "local-playtest";
 /// Explicit feature flag enabling the wipeable Core identity/select surface.
 pub const CORE_TEST_IDENTITY_FEATURE_FLAG: &str = "core_test_identity_character_select";
+/// Advertised only after every owning package makes the normal Core route honest.
+pub const CORE_WORLD_FLOW_FEATURE_FLAG: &str = "core_world_flow_integration";
 /// Build admitted by the explicit wipeable Core identity development endpoint.
 pub const M03_CORE_DEV_BUILD_ID: &str = "m03-core-dev-identity-1";
 /// Non-promotable content target label advertised by the Core identity endpoint.
