@@ -17,7 +17,7 @@ use protocol::{
     M02_PLAYER_ENTITY_ID_BASE, ManifestHash, MutationRequest, PickupPlacement, Platform,
     ProtocolVersion, ReliableEvent, WireMessage, WireText,
 };
-use sim_content::{first_playable_arena, load_and_validate};
+use sim_content::{first_playable_authority_combat_test, load_and_validate};
 use sim_core::{PlayerMovementState, SimulationVector};
 
 use crate::{
@@ -66,6 +66,12 @@ struct NetworkInputSequencer {
     last_aim: (i16, i16),
 }
 
+#[derive(Resource, Debug)]
+struct NetworkProjectileSpec {
+    speed_milli_tiles_per_second: i32,
+    directions_millionths: Vec<(i32, i32)>,
+}
+
 impl Default for NetworkInputSequencer {
     fn default() -> Self {
         Self {
@@ -98,6 +104,12 @@ struct NetworkHealthText;
 #[derive(Component)]
 struct NetworkGateOverlay;
 
+#[derive(Component)]
+struct NetworkInfoPanel;
+
+#[derive(Component)]
+struct NetworkWeaponPresentation;
+
 #[allow(clippy::too_many_lines)] // App assembly remains linear so authority exclusions are reviewable.
 pub fn run_network_playtest(config: NetworkPlayConfig) -> Result<()> {
     if config.player_token.trim().is_empty() {
@@ -121,7 +133,17 @@ pub fn run_network_playtest(config: NetworkPlayConfig) -> Result<()> {
             report.content_version
         );
     }
-    let arena = first_playable_arena(&package).context("failed to compile Bell Laboratory")?;
+    let authority_content = first_playable_authority_combat_test(&package)
+        .context("failed to compile network combat presentation")?;
+    let arena = authority_content.definitions.arena.clone();
+    let weapon = authority_content.definitions.combat.weapon();
+    let projectile_spec = NetworkProjectileSpec {
+        speed_milli_tiles_per_second: rounded_i32(
+            weapon.projectile_speed_tiles_per_second() * 1_000.0,
+        )
+        .context("authored projectile speed is outside presentation range")?,
+        directions_millionths: weapon.projectile_directions_millionths().to_vec(),
+    };
     let initial_movement = PlayerMovementState::at_arena_spawn(&arena)
         .context("failed to construct predicted player movement")?;
     let hello = ClientHello {
@@ -179,6 +201,7 @@ pub fn run_network_playtest(config: NetworkPlayConfig) -> Result<()> {
             combat_complete: false,
         })
         .insert_resource(NetworkInputSequencer::default())
+        .insert_resource(projectile_spec)
         .add_plugins(
             DefaultPlugins
                 .set(ImagePlugin::default_nearest())
@@ -208,7 +231,12 @@ pub fn run_network_playtest(config: NetworkPlayConfig) -> Result<()> {
         .add_systems(FixedUpdate, predict_and_send_input)
         .add_systems(
             Update,
-            (send_reliable_edges, update_network_hud)
+            (
+                send_reliable_edges,
+                toggle_network_info_panel,
+                update_network_avatar_animation,
+                update_network_hud,
+            )
                 .chain()
                 .in_set(FrameSet::Presentation),
         )
@@ -297,6 +325,7 @@ fn predict_and_send_input(
     window: Single<&Window, With<PrimaryWindow>>,
     camera: Single<(&Camera, &GlobalTransform)>,
     arena: Res<LoadedArena>,
+    projectile_spec: Res<NetworkProjectileSpec>,
     mut presentation: ResMut<NativeNetworkPresentation>,
     mut sequencer: ResMut<NetworkInputSequencer>,
     mut state: ResMut<NetworkPlayState>,
@@ -321,10 +350,18 @@ fn predict_and_send_input(
     .unwrap_or(sequencer.last_aim);
     sequencer.last_aim = aim;
     let held_primary = mouse.pressed(MouseButton::Left);
+    let new_primary_press = held_primary && !sequencer.primary_was_held;
     let Some(primary_sequence) = sequencer.sample_primary(held_primary) else {
         state.fatal_error = Some("primary input sequence exhausted".to_owned());
         return;
     };
+    if new_primary_press
+        && let Err(error) =
+            start_predicted_primary(&mut presentation, &projectile_spec, primary_sequence, aim)
+    {
+        state.fatal_error = Some(error.to_string());
+        return;
+    }
     bridge.0.replace_input(protocol::InputFrame {
         sequence,
         client_tick: u64::from(sequence),
@@ -431,6 +468,50 @@ fn nearest_eligible_pickup(presentation: &NativeNetworkPresentation) -> Option<u
         .map(|(_, entity_id)| entity_id)
 }
 
+fn start_predicted_primary(
+    presentation: &mut NativeNetworkPresentation,
+    spec: &NetworkProjectileSpec,
+    primary_sequence: u32,
+    aim: (i16, i16),
+) -> Result<()> {
+    let origin = presentation.runtime().local_presentation_position();
+    let origin_milli = (
+        rounded_i32(origin.x * 1_000.0).context("projectile origin x is outside range")?,
+        rounded_i32(origin.y * 1_000.0).context("projectile origin y is outside range")?,
+    );
+    let presentation_time_ms = presentation.presentation_time_ms();
+    for (index, (local_x, local_y)) in spec.directions_millionths.iter().copied().enumerate() {
+        let rotated_horizontal =
+            (i64::from(aim.0) * i64::from(local_x) - i64::from(aim.1) * i64::from(local_y)) / 1_000;
+        let rotated_vertical =
+            (i64::from(aim.1) * i64::from(local_x) + i64::from(aim.0) * i64::from(local_y)) / 1_000;
+        let velocity = (
+            i32::try_from(
+                rotated_horizontal * i64::from(spec.speed_milli_tiles_per_second) / 1_000_000,
+            )
+            .context("projectile velocity x is outside range")?,
+            i32::try_from(
+                rotated_vertical * i64::from(spec.speed_milli_tiles_per_second) / 1_000_000,
+            )
+            .context("projectile velocity y is outside range")?,
+        );
+        presentation.runtime_mut().start_local_projectile(
+            primary_sequence,
+            u16::try_from(index).context("projectile fan ordinal exceeds protocol range")?,
+            presentation_time_ms,
+            origin_milli,
+            velocity,
+        )?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)] // Bounds are checked before the exact rounded cast.
+fn rounded_i32(value: f32) -> Option<i32> {
+    (value.is_finite() && value >= i32::MIN as f32 && value <= i32::MAX as f32)
+        .then(|| value.round() as i32)
+}
+
 #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 fn cursor_aim(
     window: &Window,
@@ -454,8 +535,16 @@ fn cursor_aim(
 
 fn spawn_network_hud(mut commands: Commands) {
     commands.spawn((
+        Name::new("Network Pine Crossbow"),
+        NetworkWeaponPresentation,
+        Sprite::from_color(Color::srgb_u8(173, 141, 79), Vec2::new(0.58, 0.12)),
+        Transform::from_xyz(0.0, 0.0, 9.0),
+    ));
+    commands.spawn((
         Name::new("Network gate label"),
-        Text::new("M02 NETWORK PLAYTEST — NONPERSISTENT\nRECALL UNAVAILABLE — LOCAL TEST"),
+        Text::new(
+            "M02 NETWORK PLAYTEST — NONPERSISTENT\nRECALL UNAVAILABLE — LOCAL TEST\n[I / TAB] RUN KIT + CONTROLS",
+        ),
         TextFont::from_font_size(15.0),
         TextColor(Color::srgb_u8(240, 213, 139)),
         Node {
@@ -498,6 +587,25 @@ fn spawn_network_hud(mut commands: Commands) {
         BackgroundColor(Color::srgba_u8(8, 12, 16, 225)),
     ));
     commands.spawn((
+        Name::new("Network run kit and controls"),
+        NetworkInfoPanel,
+        Text::new(""),
+        TextFont::from_font_size(15.0),
+        TextColor(Color::srgb_u8(232, 225, 203)),
+        Node {
+            position_type: PositionType::Absolute,
+            left: px(14),
+            bottom: px(18),
+            width: px(410),
+            border: UiRect::all(px(1)),
+            padding: UiRect::all(px(12)),
+            ..default()
+        },
+        BackgroundColor(Color::srgba_u8(8, 12, 16, 238)),
+        BorderColor::all(Color::srgba_u8(173, 141, 79, 210)),
+        Visibility::Hidden,
+    ));
+    commands.spawn((
         Name::new("Network gate overlay"),
         NetworkGateOverlay,
         Text::new(""),
@@ -513,7 +621,114 @@ fn spawn_network_hud(mut commands: Commands) {
             ..default()
         },
         BackgroundColor(Color::srgba_u8(8, 12, 16, 230)),
+        Visibility::Hidden,
     ));
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn toggle_network_info_panel(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    presentation: Res<NativeNetworkPresentation>,
+    mut panel: Single<(&mut Text, &mut Visibility), With<NetworkInfoPanel>>,
+) {
+    if keyboard.just_pressed(KeyCode::KeyI) || keyboard.just_pressed(KeyCode::Tab) {
+        *panel.1 = match *panel.1 {
+            Visibility::Hidden => Visibility::Inherited,
+            _ => Visibility::Hidden,
+        };
+    }
+    if keyboard.just_pressed(KeyCode::Escape) {
+        *panel.1 = Visibility::Hidden;
+    }
+    if *panel.1 == Visibility::Hidden {
+        return;
+    }
+    let (server_tick, nearby_pickups, living_enemies) =
+        presentation
+            .latest_snapshot()
+            .map_or((0, 0, 0), |snapshot| {
+                let local = snapshot.entities.iter().find(|entity| {
+                    entity.entity_id == presentation.runtime().local_entity_id()
+                        && entity.kind == EntityKind::Player
+                });
+                let nearby = local.map_or(0, |player| {
+                    snapshot
+                        .entities
+                        .iter()
+                        .filter(|entity| {
+                            matches!(entity.kind, EntityKind::PersonalPickup | EntityKind::Loot)
+                                && entity.state_flags & ENTITY_STATE_ELIGIBLE != 0
+                        })
+                        .filter(|entity| {
+                            let dx =
+                                i64::from(entity.x_milli_tiles) - i64::from(player.x_milli_tiles);
+                            let dy =
+                                i64::from(entity.y_milli_tiles) - i64::from(player.y_milli_tiles);
+                            dx.saturating_mul(dx).saturating_add(dy.saturating_mul(dy))
+                                <= 1_250_i64.pow(2)
+                        })
+                        .count()
+                });
+                let enemies = snapshot
+                    .entities
+                    .iter()
+                    .filter(|entity| {
+                        matches!(entity.kind, EntityKind::Enemy | EntityKind::Boss)
+                            && entity.state_flags & ENTITY_STATE_ALIVE != 0
+                    })
+                    .count();
+                (snapshot.server_tick, nearby, enemies)
+            });
+    panel.0.0 = format!(
+        "RUN KIT — NONPERSISTENT [I / TAB TO CLOSE]\n\
+         MOVE  WASD       AIM  MOUSE       FIRE  LEFT MOUSE\n\
+         GRAVE MARK  RIGHT MOUSE          SLIPSTEP  SPACE\n\
+         TAKE PERSONAL PICKUP  E          CLOSE PANEL  ESC\n\
+         SERVER TICK {server_tick}   LIVING ENEMIES {living_enemies}   NEARBY PICKUPS {nearby_pickups}\n\
+         INVENTORY PERSISTENCE AND TONICS BEGIN IN M03"
+    );
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn update_network_avatar_animation(
+    time: Res<Time>,
+    movement: Res<LatestMovementAction>,
+    sequencer: Res<NetworkInputSequencer>,
+    mut player: Single<
+        &mut Transform,
+        (
+            With<crate::player::LocalPlayer>,
+            Without<NetworkWeaponPresentation>,
+        ),
+    >,
+    mut weapon: Single<
+        &mut Transform,
+        (
+            With<NetworkWeaponPresentation>,
+            Without<crate::player::LocalPlayer>,
+        ),
+    >,
+) {
+    let moving = movement.0.normalized_vector().length_squared() > 0.0;
+    let phase = time.elapsed_secs() * if moving { 11.0 } else { 3.5 };
+    let pulse = phase.sin();
+    let amount = if moving { 0.045 } else { 0.018 };
+    player.scale.x = 1.0 + pulse * amount;
+    player.scale.y = 1.0 - pulse * amount;
+
+    let aim = Vec2::new(
+        f32::from(sequencer.last_aim.0),
+        -f32::from(sequencer.last_aim.1),
+    )
+    .normalize_or_zero();
+    let recoil = if sequencer.primary_was_held {
+        (time.elapsed_secs() * 24.0).sin().abs() * 0.055
+    } else {
+        0.0
+    };
+    weapon.translation.x = player.translation.x + aim.x * (0.34 - recoil);
+    weapon.translation.y = player.translation.y + aim.y * (0.34 - recoil);
+    weapon.rotation = Quat::from_rotation_z(aim.y.atan2(aim.x));
 }
 
 #[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
@@ -524,7 +739,7 @@ fn update_network_hud(
     mut status: Single<&mut Text, With<NetworkStatusText>>,
     mut health: Single<&mut Text, (With<NetworkHealthText>, Without<NetworkStatusText>)>,
     mut overlay: Single<
-        &mut Text,
+        (&mut Text, &mut Visibility),
         (
             With<NetworkGateOverlay>,
             Without<NetworkStatusText>,
@@ -557,7 +772,7 @@ fn update_network_hud(
         || "HP — / —".to_owned(),
         |player| format!("HP {} / {}", player.current_health, player.maximum_health),
     );
-    overlay.0 = if let Some(error) = &state.fatal_error {
+    let overlay_text = if let Some(error) = &state.fatal_error {
         format!("CONNECTION FAILED\n{error}")
     } else if player.is_some_and(|player| player.state_flags & ENTITY_STATE_ALIVE == 0) {
         "YOU DIED\nAUTHORITATIVE RESULT".to_owned()
@@ -570,6 +785,12 @@ fn update_network_hud(
         state.status.clone()
     } else {
         String::new()
+    };
+    overlay.0.0 = overlay_text;
+    *overlay.1 = if overlay.0.0.is_empty() {
+        Visibility::Hidden
+    } else {
+        Visibility::Inherited
     };
 }
 
@@ -603,7 +824,32 @@ fn elapsed_millis(started: Instant) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
+
+    fn presentation_and_projectile_spec() -> (NativeNetworkPresentation, NetworkProjectileSpec) {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content");
+        let (package, _) = load_and_validate(&root).unwrap();
+        let authority = first_playable_authority_combat_test(&package).unwrap();
+        let arena = authority.definitions.arena.clone();
+        let movement = PlayerMovementState::at_arena_spawn(&arena).unwrap();
+        let weapon = authority.definitions.combat.weapon();
+        (
+            NativeNetworkPresentation::new(RemoteClientRuntime::new(
+                INITIAL_LOCAL_PLAYER_ID,
+                arena,
+                movement,
+            )),
+            NetworkProjectileSpec {
+                speed_milli_tiles_per_second: rounded_i32(
+                    weapon.projectile_speed_tiles_per_second() * 1_000.0,
+                )
+                .unwrap(),
+                directions_millionths: weapon.projectile_directions_millionths().to_vec(),
+            },
+        )
+    }
 
     #[test]
     fn pickup_selection_is_nearest_eligible_and_within_interact_reach() {
@@ -620,6 +866,39 @@ mod tests {
         assert_eq!(sequencer.sample_primary(false), Some(1));
         assert_eq!(sequencer.sample_primary(true), Some(2));
         assert_eq!(sequencer.sample_primary(false), Some(2));
+    }
+
+    #[test]
+    fn authored_primary_press_creates_immediate_local_projectile_tracks() {
+        let (mut presentation, spec) = presentation_and_projectile_spec();
+        start_predicted_primary(&mut presentation, &spec, 1, (1_000, 0)).unwrap();
+        let tracks = presentation.runtime().local_projectiles_at(0);
+        assert_eq!(tracks.len(), spec.directions_millionths.len());
+        assert!(tracks.iter().all(|track| track.source_input_sequence == 1));
+    }
+
+    #[test]
+    fn empty_gate_overlay_starts_hidden_and_info_input_toggles_panel() {
+        let (presentation, _) = presentation_and_projectile_spec();
+        let mut app = App::new();
+        app.insert_resource(ButtonInput::<KeyCode>::default())
+            .insert_resource(presentation)
+            .add_systems(Startup, spawn_network_hud)
+            .add_systems(Update, toggle_network_info_panel);
+        app.update();
+        let world = app.world_mut();
+        let mut overlay_query = world.query_filtered::<&Visibility, With<NetworkGateOverlay>>();
+        assert_eq!(overlay_query.single(world).unwrap(), &Visibility::Hidden);
+        let mut panel_query = world.query_filtered::<&Visibility, With<NetworkInfoPanel>>();
+        assert_eq!(panel_query.single(world).unwrap(), &Visibility::Hidden);
+
+        world
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyI);
+        app.update();
+        let world = app.world_mut();
+        let mut panel_query = world.query_filtered::<&Visibility, With<NetworkInfoPanel>>();
+        assert_eq!(panel_query.single(world).unwrap(), &Visibility::Inherited);
     }
 
     #[test]

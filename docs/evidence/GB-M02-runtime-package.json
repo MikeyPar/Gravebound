@@ -10,13 +10,13 @@
   },
   "client_executable": {
     "file": "client_bevy.exe",
-    "bytes": 66737152,
-    "sha256": "85CBC75530DA65C5D948DD948AEA56EB044FF3B1649AD378BEF9F707F2A3A1BB"
+    "bytes": 66813440,
+    "sha256": "971E4FD91E66A347A206D5A5174C3B9C9DAA2384485547644A4126C1ECC42CF6"
   },
   "networking_tests_passed": 69,
   "networking_tests_enumerated": 70,
-  "workspace_tests_passed": 392,
-  "workspace_tests_enumerated": 393,
+  "workspace_tests_passed": 395,
+  "workspace_tests_enumerated": 396,
   "ordinary_ci_ignored_tests": 1,
   "four_client_shared_world_smoke": true,
   "packaged_four_client_process_smoke": true,

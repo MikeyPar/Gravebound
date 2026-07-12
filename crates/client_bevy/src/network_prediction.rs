@@ -23,6 +23,7 @@ pub const NOTICEABLE_BLEND_MS: u32 = 60;
 pub const UNCONFIRMED_PROJECTILE_LIFETIME_MS: u64 = 250;
 const MILLI_TICKS_PER_TICK: u64 = 1_000;
 const SERVER_TICKS_PER_SECOND: u64 = 30;
+const SERVER_TICKS_PER_SECOND_F32: f32 = 30.0;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompleteSnapshot {
@@ -317,6 +318,12 @@ impl LocalMovementPrediction {
         let fraction = f32::from(remaining) / f32::from(total);
         self.state.position() + self.presentation_offset * fraction
     }
+
+    fn presentation_position_with_overstep(&self, overstep_fraction: f32) -> SimulationVector {
+        self.presentation_position()
+            + self.state.velocity()
+                * (overstep_fraction.clamp(0.0, 1.0) / SERVER_TICKS_PER_SECOND_F32)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -518,8 +525,8 @@ impl ProjectilePresentationSet {
         self.local
             .values()
             .filter(|track| {
-                track.authoritative_entity_id.is_some()
-                    || tick_millis <= track.expires_unconfirmed_at_millis
+                track.authoritative_entity_id.is_none()
+                    && tick_millis <= track.expires_unconfirmed_at_millis
             })
             .collect()
     }
@@ -566,6 +573,11 @@ impl NativeNetworkPresentation {
 
     pub const fn runtime_mut(&mut self) -> &mut RemoteClientRuntime {
         &mut self.runtime
+    }
+
+    #[must_use]
+    pub const fn presentation_time_ms(&self) -> u64 {
+        self.presentation_time_ms
     }
 
     #[must_use]
@@ -716,7 +728,6 @@ fn synchronize_snapshot_entities(
         .entities
         .iter()
         .filter(|entity| entity.entity_id != local_entity_id)
-        .filter(|entity| entity.kind != EntityKind::FriendlyProjectile)
         .filter(|entity| entity.state_flags & ENTITY_STATE_ALIVE != 0)
         .map(|entity| (entity.entity_id, entity.kind))
         .collect::<BTreeMap<_, _>>();
@@ -754,10 +765,11 @@ fn network_visual_style(kind: EntityKind) -> (Color, f32, f32) {
     }
 }
 
-#[allow(clippy::needless_pass_by_value)] // Bevy system parameters are wrapper values.
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)] // Bevy system parameters are wrapper values.
 fn sync_network_presentation(
     mut commands: Commands,
     time: Res<Time>,
+    fixed_time: Res<Time<Fixed>>,
     arena: Res<LoadedArena>,
     mut presentation: Option<ResMut<NativeNetworkPresentation>>,
     mut local_player: Query<&mut Transform, With<LocalPlayer>>,
@@ -777,7 +789,9 @@ fn sync_network_presentation(
         .saturating_add(delta_milli_ticks(time.delta()));
     if let Ok(mut transform) = local_player.single_mut() {
         let render = simulation_point_to_render(
-            presentation.runtime.local_presentation_position(),
+            presentation
+                .runtime
+                .local_render_position(fixed_time.overstep_fraction()),
             &arena.0,
         );
         transform.translation.x = render.x;
@@ -963,6 +977,12 @@ impl RemoteClientRuntime {
     #[must_use]
     pub fn local_presentation_position(&self) -> SimulationVector {
         self.local.presentation_position()
+    }
+
+    #[must_use]
+    pub fn local_render_position(&self, overstep_fraction: f32) -> SimulationVector {
+        self.local
+            .presentation_position_with_overstep(overstep_fraction)
     }
 
     pub fn remote_entity_at(
@@ -1354,6 +1374,23 @@ mod tests {
     }
 
     #[test]
+    fn local_render_position_interpolates_between_fixed_prediction_ticks() {
+        let mut runtime = runtime(1);
+        runtime
+            .predict_local_movement(PredictedMovementInput {
+                sequence: 1,
+                action: MovementAction::new(1, 0),
+            })
+            .unwrap();
+        let fixed = runtime.local_presentation_position();
+        let halfway = runtime.local_render_position(0.5);
+        let next = runtime.local_render_position(1.0);
+        assert!(halfway.x > fixed.x);
+        assert!(next.x > halfway.x);
+        assert!((halfway.y - fixed.y).abs() < f32::EPSILON);
+    }
+
+    #[test]
     fn authoritative_death_is_immediate_and_disables_prediction() {
         let mut runtime = runtime(1);
         let applied = runtime
@@ -1468,9 +1505,7 @@ mod tests {
                 ],
             ))
             .unwrap();
-        let confirmed = runtime.local_projectiles_at(166)[0];
-        assert_eq!(confirmed.authoritative_entity_id, Some(50));
-        assert_eq!(confirmed.position_at(166).unwrap(), (1_000, 10_000));
+        assert!(runtime.local_projectiles_at(166).is_empty());
 
         runtime
             .ingest_snapshot_chunk(chunk(2, 4, 5, vec![player(1, 10_000, 10_000, 0, 0, true)]))
