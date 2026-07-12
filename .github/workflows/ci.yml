@@ -67,9 +67,9 @@ jobs:
         env:
           POSTGRES_DB: gravebound_test
           POSTGRES_USER: gravebound_test
-          POSTGRES_PASSWORD: gravebound-${{ github.run_id }}-${{ github.run_attempt }}
+          POSTGRES_HOST_AUTH_METHOD: trust
         ports:
-          - 5432:5432
+          - 127.0.0.1:5432:5432
         options: >-
           --health-cmd "pg_isready -U gravebound_test -d gravebound_test"
           --health-interval 1s
@@ -77,7 +77,7 @@ jobs:
           --health-retries 30
     env:
       RUSTFLAGS: -C link-arg=-fuse-ld=lld
-      TEST_DATABASE_URL: postgres://gravebound_test:gravebound-${{ github.run_id }}-${{ github.run_attempt }}@127.0.0.1:5432/gravebound_test
+      TEST_DATABASE_URL: postgres://gravebound_test@127.0.0.1:5432/gravebound_test
       GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS: "1"
     steps:
       - uses: actions/checkout@v5
