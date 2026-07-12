@@ -17,6 +17,7 @@ CREATE TABLE accounts (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT transaction_timestamp(),
     PRIMARY KEY (namespace_id, account_id),
     CONSTRAINT account_id_exact_length CHECK (octet_length(account_id) = 16),
+    CONSTRAINT account_id_nonzero CHECK (account_id <> decode(repeat('00', 16), 'hex')),
     CONSTRAINT account_state_version_positive CHECK (state_version > 0),
     CONSTRAINT account_slot_capacity_core CHECK (slot_capacity = 2)
 );
@@ -40,12 +41,13 @@ CREATE TABLE characters (
         REFERENCES accounts(namespace_id, account_id) ON DELETE CASCADE,
     CONSTRAINT character_account_id_exact_length CHECK (octet_length(account_id) = 16),
     CONSTRAINT character_id_exact_length CHECK (octet_length(character_id) = 16),
+    CONSTRAINT character_id_nonzero CHECK (character_id <> decode(repeat('00', 16), 'hex')),
     CONSTRAINT character_roster_ordinal_core CHECK (roster_ordinal BETWEEN 1 AND 2),
-    CONSTRAINT character_class_id_not_blank CHECK (length(class_id) BETWEEN 1 AND 96),
+    CONSTRAINT character_class_id_core CHECK (class_id = 'class.grave_arbalist'),
     CONSTRAINT character_level_positive CHECK (level > 0),
     CONSTRAINT character_oath_id_bounded CHECK (oath_id IS NULL OR length(oath_id) BETWEEN 1 AND 96),
-    CONSTRAINT character_life_state_known CHECK (life_state BETWEEN 0 AND 1),
-    CONSTRAINT character_security_state_known CHECK (security_state BETWEEN 0 AND 1)
+    CONSTRAINT character_life_state_core CHECK (life_state = 0),
+    CONSTRAINT character_security_state_core CHECK (security_state = 0)
 );
 
 ALTER TABLE accounts ADD COLUMN selected_character_id BYTEA;
@@ -68,7 +70,9 @@ CREATE TABLE account_mutation_results (
         REFERENCES accounts(namespace_id, account_id) ON DELETE CASCADE,
     CONSTRAINT mutation_account_id_exact_length CHECK (octet_length(account_id) = 16),
     CONSTRAINT mutation_id_exact_length CHECK (octet_length(mutation_id) = 16),
+    CONSTRAINT mutation_id_nonzero CHECK (mutation_id <> decode(repeat('00', 16), 'hex')),
     CONSTRAINT mutation_payload_hash_exact_length CHECK (octet_length(payload_hash) = 32),
+    CONSTRAINT mutation_payload_hash_nonzero CHECK (payload_hash <> decode(repeat('00', 32), 'hex')),
     CONSTRAINT mutation_result_payload_bounded CHECK (octet_length(result_payload) BETWEEN 1 AND 65536)
 );
 

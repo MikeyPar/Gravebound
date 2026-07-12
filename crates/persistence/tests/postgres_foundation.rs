@@ -1,6 +1,6 @@
 use persistence::{
     EXPECTED_SCHEMA_VERSION, PersistenceConfig, PersistenceTransaction, PostgresPersistence,
-    WIPEABLE_CORE_NAMESPACE,
+    StoredCharacter, StoredMutation, WIPEABLE_CORE_NAMESPACE,
 };
 const ACCOUNT_A: [u8; 16] = [1; 16];
 const ACCOUNT_B: [u8; 16] = [2; 16];
@@ -109,6 +109,49 @@ async fn identity_schema_enforces_transactions_ownership_and_bounds() {
     assert_bound_rejections(&persistence).await;
     assert_selected_character_ownership(&persistence).await;
     assert_rollback_and_cascade(&persistence).await;
+    persistence.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires explicitly authorized disposable PostgreSQL"]
+async fn typed_identity_store_round_trips_under_one_lock() {
+    let persistence = disposable_database().await;
+    clear_accounts(&persistence).await;
+    let written = persistence
+        .transact_identity(ACCOUNT_A, 1, 2, |aggregate| {
+            assert_eq!((aggregate.state_version, aggregate.slot_capacity), (1, 2));
+            aggregate.state_version = 2;
+            aggregate.characters.push(StoredCharacter {
+                character_id: CHARACTER_A,
+                roster_ordinal: 1,
+                class_id: "class.grave_arbalist".to_owned(),
+                level: 1,
+                oath_id: None,
+                life_state: 0,
+                security_state: 0,
+            });
+            aggregate.mutations.push(StoredMutation {
+                mutation_id: [31; 16],
+                payload_hash: [41; 32],
+                result_payload: vec![51; 32],
+            });
+            aggregate.selected_character_id = Some(CHARACTER_A);
+            Ok(aggregate.clone())
+        })
+        .await
+        .unwrap();
+    let loaded = persistence
+        .transact_identity(ACCOUNT_A, 1, 2, |aggregate| Ok(aggregate.clone()))
+        .await
+        .unwrap();
+    assert_eq!(loaded, written);
+    assert_eq!(
+        persistence
+            .identity_character_owner(CHARACTER_A)
+            .await
+            .unwrap(),
+        Some(ACCOUNT_A)
+    );
     persistence.close().await;
 }
 

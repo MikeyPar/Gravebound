@@ -11,6 +11,10 @@ use sqlx::{
 };
 use thiserror::Error;
 
+mod identity;
+
+pub use identity::{StoredCharacter, StoredIdentityAggregate, StoredMutation};
+
 pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
@@ -120,6 +124,8 @@ pub enum PersistenceError {
     DestructiveTestOptInRequired,
     #[error("destructive PostgreSQL tests require database gravebound_test or gravebound_test_*")]
     UnsafeTestDatabaseName,
+    #[error("stored identity aggregate violates the approved schema")]
+    CorruptStoredIdentity,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
