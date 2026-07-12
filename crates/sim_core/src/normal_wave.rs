@@ -254,7 +254,7 @@ pub struct NormalWaveSimulation {
     health: EnemyHealthSimulation,
     hostile_projectiles: HostileProjectileSimulation,
     active_lanes: Vec<(SpawnInstanceId, ActiveEnemyLane)>,
-    player: EnemyLabPlayer,
+    players: BTreeMap<EntityId, EnemyLabPlayer>,
     phase: NormalWavePhase,
     starts_at: Tick,
     activation_tick: Tick,
@@ -305,7 +305,7 @@ impl NormalWaveSimulation {
                 hostile_projectile_ids,
             ),
             active_lanes: Vec::new(),
-            player,
+            players: BTreeMap::from([(player.target.entity_id, player)]),
             phase: NormalWavePhase::DormantTelegraph {
                 activates_at: activation_tick,
             },
@@ -332,12 +332,43 @@ impl NormalWaveSimulation {
     }
 
     #[must_use]
-    pub const fn player(&self) -> &EnemyLabPlayer {
-        &self.player
+    pub fn player(&self) -> &EnemyLabPlayer {
+        match self.players.first_key_value() {
+            Some((_, player)) => player,
+            None => unreachable!(),
+        }
     }
 
-    pub const fn player_mut(&mut self) -> &mut EnemyLabPlayer {
-        &mut self.player
+    pub fn player_mut(&mut self) -> &mut EnemyLabPlayer {
+        self.players
+            .first_entry()
+            .expect("normal wave always owns at least one player")
+            .into_mut()
+    }
+
+    #[must_use]
+    pub const fn players(&self) -> &BTreeMap<EntityId, EnemyLabPlayer> {
+        &self.players
+    }
+
+    pub fn players_mut(&mut self) -> &mut BTreeMap<EntityId, EnemyLabPlayer> {
+        &mut self.players
+    }
+
+    /// Adds a player before the wave advances. Shared authority locks its roster at first step.
+    pub fn add_player(&mut self, player: EnemyLabPlayer) -> Result<(), NormalWaveError> {
+        if self.tick != self.starts_at {
+            return Err(NormalWaveError::RosterLocked);
+        }
+        let player_id = player.target.entity_id;
+        if self.players.contains_key(&player_id) {
+            return Err(NormalWaveError::DuplicatePlayer(player_id));
+        }
+        if !player.target.position.is_finite() {
+            return Err(NormalWaveError::InvalidPlayerPosition(player_id));
+        }
+        self.players.insert(player_id, player);
+        Ok(())
     }
 
     pub fn set_damage_policy(&mut self, policy: HostileDamagePolicy) {
@@ -354,8 +385,15 @@ impl NormalWaveSimulation {
         {
             return Err(NormalWaveError::HandoffBeforeClear);
         }
+        if self.players.len() != 1 {
+            return Err(NormalWaveError::SharedHandoffUnsupported);
+        }
         Ok(NormalWaveHandoff {
-            player: self.player,
+            player: self
+                .players
+                .into_values()
+                .next()
+                .ok_or(NormalWaveError::MissingPlayer)?,
             hostile_projectile_ids: self.hostile_projectiles.into_allocator(),
         })
     }
@@ -422,16 +460,56 @@ impl NormalWaveSimulation {
     /// Fixed order: activation -> friendly damage/death -> living AI/movement -> hostile lanes and
     /// projectiles -> due drops -> wave-end hostile cleanup. The whole tick commits atomically.
     pub fn step(&mut self, combat_step: &CombatStep) -> Result<NormalWaveStep, NormalWaveError> {
+        let player_id = self.player().target.entity_id;
+        self.step_players(&BTreeMap::from([(player_id, combat_step.clone())]))
+    }
+
+    /// Advances a shared wave from the frozen per-player combat results. Network arrival order is
+    /// erased by player-map order and global projectile/contact provenance sorting.
+    pub fn step_players(
+        &mut self,
+        combat_steps: &BTreeMap<EntityId, CombatStep>,
+    ) -> Result<NormalWaveStep, NormalWaveError> {
         let mut next = self.clone();
-        let result = next.step_inner(combat_step)?;
+        let result = next.step_players_inner(combat_steps)?;
         *self = next;
         Ok(result)
     }
 
-    fn step_inner(&mut self, combat_step: &CombatStep) -> Result<NormalWaveStep, NormalWaveError> {
-        self.validate_alignment(combat_step)?;
+    fn step_players_inner(
+        &mut self,
+        combat_steps: &BTreeMap<EntityId, CombatStep>,
+    ) -> Result<NormalWaveStep, NormalWaveError> {
+        if combat_steps.keys().any(|id| !self.players.contains_key(id)) {
+            return Err(NormalWaveError::UnknownCombatPlayer);
+        }
+        let mut combat_step = CombatStep {
+            tick: self.tick,
+            ..CombatStep::default()
+        };
+        for step in combat_steps.values() {
+            if step.tick != self.tick {
+                return Err(NormalWaveError::CombatTickMismatch {
+                    expected: self.tick,
+                    received: step.tick,
+                });
+            }
+            combat_step
+                .collisions
+                .extend(step.collisions.iter().copied());
+            combat_step
+                .raw_damage_intents
+                .extend(step.raw_damage_intents.iter().copied());
+        }
+        combat_step
+            .collisions
+            .sort_by_key(|collision| (collision.projectile_id, collision.contact_ordinal));
+        combat_step
+            .raw_damage_intents
+            .sort_by_key(|intent| (intent.projectile_id, intent.contact_ordinal));
+        self.validate_alignment(&combat_step)?;
         let activated = self.activate_if_due();
-        let enemy_health_step = self.health.apply_combat_step(combat_step)?;
+        let enemy_health_step = self.health.apply_combat_step(&combat_step)?;
         let defeats = self.map_defeats(&enemy_health_step)?;
         let alive = self.alive_entity_ids();
         let just_cleared =
@@ -458,12 +536,9 @@ impl NormalWaveSimulation {
                 cleared_at: self.tick,
             };
         }
-        let mut hostile_step = self.hostile_projectiles.step(
-            &self.arena,
-            &mut self.player.target,
-            &mut self.player.consumables,
-            &mut self.player.combat,
-        )?;
+        let mut hostile_step = self
+            .hostile_projectiles
+            .step_players(&self.arena, &mut self.players)?;
         shift_hostile_step(&mut hostile_step, self.starts_at)?;
         let drops = self
             .health
@@ -574,10 +649,22 @@ impl NormalWaveSimulation {
                     instance_id: actor.spawn.instance_id,
                 });
             }
-            let input = if actor.spawn.kind == NormalWaveEnemyKind::DrownedPilgrim
-                && self.player.consumables.vitals().current_health() > 0
-            {
-                actor.actor.target_input(self.player.target.position)?
+            let target = self
+                .players
+                .values()
+                .filter(|player| player.consumables.vitals().current_health() > 0)
+                .min_by(|left, right| {
+                    let left_delta = left.target.position - actor.actor.position();
+                    let right_delta = right.target.position - actor.actor.position();
+                    left_delta
+                        .length_squared()
+                        .total_cmp(&right_delta.length_squared())
+                        .then_with(|| left.target.entity_id.cmp(&right.target.entity_id))
+                });
+            let input = if actor.spawn.kind == NormalWaveEnemyKind::DrownedPilgrim {
+                target.map_or(Ok(PilgrimTargetInput::ABSENT), |player| {
+                    actor.actor.target_input(player.target.position)
+                })?
             } else {
                 PilgrimTargetInput::ABSENT
             };
@@ -631,37 +718,49 @@ impl NormalWaveSimulation {
     ) -> Result<(), NormalWaveError> {
         for lane_index in 0..self.active_lanes.len() {
             let (instance_id, lane) = self.active_lanes[lane_index].clone();
-            if !lane.geometry.contacts_player(self.player.target.position) {
-                continue;
-            }
             let actor_index = self
                 .actors
                 .binary_search_by_key(&instance_id, |actor| actor.spawn.instance_id)
                 .map_err(|_| NormalWaveError::UnknownInstance(instance_id))?;
-            if !self.actors[actor_index]
-                .timeline
-                .register_lane_contact(lane.cast_id, self.player.target.entity_id.get())?
-            {
-                continue;
+            let player_ids = self
+                .players
+                .iter()
+                .filter(|(_, player)| {
+                    player.consumables.vitals().current_health() > 0
+                        && lane.geometry.contacts_player(player.target.position)
+                })
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>();
+            for player_id in player_ids {
+                let registered = self.actors[actor_index]
+                    .timeline
+                    .register_lane_contact(lane.cast_id, player_id.get())?;
+                if !registered {
+                    continue;
+                }
+                let player = self
+                    .players
+                    .get_mut(&player_id)
+                    .ok_or(NormalWaveError::UnknownCombatPlayer)?;
+                let damage = resolve_lane_contact_with_policy(
+                    lane.source_entity_id,
+                    &lane.attack,
+                    lane.geometry,
+                    &mut player.target,
+                    &mut player.consumables,
+                    &mut player.combat,
+                    self.damage_policy,
+                )?
+                .ok_or(NormalWaveError::LaneGeometryDisagreed)?;
+                events.push(NormalWaveLaneEvent::Contact {
+                    instance_id,
+                    source_entity_id: lane.source_entity_id,
+                    pattern_id: lane.attack.pattern_id,
+                    cast_id: lane.cast_id,
+                    player_entity_id: player_id,
+                    damage: Box::new(damage),
+                });
             }
-            let damage = resolve_lane_contact_with_policy(
-                lane.source_entity_id,
-                &lane.attack,
-                lane.geometry,
-                &mut self.player.target,
-                &mut self.player.consumables,
-                &mut self.player.combat,
-                self.damage_policy,
-            )?
-            .ok_or(NormalWaveError::LaneGeometryDisagreed)?;
-            events.push(NormalWaveLaneEvent::Contact {
-                instance_id,
-                source_entity_id: lane.source_entity_id,
-                pattern_id: lane.attack.pattern_id,
-                cast_id: lane.cast_id,
-                player_entity_id: self.player.target.entity_id,
-                damage: Box::new(damage),
-            });
         }
         Ok(())
     }
@@ -931,6 +1030,18 @@ fn validate_authored_geometry(
 pub enum NormalWaveError {
     #[error("normal wave must contain at least one enemy")]
     EmptyWave,
+    #[error("normal wave must retain at least one player")]
+    MissingPlayer,
+    #[error("duplicate normal-wave player {0}")]
+    DuplicatePlayer(EntityId),
+    #[error("combat step or lane contact referenced a player outside the wave roster")]
+    UnknownCombatPlayer,
+    #[error("player {0} position is non-finite")]
+    InvalidPlayerPosition(EntityId),
+    #[error("normal-wave roster is locked after the first step")]
+    RosterLocked,
+    #[error("single-player handoff cannot consume a shared player roster")]
+    SharedHandoffUnsupported,
     #[error("First Playable spawn telegraph must remain exactly 27 ticks")]
     SpawnTelegraphDefinitionDrift,
     #[error("duplicate spawn instance {0:?}")]
@@ -1101,6 +1212,13 @@ mod tests {
         }
     }
 
+    fn player_at(entity_id: u64, position: SimulationVector) -> EnemyLabPlayer {
+        let mut player = player();
+        player.target.entity_id = id(entity_id);
+        player.target.position = position;
+        player
+    }
+
     fn spawn(
         ordinal: u16,
         _legacy_entity: u64,
@@ -1204,6 +1322,116 @@ mod tests {
             });
         }
         step
+    }
+
+    fn damage_step(tick: u64, projectile_id: u64, target: EntityId, raw_damage: u32) -> CombatStep {
+        let intent = RawDamageIntent {
+            tick: Tick(tick),
+            projectile_id: id(projectile_id),
+            source: RawDamageIntentSource::Primary,
+            target,
+            base_raw_damage: raw_damage,
+            multiplier_basis_points: 10_000,
+            resolved_raw_damage: raw_damage,
+            contact_ordinal: 0,
+        };
+        CombatStep {
+            tick: Tick(tick),
+            collisions: vec![ProjectileCollision {
+                tick: intent.tick,
+                projectile_id: intent.projectile_id,
+                source: FriendlyProjectileSource::Primary,
+                target: CollisionTarget::Enemy(target),
+                final_position: SimulationVector::new(8.0, 3.0),
+                distance_travelled_tiles: 1.0,
+                contact_ordinal: 0,
+                empowered_by_slipstep: false,
+                focused_by_stillness: false,
+                projectile_continues: false,
+            }],
+            raw_damage_intents: vec![intent],
+            ..CombatStep::default()
+        }
+    }
+
+    #[test]
+    fn shared_players_damage_one_enemy_in_global_projectile_order() {
+        let mut wave = simulation(vec![spawn(
+            1,
+            101,
+            NormalWaveEnemyKind::DrownedPilgrim,
+            (8_000, 3_000),
+        )]);
+        wave.add_player(player_at(901, SimulationVector::new(15.0, 12.0)))
+            .unwrap();
+        for tick in 0..u64::from(FIRST_PLAYABLE_SPAWN_TELEGRAPH_TICKS) {
+            wave.step_players(&BTreeMap::from([
+                (id(900), empty_step(tick)),
+                (id(901), empty_step(tick)),
+            ]))
+            .unwrap();
+        }
+        let step = wave
+            .step_players(&BTreeMap::from([
+                (id(900), damage_step(27, 60_002, wave_id(1), 20)),
+                (id(901), damage_step(27, 60_001, wave_id(1), 20)),
+            ]))
+            .unwrap();
+        assert_eq!(step.enemy_health_step.damage_events.len(), 2);
+        assert_eq!(
+            step.enemy_health_step
+                .damage_events
+                .iter()
+                .map(|event| event.projectile_id.get())
+                .collect::<Vec<_>>(),
+            vec![60_001, 60_002]
+        );
+        assert_eq!(wave.snapshots()[0].health.current_health, 45);
+    }
+
+    #[test]
+    fn active_lane_contacts_each_shared_player_once_per_cast() {
+        let mut wave = simulation(vec![spawn(
+            1,
+            101,
+            NormalWaveEnemyKind::ChainSentry,
+            (16_000, 12_000),
+        )]);
+        wave.add_player(player_at(901, SimulationVector::new(16.0, 12.0)))
+            .unwrap();
+        let mut contacts = Vec::new();
+        for tick in 0..240 {
+            let step = wave
+                .step_players(&BTreeMap::from([
+                    (id(900), empty_step(tick)),
+                    (id(901), empty_step(tick)),
+                ]))
+                .unwrap();
+            contacts.extend(
+                step.lane_events
+                    .into_iter()
+                    .filter_map(|event| match event {
+                        NormalWaveLaneEvent::Contact {
+                            cast_id,
+                            player_entity_id,
+                            ..
+                        } => Some((cast_id, player_entity_id)),
+                        _ => None,
+                    }),
+            );
+            if contacts.len() >= 2 {
+                break;
+            }
+        }
+        assert_eq!(contacts.len(), 2);
+        assert_eq!(contacts[0].0, contacts[1].0);
+        assert_eq!(
+            contacts
+                .iter()
+                .map(|(_, player)| *player)
+                .collect::<Vec<_>>(),
+            vec![id(900), id(901)]
+        );
     }
 
     #[test]

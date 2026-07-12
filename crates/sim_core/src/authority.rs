@@ -214,7 +214,7 @@ impl AuthoritativeArena {
     }
 
     #[must_use]
-    pub const fn player(&self) -> &EnemyLabPlayer {
+    pub fn player(&self) -> &EnemyLabPlayer {
         self.wave.player()
     }
 

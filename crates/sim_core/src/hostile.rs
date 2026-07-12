@@ -5,7 +5,7 @@
 //! payloads. The roadmap orders this seam after `GB-M01-03A`–`03C` and before `GB-M01-04A` and
 //! `GB-M01-05A`. Enemy timelines authorize spawns; this module never invents an early attack.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use thiserror::Error;
 
@@ -13,10 +13,10 @@ use crate::{
     AimDirection, AimDirectionError, AimVector, ArenaGeometry, AttackCastId, BossEvent,
     CollisionError, CollisionTarget, Counterplay, DamageAppliedEvent, DamageBand, DamageError,
     DamageEvent, DamageType, DirectHitParameters, DirectHitRequest, EchoMemoryFamily, EnemyEvent,
-    EnemyHurtbox, EntityId, EntityIdAllocator, FocusedTransition, HostileDisposition, HurtboxError,
-    LaneAttackDefinition, PilgrimTargetInput, PlayerCombatState, ProjectileAttackDefinition,
-    ProjectileCollisionWorld, RedTonicSimulation, SimulationVector, SolidColliderId, SweepHit,
-    Tick, resolve_direct_hit,
+    EnemyHurtbox, EnemyLabPlayer, EntityId, EntityIdAllocator, FocusedTransition,
+    HostileDisposition, HurtboxError, LaneAttackDefinition, PilgrimTargetInput, PlayerCombatState,
+    ProjectileAttackDefinition, ProjectileCollisionWorld, RedTonicSimulation, SimulationVector,
+    SolidColliderId, Tick, resolve_direct_hit,
 };
 
 pub const PLAYER_HURTBOX_RADIUS_TILES: f32 = 0.25;
@@ -196,7 +196,7 @@ pub struct HostileProjectileSimulation {
     tick: Tick,
     projectile_ids: EntityIdAllocator,
     projectiles: Vec<HostileProjectile>,
-    projectile_damage_allowed_at: Tick,
+    projectile_damage_allowed_at: BTreeMap<EntityId, Tick>,
     damage_policy: HostileDamagePolicy,
 }
 
@@ -206,7 +206,7 @@ impl Default for HostileProjectileSimulation {
             tick: Tick(0),
             projectile_ids: EntityIdAllocator::default(),
             projectiles: Vec::new(),
-            projectile_damage_allowed_at: Tick(0),
+            projectile_damage_allowed_at: BTreeMap::new(),
             damage_policy: HostileDamagePolicy::Standard,
         }
     }
@@ -219,7 +219,7 @@ impl HostileProjectileSimulation {
             tick: Tick(0),
             projectile_ids,
             projectiles: Vec::new(),
-            projectile_damage_allowed_at: Tick(0),
+            projectile_damage_allowed_at: BTreeMap::new(),
             damage_policy: HostileDamagePolicy::Standard,
         }
     }
@@ -482,39 +482,65 @@ impl HostileProjectileSimulation {
         tonic: &mut RedTonicSimulation,
         combat: &mut PlayerCombatState,
     ) -> Result<HostileStep, HostileError> {
-        let mut next_simulation = self.clone();
-        let mut next_target = target.clone();
-        let mut next_tonic = tonic.clone();
-        let mut next_combat = combat.clone();
-        let result = next_simulation.step_inner(
-            arena,
-            &mut next_target,
-            &mut next_tonic,
-            &mut next_combat,
-        )?;
-        *self = next_simulation;
-        *target = next_target;
-        *tonic = next_tonic;
-        *combat = next_combat;
+        let player_id = target.entity_id;
+        let mut players = BTreeMap::from([(
+            player_id,
+            EnemyLabPlayer {
+                target: target.clone(),
+                consumables: tonic.clone(),
+                combat: combat.clone(),
+            },
+        )]);
+        let result = self.step_players(arena, &mut players)?;
+        let player = players
+            .remove(&player_id)
+            .ok_or(HostileError::PlayerMapInvariant)?;
+        *target = player.target;
+        *tonic = player.consumables;
+        *combat = player.combat;
         Ok(result)
     }
 
-    fn step_inner(
+    /// Advances one complete hostile tick against all living players. Map order is the stable
+    /// player order and keys must agree with the embedded target identities.
+    pub fn step_players(
         &mut self,
         arena: &ArenaGeometry,
-        target: &mut HostileTargetState,
-        tonic: &mut RedTonicSimulation,
-        combat: &mut PlayerCombatState,
+        players: &mut BTreeMap<EntityId, EnemyLabPlayer>,
     ) -> Result<HostileStep, HostileError> {
+        let mut next_simulation = self.clone();
+        let mut next_players = players.clone();
+        let result = next_simulation.step_players_inner(arena, &mut next_players)?;
+        *self = next_simulation;
+        *players = next_players;
+        Ok(result)
+    }
+
+    fn step_players_inner(
+        &mut self,
+        arena: &ArenaGeometry,
+        players: &mut BTreeMap<EntityId, EnemyLabPlayer>,
+    ) -> Result<HostileStep, HostileError> {
+        if players
+            .iter()
+            .any(|(id, player)| *id != player.target.entity_id)
+        {
+            return Err(HostileError::PlayerMapInvariant);
+        }
         let player_world = ProjectileCollisionWorld::new(
             arena,
-            vec![EnemyHurtbox::new(
-                target.entity_id,
-                target.position,
-                PLAYER_HURTBOX_RADIUS_TILES,
-            )?],
+            players
+                .values()
+                .filter(|player| player.consumables.vitals().current_health() > 0)
+                .map(|player| {
+                    EnemyHurtbox::new(
+                        player.target.entity_id,
+                        player.target.position,
+                        PLAYER_HURTBOX_RADIUS_TILES,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?,
         )?;
-        let solid_world = ProjectileCollisionWorld::new(arena, Vec::new())?;
         self.projectiles.sort_by_key(HostileProjectile::id);
         let mut survivors = Vec::with_capacity(self.projectiles.len());
         let mut events = Vec::with_capacity(self.projectiles.len() * 2);
@@ -522,10 +548,7 @@ impl HostileProjectileSimulation {
             tick: self.tick,
             projectile_damage_allowed_at: &mut self.projectile_damage_allowed_at,
             player_world: &player_world,
-            solid_world: &solid_world,
-            target,
-            tonic,
-            combat,
+            players,
             damage_policy: self.damage_policy,
             events: &mut events,
             survivors: &mut survivors,
@@ -545,12 +568,9 @@ impl HostileProjectileSimulation {
 
 struct ProjectileTickTransaction<'a> {
     tick: Tick,
-    projectile_damage_allowed_at: &'a mut Tick,
+    projectile_damage_allowed_at: &'a mut BTreeMap<EntityId, Tick>,
     player_world: &'a ProjectileCollisionWorld,
-    solid_world: &'a ProjectileCollisionWorld,
-    target: &'a mut HostileTargetState,
-    tonic: &'a mut RedTonicSimulation,
-    combat: &'a mut PlayerCombatState,
+    players: &'a mut BTreeMap<EntityId, EnemyLabPlayer>,
     damage_policy: HostileDamagePolicy,
     events: &'a mut Vec<HostileEvent>,
     survivors: &'a mut Vec<HostileProjectile>,
@@ -561,15 +581,26 @@ impl ProjectileTickTransaction<'_> {
         let from = projectile.position;
         let displacement = projectile.direction.vector()
             * (projectile.speed_tiles_per_second / TICKS_PER_SECOND_F32);
-        let world = if projectile
+        self.resolve_segment(projectile, from, displacement)
+    }
+
+    fn resolve_segment(
+        &mut self,
+        projectile: HostileProjectile,
+        from: SimulationVector,
+        displacement: SimulationVector,
+    ) -> Result<(), HostileError> {
+        let ignored = projectile
             .ignored_player_ids
-            .contains(&self.target.entity_id)
-        {
-            self.solid_world
-        } else {
-            self.player_world
-        };
-        let hit = world.sweep_circle(from, displacement, projectile.radius_tiles)?;
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        let hit = self.player_world.sweep_circle_ignoring_enemies(
+            from,
+            displacement,
+            projectile.radius_tiles,
+            &ignored,
+        )?;
         let Some(hit) = hit else {
             retain_after_motion(
                 self.tick,
@@ -587,7 +618,7 @@ impl ProjectileTickTransaction<'_> {
                 Ok(())
             }
             CollisionTarget::Enemy(player) => {
-                self.resolve_player_contact(projectile, player, from, displacement, hit)
+                self.resolve_player_contact(projectile, player, from, displacement, hit.fraction)
             }
         }
     }
@@ -598,12 +629,15 @@ impl ProjectileTickTransaction<'_> {
         player_entity_id: EntityId,
         from: SimulationVector,
         displacement: SimulationVector,
-        hit: SweepHit,
+        hit_fraction: f32,
     ) -> Result<(), HostileError> {
-        debug_assert_eq!(player_entity_id, self.target.entity_id);
-        let contact_position = from + displacement * hit.fraction;
-        let player_alive = self.tonic.vitals().current_health() > 0;
-        if player_alive && self.tick < *self.projectile_damage_allowed_at {
+        let contact_position = from + displacement * hit_fraction;
+        let damage_allowed_at = self
+            .projectile_damage_allowed_at
+            .get(&player_entity_id)
+            .copied()
+            .unwrap_or(Tick(0));
+        if self.tick < damage_allowed_at {
             self.events.push(HostileEvent::ProjectileGraceIgnored {
                 tick: self.tick,
                 projectile_id: projectile.id,
@@ -623,12 +657,10 @@ impl ProjectileTickTransaction<'_> {
             }
         }
         projectile.ignored_player_ids.insert(player_entity_id);
-        self.continue_piercing(
+        self.resolve_segment(
             projectile,
-            from,
-            displacement,
-            hit.fraction,
             contact_position,
+            displacement * (1.0 - hit_fraction),
         )
     }
 
@@ -638,21 +670,28 @@ impl ProjectileTickTransaction<'_> {
         player_entity_id: EntityId,
         position: SimulationVector,
     ) -> Result<(), HostileError> {
-        let applied = if self.tonic.vitals().current_health() > 0 {
+        let player = self
+            .players
+            .get_mut(&player_entity_id)
+            .ok_or(HostileError::UnknownPlayer(player_entity_id))?;
+        let applied = if player.consumables.vitals().current_health() > 0 {
             let result = apply_hostile_contact_transaction_with_policy(
                 projectile.source_entity_id,
                 projectile.raw_damage,
                 projectile.damage_type,
-                self.target,
-                self.tonic,
-                self.combat,
+                &mut player.target,
+                &mut player.consumables,
+                &mut player.combat,
                 self.damage_policy,
             )?;
-            *self.projectile_damage_allowed_at = Tick(
-                self.tick
-                    .0
-                    .checked_add(HOSTILE_PROJECTILE_GRACE_TICKS)
-                    .ok_or(HostileError::TickOverflow)?,
+            self.projectile_damage_allowed_at.insert(
+                player_entity_id,
+                Tick(
+                    self.tick
+                        .0
+                        .checked_add(HOSTILE_PROJECTILE_GRACE_TICKS)
+                        .ok_or(HostileError::TickOverflow)?,
+                ),
             );
             Some(result)
         } else {
@@ -674,41 +713,6 @@ impl ProjectileTickTransaction<'_> {
                 .is_some_and(|result| result.debug_invulnerable),
             focused_transition: applied.and_then(|result| result.focused_transition),
         });
-        Ok(())
-    }
-
-    fn continue_piercing(
-        &mut self,
-        projectile: HostileProjectile,
-        from: SimulationVector,
-        displacement: SimulationVector,
-        hit_fraction: f32,
-        contact_position: SimulationVector,
-    ) -> Result<(), HostileError> {
-        let remaining_displacement = displacement * (1.0 - hit_fraction);
-        if let Some(solid_hit) = self.solid_world.sweep_circle(
-            contact_position,
-            remaining_displacement,
-            projectile.radius_tiles,
-        )? {
-            let CollisionTarget::Solid(solid) = solid_hit.target else {
-                unreachable!("solid-only collision world returned a player")
-            };
-            self.push_solid_contact(
-                &projectile,
-                solid,
-                contact_position + remaining_displacement * solid_hit.fraction,
-            );
-            return Ok(());
-        }
-        retain_after_motion(
-            self.tick,
-            projectile,
-            contact_position,
-            from + displacement,
-            self.events,
-            self.survivors,
-        );
         Ok(())
     }
 
@@ -1490,6 +1494,10 @@ fn integer_sqrt(value: u64) -> u64 {
 
 #[derive(Debug, Error)]
 pub enum HostileError {
+    #[error("hostile player map key disagrees with the embedded player identity")]
+    PlayerMapInvariant,
+    #[error("hostile collision referenced unknown player {0}")]
+    UnknownPlayer(EntityId),
     #[error("enemy event does not authorize a hostile projectile spawn")]
     EventDoesNotAuthorizeProjectileSpawn,
     #[error("enemy event does not authorize an active lane contact")]
@@ -1726,6 +1734,91 @@ mod tests {
             TonicBelt::first_playable(),
         )
         .expect("tonic")
+    }
+
+    fn lab_player(entity_id: u64, position: SimulationVector) -> EnemyLabPlayer {
+        let mut target = target(position);
+        target.entity_id = id(entity_id);
+        EnemyLabPlayer {
+            target,
+            consumables: tonic(),
+            combat: combat().expect("combat"),
+        }
+    }
+
+    #[test]
+    fn multiplayer_nonpiercing_contact_uses_earliest_then_entity_id_tie_break() {
+        let mut simulation = HostileProjectileSimulation::default();
+        simulation.projectiles.push(contact_projectile(1, false));
+        let mut players = BTreeMap::from([
+            (id(900), lab_player(900, SimulationVector::new(5.6, 6.0))),
+            (id(901), lab_player(901, SimulationVector::new(5.6, 6.0))),
+        ]);
+        let step = simulation
+            .step_players(&arena(), &mut players)
+            .expect("multi-player hostile step");
+        let contacts = step
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                HostileEvent::Contact {
+                    target: HostileCollisionTarget::Player(player),
+                    ..
+                } => Some(*player),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(contacts, vec![id(900)]);
+        assert!(players[&id(900)].consumables.vitals().current_health() < 120);
+        assert_eq!(players[&id(901)].consumables.vitals().current_health(), 120);
+        assert!(simulation.projectiles().is_empty());
+    }
+
+    #[test]
+    fn multiplayer_piercing_projectile_hits_each_player_once_in_one_tick() {
+        let mut simulation = HostileProjectileSimulation::default();
+        simulation.projectiles.push(contact_projectile(1, true));
+        let mut players = BTreeMap::from([
+            (id(900), lab_player(900, SimulationVector::new(5.45, 6.0))),
+            (id(901), lab_player(901, SimulationVector::new(5.85, 6.0))),
+        ]);
+        let step = simulation
+            .step_players(&arena(), &mut players)
+            .expect("piercing multi-player hostile step");
+        let contacts = step
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                HostileEvent::Contact {
+                    target: HostileCollisionTarget::Player(player),
+                    ..
+                } => Some(*player),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(contacts, vec![id(900), id(901)]);
+        for player in players.values() {
+            assert!(player.consumables.vitals().current_health() < 120);
+        }
+        assert_eq!(simulation.projectiles().len(), 1);
+        assert_eq!(
+            simulation.projectiles()[0].ignored_player_ids,
+            BTreeSet::from([id(900), id(901)])
+        );
+    }
+
+    #[test]
+    fn multiplayer_player_map_mismatch_rolls_back_all_state() {
+        let mut simulation = HostileProjectileSimulation::default();
+        simulation.projectiles.push(contact_projectile(1, false));
+        let mut players =
+            BTreeMap::from([(id(900), lab_player(901, SimulationVector::new(5.6, 6.0)))]);
+        let before = (simulation.clone(), players.clone());
+        assert!(matches!(
+            simulation.step_players(&arena(), &mut players),
+            Err(HostileError::PlayerMapInvariant)
+        ));
+        assert_eq!((simulation, players), before);
     }
 
     #[test]

@@ -212,7 +212,7 @@ impl EnemyLabRuntime {
         }
     }
 
-    pub(crate) const fn target_armor(&self) -> u32 {
+    pub(crate) fn target_armor(&self) -> u32 {
         if let Some(boss) = &self.boss {
             boss.player().target.armor
         } else if let Some(wave) = &self.normal_wave {
