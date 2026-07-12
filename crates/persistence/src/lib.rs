@@ -12,8 +12,12 @@ use sqlx::{
 use thiserror::Error;
 
 mod identity;
+mod world_flow;
 
 pub use identity::{StoredCharacter, StoredIdentityAggregate, StoredMutation};
+pub use world_flow::{
+    StoredSafeArrival, StoredWorldLocation, StoredWorldTransferReceipt, WorldFlowTransactionState,
+};
 
 pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
@@ -137,6 +141,10 @@ pub enum PersistenceError {
     UnsafeTestDatabaseName,
     #[error("stored identity aggregate violates the approved schema")]
     CorruptStoredIdentity,
+    #[error("stored world-flow aggregate violates the approved schema")]
+    CorruptStoredWorldFlow,
+    #[error("world-flow character does not exist for the authenticated account")]
+    WorldFlowCharacterNotFound,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
