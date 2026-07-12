@@ -42,9 +42,9 @@ pub use progression::{
 };
 pub use world_flow::{
     CharacterLocation, CharacterLocationSnapshot, INSTANCE_LINEAGE_ID_BYTES, SafeArrival,
-    TRANSFER_ID_BYTES, WORLD_FLOW_ID_MAX_BYTES, WorldFlowFrame, WorldFlowRequest, WorldFlowResult,
-    WorldFlowValidationError, WorldTransferCommand, WorldTransferMutation, WorldTransferPayload,
-    WorldTransferResultCode,
+    TRANSFER_ID_BYTES, WORLD_FLOW_ID_MAX_BYTES, WorldFlowContentRevisionV1, WorldFlowFrame,
+    WorldFlowRequest, WorldFlowResult, WorldFlowValidationError, WorldTransferCommand,
+    WorldTransferMutation, WorldTransferPayload, WorldTransferResultCode,
 };
 
 use serde::{Deserialize, Serialize};

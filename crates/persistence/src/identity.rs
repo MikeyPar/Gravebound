@@ -258,8 +258,9 @@ async fn persist_aggregate(
         .map_err(PersistenceError::Database)?;
         sqlx::query(
             "INSERT INTO character_world_locations \
-             (namespace_id, account_id, character_id, character_version, location_kind) \
-             VALUES ($1, $2, $3, $4, 0) \
+             (namespace_id, account_id, character_id, character_version, location_kind, \
+              safe_arrival_kind) \
+             VALUES ($1, $2, $3, $4, 0, 0) \
              ON CONFLICT (namespace_id, account_id, character_id) DO NOTHING",
         )
         .bind(WIPEABLE_CORE_NAMESPACE)

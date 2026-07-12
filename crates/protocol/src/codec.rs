@@ -273,7 +273,11 @@ mod tests {
             sequence: 1,
             request: crate::WorldFlowRequest::Location {
                 character_id: [1; 16],
-                content_manifest_hash: ManifestHash::new("b".repeat(64)).unwrap(),
+                content_revision: crate::WorldFlowContentRevisionV1 {
+                    records_blake3: ManifestHash::new("b".repeat(64)).unwrap(),
+                    assets_blake3: ManifestHash::new("c".repeat(64)).unwrap(),
+                    localization_blake3: ManifestHash::new("d".repeat(64)).unwrap(),
+                },
             },
         });
         let frame = encode_frame(&flow).unwrap();

@@ -4,8 +4,9 @@ use std::future::Future;
 
 use persistence::{PostgresPersistence, StoredSafeArrival, StoredWorldLocation};
 use protocol::{
-    CharacterLocation, CharacterLocationSnapshot, SafeArrival, WireText, WorldFlowFrame,
-    WorldFlowRequest, WorldFlowResult, WorldTransferResultCode,
+    CharacterLocation, CharacterLocationSnapshot, SafeArrival, WireText,
+    WorldFlowContentRevisionV1, WorldFlowFrame, WorldFlowRequest, WorldFlowResult,
+    WorldTransferResultCode,
 };
 use thiserror::Error;
 
@@ -80,7 +81,7 @@ impl WorldFlowLocationRepository for PostgresWorldFlowLocationRepository {
 pub struct WorldFlowGateService<Repository, Clock> {
     repository: Repository,
     clock: Clock,
-    required_manifest_hash: protocol::ManifestHash,
+    required_content_revision: WorldFlowContentRevisionV1,
 }
 
 impl<Repository, Clock> WorldFlowGateService<Repository, Clock>
@@ -91,12 +92,12 @@ where
     pub const fn new(
         repository: Repository,
         clock: Clock,
-        required_manifest_hash: protocol::ManifestHash,
+        required_content_revision: WorldFlowContentRevisionV1,
     ) -> Self {
         Self {
             repository,
             clock,
-            required_manifest_hash,
+            required_content_revision,
         }
     }
 
@@ -117,13 +118,13 @@ where
         match &frame.request {
             WorldFlowRequest::Location {
                 character_id,
-                content_manifest_hash,
+                content_revision,
             } => {
                 self.handle_location(
                     frame.sequence,
                     authenticated.account_id,
                     *character_id,
-                    content_manifest_hash,
+                    content_revision,
                 )
                 .await
             }
@@ -139,9 +140,9 @@ where
         request_sequence: u32,
         account_id: AccountId,
         character_id: [u8; 16],
-        content_manifest_hash: &protocol::ManifestHash,
+        content_revision: &WorldFlowContentRevisionV1,
     ) -> WorldFlowResult {
-        if content_manifest_hash != &self.required_manifest_hash {
+        if content_revision != &self.required_content_revision {
             return error(
                 request_sequence,
                 WorldTransferResultCode::ContentMismatch,
@@ -166,7 +167,10 @@ where
         let reject = |code, snapshot| {
             transfer_rejection(request_sequence, mutation.mutation_id, code, snapshot)
         };
-        if mutation.payload.content_manifest_hash != self.required_manifest_hash {
+        if mutation.payload_hash != mutation.payload.canonical_hash() {
+            return reject(WorldTransferResultCode::PayloadHashMismatch, None);
+        }
+        if mutation.payload.content_revision != self.required_content_revision {
             return reject(WorldTransferResultCode::ContentMismatch, None);
         }
         if mutation.issued_at_unix_millis > self.clock.unix_millis() {
@@ -238,7 +242,11 @@ fn stored_location_snapshot(
     let character_version =
         u64::try_from(stored.character_version()).map_err(|_| WorldFlowRepositoryError::Corrupt)?;
     let location = match stored {
-        StoredWorldLocation::CharacterSelect { .. } => CharacterLocation::CharacterSelect,
+        StoredWorldLocation::CharacterSelect {
+            next_hall_arrival, ..
+        } => CharacterLocation::CharacterSelect {
+            next_hall_arrival: stored_arrival(next_hall_arrival)?,
+        },
         StoredWorldLocation::Safe {
             location_content_id,
             arrival,
@@ -275,6 +283,15 @@ fn stored_location_snapshot(
         .validate()
         .map_err(|_| WorldFlowRepositoryError::Corrupt)?;
     Ok(snapshot)
+}
+
+fn stored_arrival(arrival: StoredSafeArrival) -> Result<SafeArrival, WorldFlowRepositoryError> {
+    Ok(match arrival {
+        StoredSafeArrival::HallDefault => SafeArrival::HallDefault,
+        StoredSafeArrival::SpawnAnchor(spawn_id) => SafeArrival::SpawnAnchor {
+            spawn_id: WireText::new(spawn_id).map_err(|_| WorldFlowRepositoryError::Corrupt)?,
+        },
+    })
 }
 
 fn error(
@@ -362,6 +379,14 @@ mod tests {
         }
     }
 
+    fn revision() -> WorldFlowContentRevisionV1 {
+        WorldFlowContentRevisionV1 {
+            records_blake3: ManifestHash::new("a".repeat(64)).unwrap(),
+            assets_blake3: ManifestHash::new("b".repeat(64)).unwrap(),
+            localization_blake3: ManifestHash::new("c".repeat(64)).unwrap(),
+        }
+    }
+
     fn gate(
         selected: Option<[u8; 16]>,
     ) -> (
@@ -378,16 +403,14 @@ mod tests {
                 CharacterLocationSnapshot {
                     character_id: character,
                     character_version: 1,
-                    location: CharacterLocation::CharacterSelect,
+                    location: CharacterLocation::CharacterSelect {
+                        next_hall_arrival: SafeArrival::HallDefault,
+                    },
                 },
             )]),
         };
         (
-            WorldFlowGateService::new(
-                repository,
-                Clock,
-                ManifestHash::new("a".repeat(64)).unwrap(),
-            ),
+            WorldFlowGateService::new(repository, Clock, revision()),
             AuthenticatedAccount {
                 account_id: account,
                 namespace: AuthenticatedNamespace::WipeableTest,
@@ -397,7 +420,7 @@ mod tests {
 
     fn transfer() -> WorldFlowFrame {
         let payload = WorldTransferPayload {
-            content_manifest_hash: ManifestHash::new("a".repeat(64)).unwrap(),
+            content_revision: revision(),
             command: WorldTransferCommand::EnterHallFromCharacterSelect,
         };
         WorldFlowFrame {
@@ -428,6 +451,43 @@ mod tests {
             }
         ));
         assert_eq!(result.validate(), Ok(()));
+    }
+
+    #[tokio::test]
+    async fn well_shaped_payload_hash_and_revision_mismatches_are_typed() {
+        let (service, account) = gate(Some([2; 16]));
+        let mut hash_mismatch = transfer();
+        let WorldFlowRequest::Transfer(mutation) = &mut hash_mismatch.request else {
+            unreachable!();
+        };
+        mutation.payload_hash = [9; 32];
+        assert_eq!(hash_mismatch.validate(), Ok(()));
+        assert!(matches!(
+            service.handle(account, &hash_mismatch).await,
+            WorldFlowResult::Transfer {
+                code: WorldTransferResultCode::PayloadHashMismatch,
+                snapshot: None,
+                transfer_id: None,
+                ..
+            }
+        ));
+
+        let mut content_mismatch = transfer();
+        let WorldFlowRequest::Transfer(mutation) = &mut content_mismatch.request else {
+            unreachable!();
+        };
+        mutation.payload.content_revision.assets_blake3 =
+            ManifestHash::new("f".repeat(64)).unwrap();
+        mutation.payload_hash = mutation.payload.canonical_hash();
+        assert!(matches!(
+            service.handle(account, &content_mismatch).await,
+            WorldFlowResult::Transfer {
+                code: WorldTransferResultCode::ContentMismatch,
+                snapshot: None,
+                transfer_id: None,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]
@@ -476,7 +536,7 @@ mod tests {
             sequence: 7,
             request: WorldFlowRequest::Location {
                 character_id: [2; 16],
-                content_manifest_hash: ManifestHash::new("a".repeat(64)).unwrap(),
+                content_revision: revision(),
             },
         };
         assert!(matches!(
@@ -484,7 +544,7 @@ mod tests {
             WorldFlowResult::Location {
                 request_sequence: 7,
                 snapshot: CharacterLocationSnapshot {
-                    location: CharacterLocation::CharacterSelect,
+                    location: CharacterLocation::CharacterSelect { .. },
                     ..
                 }
             }

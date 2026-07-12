@@ -10,6 +10,14 @@ pub const WORLD_FLOW_ID_MAX_BYTES: usize = 96;
 pub const INSTANCE_LINEAGE_ID_BYTES: usize = 16;
 pub const TRANSFER_ID_BYTES: usize = 16;
 
+/// Exact independently validated `GB-M03-03A` world-flow content identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorldFlowContentRevisionV1 {
+    pub records_blake3: ManifestHash,
+    pub assets_blake3: ManifestHash,
+    pub localization_blake3: ManifestHash,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SafeArrival {
@@ -22,7 +30,9 @@ pub enum SafeArrival {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CharacterLocation {
-    CharacterSelect,
+    CharacterSelect {
+        next_hall_arrival: SafeArrival,
+    },
     Safe {
         location_id: WireText<WORLD_FLOW_ID_MAX_BYTES>,
         arrival: SafeArrival,
@@ -50,7 +60,9 @@ impl CharacterLocationSnapshot {
             return Err(WorldFlowValidationError::ZeroCharacterVersion);
         }
         match &self.location {
-            CharacterLocation::CharacterSelect => {}
+            CharacterLocation::CharacterSelect { next_hall_arrival } => {
+                validate_arrival(next_hall_arrival)?;
+            }
             CharacterLocation::Safe {
                 location_id,
                 arrival,
@@ -58,11 +70,7 @@ impl CharacterLocationSnapshot {
                 if !valid_stable_id(location_id.as_str()) {
                     return Err(WorldFlowValidationError::InvalidLocationId);
                 }
-                if let SafeArrival::SpawnAnchor { spawn_id } = arrival
-                    && !valid_stable_id(spawn_id.as_str())
-                {
-                    return Err(WorldFlowValidationError::InvalidLocationId);
-                }
+                validate_arrival(arrival)?;
             }
             CharacterLocation::Danger {
                 location_id,
@@ -106,7 +114,7 @@ impl WorldTransferCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorldTransferPayload {
-    pub content_manifest_hash: ManifestHash,
+    pub content_revision: WorldFlowContentRevisionV1,
     pub command: WorldTransferCommand,
 }
 
@@ -150,9 +158,6 @@ impl WorldTransferMutation {
             return Err(WorldFlowValidationError::ZeroPayloadHash);
         }
         self.payload.validate()?;
-        if self.payload_hash != self.payload.canonical_hash() {
-            return Err(WorldFlowValidationError::PayloadHashMismatch);
-        }
         Ok(())
     }
 }
@@ -162,7 +167,7 @@ impl WorldTransferMutation {
 pub enum WorldFlowRequest {
     Location {
         character_id: [u8; CHARACTER_ID_BYTES],
-        content_manifest_hash: ManifestHash,
+        content_revision: WorldFlowContentRevisionV1,
     },
     Transfer(WorldTransferMutation),
 }
@@ -317,8 +322,6 @@ pub enum WorldFlowValidationError {
     InstanceLocationMismatch,
     #[error("safe or danger location contains an invalid stable ID")]
     InvalidLocationId,
-    #[error("mutation payload hash does not match its canonical payload")]
-    PayloadHashMismatch,
     #[error("transfer result acceptance, code, or snapshot disagree")]
     TransferResultMismatch,
     #[error("accepted state and nonsecret transfer identity disagree")]
@@ -342,17 +345,30 @@ fn valid_stable_id(value: &str) -> bool {
     first && second && segments.all(valid_segment)
 }
 
+fn validate_arrival(arrival: &SafeArrival) -> Result<(), WorldFlowValidationError> {
+    if let SafeArrival::SpawnAnchor { spawn_id } = arrival
+        && !valid_stable_id(spawn_id.as_str())
+    {
+        return Err(WorldFlowValidationError::InvalidLocationId);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn manifest() -> ManifestHash {
-        ManifestHash::new("9".repeat(64)).unwrap()
+    fn revision() -> WorldFlowContentRevisionV1 {
+        WorldFlowContentRevisionV1 {
+            records_blake3: ManifestHash::new("7".repeat(64)).unwrap(),
+            assets_blake3: ManifestHash::new("8".repeat(64)).unwrap(),
+            localization_blake3: ManifestHash::new("9".repeat(64)).unwrap(),
+        }
     }
 
     fn transfer(command: WorldTransferCommand) -> WorldTransferMutation {
         let payload = WorldTransferPayload {
-            content_manifest_hash: manifest(),
+            content_revision: revision(),
             command,
         };
         WorldTransferMutation {
@@ -438,7 +454,9 @@ mod tests {
             snapshot: Some(CharacterLocationSnapshot {
                 character_id: [2; CHARACTER_ID_BYTES],
                 character_version: 1,
-                location: CharacterLocation::CharacterSelect,
+                location: CharacterLocation::CharacterSelect {
+                    next_hall_arrival: SafeArrival::HallDefault,
+                },
             }),
             transfer_id: None,
         };

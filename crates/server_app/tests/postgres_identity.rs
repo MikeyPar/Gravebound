@@ -126,6 +126,16 @@ fn wire_bootstrap(content_root: &Path, sequence: u32) -> AccountBootstrapFrame {
     }
 }
 
+fn world_flow_revision(content_root: &Path) -> protocol::WorldFlowContentRevisionV1 {
+    let compiled = sim_content::load_core_development_world_flow(content_root).unwrap();
+    protocol::WorldFlowContentRevisionV1 {
+        records_blake3: ManifestHash::new(compiled.hashes().records_blake3.clone()).unwrap(),
+        assets_blake3: ManifestHash::new(compiled.hashes().assets_blake3.clone()).unwrap(),
+        localization_blake3: ManifestHash::new(compiled.hashes().localization_blake3.clone())
+            .unwrap(),
+    }
+}
+
 fn current_unix_millis() -> u64 {
     u64::try_from(
         SystemTime::now()
@@ -163,7 +173,6 @@ async fn assert_persistent_world_flow_is_fail_closed(
     persistence: &PostgresPersistence,
     connection: &quinn::Connection,
     content_root: &Path,
-    ticket: &[u8],
     created: &protocol::CharacterMutationResult,
 ) {
     let snapshot = created.snapshot.as_ref().unwrap();
@@ -213,7 +222,7 @@ async fn assert_persistent_world_flow_is_fail_closed(
     assert_eq!(world_flow_row_count(persistence).await, 0);
 
     let payload = WorldTransferPayload {
-        content_manifest_hash: wire_hello(content_root, ticket).content_manifest_hash,
+        content_revision: world_flow_revision(content_root),
         command: WorldTransferCommand::EnterHallFromCharacterSelect,
     };
     let (_, result) = bot_client::perform_world_flow(
@@ -447,14 +456,8 @@ async fn postgres_real_quic_server_restart_preserves_authoritative_roster() {
     .await
     .unwrap();
     assert!(created.accepted);
-    assert_persistent_world_flow_is_fail_closed(
-        &persistence,
-        &connection,
-        &content_root,
-        ticket,
-        &created,
-    )
-    .await;
+    assert_persistent_world_flow_is_fail_closed(&persistence, &connection, &content_root, &created)
+        .await;
     connection.close(0_u32.into(), b"durable restart");
     shutdown.send(()).unwrap();
     let report = task.await.unwrap().unwrap();

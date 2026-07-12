@@ -6,7 +6,7 @@
 use std::future::Future;
 
 use persistence::PersistenceTransaction;
-use protocol::{ManifestHash, WireText};
+use protocol::{WireText, WorldFlowContentRevisionV1};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -168,7 +168,7 @@ impl SafeAggregateVersionsV1 {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DangerEntrySnapshotV1 {
     pub character_id: [u8; ID_BYTES],
-    pub content_revision: ManifestHash,
+    pub content_revision: WorldFlowContentRevisionV1,
     pub progression: ProgressionRestoreV1,
     pub inventory: InventorySecurityRestoreV1,
     pub oath_bargains: OathBargainRestoreV1,
@@ -264,7 +264,7 @@ where
         &self,
         transaction: &mut PersistenceTransaction<'_>,
         context: EntryCaptureContext,
-        content_revision: ManifestHash,
+        content_revision: WorldFlowContentRevisionV1,
         account_version: u64,
         character_version: u64,
     ) -> Result<DangerEntrySnapshotV1, RestorePointError> {
@@ -380,7 +380,11 @@ mod tests {
     fn snapshot() -> DangerEntrySnapshotV1 {
         DangerEntrySnapshotV1 {
             character_id: [1; ID_BYTES],
-            content_revision: ManifestHash::new("a".repeat(64)).unwrap(),
+            content_revision: WorldFlowContentRevisionV1 {
+                records_blake3: protocol::ManifestHash::new("a".repeat(64)).unwrap(),
+                assets_blake3: protocol::ManifestHash::new("b".repeat(64)).unwrap(),
+                localization_blake3: protocol::ManifestHash::new("c".repeat(64)).unwrap(),
+            },
             progression: ProgressionRestoreV1 {
                 level: 1,
                 xp: 0,

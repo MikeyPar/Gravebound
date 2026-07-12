@@ -234,7 +234,9 @@ impl crate::WorldFlowLocationRepository for InMemoryAccountRepository {
                 (character.id == character_id).then_some(CharacterLocationSnapshot {
                     character_id,
                     character_version: character.state_version,
-                    location: CharacterLocation::CharacterSelect,
+                    location: CharacterLocation::CharacterSelect {
+                        next_hall_arrival: protocol::SafeArrival::HallDefault,
+                    },
                 })
             })
         }))

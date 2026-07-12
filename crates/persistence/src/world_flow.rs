@@ -15,6 +15,7 @@ pub enum StoredSafeArrival {
 pub enum StoredWorldLocation {
     CharacterSelect {
         character_version: i64,
+        next_hall_arrival: StoredSafeArrival,
     },
     Safe {
         character_version: i64,
@@ -29,11 +30,20 @@ pub enum StoredWorldLocation {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredWorldFlowRevisionV1 {
+    pub records_blake3: String,
+    pub assets_blake3: String,
+    pub localization_blake3: String,
+}
+
 impl StoredWorldLocation {
     #[must_use]
     pub const fn character_version(&self) -> i64 {
         match self {
-            Self::CharacterSelect { character_version }
+            Self::CharacterSelect {
+                character_version, ..
+            }
             | Self::Safe {
                 character_version, ..
             }
@@ -50,6 +60,7 @@ pub struct StoredWorldTransferReceipt {
     pub character_id: [u8; ID_BYTES],
     pub mutation_id: [u8; ID_BYTES],
     pub payload_hash: [u8; HASH_BYTES],
+    pub content_revision: StoredWorldFlowRevisionV1,
     pub expected_character_version: i64,
     pub issued_at_unix_millis: i64,
     pub command_kind: i16,
@@ -219,8 +230,13 @@ fn decode_location(row: &sqlx::postgres::PgRow) -> Result<StoredWorldLocation, P
         return Err(PersistenceError::CorruptStoredWorldFlow);
     }
     match (kind, content_id, arrival_kind, spawn_id, lineage, restore) {
-        (0, None, None, None, None, None) => Ok(StoredWorldLocation::CharacterSelect {
+        (0, None, Some(0), None, None, None) => Ok(StoredWorldLocation::CharacterSelect {
             character_version: version,
+            next_hall_arrival: StoredSafeArrival::HallDefault,
+        }),
+        (0, None, Some(1), Some(spawn), None, None) => Ok(StoredWorldLocation::CharacterSelect {
+            character_version: version,
+            next_hall_arrival: StoredSafeArrival::SpawnAnchor(spawn),
         }),
         (1, Some(location_content_id), Some(0), None, None, None) => {
             Ok(StoredWorldLocation::Safe {
@@ -254,7 +270,8 @@ async fn load_receipt(
     mutation_id: &[u8; ID_BYTES],
 ) -> Result<Option<StoredWorldTransferReceipt>, PersistenceError> {
     let row = sqlx::query(
-        "SELECT character_id, payload_hash, expected_character_version, \
+        "SELECT character_id, payload_hash, records_blake3, assets_blake3, \
+                localization_blake3, expected_character_version, \
                 floor(extract(epoch FROM issued_at) * 1000)::bigint AS issued_at_unix_millis, \
                 command_kind, transfer_id, pre_character_version, post_character_version, \
                 result_code, result_payload \
@@ -279,6 +296,17 @@ async fn load_receipt(
                 row.try_get("payload_hash")
                     .map_err(PersistenceError::Database)?,
             )?,
+            content_revision: StoredWorldFlowRevisionV1 {
+                records_blake3: row
+                    .try_get("records_blake3")
+                    .map_err(PersistenceError::Database)?,
+                assets_blake3: row
+                    .try_get("assets_blake3")
+                    .map_err(PersistenceError::Database)?,
+                localization_blake3: row
+                    .try_get("localization_blake3")
+                    .map_err(PersistenceError::Database)?,
+            },
             expected_character_version: row
                 .try_get("expected_character_version")
                 .map_err(PersistenceError::Database)?,
@@ -310,16 +338,41 @@ async fn load_receipt(
     .transpose()
 }
 
-async fn persist_location(
-    connection: &mut sqlx::PgConnection,
-    account_id: &[u8; ID_BYTES],
-    character_id: &[u8; ID_BYTES],
-    location: &StoredWorldLocation,
-) -> Result<(), PersistenceError> {
-    let (version, kind, content, arrival, spawn, lineage, restore) = match location {
-        StoredWorldLocation::CharacterSelect { character_version } => {
-            (*character_version, 0_i16, None, None, None, None, None)
-        }
+type StoredLocationColumns<'a> = (
+    i64,
+    i16,
+    Option<&'a str>,
+    Option<i16>,
+    Option<&'a str>,
+    Option<&'a [u8]>,
+    Option<&'a [u8]>,
+);
+
+fn location_columns(location: &StoredWorldLocation) -> StoredLocationColumns<'_> {
+    match location {
+        StoredWorldLocation::CharacterSelect {
+            character_version,
+            next_hall_arrival,
+        } => match next_hall_arrival {
+            StoredSafeArrival::HallDefault => (
+                *character_version,
+                0_i16,
+                None,
+                Some(0_i16),
+                None,
+                None,
+                None,
+            ),
+            StoredSafeArrival::SpawnAnchor(spawn) => (
+                *character_version,
+                0_i16,
+                None,
+                Some(1_i16),
+                Some(spawn.as_str()),
+                None,
+                None,
+            ),
+        },
         StoredWorldLocation::Safe {
             character_version,
             location_content_id,
@@ -358,7 +411,16 @@ async fn persist_location(
             Some(instance_lineage_id.as_slice()),
             Some(entry_restore_point_id.as_slice()),
         ),
-    };
+    }
+}
+
+async fn persist_location(
+    connection: &mut sqlx::PgConnection,
+    account_id: &[u8; ID_BYTES],
+    character_id: &[u8; ID_BYTES],
+    location: &StoredWorldLocation,
+) -> Result<(), PersistenceError> {
+    let (version, kind, content, arrival, spawn, lineage, restore) = location_columns(location);
     if version <= 0 {
         return Err(PersistenceError::CorruptStoredWorldFlow);
     }
@@ -404,16 +466,21 @@ async fn insert_receipt(
     sqlx::query(
         "INSERT INTO character_world_transfer_results \
          (namespace_id, account_id, character_id, mutation_id, payload_hash, \
+          records_blake3, assets_blake3, localization_blake3, \
           expected_character_version, issued_at, command_kind, transfer_id, \
           pre_character_version, post_character_version, result_code, result_payload) \
-         VALUES ($1, $2, $3, $4, $5, $6, to_timestamp($7::double precision / 1000.0), \
-                 $8, $9, $10, $11, $12, $13)",
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, \
+                 to_timestamp($10::double precision / 1000.0), \
+                 $11, $12, $13, $14, $15, $16)",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(receipt.account_id.as_slice())
     .bind(receipt.character_id.as_slice())
     .bind(receipt.mutation_id.as_slice())
     .bind(receipt.payload_hash.as_slice())
+    .bind(&receipt.content_revision.records_blake3)
+    .bind(&receipt.content_revision.assets_blake3)
+    .bind(&receipt.content_revision.localization_blake3)
     .bind(receipt.expected_character_version)
     .bind(receipt.issued_at_unix_millis)
     .bind(receipt.command_kind)
@@ -438,6 +505,7 @@ fn validate_receipt_binding(
         || &receipt.character_id != character_id
         || &receipt.mutation_id != mutation_id
         || receipt.payload_hash.iter().all(|byte| *byte == 0)
+        || !valid_revision(&receipt.content_revision)
         || receipt.expected_character_version <= 0
         || receipt.issued_at_unix_millis <= 0
         || receipt.pre_character_version <= 0
@@ -448,6 +516,21 @@ fn validate_receipt_binding(
         return Err(PersistenceError::CorruptStoredWorldFlow);
     }
     Ok(())
+}
+
+fn valid_revision(revision: &StoredWorldFlowRevisionV1) -> bool {
+    [
+        &revision.records_blake3,
+        &revision.assets_blake3,
+        &revision.localization_blake3,
+    ]
+    .into_iter()
+    .all(|value| {
+        value.len() == 64
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
 }
 
 fn fixed_bytes<const N: usize>(bytes: Vec<u8>) -> Result<[u8; N], PersistenceError> {

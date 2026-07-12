@@ -587,6 +587,16 @@ where
         let (_, source_report) = sim_content::load_and_validate(&config.content_root)
             .map_err(|error| LocalServerRuntimeError::Content(error.to_string()))?;
         let required_manifest_hash = ManifestHash::new(source_report.package_hash_blake3)?;
+        let world_flow_content =
+            sim_content::load_core_development_world_flow(&config.content_root)
+                .map_err(|error| LocalServerRuntimeError::Content(error.to_string()))?;
+        let world_flow_revision = protocol::WorldFlowContentRevisionV1 {
+            records_blake3: ManifestHash::new(world_flow_content.hashes().records_blake3.clone())?,
+            assets_blake3: ManifestHash::new(world_flow_content.hashes().assets_blake3.clone())?,
+            localization_blake3: ManifestHash::new(
+                world_flow_content.hashes().localization_blake3.clone(),
+            )?,
+        };
         let CertifiedKey { cert, signing_key } =
             generate_simple_self_signed(vec![LOCAL_SERVER_NAME.to_owned()])?;
         let certificate = cert.der().clone();
@@ -614,7 +624,7 @@ where
         let world_flow = Arc::new(WorldFlowGateService::new(
             world_flow_repository,
             SystemIdentityClock,
-            required_manifest_hash.clone(),
+            world_flow_revision,
         ));
         let progression = Arc::new(
             ProgressionQueryService::new(progression_repository, progression_content)
@@ -982,6 +992,16 @@ mod tests {
         }
     }
 
+    fn world_flow_revision(content_root: &Path) -> protocol::WorldFlowContentRevisionV1 {
+        let compiled = sim_content::load_core_development_world_flow(content_root).unwrap();
+        protocol::WorldFlowContentRevisionV1 {
+            records_blake3: ManifestHash::new(compiled.hashes().records_blake3.clone()).unwrap(),
+            assets_blake3: ManifestHash::new(compiled.hashes().assets_blake3.clone()).unwrap(),
+            localization_blake3: ManifestHash::new(compiled.hashes().localization_blake3.clone())
+                .unwrap(),
+        }
+    }
+
     fn current_unix_millis() -> u64 {
         u64::try_from(
             SystemTime::now()
@@ -995,7 +1015,6 @@ mod tests {
     async fn assert_core_world_flow_is_fail_closed(
         connection: &quinn::Connection,
         content_root: &Path,
-        ticket: &[u8],
         created: &protocol::CharacterMutationResult,
     ) {
         let created_snapshot = created.snapshot.as_ref().unwrap();
@@ -1016,7 +1035,7 @@ mod tests {
         assert!(selected.accepted);
 
         let transfer_payload = WorldTransferPayload {
-            content_manifest_hash: core_hello(content_root, ticket).content_manifest_hash,
+            content_revision: world_flow_revision(content_root),
             command: WorldTransferCommand::EnterHallFromCharacterSelect,
         };
         let (_, result) = bot_client::perform_world_flow(
@@ -1110,7 +1129,7 @@ mod tests {
         .await
         .unwrap();
         assert!(created.accepted);
-        assert_core_world_flow_is_fail_closed(&connection, &content_root, ticket, &created).await;
+        assert_core_world_flow_is_fail_closed(&connection, &content_root, &created).await;
         connection.close(0_u32.into(), b"reconnect");
 
         let connection = endpoint

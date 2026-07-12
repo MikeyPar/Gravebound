@@ -24,14 +24,15 @@ pub use progression::{
     StoredProgressionSnapshot, StoredXpAwardResult, StoredXpEligibilityEvidence,
 };
 pub use world_flow::{
-    StoredSafeArrival, StoredWorldLocation, StoredWorldTransferReceipt, WorldFlowTransactionState,
+    StoredSafeArrival, StoredWorldFlowRevisionV1, StoredWorldLocation, StoredWorldTransferReceipt,
+    WorldFlowTransactionState,
 };
 
 pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 4;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 5;
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -399,6 +400,29 @@ mod tests {
             assert!(
                 !migration.contains(prohibited),
                 "XP-profile correction leaked {prohibited}"
+            );
+        }
+    }
+
+    #[test]
+    fn world_flow_revision_forward_migration_preserves_exact_independent_hashes() {
+        let migration =
+            include_str!("../../../migrations/0005_typed_world_flow_revision_and_arrival.sql");
+        for required in [
+            "SET safe_arrival_kind = 0",
+            "location_kind = 0",
+            "records_blake3 TEXT NOT NULL",
+            "assets_blake3 TEXT NOT NULL",
+            "localization_blake3 TEXT NOT NULL",
+            "receipt_world_flow_revision_exact",
+            "world-flow revision migration requires dormant world-flow tables",
+        ] {
+            assert!(migration.contains(required), "migration omitted {required}");
+        }
+        for prohibited in ["md5(", "sha256(", "digest(", "JSON", "JSONB"] {
+            assert!(
+                !migration.contains(prohibited),
+                "world-flow revision migration leaked {prohibited}"
             );
         }
     }
