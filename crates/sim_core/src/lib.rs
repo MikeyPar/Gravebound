@@ -43,6 +43,7 @@ pub use arena::{
 pub use authority::{
     AuthoritativeArena, AuthorityDefinitions, AuthorityEntityKind, AuthorityEntitySnapshot,
     AuthorityError, AuthorityInput, AuthorityPhase, AuthorityRecallCommit, AuthorityStep,
+    EMERGENCY_RECALL_CHANNEL_TICKS, EMERGENCY_RECALL_MOVEMENT_BASIS_POINTS, EmergencyRecallState,
     PickupEligibility,
 };
 pub use boss::{

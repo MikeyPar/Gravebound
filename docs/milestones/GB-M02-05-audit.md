@@ -50,7 +50,7 @@ The first end-to-end run exposed a real fixed-point boundary defect: rounding a 
 ## Deferred without waiver
 
 - Teleport, speed, fire-rate, forged-hit, stale/replayed application input, duplicate pickup, and mutation-misuse coverage was completed by `GB-M02-06`; this audit retains its original deferral as historical scope evidence.
-- Full journey bot and two-hour sixteen-bot soak: `GB-M02-07` and the M02 exit gate.
+- The full journey bot was completed by `GB-M02-07`; the two-hour sixteen-bot soak remains a conjunctive M02 exit gate after `GB-M02-08` supplies instance scheduling and diagnostics.
 - Realm/arena scheduler lifecycle, server tick percentiles, and clean multi-instance teardown: `GB-M02-08`.
 - Four-human impaired playability approval remains a conjunctive full M02 exit gate and is not replaced by deterministic automation.
 

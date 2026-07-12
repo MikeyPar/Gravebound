@@ -19,6 +19,11 @@ use crate::{
     RedTonicSimulation, SimulationVector, Tick, TilePoint, TonicBelt, tile_point_to_simulation,
 };
 
+/// `DTH-010`: 400 ms at the authoritative 30 Hz timebase.
+pub const EMERGENCY_RECALL_CHANNEL_TICKS: u64 = 12;
+/// `DTH-010`: movement remains available at exactly 75% while channeling.
+pub const EMERGENCY_RECALL_MOVEMENT_BASIS_POINTS: u16 = 7_500;
+
 #[derive(Debug, Clone)]
 pub struct AuthorityDefinitions {
     pub arena: ArenaGeometry,
@@ -61,6 +66,22 @@ pub enum AuthorityPhase {
     Dead { committed_at: Tick },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmergencyRecallState {
+    Inactive,
+    Channeling {
+        started_at: Tick,
+        completes_at: Tick,
+    },
+}
+
+impl EmergencyRecallState {
+    #[must_use]
+    pub const fn is_channeling(self) -> bool {
+        matches!(self, Self::Channeling { .. })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthorityRecallCommit {
     pub committed_at: Tick,
@@ -77,6 +98,7 @@ pub struct AuthorityStep {
     pub wave: NormalWaveStep,
     pub spawned_pickups: Vec<FieldPickupId>,
     pub death_committed: bool,
+    pub recall_committed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,6 +137,7 @@ pub struct AuthoritativeArena {
     pickups: Vec<FieldPickup>,
     eligibility: PickupEligibility,
     phase: AuthorityPhase,
+    emergency_recall: EmergencyRecallState,
     state_version: u64,
     reward_drop_ordinal: u64,
     friendly_projectile_sequences: BTreeMap<EntityId, (u32, u16)>,
@@ -163,6 +186,7 @@ impl AuthoritativeArena {
             pickups: Vec::new(),
             eligibility,
             phase: AuthorityPhase::Alive,
+            emergency_recall: EmergencyRecallState::Inactive,
             state_version: 1,
             reward_drop_ordinal: 1,
             friendly_projectile_sequences: BTreeMap::new(),
@@ -172,6 +196,11 @@ impl AuthoritativeArena {
     #[must_use]
     pub const fn phase(&self) -> AuthorityPhase {
         self.phase
+    }
+
+    #[must_use]
+    pub const fn emergency_recall_state(&self) -> EmergencyRecallState {
+        self.emergency_recall
     }
 
     #[must_use]
@@ -210,6 +239,7 @@ impl AuthoritativeArena {
         if !matches!(self.phase, AuthorityPhase::Alive) {
             return Err(AuthorityError::Dead);
         }
+        let input = self.apply_recall_constraints(input)?;
         let collision_world =
             ProjectileCollisionWorld::new(&self.arena, self.wave.alive_hurtboxes()?)?;
         let (combat, movement) = self.wave.player_mut().combat.step_with_movement_outcome(
@@ -263,6 +293,15 @@ impl AuthoritativeArena {
             self.pickups.clear();
             self.eligibility.reward_eligible = false;
             self.phase = AuthorityPhase::Dead { committed_at: tick };
+            self.emergency_recall = EmergencyRecallState::Inactive;
+        }
+        let recall_committed = !death_committed
+            && matches!(
+                self.emergency_recall,
+                EmergencyRecallState::Channeling { completes_at, .. } if tick >= completes_at
+            );
+        if recall_committed {
+            self.commit_recall_at(tick);
         }
         self.state_version = self
             .state_version
@@ -276,7 +315,69 @@ impl AuthoritativeArena {
             wave,
             spawned_pickups,
             death_committed,
+            recall_committed,
         })
+    }
+
+    fn apply_recall_constraints(
+        &self,
+        mut input: AuthorityInput,
+    ) -> Result<AuthorityInput, AuthorityError> {
+        if !self.emergency_recall.is_channeling() {
+            return Ok(input);
+        }
+        input.movement = input
+            .movement
+            .scaled_basis_points(EMERGENCY_RECALL_MOVEMENT_BASIS_POINTS)?;
+        input.primary_held = false;
+        input.primary_sequence = self.wave.player().combat.last_press_sequence();
+        input.ability_1_sequence = 0;
+        input.ability_2_sequence = 0;
+        Ok(input)
+    }
+
+    /// Begins the server-owned DTH-010 channel at the current authoritative tick.
+    pub fn start_emergency_recall(&mut self) -> Result<Tick, AuthorityError> {
+        if !matches!(self.phase, AuthorityPhase::Alive) {
+            return Err(AuthorityError::Dead);
+        }
+        if self.emergency_recall.is_channeling() {
+            return Err(AuthorityError::RecallAlreadyChanneling);
+        }
+        let started_at = self.wave.player().combat.tick();
+        let completes_at = Tick(
+            started_at
+                .0
+                .checked_add(EMERGENCY_RECALL_CHANNEL_TICKS)
+                .ok_or(AuthorityError::RecallTickExhausted)?,
+        );
+        let next_state_version = self
+            .state_version
+            .checked_add(1)
+            .ok_or(AuthorityError::StateVersionExhausted)?;
+        self.emergency_recall = EmergencyRecallState::Channeling {
+            started_at,
+            completes_at,
+        };
+        self.state_version = next_state_version;
+        Ok(completes_at)
+    }
+
+    /// Cancels a live manual Recall channel without changing any gameplay outcome.
+    pub fn cancel_emergency_recall(&mut self) -> Result<(), AuthorityError> {
+        if !matches!(self.phase, AuthorityPhase::Alive) {
+            return Err(AuthorityError::Dead);
+        }
+        if !self.emergency_recall.is_channeling() {
+            return Err(AuthorityError::RecallNotChanneling);
+        }
+        let next_state_version = self
+            .state_version
+            .checked_add(1)
+            .ok_or(AuthorityError::StateVersionExhausted)?;
+        self.emergency_recall = EmergencyRecallState::Inactive;
+        self.state_version = next_state_version;
+        Ok(())
     }
 
     fn materialize_due_rewards(
@@ -314,6 +415,9 @@ impl AuthoritativeArena {
         if !matches!(self.phase, AuthorityPhase::Alive) {
             return Err(AuthorityError::Dead);
         }
+        if self.emergency_recall.is_channeling() {
+            return Err(AuthorityError::RecallChanneling);
+        }
         if !self.eligibility.eligible() {
             return Err(AuthorityError::Ineligible);
         }
@@ -348,27 +452,33 @@ impl AuthoritativeArena {
         }
         let mut next = self.clone();
         let committed_at = next.wave.player().combat.tick();
-        next.wave
-            .player_mut()
-            .combat
-            .clear_projectiles_for_local_death();
-        next.wave.clear_hostiles_for_player_death();
-        next.friendly_projectile_sequences.clear();
-        let inventory = next.inventory.clear_pending_for_recall();
-        let cleared_ground_pickups = next.pickups.len();
-        next.pickups.clear();
-        next.eligibility.reward_eligible = false;
-        next.phase = AuthorityPhase::Recalled { committed_at };
+        let commit = next.commit_recall_at(committed_at);
         next.state_version = next
             .state_version
             .checked_add(1)
             .ok_or(AuthorityError::StateVersionExhausted)?;
         *self = next;
-        Ok(AuthorityRecallCommit {
+        Ok(commit)
+    }
+
+    fn commit_recall_at(&mut self, committed_at: Tick) -> AuthorityRecallCommit {
+        self.wave
+            .player_mut()
+            .combat
+            .clear_projectiles_for_local_death();
+        self.wave.clear_hostiles_for_player_death();
+        self.friendly_projectile_sequences.clear();
+        let inventory = self.inventory.clear_pending_for_recall();
+        let cleared_ground_pickups = self.pickups.len();
+        self.pickups.clear();
+        self.eligibility.reward_eligible = false;
+        self.phase = AuthorityPhase::Recalled { committed_at };
+        self.emergency_recall = EmergencyRecallState::Inactive;
+        AuthorityRecallCommit {
             committed_at,
             inventory,
             cleared_ground_pickups,
-        })
+        }
     }
 
     pub fn snapshots(&self) -> Result<Vec<AuthorityEntitySnapshot>, AuthorityError> {
@@ -544,6 +654,14 @@ fn milli_position(position: (i32, i32)) -> SimulationVector {
 pub enum AuthorityError {
     #[error("authoritative character is dead")]
     Dead,
+    #[error("Emergency Recall is already channeling")]
+    RecallAlreadyChanneling,
+    #[error("Emergency Recall is not channeling")]
+    RecallNotChanneling,
+    #[error("Emergency Recall channel completion tick exhausted")]
+    RecallTickExhausted,
+    #[error("pickup interaction is unavailable while Emergency Recall is channeling")]
+    RecallChanneling,
     #[error("session is not eligible for its personal pickup")]
     Ineligible,
     #[error("personal pickup {0:?} was not found")]

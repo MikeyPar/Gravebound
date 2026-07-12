@@ -174,18 +174,25 @@ impl ManagedSession {
         }
         let snapshots = self.authority.tick()?;
         let tick = self.server_tick();
-        let authority_dead = matches!(self.authority.arena().phase(), AuthorityPhase::Dead { .. });
-        self.resolve_post_simulation(tick, authority_dead)?;
+        let authority_phase = self.authority.arena().phase();
+        self.resolve_post_simulation(tick, authority_phase)?;
         Ok(snapshots)
     }
 
     fn resolve_post_simulation(
         &mut self,
         tick: u64,
-        authority_dead: bool,
+        authority_phase: AuthorityPhase,
     ) -> Result<(), LifecycleError> {
-        if authority_dead {
+        if matches!(authority_phase, AuthorityPhase::Dead { .. }) {
             self.phase = SessionPhase::Dead {
+                committed_tick: tick,
+            };
+            self.transport = None;
+            return Ok(());
+        }
+        if matches!(authority_phase, AuthorityPhase::Recalled { .. }) {
+            self.phase = SessionPhase::Recalled {
                 committed_tick: tick,
             };
             self.transport = None;
@@ -675,7 +682,9 @@ pub enum LifecycleError {
 mod tests {
     use std::path::PathBuf;
 
-    use protocol::{ControlEvent, ReliableEvent, SessionControlResultCode};
+    use protocol::{
+        ActionFrame, ActionKind, ControlEvent, ReliableEvent, SessionControlResultCode,
+    };
 
     use super::*;
 
@@ -802,11 +811,77 @@ mod tests {
     }
 
     #[test]
+    fn manual_recall_resolves_at_twelve_ticks_and_reconnect_routes_to_halls() {
+        let (mut directory, session_id) = joined_directory();
+        let response = directory
+            .session_mut(owner(1))
+            .unwrap()
+            .handle_gameplay_reliable(
+                transport(1),
+                WireMessage::ActionFrame(ActionFrame {
+                    sequence: 1,
+                    client_tick: 0,
+                    action: ActionKind::RecallStart,
+                }),
+            )
+            .unwrap();
+        assert!(matches!(
+            response,
+            WireMessage::ReliableEvent(ReliableEventFrame {
+                event: ReliableEvent::ActionResult {
+                    code: protocol::ActionResultCode::Accepted,
+                    ..
+                },
+                ..
+            })
+        ));
+        for _ in 0..11 {
+            directory.session_mut(owner(1)).unwrap().tick().unwrap();
+            assert_eq!(
+                directory.session(owner(1)).unwrap().phase(),
+                SessionPhase::Connected
+            );
+        }
+        let critical = directory.session_mut(owner(1)).unwrap().tick().unwrap();
+        assert!(!critical.is_empty());
+        assert_eq!(
+            directory.session(owner(1)).unwrap().phase(),
+            SessionPhase::Recalled { committed_tick: 12 }
+        );
+        assert_eq!(directory.session(owner(1)).unwrap().transport_id(), None);
+        let response = directory
+            .handle_control(
+                owner(1),
+                transport(2),
+                &control(
+                    1,
+                    SessionControlRequest::Reconnect {
+                        prior_session_id: session_id,
+                    },
+                ),
+                &content_root(),
+                500,
+            )
+            .unwrap();
+        assert_eq!(
+            result(&response.event).destination,
+            SessionDestination::LanternHalls
+        );
+    }
+
+    #[test]
     fn authoritative_death_wins_on_the_recall_boundary_tick() {
         let (mut directory, session_id) = joined_directory();
         let session = directory.session_mut(owner(1)).unwrap();
         session.transport_lost(transport(1)).unwrap();
-        session.resolve_post_simulation(90, true).unwrap();
+        session
+            .resolve_post_simulation(
+                90,
+                AuthorityPhase::Dead {
+                    committed_at: sim_core::Tick(90),
+                },
+            )
+            .unwrap();
         assert_eq!(session.phase(), SessionPhase::Dead { committed_tick: 90 });
         let response = directory
             .handle_control(

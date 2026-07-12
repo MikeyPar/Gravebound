@@ -257,7 +257,9 @@ impl AuthoritativeSession {
         let code = if matches!(self.arena.phase(), AuthorityPhase::Alive) {
             match frame.action {
                 ActionKind::Ability1Press => {
-                    if self.ability_1_pending {
+                    if self.arena.emergency_recall_state().is_channeling() {
+                        ActionResultCode::InvalidState
+                    } else if self.ability_1_pending {
                         self.ingress_diagnostics.rate_limited_actions = self
                             .ingress_diagnostics
                             .rate_limited_actions
@@ -271,7 +273,9 @@ impl AuthoritativeSession {
                     }
                 }
                 ActionKind::Ability2Press => {
-                    if self.ability_2_pending {
+                    if self.arena.emergency_recall_state().is_channeling() {
+                        ActionResultCode::InvalidState
+                    } else if self.ability_2_pending {
                         self.ingress_diagnostics.rate_limited_actions = self
                             .ingress_diagnostics
                             .rate_limited_actions
@@ -284,9 +288,17 @@ impl AuthoritativeSession {
                         ActionResultCode::Accepted
                     }
                 }
-                ActionKind::RecallStart | ActionKind::RecallCancel | ActionKind::Interact => {
-                    ActionResultCode::InvalidState
-                }
+                ActionKind::RecallStart => match self.arena.start_emergency_recall() {
+                    Ok(_) => ActionResultCode::Accepted,
+                    Err(AuthorityError::RecallAlreadyChanneling) => ActionResultCode::InvalidState,
+                    Err(error) => return Err(error.into()),
+                },
+                ActionKind::RecallCancel => match self.arena.cancel_emergency_recall() {
+                    Ok(()) => ActionResultCode::Accepted,
+                    Err(AuthorityError::RecallNotChanneling) => ActionResultCode::InvalidState,
+                    Err(error) => return Err(error.into()),
+                },
+                ActionKind::Interact => ActionResultCode::InvalidState,
             }
         } else {
             ActionResultCode::InvalidState
@@ -318,7 +330,7 @@ impl AuthoritativeSession {
         self.ability_1_pending = false;
         self.ability_2_pending = false;
         self.new_mutations_this_tick = 0;
-        if !step.tick.0.is_multiple_of(2) && !step.death_committed {
+        if !step.tick.0.is_multiple_of(2) && !step.death_committed && !step.recall_committed {
             return Ok(Vec::new());
         }
         self.snapshot_sequence = self
@@ -506,7 +518,9 @@ fn entity_state_flags(alive: bool, eligible: bool, collected: bool) -> u32 {
 fn mutation_error_code(error: &AuthorityError) -> MutationResultCode {
     match error {
         AuthorityError::Dead => MutationResultCode::Dead,
-        AuthorityError::Ineligible => MutationResultCode::Ineligible,
+        AuthorityError::Ineligible | AuthorityError::RecallChanneling => {
+            MutationResultCode::Ineligible
+        }
         AuthorityError::PickupNotFound(_) => MutationResultCode::NotFound,
         AuthorityError::PickupAlreadyResolved(_) => MutationResultCode::AlreadyResolved,
         AuthorityError::Inventory(InventoryError::PickupOutOfReach { .. }) => {
@@ -843,6 +857,180 @@ mod tests {
         assert!(matches!(
             session.handle_reliable(WireMessage::InputFrame(input(1, (0, 0), (1_000, 0), false))),
             Err(SessionError::UnexpectedReliableMessage)
+        ));
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp, clippy::too_many_lines)] // Exact authored scale and one audit trail.
+    fn manual_recall_pins_channel_locks_movement_scale_cancel_and_exact_completion() {
+        let mut ordinary =
+            AuthoritativeSession::from_content_root(&content_root()).expect("ordinary session");
+        ordinary
+            .submit_input(&input(1, (1_000, 0), (1_000, 0), false))
+            .unwrap();
+        ordinary.tick().unwrap();
+        ordinary.tick().unwrap();
+        let ordinary_velocity = ordinary.arena().movement().velocity().x;
+
+        let mut session =
+            AuthoritativeSession::from_content_root(&content_root()).expect("recall session");
+        session
+            .submit_input(&input(1, (1_000, 0), (1_000, 0), true))
+            .unwrap();
+        let started = session
+            .submit_action(&ActionFrame {
+                sequence: 1,
+                client_tick: 0,
+                action: ActionKind::RecallStart,
+            })
+            .unwrap();
+        assert!(matches!(
+            started.event,
+            ReliableEvent::ActionResult {
+                code: ActionResultCode::Accepted,
+                ..
+            }
+        ));
+        let redundant = session
+            .submit_action(&ActionFrame {
+                sequence: 2,
+                client_tick: 0,
+                action: ActionKind::RecallStart,
+            })
+            .unwrap();
+        assert!(matches!(
+            redundant.event,
+            ReliableEvent::ActionResult {
+                code: ActionResultCode::InvalidState,
+                ..
+            }
+        ));
+        let blocked_ability = session
+            .submit_action(&ActionFrame {
+                sequence: 3,
+                client_tick: 0,
+                action: ActionKind::Ability1Press,
+            })
+            .unwrap();
+        assert!(matches!(
+            blocked_ability.event,
+            ReliableEvent::ActionResult {
+                code: ActionResultCode::InvalidState,
+                ..
+            }
+        ));
+        let blocked_pickup = mutation_result(
+            session
+                .submit_mutation(&MutationRequest {
+                    mutation_id: [9; 16],
+                    pickup_id: 1,
+                    placement: PickupPlacement::Take,
+                })
+                .unwrap(),
+        );
+        assert_eq!(blocked_pickup.code, MutationResultCode::Ineligible);
+
+        session.tick().unwrap();
+        session.tick().unwrap();
+        assert_eq!(
+            session.arena().movement().velocity().x,
+            ordinary_velocity * 0.75
+        );
+        assert!(session.arena().player().combat.projectiles().is_empty());
+
+        let cancelled = session
+            .submit_action(&ActionFrame {
+                sequence: 4,
+                client_tick: 2,
+                action: ActionKind::RecallCancel,
+            })
+            .unwrap();
+        assert!(matches!(
+            cancelled.event,
+            ReliableEvent::ActionResult {
+                code: ActionResultCode::Accepted,
+                ..
+            }
+        ));
+        session.tick().unwrap();
+        assert!(!session.arena().player().combat.projectiles().is_empty());
+
+        session
+            .submit_action(&ActionFrame {
+                sequence: 5,
+                client_tick: 3,
+                action: ActionKind::RecallStart,
+            })
+            .unwrap();
+        for _ in 0..11 {
+            session.tick().unwrap();
+            assert!(matches!(session.arena().phase(), AuthorityPhase::Alive));
+        }
+        let critical = session.tick().unwrap();
+        assert!(matches!(
+            session.arena().phase(),
+            AuthorityPhase::Recalled {
+                committed_at: sim_core::Tick(15)
+            }
+        ));
+        assert!(!critical.is_empty());
+        assert!(critical.iter().all(|chunk| chunk.server_tick == 15));
+    }
+
+    #[test]
+    fn damage_does_not_cancel_manual_recall_and_death_wins_completion_tick() {
+        let mut baseline =
+            AuthoritativeSession::from_content_root(&content_root()).expect("baseline session");
+        baseline
+            .submit_input(&input(1, (0, 0), (1_000, 0), false))
+            .unwrap();
+        let death_tick = (1..=5_000)
+            .find(|_| {
+                baseline.tick().unwrap();
+                matches!(baseline.arena().phase(), AuthorityPhase::Dead { .. })
+            })
+            .expect("deterministic hostile death");
+        assert!(death_tick > sim_core::EMERGENCY_RECALL_CHANNEL_TICKS);
+
+        let mut contested =
+            AuthoritativeSession::from_content_root(&content_root()).expect("contested session");
+        contested
+            .submit_input(&input(1, (0, 0), (1_000, 0), false))
+            .unwrap();
+        for _ in 0..(death_tick - sim_core::EMERGENCY_RECALL_CHANNEL_TICKS) {
+            contested.tick().unwrap();
+        }
+        let health_before = contested
+            .arena()
+            .player()
+            .consumables
+            .vitals()
+            .current_health();
+        contested
+            .submit_action(&ActionFrame {
+                sequence: 1,
+                client_tick: death_tick - sim_core::EMERGENCY_RECALL_CHANNEL_TICKS,
+                action: ActionKind::RecallStart,
+            })
+            .unwrap();
+        for _ in 0..sim_core::EMERGENCY_RECALL_CHANNEL_TICKS - 1 {
+            contested.tick().unwrap();
+            assert!(contested.arena().emergency_recall_state().is_channeling());
+        }
+        contested.tick().unwrap();
+        assert_eq!(
+            contested
+                .arena()
+                .player()
+                .consumables
+                .vitals()
+                .current_health(),
+            0
+        );
+        assert!(health_before > 0);
+        assert!(matches!(
+            contested.arena().phase(),
+            AuthorityPhase::Dead { committed_at } if committed_at.0 == death_tick
         ));
     }
 

@@ -3,6 +3,10 @@
 //! `bot_client` will exercise the real protocol and player journey without rendering. It may
 //! choose inputs, but it cannot author gameplay outcomes or bypass server authority.
 
+mod journey;
+
+pub use journey::*;
+
 use protocol::{
     ClientHello, ControlEvent, HandshakeResponse, InputFrame, ProtocolVersion,
     RELIABLE_FRAME_LIMIT, ReliableEvent, ReliableEventFrame, SIMULATION_HZ, SessionControlFrame,
@@ -51,7 +55,7 @@ pub async fn run_doctor() -> Result<BotDoctorReport, BotFoundationError> {
         protocol: foundation.protocol,
         expected_server_hz: foundation.expected_server_hz,
         transport_enabled: true,
-        journey_enabled: false,
+        journey_enabled: true,
     })
 }
 
@@ -175,7 +179,53 @@ pub enum BotTransportError {
 
 #[cfg(test)]
 mod tests {
+    use protocol::{
+        ENTITY_STATE_ALIVE, ENTITY_STATE_ELIGIBLE, EntityKind, EntitySnapshot, MutationResult,
+        MutationResultCode, ReliableEvent, ReliableEventFrame, SessionControlRequest,
+        SessionControlResult, SessionControlResultCode, SessionDestination, SnapshotChunk,
+        WireText,
+    };
+
     use super::*;
+
+    fn entity(
+        entity_id: u64,
+        kind: EntityKind,
+        position: (i32, i32),
+        health: (u32, u32),
+        state_flags: u32,
+    ) -> EntitySnapshot {
+        EntitySnapshot {
+            entity_id,
+            kind,
+            x_milli_tiles: position.0,
+            y_milli_tiles: position.1,
+            velocity_x_milli_tiles_per_second: 0,
+            velocity_y_milli_tiles_per_second: 0,
+            source_input_sequence: u32::from(kind == EntityKind::FriendlyProjectile),
+            source_projectile_ordinal: 0,
+            current_health: health.0,
+            maximum_health: health.1,
+            state_flags,
+        }
+    }
+
+    fn chunk(
+        sequence: u32,
+        chunk_index: u16,
+        chunk_count: u16,
+        entities: Vec<EntitySnapshot>,
+    ) -> SnapshotChunk {
+        SnapshotChunk {
+            sequence,
+            server_tick: u64::from(sequence) * 2,
+            state_version: u64::from(sequence) + 10,
+            acknowledged_input_sequence: sequence,
+            chunk_index,
+            chunk_count,
+            entities,
+        }
+    }
 
     #[test]
     fn bot_foundation_matches_server_tick_contract() {
@@ -183,11 +233,210 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn doctor_reports_transport_without_claiming_the_future_journey() {
+    async fn doctor_reports_transport_and_snapshot_driven_journey() {
         let report = run_doctor().await.expect("M02 bot foundation doctor");
         assert_eq!(report.protocol, ProtocolVersion::current());
         assert_eq!(report.expected_server_hz, 30);
         assert!(report.transport_enabled);
-        assert!(!report.journey_enabled);
+        assert!(report.journey_enabled);
+    }
+
+    #[test]
+    fn snapshot_assembly_is_order_independent_bounded_and_fail_closed() {
+        let player = entity(
+            10_000,
+            EntityKind::Player,
+            (4_000, 12_000),
+            (120, 120),
+            ENTITY_STATE_ALIVE | ENTITY_STATE_ELIGIBLE,
+        );
+        let enemy = entity(
+            20_000,
+            EntityKind::Enemy,
+            (3_000, 8_000),
+            (30, 40),
+            ENTITY_STATE_ALIVE,
+        );
+        let mut assembler = BotSnapshotAssembler::default();
+        assert!(
+            assembler
+                .ingest(chunk(1, 1, 2, vec![enemy.clone()]))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            assembler
+                .ingest(chunk(1, 1, 2, vec![enemy.clone()]))
+                .unwrap()
+                .is_none()
+        );
+        let complete = assembler
+            .ingest(chunk(1, 0, 2, vec![player.clone()]))
+            .unwrap()
+            .expect("complete snapshot");
+        assert_eq!(
+            complete
+                .entities
+                .iter()
+                .map(|value| value.entity_id)
+                .collect::<Vec<_>>(),
+            vec![10_000, 20_000]
+        );
+        assert!(
+            assembler
+                .ingest(chunk(1, 0, 2, vec![player.clone()]))
+                .unwrap()
+                .is_none()
+        );
+
+        let mut inconsistent = BotSnapshotAssembler::default();
+        inconsistent
+            .ingest(chunk(2, 0, 2, vec![player.clone()]))
+            .unwrap();
+        let mut wrong = chunk(2, 1, 2, vec![enemy.clone()]);
+        wrong.state_version += 1;
+        assert!(matches!(
+            inconsistent.ingest(wrong),
+            Err(BotJourneyError::InconsistentSnapshotMetadata)
+        ));
+
+        let mut duplicate_entity = BotSnapshotAssembler::default();
+        duplicate_entity
+            .ingest(chunk(3, 0, 2, vec![player.clone()]))
+            .unwrap();
+        assert!(matches!(
+            duplicate_entity.ingest(chunk(3, 1, 2, vec![player])),
+            Err(BotJourneyError::DuplicateSnapshotEntity)
+        ));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One policy journey keeps protocol state transitions auditable.
+    fn bot_steers_fights_collects_and_preserves_session_across_reconnect() {
+        let player = entity(
+            10_000,
+            EntityKind::Player,
+            (4_000, 12_000),
+            (120, 120),
+            ENTITY_STATE_ALIVE | ENTITY_STATE_ELIGIBLE,
+        );
+        let enemy = entity(
+            20_000,
+            EntityKind::Enemy,
+            (3_000, 8_000),
+            (30, 40),
+            ENTITY_STATE_ALIVE,
+        );
+        let projectile = entity(
+            30_000,
+            EntityKind::FriendlyProjectile,
+            (3_900, 11_600),
+            (0, 0),
+            ENTITY_STATE_ALIVE,
+        );
+        let mut bot = JourneyBot::default();
+        bot.ingest_snapshot(chunk(1, 0, 1, vec![player.clone(), enemy, projectile]))
+            .unwrap();
+        let combat = bot.next_input().unwrap();
+        assert!(combat.held_primary);
+        assert_eq!(combat.primary_sequence, 1);
+        assert_eq!((combat.movement_x_milli, combat.movement_y_milli), (0, 0));
+        assert!(combat.aim_y_milli < 0);
+        assert!(bot.evidence().saw_enemy_damage);
+        assert!(bot.evidence().saw_friendly_projectile);
+
+        let pickup = entity(
+            44,
+            EntityKind::PersonalPickup,
+            (3_000, 12_000),
+            (0, 0),
+            ENTITY_STATE_ALIVE | ENTITY_STATE_ELIGIBLE,
+        );
+        bot.ingest_snapshot(chunk(2, 0, 1, vec![player, pickup]))
+            .unwrap();
+        let approach = bot.next_input().unwrap();
+        assert!(!approach.held_primary);
+        assert_eq!(
+            (approach.movement_x_milli, approach.movement_y_milli),
+            (-1_000, 0)
+        );
+        let request = bot
+            .next_pickup_request()
+            .unwrap()
+            .expect("in-range pickup request");
+        assert_eq!(request.pickup_id, 44);
+        bot.apply_reliable_event(&ReliableEventFrame {
+            sequence: 1,
+            server_tick: 4,
+            event: ReliableEvent::MutationResult(MutationResult {
+                mutation_id: request.mutation_id,
+                accepted: true,
+                code: MutationResultCode::Accepted,
+                state_version: 20,
+            }),
+        })
+        .unwrap();
+        assert_eq!(bot.evidence().mutations_accepted, 1);
+
+        let joined = SessionControlResult {
+            request_sequence: 1,
+            accepted: true,
+            code: SessionControlResultCode::Joined,
+            session_id: WireText::new("m02-session-1").unwrap(),
+            destination: SessionDestination::CombatInstance,
+            server_tick: 4,
+            state_version: 20,
+            server_monotonic_micros: 10,
+            replaced_previous_transport: false,
+        };
+        bot.apply_reliable_event(&ReliableEventFrame {
+            sequence: 2,
+            server_tick: 4,
+            event: ReliableEvent::Control(ControlEvent::SessionResult(joined)),
+        })
+        .unwrap();
+        let reconnect = bot.next_reconnect(20).unwrap();
+        assert!(matches!(
+            reconnect.request,
+            SessionControlRequest::Reconnect { ref prior_session_id }
+                if prior_session_id.as_str() == "m02-session-1"
+        ));
+        let reattached = SessionControlResult {
+            request_sequence: reconnect.sequence,
+            accepted: true,
+            code: SessionControlResultCode::Reattached,
+            session_id: WireText::new("m02-session-1").unwrap(),
+            destination: SessionDestination::CombatInstance,
+            server_tick: 4,
+            state_version: 20,
+            server_monotonic_micros: 20,
+            replaced_previous_transport: false,
+        };
+        bot.apply_reliable_event(&ReliableEventFrame {
+            sequence: 3,
+            server_tick: 4,
+            event: ReliableEvent::Control(ControlEvent::SessionResult(reattached)),
+        })
+        .unwrap();
+        assert_eq!(bot.evidence().reconnects_accepted, 1);
+    }
+
+    #[test]
+    fn terminal_snapshot_finality_and_sequence_exhaustion_fail_closed() {
+        let dead = entity(10_000, EntityKind::Player, (0, 0), (0, 120), 0);
+        let mut bot = JourneyBot::default();
+        bot.ingest_snapshot(chunk(1, 0, 1, vec![dead])).unwrap();
+        assert_eq!(bot.terminal_outcome(), BotTerminalOutcome::Dead);
+        assert!(matches!(
+            bot.next_input(),
+            Err(BotJourneyError::TerminalJourney)
+        ));
+
+        let mut exhausted = JourneyBot::default();
+        exhausted.set_input_sequence_for_test(u32::MAX);
+        assert!(matches!(
+            exhausted.next_input(),
+            Err(BotJourneyError::SequenceExhausted)
+        ));
     }
 }

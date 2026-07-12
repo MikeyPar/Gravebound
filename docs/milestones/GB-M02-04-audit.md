@@ -45,7 +45,7 @@ Protocol minor `1.3` added reliable lifecycle Control request/result variants. `
 
 - Deterministic latency, jitter, loss, duplication, reordering, and outage injection were completed by `GB-M02-05`; this audit retains their original deferral as historical scope evidence.
 - The comprehensive teleport, speed, fire-rate, forged-hit, replay, pickup, and mutation abuse matrix was completed by `GB-M02-06`; this audit retains its original deferral as historical scope evidence.
-- Full journey bot including manual Recall and reconnect: `GB-M02-07`.
+- The full journey bot, including manual Recall and reconnect, was completed by `GB-M02-07`; this audit retains its original deferral as historical scope evidence.
 - Realm/arena scheduler ownership, lifecycle diagnostics, teardown, and tick percentiles: `GB-M02-08`.
 - Durable Lantern Halls records, danger-entry crash restoration, item ledgers, and extraction transactions: M03 and later persistence packages.
 

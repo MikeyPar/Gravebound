@@ -50,4 +50,4 @@ Protocol minor `1.4` requires zero legacy ability sequences on Input and adds ty
 
 ## Handoff
 
-`GB-M02-07` must drive movement, aim, combat, pickup, death, manual Recall, and reconnect only through protocol `1.4` and the existing managed-session boundary. The bot must not call simulation, inventory, lifecycle, or authority internals to advance its journey.
+`GB-M02-07` subsequently drove movement, aim, combat, pickup, death, manual Recall, and reconnect only through protocol `1.4` and the managed-session boundary. Its policy depends on protocol-visible state only and does not call simulation, inventory, lifecycle, or authority internals to advance its journey. `GB-M02-08` now owns instance scheduling and the complete population/performance gate.

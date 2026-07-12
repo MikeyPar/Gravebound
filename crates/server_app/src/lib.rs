@@ -215,6 +215,22 @@ pub async fn receive_gameplay_input(
     session.submit_input(&input).map_err(Into::into)
 }
 
+/// Receives one canonical Input datagram through the logical-session transport binding.
+pub async fn receive_managed_gameplay_input(
+    connection: &quinn::Connection,
+    session: &mut ManagedSession,
+    transport: TransportId,
+) -> Result<InputDisposition, ServerTransportError> {
+    let frame = connection
+        .read_datagram()
+        .await
+        .map_err(|error| ServerTransportError::Quic(error.to_string()))?;
+    let WireMessage::InputFrame(input) = decode_frame(&frame)? else {
+        return Err(ServerTransportError::UnexpectedMessage);
+    };
+    session.submit_input(transport, &input).map_err(Into::into)
+}
+
 pub async fn serve_gameplay_reliable(
     connection: &quinn::Connection,
     session: &mut AuthoritativeSession,
@@ -228,6 +244,30 @@ pub async fn serve_gameplay_reliable(
         .await
         .map_err(|error| ServerTransportError::Quic(error.to_string()))?;
     let response = session.handle_reliable(decode_frame(&request)?)?;
+    let frame = encode_frame(&response)?;
+    send.write_all(&frame)
+        .await
+        .map_err(|error| ServerTransportError::Quic(error.to_string()))?;
+    send.finish()
+        .map_err(|error| ServerTransportError::Quic(error.to_string()))?;
+    Ok(response)
+}
+
+/// Serves one canonical reliable gameplay request through the active logical transport binding.
+pub async fn serve_managed_gameplay_reliable(
+    connection: &quinn::Connection,
+    session: &mut ManagedSession,
+    transport: TransportId,
+) -> Result<WireMessage, ServerTransportError> {
+    let (mut send, mut receive) = connection
+        .accept_bi()
+        .await
+        .map_err(|error| ServerTransportError::Quic(error.to_string()))?;
+    let request = receive
+        .read_to_end(RELIABLE_FRAME_LIMIT)
+        .await
+        .map_err(|error| ServerTransportError::Quic(error.to_string()))?;
+    let response = session.handle_gameplay_reliable(transport, decode_frame(&request)?)?;
     let frame = encode_frame(&response)?;
     send.write_all(&frame)
         .await

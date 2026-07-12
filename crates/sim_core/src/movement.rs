@@ -100,6 +100,22 @@ impl MovementAction {
         })
     }
 
+    /// Scales bounded player intent without changing the configured movement speed. This is used
+    /// by authoritative state such as Emergency Recall, where the GDD permits a fixed fraction of
+    /// ordinary movement while leaving class/content movement facts unchanged.
+    pub fn scaled_basis_points(self, basis_points: u16) -> Result<Self, MovementError> {
+        if basis_points > 10_000 {
+            return Err(MovementError::ScaleOutOfRange);
+        }
+        let scale = i32::from(basis_points);
+        let horizontal = i32::from(self.horizontal_milli) * scale / 10_000;
+        let vertical = i32::from(self.vertical_milli) * scale / 10_000;
+        Self::try_from_milli(
+            i16::try_from(horizontal).map_err(|_| MovementError::InputOutOfRange)?,
+            i16::try_from(vertical).map_err(|_| MovementError::InputOutOfRange)?,
+        )
+    }
+
     #[must_use]
     pub fn normalized_vector(self) -> SimulationVector {
         let vector = SimulationVector::new(
@@ -369,6 +385,8 @@ pub struct ForcedMovementStep {
 pub enum MovementError {
     #[error("movement input components must remain within -1000..=1000")]
     InputOutOfRange,
+    #[error("movement intent scale must remain within 0..=10000 basis points")]
+    ScaleOutOfRange,
     #[error("movement state contains a non-finite value")]
     NonFiniteState,
     #[error("movement configuration is invalid")]
