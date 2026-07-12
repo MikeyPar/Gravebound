@@ -963,7 +963,7 @@ mod tests {
             .unwrap()
             .await
             .unwrap();
-        bot_client::perform_handshake(&connection, core_hello(content_root, ticket))
+        bot_client::perform_handshake(&connection, core_hello(&content_root, ticket))
             .await
             .unwrap();
         let (_, reconnected) =
@@ -1006,7 +1006,7 @@ mod tests {
             .unwrap()
             .await
             .unwrap();
-        bot_client::perform_handshake(&connection, core_hello(&content_root, ticket))
+        bot_client::perform_handshake(&connection, core_hello(content_root, ticket))
             .await
             .unwrap();
         let (_, wiped) =
