@@ -102,7 +102,7 @@ Concept images establish mood, hierarchy, and visual language. They are not fina
 
 ## Current Next Step
 
-Retest the corrected M02 package in `dist/Gravebound-M02-Playtest`: start all four clients within the authored eight-second participant-lock window, verify each personal pickup copy can be collected independently, and reconnect the same numbered client within the exact three-second LinkLost deadline. After that focused owner retest passes, begin `GB-M03-01` (wipeable test identity plus Arbalist character creation/select) without pulling PostgreSQL (`GB-M03-02`) forward. Keep `fp.1.0.0` immutable while defining the M03 content/version cutover before implementation.
+Approve or amend the seven Core identity decisions in [`SPEC-CONFLICT-004`](docs/spec-conflicts/SPEC-CONFLICT-004-m03-core-identity.md), then implement the three-slice [`GB-M03-01` contract](docs/tasks/GB-M03-01.md): immutable FP/Core-development boundary, wipeable server-authoritative test identity, and native Grave Arbalist creation/select. Do not pull PostgreSQL (`GB-M03-02`) forward or promote incomplete `core.1.0.0` bytes. The corrected M02 package launched one server and four native clients on 2026-07-12, but the focused visual/pickup/reconnect owner retest remains open because Windows Graphics Capture could not capture the Bevy windows (`0x80004002`); the already-recorded owner-assumed M02 gate remains the only human disposition.
 
 ## Resolved prior handoff
 
