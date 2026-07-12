@@ -17,6 +17,7 @@ protocol = { path = "../protocol" }
 quinn.workspace = true
 rcgen.workspace = true
 rustls.workspace = true
+serde.workspace = true
 sim_core = { path = "../sim_core" }
 sim_content = { path = "../sim_content" }
 thiserror.workspace = true

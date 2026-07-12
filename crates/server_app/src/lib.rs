@@ -7,6 +7,7 @@
 mod identity;
 mod instance;
 mod lifecycle;
+mod restore_point;
 mod runtime;
 mod session;
 
@@ -26,6 +27,11 @@ pub use instance::{
 pub use lifecycle::{
     DirectoryTickOutput, LINK_LOST_TICKS, LifecycleError, LifecycleResponse, LogicalSessionId,
     ManagedSession, SessionDirectory, SessionOwnerId, SessionPhase, TransportId,
+};
+pub use restore_point::{
+    BeltStackV1, CrashRestoreContext, DangerEntrySnapshotV1, EntryCaptureContext,
+    EntryRestoreProvider, InventorySecurityRestoreV1, ItemUid, OathBargainRestoreV1,
+    ProgressionRestoreV1, RestorePointError, RestorePointProviders, SafeAggregateVersionsV1,
 };
 pub use runtime::{
     BoundCoreIdentityServer, BoundLocalServer, CORE_IDENTITY_BUILD_ID,
