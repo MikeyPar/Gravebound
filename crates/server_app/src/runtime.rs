@@ -33,8 +33,9 @@ use crate::{
     AccountId, AccountRepository, AdmissionState, AuthenticatedAccount, AuthenticatedNamespace,
     AuthenticationDecision, CharacterIdGenerator, HandshakePolicy, IdentityClock, IdentityService,
     InMemoryAccountRepository, InstanceError, InstanceScheduler, NoopIdentityEventSink,
-    PostgresAccountRepository, SERVER_SHUTDOWN_CLOSE_CODE, SessionOwnerId, TransportId,
-    close_transport, serve_identity_reliable,
+    PostgresAccountRepository, PostgresWorldFlowLocationRepository, SERVER_SHUTDOWN_CLOSE_CODE,
+    SessionOwnerId, TransportId, WorldFlowGateService, WorldFlowLocationRepository,
+    close_transport, serve_core_reliable,
 };
 
 pub const LOCAL_BUILD_ID: &str = M02_LOCAL_BUILD_ID;
@@ -493,16 +494,17 @@ type CoreIdentityAuthority<R> =
 
 /// Explicit Core-development endpoint. It never creates an [`InstanceScheduler`] and therefore
 /// cannot silently route identity clients into the M02 combat laboratory.
-pub struct BoundCoreIdentityServer<R = InMemoryAccountRepository> {
+pub struct BoundCoreIdentityServer<R = InMemoryAccountRepository, W = InMemoryAccountRepository> {
     endpoint: quinn::Endpoint,
     certificate: CertificateDer<'static>,
     local_address: SocketAddr,
     policy: HandshakePolicy,
     authority: Arc<CoreIdentityAuthority<R>>,
+    world_flow: Arc<WorldFlowGateService<W, SystemIdentityClock>>,
     persistence_enabled: bool,
 }
 
-impl<R> fmt::Debug for BoundCoreIdentityServer<R> {
+impl<R, W> fmt::Debug for BoundCoreIdentityServer<R, W> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("BoundCoreIdentityServer")
@@ -514,26 +516,30 @@ impl<R> fmt::Debug for BoundCoreIdentityServer<R> {
 
 impl BoundCoreIdentityServer {
     pub fn bind(config: &CoreIdentityServerConfig) -> Result<Self, LocalServerRuntimeError> {
-        Self::bind_with_repository(config, InMemoryAccountRepository::default(), false)
+        let repository = InMemoryAccountRepository::default();
+        Self::bind_with_repositories(config, repository.clone(), repository, false)
     }
 }
 
-impl BoundCoreIdentityServer<PostgresAccountRepository> {
+impl BoundCoreIdentityServer<PostgresAccountRepository, PostgresWorldFlowLocationRepository> {
     pub fn bind_persistent(
         config: &CoreIdentityServerConfig,
         repository: PostgresAccountRepository,
     ) -> Result<Self, LocalServerRuntimeError> {
-        Self::bind_with_repository(config, repository, true)
+        let world_flow = PostgresWorldFlowLocationRepository::new(repository.persistence());
+        Self::bind_with_repositories(config, repository, world_flow, true)
     }
 }
 
-impl<R> BoundCoreIdentityServer<R>
+impl<R, W> BoundCoreIdentityServer<R, W>
 where
     R: AccountRepository + 'static,
+    W: WorldFlowLocationRepository + 'static,
 {
-    fn bind_with_repository(
+    fn bind_with_repositories(
         config: &CoreIdentityServerConfig,
         repository: R,
+        world_flow_repository: W,
         persistence_enabled: bool,
     ) -> Result<Self, LocalServerRuntimeError> {
         sim_content::load_core_development_identity(&config.content_root)
@@ -563,7 +569,12 @@ where
             SystemIdentityClock,
             ProcessCharacterIds::default(),
             NoopIdentityEventSink,
-            required_manifest_hash,
+            required_manifest_hash.clone(),
+        ));
+        let world_flow = Arc::new(WorldFlowGateService::new(
+            world_flow_repository,
+            SystemIdentityClock,
+            required_manifest_hash.clone(),
         ));
         Ok(Self {
             endpoint,
@@ -571,6 +582,7 @@ where
             local_address,
             policy,
             authority,
+            world_flow,
             persistence_enabled,
         })
     }
@@ -610,10 +622,11 @@ where
                     let Some(incoming) = incoming else { break };
                     let policy = self.policy.clone();
                     let authority = Arc::clone(&self.authority);
+                    let world_flow = Arc::clone(&self.world_flow);
                     let accepted = Arc::clone(&accepted);
                     let rejected = Arc::clone(&rejected);
                     workers.spawn(async move {
-                        match serve_core_identity_connection(incoming, policy, authority).await {
+                        match serve_core_identity_connection(incoming, policy, authority, world_flow).await {
                             Ok(true) => { accepted.fetch_add(1, Ordering::Relaxed); }
                             Ok(false) => { rejected.fetch_add(1, Ordering::Relaxed); }
                             Err(error) => warn!(%error, "Core identity connection ended"),
@@ -642,13 +655,15 @@ where
     }
 }
 
-async fn serve_core_identity_connection<R>(
+async fn serve_core_identity_connection<R, W>(
     incoming: quinn::Incoming,
     policy: HandshakePolicy,
     authority: Arc<CoreIdentityAuthority<R>>,
+    world_flow: Arc<WorldFlowGateService<W, SystemIdentityClock>>,
 ) -> Result<bool, LocalServerRuntimeError>
 where
     R: AccountRepository,
+    W: WorldFlowLocationRepository,
 {
     let connection = incoming.await?;
     let (mut send, mut receive) = connection.accept_bi().await?;
@@ -683,10 +698,11 @@ where
         response_sequence = response_sequence
             .checked_add(1)
             .ok_or(LocalServerRuntimeError::IdentityExhausted)?;
-        if serve_identity_reliable(
+        if serve_core_reliable(
             &connection,
             authority.as_ref(),
-            Some(authenticated),
+            world_flow.as_ref(),
+            authenticated,
             response_sequence,
             0,
         )
@@ -864,7 +880,9 @@ mod tests {
     use protocol::{
         AccountBootstrapFrame, AccountBootstrapRequest, AccountBootstrapResult, ActionFrame,
         ActionKind, AuthTicket, CharacterMutationFrame, CharacterMutationPayload, Compression,
-        InputFrame, Platform, SessionControlFrame, SessionControlRequest,
+        InputFrame, Platform, SessionControlFrame, SessionControlRequest, WorldFlowFrame,
+        WorldFlowRequest, WorldFlowResult, WorldTransferCommand, WorldTransferMutation,
+        WorldTransferPayload, WorldTransferResultCode,
     };
     use tokio::sync::oneshot;
 
@@ -925,6 +943,61 @@ mod tests {
         .unwrap()
     }
 
+    async fn assert_core_world_flow_is_fail_closed(
+        connection: &quinn::Connection,
+        content_root: &Path,
+        ticket: &[u8],
+        created: &protocol::CharacterMutationResult,
+    ) {
+        let created_snapshot = created.snapshot.as_ref().unwrap();
+        let character_id = created_snapshot.characters[0].character_id;
+        let select_payload = CharacterMutationPayload::Select { character_id };
+        let (_, selected) = bot_client::perform_character_mutation(
+            connection,
+            CharacterMutationFrame {
+                mutation_id: [2; 16],
+                expected_account_version: created_snapshot.account_version,
+                payload_hash: select_payload.canonical_hash(),
+                issued_at_unix_millis: current_unix_millis(),
+                payload: select_payload,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(selected.accepted);
+
+        let transfer_payload = WorldTransferPayload {
+            content_manifest_hash: core_hello(content_root, ticket).content_manifest_hash,
+            command: WorldTransferCommand::EnterHallFromCharacterSelect,
+        };
+        let (_, result) = bot_client::perform_world_flow(
+            connection,
+            WorldFlowFrame {
+                sequence: 3,
+                request: WorldFlowRequest::Transfer(WorldTransferMutation {
+                    mutation_id: [3; 16],
+                    character_id,
+                    expected_character_version: 1,
+                    issued_at_unix_millis: current_unix_millis(),
+                    payload_hash: transfer_payload.canonical_hash(),
+                    payload: transfer_payload,
+                }),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            result,
+            WorldFlowResult::Transfer {
+                accepted: false,
+                code: WorldTransferResultCode::StageDisabled,
+                transfer_id: None,
+                snapshot: Some(_),
+                ..
+            }
+        ));
+    }
+
     #[tokio::test]
     async fn core_identity_real_quic_reconnects_and_server_restart_wipes() {
         let content_root = content_root();
@@ -955,7 +1028,15 @@ mod tests {
             bot_client::perform_handshake(&connection, core_hello(&content_root, ticket))
                 .await
                 .unwrap();
-        assert!(matches!(handshake, HandshakeResponse::Accepted(_)));
+        let HandshakeResponse::Accepted(server_hello) = handshake else {
+            panic!("Core handshake must be accepted")
+        };
+        assert!(
+            server_hello
+                .feature_flags
+                .iter()
+                .all(|flag| flag.as_str() != protocol::CORE_WORLD_FLOW_FEATURE_FLAG)
+        );
         let (_, initial) =
             bot_client::perform_account_bootstrap(&connection, bootstrap(&content_root, 1))
                 .await
@@ -980,6 +1061,7 @@ mod tests {
         .await
         .unwrap();
         assert!(created.accepted);
+        assert_core_world_flow_is_fail_closed(&connection, &content_root, ticket, &created).await;
         connection.close(0_u32.into(), b"reconnect");
 
         let connection = endpoint

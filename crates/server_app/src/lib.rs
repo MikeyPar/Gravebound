@@ -404,6 +404,68 @@ where
     Ok(response)
 }
 
+/// Serves one authenticated Core request and dispatches it to the owning domain authority.
+/// World-flow messages share the reliable transport but cannot mutate identity state, and the
+/// normal world-flow authority remains fail-closed until its downstream packages are complete.
+#[allow(clippy::too_many_arguments)]
+pub async fn serve_core_reliable<R, C, G, E, W, WC>(
+    connection: &quinn::Connection,
+    identity: &IdentityService<R, C, G, E>,
+    world_flow: &WorldFlowGateService<W, WC>,
+    authenticated: AuthenticatedAccount,
+    response_sequence: u32,
+    server_tick: u64,
+) -> Result<protocol::ReliableEventFrame, ServerTransportError>
+where
+    R: AccountRepository,
+    C: IdentityClock,
+    G: CharacterIdGenerator,
+    E: IdentityEventSink,
+    W: WorldFlowLocationRepository,
+    WC: IdentityClock,
+{
+    if response_sequence == 0 {
+        return Err(ServerTransportError::UnexpectedMessage);
+    }
+    let (mut send, mut receive) = connection
+        .accept_bi()
+        .await
+        .map_err(|error| ServerTransportError::Quic(error.to_string()))?;
+    let request = receive
+        .read_to_end(RELIABLE_FRAME_LIMIT)
+        .await
+        .map_err(|error| ServerTransportError::Quic(error.to_string()))?;
+    let event = match decode_frame(&request)? {
+        WireMessage::AccountBootstrapFrame(frame) => {
+            protocol::ReliableEvent::AccountBootstrapResult(
+                identity.bootstrap(Some(authenticated), &frame).await,
+            )
+        }
+        WireMessage::CharacterMutationFrame(frame) => {
+            protocol::ReliableEvent::CharacterMutationResult(
+                identity.mutate(Some(authenticated), &frame).await,
+            )
+        }
+        WireMessage::WorldFlowFrame(frame) => {
+            protocol::ReliableEvent::WorldFlowResult(world_flow.handle(authenticated, &frame).await)
+        }
+        _ => return Err(ServerTransportError::UnexpectedMessage),
+    };
+    let response = protocol::ReliableEventFrame {
+        sequence: response_sequence,
+        server_tick,
+        event,
+    };
+    send.write_all(&encode_frame(&WireMessage::ReliableEvent(
+        response.clone(),
+    ))?)
+    .await
+    .map_err(|error| ServerTransportError::Quic(error.to_string()))?;
+    send.finish()
+        .map_err(|error| ServerTransportError::Quic(error.to_string()))?;
+    Ok(response)
+}
+
 pub fn close_transport(connection: &quinn::Connection, close_code: u32, reason: &'static [u8]) {
     connection.close(close_code.into(), reason);
 }

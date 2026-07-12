@@ -17,9 +17,9 @@ use persistence::{
 use protocol::{
     AccountBootstrapFrame, AccountBootstrapResult, AccountErrorCode, AccountNamespace,
     AccountSnapshot, CHARACTER_ID_BYTES, CORE_CHARACTER_SLOT_CAPACITY, CharacterLifeState,
-    CharacterMutationFrame, CharacterMutationPayload, CharacterMutationResult,
-    CharacterSecurityState, CharacterSnapshot, GRAVE_ARBALIST_CLASS_ID, MUTATION_ID_BYTES,
-    ManifestHash, WireText,
+    CharacterLocation, CharacterLocationSnapshot, CharacterMutationFrame, CharacterMutationPayload,
+    CharacterMutationResult, CharacterSecurityState, CharacterSnapshot, GRAVE_ARBALIST_CLASS_ID,
+    MUTATION_ID_BYTES, ManifestHash, WireText,
 };
 use thiserror::Error;
 
@@ -197,6 +197,50 @@ impl AccountRepository for InMemoryAccountRepository {
     }
 }
 
+impl crate::WorldFlowLocationRepository for InMemoryAccountRepository {
+    async fn selected_character(
+        &self,
+        account_id: AccountId,
+    ) -> Result<Option<[u8; CHARACTER_ID_BYTES]>, crate::WorldFlowRepositoryError> {
+        let accounts = self
+            .accounts
+            .lock()
+            .map_err(|_| crate::WorldFlowRepositoryError::Unavailable)?;
+        Ok(accounts
+            .get(&account_id)
+            .and_then(|account| account.selected_character_id))
+    }
+
+    async fn character_owner(
+        &self,
+        character_id: [u8; CHARACTER_ID_BYTES],
+    ) -> Result<Option<AccountId>, crate::WorldFlowRepositoryError> {
+        AccountRepository::character_owner(self, character_id)
+            .await
+            .map_err(|_| crate::WorldFlowRepositoryError::Unavailable)
+    }
+
+    async fn location(
+        &self,
+        account_id: AccountId,
+        character_id: [u8; CHARACTER_ID_BYTES],
+    ) -> Result<Option<CharacterLocationSnapshot>, crate::WorldFlowRepositoryError> {
+        let accounts = self
+            .accounts
+            .lock()
+            .map_err(|_| crate::WorldFlowRepositoryError::Unavailable)?;
+        Ok(accounts.get(&account_id).and_then(|account| {
+            account.characters.iter().find_map(|character| {
+                (character.id == character_id).then_some(CharacterLocationSnapshot {
+                    character_id,
+                    character_version: character.state_version,
+                    location: CharacterLocation::CharacterSelect,
+                })
+            })
+        }))
+    }
+}
+
 /// Durable adapter backed by the `persistence` crate's serializable identity transaction.
 #[derive(Debug, Clone)]
 pub struct PostgresAccountRepository {
@@ -206,6 +250,10 @@ pub struct PostgresAccountRepository {
 impl PostgresAccountRepository {
     pub const fn new(persistence: PostgresPersistence) -> Self {
         Self { persistence }
+    }
+
+    pub(crate) fn persistence(&self) -> PostgresPersistence {
+        self.persistence.clone()
     }
 }
 

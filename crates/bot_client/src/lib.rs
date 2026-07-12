@@ -11,7 +11,8 @@ use protocol::{
     AccountBootstrapFrame, AccountBootstrapResult, CharacterMutationFrame, CharacterMutationResult,
     ClientHello, ControlEvent, HandshakeResponse, InputFrame, ProtocolVersion,
     RELIABLE_FRAME_LIMIT, ReliableEvent, ReliableEventFrame, SIMULATION_HZ, SessionControlFrame,
-    SessionControlResult, SnapshotChunk, WireMessage, decode_frame, encode_frame,
+    SessionControlResult, SnapshotChunk, WireMessage, WorldFlowFrame, WorldFlowResult,
+    decode_frame, encode_frame,
 };
 use thiserror::Error;
 
@@ -187,6 +188,17 @@ pub async fn perform_character_mutation(
     let event =
         perform_reliable_gameplay(connection, WireMessage::CharacterMutationFrame(frame)).await?;
     let ReliableEvent::CharacterMutationResult(result) = &event.event else {
+        return Err(BotTransportError::UnexpectedMessage);
+    };
+    Ok((event.clone(), result.clone()))
+}
+
+pub async fn perform_world_flow(
+    connection: &quinn::Connection,
+    frame: WorldFlowFrame,
+) -> Result<(ReliableEventFrame, WorldFlowResult), BotTransportError> {
+    let event = perform_reliable_gameplay(connection, WireMessage::WorldFlowFrame(frame)).await?;
+    let ReliableEvent::WorldFlowResult(result) = &event.event else {
         return Err(BotTransportError::UnexpectedMessage);
     };
     Ok((event.clone(), result.clone()))
