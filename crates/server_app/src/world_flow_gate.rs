@@ -235,7 +235,7 @@ pub enum WorldFlowRepositoryError {
     Corrupt,
 }
 
-fn stored_location_snapshot(
+pub(crate) fn stored_location_snapshot(
     character_id: [u8; 16],
     stored: StoredWorldLocation,
 ) -> Result<CharacterLocationSnapshot, WorldFlowRepositoryError> {

@@ -24,8 +24,8 @@ pub use progression::{
     StoredProgressionSnapshot, StoredXpAwardResult, StoredXpEligibilityEvidence,
 };
 pub use world_flow::{
-    StoredSafeArrival, StoredWorldFlowRevisionV1, StoredWorldLocation, StoredWorldTransferReceipt,
-    WorldFlowTransactionState,
+    StoredSafeArrival, StoredWorldFlowCharacter, StoredWorldFlowRevisionV1, StoredWorldLocation,
+    StoredWorldTransferReceipt, WorldFlowTransaction, WorldFlowTransactionState,
 };
 
 pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
@@ -152,6 +152,8 @@ pub enum PersistenceError {
     CorruptStoredIdentity,
     #[error("stored world-flow aggregate violates the approved schema")]
     CorruptStoredWorldFlow,
+    #[error("a fresh world-flow transaction must append one typed result")]
+    WorldFlowResultRequired,
     #[error("world-flow character does not exist for the authenticated account")]
     WorldFlowCharacterNotFound,
     #[error("progression character does not exist for the authenticated account")]

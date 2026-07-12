@@ -13,6 +13,7 @@ mod progression_service;
 mod restore_point;
 mod runtime;
 mod session;
+mod world_flow_coordinator;
 mod world_flow_gate;
 
 pub use identity::{
@@ -58,6 +59,9 @@ pub use session::{
     AuthoritativeSession, IngressAnomaly, IngressAnomalyKind, IngressDiagnostics, InputDisposition,
     InputRejection, MAX_CACHED_MUTATIONS, MAX_NEW_MUTATIONS_PER_TICK, MAX_RECENT_INGRESS_ANOMALIES,
     SessionError,
+};
+pub use world_flow_coordinator::{
+    DormantWorldFlowPlanner, PostgresDormantWorldFlowCoordinator, WorldFlowIdGenerator,
 };
 pub use world_flow_gate::{
     PostgresWorldFlowLocationRepository, WorldFlowGateService, WorldFlowLocationRepository,

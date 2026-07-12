@@ -71,12 +71,28 @@ pub struct StoredWorldTransferReceipt {
     pub result_payload: Vec<u8>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StoredWorldFlowCharacter {
+    pub life_state: i16,
+    pub security_state: i16,
+    pub character_version: i64,
+}
+
 /// Mutable state exposed only inside one serializable account/character transaction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorldFlowTransactionState {
+    pub selected_character_id: Option<[u8; ID_BYTES]>,
+    pub character: StoredWorldFlowCharacter,
     pub location: StoredWorldLocation,
-    pub existing_receipt: Option<StoredWorldTransferReceipt>,
     pub new_receipt: Option<StoredWorldTransferReceipt>,
+    pub location_changed: bool,
+}
+
+/// Replay is read-only and returns before character/location validation or mutation staging.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorldFlowTransaction<T> {
+    Replayed(Box<StoredWorldTransferReceipt>),
+    Committed(T),
 }
 
 impl PostgresPersistence {
@@ -117,46 +133,85 @@ impl PostgresPersistence {
         character_id: [u8; ID_BYTES],
         mutation_id: [u8; ID_BYTES],
         operation: F,
-    ) -> Result<T, PersistenceError>
+    ) -> Result<WorldFlowTransaction<T>, PersistenceError>
     where
         T: Send,
         F: FnOnce(&mut WorldFlowTransactionState) -> Result<T, PersistenceError> + Send,
     {
         let mut transaction = self.begin_transaction().await?;
-        lock_account(transaction.connection(), &account_id).await?;
+        let selected_character_id = lock_account(transaction.connection(), &account_id)
+            .await?
+            .map(fixed_bytes)
+            .transpose()?;
+        if let Some(receipt) =
+            load_receipt(transaction.connection(), &account_id, &mutation_id).await?
+        {
+            transaction.rollback().await?;
+            return Ok(WorldFlowTransaction::Replayed(Box::new(receipt)));
+        }
+        let character = lock_character(transaction.connection(), &account_id, &character_id)
+            .await?
+            .ok_or(PersistenceError::WorldFlowCharacterNotFound)?;
         let location_row =
             load_location(transaction.connection(), &account_id, &character_id, true)
                 .await?
                 .ok_or(PersistenceError::WorldFlowCharacterNotFound)?;
+        let location = decode_location(&location_row)?;
+        if character.character_version != location.character_version() {
+            return Err(PersistenceError::CorruptStoredWorldFlow);
+        }
+        let initial_location = location.clone();
         let mut state = WorldFlowTransactionState {
-            location: decode_location(&location_row)?,
-            existing_receipt: load_receipt(transaction.connection(), &account_id, &mutation_id)
-                .await?,
+            selected_character_id,
+            character,
+            location,
             new_receipt: None,
+            location_changed: false,
         };
         let result = operation(&mut state)?;
-        persist_location(
-            transaction.connection(),
-            &account_id,
-            &character_id,
-            &state.location,
-        )
-        .await?;
-        if let Some(receipt) = &state.new_receipt {
-            validate_receipt_binding(receipt, &account_id, &character_id, &mutation_id)?;
-            insert_receipt(transaction.connection(), receipt).await?;
+        if state.location_changed {
+            if state.location == initial_location
+                || state.location.character_version()
+                    != initial_location
+                        .character_version()
+                        .checked_add(1)
+                        .ok_or(PersistenceError::CorruptStoredWorldFlow)?
+            {
+                return Err(PersistenceError::CorruptStoredWorldFlow);
+            }
+            persist_location(
+                transaction.connection(),
+                &account_id,
+                &character_id,
+                &state.location,
+            )
+            .await?;
+        } else if state.location != initial_location {
+            return Err(PersistenceError::CorruptStoredWorldFlow);
         }
+        let receipt = state
+            .new_receipt
+            .as_ref()
+            .ok_or(PersistenceError::WorldFlowResultRequired)?;
+        if receipt.pre_character_version != initial_location.character_version()
+            || receipt.post_character_version != state.location.character_version()
+            || state.location_changed != (receipt.result_code == 0)
+        {
+            return Err(PersistenceError::CorruptStoredWorldFlow);
+        }
+        validate_receipt_binding(receipt, &account_id, &character_id, &mutation_id)?;
+        insert_receipt(transaction.connection(), receipt).await?;
         transaction.commit().await?;
-        Ok(result)
+        Ok(WorldFlowTransaction::Committed(result))
     }
 }
 
 async fn lock_account(
     connection: &mut sqlx::PgConnection,
     account_id: &[u8; ID_BYTES],
-) -> Result<(), PersistenceError> {
-    let exists: Option<i64> = sqlx::query_scalar(
-        "SELECT state_version FROM accounts \
+) -> Result<Option<Vec<u8>>, PersistenceError> {
+    let selected: Option<Option<Vec<u8>>> = sqlx::query_scalar(
+        "SELECT selected_character_id FROM accounts \
          WHERE namespace_id = $1 AND account_id = $2 FOR UPDATE",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
@@ -164,10 +219,42 @@ async fn lock_account(
     .fetch_optional(connection)
     .await
     .map_err(PersistenceError::Database)?;
-    if exists.is_none() {
-        return Err(PersistenceError::WorldFlowCharacterNotFound);
-    }
-    Ok(())
+    selected.ok_or(PersistenceError::WorldFlowCharacterNotFound)
+}
+
+async fn lock_character(
+    connection: &mut sqlx::PgConnection,
+    account_id: &[u8; ID_BYTES],
+    character_id: &[u8; ID_BYTES],
+) -> Result<Option<StoredWorldFlowCharacter>, PersistenceError> {
+    let row = sqlx::query(
+        "SELECT life_state, security_state, character_state_version FROM characters \
+         WHERE namespace_id = $1 AND account_id = $2 AND character_id = $3 FOR UPDATE",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
+    .fetch_optional(connection)
+    .await
+    .map_err(PersistenceError::Database)?;
+    row.map(|row| {
+        let character = StoredWorldFlowCharacter {
+            life_state: row
+                .try_get("life_state")
+                .map_err(PersistenceError::Database)?,
+            security_state: row
+                .try_get("security_state")
+                .map_err(PersistenceError::Database)?,
+            character_version: row
+                .try_get("character_state_version")
+                .map_err(PersistenceError::Database)?,
+        };
+        if character.character_version <= 0 {
+            return Err(PersistenceError::CorruptStoredWorldFlow);
+        }
+        Ok(character)
+    })
+    .transpose()
 }
 
 async fn load_location(
@@ -276,7 +363,7 @@ async fn load_receipt(
                 command_kind, transfer_id, pre_character_version, post_character_version, \
                 result_code, result_payload \
          FROM character_world_transfer_results \
-         WHERE namespace_id = $1 AND account_id = $2 AND mutation_id = $3",
+         WHERE namespace_id = $1 AND account_id = $2 AND mutation_id = $3 FOR UPDATE",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(account_id.as_slice())
@@ -508,8 +595,20 @@ fn validate_receipt_binding(
         || !valid_revision(&receipt.content_revision)
         || receipt.expected_character_version <= 0
         || receipt.issued_at_unix_millis <= 0
+        || !(0..=2).contains(&receipt.command_kind)
         || receipt.pre_character_version <= 0
         || receipt.post_character_version <= 0
+        || !(0..=20).contains(&receipt.result_code)
+        || (receipt.result_code == 0)
+            != (receipt.transfer_id.is_some()
+                && receipt.post_character_version
+                    == receipt
+                        .pre_character_version
+                        .checked_add(1)
+                        .unwrap_or(i64::MIN))
+        || (receipt.result_code != 0
+            && (receipt.transfer_id.is_some()
+                || receipt.post_character_version != receipt.pre_character_version))
         || receipt.result_payload.is_empty()
         || receipt.result_payload.len() > 65_536
     {
