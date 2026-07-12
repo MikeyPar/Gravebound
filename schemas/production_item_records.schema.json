@@ -529,7 +529,7 @@
       ]
     },
     "ProductionItemStagePolicyRecord": {
-      "description": "Required metadata present on every runtime definition under `CONT-001`.",
+      "description": "Metadata shared by unpromoted Core world-flow records.",
       "type": "object",
       "properties": {
         "affix_manifest_id": {
@@ -547,14 +547,14 @@
             "$ref": "#/$defs/ContentId"
           }
         },
-        "content_version": {
-          "type": "string"
-        },
         "current_class_weapon_relic_basis_points": {
           "type": "integer",
           "format": "uint16",
           "maximum": 65535,
           "minimum": 0
+        },
+        "earliest_release_stage": {
+          "$ref": "#/$defs/ReleaseStage"
         },
         "enabled": {
           "type": "boolean"
@@ -590,9 +590,6 @@
           "maximum": 65535,
           "minimum": 0
         },
-        "release_stage": {
-          "$ref": "#/$defs/ReleaseStage"
-        },
         "schema_version": {
           "type": "integer",
           "format": "uint32",
@@ -624,9 +621,8 @@
       "required": [
         "id",
         "schema_version",
-        "content_version",
         "enabled",
-        "release_stage",
+        "earliest_release_stage",
         "localization_name_key",
         "localization_description_key",
         "asset_ids",
@@ -777,7 +773,7 @@
       ]
     },
     "ProductionItemTemplateRecord": {
-      "description": "Required metadata present on every runtime definition under `CONT-001`.",
+      "description": "Metadata shared by unpromoted Core world-flow records.",
       "type": "object",
       "properties": {
         "asset_ids": {
@@ -786,8 +782,8 @@
             "$ref": "#/$defs/ContentId"
           }
         },
-        "content_version": {
-          "type": "string"
+        "earliest_release_stage": {
+          "$ref": "#/$defs/ReleaseStage"
         },
         "enabled": {
           "type": "boolean"
@@ -803,9 +799,6 @@
         },
         "payload": {
           "$ref": "#/$defs/ProductionItemTemplatePayload"
-        },
-        "release_stage": {
-          "$ref": "#/$defs/ReleaseStage"
         },
         "schema_version": {
           "type": "integer",
@@ -826,9 +819,8 @@
       "required": [
         "id",
         "schema_version",
-        "content_version",
         "enabled",
-        "release_stage",
+        "earliest_release_stage",
         "localization_name_key",
         "localization_description_key",
         "asset_ids",
@@ -864,7 +856,7 @@
       ]
     },
     "ProductionMaterialPoolRecord": {
-      "description": "Required metadata present on every runtime definition under `CONT-001`.",
+      "description": "Metadata shared by unpromoted Core world-flow records.",
       "type": "object",
       "properties": {
         "asset_ids": {
@@ -873,8 +865,8 @@
             "$ref": "#/$defs/ContentId"
           }
         },
-        "content_version": {
-          "type": "string"
+        "earliest_release_stage": {
+          "$ref": "#/$defs/ReleaseStage"
         },
         "enabled": {
           "type": "boolean"
@@ -893,9 +885,6 @@
           "items": {
             "$ref": "#/$defs/ProductionMaterialPoolOutcome"
           }
-        },
-        "release_stage": {
-          "$ref": "#/$defs/ReleaseStage"
         },
         "schema_version": {
           "type": "integer",
@@ -916,9 +905,8 @@
       "required": [
         "id",
         "schema_version",
-        "content_version",
         "enabled",
-        "release_stage",
+        "earliest_release_stage",
         "localization_name_key",
         "localization_description_key",
         "asset_ids",
@@ -928,7 +916,7 @@
       ]
     },
     "ProductionRarityProfileRecord": {
-      "description": "Required metadata present on every runtime definition under `CONT-001`.",
+      "description": "Metadata shared by unpromoted Core world-flow records.",
       "type": "object",
       "properties": {
         "asset_ids": {
@@ -937,8 +925,8 @@
             "$ref": "#/$defs/ContentId"
           }
         },
-        "content_version": {
-          "type": "string"
+        "earliest_release_stage": {
+          "$ref": "#/$defs/ReleaseStage"
         },
         "enabled": {
           "type": "boolean"
@@ -970,9 +958,6 @@
             "$ref": "#/$defs/ProductionRarityWeight"
           }
         },
-        "release_stage": {
-          "$ref": "#/$defs/ReleaseStage"
-        },
         "schema_version": {
           "type": "integer",
           "format": "uint32",
@@ -992,9 +977,8 @@
       "required": [
         "id",
         "schema_version",
-        "content_version",
         "enabled",
-        "release_stage",
+        "earliest_release_stage",
         "localization_name_key",
         "localization_description_key",
         "asset_ids",
@@ -1122,7 +1106,7 @@
       ]
     },
     "ProductionRewardTableRecord": {
-      "description": "Required metadata present on every runtime definition under `CONT-001`.",
+      "description": "Metadata shared by unpromoted Core world-flow records.",
       "type": "object",
       "properties": {
         "asset_ids": {
@@ -1131,8 +1115,8 @@
             "$ref": "#/$defs/ContentId"
           }
         },
-        "content_version": {
-          "type": "string"
+        "earliest_release_stage": {
+          "$ref": "#/$defs/ReleaseStage"
         },
         "enabled": {
           "type": "boolean"
@@ -1151,9 +1135,6 @@
           "items": {
             "$ref": "#/$defs/ProductionRewardRoll"
           }
-        },
-        "release_stage": {
-          "$ref": "#/$defs/ReleaseStage"
         },
         "schema_version": {
           "type": "integer",
@@ -1174,9 +1155,8 @@
       "required": [
         "id",
         "schema_version",
-        "content_version",
         "enabled",
-        "release_stage",
+        "earliest_release_stage",
         "localization_name_key",
         "localization_description_key",
         "asset_ids",

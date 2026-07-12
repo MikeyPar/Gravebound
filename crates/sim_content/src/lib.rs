@@ -4,12 +4,14 @@ mod core_dev;
 mod core_dev_copy;
 mod core_dev_progression;
 mod core_dev_world_flow;
+mod production_item;
 mod prototype;
 
 pub use core_dev::*;
 pub use core_dev_copy::*;
 pub use core_dev_progression::*;
 pub use core_dev_world_flow::*;
+pub use production_item::*;
 pub use prototype::*;
 
 use std::{

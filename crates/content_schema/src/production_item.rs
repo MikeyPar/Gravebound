@@ -6,9 +6,11 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::{CommonHeader, ContentId, EquipmentSlot};
+use crate::{ContentId, CoreDevelopmentHeader, EquipmentSlot};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ProductionItemTargetKind {
     UnpromotedItemRewardSubset,
@@ -46,7 +48,7 @@ pub struct ProductionItemRecords {
 #[serde(deny_unknown_fields)]
 pub struct ProductionItemTemplateRecord {
     #[serde(flatten)]
-    pub header: CommonHeader,
+    pub header: CoreDevelopmentHeader,
     pub payload: ProductionItemTemplatePayload,
 }
 
@@ -193,7 +195,9 @@ pub enum ProductionConsumableBehavior {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ProductionItemRarity {
     Worn,
@@ -215,7 +219,7 @@ pub struct ProductionRarityWeight {
 #[serde(deny_unknown_fields)]
 pub struct ProductionRarityProfileRecord {
     #[serde(flatten)]
-    pub header: CommonHeader,
+    pub header: CoreDevelopmentHeader,
     pub minimum_item_level: u8,
     pub maximum_item_level: u8,
     pub ordered_weights: Vec<ProductionRarityWeight>,
@@ -225,7 +229,7 @@ pub struct ProductionRarityProfileRecord {
 #[serde(deny_unknown_fields)]
 pub struct ProductionRewardTableRecord {
     #[serde(flatten)]
-    pub header: CommonHeader,
+    pub header: CoreDevelopmentHeader,
     pub ordered_rolls: Vec<ProductionRewardRoll>,
 }
 
@@ -261,7 +265,7 @@ pub struct ProductionMaterialPoolOutcome {
 #[serde(deny_unknown_fields)]
 pub struct ProductionMaterialPoolRecord {
     #[serde(flatten)]
-    pub header: CommonHeader,
+    pub header: CoreDevelopmentHeader,
     pub ordered_outcomes: Vec<ProductionMaterialPoolOutcome>,
 }
 
@@ -269,7 +273,7 @@ pub struct ProductionMaterialPoolRecord {
 #[serde(deny_unknown_fields)]
 pub struct ProductionItemStagePolicyRecord {
     #[serde(flatten)]
-    pub header: CommonHeader,
+    pub header: CoreDevelopmentHeader,
     pub current_class_weapon_relic_basis_points: u16,
     pub other_class_weapon_relic_basis_points: u16,
     pub universal_armor_charm_basis_points: u16,
