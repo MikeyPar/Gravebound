@@ -20,8 +20,8 @@ pub use progression::{
     ProgressionAwardTransaction, ProgressionAwardTransactionState, StoredBossFirstClear,
     StoredBossFirstClearState, StoredEncounterLifeState, StoredEncounterRecallState,
     StoredEncounterTrustState, StoredEncounterXpEvidence, StoredLockedProgressionCharacter,
-    StoredOrdinaryXpEvidence, StoredProgression, StoredProgressionContract, StoredXpAwardResult,
-    StoredXpEligibilityEvidence,
+    StoredOrdinaryXpEvidence, StoredProgression, StoredProgressionContract,
+    StoredProgressionSnapshot, StoredXpAwardResult, StoredXpEligibilityEvidence,
 };
 pub use world_flow::{
     StoredSafeArrival, StoredWorldLocation, StoredWorldTransferReceipt, WorldFlowTransactionState,

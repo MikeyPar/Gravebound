@@ -8,6 +8,7 @@ mod identity;
 mod instance;
 mod lifecycle;
 mod progression_award;
+mod progression_query;
 mod progression_service;
 mod restore_point;
 mod runtime;
@@ -35,6 +36,10 @@ pub use progression_award::{
     CoreProgressionRules, ProgressionAwardCode, ProgressionAwardCommand, ProgressionAwardContext,
     ProgressionAwardError, ProgressionAwardEvidence, ProgressionAwardOutcome,
     ProgressionAwardPayload, ProgressionAwardPlan,
+};
+pub use progression_query::{
+    PostgresProgressionQueryRepository, ProgressionQueryRepository,
+    ProgressionQueryRepositoryError, ProgressionQueryService, ProgressionQuerySnapshot,
 };
 pub use progression_service::PostgresProgressionAwardService;
 pub use restore_point::{

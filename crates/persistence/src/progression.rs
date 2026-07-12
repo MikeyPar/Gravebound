@@ -30,6 +30,12 @@ pub struct StoredProgression {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredProgressionSnapshot {
+    pub character: StoredLockedProgressionCharacter,
+    pub progression: StoredProgression,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredOrdinaryXpEvidence {
     pub delta_x_milli_tiles: i32,
     pub delta_y_milli_tiles: i32,
@@ -148,6 +154,64 @@ pub enum ProgressionAwardTransaction<T> {
 }
 
 impl PostgresPersistence {
+    /// Reads one owned character's validated progression without taking mutation locks.
+    pub async fn progression_snapshot(
+        &self,
+        account_id: [u8; ID_BYTES],
+        character_id: [u8; ID_BYTES],
+        contract: &StoredProgressionContract,
+    ) -> Result<Option<StoredProgressionSnapshot>, PersistenceError> {
+        validate_contract(contract)?;
+        let mut transaction = self.begin_transaction().await?;
+        let row = sqlx::query(
+            "SELECT c.level AS cached_level, c.life_state, c.security_state, \
+                    c.character_state_version, p.total_xp, p.level, p.current_health, \
+                    p.progression_version \
+             FROM characters c \
+             JOIN character_progression p \
+               ON p.namespace_id = c.namespace_id \
+              AND p.account_id = c.account_id \
+              AND p.character_id = c.character_id \
+             WHERE c.namespace_id = $1 AND c.account_id = $2 AND c.character_id = $3",
+        )
+        .bind(WIPEABLE_CORE_NAMESPACE)
+        .bind(account_id.as_slice())
+        .bind(character_id.as_slice())
+        .fetch_optional(transaction.connection())
+        .await
+        .map_err(PersistenceError::Database)?;
+        transaction.rollback().await?;
+        row.map(|row| {
+            let cached_level: i32 = row
+                .try_get("cached_level")
+                .map_err(PersistenceError::Database)?;
+            let character = StoredLockedProgressionCharacter {
+                cached_level: cached_level
+                    .try_into()
+                    .map_err(|_| PersistenceError::CorruptStoredProgression)?,
+                life_state: row
+                    .try_get("life_state")
+                    .map_err(PersistenceError::Database)?,
+                security_state: row
+                    .try_get("security_state")
+                    .map_err(PersistenceError::Database)?,
+                character_state_version: row
+                    .try_get("character_state_version")
+                    .map_err(PersistenceError::Database)?,
+            };
+            let progression = decode_progression(&row, contract)?;
+            validate_locked_character(&character, contract)?;
+            if character.cached_level != progression.level {
+                return Err(PersistenceError::CorruptStoredProgression);
+            }
+            Ok(StoredProgressionSnapshot {
+                character,
+                progression,
+            })
+        })
+        .transpose()
+    }
+
     /// Applies one XP award or returns its exact prior result.
     ///
     /// Lock order for a fresh award is account -> character -> progression. The account-wide
