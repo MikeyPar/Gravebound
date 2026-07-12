@@ -71,6 +71,7 @@ struct CharacterRecord {
     oath_id: Option<WireText<96>>,
     life_state: CharacterLifeState,
     security_state: CharacterSecurityState,
+    state_version: u64,
 }
 
 impl CharacterRecord {
@@ -297,7 +298,7 @@ impl AccountAggregate {
                 .characters
                 .into_iter()
                 .map(CharacterRecord::into_stored)
-                .collect(),
+                .collect::<Result<Vec<_>, PersistenceError>>()?,
             mutations: self
                 .mutations
                 .into_iter()
@@ -320,6 +321,11 @@ impl CharacterRecord {
         if stored.life_state != 0 || stored.security_state != 0 {
             return Err(PersistenceError::CorruptStoredIdentity);
         }
+        let state_version = u64::try_from(stored.character_state_version)
+            .map_err(|_| PersistenceError::CorruptStoredIdentity)?;
+        if state_version == 0 {
+            return Err(PersistenceError::CorruptStoredIdentity);
+        }
         Ok(Self {
             id: stored.character_id,
             roster_ordinal: u8::try_from(stored.roster_ordinal)
@@ -336,11 +342,12 @@ impl CharacterRecord {
                 .map_err(|_| PersistenceError::CorruptStoredIdentity)?,
             life_state: CharacterLifeState::Living,
             security_state: CharacterSecurityState::SafeCharacterSelect,
+            state_version,
         })
     }
 
-    fn into_stored(self) -> StoredCharacter {
-        StoredCharacter {
+    fn into_stored(self) -> Result<StoredCharacter, PersistenceError> {
+        Ok(StoredCharacter {
             character_id: self.id,
             roster_ordinal: i16::from(self.roster_ordinal),
             class_id: self.class_id.as_str().to_owned(),
@@ -348,7 +355,9 @@ impl CharacterRecord {
             oath_id: self.oath_id.map(|oath| oath.as_str().to_owned()),
             life_state: 0,
             security_state: 0,
-        }
+            character_state_version: i64::try_from(self.state_version)
+                .map_err(|_| PersistenceError::CorruptStoredIdentity)?,
+        })
     }
 }
 
@@ -599,6 +608,7 @@ where
             oath_id: None,
             life_state: CharacterLifeState::Living,
             security_state: CharacterSecurityState::SafeCharacterSelect,
+            state_version: 1,
         });
         aggregate.version += 1;
         self.events

@@ -90,6 +90,11 @@ async fn migrations_are_idempotent_exact_and_ready() {
             "_sqlx_migrations",
             "account_mutation_results",
             "accounts",
+            "character_danger_checkpoints",
+            "character_entry_restore_points",
+            "character_instance_lineages",
+            "character_world_locations",
+            "character_world_transfer_results",
             "characters",
             "gravebound_namespaces",
         ]
@@ -129,6 +134,7 @@ async fn typed_identity_store_round_trips_under_one_lock() {
                 oath_id: None,
                 life_state: 0,
                 security_state: 0,
+                character_state_version: 1,
             });
             aggregate.mutations.push(StoredMutation {
                 mutation_id: [31; 16],
@@ -152,6 +158,19 @@ async fn typed_identity_store_round_trips_under_one_lock() {
             .unwrap(),
         Some(ACCOUNT_A)
     );
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let initial_location: (i64, i16) = sqlx::query_as(
+        "SELECT character_version, location_kind FROM character_world_locations \
+         WHERE namespace_id = $1 AND account_id = $2 AND character_id = $3",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_A.as_slice())
+    .bind(CHARACTER_A.as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    transaction.rollback().await.unwrap();
+    assert_eq!(initial_location, (1, 0));
     persistence.close().await;
 }
 

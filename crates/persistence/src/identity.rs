@@ -16,6 +16,7 @@ pub struct StoredCharacter {
     pub oath_id: Option<String>,
     pub life_state: i16,
     pub security_state: i16,
+    pub character_state_version: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,7 +140,7 @@ async fn load_characters(
 ) -> Result<Vec<StoredCharacter>, PersistenceError> {
     let rows = sqlx::query(
         "SELECT character_id, roster_ordinal, class_id, level, oath_id, \
-                life_state, security_state \
+                life_state, security_state, character_state_version \
          FROM characters WHERE namespace_id = $1 AND account_id = $2 \
          ORDER BY roster_ordinal",
     )
@@ -168,6 +169,9 @@ async fn load_characters(
                     .map_err(PersistenceError::Database)?,
                 security_state: row
                     .try_get("security_state")
+                    .map_err(PersistenceError::Database)?,
+                character_state_version: row
+                    .try_get("character_state_version")
                     .map_err(PersistenceError::Database)?,
             })
         })
@@ -215,8 +219,8 @@ async fn persist_aggregate(
         sqlx::query(
             "INSERT INTO characters \
              (namespace_id, account_id, character_id, roster_ordinal, class_id, level, \
-              oath_id, life_state, security_state) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
+              oath_id, life_state, security_state, character_state_version) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
              ON CONFLICT (namespace_id, character_id) DO NOTHING",
         )
         .bind(WIPEABLE_CORE_NAMESPACE)
@@ -228,6 +232,20 @@ async fn persist_aggregate(
         .bind(&character.oath_id)
         .bind(character.life_state)
         .bind(character.security_state)
+        .bind(character.character_state_version)
+        .execute(transaction.connection())
+        .await
+        .map_err(PersistenceError::Database)?;
+        sqlx::query(
+            "INSERT INTO character_world_locations \
+             (namespace_id, account_id, character_id, character_version, location_kind) \
+             VALUES ($1, $2, $3, $4, 0) \
+             ON CONFLICT (namespace_id, account_id, character_id) DO NOTHING",
+        )
+        .bind(WIPEABLE_CORE_NAMESPACE)
+        .bind(account_id.as_slice())
+        .bind(character.character_id.as_slice())
+        .bind(character.character_state_version)
         .execute(transaction.connection())
         .await
         .map_err(PersistenceError::Database)?;

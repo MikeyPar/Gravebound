@@ -19,7 +19,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 1;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 2;
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -314,5 +314,27 @@ mod tests {
             config.validate().unwrap_err(),
             PersistenceConfigError::ZeroConnections
         );
+    }
+
+    #[test]
+    fn world_flow_migration_is_typed_and_contains_no_speculative_domain_payload() {
+        let migration = include_str!("../../../migrations/0002_wipeable_world_flow.sql");
+        for required in [
+            "character_world_locations",
+            "character_instance_lineages",
+            "character_entry_restore_points",
+            "character_world_transfer_results",
+            "character_danger_checkpoints",
+            "one_active_restore_point_per_character",
+            "component_mask = 7",
+        ] {
+            assert!(migration.contains(required), "migration omitted {required}");
+        }
+        for prohibited in ["JSON", "JSONB", "CREATE TABLE items", "core.1.0.0"] {
+            assert!(
+                !migration.contains(prohibited),
+                "world-flow root migration leaked {prohibited}"
+            );
+        }
     }
 }
