@@ -26,6 +26,7 @@ mod movement;
 mod normal_wave;
 mod pattern;
 mod performance;
+mod production_item;
 mod progression;
 mod readability;
 mod rng;
@@ -166,6 +167,9 @@ pub use performance::{
     PerformanceReportError, StressFixture, StressFixtureConfig, StressFixtureSnapshot,
     TARGET_ENEMY_COUNT, TARGET_HOSTILE_PROJECTILE_COUNT, TargetHardware,
     run_bell_proctor_reliability_fixture,
+};
+pub use production_item::{
+    CrossbowPowerRequest, EquipmentRarity, ProductionItemMathError, resolve_crossbow_weapon_power,
 };
 pub use progression::{
     CORE_LEVEL_COUNT, CoreProgressionError, CoreProgressionGrant, CoreProgressionState,
