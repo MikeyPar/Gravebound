@@ -11,7 +11,9 @@ use persistence::{PersistenceConfig, PostgresPersistence, WIPEABLE_CORE_NAMESPAC
 use protocol::{
     AccountBootstrapFrame, AccountBootstrapRequest, AccountBootstrapResult, AccountErrorCode,
     AuthTicket, CharacterMutationFrame, CharacterMutationPayload, ClientHello, Compression,
-    HandshakeResponse, ManifestHash, Platform, ProtocolVersion, WireText,
+    HandshakeResponse, ManifestHash, Platform, ProtocolVersion, WireText, WorldFlowFrame,
+    WorldFlowRequest, WorldFlowResult, WorldTransferCommand, WorldTransferMutation,
+    WorldTransferPayload, WorldTransferResultCode,
 };
 use server_app::{
     AccountId, AuthenticatedAccount, AuthenticatedNamespace, BoundCoreIdentityServer,
@@ -141,6 +143,78 @@ fn client_endpoint(certificate: rustls::pki_types::CertificateDer<'static>) -> q
     let mut endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
     endpoint.set_default_client_config(client_config);
     endpoint
+}
+
+async fn world_flow_row_count(persistence: &PostgresPersistence) -> i64 {
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let count: i64 = sqlx::query_scalar(
+        "SELECT (SELECT count(*) FROM character_instance_lineages) + \
+                (SELECT count(*) FROM character_entry_restore_points) + \
+                (SELECT count(*) FROM character_world_transfer_results)",
+    )
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    transaction.rollback().await.unwrap();
+    count
+}
+
+async fn assert_persistent_world_flow_is_fail_closed(
+    persistence: &PostgresPersistence,
+    connection: &quinn::Connection,
+    content_root: &Path,
+    ticket: &[u8],
+    created: &protocol::CharacterMutationResult,
+) {
+    let snapshot = created.snapshot.as_ref().unwrap();
+    let character_id = snapshot.characters[0].character_id;
+    let select_payload = CharacterMutationPayload::Select { character_id };
+    let (_, selected) = bot_client::perform_character_mutation(
+        connection,
+        CharacterMutationFrame {
+            mutation_id: [72; 16],
+            expected_account_version: snapshot.account_version,
+            payload_hash: select_payload.canonical_hash(),
+            issued_at_unix_millis: current_unix_millis(),
+            payload: select_payload,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(selected.accepted);
+    assert_eq!(world_flow_row_count(persistence).await, 0);
+
+    let payload = WorldTransferPayload {
+        content_manifest_hash: wire_hello(content_root, ticket).content_manifest_hash,
+        command: WorldTransferCommand::EnterHallFromCharacterSelect,
+    };
+    let (_, result) = bot_client::perform_world_flow(
+        connection,
+        WorldFlowFrame {
+            sequence: 3,
+            request: WorldFlowRequest::Transfer(WorldTransferMutation {
+                mutation_id: [73; 16],
+                character_id,
+                expected_character_version: 1,
+                issued_at_unix_millis: current_unix_millis(),
+                payload_hash: payload.canonical_hash(),
+                payload,
+            }),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        result,
+        WorldFlowResult::Transfer {
+            accepted: false,
+            code: WorldTransferResultCode::StageDisabled,
+            transfer_id: None,
+            snapshot: Some(_),
+            ..
+        }
+    ));
+    assert_eq!(world_flow_row_count(persistence).await, 0);
 }
 
 type ServerTask =
@@ -309,12 +383,19 @@ async fn postgres_real_quic_server_restart_preserves_authoritative_roster() {
         .unwrap()
         .await
         .unwrap();
-    assert!(matches!(
+    let HandshakeResponse::Accepted(server_hello) =
         bot_client::perform_handshake(&connection, wire_hello(&content_root, ticket))
             .await
-            .unwrap(),
-        HandshakeResponse::Accepted(_)
-    ));
+            .unwrap()
+    else {
+        panic!("persistent Core handshake must be accepted")
+    };
+    assert!(
+        server_hello
+            .feature_flags
+            .iter()
+            .all(|flag| flag.as_str() != protocol::CORE_WORLD_FLOW_FEATURE_FLAG)
+    );
     let (_, initial) =
         bot_client::perform_account_bootstrap(&connection, wire_bootstrap(&content_root, 1))
             .await
@@ -338,6 +419,14 @@ async fn postgres_real_quic_server_restart_preserves_authoritative_roster() {
     .await
     .unwrap();
     assert!(created.accepted);
+    assert_persistent_world_flow_is_fail_closed(
+        &persistence,
+        &connection,
+        &content_root,
+        ticket,
+        &created,
+    )
+    .await;
     connection.close(0_u32.into(), b"durable restart");
     shutdown.send(()).unwrap();
     let report = task.await.unwrap().unwrap();
