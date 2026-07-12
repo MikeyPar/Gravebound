@@ -31,9 +31,11 @@ use tracing::{debug, info, warn};
 
 use crate::{
     AccountId, AccountRepository, AdmissionState, AuthenticatedAccount, AuthenticatedNamespace,
-    AuthenticationDecision, CharacterIdGenerator, HandshakePolicy, IdentityClock, IdentityService,
-    InMemoryAccountRepository, InstanceError, InstanceScheduler, NoopIdentityEventSink,
-    PostgresAccountRepository, PostgresWorldFlowLocationRepository, SERVER_SHUTDOWN_CLOSE_CODE,
+    AuthenticationDecision, CharacterIdGenerator, DisabledProgressionQueryRepository,
+    HandshakePolicy, IdentityClock, IdentityService, InMemoryAccountRepository, InstanceError,
+    InstanceScheduler, NoopIdentityEventSink, PostgresAccountRepository,
+    PostgresProgressionQueryRepository, PostgresWorldFlowLocationRepository,
+    ProgressionQueryRepository, ProgressionQueryService, SERVER_SHUTDOWN_CLOSE_CODE,
     SessionOwnerId, TransportId, WorldFlowGateService, WorldFlowLocationRepository,
     close_transport, serve_core_reliable,
 };
@@ -494,17 +496,22 @@ type CoreIdentityAuthority<R> =
 
 /// Explicit Core-development endpoint. It never creates an [`InstanceScheduler`] and therefore
 /// cannot silently route identity clients into the M02 combat laboratory.
-pub struct BoundCoreIdentityServer<R = InMemoryAccountRepository, W = InMemoryAccountRepository> {
+pub struct BoundCoreIdentityServer<
+    R = InMemoryAccountRepository,
+    W = InMemoryAccountRepository,
+    P = DisabledProgressionQueryRepository,
+> {
     endpoint: quinn::Endpoint,
     certificate: CertificateDer<'static>,
     local_address: SocketAddr,
     policy: HandshakePolicy,
     authority: Arc<CoreIdentityAuthority<R>>,
     world_flow: Arc<WorldFlowGateService<W, SystemIdentityClock>>,
+    progression: Arc<ProgressionQueryService<P>>,
     persistence_enabled: bool,
 }
 
-impl<R, W> fmt::Debug for BoundCoreIdentityServer<R, W> {
+impl<R, W, P> fmt::Debug for BoundCoreIdentityServer<R, W, P> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("BoundCoreIdentityServer")
@@ -517,29 +524,62 @@ impl<R, W> fmt::Debug for BoundCoreIdentityServer<R, W> {
 impl BoundCoreIdentityServer {
     pub fn bind(config: &CoreIdentityServerConfig) -> Result<Self, LocalServerRuntimeError> {
         let repository = InMemoryAccountRepository::default();
-        Self::bind_with_repositories(config, repository.clone(), repository, false)
+        let progression_content =
+            sim_content::load_core_development_progression(&config.content_root)
+                .map_err(|error| LocalServerRuntimeError::Content(error.to_string()))?;
+        Self::bind_with_repositories(
+            config,
+            repository.clone(),
+            repository,
+            DisabledProgressionQueryRepository,
+            &progression_content,
+            false,
+        )
     }
 }
 
-impl BoundCoreIdentityServer<PostgresAccountRepository, PostgresWorldFlowLocationRepository> {
+impl
+    BoundCoreIdentityServer<
+        PostgresAccountRepository,
+        PostgresWorldFlowLocationRepository,
+        PostgresProgressionQueryRepository,
+    >
+{
     pub fn bind_persistent(
         config: &CoreIdentityServerConfig,
         repository: PostgresAccountRepository,
     ) -> Result<Self, LocalServerRuntimeError> {
-        let world_flow = PostgresWorldFlowLocationRepository::new(repository.persistence());
-        Self::bind_with_repositories(config, repository, world_flow, true)
+        let persistence = repository.persistence();
+        let progression_content =
+            sim_content::load_core_development_progression(&config.content_root)
+                .map_err(|error| LocalServerRuntimeError::Content(error.to_string()))?;
+        let world_flow = PostgresWorldFlowLocationRepository::new(persistence.clone());
+        let progression =
+            PostgresProgressionQueryRepository::new(persistence, &progression_content)
+                .map_err(|error| LocalServerRuntimeError::Content(error.to_string()))?;
+        Self::bind_with_repositories(
+            config,
+            repository,
+            world_flow,
+            progression,
+            &progression_content,
+            true,
+        )
     }
 }
 
-impl<R, W> BoundCoreIdentityServer<R, W>
+impl<R, W, P> BoundCoreIdentityServer<R, W, P>
 where
     R: AccountRepository + 'static,
     W: WorldFlowLocationRepository + 'static,
+    P: ProgressionQueryRepository + 'static,
 {
     fn bind_with_repositories(
         config: &CoreIdentityServerConfig,
         repository: R,
         world_flow_repository: W,
+        progression_repository: P,
+        progression_content: &sim_content::CoreDevelopmentProgression,
         persistence_enabled: bool,
     ) -> Result<Self, LocalServerRuntimeError> {
         sim_content::load_core_development_identity(&config.content_root)
@@ -576,6 +616,10 @@ where
             SystemIdentityClock,
             required_manifest_hash.clone(),
         ));
+        let progression = Arc::new(
+            ProgressionQueryService::new(progression_repository, progression_content)
+                .map_err(|error| LocalServerRuntimeError::Content(error.to_string()))?,
+        );
         Ok(Self {
             endpoint,
             certificate,
@@ -583,6 +627,7 @@ where
             policy,
             authority,
             world_flow,
+            progression,
             persistence_enabled,
         })
     }
@@ -623,10 +668,11 @@ where
                     let policy = self.policy.clone();
                     let authority = Arc::clone(&self.authority);
                     let world_flow = Arc::clone(&self.world_flow);
+                    let progression = Arc::clone(&self.progression);
                     let accepted = Arc::clone(&accepted);
                     let rejected = Arc::clone(&rejected);
                     workers.spawn(async move {
-                        match serve_core_identity_connection(incoming, policy, authority, world_flow).await {
+                        match serve_core_identity_connection(incoming, policy, authority, world_flow, progression).await {
                             Ok(true) => { accepted.fetch_add(1, Ordering::Relaxed); }
                             Ok(false) => { rejected.fetch_add(1, Ordering::Relaxed); }
                             Err(error) => warn!(%error, "Core identity connection ended"),
@@ -655,15 +701,17 @@ where
     }
 }
 
-async fn serve_core_identity_connection<R, W>(
+async fn serve_core_identity_connection<R, W, P>(
     incoming: quinn::Incoming,
     policy: HandshakePolicy,
     authority: Arc<CoreIdentityAuthority<R>>,
     world_flow: Arc<WorldFlowGateService<W, SystemIdentityClock>>,
+    progression: Arc<ProgressionQueryService<P>>,
 ) -> Result<bool, LocalServerRuntimeError>
 where
     R: AccountRepository,
     W: WorldFlowLocationRepository,
+    P: ProgressionQueryRepository,
 {
     let connection = incoming.await?;
     let (mut send, mut receive) = connection.accept_bi().await?;
@@ -702,6 +750,7 @@ where
             &connection,
             authority.as_ref(),
             world_flow.as_ref(),
+            progression.as_ref(),
             authenticated,
             response_sequence,
             0,

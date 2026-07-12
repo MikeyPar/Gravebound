@@ -38,8 +38,9 @@ pub use progression_award::{
     ProgressionAwardPayload, ProgressionAwardPlan,
 };
 pub use progression_query::{
-    PostgresProgressionQueryRepository, ProgressionQueryRepository,
-    ProgressionQueryRepositoryError, ProgressionQueryService, ProgressionQuerySnapshot,
+    DisabledProgressionQueryRepository, PostgresProgressionQueryRepository,
+    ProgressionQueryRepository, ProgressionQueryRepositoryError, ProgressionQueryService,
+    ProgressionQuerySnapshot,
 };
 pub use progression_service::PostgresProgressionAwardService;
 pub use restore_point::{
@@ -421,10 +422,11 @@ where
 /// World-flow messages share the reliable transport but cannot mutate identity state, and the
 /// normal world-flow authority remains fail-closed until its downstream packages are complete.
 #[allow(clippy::too_many_arguments)]
-pub async fn serve_core_reliable<R, C, G, E, W, WC>(
+pub async fn serve_core_reliable<R, C, G, E, W, WC, P>(
     connection: &quinn::Connection,
     identity: &IdentityService<R, C, G, E>,
     world_flow: &WorldFlowGateService<W, WC>,
+    progression: &ProgressionQueryService<P>,
     authenticated: AuthenticatedAccount,
     response_sequence: u32,
     server_tick: u64,
@@ -436,6 +438,7 @@ where
     E: IdentityEventSink,
     W: WorldFlowLocationRepository,
     WC: IdentityClock,
+    P: ProgressionQueryRepository,
 {
     if response_sequence == 0 {
         return Err(ServerTransportError::UnexpectedMessage);
@@ -462,6 +465,9 @@ where
         WireMessage::WorldFlowFrame(frame) => {
             protocol::ReliableEvent::WorldFlowResult(world_flow.handle(authenticated, &frame).await)
         }
+        WireMessage::ProgressionQueryFrame(frame) => protocol::ReliableEvent::ProgressionResult(
+            progression.handle(authenticated, &frame).await,
+        ),
         _ => return Err(ServerTransportError::UnexpectedMessage),
     };
     let response = protocol::ReliableEventFrame {

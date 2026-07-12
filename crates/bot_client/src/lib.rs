@@ -9,10 +9,10 @@ pub use journey::*;
 
 use protocol::{
     AccountBootstrapFrame, AccountBootstrapResult, CharacterMutationFrame, CharacterMutationResult,
-    ClientHello, ControlEvent, HandshakeResponse, InputFrame, ProtocolVersion,
-    RELIABLE_FRAME_LIMIT, ReliableEvent, ReliableEventFrame, SIMULATION_HZ, SessionControlFrame,
-    SessionControlResult, SnapshotChunk, WireMessage, WorldFlowFrame, WorldFlowResult,
-    decode_frame, encode_frame,
+    ClientHello, ControlEvent, HandshakeResponse, InputFrame, ProgressionQueryFrame,
+    ProgressionResult, ProtocolVersion, RELIABLE_FRAME_LIMIT, ReliableEvent, ReliableEventFrame,
+    SIMULATION_HZ, SessionControlFrame, SessionControlResult, SnapshotChunk, WireMessage,
+    WorldFlowFrame, WorldFlowResult, decode_frame, encode_frame,
 };
 use thiserror::Error;
 
@@ -199,6 +199,18 @@ pub async fn perform_world_flow(
 ) -> Result<(ReliableEventFrame, WorldFlowResult), BotTransportError> {
     let event = perform_reliable_gameplay(connection, WireMessage::WorldFlowFrame(frame)).await?;
     let ReliableEvent::WorldFlowResult(result) = &event.event else {
+        return Err(BotTransportError::UnexpectedMessage);
+    };
+    Ok((event.clone(), result.clone()))
+}
+
+pub async fn perform_progression_query(
+    connection: &quinn::Connection,
+    frame: ProgressionQueryFrame,
+) -> Result<(ReliableEventFrame, ProgressionResult), BotTransportError> {
+    let event =
+        perform_reliable_gameplay(connection, WireMessage::ProgressionQueryFrame(frame)).await?;
+    let ReliableEvent::ProgressionResult(result) = &event.event else {
         return Err(BotTransportError::UnexpectedMessage);
     };
     Ok((event.clone(), result.clone()))

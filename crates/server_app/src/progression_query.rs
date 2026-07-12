@@ -33,6 +33,27 @@ pub trait ProgressionQueryRepository: Send + Sync {
     ) -> impl Future<Output = Result<ProgressionQuerySnapshot, ProgressionQueryRepositoryError>> + Send;
 }
 
+/// Explicit non-persistent adapter used only by the identity-only development endpoint.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DisabledProgressionQueryRepository;
+
+impl ProgressionQueryRepository for DisabledProgressionQueryRepository {
+    async fn character_owner(
+        &self,
+        _character_id: [u8; 16],
+    ) -> Result<Option<AccountId>, ProgressionQueryRepositoryError> {
+        Ok(None)
+    }
+
+    async fn snapshot(
+        &self,
+        _account_id: AccountId,
+        _character_id: [u8; 16],
+    ) -> Result<ProgressionQuerySnapshot, ProgressionQueryRepositoryError> {
+        Err(ProgressionQueryRepositoryError::Unavailable)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PostgresProgressionQueryRepository {
     persistence: PostgresPersistence,

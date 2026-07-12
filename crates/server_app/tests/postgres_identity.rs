@@ -11,9 +11,9 @@ use persistence::{PersistenceConfig, PostgresPersistence, WIPEABLE_CORE_NAMESPAC
 use protocol::{
     AccountBootstrapFrame, AccountBootstrapRequest, AccountBootstrapResult, AccountErrorCode,
     AuthTicket, CharacterMutationFrame, CharacterMutationPayload, ClientHello, Compression,
-    HandshakeResponse, ManifestHash, Platform, ProtocolVersion, WireText, WorldFlowFrame,
-    WorldFlowRequest, WorldFlowResult, WorldTransferCommand, WorldTransferMutation,
-    WorldTransferPayload, WorldTransferResultCode,
+    HandshakeResponse, ManifestHash, Platform, ProgressionQueryFrame, ProgressionResult,
+    ProtocolVersion, WireText, WorldFlowFrame, WorldFlowRequest, WorldFlowResult,
+    WorldTransferCommand, WorldTransferMutation, WorldTransferPayload, WorldTransferResultCode,
 };
 use server_app::{
     AccountId, AuthenticatedAccount, AuthenticatedNamespace, BoundCoreIdentityServer,
@@ -182,6 +182,34 @@ async fn assert_persistent_world_flow_is_fail_closed(
     .await
     .unwrap();
     assert!(selected.accepted);
+    let progression = sim_content::load_core_development_progression(content_root).unwrap();
+    let (_, progression_result) = bot_client::perform_progression_query(
+        connection,
+        ProgressionQueryFrame {
+            sequence: 4,
+            character_id,
+            progression_content_revision: ManifestHash::new(
+                progression.hashes().records_blake3.clone(),
+            )
+            .unwrap(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        progression_result,
+        ProgressionResult::Snapshot {
+            projection: protocol::ProgressionProjection {
+                level: 1,
+                total_xp: 0,
+                current_health: 120,
+                maximum_health: 120,
+                progression_version: 1,
+                ..
+            },
+            ..
+        }
+    ));
     assert_eq!(world_flow_row_count(persistence).await, 0);
 
     let payload = WorldTransferPayload {
