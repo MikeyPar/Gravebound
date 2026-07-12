@@ -47,7 +47,10 @@ async fn main() -> Result<()> {
         )
         .with_target(false)
         .init();
-    let command = Cli::parse().command.unwrap_or_else(default_serve_command);
+    run_command(Cli::parse().command.unwrap_or_else(default_serve_command)).await
+}
+
+async fn run_command(command: Command) -> Result<()> {
     match command {
         Command::Doctor => {
             let report = server_app::run_doctor().await?;
@@ -67,94 +70,93 @@ async fn main() -> Result<()> {
             content_root,
             certificate_out,
         } => {
-            let server = server_app::BoundLocalServer::bind(server_app::LocalServerConfig {
-                bind_address: bind,
-                content_root,
-            })?;
-            if let Some(parent) = certificate_out.parent() {
-                std::fs::create_dir_all(parent).with_context(|| {
-                    format!(
-                        "failed to create certificate directory {}",
-                        parent.display()
-                    )
-                })?;
-            }
-            std::fs::write(&certificate_out, server.certificate_der()).with_context(|| {
-                format!(
-                    "failed to write local certificate {}",
-                    certificate_out.display()
-                )
-            })?;
-            info!(
-                address = %server.local_address(),
-                certificate = %certificate_out.display(),
-                build_id = server_app::LOCAL_BUILD_ID,
-                "GB-M02 local playtest server is ready"
-            );
-            let report = server
-                .serve_until(async {
-                    if let Err(error) = tokio::signal::ctrl_c().await {
-                        tracing::error!(%error, "failed to listen for Ctrl+C");
-                    }
-                })
-                .await?;
-            info!(
-                accepted_connections = report.accepted_connections,
-                admitted_sessions = report.admitted_sessions,
-                scheduler_frames = report.scheduler_frames,
-                dropped_snapshots = report.dropped_snapshots,
-                zero_residue = report.zero_residue,
-                "GB-M02 local playtest server stopped cleanly"
-            );
+            serve_local(bind, content_root, certificate_out).await?;
         }
         Command::ServeCoreIdentity {
             bind,
             content_root,
             certificate_out,
         } => {
-            let server =
-                server_app::BoundCoreIdentityServer::bind(&server_app::CoreIdentityServerConfig {
-                    bind_address: bind,
-                    content_root,
-                })?;
-            if let Some(parent) = certificate_out.parent() {
-                std::fs::create_dir_all(parent).with_context(|| {
-                    format!(
-                        "failed to create certificate directory {}",
-                        parent.display()
-                    )
-                })?;
-            }
-            std::fs::write(&certificate_out, server.certificate_der()).with_context(|| {
-                format!(
-                    "failed to write Core identity certificate {}",
-                    certificate_out.display()
-                )
-            })?;
-            info!(
-                address = %server.local_address(),
-                certificate = %certificate_out.display(),
-                build_id = server_app::CORE_IDENTITY_BUILD_ID,
-                content_target = server_app::CORE_IDENTITY_CONTENT_TARGET,
-                "GB-M03-01B Core identity server is ready"
-            );
-            let report = server
-                .serve_until(async {
-                    if let Err(error) = tokio::signal::ctrl_c().await {
-                        tracing::error!(%error, "failed to listen for Ctrl+C");
-                    }
-                })
-                .await?;
-            info!(
-                accepted_connections = report.accepted_connections,
-                rejected_connections = report.rejected_connections,
-                combat_sessions_admitted = report.combat_sessions_admitted,
-                persistence_enabled = report.persistence_enabled,
-                "GB-M03-01B Core identity server stopped cleanly"
-            );
+            serve_core_identity(bind, content_root, certificate_out).await?;
         }
     }
     Ok(())
+}
+
+async fn serve_local(
+    bind: SocketAddr,
+    content_root: PathBuf,
+    certificate_out: PathBuf,
+) -> Result<()> {
+    let server = server_app::BoundLocalServer::bind(server_app::LocalServerConfig {
+        bind_address: bind,
+        content_root,
+    })?;
+    write_certificate(&certificate_out, server.certificate_der(), "local")?;
+    info!(
+        address = %server.local_address(),
+        certificate = %certificate_out.display(),
+        build_id = server_app::LOCAL_BUILD_ID,
+        "GB-M02 local playtest server is ready"
+    );
+    let report = server.serve_until(shutdown_signal()).await?;
+    info!(
+        accepted_connections = report.accepted_connections,
+        admitted_sessions = report.admitted_sessions,
+        scheduler_frames = report.scheduler_frames,
+        dropped_snapshots = report.dropped_snapshots,
+        zero_residue = report.zero_residue,
+        "GB-M02 local playtest server stopped cleanly"
+    );
+    Ok(())
+}
+
+async fn serve_core_identity(
+    bind: SocketAddr,
+    content_root: PathBuf,
+    certificate_out: PathBuf,
+) -> Result<()> {
+    let server =
+        server_app::BoundCoreIdentityServer::bind(&server_app::CoreIdentityServerConfig {
+            bind_address: bind,
+            content_root,
+        })?;
+    write_certificate(&certificate_out, server.certificate_der(), "Core identity")?;
+    info!(
+        address = %server.local_address(),
+        certificate = %certificate_out.display(),
+        build_id = server_app::CORE_IDENTITY_BUILD_ID,
+        content_target = server_app::CORE_IDENTITY_CONTENT_TARGET,
+        "GB-M03-01B Core identity server is ready"
+    );
+    let report = server.serve_until(shutdown_signal()).await?;
+    info!(
+        accepted_connections = report.accepted_connections,
+        rejected_connections = report.rejected_connections,
+        combat_sessions_admitted = report.combat_sessions_admitted,
+        persistence_enabled = report.persistence_enabled,
+        "GB-M03-01B Core identity server stopped cleanly"
+    );
+    Ok(())
+}
+
+fn write_certificate(path: &PathBuf, bytes: &[u8], label: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create certificate directory {}",
+                parent.display()
+            )
+        })?;
+    }
+    std::fs::write(path, bytes)
+        .with_context(|| format!("failed to write {label} certificate {}", path.display()))
+}
+
+async fn shutdown_signal() {
+    if let Err(error) = tokio::signal::ctrl_c().await {
+        tracing::error!(%error, "failed to listen for Ctrl+C");
+    }
 }
 
 fn default_serve_command() -> Command {

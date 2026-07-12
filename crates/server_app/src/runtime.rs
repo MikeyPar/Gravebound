@@ -963,7 +963,7 @@ mod tests {
             .unwrap()
             .await
             .unwrap();
-        bot_client::perform_handshake(&connection, core_hello(&content_root, ticket))
+        bot_client::perform_handshake(&connection, core_hello(content_root, ticket))
             .await
             .unwrap();
         let (_, reconnected) =
@@ -981,9 +981,13 @@ mod tests {
         assert!(!report.persistence_enabled);
         endpoint.wait_idle().await;
 
+        assert_core_restart_wipes(&content_root, ticket).await;
+    }
+
+    async fn assert_core_restart_wipes(content_root: &Path, ticket: &[u8]) {
         let restarted = BoundCoreIdentityServer::bind(&CoreIdentityServerConfig {
             bind_address: "127.0.0.1:0".parse().unwrap(),
-            content_root: content_root.clone(),
+            content_root: content_root.to_path_buf(),
         })
         .unwrap();
         let address = restarted.local_address();
@@ -1006,7 +1010,7 @@ mod tests {
             .await
             .unwrap();
         let (_, wiped) =
-            bot_client::perform_account_bootstrap(&connection, bootstrap(&content_root, 1))
+            bot_client::perform_account_bootstrap(&connection, bootstrap(content_root, 1))
                 .await
                 .unwrap();
         let AccountBootstrapResult::Snapshot(wiped) = wiped else {
