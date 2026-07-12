@@ -102,7 +102,7 @@ Concept images establish mood, hierarchy, and visual language. They are not fina
 
 ## Current Next Step
 
-Continue [`GB-M02-09`](docs/tasks/GB-M02-09.md) with the shared impairment gates and package refresh. The server suite has no quarantined ordinary fixtures: automatic LinkLost Recall now covers player-local resolution, retirement, tombstone retention, index fail-closure, and survivor continuity, while real QUIC covers typed manual-Recall rejection and zero-residue shutdown. The release-profile sixteen-bot shared soak passes for two simulated hours across four arenas with zero divergence, stalls, residue, or post-warmup leak. After the gates pass, rebuild the native package/runbook and record the four-human shared-combat evidence. Do not begin M03 until M02 closes.
+Run the four-human shared-combat session in [`GB-M02-network-gate-runbook.md`](docs/playtests/GB-M02-network-gate-runbook.md) and record the result. Automated M02 gates now pass: 68 active networking tests, 390 active workspace tests, strict Clippy, impairment/abuse suites, deterministic traces, a release-profile sixteen-bot/two-hour shared soak, clean Windows packaging, and one-server/four-client packaged process smoke. The package includes `Start All Clients.cmd` so all four credentials enter one arena before roster activation. Do not begin M03 until the human row closes M02.
 
 ## Resolved prior handoff
 

@@ -5,23 +5,27 @@
   "content_version": "fp.1.0.0",
   "server_executable": {
     "file": "server_app.exe",
-    "bytes": 5851648,
-    "sha256": "69CA5616D95945FF481046825A5B77163E6182AEF484C0C518E9E4C13E479175"
+    "bytes": 5961728,
+    "sha256": "88BF3680DACDF757C32E86023D591C8B7BE28C98290E7B3007A0E0512C62241C"
   },
   "client_executable": {
     "file": "client_bevy.exe",
-    "bytes": 66683392,
-    "sha256": "DD4F67CF6223E9162A9AAEC70DB27C28281EED1C499BA2A5CBE73BB37FAC504C"
+    "bytes": 66736640,
+    "sha256": "620BC7EE3DB7DE0F8CA71EDB803E5EBF538983AEB3E843ABF16E6B772919D098"
   },
-  "networking_tests_passed": 69,
-  "workspace_tests_passed": 381,
+  "networking_tests_passed": 68,
+  "networking_tests_enumerated": 69,
+  "workspace_tests_passed": 390,
+  "workspace_tests_enumerated": 391,
   "ordinary_ci_ignored_tests": 1,
-  "four_client_route_smoke": true,
+  "four_client_shared_world_smoke": true,
+  "packaged_four_client_process_smoke": true,
+  "all_client_launcher_present": true,
   "zero_server_residue": true,
   "native_server_launched": true,
   "native_client_window_title": "Gravebound - M02 Network Playtest",
   "visual_capture_available": false,
   "visual_capture_error": "0x80004002: No such interface supported",
   "human_gate_complete": false,
-  "spec_conflict_resolved": false
+  "spec_conflict_resolved": true
 }
