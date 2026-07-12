@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CoreProgressionDevelopmentTarget",
+  "description": "Independently hashed progression target. It is not a release manifest and cannot be promoted.",
+  "type": "object",
+  "properties": {
+    "expected_localization_blake3": {
+      "type": "string"
+    },
+    "expected_records_blake3": {
+      "type": "string"
+    },
+    "required_class_progression_ids": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ContentId"
+      }
+    },
+    "required_curve_ids": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ContentId"
+      }
+    },
+    "required_source_binding_ids": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ContentId"
+      }
+    },
+    "required_xp_profile_ids": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ContentId"
+      }
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "target_kind": {
+      "$ref": "#/$defs/CoreProgressionTargetKind"
+    },
+    "target_name": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "target_kind",
+    "target_name",
+    "required_curve_ids",
+    "required_class_progression_ids",
+    "required_xp_profile_ids",
+    "required_source_binding_ids",
+    "expected_records_blake3",
+    "expected_localization_blake3"
+  ],
+  "$defs": {
+    "ContentId": {
+      "description": "Stable dot-separated content identifier.",
+      "type": "string"
+    },
+    "CoreProgressionTargetKind": {
+      "type": "string",
+      "enum": [
+        "unpromoted_progression_subset"
+      ]
+    }
+  }
+}

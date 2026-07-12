@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "target_kind": "unpromoted_progression_subset",
+  "target_name": "core-dev-progression",
+  "required_curve_ids": ["progression.curve.core_1_10"],
+  "required_class_progression_ids": ["progression.class.grave_arbalist.core"],
+  "required_xp_profile_ids": [
+    "xp.normal_t1",
+    "xp.normal_t2",
+    "xp.normal_t3",
+    "xp.realm_elite",
+    "xp.miniboss_t1",
+    "xp.miniboss_t2",
+    "xp.miniboss_t3",
+    "xp.event_minor",
+    "xp.event_major",
+    "xp.boss_caldus",
+    "xp.boss_veyr",
+    "xp.boss_confessor",
+    "xp.world_warden"
+  ],
+  "required_source_binding_ids": [
+    "xp.binding.enemy.drowned_pilgrim",
+    "xp.binding.enemy.bell_reed",
+    "xp.binding.enemy.chain_sentry",
+    "xp.binding.miniboss.sepulcher_knight",
+    "xp.binding.miniboss.choir_abbot",
+    "xp.binding.boss.sir_caldus"
+  ],
+  "expected_records_blake3": "051f86a69b9d2a9dd911f0d92bf53b40e460ef13c9058d6f0b1f32f11b226f95",
+  "expected_localization_blake3": "ced1d2e2845d207dad86ffd463cfdf171a46495f9006efa8571f70ad7ded0edf"
+}

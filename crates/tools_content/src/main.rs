@@ -44,6 +44,12 @@ enum Command {
         #[arg(long, default_value = "content")]
         root: PathBuf,
     },
+    /// Validate the independently hashed, non-promotable Core progression target.
+    ValidateCoreProgression {
+        /// Content root containing the immutable FP source and `core_dev` files.
+        #[arg(long, default_value = "content")]
+        root: PathBuf,
+    },
     /// Regenerate checked-in JSON Schema contracts.
     GenerateSchemas {
         /// Destination directory for generated schemas.
@@ -76,9 +82,24 @@ fn main() -> Result<()> {
         } => run_trace_command(&fixture, golden, no_verify)?,
         Command::Validate { root } => validate_content_command(&root)?,
         Command::ValidateCoreWorldFlow { root } => validate_core_world_flow_command(&root)?,
+        Command::ValidateCoreProgression { root } => validate_core_progression_command(&root)?,
         Command::GenerateSchemas { output } => generate_schemas_command(&output)?,
     }
 
+    Ok(())
+}
+
+fn validate_core_progression_command(root: &std::path::Path) -> Result<()> {
+    let compiled = sim_content::load_core_development_progression(root)?;
+    info!(
+        target = compiled.target_name(),
+        xp_cap = compiled.level_curve().xp_cap(),
+        profiles = compiled.xp_profiles().len(),
+        source_bindings = compiled.source_bindings().len(),
+        records_blake3 = compiled.hashes().records_blake3,
+        localization_blake3 = compiled.hashes().localization_blake3,
+        "unpromoted Core progression target is valid"
+    );
     Ok(())
 }
 
@@ -181,6 +202,14 @@ fn generate_schemas_command(output: &std::path::Path) -> Result<()> {
     write_schema::<content_schema::CoreWorldFlowCopyFile>(
         output,
         "core_world_flow_copy.schema.json",
+    )?;
+    write_schema::<content_schema::CoreProgressionDevelopmentTarget>(
+        output,
+        "core_progression_target.schema.json",
+    )?;
+    write_schema::<content_schema::CoreProgressionRecords>(
+        output,
+        "core_progression_records.schema.json",
     )?;
     info!(output = %output.display(), "JSON schemas generated");
     Ok(())

@@ -1,0 +1,383 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CoreProgressionRecords",
+  "type": "object",
+  "properties": {
+    "class_progression": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CoreClassProgressionRecord"
+      }
+    },
+    "level_curves": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CoreLevelCurveRecord"
+      }
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "source_bindings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CoreXpSourceBinding"
+      }
+    },
+    "xp_profiles": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CoreXpProfileRecord"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "level_curves",
+    "class_progression",
+    "xp_profiles",
+    "source_bindings"
+  ],
+  "$defs": {
+    "ContentId": {
+      "description": "Stable dot-separated content identifier.",
+      "type": "string"
+    },
+    "CoreClassProgressionRecord": {
+      "description": "Metadata shared by unpromoted Core world-flow records.",
+      "type": "object",
+      "properties": {
+        "armor_growth_levels": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0
+          }
+        },
+        "asset_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContentId"
+          }
+        },
+        "class_id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "earliest_release_stage": {
+          "$ref": "#/$defs/ReleaseStage"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "health_per_level_after_one": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "level_curve_id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "level_damage_growth_basis_points": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "localization_description_key": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "localization_name_key": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "movement_milli_tiles_per_second": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "source_document_feature_id": {
+          "type": "string"
+        },
+        "starting_armor": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "starting_maximum_health": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "schema_version",
+        "enabled",
+        "earliest_release_stage",
+        "localization_name_key",
+        "localization_description_key",
+        "asset_ids",
+        "tags",
+        "source_document_feature_id",
+        "class_id",
+        "level_curve_id",
+        "starting_maximum_health",
+        "health_per_level_after_one",
+        "starting_armor",
+        "armor_growth_levels",
+        "movement_milli_tiles_per_second",
+        "level_damage_growth_basis_points"
+      ]
+    },
+    "CoreLevelCurveRecord": {
+      "description": "Metadata shared by unpromoted Core world-flow records.",
+      "type": "object",
+      "properties": {
+        "asset_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContentId"
+          }
+        },
+        "cumulative_xp": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          }
+        },
+        "earliest_release_stage": {
+          "$ref": "#/$defs/ReleaseStage"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "localization_description_key": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "localization_name_key": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "source_document_feature_id": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "schema_version",
+        "enabled",
+        "earliest_release_stage",
+        "localization_name_key",
+        "localization_description_key",
+        "asset_ids",
+        "tags",
+        "source_document_feature_id",
+        "cumulative_xp"
+      ]
+    },
+    "CoreXpEligibilityKind": {
+      "type": "string",
+      "enum": [
+        "ordinary_enemy",
+        "encounter_contribution"
+      ]
+    },
+    "CoreXpProfileRecord": {
+      "description": "Metadata shared by unpromoted Core world-flow records.",
+      "type": "object",
+      "properties": {
+        "asset_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContentId"
+          }
+        },
+        "base_xp": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "earliest_release_stage": {
+          "$ref": "#/$defs/ReleaseStage"
+        },
+        "eligibility_kind": {
+          "$ref": "#/$defs/CoreXpEligibilityKind"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "first_account_clear_bonus_basis_points": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "localization_description_key": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "localization_name_key": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "source_document_feature_id": {
+          "type": "string"
+        },
+        "source_kind": {
+          "$ref": "#/$defs/CoreXpSourceKind"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "schema_version",
+        "enabled",
+        "earliest_release_stage",
+        "localization_name_key",
+        "localization_description_key",
+        "asset_ids",
+        "tags",
+        "source_document_feature_id",
+        "source_kind",
+        "eligibility_kind",
+        "base_xp",
+        "first_account_clear_bonus_basis_points"
+      ]
+    },
+    "CoreXpSourceBinding": {
+      "description": "Metadata shared by unpromoted Core world-flow records.",
+      "type": "object",
+      "properties": {
+        "asset_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContentId"
+          }
+        },
+        "authored_core_enabled": {
+          "type": "boolean"
+        },
+        "earliest_release_stage": {
+          "$ref": "#/$defs/ReleaseStage"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "localization_description_key": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "localization_name_key": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "source_document_feature_id": {
+          "type": "string"
+        },
+        "source_id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "xp_profile_id": {
+          "$ref": "#/$defs/ContentId"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "schema_version",
+        "enabled",
+        "earliest_release_stage",
+        "localization_name_key",
+        "localization_description_key",
+        "asset_ids",
+        "tags",
+        "source_document_feature_id",
+        "source_id",
+        "xp_profile_id",
+        "authored_core_enabled"
+      ]
+    },
+    "CoreXpSourceKind": {
+      "type": "string",
+      "enum": [
+        "normal_enemy",
+        "realm_elite",
+        "miniboss",
+        "event",
+        "boss",
+        "world_climax"
+      ]
+    },
+    "ReleaseStage": {
+      "description": "Earliest release stage that may enable a record.",
+      "type": "string",
+      "enum": [
+        "fp",
+        "core",
+        "slice",
+        "alpha",
+        "playtest",
+        "ea"
+      ]
+    }
+  }
+}

@@ -26,6 +26,7 @@ mod movement;
 mod normal_wave;
 mod pattern;
 mod performance;
+mod progression;
 mod readability;
 mod rng;
 mod shared_authority;
@@ -165,6 +166,15 @@ pub use performance::{
     PerformanceReportError, StressFixture, StressFixtureConfig, StressFixtureSnapshot,
     TARGET_ENEMY_COUNT, TARGET_HOSTILE_PROJECTILE_COUNT, TargetHardware,
     run_bell_proctor_reliability_fixture,
+};
+pub use progression::{
+    CORE_LEVEL_COUNT, CoreProgressionError, CoreProgressionGrant, CoreProgressionState,
+    EncounterXpEvidence, GraveArbalistLevelStats, GraveArbalistProgressionDefinition, LevelCurve,
+    NORMAL_XP_CONTRIBUTION_WINDOW_TICKS, NORMAL_XP_RADIUS_MILLI_TILES, NormalXpEvidence,
+    RewardLifeState, RewardRecallState, RewardTrustState, SOC_INACTIVITY_LIMIT_TICKS,
+    SOC_SHORT_ENCOUNTER_TICKS, XpEligibility, apply_core_xp, evaluate_encounter_xp_eligibility,
+    evaluate_normal_xp_eligibility, first_clear_bonus, grave_arbalist_level_stats,
+    rebuild_current_health,
 };
 pub use readability::{
     CombatEffectLayer, GrayscaleSignature, HostileReadabilityManifest, HostileReadabilityProfile,

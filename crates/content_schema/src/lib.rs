@@ -603,6 +603,99 @@ pub struct CoreDevelopmentTarget {
     pub presentation_asset_ids: Vec<ContentId>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CoreProgressionTargetKind {
+    UnpromotedProgressionSubset,
+}
+
+/// Independently hashed progression target. It is not a release manifest and cannot be promoted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CoreProgressionDevelopmentTarget {
+    pub schema_version: u32,
+    pub target_kind: CoreProgressionTargetKind,
+    pub target_name: String,
+    pub required_curve_ids: Vec<ContentId>,
+    pub required_class_progression_ids: Vec<ContentId>,
+    pub required_xp_profile_ids: Vec<ContentId>,
+    pub required_source_binding_ids: Vec<ContentId>,
+    pub expected_records_blake3: String,
+    pub expected_localization_blake3: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CoreLevelCurveRecord {
+    #[serde(flatten)]
+    pub header: CoreDevelopmentHeader,
+    pub cumulative_xp: Vec<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CoreClassProgressionRecord {
+    #[serde(flatten)]
+    pub header: CoreDevelopmentHeader,
+    pub class_id: ContentId,
+    pub level_curve_id: ContentId,
+    pub starting_maximum_health: u32,
+    pub health_per_level_after_one: u32,
+    pub starting_armor: u16,
+    pub armor_growth_levels: Vec<u16>,
+    pub movement_milli_tiles_per_second: u32,
+    pub level_damage_growth_basis_points: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CoreXpSourceKind {
+    NormalEnemy,
+    RealmElite,
+    Miniboss,
+    Event,
+    Boss,
+    WorldClimax,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CoreXpEligibilityKind {
+    OrdinaryEnemy,
+    EncounterContribution,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CoreXpProfileRecord {
+    #[serde(flatten)]
+    pub header: CoreDevelopmentHeader,
+    pub source_kind: CoreXpSourceKind,
+    pub eligibility_kind: CoreXpEligibilityKind,
+    pub base_xp: u32,
+    pub first_account_clear_bonus_basis_points: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CoreXpSourceBinding {
+    #[serde(flatten)]
+    pub header: CoreDevelopmentHeader,
+    pub source_id: ContentId,
+    pub xp_profile_id: ContentId,
+    pub authored_core_enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CoreProgressionRecords {
+    pub schema_version: u32,
+    pub level_curves: Vec<CoreLevelCurveRecord>,
+    pub class_progression: Vec<CoreClassProgressionRecord>,
+    pub xp_profiles: Vec<CoreXpProfileRecord>,
+    pub source_bindings: Vec<CoreXpSourceBinding>,
+}
+
 /// Identifies a world-flow compiler input that cannot be promoted or loaded as a release bundle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -1016,6 +1109,29 @@ mod tests {
                 "core_world_flow_copy.schema.json",
                 serde_json::to_value(schemars::schema_for!(CoreWorldFlowCopyFile))
                     .expect("serializable copy schema"),
+            ),
+        ];
+        for (name, generated) in cases {
+            let text = fs::read_to_string(schema_root.join(name)).expect("checked-in schema");
+            let checked_in: serde_json::Value =
+                serde_json::from_str(&text).expect("valid checked-in schema");
+            assert_eq!(checked_in, generated, "schema drift in {name}");
+        }
+    }
+
+    #[test]
+    fn checked_in_core_progression_schemas_match_the_rust_contracts() {
+        let schema_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../schemas");
+        let cases = [
+            (
+                "core_progression_target.schema.json",
+                serde_json::to_value(schemars::schema_for!(CoreProgressionDevelopmentTarget))
+                    .expect("serializable progression target schema"),
+            ),
+            (
+                "core_progression_records.schema.json",
+                serde_json::to_value(schemars::schema_for!(CoreProgressionRecords))
+                    .expect("serializable progression records schema"),
             ),
         ];
         for (name, generated) in cases {

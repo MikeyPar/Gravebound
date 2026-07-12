@@ -1,0 +1,188 @@
+{
+  "schema_version": 1,
+  "level_curves": [
+    {
+      "id": "progression.curve.core_1_10",
+      "schema_version": 1,
+      "enabled": true,
+      "earliest_release_stage": "core",
+      "localization_name_key": "progression.curve.core_1_10.name",
+      "localization_description_key": "progression.curve.core_1_10.description",
+      "asset_ids": [],
+      "tags": ["progression", "level_curve", "wipeable_core"],
+      "source_document_feature_id": "PROG-002",
+      "cumulative_xp": [0, 100, 250, 450, 700, 1000, 1350, 1750, 2200, 2700]
+    }
+  ],
+  "class_progression": [
+    {
+      "id": "progression.class.grave_arbalist.core",
+      "schema_version": 1,
+      "enabled": true,
+      "earliest_release_stage": "core",
+      "localization_name_key": "progression.class.grave_arbalist.core.name",
+      "localization_description_key": "progression.class.grave_arbalist.core.description",
+      "asset_ids": [],
+      "tags": ["progression", "class", "grave_arbalist"],
+      "source_document_feature_id": "CLS-020",
+      "class_id": "class.grave_arbalist",
+      "level_curve_id": "progression.curve.core_1_10",
+      "starting_maximum_health": 120,
+      "health_per_level_after_one": 4,
+      "starting_armor": 2,
+      "armor_growth_levels": [7, 14],
+      "movement_milli_tiles_per_second": 5100,
+      "level_damage_growth_basis_points": 150
+    }
+  ],
+  "xp_profiles": [
+    {
+      "id": "xp.normal_t1", "schema_version": 1, "enabled": true,
+      "earliest_release_stage": "core", "localization_name_key": "xp.normal_t1.name",
+      "localization_description_key": "xp.normal_t1.description", "asset_ids": [],
+      "tags": ["xp", "normal_enemy", "tier_1"], "source_document_feature_id": "CONT-ENEMY-002",
+      "source_kind": "normal_enemy", "eligibility_kind": "ordinary_enemy", "base_xp": 5,
+      "first_account_clear_bonus_basis_points": 0
+    },
+    {
+      "id": "xp.normal_t2", "schema_version": 1, "enabled": false,
+      "earliest_release_stage": "slice", "localization_name_key": "xp.normal_t2.name",
+      "localization_description_key": "xp.normal_t2.description", "asset_ids": [],
+      "tags": ["xp", "normal_enemy", "tier_2"], "source_document_feature_id": "CONT-ENEMY-002",
+      "source_kind": "normal_enemy", "eligibility_kind": "ordinary_enemy", "base_xp": 10,
+      "first_account_clear_bonus_basis_points": 0
+    },
+    {
+      "id": "xp.normal_t3", "schema_version": 1, "enabled": false,
+      "earliest_release_stage": "alpha", "localization_name_key": "xp.normal_t3.name",
+      "localization_description_key": "xp.normal_t3.description", "asset_ids": [],
+      "tags": ["xp", "normal_enemy", "tier_3"], "source_document_feature_id": "CONT-ENEMY-002",
+      "source_kind": "normal_enemy", "eligibility_kind": "ordinary_enemy", "base_xp": 15,
+      "first_account_clear_bonus_basis_points": 0
+    },
+    {
+      "id": "xp.realm_elite", "schema_version": 1, "enabled": false,
+      "earliest_release_stage": "slice", "localization_name_key": "xp.realm_elite.name",
+      "localization_description_key": "xp.realm_elite.description", "asset_ids": [],
+      "tags": ["xp", "realm", "elite"], "source_document_feature_id": "CONT-ENEMY-002",
+      "source_kind": "realm_elite", "eligibility_kind": "encounter_contribution", "base_xp": 60,
+      "first_account_clear_bonus_basis_points": 0
+    },
+    {
+      "id": "xp.miniboss_t1", "schema_version": 1, "enabled": true,
+      "earliest_release_stage": "core", "localization_name_key": "xp.miniboss_t1.name",
+      "localization_description_key": "xp.miniboss_t1.description", "asset_ids": [],
+      "tags": ["xp", "miniboss", "tier_1"], "source_document_feature_id": "CONT-ENEMY-002",
+      "source_kind": "miniboss", "eligibility_kind": "encounter_contribution", "base_xp": 120,
+      "first_account_clear_bonus_basis_points": 0
+    },
+    {
+      "id": "xp.miniboss_t2", "schema_version": 1, "enabled": false,
+      "earliest_release_stage": "slice", "localization_name_key": "xp.miniboss_t2.name",
+      "localization_description_key": "xp.miniboss_t2.description", "asset_ids": [],
+      "tags": ["xp", "miniboss", "tier_2"], "source_document_feature_id": "CONT-ENEMY-002",
+      "source_kind": "miniboss", "eligibility_kind": "encounter_contribution", "base_xp": 220,
+      "first_account_clear_bonus_basis_points": 0
+    },
+    {
+      "id": "xp.miniboss_t3", "schema_version": 1, "enabled": false,
+      "earliest_release_stage": "alpha", "localization_name_key": "xp.miniboss_t3.name",
+      "localization_description_key": "xp.miniboss_t3.description", "asset_ids": [],
+      "tags": ["xp", "miniboss", "tier_3"], "source_document_feature_id": "CONT-ENEMY-002",
+      "source_kind": "miniboss", "eligibility_kind": "encounter_contribution", "base_xp": 350,
+      "first_account_clear_bonus_basis_points": 0
+    },
+    {
+      "id": "xp.event_minor", "schema_version": 1, "enabled": false,
+      "earliest_release_stage": "slice", "localization_name_key": "xp.event_minor.name",
+      "localization_description_key": "xp.event_minor.description", "asset_ids": [],
+      "tags": ["xp", "event", "minor"], "source_document_feature_id": "CONT-WORLD-007",
+      "source_kind": "event", "eligibility_kind": "encounter_contribution", "base_xp": 120,
+      "first_account_clear_bonus_basis_points": 0
+    },
+    {
+      "id": "xp.event_major", "schema_version": 1, "enabled": false,
+      "earliest_release_stage": "slice", "localization_name_key": "xp.event_major.name",
+      "localization_description_key": "xp.event_major.description", "asset_ids": [],
+      "tags": ["xp", "event", "major"], "source_document_feature_id": "CONT-WORLD-007",
+      "source_kind": "event", "eligibility_kind": "encounter_contribution", "base_xp": 300,
+      "first_account_clear_bonus_basis_points": 0
+    },
+    {
+      "id": "xp.boss_caldus", "schema_version": 1, "enabled": true,
+      "earliest_release_stage": "core", "localization_name_key": "xp.boss_caldus.name",
+      "localization_description_key": "xp.boss_caldus.description", "asset_ids": [],
+      "tags": ["xp", "boss", "tier_1"], "source_document_feature_id": "CONT-ENEMY-002",
+      "source_kind": "boss", "eligibility_kind": "encounter_contribution", "base_xp": 450,
+      "first_account_clear_bonus_basis_points": 5000
+    },
+    {
+      "id": "xp.boss_veyr", "schema_version": 1, "enabled": false,
+      "earliest_release_stage": "slice", "localization_name_key": "xp.boss_veyr.name",
+      "localization_description_key": "xp.boss_veyr.description", "asset_ids": [],
+      "tags": ["xp", "boss", "tier_2"], "source_document_feature_id": "CONT-ENEMY-002",
+      "source_kind": "boss", "eligibility_kind": "encounter_contribution", "base_xp": 800,
+      "first_account_clear_bonus_basis_points": 5000
+    },
+    {
+      "id": "xp.boss_confessor", "schema_version": 1, "enabled": false,
+      "earliest_release_stage": "alpha", "localization_name_key": "xp.boss_confessor.name",
+      "localization_description_key": "xp.boss_confessor.description", "asset_ids": [],
+      "tags": ["xp", "boss", "tier_3"], "source_document_feature_id": "CONT-ENEMY-002",
+      "source_kind": "boss", "eligibility_kind": "encounter_contribution", "base_xp": 1200,
+      "first_account_clear_bonus_basis_points": 5000
+    },
+    {
+      "id": "xp.world_warden", "schema_version": 1, "enabled": false,
+      "earliest_release_stage": "alpha", "localization_name_key": "xp.world_warden.name",
+      "localization_description_key": "xp.world_warden.description", "asset_ids": [],
+      "tags": ["xp", "world_climax", "warden"], "source_document_feature_id": "CONT-ENEMY-002",
+      "source_kind": "world_climax", "eligibility_kind": "encounter_contribution", "base_xp": 1500,
+      "first_account_clear_bonus_basis_points": 5000
+    }
+  ],
+  "source_bindings": [
+    {
+      "id": "xp.binding.enemy.drowned_pilgrim", "schema_version": 1, "enabled": true,
+      "earliest_release_stage": "core", "localization_name_key": "xp.binding.enemy.drowned_pilgrim.name",
+      "localization_description_key": "xp.binding.enemy.drowned_pilgrim.description", "asset_ids": [],
+      "tags": ["xp", "binding", "normal_enemy"], "source_document_feature_id": "CONT-ENEMY-002",
+      "source_id": "enemy.drowned_pilgrim", "xp_profile_id": "xp.normal_t1", "authored_core_enabled": true
+    },
+    {
+      "id": "xp.binding.enemy.bell_reed", "schema_version": 1, "enabled": true,
+      "earliest_release_stage": "core", "localization_name_key": "xp.binding.enemy.bell_reed.name",
+      "localization_description_key": "xp.binding.enemy.bell_reed.description", "asset_ids": [],
+      "tags": ["xp", "binding", "normal_enemy"], "source_document_feature_id": "CONT-ENEMY-002",
+      "source_id": "enemy.bell_reed", "xp_profile_id": "xp.normal_t1", "authored_core_enabled": true
+    },
+    {
+      "id": "xp.binding.enemy.chain_sentry", "schema_version": 1, "enabled": true,
+      "earliest_release_stage": "core", "localization_name_key": "xp.binding.enemy.chain_sentry.name",
+      "localization_description_key": "xp.binding.enemy.chain_sentry.description", "asset_ids": [],
+      "tags": ["xp", "binding", "normal_enemy"], "source_document_feature_id": "CONT-ENEMY-002",
+      "source_id": "enemy.chain_sentry", "xp_profile_id": "xp.normal_t1", "authored_core_enabled": true
+    },
+    {
+      "id": "xp.binding.miniboss.sepulcher_knight", "schema_version": 1, "enabled": true,
+      "earliest_release_stage": "core", "localization_name_key": "xp.binding.miniboss.sepulcher_knight.name",
+      "localization_description_key": "xp.binding.miniboss.sepulcher_knight.description", "asset_ids": [],
+      "tags": ["xp", "binding", "miniboss"], "source_document_feature_id": "CONT-ENEMY-003",
+      "source_id": "miniboss.sepulcher_knight", "xp_profile_id": "xp.miniboss_t1", "authored_core_enabled": true
+    },
+    {
+      "id": "xp.binding.miniboss.choir_abbot", "schema_version": 1, "enabled": true,
+      "earliest_release_stage": "core", "localization_name_key": "xp.binding.miniboss.choir_abbot.name",
+      "localization_description_key": "xp.binding.miniboss.choir_abbot.description", "asset_ids": [],
+      "tags": ["xp", "binding", "miniboss"], "source_document_feature_id": "CONT-ENEMY-003",
+      "source_id": "miniboss.choir_abbot", "xp_profile_id": "xp.miniboss_t1", "authored_core_enabled": true
+    },
+    {
+      "id": "xp.binding.boss.sir_caldus", "schema_version": 1, "enabled": true,
+      "earliest_release_stage": "core", "localization_name_key": "xp.binding.boss.sir_caldus.name",
+      "localization_description_key": "xp.binding.boss.sir_caldus.description", "asset_ids": [],
+      "tags": ["xp", "binding", "boss"], "source_document_feature_id": "CONT-ENEMY-003",
+      "source_id": "boss.sir_caldus", "xp_profile_id": "xp.boss_caldus", "authored_core_enabled": true
+    }
+  ]
+}
