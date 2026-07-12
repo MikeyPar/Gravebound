@@ -174,6 +174,37 @@ impl CoreProgressionRules {
         &self.records_revision
     }
 
+    #[must_use]
+    pub fn profile_id_for_source(&self, source_content_id: &str) -> Option<&str> {
+        self.bindings.get(source_content_id).map(String::as_str)
+    }
+
+    #[must_use]
+    pub fn first_clear_boss_id_for_source<'a>(
+        &self,
+        source_content_id: &'a str,
+    ) -> Option<&'a str> {
+        let profile = self
+            .profile_id_for_source(source_content_id)
+            .and_then(|profile_id| self.profiles.get(profile_id))?;
+        (profile.enabled
+            && matches!(
+                profile.source_kind,
+                CoreXpSourceKind::Boss | CoreXpSourceKind::WorldClimax
+            )
+            && profile.first_clear_bonus_basis_points == 5_000)
+            .then_some(source_content_id)
+    }
+
+    pub fn project(
+        &self,
+        character_id: [u8; ID_BYTES],
+        context: ProgressionAwardContext,
+    ) -> Result<ProgressionProjection, ProgressionAwardError> {
+        context.progression.validate(self.curve)?;
+        self.projection(character_id, context)
+    }
+
     pub fn plan_fresh(
         &self,
         command: &ProgressionAwardCommand,
@@ -234,16 +265,20 @@ impl CoreProgressionRules {
         if !profile.enabled {
             return Ok(reject(ProgressionAwardCode::SourceDisabled));
         }
-        let eligible = match (profile.eligibility_kind, command.payload.evidence) {
+        let eligibility = match (profile.eligibility_kind, command.payload.evidence) {
             (
                 CoreXpEligibilityKind::OrdinaryEnemy,
                 ProgressionAwardEvidence::Ordinary(evidence),
-            ) => evaluate_normal_xp_eligibility(evidence)?.eligible,
+            ) => evaluate_normal_xp_eligibility(evidence),
             (
                 CoreXpEligibilityKind::EncounterContribution,
                 ProgressionAwardEvidence::Encounter(evidence),
-            ) => evaluate_encounter_xp_eligibility(evidence)?.eligible,
+            ) => evaluate_encounter_xp_eligibility(evidence),
             _ => return Ok(reject(ProgressionAwardCode::InvalidEvidence)),
+        };
+        let eligible = match eligibility {
+            Ok(value) => value.eligible,
+            Err(_) => return Ok(reject(ProgressionAwardCode::InvalidEvidence)),
         };
         if !eligible {
             let mut plan = reject(ProgressionAwardCode::NotEligible);
