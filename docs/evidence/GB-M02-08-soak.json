@@ -7,46 +7,46 @@
   "bot_count": 16,
   "scheduler_frames": 216000,
   "simulated_seconds": 7200,
-  "session_generations": 7588,
+  "session_generations": 16,
   "inputs": 3456000,
   "snapshot_chunks": 1728000,
-  "accepted_mutations": 5684,
-  "recalls": 5684,
-  "deaths": 1888,
+  "accepted_mutations": 16,
+  "recalls": 0,
+  "deaths": 0,
   "reconnects": 128,
-  "maximum_instances": 1,
+  "maximum_instances": 4,
   "maximum_owners": 16,
-  "allocated_instances": 119,
-  "closed_instances": 119,
-  "retired_sessions": 7572,
+  "allocated_instances": 4,
+  "closed_instances": 4,
+  "retired_sessions": 0,
   "invalid_states": 0,
   "simulation_stalls": 0,
   "state_divergences": 0,
-  "mean_tick_micros": 129,
-  "p95_tick_micros": 191,
-  "p99_tick_micros": 228,
-  "maximum_tick_micros": 2991,
-  "mean_headroom_basis_points": 9961,
+  "mean_tick_micros": 57,
+  "p95_tick_micros": 79,
+  "p99_tick_micros": 105,
+  "maximum_tick_micros": 1823,
+  "mean_headroom_basis_points": 9982,
   "resident_memory_samples": [
     {
       "simulated_tick": 0,
-      "resident_bytes": 7806976
+      "resident_bytes": 7581696
     },
     {
       "simulated_tick": 54000,
-      "resident_bytes": 8949760
+      "resident_bytes": 8622080
     },
     {
       "simulated_tick": 108000,
-      "resident_bytes": 9334784
+      "resident_bytes": 9015296
     },
     {
       "simulated_tick": 162000,
-      "resident_bytes": 9895936
+      "resident_bytes": 9474048
     },
     {
       "simulated_tick": 216000,
-      "resident_bytes": 10182656
+      "resident_bytes": 9854976
     }
   ],
   "post_warmup_growth_bytes": 1232896,

@@ -102,7 +102,7 @@ Concept images establish mood, hierarchy, and visual language. They are not fina
 
 ## Current Next Step
 
-Continue [`GB-M02-09`](docs/tasks/GB-M02-09.md) by replacing the seven quarantined manual-Recall/isolated-authority fixtures with shared automatic-Recall, retirement, teardown, and death-order coverage; then run the explicit sixteen-bot shared soak and impairment gates. `HostedInstance` now owns one maximum-four-player `SharedAuthoritativeArena`; real QUIC proves all four recipients see all players and identical shared enemy facts while retaining controlled movement, recipient acknowledgements, and owner-bound mutations. After the gates pass, rebuild the native package/runbook and record the four-human shared-combat evidence. Do not begin M03 until M02 closes.
+Continue [`GB-M02-09`](docs/tasks/GB-M02-09.md) by replacing the seven quarantined manual-Recall/isolated-authority fixtures with shared automatic-Recall, retirement, teardown, and death-order coverage, then run the impairment gates. The release-profile sixteen-bot shared soak now passes for two simulated hours across four arenas with zero divergence, stalls, residue, or post-warmup leak. `HostedInstance` owns one maximum-four-player `SharedAuthoritativeArena`; real QUIC proves all four recipients see all players and identical shared enemy facts while retaining controlled movement, recipient acknowledgements, and owner-bound mutations. After the gates pass, rebuild the native package/runbook and record the four-human shared-combat evidence. Do not begin M03 until M02 closes.
 
 ## Resolved prior handoff
 

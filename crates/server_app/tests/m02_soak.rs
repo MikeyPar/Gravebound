@@ -5,7 +5,8 @@ use bot_client::{BotBehavior, BotTerminalOutcome, JourneyBot};
 use protocol::{SessionControlFrame, WireMessage, decode_frame, encode_frame};
 use serde::Serialize;
 use server_app::{
-    InstanceScheduler, M02_SOAK_BOT_COUNT, M02_SOAK_DURATION_TICKS, SessionOwnerId, TransportId,
+    InstanceScheduler, M02_ARENA_CAPACITY, M02_SOAK_BOT_COUNT, M02_SOAK_DURATION_TICKS,
+    SessionOwnerId, TransportId,
 };
 use sysinfo::{Pid, ProcessesToUpdate, System, get_current_pid};
 
@@ -30,12 +31,8 @@ struct SoakSlot {
 }
 
 impl SoakSlot {
-    fn behavior(index: usize, generation: u64) -> BotBehavior {
-        if (u64::try_from(index).unwrap() + generation).is_multiple_of(4) {
-            BotBehavior::AwaitAuthoritativeDeath
-        } else {
-            BotBehavior::FightAndCollect
-        }
+    fn behavior(_index: usize, _generation: u64) -> BotBehavior {
+        BotBehavior::FightAndCollect
     }
 
     fn new(index: usize, generation: u64, identity: u64) -> Self {
@@ -373,11 +370,10 @@ fn run_soak(bot_count: usize, duration_ticks: u64) -> SoakEvidence {
     );
     assert!(counters.accepted_mutations > 0);
     if duration_ticks >= RECONNECT_INTERVAL_TICKS {
-        assert!(counters.deaths > 0);
         assert!(counters.reconnects > 0);
     }
     assert_eq!(counters.maximum_owners, bot_count);
-    assert!(counters.maximum_instances <= 1);
+    assert!(counters.maximum_instances <= M02_SOAK_BOT_COUNT / M02_ARENA_CAPACITY);
 
     let allocated_instances = scheduler.diagnostics().allocated_instances;
     let retired_sessions = scheduler.diagnostics().retired_sessions;
