@@ -6,17 +6,17 @@
   "server_executable": {
     "file": "server_app.exe",
     "bytes": 5961728,
-    "sha256": "88BF3680DACDF757C32E86023D591C8B7BE28C98290E7B3007A0E0512C62241C"
+    "sha256": "0843BE465D1EF6EDFDB08E6FDFB0C0FE8DE67F0085620591F060A5D7E0EA0DCF"
   },
   "client_executable": {
     "file": "client_bevy.exe",
-    "bytes": 66736640,
-    "sha256": "620BC7EE3DB7DE0F8CA71EDB803E5EBF538983AEB3E843ABF16E6B772919D098"
+    "bytes": 66737152,
+    "sha256": "85CBC75530DA65C5D948DD948AEA56EB044FF3B1649AD378BEF9F707F2A3A1BB"
   },
-  "networking_tests_passed": 68,
-  "networking_tests_enumerated": 69,
-  "workspace_tests_passed": 390,
-  "workspace_tests_enumerated": 391,
+  "networking_tests_passed": 69,
+  "networking_tests_enumerated": 70,
+  "workspace_tests_passed": 392,
+  "workspace_tests_enumerated": 393,
   "ordinary_ci_ignored_tests": 1,
   "four_client_shared_world_smoke": true,
   "packaged_four_client_process_smoke": true,

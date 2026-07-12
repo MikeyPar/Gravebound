@@ -79,6 +79,16 @@ impl Default for NetworkInputSequencer {
     }
 }
 
+impl NetworkInputSequencer {
+    fn sample_primary(&mut self, held: bool) -> Option<u32> {
+        if held && !self.primary_was_held {
+            self.primary_sequence = self.primary_sequence.checked_add(1)?;
+        }
+        self.primary_was_held = held;
+        Some(self.primary_sequence)
+    }
+}
+
 #[derive(Component)]
 struct NetworkStatusText;
 
@@ -311,10 +321,10 @@ fn predict_and_send_input(
     .unwrap_or(sequencer.last_aim);
     sequencer.last_aim = aim;
     let held_primary = mouse.pressed(MouseButton::Left);
-    if held_primary && !sequencer.primary_was_held {
-        sequencer.primary_sequence = sequencer.primary_sequence.saturating_add(1).max(1);
-    }
-    sequencer.primary_was_held = held_primary;
+    let Some(primary_sequence) = sequencer.sample_primary(held_primary) else {
+        state.fatal_error = Some("primary input sequence exhausted".to_owned());
+        return;
+    };
     bridge.0.replace_input(protocol::InputFrame {
         sequence,
         client_tick: u64::from(sequence),
@@ -323,11 +333,7 @@ fn predict_and_send_input(
         aim_x_milli: aim.0,
         aim_y_milli: aim.1,
         held_primary,
-        primary_sequence: if held_primary {
-            sequencer.primary_sequence
-        } else {
-            0
-        },
+        primary_sequence,
         ability_1_sequence: 0,
         ability_2_sequence: 0,
     });
@@ -603,6 +609,17 @@ mod tests {
     fn pickup_selection_is_nearest_eligible_and_within_interact_reach() {
         assert_eq!(INITIAL_LOCAL_PLAYER_ID, 10_000);
         assert_eq!(NetworkInputSequencer::default().last_aim, (1_000, 0));
+    }
+
+    #[test]
+    fn primary_sequence_remains_monotonic_across_press_hold_and_release() {
+        let mut sequencer = NetworkInputSequencer::default();
+        assert_eq!(sequencer.sample_primary(false), Some(0));
+        assert_eq!(sequencer.sample_primary(true), Some(1));
+        assert_eq!(sequencer.sample_primary(true), Some(1));
+        assert_eq!(sequencer.sample_primary(false), Some(1));
+        assert_eq!(sequencer.sample_primary(true), Some(2));
+        assert_eq!(sequencer.sample_primary(false), Some(2));
     }
 
     #[test]

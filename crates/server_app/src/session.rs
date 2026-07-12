@@ -242,7 +242,9 @@ impl AuthoritativeSession {
             aim_x_milli: frame.aim_x_milli,
             aim_y_milli: frame.aim_y_milli,
             held_primary: frame.held_primary,
-            primary_sequence: frame.primary_sequence,
+            // Released legacy clients used zero here. Combat sequence validation is intentionally
+            // monotonic across both held and released frames, so retain the last accepted press.
+            primary_sequence: self.maximum_primary_sequence,
         };
         Ok(InputDisposition::Accepted)
     }
@@ -784,6 +786,27 @@ mod tests {
             panic!("expected mutation result")
         };
         result
+    }
+
+    #[test]
+    fn legacy_zero_sequence_release_is_canonicalized_before_combat() {
+        let mut session =
+            AuthoritativeSession::from_content_root(&content_root()).expect("session content");
+        session
+            .submit_input(&input(1, (0, 0), (1_000, 0), true))
+            .unwrap();
+        session.tick().unwrap();
+
+        let mut release = input(2, (0, 0), (1_000, 0), false);
+        release.primary_sequence = 0;
+        assert_eq!(
+            session.submit_input(&release).unwrap(),
+            InputDisposition::Accepted
+        );
+        assert_eq!(session.latest_input.primary_sequence, 1);
+        session
+            .tick()
+            .expect("release cannot regress combat sequence");
     }
 
     #[test]

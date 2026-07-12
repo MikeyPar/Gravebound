@@ -19,7 +19,7 @@ PASS. The native client and local QUIC server run one authoritative combat world
 - Shared response clocks cover snapshots, reconnect, leave, actions, mutations, and exact LinkLost deadlines.
 - The client binds prediction to `controlled_entity_id`; owner-qualified projectile provenance prevents remote/local confirmation collisions.
 - Ordinary server tests contain no quarantined fixtures. The only ignored test is the explicit release-profile two-hour soak, which passes when invoked by the gate command.
-- Networking CI (68 active tests), strict workspace Clippy, full workspace CI (390 active tests), content validation, deterministic traces, impairment, abuse, retirement, teardown, and release soak pass.
+- Networking CI (69 active tests), strict workspace Clippy, full workspace CI (392 active tests), content validation, deterministic traces, impairment, abuse, retirement, teardown, and release soak pass.
 - Optimized Windows executables were packaged with clean-destination enforcement, exact hashes, a shared runbook, and an all-client launcher. The actual packaged server/all-client `.cmd` launchers produced exactly one server and four concurrently live clients.
 
 ## Gate disposition

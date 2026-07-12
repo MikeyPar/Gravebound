@@ -60,7 +60,7 @@ Failure holds the project in M02 authority/network work. It does not authorize p
 
 ## Current gate status
 
-- Automated packages and gates: PASS, including 68 active networking tests, 390 active workspace tests, strict Clippy, deterministic traces, impairment/abuse suites, and the release-profile sixteen-bot/two-hour shared soak.
+- Automated packages and gates: PASS, including 69 active networking tests, 392 active workspace tests, strict Clippy, deterministic traces, impairment/abuse suites, and the release-profile sixteen-bot/two-hour shared soak.
 - Runnable local server/client, bounded transport, genuine four-client shared-world QUIC smoke, clean package, and one-server/four-client packaged process smoke: PASS.
 - `SPEC-CONFLICT-003` is resolved by ADR-027: “together” means one shared authority world and manual Recall remains unavailable in immutable `fp.1.0.0`.
 - Four-human combat completion: OWNER-ASSUMED PASS under the owner's 2026-07-12 direction and ADR-025. Individual QA-008 telemetry was not supplied and is not fabricated.

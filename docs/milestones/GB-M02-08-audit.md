@@ -43,8 +43,8 @@ Death and automatic-Recall ordering are covered by deterministic focused tests r
 
 ## Final verification
 
-- Networking CI: 68 active tests PASS; one explicit long soak omitted from ordinary CI.
-- Full workspace CI: 390 active tests PASS; one explicit long soak omitted from ordinary CI.
+- Networking CI: 69 active tests PASS; one explicit long soak omitted from ordinary CI.
+- Full workspace CI: 392 active tests PASS; one explicit long soak omitted from ordinary CI.
 - Strict workspace Clippy, content validation, two identical deterministic traces, release build, package hashes, real-QUIC shared smoke, and packaged process smoke: PASS.
 - Human row: OWNER-ASSUMED PASS in [`GB-M02-owner-assumed-session-record.md`](../playtests/GB-M02-owner-assumed-session-record.md); no individual telemetry is fabricated.
 
