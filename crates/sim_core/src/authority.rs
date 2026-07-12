@@ -210,10 +210,9 @@ impl AuthoritativeArena {
         if !matches!(self.phase, AuthorityPhase::Alive) {
             return Err(AuthorityError::Dead);
         }
-        let movement = self.movement.step(input.movement, &self.arena)?;
         let collision_world =
             ProjectileCollisionWorld::new(&self.arena, self.wave.alive_hurtboxes()?)?;
-        let combat = self.wave.player_mut().combat.step_with_movement(
+        let (combat, movement) = self.wave.player_mut().combat.step_with_movement_outcome(
             &mut self.movement,
             CombatAction {
                 aim: input.aim,

@@ -33,7 +33,7 @@ use thiserror::Error;
 /// First incompatible protocol generation.
 pub const PROTOCOL_MAJOR: u16 = 1;
 /// Backward-compatible feature generation within [`PROTOCOL_MAJOR`].
-pub const PROTOCOL_MINOR: u16 = 3;
+pub const PROTOCOL_MINOR: u16 = 4;
 /// Authoritative simulation and client-input cadence from GDD `TECH-012`.
 pub const SIMULATION_HZ: u16 = 30;
 /// Baseline world snapshot cadence from GDD `TECH-012`.

@@ -11,7 +11,11 @@ pub use lifecycle::{
     LINK_LOST_TICKS, LifecycleError, LifecycleResponse, LogicalSessionId, ManagedSession,
     SessionDirectory, SessionOwnerId, SessionPhase, TransportId,
 };
-pub use session::{AuthoritativeSession, InputDisposition, SessionError};
+pub use session::{
+    AuthoritativeSession, IngressAnomaly, IngressAnomalyKind, IngressDiagnostics, InputDisposition,
+    InputRejection, MAX_CACHED_MUTATIONS, MAX_NEW_MUTATIONS_PER_TICK, MAX_RECENT_INGRESS_ANOMALIES,
+    SessionError,
+};
 
 use protocol::{
     ClientHello, HandshakeRejection, HandshakeResponse, ManifestHash, ProtocolVersion,

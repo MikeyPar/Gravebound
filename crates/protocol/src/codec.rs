@@ -143,8 +143,8 @@ mod tests {
             aim_y_milli: -707,
             held_primary: true,
             primary_sequence: 3,
-            ability_1_sequence: 2,
-            ability_2_sequence: 1,
+            ability_1_sequence: 0,
+            ability_2_sequence: 0,
         })
     }
 
@@ -155,7 +155,7 @@ mod tests {
         assert_eq!(decode_frame(&frame).unwrap(), input_message());
         assert_eq!(
             blake3::hash(&frame).to_hex().to_string(),
-            "f184214e389ffdcf927673533a20b4bcda6454d1209a5fdf08da9dff148c9c87"
+            "3e6eefc3309a19a6c385b03f4cf0523f7e3dafc7dd708faaf4bb7be2cfdadb4a"
         );
     }
 

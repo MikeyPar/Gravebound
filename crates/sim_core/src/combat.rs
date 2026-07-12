@@ -5,8 +5,9 @@ use thiserror::Error;
 use crate::{
     ArenaGeometry, BASIS_POINTS_PER_ONE, CollisionError, CollisionTarget, EntityId,
     EntityIdAllocator, GraveMarkDefinition, IntentMathError, MovementAction, MovementError,
-    PlayerMovementState, ProjectileCollisionWorld, SimulationVector, SlipstepDefinition,
-    SolidColliderId, StillnessDefinition, TICKS_PER_SECOND, Tick, WeaponDefinition,
+    MovementStep, PlayerMovementState, ProjectileCollisionWorld, SimulationVector,
+    SlipstepDefinition, SolidColliderId, StillnessDefinition, TICKS_PER_SECOND, Tick,
+    WeaponDefinition,
 };
 
 const AIM_EPSILON_SQUARED: f32 = 1.0e-12;
@@ -581,7 +582,7 @@ impl PlayerCombatState {
         collision_world: &ProjectileCollisionWorld,
     ) -> Result<CombatStep, CombatError> {
         let mut next = self.clone();
-        let result = next.step_inner(action, player_position, collision_world, None)?;
+        let (result, _) = next.step_inner(action, player_position, collision_world, None)?;
         *self = next;
         Ok(result)
     }
@@ -594,17 +595,30 @@ impl PlayerCombatState {
         arena: &ArenaGeometry,
         collision_world: &ProjectileCollisionWorld,
     ) -> Result<CombatStep, CombatError> {
+        self.step_with_movement_outcome(movement, action, arena, collision_world)
+            .map(|(combat, _)| combat)
+    }
+
+    /// Advances one avatar tick and exposes the exact single committed movement outcome.
+    pub fn step_with_movement_outcome(
+        &mut self,
+        movement: &mut PlayerMovementState,
+        action: CombatAction,
+        arena: &ArenaGeometry,
+        collision_world: &ProjectileCollisionWorld,
+    ) -> Result<(CombatStep, MovementStep), CombatError> {
         let mut next_combat = self.clone();
         let mut next_movement = *movement;
-        let result = next_combat.step_inner(
+        let (result, movement_step) = next_combat.step_inner(
             action,
             next_movement.position(),
             collision_world,
             Some((&mut next_movement, arena)),
         )?;
+        let movement_step = movement_step.ok_or(CombatError::MovementOutcomeMissing)?;
         *self = next_combat;
         *movement = next_movement;
-        Ok(result)
+        Ok((result, movement_step))
     }
 
     fn step_inner(
@@ -613,7 +627,7 @@ impl PlayerCombatState {
         mut player_position: SimulationVector,
         collision_world: &ProjectileCollisionWorld,
         movement: Option<(&mut PlayerMovementState, &ArenaGeometry)>,
-    ) -> Result<CombatStep, CombatError> {
+    ) -> Result<(CombatStep, Option<MovementStep>), CombatError> {
         if !player_position.is_finite() {
             return Err(CombatError::NonFinitePlayerPosition);
         }
@@ -644,6 +658,7 @@ impl PlayerCombatState {
         self.process_slipstep_input(action, player_position, &mut step)?;
 
         let mut slipstep_travelled = false;
+        let mut movement_step = None;
         if let Some((movement, arena)) = movement {
             if let Some(active) = self.active_slipstep {
                 slipstep_travelled = true;
@@ -654,6 +669,11 @@ impl PlayerCombatState {
                 };
                 let moved =
                     movement.apply_forced_displacement(displacement, collision_world, arena)?;
+                movement_step = Some(MovementStep {
+                    position: moved.position,
+                    velocity: movement.velocity(),
+                    collided: moved.solid.is_some(),
+                });
                 player_position = moved.position;
                 step.direct_damage_reduction_basis_points =
                     self.slipstep.direct_damage_reduction_basis_points();
@@ -679,7 +699,7 @@ impl PlayerCombatState {
                     ..active
                 });
             } else {
-                movement.step(action.movement, arena)?;
+                movement_step = Some(movement.step(action.movement, arena)?);
                 player_position = movement.position();
             }
             self.update_stillness(
@@ -693,7 +713,7 @@ impl PlayerCombatState {
         }
 
         self.resolve_primary(action, player_position, &mut step)?;
-        Ok(step)
+        Ok((step, movement_step))
     }
 
     fn resolve_primary(
@@ -1388,6 +1408,8 @@ pub enum CombatError {
     StaleAbilityTwoPressSequence { received: u32, last: u32 },
     #[error("Slipstep requires the authoritative movement state")]
     MovementStateRequired,
+    #[error("movement-aware combat tick did not produce a movement outcome")]
+    MovementOutcomeMissing,
     #[error("projectile modifier arithmetic overflowed")]
     ProjectileModifierOverflow,
     #[error("projectile contact ordinal exhausted u32")]

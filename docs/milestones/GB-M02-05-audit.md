@@ -49,11 +49,11 @@ The first end-to-end run exposed a real fixed-point boundary defect: rounding a 
 
 ## Deferred without waiver
 
-- Teleport, speed, fire-rate, forged-hit, stale/replayed application input, duplicate pickup, and mutation-misuse matrix: `GB-M02-06`.
+- Teleport, speed, fire-rate, forged-hit, stale/replayed application input, duplicate pickup, and mutation-misuse coverage was completed by `GB-M02-06`; this audit retains its original deferral as historical scope evidence.
 - Full journey bot and two-hour sixteen-bot soak: `GB-M02-07` and the M02 exit gate.
 - Realm/arena scheduler lifecycle, server tick percentiles, and clean multi-instance teardown: `GB-M02-08`.
 - Four-human impaired playability approval remains a conjunctive full M02 exit gate and is not replaced by deterministic automation.
 
 ## Handoff
 
-`GB-M02-06` must attack the actual encoded protocol and managed-session ingress exposed here. It may deliberately duplicate or replay application messages, but accepted server state must still arise only from bounded intent, existing simulation rules, sequenced inputs/actions, and idempotent mutations.
+`GB-M02-06` subsequently attacked the actual encoded protocol and managed-session ingress exposed here. Encoded abuse now remains bounded by intent-only messages, existing simulation rules, sequenced inputs/actions, and payload-bound idempotent mutations; `GB-M02-07` can build its real-protocol journey bot on that closed boundary.

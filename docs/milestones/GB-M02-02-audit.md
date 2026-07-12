@@ -25,7 +25,7 @@ PASS. The live-instance server is final for every gameplay category named by the
 
 ## Protocol and transport evidence
 
-- Protocol advanced to `1.1` for M02-02, `1.2` in M02-03 for authoritative velocity/projectile-presentation facts, and `1.3` in M02-04 for lifecycle Control messages; exact minor match is required until a tested adapter exists.
+- Protocol advanced to `1.1` for M02-02, `1.2` in M02-03 for authoritative velocity/projectile-presentation facts, `1.3` in M02-04 for lifecycle Control messages, and `1.4` in M02-06 for fail-closed ingress semantics and typed mutation results; exact minor match is required until a tested adapter exists.
 - Mutation request uses a nonzero 128-bit idempotency key, stable pickup ID, and closed placement enum.
 - Mutation result has a typed code whose accepted flag must agree with `Accepted`.
 - Snapshots carry state version and closed player/enemy/friendly-projectile/hostile-projectile/personal-pickup kinds.
@@ -45,7 +45,7 @@ PASS. The live-instance server is final for every gameplay category named by the
 
 - Prediction/interpolation/reconciliation and correction telemetry were completed by `GB-M02-03`; this audit retains their original deferral as historical scope evidence.
 - Recall, LinkLost, reconnect, duplicate-session handoff, and shutdown: `GB-M02-04`.
-- Impairment and comprehensive malicious input/mutation matrices: `GB-M02-05`/`GB-M02-06`.
+- Impairment and comprehensive malicious input/mutation matrices were completed by `GB-M02-05`/`GB-M02-06`; this audit retains their original deferral as historical scope evidence.
 - Full journey bot and instance lifecycle: `GB-M02-07`/`GB-M02-08`.
 - Durable account, item, and death transactions: M03.
 

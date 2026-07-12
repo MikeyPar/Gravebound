@@ -30,7 +30,7 @@ PASS. One authenticated owner now has exactly one server-owned logical combat se
 
 ## Protocol decision
 
-Protocol minor `1.3` adds reliable lifecycle Control request/result variants. Exact minor matching remains mandatory and no adapter is claimed. Session owner and transport identities remain server-internal; the wire carries only the bounded logical session identifier required for reconnect.
+Protocol minor `1.3` added reliable lifecycle Control request/result variants. `GB-M02-06` subsequently advances the exact-match protocol to `1.4` for fail-closed ingress semantics and typed mutation results. Exact minor matching remains mandatory and no adapter is claimed. Session owner and transport identities remain server-internal; the wire carries only the bounded logical session identifier required for reconnect.
 
 ## Verification
 
@@ -44,7 +44,7 @@ Protocol minor `1.3` adds reliable lifecycle Control request/result variants. Ex
 ## Deferred without waiver
 
 - Deterministic latency, jitter, loss, duplication, reordering, and outage injection were completed by `GB-M02-05`; this audit retains their original deferral as historical scope evidence.
-- Comprehensive teleport, speed, fire-rate, forged-hit, replay, pickup, and mutation abuse matrix: `GB-M02-06`.
+- The comprehensive teleport, speed, fire-rate, forged-hit, replay, pickup, and mutation abuse matrix was completed by `GB-M02-06`; this audit retains its original deferral as historical scope evidence.
 - Full journey bot including manual Recall and reconnect: `GB-M02-07`.
 - Realm/arena scheduler ownership, lifecycle diagnostics, teardown, and tick percentiles: `GB-M02-08`.
 - Durable Lantern Halls records, danger-entry crash restoration, item ledgers, and extraction transactions: M03 and later persistence packages.

@@ -27,7 +27,7 @@ PASS. The native client now predicts only local movement and immediate local pro
 
 ## Protocol decision
 
-Protocol minor `1.2` added authoritative entity velocity plus friendly-projectile source input sequence and within-attack ordinal. `GB-M02-04` subsequently advances the exact-match protocol to `1.3` for lifecycle Control messages. No compatibility adapter is claimed. The canonical codec fixture is repinned for each intentional version change.
+Protocol minor `1.2` added authoritative entity velocity plus friendly-projectile source input sequence and within-attack ordinal. `GB-M02-04` subsequently advanced the exact-match protocol to `1.3` for lifecycle Control messages, and `GB-M02-06` advanced it to `1.4` for fail-closed ingress semantics and typed mutation results. No compatibility adapter is claimed. The canonical codec fixture is repinned for each intentional version change.
 
 ## Verification
 
@@ -42,7 +42,7 @@ Protocol minor `1.2` added authoritative entity velocity plus friendly-projectil
 
 - Join, leave, timeout, three-second `LinkLost`, reconnect, duplicate-session handoff, and shutdown: `GB-M02-04`.
 - Deterministic latency, jitter, loss, duplication, reordering, and outage injection: `GB-M02-05`.
-- Comprehensive malicious input and mutation rejection: `GB-M02-06`.
+- Comprehensive malicious input and mutation rejection was completed by `GB-M02-06`; this audit retains its original deferral as historical scope evidence.
 - Full journey bot and instance lifecycle: `GB-M02-07`/`GB-M02-08`.
 - Four-human, sixteen-bot, impairment-playability, and server tick percentile gates: full M02 exit gate.
 

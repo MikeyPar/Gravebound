@@ -61,6 +61,9 @@ impl InputFrame {
         if self.held_primary && self.primary_sequence == 0 {
             return Err(MessageValidationError::HeldPrimaryWithoutSequence);
         }
+        if self.ability_1_sequence != 0 || self.ability_2_sequence != 0 {
+            return Err(MessageValidationError::AbilitySequenceOnInputChannel);
+        }
         Ok(())
     }
 }
@@ -251,6 +254,8 @@ pub enum MutationResultCode {
     OutOfRange,
     InventoryRejected,
     Dead,
+    IdempotencyConflict,
+    RateLimited,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -514,6 +519,8 @@ pub enum MessageValidationError {
     ZeroAim,
     #[error("held primary input requires a nonzero primary sequence")]
     HeldPrimaryWithoutSequence,
+    #[error("ability press sequences must use the reliable Action channel")]
+    AbilitySequenceOnInputChannel,
     #[error("entity ID must be nonzero")]
     ZeroEntityId,
     #[error("entity health is invalid")]
@@ -596,6 +603,12 @@ mod tests {
         assert_eq!(
             input.validate(),
             Err(MessageValidationError::HeldPrimaryWithoutSequence)
+        );
+        input.held_primary = false;
+        input.ability_1_sequence = 1;
+        assert_eq!(
+            input.validate(),
+            Err(MessageValidationError::AbilitySequenceOnInputChannel)
         );
     }
 

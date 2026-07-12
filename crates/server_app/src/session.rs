@@ -1,4 +1,5 @@
-use std::{collections::BTreeMap, path::Path};
+use std::collections::{BTreeMap, VecDeque};
+use std::path::Path;
 
 use protocol::{
     ActionFrame, ActionKind, ActionResultCode, ControlEvent, ENTITY_STATE_ALIVE,
@@ -20,6 +21,61 @@ const PLAYER_ENTITY_ID: u64 = 10_000;
 pub enum InputDisposition {
     Accepted,
     Superseded,
+    Rejected(InputRejection),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputRejection {
+    PrimarySequenceRegression,
+}
+
+pub const MAX_NEW_MUTATIONS_PER_TICK: u8 = 8;
+pub const MAX_CACHED_MUTATIONS: usize = 1_024;
+pub const MAX_RECENT_INGRESS_ANOMALIES: usize = 64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IngressAnomalyKind {
+    PrimarySequenceRegression,
+    StaleReliableAction,
+    ActionRateLimited,
+    MutationIdempotencyConflict,
+    MutationRateLimited,
+    MutationRejected,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IngressAnomaly {
+    pub server_tick: u64,
+    pub kind: IngressAnomalyKind,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IngressDiagnostics {
+    pub superseded_inputs: u64,
+    pub rejected_primary_sequences: u64,
+    pub stale_reliable_actions: u64,
+    pub rate_limited_actions: u64,
+    pub idempotency_conflicts: u64,
+    pub rate_limited_mutations: u64,
+    pub rejected_mutations: u64,
+    pub anomaly_score: u64,
+    pub recent_anomalies: VecDeque<IngressAnomaly>,
+}
+
+impl IngressDiagnostics {
+    fn record(&mut self, server_tick: u64, kind: IngressAnomalyKind) {
+        self.anomaly_score = self.anomaly_score.saturating_add(match kind {
+            IngressAnomalyKind::PrimarySequenceRegression
+            | IngressAnomalyKind::MutationIdempotencyConflict => 3,
+            IngressAnomalyKind::ActionRateLimited | IngressAnomalyKind::MutationRateLimited => 2,
+            IngressAnomalyKind::StaleReliableAction | IngressAnomalyKind::MutationRejected => 1,
+        });
+        if self.recent_anomalies.len() == MAX_RECENT_INGRESS_ANOMALIES {
+            self.recent_anomalies.pop_front();
+        }
+        self.recent_anomalies
+            .push_back(IngressAnomaly { server_tick, kind });
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -58,7 +114,18 @@ pub struct AuthoritativeSession {
     ability_2_sequence: u32,
     snapshot_sequence: u32,
     reliable_sequence: u32,
-    mutation_results: BTreeMap<[u8; 16], MutationResult>,
+    mutation_results: BTreeMap<[u8; 16], CachedMutation>,
+    maximum_primary_sequence: u32,
+    ability_1_pending: bool,
+    ability_2_pending: bool,
+    new_mutations_this_tick: u8,
+    ingress_diagnostics: IngressDiagnostics,
+}
+
+#[derive(Debug, Clone)]
+struct CachedMutation {
+    request: MutationRequest,
+    result: MutationResult,
 }
 
 impl AuthoritativeSession {
@@ -98,12 +165,22 @@ impl AuthoritativeSession {
             snapshot_sequence: 0,
             reliable_sequence: 0,
             mutation_results: BTreeMap::new(),
+            maximum_primary_sequence: 0,
+            ability_1_pending: false,
+            ability_2_pending: false,
+            new_mutations_this_tick: 0,
+            ingress_diagnostics: IngressDiagnostics::default(),
         })
     }
 
     #[must_use]
     pub const fn arena(&self) -> &AuthoritativeArena {
         &self.arena
+    }
+
+    #[must_use]
+    pub const fn ingress_diagnostics(&self) -> &IngressDiagnostics {
+        &self.ingress_diagnostics
     }
 
     /// Stops transport-carried continuous intent without changing authoritative gameplay state.
@@ -128,7 +205,23 @@ impl AuthoritativeSession {
             .validate()
             .map_err(|_| SessionError::InvalidProtocolMessage)?;
         if frame.sequence <= self.latest_input.sequence {
+            self.ingress_diagnostics.superseded_inputs =
+                self.ingress_diagnostics.superseded_inputs.saturating_add(1);
             return Ok(InputDisposition::Superseded);
+        }
+        if frame.held_primary && frame.primary_sequence < self.maximum_primary_sequence {
+            self.ingress_diagnostics.rejected_primary_sequences = self
+                .ingress_diagnostics
+                .rejected_primary_sequences
+                .saturating_add(1);
+            self.record_anomaly(IngressAnomalyKind::PrimarySequenceRegression);
+            return Ok(InputDisposition::Rejected(
+                InputRejection::PrimarySequenceRegression,
+            ));
+        }
+        if frame.held_primary {
+            self.maximum_primary_sequence =
+                self.maximum_primary_sequence.max(frame.primary_sequence);
         }
         self.latest_input = LatestInput {
             sequence: frame.sequence,
@@ -150,21 +243,46 @@ impl AuthoritativeSession {
             .validate()
             .map_err(|_| SessionError::InvalidProtocolMessage)?;
         if frame.sequence <= self.last_action_sequence {
-            return Err(SessionError::NonMonotonicAction {
-                received: frame.sequence,
-                last: self.last_action_sequence,
+            self.ingress_diagnostics.stale_reliable_actions = self
+                .ingress_diagnostics
+                .stale_reliable_actions
+                .saturating_add(1);
+            self.record_anomaly(IngressAnomalyKind::StaleReliableAction);
+            return self.reliable_event(ReliableEvent::ActionResult {
+                action_sequence: frame.sequence,
+                code: ActionResultCode::StaleSequence,
             });
         }
         self.last_action_sequence = frame.sequence;
         let code = if matches!(self.arena.phase(), AuthorityPhase::Alive) {
             match frame.action {
                 ActionKind::Ability1Press => {
-                    self.ability_1_sequence = frame.sequence;
-                    ActionResultCode::Accepted
+                    if self.ability_1_pending {
+                        self.ingress_diagnostics.rate_limited_actions = self
+                            .ingress_diagnostics
+                            .rate_limited_actions
+                            .saturating_add(1);
+                        self.record_anomaly(IngressAnomalyKind::ActionRateLimited);
+                        ActionResultCode::RateLimited
+                    } else {
+                        self.ability_1_pending = true;
+                        self.ability_1_sequence = frame.sequence;
+                        ActionResultCode::Accepted
+                    }
                 }
                 ActionKind::Ability2Press => {
-                    self.ability_2_sequence = frame.sequence;
-                    ActionResultCode::Accepted
+                    if self.ability_2_pending {
+                        self.ingress_diagnostics.rate_limited_actions = self
+                            .ingress_diagnostics
+                            .rate_limited_actions
+                            .saturating_add(1);
+                        self.record_anomaly(IngressAnomalyKind::ActionRateLimited);
+                        ActionResultCode::RateLimited
+                    } else {
+                        self.ability_2_pending = true;
+                        self.ability_2_sequence = frame.sequence;
+                        ActionResultCode::Accepted
+                    }
                 }
                 ActionKind::RecallStart | ActionKind::RecallCancel | ActionKind::Interact => {
                     ActionResultCode::InvalidState
@@ -197,6 +315,9 @@ impl AuthoritativeSession {
             ability_1_sequence: self.ability_1_sequence,
             ability_2_sequence: self.ability_2_sequence,
         })?;
+        self.ability_1_pending = false;
+        self.ability_2_pending = false;
+        self.new_mutations_this_tick = 0;
         if !step.tick.0.is_multiple_of(2) && !step.death_committed {
             return Ok(Vec::new());
         }
@@ -259,9 +380,42 @@ impl AuthoritativeSession {
         request
             .validate()
             .map_err(|_| SessionError::InvalidProtocolMessage)?;
-        let result = if let Some(cached) = self.mutation_results.get(&request.mutation_id) {
-            cached.clone()
+        let result = if let Some(cached) = self.mutation_results.get(&request.mutation_id).cloned()
+        {
+            if cached.request == *request {
+                cached.result.clone()
+            } else {
+                self.ingress_diagnostics.idempotency_conflicts = self
+                    .ingress_diagnostics
+                    .idempotency_conflicts
+                    .saturating_add(1);
+                self.record_anomaly(IngressAnomalyKind::MutationIdempotencyConflict);
+                MutationResult {
+                    mutation_id: request.mutation_id,
+                    accepted: false,
+                    code: MutationResultCode::IdempotencyConflict,
+                    state_version: self.arena.state_version(),
+                }
+            }
+        } else if self.new_mutations_this_tick >= MAX_NEW_MUTATIONS_PER_TICK
+            || self.mutation_results.len() >= MAX_CACHED_MUTATIONS
+        {
+            self.ingress_diagnostics.rate_limited_mutations = self
+                .ingress_diagnostics
+                .rate_limited_mutations
+                .saturating_add(1);
+            self.record_anomaly(IngressAnomalyKind::MutationRateLimited);
+            MutationResult {
+                mutation_id: request.mutation_id,
+                accepted: false,
+                code: MutationResultCode::RateLimited,
+                state_version: self.arena.state_version(),
+            }
         } else {
+            self.new_mutations_this_tick = self
+                .new_mutations_this_tick
+                .checked_add(1)
+                .ok_or(SessionError::SequenceExhausted)?;
             let pickup_id = FieldPickupId::new(request.pickup_id)
                 .map_err(|_| SessionError::InvalidProtocolMessage)?;
             let placement = match request.placement {
@@ -278,8 +432,20 @@ impl AuthoritativeSession {
                 code,
                 state_version: self.arena.state_version(),
             };
-            self.mutation_results
-                .insert(request.mutation_id, result.clone());
+            if !accepted {
+                self.ingress_diagnostics.rejected_mutations = self
+                    .ingress_diagnostics
+                    .rejected_mutations
+                    .saturating_add(1);
+                self.record_anomaly(IngressAnomalyKind::MutationRejected);
+            }
+            self.mutation_results.insert(
+                request.mutation_id,
+                CachedMutation {
+                    request: request.clone(),
+                    result: result.clone(),
+                },
+            );
             result
         };
         self.reliable_event(ReliableEvent::MutationResult(result))
@@ -304,6 +470,11 @@ impl AuthoritativeSession {
             server_tick: self.arena.player().combat.tick().0,
             event,
         })
+    }
+
+    fn record_anomaly(&mut self, kind: IngressAnomalyKind) {
+        self.ingress_diagnostics
+            .record(self.arena.player().combat.tick().0, kind);
     }
 
     pub(crate) fn emit_control_result(
@@ -356,8 +527,6 @@ pub enum SessionError {
     InvalidPlayerIdentity,
     #[error("protocol message failed validation")]
     InvalidProtocolMessage,
-    #[error("reliable action sequence {received} is not newer than {last}")]
-    NonMonotonicAction { received: u32, last: u32 },
     #[error("server sequence exhausted")]
     SequenceExhausted,
     #[error("snapshot entity count exceeds protocol bounds")]
@@ -562,6 +731,18 @@ mod tests {
         );
         assert_eq!(replay, accepted);
         assert_eq!(session.arena().state_version(), version_after);
+        let duplicate_pickup = mutation_result(
+            session
+                .submit_mutation(&MutationRequest {
+                    mutation_id: [4; 16],
+                    pickup_id,
+                    placement: PickupPlacement::Take,
+                })
+                .unwrap(),
+        );
+        assert_eq!(duplicate_pickup.code, MutationResultCode::AlreadyResolved);
+        assert!(!duplicate_pickup.accepted);
+        assert_eq!(session.arena().state_version(), version_after);
     }
 
     #[test]
@@ -645,18 +826,206 @@ mod tests {
                 action: ActionKind::Ability1Press,
             })
             .unwrap();
-        assert!(matches!(
-            session.submit_action(&ActionFrame {
+        let stale = session
+            .submit_action(&ActionFrame {
                 sequence: 1,
                 client_tick: 2,
                 action: ActionKind::Ability2Press,
-            }),
-            Err(SessionError::NonMonotonicAction { .. })
+            })
+            .unwrap();
+        assert!(matches!(
+            stale.event,
+            ReliableEvent::ActionResult {
+                action_sequence: 1,
+                code: ActionResultCode::StaleSequence
+            }
         ));
         assert!(matches!(
             session.handle_reliable(WireMessage::InputFrame(input(1, (0, 0), (1_000, 0), false))),
             Err(SessionError::UnexpectedReliableMessage)
         ));
+    }
+
+    #[test]
+    fn action_flood_is_typed_bounded_and_does_not_overwrite_first_press() {
+        let mut session =
+            AuthoritativeSession::from_content_root(&content_root()).expect("session content");
+        let first = session
+            .submit_action(&ActionFrame {
+                sequence: 1,
+                client_tick: 0,
+                action: ActionKind::Ability1Press,
+            })
+            .unwrap();
+        let flooded = session
+            .submit_action(&ActionFrame {
+                sequence: 2,
+                client_tick: 0,
+                action: ActionKind::Ability1Press,
+            })
+            .unwrap();
+        let other_ability = session
+            .submit_action(&ActionFrame {
+                sequence: 3,
+                client_tick: 0,
+                action: ActionKind::Ability2Press,
+            })
+            .unwrap();
+        assert!(matches!(
+            first.event,
+            ReliableEvent::ActionResult {
+                action_sequence: 1,
+                code: ActionResultCode::Accepted
+            }
+        ));
+        assert!(matches!(
+            flooded.event,
+            ReliableEvent::ActionResult {
+                action_sequence: 2,
+                code: ActionResultCode::RateLimited
+            }
+        ));
+        assert!(matches!(
+            other_ability.event,
+            ReliableEvent::ActionResult {
+                action_sequence: 3,
+                code: ActionResultCode::Accepted
+            }
+        ));
+        session.tick().unwrap();
+        assert_eq!(
+            session
+                .arena()
+                .player()
+                .combat
+                .last_ability_1_press_sequence(),
+            1
+        );
+        assert_eq!(
+            session
+                .arena()
+                .player()
+                .combat
+                .last_ability_2_press_sequence(),
+            3
+        );
+        assert_eq!(session.ingress_diagnostics().rate_limited_actions, 1);
+    }
+
+    #[test]
+    fn mutation_id_payload_conflict_and_per_tick_limit_are_nonmutating() {
+        let mut session =
+            AuthoritativeSession::from_content_root(&content_root()).expect("session content");
+        let original = MutationRequest {
+            mutation_id: [9; 16],
+            pickup_id: 1,
+            placement: PickupPlacement::Take,
+        };
+        let first = mutation_result(session.submit_mutation(&original).unwrap());
+        assert_eq!(first.code, MutationResultCode::NotFound);
+        let state_version = session.arena().state_version();
+        let conflict = mutation_result(
+            session
+                .submit_mutation(&MutationRequest {
+                    mutation_id: original.mutation_id,
+                    pickup_id: 2,
+                    placement: PickupPlacement::Equip,
+                })
+                .unwrap(),
+        );
+        assert_eq!(conflict.code, MutationResultCode::IdempotencyConflict);
+        assert_eq!(session.arena().state_version(), state_version);
+        assert_eq!(
+            mutation_result(session.submit_mutation(&original).unwrap()),
+            first
+        );
+
+        let mut limited =
+            AuthoritativeSession::from_content_root(&content_root()).expect("session content");
+        for ordinal in 1..=MAX_NEW_MUTATIONS_PER_TICK {
+            let mut mutation_id = [0; 16];
+            mutation_id[0] = ordinal;
+            let result = mutation_result(
+                limited
+                    .submit_mutation(&MutationRequest {
+                        mutation_id,
+                        pickup_id: u64::from(ordinal),
+                        placement: PickupPlacement::Take,
+                    })
+                    .unwrap(),
+            );
+            assert_eq!(result.code, MutationResultCode::NotFound);
+        }
+        let limited_result = mutation_result(
+            limited
+                .submit_mutation(&MutationRequest {
+                    mutation_id: [10; 16],
+                    pickup_id: 10,
+                    placement: PickupPlacement::Take,
+                })
+                .unwrap(),
+        );
+        assert_eq!(limited_result.code, MutationResultCode::RateLimited);
+        assert_eq!(
+            limited.mutation_results.len(),
+            usize::from(MAX_NEW_MUTATIONS_PER_TICK)
+        );
+        limited.tick().unwrap();
+        let next_tick = mutation_result(
+            limited
+                .submit_mutation(&MutationRequest {
+                    mutation_id: [11; 16],
+                    pickup_id: 11,
+                    placement: PickupPlacement::Take,
+                })
+                .unwrap(),
+        );
+        assert_eq!(next_tick.code, MutationResultCode::NotFound);
+    }
+
+    #[test]
+    fn mutation_cache_and_anomaly_history_are_strictly_bounded() {
+        let mut session =
+            AuthoritativeSession::from_content_root(&content_root()).expect("session content");
+        for ordinal in 0..MAX_CACHED_MUTATIONS {
+            let mut mutation_id = [0; 16];
+            mutation_id[..8].copy_from_slice(&u64::try_from(ordinal).unwrap().to_le_bytes());
+            let request = MutationRequest {
+                mutation_id,
+                pickup_id: u64::try_from(ordinal).unwrap() + 1,
+                placement: PickupPlacement::Take,
+            };
+            session.mutation_results.insert(
+                mutation_id,
+                CachedMutation {
+                    request,
+                    result: MutationResult {
+                        mutation_id,
+                        accepted: false,
+                        code: MutationResultCode::NotFound,
+                        state_version: 1,
+                    },
+                },
+            );
+        }
+        let result = mutation_result(
+            session
+                .submit_mutation(&MutationRequest {
+                    mutation_id: [0xff; 16],
+                    pickup_id: u64::MAX,
+                    placement: PickupPlacement::Take,
+                })
+                .unwrap(),
+        );
+        assert_eq!(result.code, MutationResultCode::RateLimited);
+        assert_eq!(session.mutation_results.len(), MAX_CACHED_MUTATIONS);
+        for _ in 0..100 {
+            session.record_anomaly(IngressAnomalyKind::MutationRejected);
+        }
+        assert_eq!(
+            session.ingress_diagnostics().recent_anomalies.len(),
+            MAX_RECENT_INGRESS_ANOMALIES
+        );
     }
 
     #[test]

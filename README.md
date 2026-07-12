@@ -4,7 +4,7 @@ Gravebound is a server-authoritative, permanent-death, 2D dark-fantasy bullet-he
 
 Every character life is temporary. The account remembers what happened, and exceptional deaths can return as personalized Fallen Hero Echo encounters. The design emphasizes readable combat, rapid recovery, fair monetization, solo viability, and long-term replayability without permanent account-level combat power.
 
-> **Project status:** M01 First Playable is closed under the owner's explicit successful-playtest assumption. M02 now has the versioned QUIC handshake, deterministic server-authoritative combat, native-client prediction/reconciliation, connection lifecycle, and codec-backed adverse-network verification through `GB-M02-05`; abuse, journey-bot, instance-lifecycle, and full M02 population/performance gates remain.
+> **Project status:** M01 First Playable is closed under the owner's explicit successful-playtest assumption. M02 now has the versioned QUIC handshake, deterministic server-authoritative combat, native-client prediction/reconciliation, connection lifecycle, codec-backed adverse-network verification, and fail-closed gameplay ingress through `GB-M02-06`; journey-bot, instance-lifecycle, and full M02 population/performance gates remain.
 
 ![Bell Sepulcher gameplay concept](Concept%20Art/01-bell-sepulcher-gameplay.png)
 
@@ -102,7 +102,7 @@ Concept images establish mood, hierarchy, and visual language. They are not fina
 
 ## Current Next Step
 
-Implement `GB-M02-06`: reject teleport, speed, fire-rate, forged hit, duplicate pickup, stale/replayed input, and mutation misuse through the real protocol and managed-session authority boundary. `GB-M02-05` passes with a deterministic codec-backed impairment crate, every QA-006 latency profile, bounded latency/jitter/loss/duplication/reordering/outage scheduling, reliable channel ordering, exact outage lifecycle transitions, the 100 ms RTT / 20 ms jitter / 1% loss gameplay-and-death trace, critical death-tick snapshots, and safe millitile contact reconciliation. See the [completion audit](docs/milestones/GB-M02-05-audit.md). `GB-M01` remains closed under the explicit owner-assumed human gate recorded in `docs/playtests/GB-M01-owner-assumed-gate.md`.
+Implement `GB-M02-07`: make the headless bot move, aim, fight, pick up, die, Recall, and reconnect only through the real protocol and the same bounded managed-session ingress used by a human client. `GB-M02-06` passes with protocol `1.4`, intent-only authority, typed replay/rate/idempotency rejection, bounded diagnostics and mutation caches, encoded abuse fixtures, server-owned fire cadence, and a corrected single-step authoritative movement path. Networking CI passes 50 tests and full workspace CI passes 359 tests. See the [completion audit](docs/milestones/GB-M02-06-audit.md). `GB-M01` remains closed under the explicit owner-assumed human gate recorded in `docs/playtests/GB-M01-owner-assumed-gate.md`.
 
 ## Resolved prior handoff
 
