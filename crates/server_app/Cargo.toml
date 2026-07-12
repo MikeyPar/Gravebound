@@ -21,6 +21,8 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 bot_client = { path = "../bot_client" }
+client_bevy = { path = "../client_bevy" }
+network_harness = { path = "../network_harness" }
 rcgen.workspace = true
 rustls.workspace = true
 

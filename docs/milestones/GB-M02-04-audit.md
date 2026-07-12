@@ -43,7 +43,7 @@ Protocol minor `1.3` adds reliable lifecycle Control request/result variants. Ex
 
 ## Deferred without waiver
 
-- Deterministic latency, jitter, loss, duplication, reordering, and outage injection: `GB-M02-05`.
+- Deterministic latency, jitter, loss, duplication, reordering, and outage injection were completed by `GB-M02-05`; this audit retains their original deferral as historical scope evidence.
 - Comprehensive teleport, speed, fire-rate, forged-hit, replay, pickup, and mutation abuse matrix: `GB-M02-06`.
 - Full journey bot including manual Recall and reconnect: `GB-M02-07`.
 - Realm/arena scheduler ownership, lifecycle diagnostics, teardown, and tick percentiles: `GB-M02-08`.
@@ -51,4 +51,4 @@ Protocol minor `1.3` adds reliable lifecycle Control request/result variants. Ex
 
 ## Handoff
 
-`GB-M02-05` must drive the existing protocol, managed session, prediction, reconciliation, and client lifecycle through a deterministic impairment layer. It may delay, drop, duplicate, or reorder transport delivery, but it may not bypass the actual codec/channel semantics, introduce wall-clock sleeps into deterministic tests, or grant the client authority over timeout, Recall, or death.
+`GB-M02-05` subsequently drove the existing protocol, managed session, prediction, reconciliation, and client lifecycle through a deterministic codec-backed impairment layer without granting the harness authority over timeout, Recall, or death.

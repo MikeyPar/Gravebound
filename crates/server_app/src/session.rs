@@ -197,7 +197,7 @@ impl AuthoritativeSession {
             ability_1_sequence: self.ability_1_sequence,
             ability_2_sequence: self.ability_2_sequence,
         })?;
-        if !step.tick.0.is_multiple_of(2) {
+        if !step.tick.0.is_multiple_of(2) && !step.death_committed {
             return Ok(Vec::new());
         }
         self.snapshot_sequence = self
@@ -572,8 +572,9 @@ mod tests {
             .submit_input(&input(1, (0, 0), (1_000, 0), false))
             .unwrap();
         let mut saw_hostile_projectile = false;
+        let mut death_snapshot = None;
         for _ in 0..5_000 {
-            session.tick().expect("alive authority tick");
+            let emitted = session.tick().expect("alive authority tick");
             saw_hostile_projectile |= session
                 .arena()
                 .snapshots()
@@ -581,6 +582,7 @@ mod tests {
                 .iter()
                 .any(|entity| entity.kind == AuthorityEntityKind::HostileProjectile);
             if matches!(session.arena().phase(), AuthorityPhase::Dead { .. }) {
+                death_snapshot = Some(emitted);
                 break;
             }
         }
@@ -597,6 +599,16 @@ mod tests {
                 .vitals()
                 .current_health(),
             0
+        );
+        let AuthorityPhase::Dead { committed_at } = session.arena().phase() else {
+            panic!("death phase");
+        };
+        let death_snapshot = death_snapshot.expect("death snapshot capture");
+        assert!(!death_snapshot.is_empty());
+        assert!(
+            death_snapshot
+                .iter()
+                .all(|snapshot| snapshot.server_tick == committed_at.0)
         );
         assert!(session.arena().snapshots().unwrap().iter().all(|entity| {
             !matches!(

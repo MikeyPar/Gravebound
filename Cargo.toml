@@ -3,6 +3,7 @@ members = [
     "crates/bot_client",
     "crates/client_bevy",
     "crates/content_schema",
+    "crates/network_harness",
     "crates/protocol",
     "crates/server_app",
     "crates/sim_content",

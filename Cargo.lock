@@ -3748,6 +3748,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "network_harness"
+version = "0.1.0"
+dependencies = [
+ "protocol",
+ "rand_chacha",
+ "rand_core",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "nix"
 version = "0.31.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5030,6 +5040,8 @@ dependencies = [
  "anyhow",
  "bot_client",
  "clap",
+ "client_bevy",
+ "network_harness",
  "protocol",
  "quinn",
  "rcgen",

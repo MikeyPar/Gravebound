@@ -4,7 +4,7 @@ Gravebound is a server-authoritative, permanent-death, 2D dark-fantasy bullet-he
 
 Every character life is temporary. The account remembers what happened, and exceptional deaths can return as personalized Fallen Hero Echo encounters. The design emphasizes readable combat, rapid recovery, fair monetization, solo viability, and long-term replayability without permanent account-level combat power.
 
-> **Project status:** M01 First Playable is closed under the owner's explicit successful-playtest assumption. M02 now has the versioned QUIC handshake, deterministic server-authoritative combat, native-client prediction/reconciliation, and authoritative connection lifecycle through `GB-M02-04`; impairment, abuse, journey-bot, instance-lifecycle, and full M02 population/performance gates remain.
+> **Project status:** M01 First Playable is closed under the owner's explicit successful-playtest assumption. M02 now has the versioned QUIC handshake, deterministic server-authoritative combat, native-client prediction/reconciliation, connection lifecycle, and codec-backed adverse-network verification through `GB-M02-05`; abuse, journey-bot, instance-lifecycle, and full M02 population/performance gates remain.
 
 ![Bell Sepulcher gameplay concept](Concept%20Art/01-bell-sepulcher-gameplay.png)
 
@@ -102,7 +102,7 @@ Concept images establish mood, hierarchy, and visual language. They are not fina
 
 ## Current Next Step
 
-Implement `GB-M02-05`: add a deterministic transport-impairment harness for latency, jitter, loss, duplication, reordering, and outages against protocol `1.3`, then prove the documented 100 ms RTT / 20 ms jitter / 1% loss playability case without weakening authority or correction telemetry. `GB-M02-04` passes with typed Control requests/results, one logical authority per authenticated owner, exact 90-tick vulnerable `LinkLost`, death-before-Recall ordering, Emergency Recall inventory disposition, state-preserving reconnect, atomic duplicate transport handoff, client authoritative-resolution waiting, real QUIC lifecycle coverage, and nonlethal clean shutdown. See the [completion audit](docs/milestones/GB-M02-04-audit.md). `GB-M01` remains closed under the explicit owner-assumed human gate recorded in `docs/playtests/GB-M01-owner-assumed-gate.md`.
+Implement `GB-M02-06`: reject teleport, speed, fire-rate, forged hit, duplicate pickup, stale/replayed input, and mutation misuse through the real protocol and managed-session authority boundary. `GB-M02-05` passes with a deterministic codec-backed impairment crate, every QA-006 latency profile, bounded latency/jitter/loss/duplication/reordering/outage scheduling, reliable channel ordering, exact outage lifecycle transitions, the 100 ms RTT / 20 ms jitter / 1% loss gameplay-and-death trace, critical death-tick snapshots, and safe millitile contact reconciliation. See the [completion audit](docs/milestones/GB-M02-05-audit.md). `GB-M01` remains closed under the explicit owner-assumed human gate recorded in `docs/playtests/GB-M01-owner-assumed-gate.md`.
 
 ## Resolved prior handoff
 

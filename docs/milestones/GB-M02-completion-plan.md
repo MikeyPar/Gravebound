@@ -38,7 +38,7 @@ M01 PASS
 | `GB-M02-02` | Server authority for movement, attacks, cooldowns, projectiles, collision, health, death, eligibility, and pickup using shared `sim_core`. | PASS |
 | `GB-M02-03` | Local movement prediction, remote interpolation, reconciliation thresholds, and deterministic projectile presentation. | PASS |
 | `GB-M02-04` | Join/leave/timeout, three-second `LinkLost`, reconnect, duplicate-session handoff, and clean shutdown. | PASS |
-| `GB-M02-05` | Deterministic latency, jitter, loss, duplication, reordering, and outage harness. | PENDING |
+| `GB-M02-05` | Deterministic latency, jitter, loss, duplication, reordering, and outage harness. | PASS |
 | `GB-M02-06` | Reject teleport, speed, fire-rate, forged hit, duplicate pickup, stale/replayed input, and mutation misuse. | PENDING |
 | `GB-M02-07` | Headless bot moves, aims, fights, picks up, dies, Recalls, and reconnects only through the real protocol. | PENDING |
 | `GB-M02-08` | Realm/arena instance lifecycle, ownership, scheduler, tick diagnostics, and clean teardown. | PENDING |

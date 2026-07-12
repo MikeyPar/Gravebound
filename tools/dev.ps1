@@ -33,8 +33,8 @@ try {
         'server-doctor' { Invoke-Cargo -Arguments @('run', '--locked', '-p', 'server_app', '--', 'doctor') }
         'bot-doctor' { Invoke-Cargo -Arguments @('run', '--locked', '-p', 'bot_client', '--', 'doctor') }
         'network-ci' {
-            Invoke-Cargo -Arguments @('test', '--locked', '-p', 'protocol', '-p', 'server_app', '-p', 'bot_client')
-            Invoke-Cargo -Arguments @('clippy', '--locked', '-p', 'protocol', '-p', 'server_app', '-p', 'bot_client', '--all-targets', '--', '-D', 'warnings')
+            Invoke-Cargo -Arguments @('test', '--locked', '-p', 'protocol', '-p', 'network_harness', '-p', 'server_app', '-p', 'bot_client')
+            Invoke-Cargo -Arguments @('clippy', '--locked', '-p', 'protocol', '-p', 'network_harness', '-p', 'server_app', '-p', 'bot_client', '--all-targets', '--', '-D', 'warnings')
             Invoke-Cargo -Arguments @('run', '--locked', '-p', 'server_app', '--', 'doctor')
             Invoke-Cargo -Arguments @('run', '--locked', '-p', 'bot_client', '--', 'doctor')
         }

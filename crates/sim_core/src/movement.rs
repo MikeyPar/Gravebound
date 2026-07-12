@@ -13,6 +13,7 @@ pub const PLAYER_COLLISION_RADIUS_TILES: f32 = 0.30;
 pub const MOVEMENT_RESPONSE_TICKS: u32 = 2;
 const COLLISION_PASSES: usize = 4;
 const CONTACT_EPSILON: f32 = 1.0e-6;
+const NETWORK_QUANTIZATION_CONTACT_TOLERANCE_TILES: f32 = 0.001;
 const TICKS_PER_SECOND_F32: f32 = 30.0;
 
 /// Renderer-independent vector in northwest-authored simulation coordinates.
@@ -170,15 +171,25 @@ impl PlayerMovementState {
         config: PlayerMovementConfig,
         arena: &ArenaGeometry,
     ) -> Result<Self, MovementError> {
-        let state = Self {
+        if !movement_config_is_valid(config) {
+            return Err(MovementError::InvalidConfig);
+        }
+        if velocity.length() > config.final_speed_tiles_per_second + CONTACT_EPSILON {
+            return Err(MovementError::VelocityExceedsMaximum);
+        }
+        let mut state = Self {
             position,
             velocity,
             config,
         };
-        state.validate(arena)?;
-        if velocity.length() > config.final_speed_tiles_per_second + CONTACT_EPSILON {
-            return Err(MovementError::VelocityExceedsMaximum);
+        if !state.position.is_finite() || !state.velocity.is_finite() {
+            return Err(MovementError::NonFiniteState);
         }
+        state.resolve_solids(arena);
+        if (state.position - position).length() > NETWORK_QUANTIZATION_CONTACT_TOLERANCE_TILES {
+            return Err(MovementError::IllegalPosition);
+        }
+        state.validate(arena)?;
         Ok(state)
     }
 
@@ -222,25 +233,7 @@ impl PlayerMovementState {
 
         for _ in 0..substep_count {
             self.position = self.position + substep;
-            collided |= self.resolve_shell(arena);
-            for _ in 0..COLLISION_PASSES {
-                let mut pass_collision = false;
-                for pillar in &arena.pillars {
-                    if let Some((normal, depth)) = circle_rectangle_contact(
-                        self.position,
-                        *pillar,
-                        self.config.collision_radius_tiles,
-                    ) {
-                        self.position = self.position + normal * (depth + CONTACT_EPSILON);
-                        remove_inward_velocity(&mut self.velocity, normal);
-                        pass_collision = true;
-                    }
-                }
-                collided |= pass_collision;
-                if !pass_collision {
-                    break;
-                }
-            }
+            collided |= self.resolve_solids(arena);
         }
 
         if !self.position.is_finite() || !self.velocity.is_finite() {
@@ -289,12 +282,7 @@ impl PlayerMovementState {
         if !self.position.is_finite() || !self.velocity.is_finite() {
             return Err(MovementError::NonFiniteState);
         }
-        if !self.config.final_speed_tiles_per_second.is_finite()
-            || self.config.final_speed_tiles_per_second <= 0.0
-            || self.config.response_ticks == 0
-            || !self.config.collision_radius_tiles.is_finite()
-            || self.config.collision_radius_tiles <= 0.0
-        {
+        if !movement_config_is_valid(self.config) {
             return Err(MovementError::InvalidConfig);
         }
         if !position_is_legal(self.position, self.config.collision_radius_tiles, arena) {
@@ -328,6 +316,37 @@ impl PlayerMovementState {
         }
         collided
     }
+
+    fn resolve_solids(&mut self, arena: &ArenaGeometry) -> bool {
+        let mut collided = self.resolve_shell(arena);
+        for _ in 0..COLLISION_PASSES {
+            let mut pass_collision = false;
+            for pillar in &arena.pillars {
+                if let Some((normal, depth)) = circle_rectangle_contact(
+                    self.position,
+                    *pillar,
+                    self.config.collision_radius_tiles,
+                ) {
+                    self.position = self.position + normal * (depth + CONTACT_EPSILON);
+                    remove_inward_velocity(&mut self.velocity, normal);
+                    pass_collision = true;
+                }
+            }
+            collided |= pass_collision;
+            if !pass_collision {
+                break;
+            }
+        }
+        collided
+    }
+}
+
+fn movement_config_is_valid(config: PlayerMovementConfig) -> bool {
+    config.final_speed_tiles_per_second.is_finite()
+        && config.final_speed_tiles_per_second > 0.0
+        && config.response_ticks != 0
+        && config.collision_radius_tiles.is_finite()
+        && config.collision_radius_tiles > 0.0
 }
 
 /// Observable result from one fixed movement tick.
@@ -630,6 +649,29 @@ mod tests {
         assert_eq!(
             PlayerMovementState::new(SimulationVector::new(f32::NAN, 2.0), &arena),
             Err(MovementError::NonFiniteState)
+        );
+    }
+
+    #[test]
+    fn authoritative_millitile_contact_repairs_only_quantization_depth() {
+        let arena = arena(32_000, 24_000, TilePoint::new(4_000, 12_000), vec![]);
+        let repaired = PlayerMovementState::from_authoritative_snapshot(
+            SimulationVector::new(0.2995, 12.0),
+            SimulationVector::new(-1.0, 0.0),
+            PlayerMovementConfig::default(),
+            &arena,
+        )
+        .expect("sub-millitile shell contact");
+        assert!(repaired.position().x >= PLAYER_COLLISION_RADIUS_TILES);
+        assert!(repaired.velocity().x.abs() < CONTACT_EPSILON);
+        assert_eq!(
+            PlayerMovementState::from_authoritative_snapshot(
+                SimulationVector::new(0.29, 12.0),
+                SimulationVector::default(),
+                PlayerMovementConfig::default(),
+                &arena,
+            ),
+            Err(MovementError::IllegalPosition)
         );
     }
 }
