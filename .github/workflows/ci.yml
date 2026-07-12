@@ -80,6 +80,10 @@ jobs:
       GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS: "1"
     steps:
       - uses: actions/checkout@v5
+      - name: Install Linux integration dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes clang lld libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
       - name: Install pinned Rust toolchain
         run: rustup show active-toolchain
       - name: Run mandatory PostgreSQL gate
