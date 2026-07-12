@@ -13,8 +13,8 @@ use bevy::{
 };
 use protocol::{
     ActionFrame, ActionKind, AuthTicket, ClientHello, Compression, ENTITY_STATE_ALIVE,
-    ENTITY_STATE_ELIGIBLE, EntityKind, M02_ISOLATED_PLAYER_ENTITY_ID, M02_LOCAL_BUILD_ID,
-    M02_LOCAL_SERVER_NAME, ManifestHash, MutationRequest, PickupPlacement, Platform,
+    ENTITY_STATE_ELIGIBLE, EntityKind, M02_LOCAL_BUILD_ID, M02_LOCAL_SERVER_NAME,
+    M02_PLAYER_ENTITY_ID_BASE, ManifestHash, MutationRequest, PickupPlacement, Platform,
     ProtocolVersion, ReliableEvent, WireMessage, WireText,
 };
 use sim_content::{first_playable_arena, load_and_validate};
@@ -32,7 +32,7 @@ use crate::{
 };
 
 const NETWORK_WINDOW_TITLE: &str = "Gravebound - M02 Network Playtest";
-const LOCAL_PLAYER_ID: u64 = M02_ISOLATED_PLAYER_ENTITY_ID;
+const INITIAL_LOCAL_PLAYER_ID: u64 = M02_PLAYER_ENTITY_ID_BASE;
 
 #[derive(Debug, Clone)]
 pub struct NetworkPlayConfig {
@@ -154,7 +154,7 @@ pub fn run_network_playtest(config: NetworkPlayConfig) -> Result<()> {
             milestone_label: "GB-M02 AUTHORITY GATE",
         })
         .insert_resource(NativeNetworkPresentation::new(RemoteClientRuntime::new(
-            LOCAL_PLAYER_ID,
+            INITIAL_LOCAL_PLAYER_ID,
             arena,
             initial_movement,
         )))
@@ -214,6 +214,7 @@ fn poll_network_transport(
     bridge: Res<NetworkBridge>,
     mut inbox: ResMut<RemoteSnapshotInbox>,
     mut state: ResMut<NetworkPlayState>,
+    mut presentation: ResMut<NativeNetworkPresentation>,
 ) {
     for snapshot in bridge.0.drain_snapshots() {
         inbox.push(snapshot);
@@ -225,6 +226,16 @@ fn poll_network_transport(
             TransportEvent::Reliable(event) => {
                 state.reliable_results = state.reliable_results.saturating_add(1);
                 if matches!(event.event, ReliableEvent::Control(_)) {
+                    if let ReliableEvent::Control(protocol::ControlEvent::SessionResult(result)) =
+                        &event.event
+                        && let Some(entity_id) = result.controlled_entity_id
+                        && presentation.runtime().local_entity_id() != entity_id
+                        && let Err(error) =
+                            presentation.runtime_mut().bind_local_entity_id(entity_id)
+                    {
+                        state.fatal_error = Some(error.to_string());
+                        continue;
+                    }
                     let now = elapsed_millis(state.started);
                     match state.lifecycle.apply_reliable_event(&event, now) {
                         Ok(()) => {
@@ -393,10 +404,10 @@ fn send_reliable_edges(
 
 fn nearest_eligible_pickup(presentation: &NativeNetworkPresentation) -> Option<u64> {
     let snapshot = presentation.latest_snapshot()?;
-    let player = snapshot
-        .entities
-        .iter()
-        .find(|entity| entity.entity_id == LOCAL_PLAYER_ID && entity.kind == EntityKind::Player)?;
+    let player = snapshot.entities.iter().find(|entity| {
+        entity.entity_id == presentation.runtime().local_entity_id()
+            && entity.kind == EntityKind::Player
+    })?;
     snapshot
         .entities
         .iter()
@@ -523,10 +534,10 @@ fn update_network_hud(
         state.reliable_results
     );
     let player = presentation.latest_snapshot().and_then(|snapshot| {
-        snapshot
-            .entities
-            .iter()
-            .find(|entity| entity.entity_id == LOCAL_PLAYER_ID && entity.kind == EntityKind::Player)
+        snapshot.entities.iter().find(|entity| {
+            entity.entity_id == presentation.runtime().local_entity_id()
+                && entity.kind == EntityKind::Player
+        })
     });
     if let Some(snapshot) = presentation.latest_snapshot() {
         let has_living_hostile = snapshot.entities.iter().any(|entity| {
@@ -590,7 +601,7 @@ mod tests {
 
     #[test]
     fn pickup_selection_is_nearest_eligible_and_within_interact_reach() {
-        assert_eq!(LOCAL_PLAYER_ID, 10_000);
+        assert_eq!(INITIAL_LOCAL_PLAYER_ID, 10_000);
         assert_eq!(NetworkInputSequencer::default().last_aim, (1_000, 0));
     }
 

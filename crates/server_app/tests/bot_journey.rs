@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use bot_client::{BotBehavior, BotTerminalOutcome, JourneyBot};
 use protocol::{
-    ActionKind, AuthTicket, ClientHello, Compression, HandshakeResponse, ManifestHash, Platform,
+    AuthTicket, ClientHello, Compression, HandshakeResponse, ManifestHash, Platform,
     ProtocolVersion, SessionDestination, WireMessage, WireText,
 };
 use rcgen::{CertifiedKey, generate_simple_self_signed};
@@ -192,7 +192,7 @@ async fn drive_tick(
 
 #[tokio::test]
 #[allow(clippy::too_many_lines)] // One real-QUIC journey keeps every authority handoff visible.
-async fn real_quic_bot_fights_collects_reconnects_and_manually_recalls() {
+async fn real_quic_bot_fights_collects_reconnects_and_automatically_recalls_on_link_loss() {
     let (server_endpoint, client_endpoint, server_address) = endpoints();
     let owner = SessionOwnerId::new(1).unwrap();
     let first_transport = TransportId::new(1).unwrap();
@@ -267,27 +267,18 @@ async fn real_quic_bot_fights_collects_reconnects_and_manually_recalls() {
         player_before_reconnect
     );
 
-    let recall = bot.next_action(ActionKind::RecallStart).unwrap();
-    exchange_reliable(
-        &mut bot,
-        &second_client,
-        &second_server,
-        directory.session_mut(owner).unwrap(),
-        second_transport,
-        WireMessage::ActionFrame(recall),
-    )
-    .await;
-    for _ in 0..sim_core::EMERGENCY_RECALL_CHANNEL_TICKS {
-        drive_tick(
-            &mut bot,
-            &second_client,
-            &second_server,
-            directory.session_mut(owner).unwrap(),
-            second_transport,
-        )
-        .await;
+    directory
+        .session_mut(owner)
+        .unwrap()
+        .transport_lost(second_transport)
+        .unwrap();
+    close_transport(&second_server, 0_u32, b"automatic recall fixture");
+    for _ in 0..server_app::LINK_LOST_TICKS {
+        let snapshots = directory.session_mut(owner).unwrap().tick().unwrap();
+        for snapshot in snapshots {
+            bot.ingest_snapshot(snapshot).unwrap();
+        }
     }
-    assert_eq!(bot.terminal_outcome(), BotTerminalOutcome::Recalled);
     assert!(matches!(
         directory.session(owner).unwrap().phase(),
         SessionPhase::Recalled { .. }

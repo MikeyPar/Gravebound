@@ -351,6 +351,11 @@ impl ManagedSession {
             state_version: self.state_version(),
             server_monotonic_micros,
             replaced_previous_transport,
+            controlled_entity_id: matches!(
+                code,
+                SessionControlResultCode::Joined | SessionControlResultCode::Reattached
+            )
+            .then_some(protocol::M02_PLAYER_ENTITY_ID_BASE + self.id.get() - 1),
         })
     }
 
@@ -596,6 +601,7 @@ impl SessionDirectory {
             state_version: 0,
             server_monotonic_micros,
             replaced_previous_transport: false,
+            controlled_entity_id: None,
         };
         Ok(LifecycleResponse {
             event: ReliableEventFrame {
@@ -916,6 +922,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "superseded by CONT-FP-010 manual Recall prohibition"]
     fn manual_recall_resolves_at_twelve_ticks_and_reconnect_routes_to_halls() {
         let (mut directory, session_id) = joined_directory();
         let response = directory

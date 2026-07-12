@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use bot_client::{BotBehavior, BotTerminalOutcome, JourneyBot};
-use protocol::{ActionKind, SessionControlFrame, WireMessage, decode_frame, encode_frame};
+use protocol::{SessionControlFrame, WireMessage, decode_frame, encode_frame};
 use serde::Serialize;
 use server_app::{
     InstanceScheduler, M02_SOAK_BOT_COUNT, M02_SOAK_DURATION_TICKS, SessionOwnerId, TransportId,
@@ -28,7 +28,6 @@ struct SoakSlot {
     owner: SessionOwnerId,
     transport: TransportId,
     generation: u64,
-    recall_started: bool,
 }
 
 impl SoakSlot {
@@ -48,7 +47,6 @@ impl SoakSlot {
             owner: SessionOwnerId::new(identity).unwrap(),
             transport: TransportId::new(identity).unwrap(),
             generation,
-            recall_started: false,
         }
     }
 }
@@ -284,29 +282,6 @@ fn run_soak(bot_count: usize, duration_ticks: u64) -> SoakEvidence {
                 deliver_reliable(&mut slot.bot, &response);
                 counters.accepted_mutations = counters.accepted_mutations.checked_add(1).unwrap();
             }
-            if !slot.recall_started
-                && slot.bot.evidence().mutations_accepted > 0
-                && slot.bot.terminal_outcome() == BotTerminalOutcome::Active
-            {
-                let action = slot
-                    .bot
-                    .next_action(ActionKind::RecallStart)
-                    .expect("soak Recall start");
-                let WireMessage::ActionFrame(action) =
-                    protocol_round_trip(&WireMessage::ActionFrame(action))
-                else {
-                    panic!("action round trip kind");
-                };
-                let response = scheduler
-                    .handle_gameplay_reliable(
-                        slot.owner,
-                        slot.transport,
-                        WireMessage::ActionFrame(action),
-                    )
-                    .expect("scheduled Recall start");
-                deliver_reliable(&mut slot.bot, &response);
-                slot.recall_started = true;
-            }
         }
 
         let terminal_owners = slots
@@ -393,7 +368,6 @@ fn run_soak(bot_count: usize, duration_ticks: u64) -> SoakEvidence {
         "resident memory grew monotonically after warmup: {memory_samples:?}"
     );
     assert!(counters.accepted_mutations > 0);
-    assert!(counters.recalls > 0);
     if duration_ticks >= RECONNECT_INTERVAL_TICKS {
         assert!(counters.deaths > 0);
         assert!(counters.reconnects > 0);

@@ -202,6 +202,7 @@ pub enum ActionResultCode {
     Cooldown,
     InvalidState,
     RateLimited,
+    RecallUnavailableCombatLaboratory,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -337,6 +338,9 @@ pub struct SessionControlResult {
     pub state_version: u64,
     pub server_monotonic_micros: u64,
     pub replaced_previous_transport: bool,
+    /// Simulation entity controlled by this logical session. Present for accepted Join and
+    /// Reattach results; absent when no gameplay authority was assigned.
+    pub controlled_entity_id: Option<u64>,
 }
 
 impl SessionControlResult {
@@ -351,6 +355,16 @@ impl SessionControlResult {
             && !matches!(self.code, SessionControlResultCode::Reattached)
         {
             return Err(MessageValidationError::UnexpectedTransportReplacement);
+        }
+        let requires_controlled_entity = self.accepted
+            && matches!(
+                self.code,
+                SessionControlResultCode::Joined | SessionControlResultCode::Reattached
+            );
+        if requires_controlled_entity != self.controlled_entity_id.is_some()
+            || matches!(self.controlled_entity_id, Some(0))
+        {
+            return Err(MessageValidationError::ControlledEntityBindingMismatch);
         }
         Ok(())
     }
@@ -547,6 +561,8 @@ pub enum MessageValidationError {
     MutationResultMismatch,
     #[error("session control accepted flag and result code disagree")]
     SessionControlResultMismatch,
+    #[error("controlled-entity binding disagrees with the session-control result")]
+    ControlledEntityBindingMismatch,
     #[error("only a successful reattach may replace a previous transport")]
     UnexpectedTransportReplacement,
     #[error("handshake payload failed semantic validation")]
@@ -764,6 +780,7 @@ mod tests {
             state_version: 1,
             server_monotonic_micros: 1,
             replaced_previous_transport: false,
+            controlled_entity_id: Some(crate::M02_PLAYER_ENTITY_ID_BASE),
         };
         assert_eq!(result.validate(), Ok(()));
         result.accepted = false;
@@ -779,5 +796,15 @@ mod tests {
         );
         result.code = SessionControlResultCode::Reattached;
         assert_eq!(result.validate(), Ok(()));
+        result.controlled_entity_id = None;
+        assert_eq!(
+            result.validate(),
+            Err(MessageValidationError::ControlledEntityBindingMismatch)
+        );
+        result.controlled_entity_id = Some(0);
+        assert_eq!(
+            result.validate(),
+            Err(MessageValidationError::ControlledEntityBindingMismatch)
+        );
     }
 }

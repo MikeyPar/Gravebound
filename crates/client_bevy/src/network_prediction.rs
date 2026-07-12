@@ -888,6 +888,26 @@ impl RemoteClientRuntime {
         }
     }
 
+    /// Binds prediction to the entity assigned by an accepted Join/Reattach result. Rebinding
+    /// after snapshot assembly begins fails closed because earlier acknowledgements would become
+    /// ambiguous.
+    pub fn bind_local_entity_id(&mut self, entity_id: u64) -> Result<(), NetworkPredictionError> {
+        if entity_id == 0
+            || self.assembler.last_completed_sequence != 0
+            || !self.assembler.pending.is_empty()
+        {
+            return Err(NetworkPredictionError::InvalidLocalEntityBinding);
+        }
+        self.local_entity_id = entity_id;
+        self.local.local_entity_id = entity_id;
+        Ok(())
+    }
+
+    #[must_use]
+    pub const fn local_entity_id(&self) -> u64 {
+        self.local_entity_id
+    }
+
     pub fn predict_local_movement(
         &mut self,
         input: PredictedMovementInput,
@@ -1056,6 +1076,8 @@ fn server_tick_to_millis(server_tick: u64) -> u64 {
 
 #[derive(Debug, Error)]
 pub enum NetworkPredictionError {
+    #[error("controlled-player entity binding is zero or arrived after snapshot assembly began")]
+    InvalidLocalEntityBinding,
     #[error("snapshot chunk failed protocol validation")]
     InvalidSnapshotChunk,
     #[error("snapshot chunks disagree on immutable metadata")]

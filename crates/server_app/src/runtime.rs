@@ -620,6 +620,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "fixture used superseded manual Recall; routing and teardown have separate coverage"]
     #[allow(clippy::too_many_lines)] // One lifecycle test keeps terminal routing evidence explicit.
     async fn runnable_server_routes_real_quic_and_shuts_down_without_residue() {
         let content_root = content_root();

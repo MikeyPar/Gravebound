@@ -33,7 +33,7 @@ use thiserror::Error;
 /// First incompatible protocol generation.
 pub const PROTOCOL_MAJOR: u16 = 1;
 /// Backward-compatible feature generation within [`PROTOCOL_MAJOR`].
-pub const PROTOCOL_MINOR: u16 = 4;
+pub const PROTOCOL_MINOR: u16 = 5;
 /// Authoritative simulation and client-input cadence from GDD `TECH-012`.
 pub const SIMULATION_HZ: u16 = 30;
 /// Baseline world snapshot cadence from GDD `TECH-012`.
@@ -54,9 +54,10 @@ pub const M02_LOCAL_BUILD_ID: &str = "m02-local-1";
 pub const M02_LOCAL_SERVER_NAME: &str = "localhost";
 /// Region label reported by the nonpersistent M02 local server.
 pub const M02_LOCAL_REGION_ID: &str = "local-playtest";
-/// Controlled player identity in the isolated M02 combat-session protocol.
-/// Shared-world authority must replace this implicit identity with an explicit binding.
-pub const M02_ISOLATED_PLAYER_ENTITY_ID: u64 = 10_000;
+/// First entity ID in the M02 hosted-arena player namespace.
+pub const M02_PLAYER_ENTITY_ID_BASE: u64 = 10_000;
+/// Compatibility alias retained while the single-player authority facade remains under test.
+pub const M02_ISOLATED_PLAYER_ENTITY_ID: u64 = M02_PLAYER_ENTITY_ID_BASE;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ProtocolVersion {

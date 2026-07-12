@@ -281,6 +281,7 @@ mod tests {
                 state_version: 7,
                 server_monotonic_micros: 123_000,
                 replaced_previous_transport: false,
+                controlled_entity_id: Some(protocol::M02_PLAYER_ENTITY_ID_BASE),
             })),
         }
     }

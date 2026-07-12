@@ -4,7 +4,7 @@ Gravebound is a server-authoritative, permanent-death, 2D dark-fantasy bullet-he
 
 Every character life is temporary. The account remembers what happened, and exceptional deaths can return as personalized Fallen Hero Echo encounters. The design emphasizes readable combat, rapid recovery, fair monetization, solo viability, and long-term replayability without permanent account-level combat power.
 
-> **Project status:** M01 First Playable is closed under the owner's explicit successful-playtest assumption. Every automated M02 package through `GB-M02-08` passes, and `GB-M02-GATE` now has a runnable local QUIC server, native network client, bounded transport, four-client routing smoke, and packaged playtest launchers. Overall M02 remains held on recorded four-human completion and `SPEC-CONFLICT-003`; M03 persistence/content expansion is not yet authorized.
+> **Project status:** M01 First Playable is closed under the owner's explicit successful-playtest assumption. Automated M02 packages through `GB-M02-08` and the runnable native network package pass. `ADR-027` resolves the remaining scope decision: M02 now requires four clients in one genuine shared authoritative combat world, with `fp.1.0.0` manual Recall prohibited. `GB-M02-09` is in progress; M03 is not yet authorized.
 
 ![Bell Sepulcher gameplay concept](Concept%20Art/01-bell-sepulcher-gameplay.png)
 
@@ -102,7 +102,7 @@ Concept images establish mood, hierarchy, and visual language. They are not fina
 
 ## Current Next Step
 
-Execute the packaged [`GB-M02` native network runbook](docs/playtests/GB-M02-network-gate-runbook.md) with four humans and resolve [`SPEC-CONFLICT-003`](docs/spec-conflicts/SPEC-CONFLICT-003-m02-together-and-fp-recall.md). The runnable server/client seam and four-client isolated routing smoke now pass; automated soak, impairment, malicious/mutation, teardown, and performance evidence remain green. Do not label isolated concurrent sessions as shared party combat, fabricate human evidence, or begin M03 until the gate audit is fully resolved. See the [`GB-M02-GATE` implementation audit](docs/milestones/GB-M02-runtime-audit.md) and [exit-gate audit](docs/milestones/GB-M02-gate-audit.md).
+Implement [`GB-M02-09`](docs/tasks/GB-M02-09.md): add owner-qualified friendly-projectile provenance, multi-target hostile/lane simulation, `SharedAuthoritativeArena`, and instance-owned shared authority while preserving one-player deterministic regressions. Protocol 1.5 controlled-player binding and exact `fp.1.0.0` manual-Recall rejection are complete. Replace the isolated four-client smoke with shared enemy-health/death assertions, then rerun all gates and package the four-human shared playtest. Do not begin M03 until M02 closes.
 
 ## Resolved prior handoff
 

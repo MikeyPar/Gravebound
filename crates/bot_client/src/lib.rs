@@ -388,6 +388,7 @@ mod tests {
             state_version: 20,
             server_monotonic_micros: 10,
             replaced_previous_transport: false,
+            controlled_entity_id: Some(protocol::M02_PLAYER_ENTITY_ID_BASE),
         };
         bot.apply_reliable_event(&ReliableEventFrame {
             sequence: 2,
@@ -411,6 +412,7 @@ mod tests {
             state_version: 20,
             server_monotonic_micros: 20,
             replaced_previous_transport: false,
+            controlled_entity_id: Some(protocol::M02_PLAYER_ENTITY_ID_BASE),
         };
         bot.apply_reliable_event(&ReliableEventFrame {
             sequence: 3,

@@ -300,16 +300,9 @@ impl AuthoritativeSession {
                         ActionResultCode::Accepted
                     }
                 }
-                ActionKind::RecallStart => match self.arena.start_emergency_recall() {
-                    Ok(_) => ActionResultCode::Accepted,
-                    Err(AuthorityError::RecallAlreadyChanneling) => ActionResultCode::InvalidState,
-                    Err(error) => return Err(error.into()),
-                },
-                ActionKind::RecallCancel => match self.arena.cancel_emergency_recall() {
-                    Ok(()) => ActionResultCode::Accepted,
-                    Err(AuthorityError::RecallNotChanneling) => ActionResultCode::InvalidState,
-                    Err(error) => return Err(error.into()),
-                },
+                ActionKind::RecallStart | ActionKind::RecallCancel => {
+                    ActionResultCode::RecallUnavailableCombatLaboratory
+                }
                 ActionKind::Interact => ActionResultCode::InvalidState,
             }
         } else {
@@ -873,6 +866,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "superseded by CONT-FP-010; automatic LinkLost Recall remains lifecycle-covered"]
     #[allow(clippy::float_cmp, clippy::too_many_lines)] // Exact authored scale and one audit trail.
     fn manual_recall_pins_channel_locks_movement_scale_cancel_and_exact_completion() {
         let mut ordinary =
@@ -990,6 +984,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "superseded by CONT-FP-010; death-versus-auto-Recall remains lifecycle-covered"]
     fn damage_does_not_cancel_manual_recall_and_death_wins_completion_tick() {
         let mut baseline =
             AuthoritativeSession::from_content_root(&content_root()).expect("baseline session");
@@ -1044,6 +1039,35 @@ mod tests {
             contested.arena().phase(),
             AuthorityPhase::Dead { committed_at } if committed_at.0 == death_tick
         ));
+    }
+
+    #[test]
+    fn first_playable_manual_recall_is_typed_unavailable_and_nonmutating() {
+        let mut session =
+            AuthoritativeSession::from_content_root(&content_root()).expect("session content");
+        let state_version = session.arena().state_version();
+        for (sequence, action) in [ActionKind::RecallStart, ActionKind::RecallCancel]
+            .into_iter()
+            .enumerate()
+        {
+            let result = session
+                .submit_action(&ActionFrame {
+                    sequence: u32::try_from(sequence + 1).unwrap(),
+                    client_tick: 0,
+                    action,
+                })
+                .unwrap();
+            assert!(matches!(
+                result.event,
+                ReliableEvent::ActionResult {
+                    code: ActionResultCode::RecallUnavailableCombatLaboratory,
+                    ..
+                }
+            ));
+        }
+        assert_eq!(session.arena().state_version(), state_version);
+        assert!(matches!(session.arena().phase(), AuthorityPhase::Alive));
+        assert!(!session.arena().emergency_recall_state().is_channeling());
     }
 
     #[test]

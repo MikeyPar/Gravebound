@@ -2,7 +2,7 @@
 
 ## Status
 
-Open. Only the conflicting promotion claims and manual-Recall client work are stopped; runnable network authority work may continue.
+Resolved by owner direction on 2026-07-12. ADR-027 is the binding implementation decision.
 
 ## Conflict A — four-human meaning
 
@@ -16,16 +16,15 @@ Open. Only the conflicting promotion claims and manual-Recall client work are st
 - Roadmap `GB-M02-07` says the headless bot “Recalls,” while GDD `DTH-010` and `TECH-015` require Emergency Recall and automatic disconnect resolution. Existing M02-07 interpreted this as a successful manual Recall journey.
 - Protocol `1.4` has no exact `recall_unavailable_combat_laboratory` result code.
 
-## Conservative implementation pending owner/spec decision
+## Implemented resolution
 
+- M02 requires genuine shared-world combat for the four-human exit row. Isolated concurrent sessions remain regression evidence only.
 - The native M02 playtest client does not offer or transmit manual Recall and displays the Content Specification copy.
+- Protocol 1.5 returns `recall_unavailable_combat_laboratory` for manual Recall actions without mutating state.
 - Automatic `LinkLost` Recall remains required because it is explicitly network lifecycle behavior.
 - Existing server/manual-bot coverage is retained as historical implementation evidence, but it does not override `CONT-FP-010` or close this conflict.
 - Four concurrent isolated human completions may be recorded as runtime/authority evidence. They must not be labeled shared party combat or used alone to assert the ambiguous “together” row.
 
-## Required resolution
+## Follow-through
 
-The owner/spec revision must choose both:
-
-1. Define M02 “together” as either concurrent isolated completions on one server or shared-world combat, with the latter adding an explicit multiplayer-authority package.
-2. Define whether M02's network build inherits the `fp.1.0.0` manual Recall prohibition or creates a versioned network-test exception, including the exact typed result and tests.
+`GB-M02-09` specifies the shared aggregate, deterministic ordering, protocol identity, player-local lifecycle, and acceptance tests. M02 cannot close until that package and the four-human shared playtest pass.
