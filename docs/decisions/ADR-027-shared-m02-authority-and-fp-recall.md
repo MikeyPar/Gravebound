@@ -19,3 +19,7 @@ One shared combat aggregate will be owned by each hosted instance. Logical sessi
 - M03 remains blocked.
 - Existing manual-Recall session fixtures are superseded; automatic Recall and death-before-Recall ordering remain mandatory coverage.
 - No M04 party scaling or group rewards are introduced. The authored `fp.1.0.0` encounter is unchanged for one to four M02 participants.
+
+## Outcome
+
+Implemented and verified on 2026-07-12. `GB-M02-09` supplies the shared aggregate and protocol 1.5 contract. The final human row is recorded as an explicitly labeled owner-assumed pass under ADR-025, so M02 is closed without inventing individual tester telemetry.

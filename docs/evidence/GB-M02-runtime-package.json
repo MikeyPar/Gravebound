@@ -20,6 +20,7 @@
   "ordinary_ci_ignored_tests": 1,
   "four_client_shared_world_smoke": true,
   "packaged_four_client_process_smoke": true,
+  "packaged_launcher_smoke": true,
   "all_client_launcher_present": true,
   "zero_server_residue": true,
   "native_server_launched": true,

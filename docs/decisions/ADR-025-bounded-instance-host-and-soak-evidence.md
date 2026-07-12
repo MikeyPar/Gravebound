@@ -1,6 +1,6 @@
 # ADR-025 - Bounded instance host and soak evidence
 
-Status: Accepted
+Status: Accepted, amended by ADR-027 and `GB-M02-09`
 
 Implementation package: `GB-M02-08`
 
@@ -25,3 +25,7 @@ Implementation package: `GB-M02-08`
 - Population performance and cleanup become reproducible artifacts instead of assertions based on unit-test speed.
 - The M02 arena host intentionally does not claim shared co-op encounter simulation or production realm capacity.
 - Later operations work must replace the full-window test collector with production rolling metrics and external observability.
+
+## 2026-07-12 amendment
+
+ADR-027 supersedes the original isolated-session capacity/stepping model. Current M02 capacity is four players per `HostedInstance`; the instance owns one shared authority aggregate and sixteen-bot evidence runs as four arenas. The owner-assumption labeling rule in decision 8 remains binding.

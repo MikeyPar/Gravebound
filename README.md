@@ -102,7 +102,7 @@ Concept images establish mood, hierarchy, and visual language. They are not fina
 
 ## Current Next Step
 
-Run the four-human shared-combat session in [`GB-M02-network-gate-runbook.md`](docs/playtests/GB-M02-network-gate-runbook.md) and record the result. Automated M02 gates now pass: 68 active networking tests, 390 active workspace tests, strict Clippy, impairment/abuse suites, deterministic traces, a release-profile sixteen-bot/two-hour shared soak, clean Windows packaging, and one-server/four-client packaged process smoke. The package includes `Start All Clients.cmd` so all four credentials enter one arena before roster activation. Do not begin M03 until the human row closes M02.
+Begin `GB-M03-01`: wipeable test identity plus Arbalist character creation/select, using the existing protocol/session boundary and without pulling PostgreSQL (`GB-M03-02`) forward. M02 is closed: its automated authority, impairment, abuse, soak, deterministic, package, and four-client process gates are measured PASS; the human row is an explicitly labeled owner-assumed PASS under ADR-025 and is not represented as measured cohort telemetry. Keep `fp.1.0.0` immutable while defining the M03 content/version cutover before implementation.
 
 ## Resolved prior handoff
 

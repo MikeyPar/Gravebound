@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted for `GB-M02-GATE`.
+Accepted for `GB-M02-GATE`; identity/isolated-authority clauses superseded by ADR-027.
 
 ## Context
 
@@ -23,3 +23,7 @@ Accepted for `GB-M02-GATE`.
 - Input and snapshots remain droppable latest-state traffic; reliable queue saturation fails visibly instead of silently losing a command.
 - Credentials, content, characters, and certificates are ephemeral and unsuitable for production.
 - Concurrent isolated sessions do not establish shared-world multiplayer. The gate audit must keep that distinction visible.
+
+## 2026-07-12 amendment
+
+Protocol 1.5 now carries `controlled_entity_id` and owner-qualified projectile provenance. `HostedInstance` owns one shared maximum-four-player combat authority, so the isolated-ID and isolated-session limitations above are historical context rather than current behavior. Certificate trust, bounded transport, executable-mode, and nonpersistent-scope decisions remain active.

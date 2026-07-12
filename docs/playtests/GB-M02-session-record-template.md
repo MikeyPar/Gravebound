@@ -39,5 +39,5 @@
 - Four concurrent native completions: `PASS` / `PENDING`
 - Zero P0/P1: `PASS` / `PENDING`
 - Local controls playable: `PASS` / `PENDING`
-- Shared-world “together” interpretation: `UNRESOLVED — SPEC-CONFLICT-003`
+- Shared-world “together” interpretation: `RESOLVED — ADR-027`
 - Owner decision and signature/date:

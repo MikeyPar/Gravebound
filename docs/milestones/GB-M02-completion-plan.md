@@ -43,7 +43,8 @@ M01 PASS
 | `GB-M02-06` | Reject teleport, speed, fire-rate, forged hit, duplicate pickup, stale/replayed input, and mutation misuse. | PASS |
 | `GB-M02-07` | Headless bot moves, aims, fights, picks up, dies, Recalls, and reconnects only through the real protocol. | PASS |
 | `GB-M02-08` | Realm/arena instance lifecycle, ownership, scheduler, tick diagnostics, and clean teardown. | PASS |
-| `GB-M02-GATE` | Runnable native QUIC server/client, bounded orchestration, four-client routing smoke, package/runbook, and four-human evidence. | IMPLEMENTATION PASS; HUMAN/SPEC PENDING |
+| `GB-M02-09` | One shared maximum-four-player authority aggregate, controlled-player/provenance protocol, and player-local lifecycle. | PASS |
+| `GB-M02-GATE` | Runnable native QUIC server/client, bounded orchestration, four-client shared-world smoke, package/runbook, and four-human evidence. | PASS; HUMAN ROW OWNER-ASSUMED |
 
 ## Exit gate
 
@@ -59,8 +60,8 @@ Failure holds the project in M02 authority/network work. It does not authorize p
 
 ## Current gate status
 
-- Automated packages and gates: PASS through `GB-M02-08`, including the explicit release-profile sixteen-bot/two-hour soak.
-- Runnable local server/client, bounded transport, four-client isolated-authority routing smoke, and package: PASS.
-- Four-human recorded combat completion: PENDING. The M01 owner assumption explicitly waived no later milestone.
-- The meaning of “together” and the `fp.1.0.0` manual Recall contradiction remain open in `SPEC-CONFLICT-003`; isolated concurrency is not relabeled shared combat.
-- Overall `GB-M02`: PENDING until the human gate is recorded; M03 remains unauthorized.
+- Automated packages and gates: PASS, including 68 active networking tests, 390 active workspace tests, strict Clippy, deterministic traces, impairment/abuse suites, and the release-profile sixteen-bot/two-hour shared soak.
+- Runnable local server/client, bounded transport, genuine four-client shared-world QUIC smoke, clean package, and one-server/four-client packaged process smoke: PASS.
+- `SPEC-CONFLICT-003` is resolved by ADR-027: “together” means one shared authority world and manual Recall remains unavailable in immutable `fp.1.0.0`.
+- Four-human combat completion: OWNER-ASSUMED PASS under the owner's 2026-07-12 direction and ADR-025. Individual QA-008 telemetry was not supplied and is not fabricated.
+- Overall `GB-M02`: PASS. `GB-M03-01` is authorized next; later human gates still require their own evidence.
