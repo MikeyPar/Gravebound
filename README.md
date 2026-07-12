@@ -4,7 +4,7 @@ Gravebound is a server-authoritative, permanent-death, 2D dark-fantasy bullet-he
 
 Every character life is temporary. The account remembers what happened, and exceptional deaths can return as personalized Fallen Hero Echo encounters. The design emphasizes readable combat, rapid recovery, fair monetization, solo viability, and long-term replayability without permanent account-level combat power.
 
-> **Project status:** M01 First Playable is closed under the owner's explicit successful-playtest assumption. Automated M02 packages through `GB-M02-08` and the runnable native network package pass. `ADR-027` resolves the remaining scope decision: M02 now requires four clients in one genuine shared authoritative combat world, with `fp.1.0.0` manual Recall prohibited. `GB-M02-09` is in progress; M03 is not yet authorized.
+> **Project status:** M01 and M02 are closed under their recorded gates. `GB-M03-01` now passes as a wipeable, server-authoritative Core identity and native Grave Arbalist creation/select slice. M03 persistence, world routing, progression, permanent death, recovery, telemetry, and operations packages remain open.
 
 ![Bell Sepulcher gameplay concept](Concept%20Art/01-bell-sepulcher-gameplay.png)
 
@@ -102,7 +102,7 @@ Concept images establish mood, hierarchy, and visual language. They are not fina
 
 ## Current Next Step
 
-Implement `GB-M03-01A`, the immutable FP/Core-development content boundary from the approved [`GB-M03-01` contract](docs/tasks/GB-M03-01.md), then add the wipeable server-authoritative identity/protocol (`01B`) and native Grave Arbalist creation/select (`01C`). All seven Core identity decisions in [`SPEC-CONFLICT-004`](docs/spec-conflicts/SPEC-CONFLICT-004-m03-core-identity.md) are approved. Do not pull PostgreSQL (`GB-M03-02`) forward or promote incomplete `core.1.0.0` bytes. The focused M02 visual/pickup/reconnect owner retest remains an explicitly open follow-up and is not measured M03 evidence.
+Implement `GB-M03-02` by first accepting the M03 PostgreSQL ADR required by the roadmap: access layer, transaction boundaries, migration discipline, ephemeral test-database policy, wipeable namespace, and rollback behavior. Then add the `persistence` crate and ephemeral PostgreSQL stack from `GB-M03-11`, and replace the `GB-M03-01` in-memory repository adapter without moving domain validation into SQL. Do not pull Hall routing, items, memorials, ledgers, or formal `core.1.0.0` promotion into the infrastructure slice; each aggregate is wired only under its owning reviewed package.
 
 ## Resolved prior handoff
 

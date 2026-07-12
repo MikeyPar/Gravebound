@@ -55,6 +55,9 @@ Set-Location Gravebound
 | M02 local QUIC server | `.\tools\dev.cmd m02-server` |
 | M02 native client (`GRAVEBOUND_LOCAL_PLAYER` selects the opaque token) | `.\tools\dev.cmd m02-client` |
 | Package one server plus four native client launchers | `.\tools\dev.cmd m02-package` |
+| Core identity focused tests | `.\tools\dev.cmd m03-identity-smoke` |
+| Wipeable Core identity server | `.\tools\dev.cmd m03-identity-server` |
+| Native Core character select (`GRAVEBOUND_TEST_IDENTITY` chooses the opaque token) | `.\tools\dev.cmd m03-identity-client` |
 | Windows release build | `.\tools\dev.cmd release` |
 | Full local CI equivalent | `.\tools\dev.cmd ci` |
 
@@ -65,6 +68,7 @@ Direct Cargo aliases are also available: `cargo gb-format`, `cargo gb-lint`, `ca
 - **LocalLab:** available in M00; `client_bevy` and `sim_core` share one process with ephemeral state.
 - **Headless/Replay:** `cargo run -p tools_content -- trace tests/deterministic/m00_smoke.json`.
 - **M02 Network Playtest:** `.\tools\dev.cmd m02-package` produces `dist\Gravebound-M02-Playtest` with one authoritative server, four uniquely credentialed native client launchers, immutable `fp.1.0.0`, and the human runbook. This mode is nonpersistent and uses an explicitly trusted per-launch loopback certificate.
+- **M03 Core Identity:** start `.\tools\dev.cmd m03-identity-server`, then run `.\tools\dev.cmd m03-identity-client`. The separate `core-dev` endpoint validates immutable FP source plus the unpromoted identity/copy descriptors, exposes only the wipeable character-select authority, admits zero combat sessions, and loses every roster on server restart. PostgreSQL and formal `core.1.0.0` promotion remain disabled.
 - **LocalStack:** intentionally unavailable until M03 supplies PostgreSQL persistence. The runnable M02 network playtest is not mislabeled LocalStack because it has no durable database.
 - **Server foundation:** `.\tools\dev.cmd server-doctor` validates the M02 crate boundary, shared 30 Hz simulation contract, canonical protocol rates, real transport, and scheduler.
 - **Bot foundation:** `.\tools\dev.cmd bot-doctor` validates the headless client boundary, shared cadence, real transport, and protocol-visible journey execution.
@@ -223,3 +227,7 @@ $env:RUST_LOG = 'info,client_bevy=debug,sim_core=debug,sim_content=debug'
 ```
 
 Never log credentials, authentication tickets, account tokens, or future commerce secrets.
+
+## GB-M03-01C identity evidence
+
+The Core identity client accepts the existing `GRAVEBOUND_WINDOW_SIZE` and `GRAVEBOUND_SCREENSHOT_PATH` evidence controls. When a screenshot path is present, the client performs the real authoritative empty-roster -> creation -> selection journey, waits 60 settled presentation frames, writes the frame atomically, and exits. Run the server first and use a fresh opaque test token. The accepted frame must show the wipe warning, protocol 1.6 feature flag, one selected level-1 Grave Arbalist, one empty slot, no oath, `NOT EQUIPPED`, `AVAILABLE IN A LATER TEST`, the locked base silhouette, and localized class/ability copy. Inspect both 1280x720 and 1920x1080 output; an incomplete GPU composite is rejected even when the semantic journey passed.
