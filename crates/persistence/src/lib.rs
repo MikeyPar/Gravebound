@@ -31,7 +31,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 3;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 4;
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -377,6 +377,28 @@ mod tests {
             assert!(
                 !migration.contains(prohibited),
                 "progression migration leaked {prohibited}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejected_xp_profile_forward_migration_is_nullable_but_still_bounded() {
+        let migration = include_str!("../../../migrations/0004_nullable_rejected_xp_profile.sql");
+        for required in [
+            "ADD COLUMN normal_living_at_death BOOLEAN",
+            "ALTER COLUMN xp_profile_id DROP NOT NULL",
+            "DROP CONSTRAINT xp_profile_id_bounded",
+            "DROP CONSTRAINT xp_normal_evidence_shape",
+            "xp_profile_id IS NULL OR length(xp_profile_id) BETWEEN 3 AND 96",
+            "normal_living_at_death IS NOT NULL",
+            "normal_living_at_death IS NULL",
+        ] {
+            assert!(migration.contains(required), "migration omitted {required}");
+        }
+        for prohibited in ["JSON", "JSONB", "DROP TABLE", "core.1.0.0"] {
+            assert!(
+                !migration.contains(prohibited),
+                "XP-profile correction leaked {prohibited}"
             );
         }
     }

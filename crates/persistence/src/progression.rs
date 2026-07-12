@@ -36,6 +36,7 @@ pub struct StoredOrdinaryXpEvidence {
     pub window_ticks: i32,
     pub actual_health_damage: i64,
     pub effective_support: bool,
+    pub living_at_enemy_death: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,7 +86,7 @@ pub struct StoredXpAwardResult {
     pub reward_event_id: [u8; ID_BYTES],
     pub payload_hash: [u8; HASH_BYTES],
     pub source_content_id: String,
-    pub xp_profile_id: String,
+    pub xp_profile_id: Option<String>,
     /// Exact lowercase BLAKE3 manifest digest, without a mutable development label.
     pub progression_content_revision: String,
     pub evidence: StoredXpEligibilityEvidence,
@@ -351,7 +352,8 @@ async fn load_award_result(
         "SELECT character_id, payload_hash, source_content_id, xp_profile_id, \
                 progression_content_revision, eligibility_kind, eligible, \
                 normal_delta_x_milli_tiles, normal_delta_y_milli_tiles, normal_window_ticks, \
-                normal_actual_damage, normal_effective_support, encounter_active_ticks, \
+                normal_actual_damage, normal_effective_support, normal_living_at_death, \
+                encounter_active_ticks, \
                 encounter_present_ticks, encounter_longest_inactivity_ticks, \
                 encounter_reference_health, encounter_direct_damage, \
                 encounter_effective_healing, encounter_damage_prevented, \
@@ -518,6 +520,7 @@ fn decode_evidence(
                     window_ticks: required_column(row, "normal_window_ticks")?,
                     actual_health_damage: required_column(row, "normal_actual_damage")?,
                     effective_support: required_column(row, "normal_effective_support")?,
+                    living_at_enemy_death: required_column(row, "normal_living_at_death")?,
                 },
             ))
         }
@@ -566,7 +569,8 @@ fn ensure_ordinary_columns_absent(row: &sqlx::postgres::PgRow) -> Result<(), Per
     ensure_null::<i32>(row, "normal_delta_y_milli_tiles")?;
     ensure_null::<i32>(row, "normal_window_ticks")?;
     ensure_null::<i64>(row, "normal_actual_damage")?;
-    ensure_null::<bool>(row, "normal_effective_support")
+    ensure_null::<bool>(row, "normal_effective_support")?;
+    ensure_null::<bool>(row, "normal_living_at_death")
 }
 
 fn ensure_encounter_columns_absent(row: &sqlx::postgres::PgRow) -> Result<(), PersistenceError> {
@@ -663,6 +667,7 @@ async fn insert_award_result(
         normal_ticks,
         normal_damage,
         normal_support,
+        normal_living,
         encounter_active,
         encounter_present,
         encounter_inactive,
@@ -681,6 +686,7 @@ async fn insert_award_result(
           source_content_id, xp_profile_id, progression_content_revision, eligibility_kind, \
           eligible, normal_delta_x_milli_tiles, normal_delta_y_milli_tiles, \
           normal_window_ticks, normal_actual_damage, normal_effective_support, \
+          normal_living_at_death, \
           encounter_active_ticks, encounter_present_ticks, encounter_longest_inactivity_ticks, \
           encounter_reference_health, encounter_direct_damage, encounter_effective_healing, \
           encounter_damage_prevented, encounter_objective_credits, encounter_life_state, \
@@ -689,7 +695,7 @@ async fn insert_award_result(
           post_level, pre_progression_version, post_progression_version, result_code, result_payload) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, \
                  $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, \
-                 $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40)",
+                 $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41)",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(result.account_id.as_slice())
@@ -697,7 +703,7 @@ async fn insert_award_result(
     .bind(result.reward_event_id.as_slice())
     .bind(result.payload_hash.as_slice())
     .bind(&result.source_content_id)
-    .bind(&result.xp_profile_id)
+    .bind(result.xp_profile_id.as_deref())
     .bind(&result.progression_content_revision)
     .bind(eligibility_kind)
     .bind(result.eligible)
@@ -706,6 +712,7 @@ async fn insert_award_result(
     .bind(normal_ticks)
     .bind(normal_damage)
     .bind(normal_support)
+    .bind(normal_living)
     .bind(encounter_active)
     .bind(encounter_present)
     .bind(encounter_inactive)
@@ -747,6 +754,7 @@ fn evidence_columns(
     Option<i32>,
     Option<i64>,
     Option<bool>,
+    Option<bool>,
     Option<i64>,
     Option<i64>,
     Option<i64>,
@@ -767,6 +775,7 @@ fn evidence_columns(
             Some(evidence.window_ticks),
             Some(evidence.actual_health_damage),
             Some(evidence.effective_support),
+            Some(evidence.living_at_enemy_death),
             None,
             None,
             None,
@@ -781,6 +790,7 @@ fn evidence_columns(
         ),
         StoredXpEligibilityEvidence::Encounter(evidence) => (
             1,
+            None,
             None,
             None,
             None,
@@ -922,7 +932,9 @@ fn validate_award_result(
         return Err(PersistenceError::CorruptStoredProgression);
     }
     validate_bounded_id(&result.source_content_id)?;
-    validate_bounded_id(&result.xp_profile_id)?;
+    if let Some(profile_id) = &result.xp_profile_id {
+        validate_bounded_id(profile_id)?;
+    }
     if result.progression_content_revision.len() != 64
         || !result
             .progression_content_revision
@@ -950,6 +962,7 @@ fn validate_award_result(
         || !(0..=12).contains(&result.result_code)
         || result.result_payload.is_empty()
         || result.result_payload.len() > MAX_RESULT_PAYLOAD_BYTES
+        || (result.eligible && result.xp_profile_id.is_none())
         || (!result.eligible
             && (result.first_clear_awarded
                 || result.base_xp != 0
@@ -1115,7 +1128,7 @@ mod tests {
             reward_event_id: [3; 16],
             payload_hash: [4; 32],
             source_content_id: "enemy.drowned_pilgrim".to_owned(),
-            xp_profile_id: "xp.normal_t1".to_owned(),
+            xp_profile_id: Some("xp.normal_t1".to_owned()),
             progression_content_revision: "a".repeat(64),
             evidence: StoredXpEligibilityEvidence::Ordinary(StoredOrdinaryXpEvidence {
                 delta_x_milli_tiles: 1_000,
@@ -1123,6 +1136,7 @@ mod tests {
                 window_ticks: 300,
                 actual_health_damage: 1,
                 effective_support: false,
+                living_at_enemy_death: true,
             }),
             eligible: true,
             first_clear_awarded: false,
@@ -1149,7 +1163,7 @@ mod tests {
 
         let mut encounter = ordinary;
         encounter.source_content_id = "boss.sir_caldus".to_owned();
-        encounter.xp_profile_id = "xp.boss_caldus".to_owned();
+        encounter.xp_profile_id = Some("xp.boss_caldus".to_owned());
         encounter.evidence = StoredXpEligibilityEvidence::Encounter(StoredEncounterXpEvidence {
             active_ticks: 3_000,
             present_ticks: 2_000,
@@ -1184,6 +1198,25 @@ mod tests {
     }
 
     #[test]
+    fn only_rejected_awards_may_omit_an_xp_profile() {
+        let mut rejected = ordinary_result();
+        rejected.xp_profile_id = None;
+        rejected.eligible = false;
+        rejected.base_xp = 0;
+        rejected.requested_xp = 0;
+        rejected.applied_xp = 0;
+        rejected.pre_total_xp = 95;
+        rejected.post_total_xp = 95;
+        rejected.pre_level = 1;
+        rejected.post_level = 1;
+        rejected.post_progression_version = rejected.pre_progression_version;
+        assert!(validate_award_result(&rejected, &contract()).is_ok());
+
+        rejected.eligible = true;
+        assert!(validate_award_result(&rejected, &contract()).is_err());
+    }
+
+    #[test]
     fn fresh_state_requires_exact_projection_and_first_clear_marker_binding() {
         let initial = StoredProgression {
             total_xp: 0,
@@ -1199,7 +1232,7 @@ mod tests {
         };
         let mut result = ordinary_result();
         result.source_content_id = "boss.sir_caldus".to_owned();
-        result.xp_profile_id = "xp.boss_caldus".to_owned();
+        result.xp_profile_id = Some("xp.boss_caldus".to_owned());
         result.evidence = StoredXpEligibilityEvidence::Encounter(StoredEncounterXpEvidence {
             active_ticks: 100,
             present_ticks: 100,
