@@ -8,6 +8,7 @@ mod journey;
 pub use journey::*;
 
 use protocol::{
+    AccountBootstrapFrame, AccountBootstrapResult, CharacterMutationFrame, CharacterMutationResult,
     ClientHello, ControlEvent, HandshakeResponse, InputFrame, ProtocolVersion,
     RELIABLE_FRAME_LIMIT, ReliableEvent, ReliableEventFrame, SIMULATION_HZ, SessionControlFrame,
     SessionControlResult, SnapshotChunk, WireMessage, decode_frame, encode_frame,
@@ -162,6 +163,30 @@ pub async fn perform_session_control(
         return Err(BotTransportError::UnexpectedMessage);
     };
     let ReliableEvent::Control(ControlEvent::SessionResult(result)) = &event.event else {
+        return Err(BotTransportError::UnexpectedMessage);
+    };
+    Ok((event.clone(), result.clone()))
+}
+
+pub async fn perform_account_bootstrap(
+    connection: &quinn::Connection,
+    frame: AccountBootstrapFrame,
+) -> Result<(ReliableEventFrame, AccountBootstrapResult), BotTransportError> {
+    let event =
+        perform_reliable_gameplay(connection, WireMessage::AccountBootstrapFrame(frame)).await?;
+    let ReliableEvent::AccountBootstrapResult(result) = &event.event else {
+        return Err(BotTransportError::UnexpectedMessage);
+    };
+    Ok((event.clone(), result.clone()))
+}
+
+pub async fn perform_character_mutation(
+    connection: &quinn::Connection,
+    frame: CharacterMutationFrame,
+) -> Result<(ReliableEventFrame, CharacterMutationResult), BotTransportError> {
+    let event =
+        perform_reliable_gameplay(connection, WireMessage::CharacterMutationFrame(frame)).await?;
+    let ReliableEvent::CharacterMutationResult(result) = &event.event else {
         return Err(BotTransportError::UnexpectedMessage);
     };
     Ok((event.clone(), result.clone()))

@@ -4,11 +4,18 @@
 //! `sim_core`. It must not own rendering, client settings, gameplay rules, or persistence logic.
 //! M02 deliberately has no database dependency.
 
+mod identity;
 mod instance;
 mod lifecycle;
 mod runtime;
 mod session;
 
+pub use identity::{
+    AccountAggregate, AccountId, AccountRepository, AccountRepositoryError, AuthenticatedAccount,
+    AuthenticatedNamespace, CharacterIdGenerator, IdentityClock, IdentityEvent, IdentityEventSink,
+    IdentityService, InMemoryAccountRepository, MAX_ACCOUNT_MUTATION_RESULTS,
+    NoopIdentityEventSink,
+};
 pub use instance::{
     ArenaInstancePhase, HostedInstanceId, InstanceControlResponse, InstanceDiagnostics,
     InstanceError, InstanceKind, InstanceScheduler, M02_ARENA_CAPACITY, M02_SOAK_BOT_COUNT,
@@ -21,8 +28,10 @@ pub use lifecycle::{
     ManagedSession, SessionDirectory, SessionOwnerId, SessionPhase, TransportId,
 };
 pub use runtime::{
-    BoundLocalServer, LOCAL_BUILD_ID, LOCAL_REGION_ID, LOCAL_SERVER_NAME, LocalServerConfig,
-    LocalServerReport, LocalServerRuntimeError,
+    BoundCoreIdentityServer, BoundLocalServer, CORE_IDENTITY_BUILD_ID,
+    CORE_IDENTITY_CONTENT_TARGET, CoreIdentityServerConfig, CoreIdentityServerReport,
+    LOCAL_BUILD_ID, LOCAL_REGION_ID, LOCAL_SERVER_NAME, LocalServerConfig, LocalServerReport,
+    LocalServerRuntimeError,
 };
 pub use session::{
     AuthoritativeSession, IngressAnomaly, IngressAnomalyKind, IngressDiagnostics, InputDisposition,
@@ -325,6 +334,58 @@ pub async fn serve_session_control(
     send.write_all(&encode_frame(&wire)?)
         .await
         .map_err(|error| ServerTransportError::Quic(error.to_string()))?;
+    send.finish()
+        .map_err(|error| ServerTransportError::Quic(error.to_string()))?;
+    Ok(response)
+}
+
+/// Serves one Core identity request without admitting the connection to an M02 combat session.
+/// The authenticated account is resolved outside this function and cannot be overridden on wire.
+pub async fn serve_identity_reliable<R, C, G, E>(
+    connection: &quinn::Connection,
+    service: &IdentityService<R, C, G, E>,
+    authenticated: Option<AuthenticatedAccount>,
+    response_sequence: u32,
+    server_tick: u64,
+) -> Result<protocol::ReliableEventFrame, ServerTransportError>
+where
+    R: AccountRepository,
+    C: IdentityClock,
+    G: CharacterIdGenerator,
+    E: IdentityEventSink,
+{
+    if response_sequence == 0 {
+        return Err(ServerTransportError::UnexpectedMessage);
+    }
+    let (mut send, mut receive) = connection
+        .accept_bi()
+        .await
+        .map_err(|error| ServerTransportError::Quic(error.to_string()))?;
+    let request = receive
+        .read_to_end(RELIABLE_FRAME_LIMIT)
+        .await
+        .map_err(|error| ServerTransportError::Quic(error.to_string()))?;
+    let event = match decode_frame(&request)? {
+        WireMessage::AccountBootstrapFrame(frame) => {
+            protocol::ReliableEvent::AccountBootstrapResult(
+                service.bootstrap(authenticated, &frame),
+            )
+        }
+        WireMessage::CharacterMutationFrame(frame) => {
+            protocol::ReliableEvent::CharacterMutationResult(service.mutate(authenticated, &frame))
+        }
+        _ => return Err(ServerTransportError::UnexpectedMessage),
+    };
+    let response = protocol::ReliableEventFrame {
+        sequence: response_sequence,
+        server_tick,
+        event,
+    };
+    send.write_all(&encode_frame(&WireMessage::ReliableEvent(
+        response.clone(),
+    ))?)
+    .await
+    .map_err(|error| ServerTransportError::Quic(error.to_string()))?;
     send.finish()
         .map_err(|error| ServerTransportError::Quic(error.to_string()))?;
     Ok(response)

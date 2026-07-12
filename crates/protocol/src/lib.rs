@@ -4,15 +4,23 @@
 //! typed protocol errors. It never owns gameplay rules, rendering, transport sockets, sessions,
 //! or persistence. `GB-M02-01` supplies the bounded handshake, gameplay envelopes, and codec.
 
+mod account;
 mod bounded;
 mod codec;
 mod handshake;
 mod messages;
 
+pub use account::{
+    AccountBootstrapFrame, AccountBootstrapRequest, AccountBootstrapResult, AccountErrorCode,
+    AccountMessageValidationError, AccountNamespace, AccountSnapshot, CHARACTER_ID_BYTES,
+    CLASS_ID_MAX_BYTES, CORE_CHARACTER_SLOT_CAPACITY, CharacterLifeState, CharacterMutationFrame,
+    CharacterMutationPayload, CharacterMutationResult, CharacterSecurityState, CharacterSnapshot,
+    GRAVE_ARBALIST_CLASS_ID, MAX_ACCOUNT_CHARACTERS, MUTATION_ID_BYTES, PAYLOAD_HASH_BYTES,
+};
 pub use bounded::{AuthTicket, BoundedValueError, ManifestHash, WireText};
 pub use codec::{
     DATAGRAM_FRAME_LIMIT, FRAME_HEADER_BYTES, RELIABLE_FRAME_LIMIT, WireCodecError, decode_frame,
-    encode_frame,
+    encode_frame, encode_m02_compatibility_frame,
 };
 pub use handshake::{
     ClientHello, Compression, HandshakeRejection, HandshakeResponse, Platform, ServerHello,
@@ -33,7 +41,9 @@ use thiserror::Error;
 /// First incompatible protocol generation.
 pub const PROTOCOL_MAJOR: u16 = 1;
 /// Backward-compatible feature generation within [`PROTOCOL_MAJOR`].
-pub const PROTOCOL_MINOR: u16 = 5;
+pub const PROTOCOL_MINOR: u16 = 6;
+/// Exact final M02 wire generation retained for byte-for-byte compatibility fixtures.
+pub const M02_PROTOCOL_MINOR: u16 = 5;
 /// Authoritative simulation and client-input cadence from GDD `TECH-012`.
 pub const SIMULATION_HZ: u16 = 30;
 /// Baseline world snapshot cadence from GDD `TECH-012`.
@@ -54,6 +64,12 @@ pub const M02_LOCAL_BUILD_ID: &str = "m02-local-1";
 pub const M02_LOCAL_SERVER_NAME: &str = "localhost";
 /// Region label reported by the nonpersistent M02 local server.
 pub const M02_LOCAL_REGION_ID: &str = "local-playtest";
+/// Explicit feature flag enabling the wipeable Core identity/select surface.
+pub const CORE_TEST_IDENTITY_FEATURE_FLAG: &str = "core_test_identity_character_select";
+/// Build admitted by the explicit wipeable Core identity development endpoint.
+pub const M03_CORE_DEV_BUILD_ID: &str = "m03-core-dev-identity-1";
+/// Non-promotable content target label advertised by the Core identity endpoint.
+pub const M03_CORE_DEV_CONTENT_TARGET: &str = "core-dev";
 /// First entity ID in the M02 hosted-arena player namespace.
 pub const M02_PLAYER_ENTITY_ID_BASE: u64 = 10_000;
 /// Compatibility alias retained while the single-player authority facade remains under test.

@@ -3,7 +3,10 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{ClientHello, HandshakeResponse, NetworkChannel, WireText};
+use crate::{
+    AccountBootstrapFrame, AccountBootstrapResult, CharacterMutationFrame, CharacterMutationResult,
+    ClientHello, HandshakeResponse, NetworkChannel, WireText,
+};
 
 pub const FIXED_VECTOR_SCALE: i16 = 1_000;
 pub const MAX_SNAPSHOT_ENTITIES_PER_CHUNK: usize = 32;
@@ -24,6 +27,8 @@ pub enum MessageKind {
     ReliableEvent,
     MutationRequest,
     SessionControlFrame,
+    AccountBootstrapFrame,
+    CharacterMutationFrame,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -417,6 +422,8 @@ pub enum ReliableEvent {
         x_milli_tiles: i32,
         y_milli_tiles: i32,
     },
+    AccountBootstrapResult(AccountBootstrapResult),
+    CharacterMutationResult(CharacterMutationResult),
 }
 
 impl ReliableEvent {
@@ -425,8 +432,8 @@ impl ReliableEvent {
         match self {
             Self::ActionResult { .. } => NetworkChannel::Action,
             Self::PatternStarted(_) => NetworkChannel::Pattern,
-            Self::MutationResult(_) => NetworkChannel::Mutation,
-            Self::Control(_) => NetworkChannel::Control,
+            Self::MutationResult(_) | Self::CharacterMutationResult(_) => NetworkChannel::Mutation,
+            Self::Control(_) | Self::AccountBootstrapResult(_) => NetworkChannel::Control,
             Self::SocialPing { .. } => NetworkChannel::Social,
         }
     }
@@ -441,6 +448,12 @@ impl ReliableEvent {
             Self::SocialPing { ping_sequence, .. } if *ping_sequence == 0 => {
                 Err(MessageValidationError::ZeroSequence)
             }
+            Self::AccountBootstrapResult(result) => result
+                .validate()
+                .map_err(|_| MessageValidationError::Account),
+            Self::CharacterMutationResult(result) => result
+                .validate()
+                .map_err(|_| MessageValidationError::Account),
             _ => Ok(()),
         }
     }
@@ -473,6 +486,8 @@ pub enum WireMessage {
     ReliableEvent(ReliableEventFrame),
     MutationRequest(MutationRequest),
     SessionControlFrame(SessionControlFrame),
+    AccountBootstrapFrame(AccountBootstrapFrame),
+    CharacterMutationFrame(CharacterMutationFrame),
 }
 
 impl WireMessage {
@@ -487,20 +502,23 @@ impl WireMessage {
             Self::ReliableEvent(_) => MessageKind::ReliableEvent,
             Self::MutationRequest(_) => MessageKind::MutationRequest,
             Self::SessionControlFrame(_) => MessageKind::SessionControlFrame,
+            Self::AccountBootstrapFrame(_) => MessageKind::AccountBootstrapFrame,
+            Self::CharacterMutationFrame(_) => MessageKind::CharacterMutationFrame,
         }
     }
 
     #[must_use]
     pub const fn channel(&self) -> NetworkChannel {
         match self {
-            Self::ClientHello(_) | Self::HandshakeResponse(_) | Self::SessionControlFrame(_) => {
-                NetworkChannel::Control
-            }
+            Self::ClientHello(_)
+            | Self::HandshakeResponse(_)
+            | Self::SessionControlFrame(_)
+            | Self::AccountBootstrapFrame(_) => NetworkChannel::Control,
             Self::InputFrame(_) => NetworkChannel::Input,
             Self::ActionFrame(_) => NetworkChannel::Action,
             Self::SnapshotChunk(_) => NetworkChannel::Snapshot,
             Self::ReliableEvent(frame) => frame.event.channel(),
-            Self::MutationRequest(_) => NetworkChannel::Mutation,
+            Self::MutationRequest(_) | Self::CharacterMutationFrame(_) => NetworkChannel::Mutation,
         }
     }
 
@@ -523,12 +541,20 @@ impl WireMessage {
             Self::ReliableEvent(value) => value.validate(),
             Self::MutationRequest(value) => value.validate(),
             Self::SessionControlFrame(value) => value.validate(),
+            Self::AccountBootstrapFrame(value) => value
+                .validate()
+                .map_err(|_| MessageValidationError::Account),
+            Self::CharacterMutationFrame(value) => value
+                .validate()
+                .map_err(|_| MessageValidationError::Account),
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum MessageValidationError {
+    #[error("account message failed semantic validation")]
+    Account,
     #[error("message sequence must be nonzero")]
     ZeroSequence,
     #[error("fixed-point vector component must remain within -1000..=1000")]

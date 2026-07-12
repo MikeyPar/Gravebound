@@ -5,18 +5,23 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fmt,
     future::Future,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
-    sync::Arc,
-    time::{Duration, Instant},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use protocol::{
-    ClientHello, ControlEvent, HandshakeResponse, M02_LOCAL_BUILD_ID, M02_LOCAL_REGION_ID,
-    M02_LOCAL_SERVER_NAME, ManifestHash, ProtocolVersion, RELIABLE_FRAME_LIMIT, ReliableEvent,
-    ReliableEventFrame, SIMULATION_HZ, SessionControlResultCode, WireMessage, WireText,
-    decode_frame, encode_frame,
+    CORE_TEST_IDENTITY_FEATURE_FLAG, ClientHello, ControlEvent, HandshakeResponse,
+    M02_LOCAL_BUILD_ID, M02_LOCAL_REGION_ID, M02_LOCAL_SERVER_NAME, M03_CORE_DEV_BUILD_ID,
+    M03_CORE_DEV_CONTENT_TARGET, ManifestHash, ProtocolVersion, RELIABLE_FRAME_LIMIT,
+    ReliableEvent, ReliableEventFrame, SIMULATION_HZ, SessionControlResultCode, WireMessage,
+    WireText, decode_frame, encode_frame,
 };
 use rcgen::{CertifiedKey, generate_simple_self_signed};
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
@@ -25,16 +30,49 @@ use tokio::{sync::Mutex, task::JoinSet, time::MissedTickBehavior};
 use tracing::{debug, info, warn};
 
 use crate::{
-    AdmissionState, AuthenticationDecision, HandshakePolicy, InstanceError, InstanceScheduler,
+    AccountId, AdmissionState, AuthenticatedAccount, AuthenticatedNamespace,
+    AuthenticationDecision, CharacterIdGenerator, HandshakePolicy, IdentityClock, IdentityService,
+    InMemoryAccountRepository, InstanceError, InstanceScheduler, NoopIdentityEventSink,
     SERVER_SHUTDOWN_CLOSE_CODE, SessionOwnerId, TransportId, close_transport,
+    serve_identity_reliable,
 };
 
 pub const LOCAL_BUILD_ID: &str = M02_LOCAL_BUILD_ID;
 pub const LOCAL_REGION_ID: &str = M02_LOCAL_REGION_ID;
 pub const LOCAL_SERVER_NAME: &str = M02_LOCAL_SERVER_NAME;
+pub const CORE_IDENTITY_BUILD_ID: &str = M03_CORE_DEV_BUILD_ID;
+pub const CORE_IDENTITY_CONTENT_TARGET: &str = M03_CORE_DEV_CONTENT_TARGET;
 const LOCAL_FEATURE_FLAG: &str = "m02-local-runtime";
 #[allow(clippy::cast_lossless)] // `From::from` is not const-stable for this conversion.
 const TICK_NANOS: u64 = 1_000_000_000 / SIMULATION_HZ as u64;
+
+#[derive(Debug, Clone, Copy)]
+struct SystemIdentityClock;
+
+impl IdentityClock for SystemIdentityClock {
+    fn unix_millis(&self) -> u64 {
+        u64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+        )
+        .unwrap_or(u64::MAX)
+    }
+}
+
+#[derive(Debug, Default)]
+struct ProcessCharacterIds(AtomicU64);
+
+impl CharacterIdGenerator for ProcessCharacterIds {
+    fn next_id(&self) -> [u8; 16] {
+        let ordinal = self.0.fetch_add(1, Ordering::Relaxed).saturating_add(1);
+        let hash = blake3::hash(&ordinal.to_le_bytes());
+        let mut id = [0; 16];
+        id.copy_from_slice(&hash.as_bytes()[..16]);
+        id
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct LocalServerConfig {
@@ -427,6 +465,216 @@ impl BoundLocalServer {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct CoreIdentityServerConfig {
+    pub bind_address: SocketAddr,
+    pub content_root: PathBuf,
+}
+
+impl Default for CoreIdentityServerConfig {
+    fn default() -> Self {
+        Self {
+            bind_address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 50_001),
+            content_root: PathBuf::from("content"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CoreIdentityServerReport {
+    pub accepted_connections: u64,
+    pub rejected_connections: u64,
+    pub combat_sessions_admitted: u64,
+    pub persistence_enabled: bool,
+}
+
+type CoreIdentityAuthority = IdentityService<
+    InMemoryAccountRepository,
+    SystemIdentityClock,
+    ProcessCharacterIds,
+    NoopIdentityEventSink,
+>;
+
+/// Explicit Core-development endpoint. It never creates an [`InstanceScheduler`] and therefore
+/// cannot silently route identity clients into the M02 combat laboratory.
+pub struct BoundCoreIdentityServer {
+    endpoint: quinn::Endpoint,
+    certificate: CertificateDer<'static>,
+    local_address: SocketAddr,
+    policy: HandshakePolicy,
+    authority: Arc<CoreIdentityAuthority>,
+}
+
+impl fmt::Debug for BoundCoreIdentityServer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BoundCoreIdentityServer")
+            .field("local_address", &self.local_address)
+            .field("policy", &self.policy)
+            .finish_non_exhaustive()
+    }
+}
+
+impl BoundCoreIdentityServer {
+    pub fn bind(config: &CoreIdentityServerConfig) -> Result<Self, LocalServerRuntimeError> {
+        sim_content::load_core_development_identity(&config.content_root)
+            .map_err(|error| LocalServerRuntimeError::Content(error.to_string()))?;
+        let (_, source_report) = sim_content::load_and_validate(&config.content_root)
+            .map_err(|error| LocalServerRuntimeError::Content(error.to_string()))?;
+        let required_manifest_hash = ManifestHash::new(source_report.package_hash_blake3)?;
+        let CertifiedKey { cert, signing_key } =
+            generate_simple_self_signed(vec![LOCAL_SERVER_NAME.to_owned()])?;
+        let certificate = cert.der().clone();
+        let private_key = PrivatePkcs8KeyDer::from(signing_key.serialize_der());
+        let server_config =
+            quinn::ServerConfig::with_single_cert(vec![certificate.clone()], private_key.into())?;
+        let endpoint = quinn::Endpoint::server(server_config, config.bind_address)?;
+        let local_address = endpoint.local_addr()?;
+        let policy = HandshakePolicy {
+            required_protocol: ProtocolVersion::current(),
+            required_client_build: WireText::new(CORE_IDENTITY_BUILD_ID)?,
+            required_manifest_hash: required_manifest_hash.clone(),
+            content_bundle_version: WireText::new(CORE_IDENTITY_CONTENT_TARGET)?,
+            region_id: WireText::new(LOCAL_REGION_ID)?,
+            feature_flags: vec![WireText::new(CORE_TEST_IDENTITY_FEATURE_FLAG)?],
+            admission: AdmissionState::Available,
+        };
+        let authority = Arc::new(IdentityService::new(
+            InMemoryAccountRepository::default(),
+            SystemIdentityClock,
+            ProcessCharacterIds::default(),
+            NoopIdentityEventSink,
+            required_manifest_hash,
+        ));
+        Ok(Self {
+            endpoint,
+            certificate,
+            local_address,
+            policy,
+            authority,
+        })
+    }
+
+    #[must_use]
+    pub const fn local_address(&self) -> SocketAddr {
+        self.local_address
+    }
+
+    #[must_use]
+    pub fn certificate_der(&self) -> &[u8] {
+        self.certificate.as_ref()
+    }
+
+    pub async fn serve_until<F>(
+        self,
+        shutdown: F,
+    ) -> Result<CoreIdentityServerReport, LocalServerRuntimeError>
+    where
+        F: Future<Output = ()>,
+    {
+        info!(
+            address = %self.local_address,
+            feature_id = "GB-M03-01B",
+            "wipeable Core identity server ready"
+        );
+        let accepted = Arc::new(AtomicU64::new(0));
+        let rejected = Arc::new(AtomicU64::new(0));
+        let mut workers = JoinSet::new();
+        tokio::pin!(shutdown);
+        loop {
+            tokio::select! {
+                biased;
+                () = &mut shutdown => break,
+                incoming = self.endpoint.accept() => {
+                    let Some(incoming) = incoming else { break };
+                    let policy = self.policy.clone();
+                    let authority = Arc::clone(&self.authority);
+                    let accepted = Arc::clone(&accepted);
+                    let rejected = Arc::clone(&rejected);
+                    workers.spawn(async move {
+                        match serve_core_identity_connection(incoming, policy, authority).await {
+                            Ok(true) => { accepted.fetch_add(1, Ordering::Relaxed); }
+                            Ok(false) => { rejected.fetch_add(1, Ordering::Relaxed); }
+                            Err(error) => warn!(%error, "Core identity connection ended"),
+                        }
+                    });
+                }
+                completed = workers.join_next(), if !workers.is_empty() => {
+                    if let Some(Err(error)) = completed {
+                        warn!(%error, "Core identity task panicked or was cancelled");
+                    }
+                }
+            }
+        }
+        self.endpoint.close(
+            SERVER_SHUTDOWN_CLOSE_CODE.into(),
+            b"Core identity server shutdown",
+        );
+        while workers.join_next().await.is_some() {}
+        self.endpoint.wait_idle().await;
+        Ok(CoreIdentityServerReport {
+            accepted_connections: accepted.load(Ordering::Relaxed),
+            rejected_connections: rejected.load(Ordering::Relaxed),
+            combat_sessions_admitted: 0,
+            persistence_enabled: false,
+        })
+    }
+}
+
+async fn serve_core_identity_connection(
+    incoming: quinn::Incoming,
+    policy: HandshakePolicy,
+    authority: Arc<CoreIdentityAuthority>,
+) -> Result<bool, LocalServerRuntimeError> {
+    let connection = incoming.await?;
+    let (mut send, mut receive) = connection.accept_bi().await?;
+    let request = receive.read_to_end(RELIABLE_FRAME_LIMIT).await?;
+    let WireMessage::ClientHello(hello) = decode_frame(&request)? else {
+        return Err(LocalServerRuntimeError::UnexpectedHandshake);
+    };
+    let response = policy.evaluate(
+        &hello,
+        AuthenticationDecision::Accepted,
+        WireText::new("core-identity-session")?,
+    );
+    send.write_all(&encode_frame(&WireMessage::HandshakeResponse(
+        response.clone(),
+    ))?)
+    .await?;
+    send.finish()?;
+    if !matches!(response, HandshakeResponse::Accepted(_)) {
+        return Ok(false);
+    }
+    let hash = blake3::hash(hello.auth_ticket.expose_for_validation());
+    let mut account_bytes = [0; 16];
+    account_bytes.copy_from_slice(&hash.as_bytes()[..16]);
+    let account_id =
+        AccountId::new(account_bytes).ok_or(LocalServerRuntimeError::IdentityExhausted)?;
+    let authenticated = AuthenticatedAccount {
+        account_id,
+        namespace: AuthenticatedNamespace::WipeableTest,
+    };
+    let mut response_sequence = 0_u32;
+    loop {
+        response_sequence = response_sequence
+            .checked_add(1)
+            .ok_or(LocalServerRuntimeError::IdentityExhausted)?;
+        if serve_identity_reliable(
+            &connection,
+            authority.as_ref(),
+            Some(authenticated),
+            response_sequence,
+            0,
+        )
+        .await
+        .is_err()
+        {
+            break;
+        }
+    }
+    Ok(true)
+}
+
 async fn serve_connection(
     incoming: quinn::Incoming,
     state: Arc<Mutex<RuntimeState>>,
@@ -590,8 +838,9 @@ mod tests {
     use std::{path::Path, sync::Arc};
 
     use protocol::{
-        ActionFrame, ActionKind, AuthTicket, Compression, InputFrame, Platform,
-        SessionControlFrame, SessionControlRequest,
+        AccountBootstrapFrame, AccountBootstrapRequest, AccountBootstrapResult, ActionFrame,
+        ActionKind, AuthTicket, CharacterMutationFrame, CharacterMutationPayload, Compression,
+        InputFrame, Platform, SessionControlFrame, SessionControlRequest,
     };
     use tokio::sync::oneshot;
 
@@ -617,6 +866,157 @@ mod tests {
             auth_ticket: AuthTicket::new(ticket.to_vec()).unwrap(),
             locale: WireText::new("en-US").unwrap(),
         }
+    }
+
+    fn core_hello(content_root: &Path, ticket: &[u8]) -> ClientHello {
+        let (_, report) = sim_content::load_and_validate(content_root).unwrap();
+        ClientHello {
+            protocol_major: ProtocolVersion::current().major,
+            protocol_minor: ProtocolVersion::current().minor,
+            client_build_id: WireText::new(M03_CORE_DEV_BUILD_ID).unwrap(),
+            platform: Platform::WindowsNative,
+            supported_compression: vec![Compression::None],
+            content_manifest_hash: ManifestHash::new(report.package_hash_blake3).unwrap(),
+            auth_ticket: AuthTicket::new(ticket.to_vec()).unwrap(),
+            locale: WireText::new("en-US").unwrap(),
+        }
+    }
+
+    fn bootstrap(content_root: &Path, sequence: u32) -> AccountBootstrapFrame {
+        let (_, report) = sim_content::load_and_validate(content_root).unwrap();
+        AccountBootstrapFrame {
+            sequence,
+            request: AccountBootstrapRequest::Bootstrap,
+            content_manifest_hash: ManifestHash::new(report.package_hash_blake3).unwrap(),
+        }
+    }
+
+    fn current_unix_millis() -> u64 {
+        u64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn core_identity_real_quic_reconnects_and_server_restart_wipes() {
+        let content_root = content_root();
+        let server = BoundCoreIdentityServer::bind(&CoreIdentityServerConfig {
+            bind_address: "127.0.0.1:0".parse().unwrap(),
+            content_root: content_root.clone(),
+        })
+        .unwrap();
+        let address = server.local_address();
+        let certificate = CertificateDer::from(server.certificate_der().to_vec());
+        let (shutdown_send, shutdown_receive) = oneshot::channel::<()>();
+        let server_task = tokio::spawn(server.serve_until(async {
+            let _ = shutdown_receive.await;
+        }));
+
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(certificate).unwrap();
+        let client_config = quinn::ClientConfig::with_root_certificates(Arc::new(roots)).unwrap();
+        let mut endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+        endpoint.set_default_client_config(client_config);
+        let ticket = b"core-runtime-test-account";
+        let connection = endpoint
+            .connect(address, LOCAL_SERVER_NAME)
+            .unwrap()
+            .await
+            .unwrap();
+        let handshake =
+            bot_client::perform_handshake(&connection, core_hello(&content_root, ticket))
+                .await
+                .unwrap();
+        assert!(matches!(handshake, HandshakeResponse::Accepted(_)));
+        let (_, initial) =
+            bot_client::perform_account_bootstrap(&connection, bootstrap(&content_root, 1))
+                .await
+                .unwrap();
+        let AccountBootstrapResult::Snapshot(initial) = initial else {
+            panic!("initial Core account snapshot")
+        };
+        assert!(initial.characters.is_empty());
+        let payload = CharacterMutationPayload::Create {
+            class_id: WireText::new(protocol::GRAVE_ARBALIST_CLASS_ID).unwrap(),
+        };
+        let (_, created) = bot_client::perform_character_mutation(
+            &connection,
+            CharacterMutationFrame {
+                mutation_id: [1; 16],
+                expected_account_version: 1,
+                payload_hash: payload.canonical_hash(),
+                issued_at_unix_millis: current_unix_millis(),
+                payload,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(created.accepted);
+        connection.close(0_u32.into(), b"reconnect");
+
+        let connection = endpoint
+            .connect(address, LOCAL_SERVER_NAME)
+            .unwrap()
+            .await
+            .unwrap();
+        bot_client::perform_handshake(&connection, core_hello(&content_root, ticket))
+            .await
+            .unwrap();
+        let (_, reconnected) =
+            bot_client::perform_account_bootstrap(&connection, bootstrap(&content_root, 2))
+                .await
+                .unwrap();
+        let AccountBootstrapResult::Snapshot(reconnected) = reconnected else {
+            panic!("reconnected Core account snapshot")
+        };
+        assert_eq!(reconnected.characters.len(), 1);
+        connection.close(0_u32.into(), b"restart test");
+        shutdown_send.send(()).unwrap();
+        let report = server_task.await.unwrap().unwrap();
+        assert_eq!(report.combat_sessions_admitted, 0);
+        assert!(!report.persistence_enabled);
+        endpoint.wait_idle().await;
+
+        let restarted = BoundCoreIdentityServer::bind(&CoreIdentityServerConfig {
+            bind_address: "127.0.0.1:0".parse().unwrap(),
+            content_root: content_root.clone(),
+        })
+        .unwrap();
+        let address = restarted.local_address();
+        let certificate = CertificateDer::from(restarted.certificate_der().to_vec());
+        let (shutdown_send, shutdown_receive) = oneshot::channel::<()>();
+        let restarted_task = tokio::spawn(restarted.serve_until(async {
+            let _ = shutdown_receive.await;
+        }));
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(certificate).unwrap();
+        let client_config = quinn::ClientConfig::with_root_certificates(Arc::new(roots)).unwrap();
+        let mut endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+        endpoint.set_default_client_config(client_config);
+        let connection = endpoint
+            .connect(address, LOCAL_SERVER_NAME)
+            .unwrap()
+            .await
+            .unwrap();
+        bot_client::perform_handshake(&connection, core_hello(&content_root, ticket))
+            .await
+            .unwrap();
+        let (_, wiped) =
+            bot_client::perform_account_bootstrap(&connection, bootstrap(&content_root, 1))
+                .await
+                .unwrap();
+        let AccountBootstrapResult::Snapshot(wiped) = wiped else {
+            panic!("wiped Core account snapshot")
+        };
+        assert!(wiped.characters.is_empty());
+        connection.close(0_u32.into(), b"complete");
+        shutdown_send.send(()).unwrap();
+        restarted_task.await.unwrap().unwrap();
+        endpoint.wait_idle().await;
     }
 
     #[tokio::test]

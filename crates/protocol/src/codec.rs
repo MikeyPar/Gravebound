@@ -1,7 +1,7 @@
 use postcard::{from_bytes, to_stdvec};
 use thiserror::Error;
 
-use crate::{MessageKind, ProtocolVersion, WireMessage};
+use crate::{M02_PROTOCOL_MINOR, MessageKind, PROTOCOL_MAJOR, ProtocolVersion, WireMessage};
 
 const MAGIC: [u8; 4] = *b"GBN1";
 pub const FRAME_HEADER_BYTES: usize = 14;
@@ -9,6 +9,31 @@ pub const DATAGRAM_FRAME_LIMIT: usize = 1_200;
 pub const RELIABLE_FRAME_LIMIT: usize = 64 * 1_024;
 
 pub fn encode_frame(message: &WireMessage) -> Result<Vec<u8>, WireCodecError> {
+    encode_frame_for_version(message, ProtocolVersion::current())
+}
+
+/// Reproduces canonical M02 bytes for immutable fixtures and package verification. These frames
+/// are not accepted by the exact-minor 1.6 live decoder.
+pub fn encode_m02_compatibility_frame(message: &WireMessage) -> Result<Vec<u8>, WireCodecError> {
+    if matches!(
+        message.kind(),
+        MessageKind::AccountBootstrapFrame | MessageKind::CharacterMutationFrame
+    ) {
+        return Err(WireCodecError::MessageUnavailableAtVersion);
+    }
+    encode_frame_for_version(
+        message,
+        ProtocolVersion {
+            major: PROTOCOL_MAJOR,
+            minor: M02_PROTOCOL_MINOR,
+        },
+    )
+}
+
+fn encode_frame_for_version(
+    message: &WireMessage,
+    version: ProtocolVersion,
+) -> Result<Vec<u8>, WireCodecError> {
     message
         .validate()
         .map_err(|_| WireCodecError::InvalidMessage)?;
@@ -25,7 +50,6 @@ pub fn encode_frame(message: &WireMessage) -> Result<Vec<u8>, WireCodecError> {
     if total_len > limit {
         return Err(WireCodecError::FrameTooLarge);
     }
-    let version = ProtocolVersion::current();
     let mut frame = Vec::with_capacity(total_len);
     frame.extend_from_slice(&MAGIC);
     frame.extend_from_slice(&version.major.to_le_bytes());
@@ -87,6 +111,8 @@ const fn message_kind_byte(kind: MessageKind) -> u8 {
         MessageKind::ReliableEvent => 6,
         MessageKind::MutationRequest => 7,
         MessageKind::SessionControlFrame => 8,
+        MessageKind::AccountBootstrapFrame => 9,
+        MessageKind::CharacterMutationFrame => 10,
     }
 }
 
@@ -100,6 +126,8 @@ const fn message_kind_from_byte(value: u8) -> Result<MessageKind, WireCodecError
         6 => Ok(MessageKind::ReliableEvent),
         7 => Ok(MessageKind::MutationRequest),
         8 => Ok(MessageKind::SessionControlFrame),
+        9 => Ok(MessageKind::AccountBootstrapFrame),
+        10 => Ok(MessageKind::CharacterMutationFrame),
         other => Err(WireCodecError::UnknownMessageKind(other)),
     }
 }
@@ -122,6 +150,8 @@ pub enum WireCodecError {
     HeaderPayloadMismatch,
     #[error("wire message failed semantic validation")]
     InvalidMessage,
+    #[error("wire message is unavailable at the requested protocol generation")]
+    MessageUnavailableAtVersion,
     #[error("wire message encode failed: {0}")]
     Encode(String),
     #[error("wire message decode failed: {0}")]
@@ -131,7 +161,11 @@ pub enum WireCodecError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{InputFrame, WireMessage};
+    use crate::{
+        AccountBootstrapFrame, AccountBootstrapRequest, CharacterMutationFrame,
+        CharacterMutationPayload, GRAVE_ARBALIST_CLASS_ID, InputFrame, ManifestHash, WireMessage,
+        WireText,
+    };
 
     fn input_message() -> WireMessage {
         WireMessage::InputFrame(InputFrame {
@@ -155,6 +189,11 @@ mod tests {
         assert_eq!(decode_frame(&frame).unwrap(), input_message());
         assert_eq!(
             blake3::hash(&frame).to_hex().to_string(),
+            "ca58394712de1d0bc954d7611f4c30a1e583b23c004932c42d547e2f68a000b7"
+        );
+        let m02 = encode_m02_compatibility_frame(&input_message()).unwrap();
+        assert_eq!(
+            blake3::hash(&m02).to_hex().to_string(),
             "643b0c2d1746c2e697e2c5cb3b4fc0e352019903a951004326e808e00b5cd7ec"
         );
     }
@@ -188,6 +227,36 @@ mod tests {
         assert_eq!(
             decode_frame(&bad),
             Err(WireCodecError::HeaderPayloadMismatch)
+        );
+    }
+
+    #[test]
+    fn protocol_1_6_appends_bounded_account_message_kinds() {
+        let bootstrap = WireMessage::AccountBootstrapFrame(AccountBootstrapFrame {
+            sequence: 1,
+            request: AccountBootstrapRequest::Bootstrap,
+            content_manifest_hash: ManifestHash::new("a".repeat(64)).unwrap(),
+        });
+        let frame = encode_frame(&bootstrap).unwrap();
+        assert_eq!(frame[8], 9);
+        assert_eq!(decode_frame(&frame), Ok(bootstrap));
+
+        let payload = CharacterMutationPayload::Create {
+            class_id: WireText::new(GRAVE_ARBALIST_CLASS_ID).unwrap(),
+        };
+        let mutation = WireMessage::CharacterMutationFrame(CharacterMutationFrame {
+            mutation_id: [1; 16],
+            expected_account_version: 1,
+            payload_hash: payload.canonical_hash(),
+            issued_at_unix_millis: 1,
+            payload,
+        });
+        let frame = encode_frame(&mutation).unwrap();
+        assert_eq!(frame[8], 10);
+        assert_eq!(decode_frame(&frame), Ok(mutation.clone()));
+        assert_eq!(
+            encode_m02_compatibility_frame(&mutation),
+            Err(WireCodecError::MessageUnavailableAtVersion)
         );
     }
 }

@@ -28,6 +28,15 @@ enum Command {
         #[arg(long, default_value = "target/gravebound-local/server-cert.der")]
         certificate_out: PathBuf,
     },
+    /// Run the wipeable Core identity server without M02 combat admission.
+    ServeCoreIdentity {
+        #[arg(long, default_value = "127.0.0.1:50001")]
+        bind: SocketAddr,
+        #[arg(long, default_value = "content")]
+        content_root: PathBuf,
+        #[arg(long, default_value = "target/gravebound-core-dev/server-cert.der")]
+        certificate_out: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -96,6 +105,52 @@ async fn main() -> Result<()> {
                 dropped_snapshots = report.dropped_snapshots,
                 zero_residue = report.zero_residue,
                 "GB-M02 local playtest server stopped cleanly"
+            );
+        }
+        Command::ServeCoreIdentity {
+            bind,
+            content_root,
+            certificate_out,
+        } => {
+            let server =
+                server_app::BoundCoreIdentityServer::bind(&server_app::CoreIdentityServerConfig {
+                    bind_address: bind,
+                    content_root,
+                })?;
+            if let Some(parent) = certificate_out.parent() {
+                std::fs::create_dir_all(parent).with_context(|| {
+                    format!(
+                        "failed to create certificate directory {}",
+                        parent.display()
+                    )
+                })?;
+            }
+            std::fs::write(&certificate_out, server.certificate_der()).with_context(|| {
+                format!(
+                    "failed to write Core identity certificate {}",
+                    certificate_out.display()
+                )
+            })?;
+            info!(
+                address = %server.local_address(),
+                certificate = %certificate_out.display(),
+                build_id = server_app::CORE_IDENTITY_BUILD_ID,
+                content_target = server_app::CORE_IDENTITY_CONTENT_TARGET,
+                "GB-M03-01B Core identity server is ready"
+            );
+            let report = server
+                .serve_until(async {
+                    if let Err(error) = tokio::signal::ctrl_c().await {
+                        tracing::error!(%error, "failed to listen for Ctrl+C");
+                    }
+                })
+                .await?;
+            info!(
+                accepted_connections = report.accepted_connections,
+                rejected_connections = report.rejected_connections,
+                combat_sessions_admitted = report.combat_sessions_admitted,
+                persistence_enabled = report.persistence_enabled,
+                "GB-M03-01B Core identity server stopped cleanly"
             );
         }
     }

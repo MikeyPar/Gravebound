@@ -1,6 +1,9 @@
 use std::fmt;
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
+use serde::{
+    Deserialize, Deserializer, Serialize, Serializer,
+    de::{Error as _, Visitor},
+};
 use thiserror::Error;
 
 pub const AUTH_TICKET_MAX_BYTES: usize = 2_048;
@@ -58,8 +61,38 @@ impl<'de, const MAX: usize> Deserialize<'de> for WireText<MAX> {
     where
         D: Deserializer<'de>,
     {
-        let value = String::deserialize(deserializer)?;
-        Self::new(value).map_err(D::Error::custom)
+        struct WireTextVisitor<const MAX: usize>;
+
+        impl<const MAX: usize> Visitor<'_> for WireTextVisitor<MAX> {
+            type Value = WireText<MAX>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(formatter, "1..={MAX} safe wire-text bytes")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                WireText::new(value).map_err(E::custom)
+            }
+
+            fn visit_borrowed_str<E>(self, value: &'_ str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                self.visit_str(value)
+            }
+
+            fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                WireText::new(value).map_err(E::custom)
+            }
+        }
+
+        deserializer.deserialize_str(WireTextVisitor::<MAX>)
     }
 }
 
