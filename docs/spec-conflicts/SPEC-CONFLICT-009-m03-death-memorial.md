@@ -1,6 +1,6 @@
 # SPEC-CONFLICT-009 — M03 permanent-death and memorial contract
 
-**Status:** Awaiting owner decision
+**Status:** Owner-approved on 2026-07-12
 
 **Raised:** 2026-07-12
 
@@ -81,6 +81,6 @@ For an eligible death, insert the Echo as `Dormant`, then run oldest-first `(cre
 
 `GB-M03-03B`, `04D`/`04E`, and `05` supply required location, item identity/ledger, and Oath/Bargain snapshots. `07` consumes the committed successor path; `08` shares death/Recall/extraction arbitration; `09`/`10` consume telemetry/support seams. The route remains gated under approved `SPEC-CONFLICT-006`.
 
-## Approval requested
+## Approval record
 
-Approve all five recommended resolutions, or provide amendments. Approval permits the death/memorial schemas and transaction boundary to be implemented without weakening permanent-loss or Echo atomicity.
+The owner approved all five recommended resolutions without amendment on 2026-07-12. The death/memorial schemas and transaction boundary may proceed exactly as recorded above without weakening permanent-loss or Echo atomicity.

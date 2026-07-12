@@ -1,6 +1,6 @@
 # SPEC-CONFLICT-010 — M03 world-flow revision and return-arrival contract
 
-**Status:** Awaiting owner decision
+**Status:** Owner-approved on 2026-07-12
 
 **Raised:** 2026-07-12
 
@@ -43,6 +43,6 @@ The closeout audit found three exact rules that cannot be completed safely from 
 - Normal runtime continues to return `StageDisabled` before allocation, ID generation, or transaction and never advertises `core_world_flow_integration`.
 - Real progression/item/Oath storage remains owned by `GB-M03-04`/`05`; range/allocation/presentation by `03C`; death/extraction/Recall by `06`/`08`.
 
-## Approval requested
+## Approval record
 
-Approve all three recommended resolutions, or provide amendments. Approval permits the dormant coordinator and disposable PostgreSQL proof to be completed without inventing a composite revision or losing approved arrival semantics.
+The owner approved all three recommended resolutions without amendment on 2026-07-12. The dormant coordinator and disposable PostgreSQL proof may proceed exactly as recorded above without inventing a composite revision or losing approved arrival semantics.
