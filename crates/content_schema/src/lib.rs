@@ -603,6 +603,49 @@ pub struct CoreDevelopmentTarget {
     pub presentation_asset_ids: Vec<ContentId>,
 }
 
+/// Required labels for every safe Core identity screen state in `GB-M03-01`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CoreIdentityPhaseCopy {
+    pub boot: String,
+    pub patch_check: String,
+    pub authenticating: String,
+    pub roster_loading: String,
+    pub roster_empty: String,
+    pub roster_ready: String,
+    pub character_creation: String,
+    pub creating: String,
+    pub selecting: String,
+    pub selected: String,
+    pub disconnected: String,
+    pub disabled: String,
+    pub error: String,
+}
+
+/// Strict `en-US` copy source for the unpromoted Core identity UI.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CoreIdentityCopyFile {
+    pub schema_version: u32,
+    pub locale: String,
+    pub window_title: String,
+    pub brand_header: String,
+    pub wipe_warning: String,
+    pub phases: CoreIdentityPhaseCopy,
+    pub status_template: String,
+    pub loading_roster: String,
+    pub populated_slot_template: String,
+    pub empty_slot_template: String,
+    pub selected_badge: String,
+    pub class_detail_template: String,
+    pub create_action: String,
+    pub select_slot_action_template: String,
+    pub retry_action: String,
+    pub footer_template: String,
+    pub closed_feature_literal: String,
+    pub not_equipped_literal: String,
+}
+
 /// Traceability registry. Every implementation task must have explicit acceptance criteria.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -707,6 +750,18 @@ mod tests {
             serde_json::from_slice(&fs::read(path).expect("checked-in Core development schema"))
                 .expect("valid JSON Schema");
         let generated = serde_json::to_value(schemars::schema_for!(CoreDevelopmentTarget))
+            .expect("serializable generated schema");
+        assert_eq!(checked_in, generated);
+    }
+
+    #[test]
+    fn checked_in_core_identity_copy_schema_matches_the_rust_contract() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../schemas/core_identity_copy.schema.json");
+        let checked_in: serde_json::Value =
+            serde_json::from_slice(&fs::read(path).expect("checked-in Core identity copy schema"))
+                .expect("valid JSON Schema");
+        let generated = serde_json::to_value(schemars::schema_for!(CoreIdentityCopyFile))
             .expect("serializable generated schema");
         assert_eq!(checked_in, generated);
     }

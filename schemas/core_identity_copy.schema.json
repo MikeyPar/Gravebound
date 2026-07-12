@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CoreIdentityCopyFile",
+  "description": "Strict `en-US` copy source for the unpromoted Core identity UI.",
+  "type": "object",
+  "properties": {
+    "brand_header": { "type": "string" },
+    "class_detail_template": { "type": "string" },
+    "closed_feature_literal": { "type": "string" },
+    "create_action": { "type": "string" },
+    "empty_slot_template": { "type": "string" },
+    "footer_template": { "type": "string" },
+    "loading_roster": { "type": "string" },
+    "locale": { "type": "string" },
+    "not_equipped_literal": { "type": "string" },
+    "phases": { "$ref": "#/$defs/CoreIdentityPhaseCopy" },
+    "populated_slot_template": { "type": "string" },
+    "retry_action": { "type": "string" },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "select_slot_action_template": { "type": "string" },
+    "selected_badge": { "type": "string" },
+    "status_template": { "type": "string" },
+    "window_title": { "type": "string" },
+    "wipe_warning": { "type": "string" }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "locale",
+    "window_title",
+    "brand_header",
+    "wipe_warning",
+    "phases",
+    "status_template",
+    "loading_roster",
+    "populated_slot_template",
+    "empty_slot_template",
+    "selected_badge",
+    "class_detail_template",
+    "create_action",
+    "select_slot_action_template",
+    "retry_action",
+    "footer_template",
+    "closed_feature_literal",
+    "not_equipped_literal"
+  ],
+  "$defs": {
+    "CoreIdentityPhaseCopy": {
+      "description": "Required labels for every safe Core identity screen state in `GB-M03-01`.",
+      "type": "object",
+      "properties": {
+        "authenticating": { "type": "string" },
+        "boot": { "type": "string" },
+        "character_creation": { "type": "string" },
+        "creating": { "type": "string" },
+        "disabled": { "type": "string" },
+        "disconnected": { "type": "string" },
+        "error": { "type": "string" },
+        "patch_check": { "type": "string" },
+        "roster_empty": { "type": "string" },
+        "roster_loading": { "type": "string" },
+        "roster_ready": { "type": "string" },
+        "selected": { "type": "string" },
+        "selecting": { "type": "string" }
+      },
+      "additionalProperties": false,
+      "required": [
+        "boot",
+        "patch_check",
+        "authenticating",
+        "roster_loading",
+        "roster_empty",
+        "roster_ready",
+        "character_creation",
+        "creating",
+        "selecting",
+        "selected",
+        "disconnected",
+        "disabled",
+        "error"
+      ]
+    }
+  }
+}
