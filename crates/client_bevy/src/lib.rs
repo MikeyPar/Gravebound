@@ -17,6 +17,7 @@ mod network_prediction;
 mod network_session;
 mod network_transport;
 mod player;
+mod progression_hud;
 mod stress_benchmark;
 mod telemetry;
 

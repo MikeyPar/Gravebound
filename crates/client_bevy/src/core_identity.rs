@@ -17,12 +17,12 @@ use protocol::{
     AccountBootstrapResult, AccountErrorCode, AccountSnapshot, AuthTicket,
     CORE_TEST_IDENTITY_FEATURE_FLAG, CharacterMutationFrame, CharacterMutationPayload,
     CharacterMutationResult, ClientHello, Compression, GRAVE_ARBALIST_CLASS_ID,
-    M02_LOCAL_SERVER_NAME, M03_CORE_DEV_BUILD_ID, ManifestHash, Platform, ProtocolVersion,
-    ReliableEvent, WireMessage, WireText,
+    M02_LOCAL_SERVER_NAME, M03_CORE_DEV_BUILD_ID, ManifestHash, Platform, ProgressionQueryFrame,
+    ProtocolVersion, ReliableEvent, WireMessage, WireText,
 };
 use sim_content::{
     CoreDevelopmentIdentityCopy, load_and_validate, load_core_development_identity,
-    load_core_development_identity_copy,
+    load_core_development_identity_copy, load_core_development_progression,
 };
 
 use crate::{
@@ -30,6 +30,7 @@ use crate::{
     network_transport::{
         NetworkStartup, NetworkTransportConfig, NetworkWorkerHandle, TransportEvent,
     },
+    progression_hud::ProgressionHudModel,
     save_screenshot_atomically,
 };
 
@@ -228,6 +229,16 @@ struct CoreRosterText;
 struct CoreDetailText;
 
 #[derive(Component)]
+struct CoreProgressionHudText;
+
+#[derive(Debug, Resource)]
+struct CoreProgressionQueryState {
+    content_revision: ManifestHash,
+    requested_character_id: Option<[u8; 16]>,
+    next_sequence: u32,
+}
+
+#[derive(Component)]
 struct CoreActionLabel(CoreAction);
 
 #[derive(Debug, Resource)]
@@ -254,6 +265,10 @@ pub fn run_core_identity(config: CoreIdentityConfig) -> Result<()> {
         .context("unpromoted Core identity content failed validation")?;
     let identity_copy = load_core_development_identity_copy(&config.content_root)
         .context("Core identity UI copy failed validation")?;
+    let progression_content = load_core_development_progression(&config.content_root)
+        .context("Core progression content failed validation")?;
+    let progression_content_revision =
+        ManifestHash::new(progression_content.hashes().records_blake3.clone())?;
     let (_, source_report) = load_and_validate(&config.content_root)
         .context("Core identity source package failed validation")?;
     if identity_content.class().header.id.as_str() != GRAVE_ARBALIST_CLASS_ID {
@@ -295,6 +310,12 @@ pub fn run_core_identity(config: CoreIdentityConfig) -> Result<()> {
         .insert_resource(CoreNetworkBridge(worker))
         .insert_resource(CoreMutationSequencer::default())
         .insert_resource(CoreUiCopy(identity_copy.clone()))
+        .insert_resource(ProgressionHudModel::default())
+        .insert_resource(CoreProgressionQueryState {
+            content_revision: progression_content_revision,
+            requested_character_id: None,
+            next_sequence: 1,
+        })
         .insert_resource(CoreEvidenceAutomation(screenshot_request.is_some()))
         .add_plugins(
             DefaultPlugins
@@ -313,6 +334,7 @@ pub fn run_core_identity(config: CoreIdentityConfig) -> Result<()> {
             Update,
             (
                 poll_core_transport,
+                request_selected_progression,
                 handle_core_keyboard,
                 handle_core_buttons,
                 automate_core_evidence,
@@ -336,7 +358,11 @@ pub fn run_core_identity(config: CoreIdentityConfig) -> Result<()> {
 struct CoreEvidenceAutomation(bool);
 
 #[allow(clippy::needless_pass_by_value)] // Bevy system parameters are wrapper values.
-fn poll_core_transport(bridge: Res<CoreNetworkBridge>, mut model: ResMut<CoreIdentityModel>) {
+fn poll_core_transport(
+    bridge: Res<CoreNetworkBridge>,
+    mut model: ResMut<CoreIdentityModel>,
+    mut progression: ResMut<ProgressionHudModel>,
+) {
     for event in bridge.0.drain_events() {
         match event {
             TransportEvent::Connecting => model.begin_authentication(),
@@ -344,6 +370,7 @@ fn poll_core_transport(bridge: Res<CoreNetworkBridge>, mut model: ResMut<CoreIde
             TransportEvent::Reliable(frame) => match frame.event {
                 ReliableEvent::AccountBootstrapResult(result) => model.apply_bootstrap(result),
                 ReliableEvent::CharacterMutationResult(result) => model.apply_mutation(result),
+                ReliableEvent::ProgressionResult(result) => progression.apply(result),
                 _ => model.transport_failed(),
             },
             TransportEvent::LinkLost
@@ -351,6 +378,46 @@ fn poll_core_transport(bridge: Res<CoreNetworkBridge>, mut model: ResMut<CoreIde
             | TransportEvent::TransportClosed => model.disconnected(),
             TransportEvent::Fatal(_) => model.transport_failed(),
         }
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)] // Bevy system parameters are wrapper values.
+fn request_selected_progression(
+    bridge: Res<CoreNetworkBridge>,
+    model: Res<CoreIdentityModel>,
+    mut state: ResMut<CoreProgressionQueryState>,
+    mut progression: ResMut<ProgressionHudModel>,
+) {
+    let selected = model
+        .snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.selected_character_id);
+    if selected == state.requested_character_id {
+        return;
+    }
+    state.requested_character_id = selected;
+    progression.clear();
+    let Some(character_id) = selected else {
+        return;
+    };
+    let sequence = state.next_sequence;
+    let Some(next_sequence) = sequence.checked_add(1) else {
+        state.requested_character_id = None;
+        return;
+    };
+    let frame = ProgressionQueryFrame {
+        sequence,
+        character_id,
+        progression_content_revision: state.content_revision.clone(),
+    };
+    if bridge
+        .0
+        .queue_reliable(WireMessage::ProgressionQueryFrame(frame))
+        .is_ok()
+    {
+        state.next_sequence = next_sequence;
+    } else {
+        state.requested_character_id = None;
     }
 }
 
@@ -572,6 +639,7 @@ fn spawn_core_identity_ui(mut commands: Commands, copy: Res<CoreUiCopy>) {
                 TextColor(Color::srgb_u8(151, 208, 201)),
                 CoreStatusText,
             ));
+            spawn_progression_hud(root);
             root.spawn((
                 Text::new(&authored.loading_roster),
                 TextFont::from_font_size(18.0),
@@ -629,6 +697,24 @@ fn spawn_core_identity_ui(mut commands: Commands, copy: Res<CoreUiCopy>) {
                 TextColor(Color::srgb_u8(164, 169, 164)),
             ));
         });
+}
+
+fn spawn_progression_hud(parent: &mut ChildSpawnerCommands) {
+    parent.spawn((
+        Text::new("VITALS\nSelect a living character to load progression."),
+        TextFont::from_font_size(16.0),
+        TextColor(Color::srgb_u8(235, 232, 216)),
+        Node {
+            width: percent(48),
+            min_width: px(440),
+            padding: UiRect::axes(px(14), px(10)),
+            border: UiRect::all(px(2)),
+            ..default()
+        },
+        BackgroundColor(Color::srgba_u8(12, 18, 23, 245)),
+        BorderColor::all(Color::srgb_u8(135, 186, 178)),
+        CoreProgressionHudText,
+    ));
 }
 
 fn spawn_action_button(parent: &mut ChildSpawnerCommands, action: CoreAction, label: &str) {
@@ -718,10 +804,15 @@ fn spawn_arbalist_silhouette(parent: &mut ChildSpawnerCommands) {
         });
 }
 
-#[allow(clippy::needless_pass_by_value, clippy::type_complexity)] // Bevy system parameters encode disjoint UI queries.
+#[allow(
+    clippy::needless_pass_by_value,
+    clippy::too_many_arguments,
+    clippy::type_complexity
+)] // Bevy system parameters encode disjoint UI queries and resources.
 fn update_core_identity_ui(
     model: Res<CoreIdentityModel>,
     copy: Res<CoreUiCopy>,
+    progression: Res<ProgressionHudModel>,
     mut status: Single<&mut Text, With<CoreStatusText>>,
     mut roster: Single<&mut Text, (With<CoreRosterText>, Without<CoreStatusText>)>,
     mut details: Single<
@@ -730,6 +821,15 @@ fn update_core_identity_ui(
             With<CoreDetailText>,
             Without<CoreStatusText>,
             Without<CoreRosterText>,
+        ),
+    >,
+    mut progression_text: Single<
+        &mut Text,
+        (
+            With<CoreProgressionHudText>,
+            Without<CoreStatusText>,
+            Without<CoreRosterText>,
+            Without<CoreDetailText>,
         ),
     >,
     mut actions: Query<(&CoreActionLabel, &mut BackgroundColor, &mut BorderColor)>,
@@ -755,6 +855,7 @@ fn update_core_identity_ui(
             ("feature_flag", CORE_TEST_IDENTITY_FEATURE_FLAG.to_owned()),
         ],
     ));
+    **progression_text = Text::new(progression.render());
 
     let mut rows = Vec::with_capacity(2);
     for ordinal in 1..=2 {
