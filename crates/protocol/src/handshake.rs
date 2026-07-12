@@ -151,7 +151,7 @@ mod tests {
     fn client_hello() -> ClientHello {
         ClientHello {
             protocol_major: 1,
-            protocol_minor: 0,
+            protocol_minor: crate::PROTOCOL_MINOR,
             client_build_id: WireText::new(format!("release-{}", "1".repeat(64))).unwrap(),
             platform: Platform::WindowsNative,
             supported_compression: vec![Compression::None],

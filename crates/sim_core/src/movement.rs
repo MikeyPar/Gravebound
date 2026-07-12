@@ -1,5 +1,3 @@
-use std::f32::consts::FRAC_1_SQRT_2;
-
 use thiserror::Error;
 
 use crate::{
@@ -77,27 +75,41 @@ impl std::ops::Mul<f32> for SimulationVector {
 /// Compact latest-state digital movement action. Opposing bindings cancel on their axis.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct MovementAction {
-    horizontal: i8,
-    vertical: i8,
+    horizontal_milli: i16,
+    vertical_milli: i16,
 }
 
 impl MovementAction {
     #[must_use]
     pub fn new(horizontal: i8, vertical: i8) -> Self {
         Self {
-            horizontal: horizontal.clamp(-1, 1),
-            vertical: vertical.clamp(-1, 1),
+            horizontal_milli: i16::from(horizontal.clamp(-1, 1)) * 1_000,
+            vertical_milli: i16::from(vertical.clamp(-1, 1)) * 1_000,
         }
+    }
+
+    /// Creates a bounded analog action from the shared network fixed-point scale.
+    pub fn try_from_milli(horizontal: i16, vertical: i16) -> Result<Self, MovementError> {
+        if !(-1_000..=1_000).contains(&horizontal) || !(-1_000..=1_000).contains(&vertical) {
+            return Err(MovementError::InputOutOfRange);
+        }
+        Ok(Self {
+            horizontal_milli: horizontal,
+            vertical_milli: vertical,
+        })
     }
 
     #[must_use]
     pub fn normalized_vector(self) -> SimulationVector {
-        let x = f32::from(self.horizontal);
-        let y = f32::from(self.vertical);
-        if self.horizontal != 0 && self.vertical != 0 {
-            SimulationVector::new(x * FRAC_1_SQRT_2, y * FRAC_1_SQRT_2)
+        let vector = SimulationVector::new(
+            f32::from(self.horizontal_milli) / 1_000.0,
+            f32::from(self.vertical_milli) / 1_000.0,
+        );
+        if vector.length_squared() > 1.0 {
+            let inverse_length = vector.length().recip();
+            vector * inverse_length
         } else {
-            SimulationVector::new(x, y)
+            vector
         }
     }
 }
@@ -317,6 +329,8 @@ pub struct ForcedMovementStep {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum MovementError {
+    #[error("movement input components must remain within -1000..=1000")]
+    InputOutOfRange,
     #[error("movement state contains a non-finite value")]
     NonFiniteState,
     #[error("movement configuration is invalid")]
@@ -446,6 +460,19 @@ mod tests {
         let diagonal = MovementAction::new(1, 1).normalized_vector();
         assert!((cardinal.length() - 1.0).abs() < f32::EPSILON);
         assert!((diagonal.length() - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn network_fixed_point_preserves_analog_magnitude_and_bounds() {
+        let half = MovementAction::try_from_milli(300, -400).expect("bounded analog input");
+        assert!((half.normalized_vector().length() - 0.5).abs() < f32::EPSILON);
+        let clamped_diagonal =
+            MovementAction::try_from_milli(1_000, 1_000).expect("bounded diagonal");
+        assert!((clamped_diagonal.normalized_vector().length() - 1.0).abs() < f32::EPSILON);
+        assert_eq!(
+            MovementAction::try_from_milli(1_001, 0),
+            Err(MovementError::InputOutOfRange)
+        );
     }
 
     #[test]

@@ -18,8 +18,10 @@ pub use handshake::{
     ClientHello, Compression, HandshakeRejection, HandshakeResponse, Platform, ServerHello,
 };
 pub use messages::{
-    ActionFrame, ActionKind, ActionResultCode, ControlEvent, EntityKind, EntitySnapshot,
-    InputFrame, MessageKind, MessageValidationError, MutationResult, PatternDescriptor,
+    ActionFrame, ActionKind, ActionResultCode, ControlEvent, ENTITY_STATE_ALIVE,
+    ENTITY_STATE_COLLECTED, ENTITY_STATE_ELIGIBLE, EntityKind, EntitySnapshot, InputFrame,
+    MAX_SNAPSHOT_CHUNKS, MAX_SNAPSHOT_ENTITIES_PER_CHUNK, MessageKind, MessageValidationError,
+    MutationRequest, MutationResult, MutationResultCode, PatternDescriptor, PickupPlacement,
     ReliableEvent, ReliableEventFrame, SnapshotChunk, SocialPingKind, WireMessage,
 };
 
@@ -29,7 +31,7 @@ use thiserror::Error;
 /// First incompatible protocol generation.
 pub const PROTOCOL_MAJOR: u16 = 1;
 /// Backward-compatible feature generation within [`PROTOCOL_MAJOR`].
-pub const PROTOCOL_MINOR: u16 = 0;
+pub const PROTOCOL_MINOR: u16 = 1;
 /// Authoritative simulation and client-input cadence from GDD `TECH-012`.
 pub const SIMULATION_HZ: u16 = 30;
 /// Baseline world snapshot cadence from GDD `TECH-012`.
@@ -62,7 +64,7 @@ impl ProtocolVersion {
 
     #[must_use]
     pub const fn is_compatible_with(self, required: Self) -> bool {
-        self.major == required.major && self.minor >= required.minor
+        self.major == required.major && self.minor == required.minor
     }
 }
 
@@ -163,15 +165,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn current_version_is_compatible_only_with_same_major_and_older_minor() {
+    fn current_version_requires_exact_minor_until_an_adapter_exists() {
         let current = ProtocolVersion::current();
         assert!(current.is_compatible_with(current));
         assert!(
-            ProtocolVersion { major: 1, minor: 3 }
+            !ProtocolVersion { major: 1, minor: 3 }
                 .is_compatible_with(ProtocolVersion { major: 1, minor: 2 })
         );
+        assert!(
+            !ProtocolVersion { major: 1, minor: 0 }
+                .is_compatible_with(ProtocolVersion { major: 1, minor: 1 })
+        );
+        assert!(
+            ProtocolVersion { major: 1, minor: 3 }
+                .is_compatible_with(ProtocolVersion { major: 1, minor: 3 })
+        );
         assert!(!ProtocolVersion { major: 2, minor: 0 }.is_compatible_with(current));
-        assert!(!current.is_compatible_with(ProtocolVersion { major: 1, minor: 1 }));
+        assert!(!current.is_compatible_with(ProtocolVersion { major: 1, minor: 0 }));
     }
 
     #[test]

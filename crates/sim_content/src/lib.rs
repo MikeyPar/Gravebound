@@ -7,6 +7,7 @@ pub use prototype::*;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt, fs,
+    num::NonZeroU64,
     path::{Path, PathBuf},
 };
 
@@ -20,16 +21,19 @@ use content_schema::{
     ItemRecord, PatternKind, PatternRecord, ReleaseManifest, ReleaseStage, SCHEMA_VERSION,
 };
 use sim_core::{
-    ArenaAnchor, ArenaGeometry, BELL_PROCTOR_CROSS_ID, BELL_PROCTOR_FAN_ID, BELL_PROCTOR_ID,
-    BELL_PROCTOR_REWARD_ID, BELL_PROCTOR_RING_ID, BELL_REED_ID, BellProctorDefinition,
-    BellProctorDefinitionParameters, BellReedDefinition, BellReedDefinitionParameters, BossCueKind,
-    BossTimelineCue, CHAIN_SENTRY_ID, ChainSentryDefinition, ChainSentryDefinitionParameters,
-    Counterplay, DROWNED_PILGRIM_ID, DamageBand, DamageType, DirectHitParameters, DirectHitRequest,
-    DrownedPilgrimDefinition, DrownedPilgrimDefinitionParameters, EchoMemoryFamily, EnemyRole,
-    EntityId, GraveMarkDefinition, GraveMarkDefinitionParameters, HostileDisposition,
-    LaneAttackDefinition, MILLI_TILES_PER_TILE, NORMAL_ENEMY_REWARD_TABLE_ID,
+    ArenaAnchor, ArenaGeometry, AuthorityDefinitions, BELL_PROCTOR_CROSS_ID, BELL_PROCTOR_FAN_ID,
+    BELL_PROCTOR_ID, BELL_PROCTOR_REWARD_ID, BELL_PROCTOR_RING_ID, BELL_REED_ID,
+    BellProctorDefinition, BellProctorDefinitionParameters, BellReedDefinition,
+    BellReedDefinitionParameters, BossCueKind, BossTimelineCue, CHAIN_SENTRY_ID,
+    ChainSentryDefinition, ChainSentryDefinitionParameters, Counterplay, DROWNED_PILGRIM_ID,
+    DamageBand, DamageType, DirectHitParameters, DirectHitRequest, DrownedPilgrimDefinition,
+    DrownedPilgrimDefinitionParameters, EchoMemoryFamily, EnemyRole, EntityId, EntityIdAllocator,
+    EquipmentItem, EquipmentSlot as SimulationEquipmentSlot, GraveMarkDefinition,
+    GraveMarkDefinitionParameters, HostileDisposition, InventoryStack, ItemContentId,
+    ItemInstanceId, LaneAttackDefinition, MILLI_TILES_PER_TILE, NORMAL_ENEMY_REWARD_TABLE_ID,
+    NormalWaveDefinitions, NormalWaveEnemyKind, NormalWaveSpawn, PlayerCombatState,
     ProjectileAttackDefinition, RedTonicDefinition, RedTonicDefinitionParameters,
-    SlipstepDefinition, SlipstepDefinitionParameters, StillnessDefinition,
+    SlipstepDefinition, SlipstepDefinitionParameters, SpawnInstanceId, StillnessDefinition,
     StillnessDefinitionParameters, TilePoint, TileRectangle, WeaponDefinition,
     WeaponDefinitionParameters, duration_ms_to_ticks_ceil, duration_ms_to_ticks_nearest,
     resolve_direct_hit, validate_damage_band,
@@ -48,6 +52,7 @@ pub const FIRST_PLAYABLE_UNDERTAKER_KNOT_ID: &str = "item.prototype.charm.undert
 pub const FIRST_PLAYABLE_DROWNED_PILGRIM_PATTERN_ID: &str = "pattern.enemy.drowned_pilgrim.fan";
 pub const FIRST_PLAYABLE_BELL_REED_PATTERN_ID: &str = "pattern.enemy.bell_reed.gap_ring";
 pub const FIRST_PLAYABLE_CHAIN_SENTRY_PATTERN_ID: &str = "pattern.enemy.chain_sentry.cross_lanes";
+pub const M02_COMBAT_TEST_REWARD_SEED: u64 = 7;
 const COMMON_PROJECTILE_RADIUS_MILLI_TILES: u32 = 120;
 const ABILITY_INPUT_BUFFER_MS: u64 = 100;
 const GLOBAL_ABILITY_COOLDOWN_MS: u64 = 150;
@@ -88,6 +93,135 @@ pub struct ValidationReport {
     pub record_count: usize,
     pub feature_count: usize,
     pub package_hash_blake3: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct AuthorityCombatTestContent {
+    pub definitions: AuthorityDefinitions,
+    pub spawns: Vec<NormalWaveSpawn>,
+    pub hostile_projectile_ids: EntityIdAllocator,
+}
+
+/// Compiles the M02 authority fixture exclusively from the validated `fp.1.0.0` package.
+pub fn first_playable_authority_combat_test(
+    package: &ContentPackage,
+) -> Result<AuthorityCombatTestContent> {
+    let arena = first_playable_arena(package)?;
+    let class = package
+        .classes
+        .iter()
+        .find(|record| record.header.id.as_str() == FIRST_PLAYABLE_CLASS_ID)
+        .context("First Playable Grave Arbalist class record is missing")?;
+    let catalog = first_playable_equipment_catalog(package)?;
+    let reedcloth = catalog
+        .get("item.prototype.armor.reedcloth_wraps")
+        .context("First Playable Reedcloth Wraps record is missing")?;
+    let PrototypeItemBehavior::Armor {
+        max_health_add,
+        armor_add,
+        veil_resistance_add_basis_points,
+        ..
+    } = reedcloth.behavior
+    else {
+        bail!("First Playable Reedcloth Wraps must compile as armor");
+    };
+    let maximum_health = checked_add_signed(
+        class.numeric_payload.starting_max_health,
+        max_health_add,
+        "maximum health",
+    )?;
+    let starting_armor =
+        checked_add_signed(class.numeric_payload.starting_armor, armor_add, "armor")?;
+    let combat = PlayerCombatState::with_projectile_allocator(
+        first_playable_weapon(package)?,
+        first_playable_grave_mark(package)?,
+        first_playable_slipstep(package)?,
+        first_playable_stillness(package)?,
+        EntityIdAllocator::starting_at(NonZeroU64::new(40_000).expect("nonzero fixture ID")),
+    )?;
+    let reward_catalog = first_playable_reward_catalog(package)?;
+    let grants = reward_catalog.resolve(
+        "reward.prototype.normal_enemy",
+        &package.release_manifest.content_version,
+        M02_COMBAT_TEST_REWARD_SEED,
+        1,
+    )?;
+    let reward_stacks = grants
+        .iter()
+        .enumerate()
+        .map(|(index, grant)| reward_stack(&catalog, index, grant))
+        .collect::<Result<Vec<_>>>()?;
+    if reward_stacks.is_empty() {
+        bail!("M02 combat-test reward seed must resolve at least one personal pickup");
+    }
+    let spawn_point = arena
+        .anchors
+        .iter()
+        .find(|anchor| anchor.id == "W1")
+        .context("First Playable arena is missing W1")?
+        .point;
+    Ok(AuthorityCombatTestContent {
+        definitions: AuthorityDefinitions {
+            arena,
+            wave: NormalWaveDefinitions {
+                drowned_pilgrim: first_playable_drowned_pilgrim(package)?,
+                bell_reed: first_playable_bell_reed(package)?,
+                chain_sentry: first_playable_chain_sentry(package)?,
+            },
+            combat,
+            red_tonic: first_playable_red_tonic(package)?,
+            maximum_health,
+            starting_armor,
+            resistance_basis_points: veil_resistance_add_basis_points,
+            reward_stacks,
+        },
+        spawns: vec![NormalWaveSpawn {
+            instance_id: SpawnInstanceId {
+                run_ordinal: 1,
+                spawn_ordinal: 1,
+            },
+            kind: NormalWaveEnemyKind::DrownedPilgrim,
+            position_milli_tiles: (spawn_point.x_milli_tiles, spawn_point.y_milli_tiles),
+        }],
+        hostile_projectile_ids: EntityIdAllocator::starting_at(
+            NonZeroU64::new(20_000).expect("nonzero fixture ID"),
+        ),
+    })
+}
+
+fn checked_add_signed(base: u32, modifier: i32, label: &str) -> Result<u32> {
+    let value = i64::from(base) + i64::from(modifier);
+    u32::try_from(value).with_context(|| format!("First Playable {label} is outside u32 range"))
+}
+
+fn reward_stack(
+    catalog: &PrototypeEquipmentCatalog,
+    index: usize,
+    grant: &PrototypeRewardGrant,
+) -> Result<InventoryStack> {
+    let ordinal = u64::try_from(index)
+        .context("M02 reward stack index exceeds u64")?
+        .checked_add(50_001)
+        .context("M02 reward item identity overflow")?;
+    let instance_id = ItemInstanceId::new(ordinal)?;
+    if grant.item_id == FIRST_PLAYABLE_RED_TONIC_ID {
+        let quantity = u8::try_from(grant.quantity).context("Red Tonic reward exceeds u8")?;
+        return InventoryStack::red_tonic(instance_id, quantity).map_err(Into::into);
+    }
+    let definition = catalog
+        .get(&grant.item_id)
+        .with_context(|| format!("M02 reward references unknown item {}", grant.item_id))?;
+    let slot = match definition.slot {
+        EquipmentSlot::Weapon => SimulationEquipmentSlot::Weapon,
+        EquipmentSlot::Relic => SimulationEquipmentSlot::Relic,
+        EquipmentSlot::Armor => SimulationEquipmentSlot::Armor,
+        EquipmentSlot::Charm => SimulationEquipmentSlot::Charm,
+    };
+    Ok(InventoryStack::Equipment(EquipmentItem::new(
+        instance_id,
+        ItemContentId::new(grant.item_id.clone())?,
+        slot,
+    )))
 }
 
 /// Reports the schema version this loader accepts.
@@ -2251,6 +2385,34 @@ mod tests {
         let (_, report) = load_and_validate(&content_root()).expect("valid package");
         assert_eq!(report.content_version, FIRST_PLAYABLE_CONTENT_VERSION);
         assert_eq!(report.record_count, 34);
+    }
+
+    #[test]
+    fn m02_authority_fixture_compiles_only_from_checked_in_content() {
+        let package = valid_package();
+        let rewards = first_playable_reward_catalog(&package).expect("rewards");
+        let first_seed = (0..1_000_u64)
+            .find(|seed| {
+                !rewards
+                    .resolve(
+                        "reward.prototype.normal_enemy",
+                        &package.release_manifest.content_version,
+                        *seed,
+                        1,
+                    )
+                    .expect("reward resolution")
+                    .is_empty()
+            })
+            .expect("a bounded seed resolves a reward");
+        assert_eq!(first_seed, M02_COMBAT_TEST_REWARD_SEED);
+        let fixture =
+            first_playable_authority_combat_test(&package).expect("M02 authority content");
+        assert_eq!(fixture.definitions.maximum_health, 128);
+        assert_eq!(fixture.definitions.starting_armor, 2);
+        assert_eq!(fixture.definitions.reward_stacks.len(), 1);
+        assert_eq!(fixture.spawns.len(), 1);
+        assert_eq!(fixture.spawns[0].kind, NormalWaveEnemyKind::DrownedPilgrim);
+        assert_eq!(fixture.spawns[0].position_milli_tiles, (3_000, 8_000));
     }
 
     #[test]

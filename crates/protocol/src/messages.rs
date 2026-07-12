@@ -9,6 +9,9 @@ pub const FIXED_VECTOR_SCALE: i16 = 1_000;
 pub const MAX_SNAPSHOT_ENTITIES_PER_CHUNK: usize = 32;
 pub const MAX_SNAPSHOT_CHUNKS: u16 = 64;
 pub const CONTENT_ID_MAX_BYTES: usize = 96;
+pub const ENTITY_STATE_ALIVE: u32 = 1 << 0;
+pub const ENTITY_STATE_ELIGIBLE: u32 = 1 << 1;
+pub const ENTITY_STATE_COLLECTED: u32 = 1 << 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -19,6 +22,7 @@ pub enum MessageKind {
     ActionFrame,
     SnapshotChunk,
     ReliableEvent,
+    MutationRequest,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,6 +95,9 @@ pub enum EntityKind {
     Boss,
     Loot,
     Objective,
+    FriendlyProjectile,
+    HostileProjectile,
+    PersonalPickup,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,8 +116,17 @@ impl EntitySnapshot {
         if self.entity_id == 0 {
             return Err(MessageValidationError::ZeroEntityId);
         }
-        if self.maximum_health == 0 || self.current_health > self.maximum_health {
-            return Err(MessageValidationError::InvalidHealth);
+        match self.kind {
+            EntityKind::Player | EntityKind::Enemy | EntityKind::Boss
+                if self.maximum_health == 0 || self.current_health > self.maximum_health =>
+            {
+                return Err(MessageValidationError::InvalidHealth);
+            }
+            EntityKind::Player | EntityKind::Enemy | EntityKind::Boss => {}
+            _ if self.maximum_health != 0 || self.current_health != 0 => {
+                return Err(MessageValidationError::UnexpectedHealth);
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -120,6 +136,7 @@ impl EntitySnapshot {
 pub struct SnapshotChunk {
     pub sequence: u32,
     pub server_tick: u64,
+    pub state_version: u64,
     pub acknowledged_input_sequence: u32,
     pub chunk_index: u16,
     pub chunk_count: u16,
@@ -185,6 +202,7 @@ pub struct PatternDescriptor {
 pub struct MutationResult {
     pub mutation_id: [u8; 16],
     pub accepted: bool,
+    pub code: MutationResultCode,
     pub state_version: u64,
 }
 
@@ -192,6 +210,47 @@ impl MutationResult {
     fn validate(&self) -> Result<(), MessageValidationError> {
         if self.mutation_id == [0; 16] {
             return Err(MessageValidationError::ZeroMutationId);
+        }
+        if self.accepted != (self.code == MutationResultCode::Accepted) {
+            return Err(MessageValidationError::MutationResultMismatch);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MutationResultCode {
+    Accepted,
+    Ineligible,
+    NotFound,
+    AlreadyResolved,
+    OutOfRange,
+    InventoryRejected,
+    Dead,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PickupPlacement {
+    Take,
+    Equip,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MutationRequest {
+    pub mutation_id: [u8; 16],
+    pub pickup_id: u64,
+    pub placement: PickupPlacement,
+}
+
+impl MutationRequest {
+    pub const fn validate(&self) -> Result<(), MessageValidationError> {
+        if all_zero(&self.mutation_id) {
+            return Err(MessageValidationError::ZeroMutationId);
+        }
+        if self.pickup_id == 0 {
+            return Err(MessageValidationError::ZeroPickupId);
         }
         Ok(())
     }
@@ -280,6 +339,7 @@ pub enum WireMessage {
     ActionFrame(ActionFrame),
     SnapshotChunk(SnapshotChunk),
     ReliableEvent(ReliableEventFrame),
+    MutationRequest(MutationRequest),
 }
 
 impl WireMessage {
@@ -292,6 +352,7 @@ impl WireMessage {
             Self::ActionFrame(_) => MessageKind::ActionFrame,
             Self::SnapshotChunk(_) => MessageKind::SnapshotChunk,
             Self::ReliableEvent(_) => MessageKind::ReliableEvent,
+            Self::MutationRequest(_) => MessageKind::MutationRequest,
         }
     }
 
@@ -303,6 +364,7 @@ impl WireMessage {
             Self::ActionFrame(_) => NetworkChannel::Action,
             Self::SnapshotChunk(_) => NetworkChannel::Snapshot,
             Self::ReliableEvent(frame) => frame.event.channel(),
+            Self::MutationRequest(_) => NetworkChannel::Mutation,
         }
     }
 
@@ -323,6 +385,7 @@ impl WireMessage {
             Self::ActionFrame(value) => value.validate(),
             Self::SnapshotChunk(value) => value.validate(),
             Self::ReliableEvent(value) => value.validate(),
+            Self::MutationRequest(value) => value.validate(),
         }
     }
 }
@@ -339,6 +402,8 @@ pub enum MessageValidationError {
     ZeroEntityId,
     #[error("entity health is invalid")]
     InvalidHealth,
+    #[error("non-health entity must carry zero current and maximum health")]
+    UnexpectedHealth,
     #[error("snapshot chunk index/count is invalid")]
     InvalidSnapshotChunk,
     #[error("snapshot exceeds {MAX_SNAPSHOT_ENTITIES_PER_CHUNK} entities per chunk")]
@@ -347,8 +412,23 @@ pub enum MessageValidationError {
     DuplicateEntityId,
     #[error("mutation ID must be nonzero")]
     ZeroMutationId,
+    #[error("pickup ID must be nonzero")]
+    ZeroPickupId,
+    #[error("mutation accepted flag and result code disagree")]
+    MutationResultMismatch,
     #[error("handshake payload failed semantic validation")]
     Handshake,
+}
+
+const fn all_zero(bytes: &[u8; 16]) -> bool {
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != 0 {
+            return false;
+        }
+        index += 1;
+    }
+    true
 }
 
 #[cfg(test)]
@@ -400,6 +480,7 @@ mod tests {
         let mut chunk = SnapshotChunk {
             sequence: 1,
             server_tick: 2,
+            state_version: 3,
             acknowledged_input_sequence: 1,
             chunk_index: 0,
             chunk_count: 1,
@@ -436,5 +517,46 @@ mod tests {
         });
         assert_eq!(input.channel(), NetworkChannel::Input);
         assert!(input.uses_datagram());
+
+        let mutation = WireMessage::MutationRequest(MutationRequest {
+            mutation_id: [1; 16],
+            pickup_id: 9,
+            placement: PickupPlacement::Take,
+        });
+        assert_eq!(mutation.channel(), NetworkChannel::Mutation);
+        assert!(!mutation.uses_datagram());
+        assert_eq!(mutation.validate(), Ok(()));
+    }
+
+    #[test]
+    fn mutations_reject_zero_identity_and_inconsistent_results() {
+        assert_eq!(
+            MutationRequest {
+                mutation_id: [0; 16],
+                pickup_id: 1,
+                placement: PickupPlacement::Take,
+            }
+            .validate(),
+            Err(MessageValidationError::ZeroMutationId)
+        );
+        assert_eq!(
+            MutationRequest {
+                mutation_id: [1; 16],
+                pickup_id: 0,
+                placement: PickupPlacement::Take,
+            }
+            .validate(),
+            Err(MessageValidationError::ZeroPickupId)
+        );
+        assert_eq!(
+            MutationResult {
+                mutation_id: [1; 16],
+                accepted: true,
+                code: MutationResultCode::OutOfRange,
+                state_version: 1,
+            }
+            .validate(),
+            Err(MessageValidationError::MutationResultMismatch)
+        );
     }
 }

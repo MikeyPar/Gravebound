@@ -13,6 +13,7 @@ clap.workspace = true
 protocol = { path = "../protocol" }
 quinn.workspace = true
 sim_core = { path = "../sim_core" }
+sim_content = { path = "../sim_content" }
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true

@@ -365,6 +365,11 @@ impl NormalWaveSimulation {
         self.hostile_projectiles.projectiles()
     }
 
+    /// Clears every hostile projectile/hazard when authoritative player death freezes the run.
+    pub fn clear_hostiles_for_player_death(&mut self) -> NormalWaveClearedHostiles {
+        self.clear_hostiles()
+    }
+
     #[must_use]
     pub fn active_lanes(&self) -> Vec<(SpawnInstanceId, &ActiveEnemyLane)> {
         self.active_lanes

@@ -4,8 +4,8 @@
 //! choose inputs, but it cannot author gameplay outcomes or bypass server authority.
 
 use protocol::{
-    ClientHello, HandshakeResponse, ProtocolVersion, RELIABLE_FRAME_LIMIT, SIMULATION_HZ,
-    WireMessage, decode_frame, encode_frame,
+    ClientHello, HandshakeResponse, InputFrame, ProtocolVersion, RELIABLE_FRAME_LIMIT,
+    ReliableEventFrame, SIMULATION_HZ, SnapshotChunk, WireMessage, decode_frame, encode_frame,
 };
 use thiserror::Error;
 
@@ -81,6 +81,56 @@ pub async fn perform_handshake(
         .map_err(|error| BotTransportError::Quic(error.to_string()))?;
     match decode_frame(&response)? {
         WireMessage::HandshakeResponse(response) => Ok(response),
+        _ => Err(BotTransportError::UnexpectedMessage),
+    }
+}
+
+pub fn send_input_datagram(
+    connection: &quinn::Connection,
+    input: InputFrame,
+) -> Result<(), BotTransportError> {
+    let frame = encode_frame(&WireMessage::InputFrame(input))?;
+    connection
+        .send_datagram(frame.into())
+        .map_err(|error| BotTransportError::Quic(error.to_string()))
+}
+
+pub async fn receive_snapshot_datagram(
+    connection: &quinn::Connection,
+) -> Result<SnapshotChunk, BotTransportError> {
+    let frame = connection
+        .read_datagram()
+        .await
+        .map_err(|error| BotTransportError::Quic(error.to_string()))?;
+    match decode_frame(&frame)? {
+        WireMessage::SnapshotChunk(snapshot) => Ok(snapshot),
+        _ => Err(BotTransportError::UnexpectedMessage),
+    }
+}
+
+pub async fn perform_reliable_gameplay(
+    connection: &quinn::Connection,
+    message: WireMessage,
+) -> Result<ReliableEventFrame, BotTransportError> {
+    if message.uses_datagram() {
+        return Err(BotTransportError::UnexpectedMessage);
+    }
+    let request = encode_frame(&message)?;
+    let (mut send, mut receive) = connection
+        .open_bi()
+        .await
+        .map_err(|error| BotTransportError::Quic(error.to_string()))?;
+    send.write_all(&request)
+        .await
+        .map_err(|error| BotTransportError::Quic(error.to_string()))?;
+    send.finish()
+        .map_err(|error| BotTransportError::Quic(error.to_string()))?;
+    let response = receive
+        .read_to_end(RELIABLE_FRAME_LIMIT)
+        .await
+        .map_err(|error| BotTransportError::Quic(error.to_string()))?;
+    match decode_frame(&response)? {
+        WireMessage::ReliableEvent(event) => Ok(event),
         _ => Err(BotTransportError::UnexpectedMessage),
     }
 }

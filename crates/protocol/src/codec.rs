@@ -85,6 +85,7 @@ const fn message_kind_byte(kind: MessageKind) -> u8 {
         MessageKind::ActionFrame => 4,
         MessageKind::SnapshotChunk => 5,
         MessageKind::ReliableEvent => 6,
+        MessageKind::MutationRequest => 7,
     }
 }
 
@@ -96,6 +97,7 @@ const fn message_kind_from_byte(value: u8) -> Result<MessageKind, WireCodecError
         4 => Ok(MessageKind::ActionFrame),
         5 => Ok(MessageKind::SnapshotChunk),
         6 => Ok(MessageKind::ReliableEvent),
+        7 => Ok(MessageKind::MutationRequest),
         other => Err(WireCodecError::UnknownMessageKind(other)),
     }
 }
@@ -151,7 +153,7 @@ mod tests {
         assert_eq!(decode_frame(&frame).unwrap(), input_message());
         assert_eq!(
             blake3::hash(&frame).to_hex().to_string(),
-            "bb3eb35fa405104a2bcbab231f9c726d7df9536f9a35b95a382f8a4088b6b632"
+            "370610a6cd10fbff52dcc5d34a1da68c531edf96f0c37df7b0120eec50de1183"
         );
     }
 
@@ -163,6 +165,12 @@ mod tests {
         assert_eq!(decode_frame(&bad), Err(WireCodecError::InvalidMagic));
         let mut bad = valid.clone();
         bad[4..6].copy_from_slice(&2_u16.to_le_bytes());
+        assert!(matches!(
+            decode_frame(&bad),
+            Err(WireCodecError::IncompatibleVersion(_))
+        ));
+        let mut bad = valid.clone();
+        bad[6..8].copy_from_slice(&0_u16.to_le_bytes());
         assert!(matches!(
             decode_frame(&bad),
             Err(WireCodecError::IncompatibleVersion(_))

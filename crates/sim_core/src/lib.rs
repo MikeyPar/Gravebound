@@ -5,6 +5,7 @@
 
 mod ability;
 mod arena;
+mod authority;
 mod boss;
 mod boss_encounter;
 mod clock;
@@ -38,6 +39,10 @@ pub use ability::{
 };
 pub use arena::{
     ArenaAnchor, ArenaGeometry, ArenaGeometryError, MILLI_TILES_PER_TILE, TilePoint, TileRectangle,
+};
+pub use authority::{
+    AuthoritativeArena, AuthorityDefinitions, AuthorityEntityKind, AuthorityEntitySnapshot,
+    AuthorityError, AuthorityInput, AuthorityPhase, AuthorityStep, PickupEligibility,
 };
 pub use boss::{
     BELL_PROCTOR_CROSS_ID, BELL_PROCTOR_FAN_ID, BELL_PROCTOR_ID, BELL_PROCTOR_REWARD_ID,

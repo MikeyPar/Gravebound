@@ -545,6 +545,11 @@ impl PlayerCombatState {
     }
 
     #[must_use]
+    pub const fn last_ability_2_press_sequence(&self) -> u32 {
+        self.last_ability_2_press_sequence
+    }
+
+    #[must_use]
     pub const fn pending_grave_mark_sequence(&self) -> Option<u32> {
         match self.pending_grave_mark {
             Some(pending) => Some(pending.press_sequence),

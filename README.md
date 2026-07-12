@@ -4,7 +4,7 @@ Gravebound is a server-authoritative, permanent-death, 2D dark-fantasy bullet-he
 
 Every character life is temporary. The account remembers what happened, and exceptional deaths can return as personalized Fallen Hero Echo encounters. The design emphasizes readable combat, rapid recovery, fair monetization, solo viability, and long-term replayability without permanent account-level combat power.
 
-> **Project status:** M01 First Playable is locally playable end to end. Grave Arbalist, exact `4/6/6` waves, Bell Proctor, damage/readability, rewards, death and victory restart, debug tools, accessibility controls and resolution matrix, deterministic stress fixtures, and privacy-safe live telemetry are implemented. Remaining M01 promotion gates are target-hardware performance evidence, one on-device Tonic audio check, a researcher-operated telemetry/survey dry run, and at least 10 eligible blind testers. See the [completion plan](docs/milestones/GB-M01-completion-plan.md).
+> **Project status:** M01 First Playable is closed under the owner's explicit successful-playtest assumption. M02 now has the versioned QUIC handshake and a deterministic server-authoritative combat session through `GB-M02-02`; prediction, reconciliation, reconnect, impairment, abuse, journey-bot, instance-lifecycle, and full M02 population/performance gates remain.
 
 ![Bell Sepulcher gameplay concept](Concept%20Art/01-bell-sepulcher-gameplay.png)
 
@@ -102,7 +102,7 @@ Concept images establish mood, hierarchy, and visual language. They are not fina
 
 ## Current Next Step
 
-Implement `GB-M02-02`: route movement, attacks, cooldowns, projectiles, collision, health, death, eligibility, and pickup through the authoritative server while retaining `sim_core` as the single gameplay-rule owner. `GB-M02-01` passes with bounded versioned wire contracts, canonical postcard fixtures, typed admission/rejection policy, and a real TLS-authenticated QUIC loopback handshake; the roadmap ADR-003 decision is preserved as repository `ADR-018` because `ADR-003` already names the M01 primary-fire decision. `GB-M01` remains closed under the explicit owner-assumed human gate recorded in `docs/playtests/GB-M01-owner-assumed-gate.md`.
+Implement `GB-M02-03`: add local movement prediction, remote interpolation, correction thresholds/telemetry, and deterministic projectile presentation against protocol `1.1` snapshots without giving the client authority over position, health, hits, death, eligibility, or item grants. `GB-M02-02` passes with immutable-content compilation, a transactionally stepped `sim_core` authority aggregate, 30 Hz input/15 Hz snapshots, reliable idempotent pickup, deterministic replay, real hostile death, and QUIC datagram/stream integration. `GB-M01` remains closed under the explicit owner-assumed human gate recorded in `docs/playtests/GB-M01-owner-assumed-gate.md`.
 
 ## Resolved prior handoff
 
