@@ -151,6 +151,7 @@ pub(crate) fn spawn_arena_view(
     mut commands: Commands,
     arena: Res<LoadedArena>,
     diagnostics: Res<PackageDiagnostics>,
+    scenario: Res<crate::combat::EvidenceScenario>,
 ) {
     let plan = build_render_plan(&arena.0).expect("validated arena must produce a render plan");
     commands.spawn((
@@ -159,7 +160,18 @@ pub(crate) fn spawn_arena_view(
         Camera2d,
         Projection::Orthographic(OrthographicProjection {
             scaling_mode: ScalingMode::FixedVertical {
-                viewport_height: DEFAULT_VIEW_HEIGHT_TILES,
+                viewport_height: if matches!(
+                    *scenario,
+                    crate::combat::EvidenceScenario::DebugOverlayShowcase
+                        | crate::combat::EvidenceScenario::BossShowcase
+                        | crate::combat::EvidenceScenario::BossCompletionShowcase
+                        | crate::combat::EvidenceScenario::StressFull
+                        | crate::combat::EvidenceScenario::StressReduced
+                ) {
+                    24.0
+                } else {
+                    DEFAULT_VIEW_HEIGHT_TILES
+                },
             },
             ..OrthographicProjection::default_2d()
         }),
@@ -234,7 +246,8 @@ pub(crate) fn spawn_arena_view(
     spawn_hud(&mut commands, &arena.0, &diagnostics);
 
     info!(
-        feature_id = "GB-M01-02B",
+        feature_id = "GB-M01-02C",
+        build_id = %diagnostics.build_id,
         arena_id = %arena.0.id,
         content_version = %diagnostics.content_version,
         content_hash = %diagnostics.package_hash_blake3,
@@ -366,6 +379,12 @@ fn spawn_marker(
 }
 
 fn spawn_hud(commands: &mut Commands, arena: &ArenaGeometry, diagnostics: &PackageDiagnostics) {
+    let short_build = diagnostics
+        .build_id
+        .strip_prefix("release-")
+        .unwrap_or(&diagnostics.build_id)
+        .get(..12)
+        .unwrap_or(&diagnostics.build_id);
     let short_hash = diagnostics
         .package_hash_blake3
         .get(..12)
@@ -373,7 +392,8 @@ fn spawn_hud(commands: &mut Commands, arena: &ArenaGeometry, diagnostics: &Packa
     commands.spawn((
         Name::new("Foundation diagnostics"),
         Text::new(format!(
-            "GRAVEBOUND  /  LOCAL LAB\nGB-M01-02B  |  {}\n{}  |  {} Hz  |  content {}  |  {} records  |  hash {}",
+            "GRAVEBOUND  /  LOCAL LAB  |  build {}\nGB-M01 FIRST PLAYABLE  |  {}\n{}  |  {} Hz  |  content {}  |  {} records  |  hash {}",
+            short_build,
             arena.id,
             "24 x 13.5 TILE ORTHOGRAPHIC VIEW",
             sim_core::TICKS_PER_SECOND,

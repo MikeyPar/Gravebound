@@ -10,8 +10,12 @@ repository.workspace = true
 [dependencies]
 anyhow.workspace = true
 bevy.workspace = true
+blake3.workspace = true
+rodio.workspace = true
 sim_content = { path = "../sim_content" }
 sim_core = { path = "../sim_core" }
+serde_json.workspace = true
+sysinfo.workspace = true
 thiserror.workspace = true
 
 [[bin]]

@@ -2,7 +2,10 @@ use std::f32::consts::FRAC_1_SQRT_2;
 
 use thiserror::Error;
 
-use crate::{ArenaGeometry, MILLI_TILES_PER_TILE, TICKS_PER_SECOND, TilePoint, TileRectangle};
+use crate::{
+    ArenaGeometry, CollisionError, CollisionTarget, MILLI_TILES_PER_TILE, ProjectileCollisionWorld,
+    TICKS_PER_SECOND, TilePoint, TileRectangle,
+};
 
 /// Grave Arbalist movement speed from `CLS-020`.
 pub const GRAVE_ARBALIST_SPEED_TILES_PER_SECOND: f32 = 5.1;
@@ -131,10 +134,18 @@ impl PlayerMovementState {
     }
 
     pub fn new(position: SimulationVector, arena: &ArenaGeometry) -> Result<Self, MovementError> {
+        Self::new_with_config(position, PlayerMovementConfig::default(), arena)
+    }
+
+    pub fn new_with_config(
+        position: SimulationVector,
+        config: PlayerMovementConfig,
+        arena: &ArenaGeometry,
+    ) -> Result<Self, MovementError> {
         let state = Self {
             position,
             velocity: SimulationVector::default(),
-            config: PlayerMovementConfig::default(),
+            config,
         };
         state.validate(arena)?;
         Ok(state)
@@ -211,6 +222,38 @@ impl PlayerMovementState {
         })
     }
 
+    /// Applies one authoritative movement-ability segment, stopping exactly at the first solid.
+    pub fn apply_forced_displacement(
+        &mut self,
+        displacement: SimulationVector,
+        collision_world: &ProjectileCollisionWorld,
+        arena: &ArenaGeometry,
+    ) -> Result<ForcedMovementStep, MovementError> {
+        self.validate(arena)?;
+        if !displacement.is_finite() {
+            return Err(MovementError::NonFiniteState);
+        }
+        let hit = collision_world.sweep_solids(
+            self.position,
+            displacement,
+            self.config.collision_radius_tiles,
+        )?;
+        let (fraction, solid) = hit.map_or((1.0, None), |hit| {
+            let CollisionTarget::Solid(solid) = hit.target else {
+                unreachable!("solid-only sweep returned an enemy")
+            };
+            (hit.fraction, Some(solid))
+        });
+        self.position = self.position + displacement * fraction;
+        self.velocity = SimulationVector::default();
+        self.validate(arena)?;
+        Ok(ForcedMovementStep {
+            position: self.position,
+            travelled_tiles: displacement.length() * fraction,
+            solid,
+        })
+    }
+
     fn validate(self, arena: &ArenaGeometry) -> Result<(), MovementError> {
         if !self.position.is_finite() || !self.velocity.is_finite() {
             return Err(MovementError::NonFiniteState);
@@ -264,6 +307,14 @@ pub struct MovementStep {
     pub collided: bool,
 }
 
+/// Result of a nonwalking movement segment such as Slipstep.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ForcedMovementStep {
+    pub position: SimulationVector,
+    pub travelled_tiles: f32,
+    pub solid: Option<crate::SolidColliderId>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum MovementError {
     #[error("movement state contains a non-finite value")]
@@ -272,6 +323,8 @@ pub enum MovementError {
     InvalidConfig,
     #[error("player position intersects the arena shell or a solid pillar")]
     IllegalPosition,
+    #[error(transparent)]
+    Collision(#[from] CollisionError),
 }
 
 #[must_use]

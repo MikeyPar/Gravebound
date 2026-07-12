@@ -20,5 +20,7 @@ Desktop.ini
 
 # Temporary and generated local files
 /tmp/
+/artifacts/
+/dist/
 *.log
 *.bak

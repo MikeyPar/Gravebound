@@ -3,18 +3,52 @@
 //! This crate is the sole owner of authoritative time, entity allocation, random streams, and
 //! canonical foundation-state hashing. It intentionally has no Bevy or platform dependency.
 
+mod ability;
 mod arena;
+mod boss;
+mod boss_encounter;
 mod clock;
 mod collision;
 mod combat;
+mod consumable;
+mod damage;
+mod death;
+mod debug_state;
+mod encounter;
+mod enemy;
+mod enemy_health;
+mod enemy_lab;
 mod entity;
+mod hostile;
+mod inventory;
 mod movement;
+mod normal_wave;
+mod pattern;
+mod performance;
+mod readability;
 mod rng;
+mod telemetry;
 mod trace;
 mod weapon;
 
+pub use ability::{
+    AbilityDefinitionError, BASIS_POINTS_PER_ONE, GraveMarkDefinition,
+    GraveMarkDefinitionParameters, IntentMathError, SlipstepDefinition,
+    SlipstepDefinitionParameters, StillnessDefinition, StillnessDefinitionParameters,
+};
 pub use arena::{
     ArenaAnchor, ArenaGeometry, ArenaGeometryError, MILLI_TILES_PER_TILE, TilePoint, TileRectangle,
+};
+pub use boss::{
+    BELL_PROCTOR_CROSS_ID, BELL_PROCTOR_FAN_ID, BELL_PROCTOR_ID, BELL_PROCTOR_REWARD_ID,
+    BELL_PROCTOR_RING_ID, BellProctorDefinition, BellProctorDefinitionParameters, BellProctorPhase,
+    BellProctorSimulation, BellProctorStateKind, BossCastId, BossCueKind, BossDefinitionError,
+    BossEvent, BossInput, BossRuntimeError, BossTimelineCue,
+};
+pub use boss_encounter::{
+    BELL_PROCTOR_ENTITY_ID_OFFSET, BellProctorClearedHostiles, BellProctorDamageEvent,
+    BellProctorDefeat, BellProctorEncounterError, BellProctorEncounterSimulation,
+    BellProctorEncounterSnapshot, BellProctorEncounterStep, BellProctorLaneContact,
 };
 pub use clock::{
     FixedStepClock, TICK_RATE_HZ, Tick, duration_ms_to_ticks_ceil, duration_ms_to_ticks_nearest,
@@ -24,16 +58,121 @@ pub use collision::{
     ShellSide, SolidColliderId, SweepHit,
 };
 pub use combat::{
-    AimDirection, AimDirectionError, CombatAction, CombatError, CombatStep, FriendlyProjectile,
-    PlayerCombatState, ProjectileCollision, ProjectileExpired, ShotEvent,
+    ActiveGraveMark, AimDirection, AimDirectionError, CombatAction, CombatError, CombatStep,
+    FocusedTransition, FocusedTransitionKind, FriendlyProjectile, FriendlyProjectileSource,
+    GraveMarkInputEvent, GraveMarkInputResult, GraveMarkTransition, GraveMarkTransitionKind,
+    PlayerCombatState, ProjectileCollision, ProjectileExpired, RawDamageIntent,
+    RawDamageIntentSource, ShotEvent, SlipstepInputEvent, SlipstepInputResult, SlipstepTransition,
+    SlipstepTransitionKind,
+};
+pub use consumable::{
+    BeltError, BeltSlot, ConsumableAction, ConsumableError, ConsumableEvent, ConsumableStep,
+    DamageAppliedEvent, PlayerVitals, RED_TONIC_CONTENT_ID, RED_TONIC_RESTORE_BASIS_POINTS,
+    RED_TONIC_RESTORE_TICKS, RED_TONIC_SHARED_COOLDOWN_TICKS, RED_TONIC_STACK_CAP,
+    RedTonicDefinition, RedTonicDefinitionError, RedTonicDefinitionParameters, RedTonicSimulation,
+    TonicBelt, TonicMergeResult, TonicUseRejection, UNDERTAKER_KNOT_RESTORE_BASIS_POINTS,
+    UNDERTAKER_KNOT_SHARED_COOLDOWN_TICKS, VitalsError,
+};
+pub use damage::{
+    DamageBand, DamageBandError, DamageError, DamageEvent, DamageType, DirectHitParameters,
+    DirectHitRequest, classify_damage_band, resolve_direct_hit, validate_damage_band,
+};
+pub use death::{
+    LOCAL_DEATH_TRACE_TICKS, LOCAL_RESTART_DEADLINE_TICKS, LocalCombatTraceEntry,
+    LocalDamageObservation, LocalDeathCause, LocalDeathCommit, LocalDeathError, LocalDeathId,
+    LocalRestartCommit, LocalRunLifecycle, LocalRunPhase, LocalVictoryRestartCommit,
+    RunEntityCounts,
+};
+pub use debug_state::{
+    DebugBossState, DebugEnemyState, DebugStateError, LocalDebugStateInput, LocalDebugStateSnapshot,
+};
+pub use encounter::{
+    BOSS_INTRODUCTION_TICKS, BOSS_REWARD_ID, BellLaboratoryEncounter, EncounterAction,
+    EncounterError, EncounterEvent, EncounterInput, EncounterSpawnSpec, EncounterStage,
+    EncounterState, EncounterStep, FIRST_PLAYABLE_DEFAULT_SEED, FIRST_WAVE_DELAY_TICKS,
+    REWARD_DELAY_TICKS, RecallRejection, RestartReason, SPAWN_TELEGRAPH_TICKS, SpawnInstanceId,
+    SpawnLocation, WAVE_1_REWARD_ID, WAVE_2_REWARD_ID, WAVE_3_REWARD_ID,
+};
+pub use enemy::{
+    AimVector, AttackCastId, BELL_REED_ID, BellReedDefinition, BellReedDefinitionParameters,
+    BellReedSimulation, CHAIN_SENTRY_ID, ChainSentryDefinition, ChainSentryDefinitionParameters,
+    ChainSentrySimulation, Counterplay, DROWNED_PILGRIM_ID, DrownedPilgrimDefinition,
+    DrownedPilgrimDefinitionParameters, DrownedPilgrimSimulation, EchoMemoryFamily,
+    EnemyDefinitionError, EnemyEvent, EnemyRole, EnemyRuntimeError, EnemyStateKind,
+    HostileDisposition, LaneAttackDefinition, NORMAL_ENEMY_REWARD_TABLE_ID, PilgrimTargetInput,
+    ProjectileAttackDefinition,
+};
+pub use enemy_health::{
+    EnemyDamageEvent, EnemyDeathEvent, EnemyHealthActor, EnemyHealthError, EnemyHealthSimulation,
+    EnemyHealthSnapshot, EnemyHealthStep, FirstPlayableEnemyKind, IgnoredFriendlyIntent,
+    IgnoredIntentReason, NORMAL_REWARD_DROP_DELAY_TICKS, NormalRewardDropEvent,
+};
+pub use enemy_lab::{
+    ActiveEnemyLane, ClearedEnemyHostiles, EnemyActorGroup, EnemyLab, EnemyLabActorIds,
+    EnemyLabActorPositions, EnemyLabDefinitions, EnemyLabError, EnemyLabPlayer, EnemyLabStep,
+    EnemyLabTargetSnapshot, EnemyLaneEvent, EnemyShowcaseReadiness, EnemyTimelineEvent,
 };
 pub use entity::{EntityId, EntityIdAllocator};
+pub use hostile::{
+    AppliedHostileDamage, EnemyActor, EnemyActorKind, EnemyActorMovement,
+    HOSTILE_PROJECTILE_GRACE_TICKS, HostileCollisionTarget, HostileDamagePolicy, HostileError,
+    HostileEvent, HostileProjectile, HostileProjectileSimulation, HostileProjectileSourceKind,
+    HostileStep, HostileTargetState, LaneGeometry, PLAYER_HURTBOX_RADIUS_TILES,
+    apply_hostile_contact_transaction, apply_hostile_contact_transaction_with_policy,
+    resolve_lane_contact, resolve_lane_contact_with_policy,
+};
+pub use inventory::{
+    AUTOMATIC_PICKUP_RADIUS_TILES, EQUIPMENT_SLOT_COUNT, EquipmentItem, EquipmentSlot,
+    FIELD_PICKUP_LIFETIME_TICKS, FieldPickup, FieldPickupAccess, FieldPickupId,
+    INTERACT_PICKUP_RADIUS_TILES, InventoryError, InventoryStack, ItemContentId, ItemInstanceId,
+    OwnedItemLocation, PROTOTYPE_BACKPACK_CAPACITY, PickupOutcome, PlacementChoice,
+    PrototypeInventory, RestartCleanup, RewardChoice, RewardOutcome,
+};
 pub use movement::{
-    GRAVE_ARBALIST_SPEED_TILES_PER_SECOND, MOVEMENT_RESPONSE_TICKS, MovementAction, MovementError,
-    MovementStep, PLAYER_COLLISION_RADIUS_TILES, PlayerMovementConfig, PlayerMovementState,
-    SimulationVector, tile_point_to_simulation,
+    ForcedMovementStep, GRAVE_ARBALIST_SPEED_TILES_PER_SECOND, MOVEMENT_RESPONSE_TICKS,
+    MovementAction, MovementError, MovementStep, PLAYER_COLLISION_RADIUS_TILES,
+    PlayerMovementConfig, PlayerMovementState, SimulationVector, tile_point_to_simulation,
+};
+pub use normal_wave::{
+    FIRST_PLAYABLE_SPAWN_TELEGRAPH_TICKS, HOSTILE_PROJECTILE_ID_OFFSET,
+    NORMAL_WAVE_ENEMY_ID_OFFSET, NORMAL_WAVE_MAX_SPAWN_ORDINAL, NormalWaveClearedHostiles,
+    NormalWaveDefeat, NormalWaveDefinitions, NormalWaveDrop, NormalWaveEnemyKind,
+    NormalWaveEntityIdError, NormalWaveError, NormalWaveHandoff, NormalWaveInstanceSnapshot,
+    NormalWaveLaneEvent, NormalWavePhase, NormalWaveSimulation, NormalWaveSpawn, NormalWaveStep,
+    NormalWaveTimelineEvent, RUN_ENTITY_ID_STRIDE, normal_wave_entity_id,
+    normal_wave_projectile_allocator,
+};
+pub use pattern::{
+    CombatColorFamily, FirstPlayableMinSpeedPaths, FixedTimelineEvent, MinimumSpeedRouteEvidence,
+    MinimumSpeedRouteKind, OriginCue, PatternContext, PatternDefinition, PatternDiagnostic,
+    PatternFairnessFixture, PatternKind, PatternStatus, ShapeCue, TimelineAction, ValidatedPattern,
+    frostbind_compatibility_speed_milli_tiles_per_second, minimum_warnings, projectile_arrival_ms,
+    required_player_center_boundary_clearance_milli_tiles, safe_player_center_span_milli_tiles,
+    solve_first_playable_min_speed_paths, validate_pattern_combination,
+};
+pub use performance::{
+    BOSS_RELIABILITY_RUN_COUNT, BOSS_REPLAY_TICKS, BossReliabilityReport, EffectMode,
+    FrameSampleKind, MemoryAssessment, MemorySample, PerformanceAcceptance,
+    PerformanceEvidenceInput, PerformanceEvidenceReport, PerformanceReportError, StressFixture,
+    StressFixtureConfig, StressFixtureSnapshot, TARGET_ENEMY_COUNT,
+    TARGET_HOSTILE_PROJECTILE_COUNT, TargetHardware, run_bell_proctor_reliability_fixture,
+};
+pub use readability::{
+    CombatEffectLayer, GrayscaleSignature, HostileReadabilityManifest, HostileReadabilityProfile,
+    OutlineTreatment, ReadabilityDiagnostic, TelegraphExposureError, TelegraphExposureEvent,
+    TelegraphExposureState, TelegraphExposureTracker, TelegraphUse, WarningAudioPriority,
+    canonical_priority_stack_is_valid, compile_hostile_readability_manifest,
 };
 pub use rng::{DeterministicRng, RngError, derive_stream_seed};
+pub use telemetry::{
+    BossPhaseTelemetry, CohortEligibility, DamageTelemetry, DeathCauseTelemetry, DeathTelemetry,
+    GenreFamiliarity, ItemLifecycleAction, ItemLifecycleTelemetry, KillerResponseTelemetry,
+    LOCAL_ACCOUNT_SENTINEL, LOCAL_ENVIRONMENT, LOCAL_REGION, LocalTelemetryContext,
+    LocalTelemetryError, LocalTelemetryLog, MetricEligibility, ObservationMoment,
+    ObservationTelemetry, OpenQuestion, OpenSurveyAnswer, PrivacySafeSurveySummary, Rating,
+    RestartReasonTelemetry, RestartTelemetry, SurveyTelemetry, TELEMETRY_SCHEMA_VERSION,
+    TelemetryEnvelope, TelemetryEvent, TelemetryEventKind, TelemetryRecord,
+};
 pub use trace::{
     FoundationEntity, FoundationSimulation, InputFrame, TickHash, TraceError, TraceFixture,
     TraceReport, run_trace,

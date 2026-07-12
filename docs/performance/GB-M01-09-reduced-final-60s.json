@@ -1,0 +1,63 @@
+{
+  "report_schema": "gravebound.performance.gb-m01-09.v1",
+  "build_id": "release-3211217280767d1003b98269096dd1dfe3ed4a76128c84089b0d9e6624c82a9a",
+  "bundle_id": "fp.1.0.0",
+  "fixture_seed": 5134751394534600761,
+  "duration_ms": 60009,
+  "peak_hostile_projectiles": 800,
+  "peak_enemies": 40,
+  "effect_mode": "reduced",
+  "frame_sample_kind": "rendered_frame",
+  "frame_sample_count": 10251,
+  "measured_fps_milli": 170836,
+  "p95_frame_time_micros": 12415,
+  "p99_frame_time_micros": 14775,
+  "memory_samples": [
+    {
+      "elapsed_ms": 0,
+      "resident_bytes": 304619520
+    },
+    {
+      "elapsed_ms": 10007,
+      "resident_bytes": 304955392
+    },
+    {
+      "elapsed_ms": 20002,
+      "resident_bytes": 305242112
+    },
+    {
+      "elapsed_ms": 30001,
+      "resident_bytes": 305250304
+    },
+    {
+      "elapsed_ms": 40001,
+      "resident_bytes": 305356800
+    },
+    {
+      "elapsed_ms": 50003,
+      "resident_bytes": 305360896
+    },
+    {
+      "elapsed_ms": 60009,
+      "resident_bytes": 305451008
+    }
+  ],
+  "peak_resident_bytes": 305451008,
+  "memory_assessment": "insufficient_duration",
+  "target_hardware": {
+    "operating_system": "Windows 10 Home",
+    "cpu": "Intel(R) Core(TM) i7-10700K CPU @ 3.80GHz",
+    "memory_bytes": 68604682240,
+    "gpu": "AMD Radeon RX 6700 XT",
+    "width_pixels": 1920,
+    "height_pixels": 1080
+  },
+  "target_class_verified": true,
+  "hostile_telegraphs_retained": true,
+  "culled_effect_priorities": [
+    5,
+    4
+  ],
+  "acceptance": "memory_failed",
+  "raw_report_hash_blake3": "36a9015598b8c35a21258a89f3b5a990f739ead0aedc1ca2d7f5bd21da31c410"
+}

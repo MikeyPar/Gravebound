@@ -285,6 +285,92 @@ pub struct StateStep {
     pub duration_ms: Option<u32>,
 }
 
+/// Benchmark boss definition. Timelines remain authored data and compile into integer ticks.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BossRecord {
+    #[serde(flatten)]
+    pub header: CommonHeader,
+    pub numeric_payload: BossPayload,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BossPayload {
+    pub health: u32,
+    pub armor: u32,
+    pub hurtbox_radius_milli_tiles: u32,
+    pub position: Point,
+    pub movement_mode: BossMovementMode,
+    pub summons_enabled: bool,
+    pub status_effect_ids: Vec<ContentId>,
+    pub target_solo_duration_min_ms: u32,
+    pub target_solo_duration_max_ms: u32,
+    pub soft_enrage_ms: u32,
+    pub introduction_ms: u32,
+    pub phase_break_ms: u32,
+    pub phase_break_received_damage_multiplier_basis_points: u32,
+    pub soft_enrage_downtime_multiplier_basis_points: u32,
+    pub phase_two_health_threshold_basis_points: u32,
+    pub phase_three_health_threshold_basis_points: u32,
+    pub low_health_restart_basis_points: u32,
+    pub phase_three_low_health_loop_ms: u32,
+    pub fan_offsets_degrees: Vec<i16>,
+    pub ring_index_count: u32,
+    pub ring_omitted_count: u32,
+    pub ring_gap_advance: u32,
+    pub phase_three_second_gap_advance: u32,
+    pub ring_preview_ms: u32,
+    pub cross_axis_sets_degrees: Vec<[u16; 2]>,
+    pub fan_pattern_id: ContentId,
+    pub ring_pattern_id: ContentId,
+    pub cross_pattern_id: ContentId,
+    pub phase_timelines: Vec<BossPhaseTimeline>,
+    pub reward_table_id: ContentId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BossMovementMode {
+    Fixed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BossPhaseTimeline {
+    pub phase: BossPhase,
+    pub loop_ms: u32,
+    pub cues: Vec<BossTimelineCueRecord>,
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum BossPhase {
+    Phase1,
+    Phase2,
+    Phase3,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BossTimelineCueRecord {
+    pub kind: BossCueKind,
+    pub starts_at_ms: u32,
+    pub resolves_at_ms: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BossCueKind {
+    Fan,
+    Ring,
+    RingPreviewA,
+    RingPreviewB,
+    Cross,
+}
+
 /// Hostile attack contract used by the deterministic scheduler.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -362,6 +448,7 @@ pub struct ArenaPayload {
     pub pillars: Vec<Rectangle>,
     pub anchors: Vec<NamedPoint>,
     pub allowed_enemy_ids: Vec<ContentId>,
+    pub allowed_boss_ids: Vec<ContentId>,
     pub allowed_reward_table_ids: Vec<ContentId>,
 }
 

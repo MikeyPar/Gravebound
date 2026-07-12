@@ -174,6 +174,26 @@ impl ProjectileCollisionWorld {
         if !radius_tiles.is_finite() || radius_tiles <= 0.0 {
             return Err(CollisionError::InvalidProjectileRadius);
         }
+        self.sweep_circle_ignoring_enemies(start, displacement, radius_tiles, &[])
+    }
+
+    /// Finds the earliest contact while excluding enemies already hit by one piercing projectile.
+    pub fn sweep_circle_ignoring_enemies(
+        &self,
+        start: SimulationVector,
+        displacement: SimulationVector,
+        radius_tiles: f32,
+        ignored_enemies: &[EntityId],
+    ) -> Result<Option<SweepHit>, CollisionError> {
+        if !start.is_finite() || !displacement.is_finite() {
+            return Err(CollisionError::NonFiniteSweep);
+        }
+        if !radius_tiles.is_finite() || radius_tiles <= 0.0 {
+            return Err(CollisionError::InvalidProjectileRadius);
+        }
+        if !ignored_enemies.windows(2).all(|pair| pair[0] < pair[1]) {
+            return Err(CollisionError::IgnoredEnemyIdsNotSortedUnique);
+        }
         let mut best = None;
         self.collect_shell_hits(start, displacement, radius_tiles, &mut best)?;
         for (index, pillar) in self.pillars.iter().copied().enumerate() {
@@ -188,6 +208,9 @@ impl ProjectileCollisionWorld {
             )?;
         }
         for enemy in &self.enemies {
+            if ignored_enemies.binary_search(&enemy.id).is_ok() {
+                continue;
+            }
             let combined_radius = radius_tiles + enemy.radius_tiles;
             if !combined_radius.is_finite() {
                 return Err(CollisionError::CalculatedNonFiniteContact);
@@ -205,6 +228,21 @@ impl ProjectileCollisionWorld {
             }
         }
         Ok(best)
+    }
+
+    /// Finds the earliest solid contact, intentionally ignoring nonblocking enemy hurtboxes.
+    pub fn sweep_solids(
+        &self,
+        start: SimulationVector,
+        displacement: SimulationVector,
+        radius_tiles: f32,
+    ) -> Result<Option<SweepHit>, CollisionError> {
+        let ignored = self
+            .enemies
+            .iter()
+            .map(|enemy| enemy.id)
+            .collect::<Vec<_>>();
+        self.sweep_circle_ignoring_enemies(start, displacement, radius_tiles, &ignored)
     }
 
     fn collect_shell_hits(
@@ -288,6 +326,8 @@ pub enum CollisionError {
     TooManyPillars,
     #[error("collision calculation produced a non-finite contact")]
     CalculatedNonFiniteContact,
+    #[error("ignored enemy IDs must be sorted and unique")]
+    IgnoredEnemyIdsNotSortedUnique,
 }
 
 fn axis_contact_fraction(
