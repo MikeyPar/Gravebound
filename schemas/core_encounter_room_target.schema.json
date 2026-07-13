@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CoreEncounterRoomDevelopmentTarget",
+  "description": "Ordered allowlists and immutable source hashes for the `GB-M03-03D` content boundary.",
+  "type": "object",
+  "properties": {
+    "expected_assets_blake3": {
+      "type": "string"
+    },
+    "expected_localization_blake3": {
+      "type": "string"
+    },
+    "expected_records_blake3": {
+      "type": "string"
+    },
+    "required_asset_ids": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ContentId"
+      }
+    },
+    "required_layout_ids": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ContentId"
+      }
+    },
+    "required_localization_keys": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ContentId"
+      }
+    },
+    "required_miniboss_ids": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ContentId"
+      }
+    },
+    "required_normal_enemy_ids": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ContentId"
+      }
+    },
+    "required_pack_ids": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ContentId"
+      }
+    },
+    "required_pattern_ids": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ContentId"
+      }
+    },
+    "required_room_template_ids": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ContentId"
+      }
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "target_kind": {
+      "$ref": "#/$defs/CoreEncounterRoomTargetKind"
+    },
+    "target_name": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "target_kind",
+    "target_name",
+    "required_normal_enemy_ids",
+    "required_miniboss_ids",
+    "required_pattern_ids",
+    "required_room_template_ids",
+    "required_pack_ids",
+    "required_layout_ids",
+    "required_asset_ids",
+    "required_localization_keys",
+    "expected_records_blake3",
+    "expected_assets_blake3",
+    "expected_localization_blake3"
+  ],
+  "$defs": {
+    "ContentId": {
+      "description": "Stable dot-separated content identifier.",
+      "type": "string"
+    },
+    "CoreEncounterRoomTargetKind": {
+      "description": "Identifies a compiler input that cannot be loaded or promoted as a release bundle.",
+      "type": "string",
+      "enum": [
+        "unpromoted_encounter_room_subset"
+      ]
+    }
+  }
+}

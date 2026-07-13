@@ -4,7 +4,7 @@ Gravebound is a server-authoritative, permanent-death, 2D dark-fantasy bullet-he
 
 Every character life is temporary. The account remembers what happened, and exceptional deaths can return as personalized Fallen Hero Echo encounters. The design emphasizes readable combat, rapid recovery, fair monetization, solo viability, and long-term replayability without permanent account-level combat power.
 
-> **Project status:** M01 and M02 are closed under their recorded gates. M03 identity, PostgreSQL foundations, exact world-flow content, atomic dormant transfers, Hall/private-microrealm simulation and native evidence, progression through durable reward placement, the complete first Oath/Bargain package, and the minimal Ash wallet pass under their recorded audits. `GB-M03-03D` strict Core encounter/room content is now active. Parent `GB-M03-02`, `03`, and `04` remain open alongside permanent death, successor recovery, extraction/Recall, telemetry, support, Echo, platform, and final private-loop gates.
+> **Project status:** M01 and M02 are closed under their recorded gates. M03 identity, PostgreSQL foundations, exact world-flow content, atomic dormant transfers, Hall/private-microrealm simulation and native evidence, progression through durable reward placement, the complete first Oath/Bargain package, and the minimal Ash wallet pass under their recorded audits. `GB-M03-03D` now has strict, hashed Core encounter/room records and compiler validation; behavior and runtime room construction are active next. Parent `GB-M03-02`, `03`, and `04` remain open alongside permanent death, successor recovery, extraction/Recall, telemetry, support, Echo, platform, and final private-loop gates.
 
 ![Bell Sepulcher gameplay concept](Concept%20Art/01-bell-sepulcher-gameplay.png)
 
@@ -112,7 +112,7 @@ Concept images establish mood, hierarchy, and visual language. They are not fina
 
 ## Current Next Step
 
-[`GB-M03-03C`](docs/milestones/GB-M03-03C-audit.md) closes exact Hall/private-microrealm simulation, inspected standard/reduced-motion presentation, and the pinned interaction/lifecycle trace. Implement `GB-M03-03D` strict six-normal/two-miniboss encounter content, nine Bell templates, `pack.bell.01`, and the fixed branch-disabled layout before runtime behavior, then continue `03E`-`03F`. Continue `GB-M03-04E`-`04G` and the approved `SPEC-CONFLICT-009` death foundation as their dependencies become ready. Keep 50-Ash purge, paid Oath change, Core promotion, Character Select `Play`, Realm Gate admission, the normal player route, and affected Hall stations fail closed until their owning gates pass.
+[`GB-M03-03C`](docs/milestones/GB-M03-03C-audit.md) closes exact Hall/private-microrealm simulation, inspected standard/reduced-motion presentation, and the pinned interaction/lifecycle trace. `GB-M03-03D` strict six-normal/two-miniboss manifest, nine Bell templates, `pack.bell.01`, and fixed branch-disabled layout now compile from independently hashed records. Add typed exact behavior/pattern records and renderer-independent room/corridor compilation next, then continue `03E`-`03F`. Continue `GB-M03-04E`-`04G` and the approved `SPEC-CONFLICT-009` death foundation as their dependencies become ready. Keep 50-Ash purge, paid Oath change, Core promotion, Character Select `Play`, Realm Gate admission, the normal player route, and affected Hall stations fail closed until their owning gates pass.
 
 ## Resolved prior handoff
 

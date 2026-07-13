@@ -2,6 +2,7 @@
 
 mod core_dev;
 mod core_dev_copy;
+mod core_dev_encounter_room;
 mod core_dev_oath_bargain;
 mod core_dev_progression;
 mod core_dev_world_flow;
@@ -10,6 +11,7 @@ mod prototype;
 
 pub use core_dev::*;
 pub use core_dev_copy::*;
+pub use core_dev_encounter_room::*;
 pub use core_dev_oath_bargain::*;
 pub use core_dev_progression::*;
 pub use core_dev_world_flow::*;

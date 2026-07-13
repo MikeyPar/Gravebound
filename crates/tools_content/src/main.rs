@@ -44,6 +44,12 @@ enum Command {
         #[arg(long, default_value = "content")]
         root: PathBuf,
     },
+    /// Validate the independently hashed, non-promotable Core encounter/room target.
+    ValidateCoreEncounterRooms {
+        /// Content root containing the immutable FP source and `core_dev` files.
+        #[arg(long, default_value = "content")]
+        root: PathBuf,
+    },
     /// Validate the independently hashed, non-promotable Core progression target.
     ValidateCoreProgression {
         /// Content root containing the immutable FP source and `core_dev` files.
@@ -94,6 +100,9 @@ fn main() -> Result<()> {
         } => run_trace_command(&fixture, golden, no_verify)?,
         Command::Validate { root } => validate_content_command(&root)?,
         Command::ValidateCoreWorldFlow { root } => validate_core_world_flow_command(&root)?,
+        Command::ValidateCoreEncounterRooms { root } => {
+            validate_core_encounter_rooms_command(&root)?;
+        }
         Command::ValidateCoreProgression { root } => validate_core_progression_command(&root)?,
         Command::ValidateCoreItems { root } => validate_core_items_command(&root)?,
         Command::ValidateCoreOathsBargains { root } => {
@@ -102,6 +111,23 @@ fn main() -> Result<()> {
         Command::GenerateSchemas { output } => generate_schemas_command(&output)?,
     }
 
+    Ok(())
+}
+
+fn validate_core_encounter_rooms_command(root: &std::path::Path) -> Result<()> {
+    let compiled = sim_content::load_core_development_encounter_rooms(root)?;
+    info!(
+        target = compiled.target_name(),
+        normal_enemies = 6,
+        minibosses = 2,
+        rooms = compiled.rooms().len(),
+        pack = compiled.pack_bell_01().header.id.as_str(),
+        layout = compiled.fixed_layout().header.id.as_str(),
+        records_blake3 = compiled.hashes().records_blake3,
+        assets_blake3 = compiled.hashes().assets_blake3,
+        localization_blake3 = compiled.hashes().localization_blake3,
+        "unpromoted Core encounter/room target is valid"
+    );
     Ok(())
 }
 
@@ -244,6 +270,22 @@ fn generate_schemas_command(output: &std::path::Path) -> Result<()> {
     write_schema::<content_schema::CoreWorldFlowCopyFile>(
         output,
         "core_world_flow_copy.schema.json",
+    )?;
+    write_schema::<content_schema::CoreEncounterRoomDevelopmentTarget>(
+        output,
+        "core_encounter_room_target.schema.json",
+    )?;
+    write_schema::<content_schema::CoreEncounterRoomRecords>(
+        output,
+        "core_encounter_room_records.schema.json",
+    )?;
+    write_schema::<content_schema::CoreEncounterRoomAssetManifest>(
+        output,
+        "core_encounter_room_assets.schema.json",
+    )?;
+    write_schema::<content_schema::CoreEncounterRoomCopyFile>(
+        output,
+        "core_encounter_room_copy.schema.json",
     )?;
     write_schema::<content_schema::CoreProgressionDevelopmentTarget>(
         output,

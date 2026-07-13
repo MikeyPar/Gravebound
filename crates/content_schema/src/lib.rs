@@ -6,8 +6,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+mod core_encounter_room;
 mod production_item;
 mod production_oath_bargain;
+pub use core_encounter_room::*;
 pub use production_item::*;
 pub use production_oath_bargain::*;
 
@@ -1114,6 +1116,39 @@ mod tests {
                 "core_world_flow_copy.schema.json",
                 serde_json::to_value(schemars::schema_for!(CoreWorldFlowCopyFile))
                     .expect("serializable copy schema"),
+            ),
+        ];
+        for (name, generated) in cases {
+            let text = fs::read_to_string(schema_root.join(name)).expect("checked-in schema");
+            let checked_in: serde_json::Value =
+                serde_json::from_str(&text).expect("valid checked-in schema");
+            assert_eq!(checked_in, generated, "schema drift in {name}");
+        }
+    }
+
+    #[test]
+    fn checked_in_core_encounter_room_schemas_match_the_rust_contracts() {
+        let schema_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../schemas");
+        let cases = [
+            (
+                "core_encounter_room_target.schema.json",
+                serde_json::to_value(schemars::schema_for!(CoreEncounterRoomDevelopmentTarget))
+                    .expect("serializable encounter-room target schema"),
+            ),
+            (
+                "core_encounter_room_records.schema.json",
+                serde_json::to_value(schemars::schema_for!(CoreEncounterRoomRecords))
+                    .expect("serializable encounter-room records schema"),
+            ),
+            (
+                "core_encounter_room_assets.schema.json",
+                serde_json::to_value(schemars::schema_for!(CoreEncounterRoomAssetManifest))
+                    .expect("serializable encounter-room assets schema"),
+            ),
+            (
+                "core_encounter_room_copy.schema.json",
+                serde_json::to_value(schemars::schema_for!(CoreEncounterRoomCopyFile))
+                    .expect("serializable encounter-room copy schema"),
             ),
         ];
         for (name, generated) in cases {

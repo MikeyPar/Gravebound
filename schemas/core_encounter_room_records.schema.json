@@ -1,0 +1,819 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CoreEncounterRoomRecords",
+  "description": "Complete strict authoring set for the first `GB-M03-03D` compiler layer.",
+  "type": "object",
+  "properties": {
+    "layouts": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CoreFixedLayoutRecord"
+      }
+    },
+    "packs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CoreEncounterPackRecord"
+      }
+    },
+    "rooms": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CoreRoomTemplateRecord"
+      }
+    },
+    "roster": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CoreEncounterRosterMember"
+      }
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "roster",
+    "rooms",
+    "packs",
+    "layouts"
+  ],
+  "$defs": {
+    "ContentId": {
+      "description": "Stable dot-separated content identifier.",
+      "type": "string"
+    },
+    "CoreEncounterPackMember": {
+      "type": "object",
+      "properties": {
+        "count": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "enemy_id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "threat_each": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "enemy_id",
+        "count",
+        "threat_each"
+      ]
+    },
+    "CoreEncounterPackRecord": {
+      "description": "Exact simultaneous pack or fixed-room encounter composition.",
+      "type": "object",
+      "properties": {
+        "asset_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContentId"
+          }
+        },
+        "authored_core_enabled": {
+          "type": "boolean"
+        },
+        "base_budget": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "earliest_release_stage": {
+          "$ref": "#/$defs/ReleaseStage"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "localization_description_key": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "localization_name_key": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "members": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CoreEncounterPackMember"
+          }
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "simultaneous_spawn": {
+          "type": "boolean"
+        },
+        "source_document_feature_id": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "warning_milliseconds": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "schema_version",
+        "enabled",
+        "earliest_release_stage",
+        "localization_name_key",
+        "localization_description_key",
+        "asset_ids",
+        "tags",
+        "source_document_feature_id",
+        "members",
+        "base_budget",
+        "warning_milliseconds",
+        "simultaneous_spawn",
+        "authored_core_enabled"
+      ]
+    },
+    "CoreEncounterRank": {
+      "type": "string",
+      "enum": [
+        "normal",
+        "miniboss"
+      ]
+    },
+    "CoreEncounterRosterMember": {
+      "description": "Exact roster membership. Behavior definitions are compiled in the subsequent `03D` layer.",
+      "type": "object",
+      "properties": {
+        "asset_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContentId"
+          }
+        },
+        "authored_core_enabled": {
+          "type": "boolean"
+        },
+        "earliest_release_stage": {
+          "$ref": "#/$defs/ReleaseStage"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "localization_description_key": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "localization_name_key": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "rank": {
+          "$ref": "#/$defs/CoreEncounterRank"
+        },
+        "required_pattern_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContentId"
+          }
+        },
+        "reward_profile_id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "source_document_feature_id": {
+          "type": "string"
+        },
+        "source_kind": {
+          "$ref": "#/$defs/CoreEncounterSourceKind"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "xp_profile_id": {
+          "$ref": "#/$defs/ContentId"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "schema_version",
+        "enabled",
+        "earliest_release_stage",
+        "localization_name_key",
+        "localization_description_key",
+        "asset_ids",
+        "tags",
+        "source_document_feature_id",
+        "rank",
+        "source_kind",
+        "required_pattern_ids",
+        "reward_profile_id",
+        "xp_profile_id",
+        "authored_core_enabled"
+      ]
+    },
+    "CoreEncounterSourceKind": {
+      "description": "Whether `03D` reuses an immutable FP definition or authors a new Core definition.",
+      "type": "string",
+      "enum": [
+        "immutable_first_playable",
+        "authored_core"
+      ]
+    },
+    "CoreFixedLayoutEdge": {
+      "type": "object",
+      "properties": {
+        "corridor_length_tiles": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "corridor_width_milli_tiles": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "from_door_id": {
+          "type": "string"
+        },
+        "from_node_id": {
+          "type": "string"
+        },
+        "to_door_id": {
+          "type": "string"
+        },
+        "to_node_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "from_node_id",
+        "to_node_id",
+        "from_door_id",
+        "to_door_id",
+        "corridor_width_milli_tiles",
+        "corridor_length_tiles"
+      ]
+    },
+    "CoreFixedLayoutNode": {
+      "type": "object",
+      "properties": {
+        "counts_toward_six_room_total": {
+          "type": "boolean"
+        },
+        "encounter": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CoreFixedRoomEncounter"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "grid_x": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "grid_y": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "node_id": {
+          "type": "string"
+        },
+        "room_template_id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "rotation_degrees": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "node_id",
+        "grid_x",
+        "grid_y",
+        "rotation_degrees",
+        "room_template_id",
+        "counts_toward_six_room_total"
+      ]
+    },
+    "CoreFixedLayoutRecord": {
+      "description": "Fixed M03 main chain plus authored-but-disabled branch metadata.",
+      "type": "object",
+      "properties": {
+        "asset_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContentId"
+          }
+        },
+        "authored_core_enabled": {
+          "type": "boolean"
+        },
+        "branches_enabled": {
+          "type": "boolean"
+        },
+        "disabled_branch_node_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "earliest_release_stage": {
+          "$ref": "#/$defs/ReleaseStage"
+        },
+        "edges": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CoreFixedLayoutEdge"
+          }
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "localization_description_key": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "localization_name_key": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "main_chain_node_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "nodes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CoreFixedLayoutNode"
+          }
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "seeded_selection_enabled": {
+          "type": "boolean"
+        },
+        "source_document_feature_id": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "schema_version",
+        "enabled",
+        "earliest_release_stage",
+        "localization_name_key",
+        "localization_description_key",
+        "asset_ids",
+        "tags",
+        "source_document_feature_id",
+        "main_chain_node_ids",
+        "nodes",
+        "edges",
+        "disabled_branch_node_ids",
+        "branches_enabled",
+        "seeded_selection_enabled",
+        "authored_core_enabled"
+      ]
+    },
+    "CoreFixedRoomEncounter": {
+      "description": "Inline authored fallback composition. The specification does not assign these room encounters\nstable pack IDs, so the schema deliberately avoids inventing any.",
+      "type": "object",
+      "properties": {
+        "base_budget": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "members": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CoreEncounterPackMember"
+          }
+        },
+        "warning_milliseconds": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "members",
+        "base_budget",
+        "warning_milliseconds"
+      ]
+    },
+    "CoreRoomAnchor": {
+      "type": "object",
+      "properties": {
+        "bound_content_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContentId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/CoreRoomAnchorKind"
+        },
+        "point": {
+          "$ref": "#/$defs/MilliTilePoint"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "point"
+      ]
+    },
+    "CoreRoomAnchorKind": {
+      "type": "string",
+      "enum": [
+        "safe_entry",
+        "exit",
+        "fodder",
+        "pressure",
+        "disruptor",
+        "anchor_enemy",
+        "miniboss",
+        "stage",
+        "add",
+        "shrine",
+        "stabilization",
+        "chest",
+        "boss",
+        "charge_endpoint",
+        "group"
+      ]
+    },
+    "CoreRoomDoor": {
+      "description": "One door centered on a room edge. Offset is measured from the edge's northwest endpoint.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "offset_milli_tiles": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "side": {
+          "$ref": "#/$defs/CoreRoomDoorSide"
+        },
+        "width_milli_tiles": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "side",
+        "offset_milli_tiles",
+        "width_milli_tiles"
+      ]
+    },
+    "CoreRoomDoorSide": {
+      "type": "string",
+      "enum": [
+        "north",
+        "east",
+        "south",
+        "west"
+      ]
+    },
+    "CoreRoomTemplateRecord": {
+      "description": "One exact northwest-origin Bell Sepulcher template.",
+      "type": "object",
+      "properties": {
+        "anchors": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CoreRoomAnchor"
+          }
+        },
+        "asset_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContentId"
+          }
+        },
+        "authored_core_enabled": {
+          "type": "boolean"
+        },
+        "doors": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CoreRoomDoor"
+          }
+        },
+        "earliest_release_stage": {
+          "$ref": "#/$defs/ReleaseStage"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "height_milli_tiles": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "localization_description_key": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "localization_name_key": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "safe_noncombat": {
+          "type": "boolean"
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "source_document_feature_id": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "volumes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CoreRoomVolume"
+          }
+        },
+        "width_milli_tiles": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "schema_version",
+        "enabled",
+        "earliest_release_stage",
+        "localization_name_key",
+        "localization_description_key",
+        "asset_ids",
+        "tags",
+        "source_document_feature_id",
+        "width_milli_tiles",
+        "height_milli_tiles",
+        "doors",
+        "volumes",
+        "anchors",
+        "safe_noncombat",
+        "authored_core_enabled"
+      ]
+    },
+    "CoreRoomVolume": {
+      "type": "object",
+      "properties": {
+        "geometry": {
+          "$ref": "#/$defs/CoreRoomVolumeGeometry"
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/CoreRoomVolumeKind"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "geometry"
+      ]
+    },
+    "CoreRoomVolumeGeometry": {
+      "description": "Closed geometry variants prevent an author from supplying incompatible spatial fields.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "rectangle": {
+              "$ref": "#/$defs/MilliTileRectangle"
+            },
+            "shape": {
+              "type": "string",
+              "const": "rectangle"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "shape",
+            "rectangle"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "circle": {
+              "$ref": "#/$defs/MilliTileCircle"
+            },
+            "shape": {
+              "type": "string",
+              "const": "circle"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "shape",
+            "circle"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "points": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/MilliTilePoint"
+              }
+            },
+            "shape": {
+              "type": "string",
+              "const": "polyline"
+            },
+            "width_milli_tiles": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "shape",
+            "width_milli_tiles",
+            "points"
+          ]
+        }
+      ]
+    },
+    "CoreRoomVolumeKind": {
+      "type": "string",
+      "enum": [
+        "solid",
+        "deep_water",
+        "walkable_boundary",
+        "pattern_lane",
+        "objective_area"
+      ]
+    },
+    "MilliTileCircle": {
+      "description": "Exact fixed-point circle in milli-tiles.",
+      "type": "object",
+      "properties": {
+        "center": {
+          "$ref": "#/$defs/MilliTilePoint"
+        },
+        "radius": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "center",
+        "radius"
+      ]
+    },
+    "MilliTilePoint": {
+      "description": "Exact fixed-point point in milli-tiles.",
+      "type": "object",
+      "properties": {
+        "x": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "y": {
+          "type": "integer",
+          "format": "int32"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "x",
+        "y"
+      ]
+    },
+    "MilliTileRectangle": {
+      "description": "Exact fixed-point axis-aligned rectangle in milli-tiles.",
+      "type": "object",
+      "properties": {
+        "height": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "width": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "x": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "y": {
+          "type": "integer",
+          "format": "int32"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "x",
+        "y",
+        "width",
+        "height"
+      ]
+    },
+    "ReleaseStage": {
+      "description": "Earliest release stage that may enable a record.",
+      "type": "string",
+      "enum": [
+        "fp",
+        "core",
+        "slice",
+        "alpha",
+        "playtest",
+        "ea"
+      ]
+    }
+  }
+}

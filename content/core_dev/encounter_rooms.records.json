@@ -1,0 +1,259 @@
+{
+  "schema_version": 1,
+  "roster": [
+    {
+      "id": "enemy.drowned_pilgrim", "schema_version": 1, "enabled": true,
+      "earliest_release_stage": "core", "localization_name_key": "enemy.drowned_pilgrim.name",
+      "localization_description_key": "enemy.drowned_pilgrim.description",
+      "asset_ids": ["sprite.enemy.drowned_pilgrim", "portrait.enemy.drowned_pilgrim"],
+      "tags": ["normal", "fodder"], "source_document_feature_id": "CONT-ENEMY-001",
+      "rank": "normal", "source_kind": "immutable_first_playable",
+      "required_pattern_ids": ["pattern.enemy.drowned_pilgrim.fan"],
+      "reward_profile_id": "reward.normal_outer", "xp_profile_id": "xp.normal_t1",
+      "authored_core_enabled": true
+    },
+    {
+      "id": "enemy.mire_leech", "schema_version": 1, "enabled": true,
+      "earliest_release_stage": "core", "localization_name_key": "enemy.mire_leech.name",
+      "localization_description_key": "enemy.mire_leech.description",
+      "asset_ids": ["sprite.enemy.mire_leech", "portrait.enemy.mire_leech"],
+      "tags": ["normal", "fodder"], "source_document_feature_id": "CONT-ENEMY-002",
+      "rank": "normal", "source_kind": "authored_core",
+      "required_pattern_ids": ["pattern.enemy.mire_leech.charge"],
+      "reward_profile_id": "reward.normal_outer", "xp_profile_id": "xp.normal_t1",
+      "authored_core_enabled": true
+    },
+    {
+      "id": "enemy.bell_reed", "schema_version": 1, "enabled": true,
+      "earliest_release_stage": "core", "localization_name_key": "enemy.bell_reed.name",
+      "localization_description_key": "enemy.bell_reed.description",
+      "asset_ids": ["sprite.enemy.bell_reed", "portrait.enemy.bell_reed"],
+      "tags": ["normal", "pressure"], "source_document_feature_id": "CONT-ENEMY-001",
+      "rank": "normal", "source_kind": "immutable_first_playable",
+      "required_pattern_ids": ["pattern.enemy.bell_reed.gap_ring"],
+      "reward_profile_id": "reward.normal_outer", "xp_profile_id": "xp.normal_t1",
+      "authored_core_enabled": true
+    },
+    {
+      "id": "enemy.bell_acolyte", "schema_version": 1, "enabled": true,
+      "earliest_release_stage": "core", "localization_name_key": "enemy.bell_acolyte.name",
+      "localization_description_key": "enemy.bell_acolyte.description",
+      "asset_ids": ["sprite.enemy.bell_acolyte", "portrait.enemy.bell_acolyte"],
+      "tags": ["normal", "pressure"], "source_document_feature_id": "CONT-ENEMY-002",
+      "rank": "normal", "source_kind": "authored_core",
+      "required_pattern_ids": ["pattern.enemy.bell_acolyte.alternating_fan"],
+      "reward_profile_id": "reward.normal_outer", "xp_profile_id": "xp.normal_t1",
+      "authored_core_enabled": true
+    },
+    {
+      "id": "enemy.chain_sentry", "schema_version": 1, "enabled": true,
+      "earliest_release_stage": "core", "localization_name_key": "enemy.chain_sentry.name",
+      "localization_description_key": "enemy.chain_sentry.description",
+      "asset_ids": ["sprite.enemy.chain_sentry", "portrait.enemy.chain_sentry"],
+      "tags": ["normal", "anchor"], "source_document_feature_id": "CONT-ENEMY-001",
+      "rank": "normal", "source_kind": "immutable_first_playable",
+      "required_pattern_ids": ["pattern.enemy.chain_sentry.cross_lanes"],
+      "reward_profile_id": "reward.normal_outer", "xp_profile_id": "xp.normal_t1",
+      "authored_core_enabled": true
+    },
+    {
+      "id": "enemy.choir_skull", "schema_version": 1, "enabled": true,
+      "earliest_release_stage": "core", "localization_name_key": "enemy.choir_skull.name",
+      "localization_description_key": "enemy.choir_skull.description",
+      "asset_ids": ["sprite.enemy.choir_skull", "portrait.enemy.choir_skull"],
+      "tags": ["normal", "disruptor"], "source_document_feature_id": "CONT-ENEMY-002",
+      "rank": "normal", "source_kind": "authored_core",
+      "required_pattern_ids": ["pattern.enemy.choir_skull.rotor"],
+      "reward_profile_id": "reward.normal_outer", "xp_profile_id": "xp.normal_t1",
+      "authored_core_enabled": true
+    },
+    {
+      "id": "miniboss.sepulcher_knight", "schema_version": 1, "enabled": true,
+      "earliest_release_stage": "core", "localization_name_key": "miniboss.sepulcher_knight.name",
+      "localization_description_key": "miniboss.sepulcher_knight.description",
+      "asset_ids": ["sprite.miniboss.sepulcher_knight", "portrait.miniboss.sepulcher_knight"],
+      "tags": ["miniboss", "elite", "anchor"], "source_document_feature_id": "ENC-014",
+      "rank": "miniboss", "source_kind": "authored_core",
+      "required_pattern_ids": ["miniboss.sepulcher_knight.charge_lane", "miniboss.sepulcher_knight.stop_ring", "miniboss.sepulcher_knight.shield_fan"],
+      "reward_profile_id": "reward.miniboss_t1", "xp_profile_id": "xp.miniboss_t1",
+      "authored_core_enabled": true
+    },
+    {
+      "id": "miniboss.choir_abbot", "schema_version": 1, "enabled": true,
+      "earliest_release_stage": "core", "localization_name_key": "miniboss.choir_abbot.name",
+      "localization_description_key": "miniboss.choir_abbot.description",
+      "asset_ids": ["sprite.miniboss.choir_abbot", "portrait.miniboss.choir_abbot"],
+      "tags": ["miniboss", "elite", "disruptor"], "source_document_feature_id": "ENC-014",
+      "rank": "miniboss", "source_kind": "authored_core",
+      "required_pattern_ids": ["miniboss.choir_abbot.rotor", "miniboss.choir_abbot.recovery_ring"],
+      "reward_profile_id": "reward.miniboss_t1", "xp_profile_id": "xp.miniboss_t1",
+      "authored_core_enabled": true
+    }
+  ],
+  "rooms": [
+    {
+      "id": "room.bell.vestibule_01", "schema_version": 1, "enabled": true,
+      "earliest_release_stage": "core", "localization_name_key": "room.bell.vestibule_01.name",
+      "localization_description_key": "room.bell.vestibule_01.description",
+      "asset_ids": ["tilemap.room.bell.vestibule_01"], "tags": ["room", "bell", "safe"],
+      "source_document_feature_id": "CONT-ROOM-002", "width_milli_tiles": 13000, "height_milli_tiles": 11000,
+      "doors": [{"id":"west","side":"west","offset_milli_tiles":5500,"width_milli_tiles":3000},{"id":"east","side":"east","offset_milli_tiles":5500,"width_milli_tiles":3000}],
+      "volumes": [],
+      "anchors": [{"id":"safe","kind":"safe_entry","point":{"x":3000,"y":5500},"bound_content_id":null},{"id":"exit","kind":"exit","point":{"x":10000,"y":5500},"bound_content_id":null}],
+      "safe_noncombat": true, "authored_core_enabled": true
+    },
+    {
+      "id": "room.bell.cross_01", "schema_version": 1, "enabled": true,
+      "earliest_release_stage": "core", "localization_name_key": "room.bell.cross_01.name",
+      "localization_description_key": "room.bell.cross_01.description",
+      "asset_ids": ["tilemap.room.bell.cross_01"], "tags": ["room", "bell", "combat"],
+      "source_document_feature_id": "CONT-ROOM-002", "width_milli_tiles": 17000, "height_milli_tiles": 17000,
+      "doors": [{"id":"north","side":"north","offset_milli_tiles":8500,"width_milli_tiles":3000},{"id":"east","side":"east","offset_milli_tiles":8500,"width_milli_tiles":3000},{"id":"south","side":"south","offset_milli_tiles":8500,"width_milli_tiles":3000},{"id":"west","side":"west","offset_milli_tiles":8500,"width_milli_tiles":3000}],
+      "volumes": [
+        {"id":"solid.nw","kind":"solid","geometry":{"shape":"rectangle","rectangle":{"x":4000,"y":4000,"width":2000,"height":2000}}},
+        {"id":"solid.ne","kind":"solid","geometry":{"shape":"rectangle","rectangle":{"x":11000,"y":4000,"width":2000,"height":2000}}},
+        {"id":"solid.sw","kind":"solid","geometry":{"shape":"rectangle","rectangle":{"x":4000,"y":11000,"width":2000,"height":2000}}},
+        {"id":"solid.se","kind":"solid","geometry":{"shape":"rectangle","rectangle":{"x":11000,"y":11000,"width":2000,"height":2000}}},
+        {"id":"lane.horizontal","kind":"pattern_lane","geometry":{"shape":"polyline","width_milli_tiles":1000,"points":[{"x":2000,"y":8500},{"x":15000,"y":8500}]}},
+        {"id":"lane.vertical","kind":"pattern_lane","geometry":{"shape":"polyline","width_milli_tiles":1000,"points":[{"x":8500,"y":2000},{"x":8500,"y":15000}]}}
+      ],
+      "anchors": [
+        {"id":"f1","kind":"fodder","point":{"x":3000,"y":3000},"bound_content_id":null},{"id":"f2","kind":"fodder","point":{"x":8500,"y":3000},"bound_content_id":null},{"id":"f3","kind":"fodder","point":{"x":14000,"y":3000},"bound_content_id":null},
+        {"id":"f4","kind":"fodder","point":{"x":3000,"y":14000},"bound_content_id":null},{"id":"f5","kind":"fodder","point":{"x":8500,"y":14000},"bound_content_id":null},{"id":"f6","kind":"fodder","point":{"x":14000,"y":14000},"bound_content_id":null},
+        {"id":"p1","kind":"pressure","point":{"x":3000,"y":8500},"bound_content_id":null},{"id":"p2","kind":"pressure","point":{"x":14000,"y":8500},"bound_content_id":null},{"id":"a1","kind":"anchor_enemy","point":{"x":8500,"y":8500},"bound_content_id":null}
+      ], "safe_noncombat": false, "authored_core_enabled": true
+    },
+    {
+      "id": "room.bell.nave_01", "schema_version": 1, "enabled": true,
+      "earliest_release_stage": "core", "localization_name_key": "room.bell.nave_01.name",
+      "localization_description_key": "room.bell.nave_01.description",
+      "asset_ids": ["tilemap.room.bell.nave_01"], "tags": ["room", "bell", "combat"],
+      "source_document_feature_id": "CONT-ROOM-002", "width_milli_tiles": 15000, "height_milli_tiles": 21000,
+      "doors": [{"id":"north","side":"north","offset_milli_tiles":7500,"width_milli_tiles":3000},{"id":"south","side":"south","offset_milli_tiles":7500,"width_milli_tiles":3000}],
+      "volumes": [
+        {"id":"pew.nw","kind":"solid","geometry":{"shape":"rectangle","rectangle":{"x":3000,"y":6000,"width":3000,"height":1000}}},{"id":"pew.ne","kind":"solid","geometry":{"shape":"rectangle","rectangle":{"x":9000,"y":6000,"width":3000,"height":1000}}},
+        {"id":"pew.sw","kind":"solid","geometry":{"shape":"rectangle","rectangle":{"x":3000,"y":14000,"width":3000,"height":1000}}},{"id":"pew.se","kind":"solid","geometry":{"shape":"rectangle","rectangle":{"x":9000,"y":14000,"width":3000,"height":1000}}},
+        {"id":"ring.center","kind":"objective_area","geometry":{"shape":"circle","circle":{"center":{"x":7500,"y":10500},"radius":3000}}}
+      ],
+      "anchors": [
+        {"id":"f1","kind":"fodder","point":{"x":3000,"y":4000},"bound_content_id":null},{"id":"f2","kind":"fodder","point":{"x":7500,"y":4000},"bound_content_id":null},{"id":"f3","kind":"fodder","point":{"x":12000,"y":4000},"bound_content_id":null},
+        {"id":"f4","kind":"fodder","point":{"x":3000,"y":17000},"bound_content_id":null},{"id":"f5","kind":"fodder","point":{"x":7500,"y":17000},"bound_content_id":null},{"id":"f6","kind":"fodder","point":{"x":12000,"y":17000},"bound_content_id":null},
+        {"id":"p1","kind":"pressure","point":{"x":3000,"y":10500},"bound_content_id":null},{"id":"d1","kind":"disruptor","point":{"x":3000,"y":10500},"bound_content_id":null},{"id":"p2","kind":"pressure","point":{"x":12000,"y":10500},"bound_content_id":null},{"id":"d2","kind":"disruptor","point":{"x":12000,"y":10500},"bound_content_id":null},{"id":"d3","kind":"disruptor","point":{"x":7500,"y":10500},"bound_content_id":null},{"id":"a1","kind":"anchor_enemy","point":{"x":7500,"y":10500},"bound_content_id":null}
+      ], "safe_noncombat": false, "authored_core_enabled": true
+    },
+    {
+      "id": "room.bell.bridge_01", "schema_version": 1, "enabled": true,
+      "earliest_release_stage": "core", "localization_name_key": "room.bell.bridge_01.name",
+      "localization_description_key": "room.bell.bridge_01.description",
+      "asset_ids": ["tilemap.room.bell.bridge_01"], "tags": ["room", "bell", "combat"],
+      "source_document_feature_id": "CONT-ROOM-002", "width_milli_tiles": 23000, "height_milli_tiles": 11000,
+      "doors": [{"id":"west","side":"west","offset_milli_tiles":5500,"width_milli_tiles":3000},{"id":"east","side":"east","offset_milli_tiles":5500,"width_milli_tiles":3000}],
+      "volumes": [
+        {"id":"water.north","kind":"deep_water","geometry":{"shape":"rectangle","rectangle":{"x":0,"y":0,"width":23000,"height":3000}}},{"id":"water.south","kind":"deep_water","geometry":{"shape":"rectangle","rectangle":{"x":0,"y":9000,"width":23000,"height":2000}}},
+        {"id":"lane.west","kind":"pattern_lane","geometry":{"shape":"polyline","width_milli_tiles":1000,"points":[{"x":7500,"y":3000},{"x":7500,"y":9000}]}},{"id":"lane.east","kind":"pattern_lane","geometry":{"shape":"polyline","width_milli_tiles":1000,"points":[{"x":15500,"y":3000},{"x":15500,"y":9000}]}}
+      ],
+      "anchors": [
+        {"id":"f1","kind":"fodder","point":{"x":4000,"y":4000},"bound_content_id":null},{"id":"f2","kind":"fodder","point":{"x":8000,"y":7000},"bound_content_id":null},{"id":"f3","kind":"fodder","point":{"x":12000,"y":4000},"bound_content_id":null},{"id":"f4","kind":"fodder","point":{"x":16000,"y":7000},"bound_content_id":null},{"id":"f5","kind":"fodder","point":{"x":19000,"y":4000},"bound_content_id":null},{"id":"f6","kind":"fodder","point":{"x":20000,"y":7000},"bound_content_id":null},
+        {"id":"p1","kind":"pressure","point":{"x":7500,"y":5500},"bound_content_id":null},{"id":"p2","kind":"pressure","point":{"x":15500,"y":5500},"bound_content_id":null},{"id":"a1","kind":"anchor_enemy","point":{"x":11500,"y":5500},"bound_content_id":null}
+      ], "safe_noncombat": false, "authored_core_enabled": true
+    },
+    {
+      "id": "room.bell.choir_01", "schema_version": 1, "enabled": true,
+      "earliest_release_stage": "core", "localization_name_key": "room.bell.choir_01.name",
+      "localization_description_key": "room.bell.choir_01.description",
+      "asset_ids": ["tilemap.room.bell.choir_01"], "tags": ["room", "bell", "miniboss"],
+      "source_document_feature_id": "CONT-ROOM-002", "width_milli_tiles": 19000, "height_milli_tiles": 15000,
+      "doors": [{"id":"north","side":"north","offset_milli_tiles":9500,"width_milli_tiles":3000},{"id":"east","side":"east","offset_milli_tiles":7500,"width_milli_tiles":3000},{"id":"south","side":"south","offset_milli_tiles":9500,"width_milli_tiles":3000},{"id":"west","side":"west","offset_milli_tiles":7500,"width_milli_tiles":3000}],
+      "volumes": [
+        {"id":"pillar.nw","kind":"solid","geometry":{"shape":"rectangle","rectangle":{"x":4250,"y":3250,"width":1500,"height":1500}}},{"id":"pillar.ne","kind":"solid","geometry":{"shape":"rectangle","rectangle":{"x":13250,"y":3250,"width":1500,"height":1500}}},
+        {"id":"pillar.sw","kind":"solid","geometry":{"shape":"rectangle","rectangle":{"x":4250,"y":10250,"width":1500,"height":1500}}},{"id":"pillar.se","kind":"solid","geometry":{"shape":"rectangle","rectangle":{"x":13250,"y":10250,"width":1500,"height":1500}}}
+      ],
+      "anchors": [
+        {"id":"f1","kind":"fodder","point":{"x":3000,"y":3000},"bound_content_id":null},{"id":"f2","kind":"fodder","point":{"x":9500,"y":3000},"bound_content_id":null},{"id":"f3","kind":"fodder","point":{"x":16000,"y":3000},"bound_content_id":null},{"id":"f4","kind":"fodder","point":{"x":3000,"y":12000},"bound_content_id":null},{"id":"f5","kind":"fodder","point":{"x":9500,"y":12000},"bound_content_id":null},{"id":"f6","kind":"fodder","point":{"x":16000,"y":12000},"bound_content_id":null},
+        {"id":"p1","kind":"pressure","point":{"x":4000,"y":7500},"bound_content_id":null},{"id":"d1","kind":"disruptor","point":{"x":4000,"y":7500},"bound_content_id":null},{"id":"p2","kind":"pressure","point":{"x":15000,"y":7500},"bound_content_id":null},{"id":"d2","kind":"disruptor","point":{"x":15000,"y":7500},"bound_content_id":null},{"id":"a1","kind":"anchor_enemy","point":{"x":9500,"y":7500},"bound_content_id":"miniboss.choir_abbot"}
+      ], "safe_noncombat": false, "authored_core_enabled": true
+    },
+    {
+      "id": "room.bell.knight_01", "schema_version": 1, "enabled": true,
+      "earliest_release_stage": "core", "localization_name_key": "room.bell.knight_01.name",
+      "localization_description_key": "room.bell.knight_01.description",
+      "asset_ids": ["tilemap.room.bell.knight_01"], "tags": ["room", "bell", "miniboss"],
+      "source_document_feature_id": "CONT-ROOM-002", "width_milli_tiles": 19000, "height_milli_tiles": 15000,
+      "doors": [{"id":"west","side":"west","offset_milli_tiles":7500,"width_milli_tiles":3000},{"id":"east","side":"east","offset_milli_tiles":7500,"width_milli_tiles":3000}],
+      "volumes": [
+        {"id":"lane.north","kind":"pattern_lane","geometry":{"shape":"polyline","width_milli_tiles":1200,"points":[{"x":2000,"y":3500},{"x":17000,"y":3500}]}},{"id":"lane.center","kind":"pattern_lane","geometry":{"shape":"polyline","width_milli_tiles":1200,"points":[{"x":2000,"y":7500},{"x":17000,"y":7500}]}},{"id":"lane.south","kind":"pattern_lane","geometry":{"shape":"polyline","width_milli_tiles":1200,"points":[{"x":2000,"y":11500},{"x":17000,"y":11500}]}}
+      ],
+      "anchors": [{"id":"miniboss","kind":"miniboss","point":{"x":13500,"y":7500},"bound_content_id":"miniboss.sepulcher_knight"},{"id":"stage","kind":"stage","point":{"x":3000,"y":7500},"bound_content_id":null},{"id":"add.north","kind":"add","point":{"x":9500,"y":3500},"bound_content_id":null},{"id":"add.south","kind":"add","point":{"x":9500,"y":11500},"bound_content_id":null}],
+      "safe_noncombat": false, "authored_core_enabled": true
+    },
+    {
+      "id": "room.bell.rest_01", "schema_version": 1, "enabled": true,
+      "earliest_release_stage": "core", "localization_name_key": "room.bell.rest_01.name",
+      "localization_description_key": "room.bell.rest_01.description",
+      "asset_ids": ["tilemap.room.bell.rest_01"], "tags": ["room", "bell", "safe", "bargain"],
+      "source_document_feature_id": "CONT-ROOM-002", "width_milli_tiles": 15000, "height_milli_tiles": 13000,
+      "doors": [{"id":"west","side":"west","offset_milli_tiles":6500,"width_milli_tiles":3000},{"id":"east","side":"east","offset_milli_tiles":6500,"width_milli_tiles":3000}],
+      "volumes": [], "anchors": [{"id":"shrine","kind":"shrine","point":{"x":7500,"y":4500},"bound_content_id":null},{"id":"stabilization","kind":"stabilization","point":{"x":7500,"y":8500},"bound_content_id":null}],
+      "safe_noncombat": true, "authored_core_enabled": true
+    },
+    {
+      "id": "room.bell.secret_01", "schema_version": 1, "enabled": true,
+      "earliest_release_stage": "core", "localization_name_key": "room.bell.secret_01.name",
+      "localization_description_key": "room.bell.secret_01.description",
+      "asset_ids": ["tilemap.room.bell.secret_01"], "tags": ["room", "bell", "secret", "branch_disabled"],
+      "source_document_feature_id": "CONT-ROOM-002", "width_milli_tiles": 11000, "height_milli_tiles": 11000,
+      "doors": [{"id":"south","side":"south","offset_milli_tiles":5500,"width_milli_tiles":3000}],
+      "volumes": [{"id":"ring.center","kind":"objective_area","geometry":{"shape":"circle","circle":{"center":{"x":5500,"y":5500},"radius":3000}}}],
+      "anchors": [{"id":"d1","kind":"disruptor","point":{"x":5500,"y":5500},"bound_content_id":null},{"id":"p1","kind":"pressure","point":{"x":5500,"y":5500},"bound_content_id":null},{"id":"chest","kind":"chest","point":{"x":5500,"y":2500},"bound_content_id":null}],
+      "safe_noncombat": false, "authored_core_enabled": true
+    },
+    {
+      "id": "arena.boss.caldus_01", "schema_version": 1, "enabled": true,
+      "earliest_release_stage": "core", "localization_name_key": "arena.boss.caldus_01.name",
+      "localization_description_key": "arena.boss.caldus_01.description",
+      "asset_ids": ["tilemap.arena.boss.caldus_01"], "tags": ["arena", "bell", "boss", "boss_behavior_disabled"],
+      "source_document_feature_id": "CONT-ROOM-002", "width_milli_tiles": 18000, "height_milli_tiles": 18000,
+      "doors": [{"id":"west","side":"west","offset_milli_tiles":9000,"width_milli_tiles":3000}],
+      "volumes": [{"id":"walkable.circle","kind":"walkable_boundary","geometry":{"shape":"circle","circle":{"center":{"x":9000,"y":9000},"radius":8000}}}],
+      "anchors": [{"id":"boss","kind":"boss","point":{"x":9000,"y":9000},"bound_content_id":null},{"id":"stage","kind":"stage","point":{"x":2500,"y":9000},"bound_content_id":null},{"id":"group.north","kind":"group","point":{"x":2500,"y":6000},"bound_content_id":null},{"id":"group.south","kind":"group","point":{"x":2500,"y":12000},"bound_content_id":null},{"id":"charge.west","kind":"charge_endpoint","point":{"x":1000,"y":9000},"bound_content_id":null},{"id":"charge.east","kind":"charge_endpoint","point":{"x":17000,"y":9000},"bound_content_id":null},{"id":"charge.north","kind":"charge_endpoint","point":{"x":9000,"y":1000},"bound_content_id":null},{"id":"charge.south","kind":"charge_endpoint","point":{"x":9000,"y":17000},"bound_content_id":null}],
+      "safe_noncombat": false, "authored_core_enabled": true
+    }
+  ],
+  "packs": [
+    {
+      "id":"pack.bell.01", "schema_version":1, "enabled":true, "earliest_release_stage":"core",
+      "localization_name_key":"pack.bell.01.name", "localization_description_key":"pack.bell.01.description",
+      "asset_ids":[], "tags":["microrealm", "simultaneous"], "source_document_feature_id":"CONT-ROOM-006",
+      "members":[{"enemy_id":"enemy.drowned_pilgrim","count":6,"threat_each":1},{"enemy_id":"enemy.bell_reed","count":2,"threat_each":3}],
+      "base_budget":12, "warning_milliseconds":900, "simultaneous_spawn":true, "authored_core_enabled":true
+    }
+  ],
+  "layouts": [
+    {
+      "id":"layout.core_private_life_01", "schema_version":1, "enabled":true, "earliest_release_stage":"core",
+      "localization_name_key":"layout.core_private_life_01.name", "localization_description_key":"layout.core_private_life_01.description",
+      "asset_ids":[], "tags":["fixed", "private_life", "branch_disabled"], "source_document_feature_id":"CONT-ROOM-007",
+      "main_chain_node_ids":["B0","B1","B2","B3","B4","B5","B6"],
+      "nodes":[
+        {"node_id":"B0","grid_x":0,"grid_y":0,"rotation_degrees":0,"room_template_id":"room.bell.vestibule_01","encounter":null,"counts_toward_six_room_total":false},
+        {"node_id":"B1","grid_x":1,"grid_y":0,"rotation_degrees":0,"room_template_id":"room.bell.cross_01","encounter":{"members":[{"enemy_id":"enemy.drowned_pilgrim","count":6,"threat_each":1},{"enemy_id":"enemy.bell_reed","count":2,"threat_each":3}],"base_budget":12,"warning_milliseconds":900},"counts_toward_six_room_total":true},
+        {"node_id":"B2","grid_x":2,"grid_y":0,"rotation_degrees":90,"room_template_id":"room.bell.nave_01","encounter":{"members":[{"enemy_id":"enemy.drowned_pilgrim","count":6,"threat_each":1},{"enemy_id":"enemy.bell_acolyte","count":2,"threat_each":3},{"enemy_id":"enemy.choir_skull","count":1,"threat_each":4}],"base_budget":16,"warning_milliseconds":900},"counts_toward_six_room_total":true},
+        {"node_id":"B3","grid_x":3,"grid_y":0,"rotation_degrees":0,"room_template_id":"room.bell.knight_01","encounter":{"members":[{"enemy_id":"miniboss.sepulcher_knight","count":1,"threat_each":10}],"base_budget":10,"warning_milliseconds":900},"counts_toward_six_room_total":true},
+        {"node_id":"B4","grid_x":4,"grid_y":0,"rotation_degrees":0,"room_template_id":"room.bell.rest_01","encounter":null,"counts_toward_six_room_total":true},
+        {"node_id":"B5","grid_x":5,"grid_y":0,"rotation_degrees":0,"room_template_id":"room.bell.bridge_01","encounter":{"members":[{"enemy_id":"enemy.drowned_pilgrim","count":6,"threat_each":1},{"enemy_id":"enemy.chain_sentry","count":1,"threat_each":6}],"base_budget":12,"warning_milliseconds":900},"counts_toward_six_room_total":true},
+        {"node_id":"B6","grid_x":6,"grid_y":0,"rotation_degrees":0,"room_template_id":"arena.boss.caldus_01","encounter":null,"counts_toward_six_room_total":true},
+        {"node_id":"BB1","grid_x":1,"grid_y":-1,"rotation_degrees":0,"room_template_id":"room.bell.choir_01","encounter":{"members":[{"enemy_id":"miniboss.choir_abbot","count":1,"threat_each":10}],"base_budget":10,"warning_milliseconds":900},"counts_toward_six_room_total":false},
+        {"node_id":"BS1","grid_x":1,"grid_y":-2,"rotation_degrees":0,"room_template_id":"room.bell.secret_01","encounter":null,"counts_toward_six_room_total":false}
+      ],
+      "edges":[
+        {"from_node_id":"B0","to_node_id":"B1","from_door_id":"east","to_door_id":"west","corridor_width_milli_tiles":3000,"corridor_length_tiles":4},
+        {"from_node_id":"B1","to_node_id":"B2","from_door_id":"east","to_door_id":"south","corridor_width_milli_tiles":3000,"corridor_length_tiles":4},
+        {"from_node_id":"B2","to_node_id":"B3","from_door_id":"north","to_door_id":"west","corridor_width_milli_tiles":3000,"corridor_length_tiles":4},
+        {"from_node_id":"B3","to_node_id":"B4","from_door_id":"east","to_door_id":"west","corridor_width_milli_tiles":3000,"corridor_length_tiles":4},
+        {"from_node_id":"B4","to_node_id":"B5","from_door_id":"east","to_door_id":"west","corridor_width_milli_tiles":3000,"corridor_length_tiles":4},
+        {"from_node_id":"B5","to_node_id":"B6","from_door_id":"east","to_door_id":"west","corridor_width_milli_tiles":3000,"corridor_length_tiles":4}
+      ],
+      "disabled_branch_node_ids":["BB1","BS1"], "branches_enabled":false, "seeded_selection_enabled":false, "authored_core_enabled":true
+    }
+  ]
+}

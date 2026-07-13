@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CoreEncounterRoomAssetManifest",
+  "type": "object",
+  "properties": {
+    "assets": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CoreEncounterRoomAsset"
+      }
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "assets"
+  ],
+  "$defs": {
+    "ContentId": {
+      "description": "Stable dot-separated content identifier.",
+      "type": "string"
+    },
+    "CoreEncounterRoomAsset": {
+      "type": "object",
+      "properties": {
+        "asset_id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "kind": {
+          "$ref": "#/$defs/CoreEncounterRoomAssetKind"
+        },
+        "source_record_id": {
+          "$ref": "#/$defs/ContentId"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "asset_id",
+        "source_record_id",
+        "kind"
+      ]
+    },
+    "CoreEncounterRoomAssetKind": {
+      "type": "string",
+      "enum": [
+        "enemy_silhouette",
+        "enemy_portrait",
+        "miniboss_silhouette",
+        "miniboss_portrait",
+        "room_tilemap",
+        "telegraph",
+        "warning_audio"
+      ]
+    }
+  }
+}
