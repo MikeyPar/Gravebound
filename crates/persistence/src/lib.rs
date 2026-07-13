@@ -11,6 +11,7 @@ use sqlx::{
 };
 use thiserror::Error;
 
+mod ground_expiry;
 mod identity;
 mod items;
 mod oath;
@@ -18,6 +19,7 @@ mod progression;
 mod reward;
 mod world_flow;
 
+pub use ground_expiry::{MAX_GROUND_EXPIRY_BATCH, StoredGroundExpiry, StoredGroundExpiryCandidate};
 pub use identity::{StoredCharacter, StoredIdentityAggregate, StoredMutation};
 pub use items::{
     STARTER_INITIALIZER_REVISION, STARTER_ITEM_COUNT, StoredStarterInitialization,
