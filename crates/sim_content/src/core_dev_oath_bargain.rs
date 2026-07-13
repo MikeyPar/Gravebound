@@ -1063,7 +1063,7 @@ mod tests {
     }
 
     #[test]
-    fn every_core_oath_bargain_crossbow_combination_respects_caps_and_cadence() {
+    fn every_core_oath_bargain_item_bound_crossbow_combination_compiles() {
         let (class_package, _) = crate::load_and_validate(&content_root()).unwrap();
         let items = crate::load_core_development_items(&content_root()).unwrap();
         let choices = load_core_development_oaths_bargains(&content_root()).unwrap();
@@ -1106,20 +1106,27 @@ mod tests {
                     sim_core::resolve_oath_maximum_health(120, maximum_health_multiplier,).unwrap()
                         >= 84
                 );
-                if let Some(oath_id) = oath_id {
-                    for (weapon_id, minimum_level) in weapons {
-                        let definitions = compile_core_oathed_combat_definitions(
-                            &class_package,
-                            &items,
-                            &choices,
-                            oath_id,
-                            weapon_id,
-                            minimum_level,
-                            modifiers.ordinary_attack_rate_basis_points,
-                        )
-                        .unwrap();
-                        assert!(definitions.weapon.attack_interval_ticks() > 0);
-                    }
+                for (weapon_id, minimum_level) in weapons {
+                    let definitions = compile_core_combat_definitions_for_item(
+                        &class_package,
+                        &items,
+                        &choices,
+                        oath_id,
+                        &active,
+                        weapon_id,
+                        minimum_level,
+                        EquipmentRarity::Worn,
+                        0,
+                    )
+                    .unwrap();
+                    assert_eq!(definitions.bargain_modifiers, modifiers);
+                    assert_eq!(definitions.bargains, loadout);
+                    assert_eq!(definitions.oath.is_some(), oath_id.is_some());
+                    assert!(definitions.weapon.attack_interval_ticks() > 0);
+                    assert!(
+                        definitions.maximum_health_multiplier_basis_points
+                            >= sim_core::MINIMUM_MAXIMUM_HEALTH_BASIS_POINTS
+                    );
                 }
             }
         }
