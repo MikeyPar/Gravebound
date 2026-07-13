@@ -9,7 +9,8 @@ pub use journey::*;
 
 use protocol::{
     AccountBootstrapFrame, AccountBootstrapResult, CharacterMutationFrame, CharacterMutationResult,
-    ClientHello, ControlEvent, HandshakeResponse, InputFrame, ProgressionQueryFrame,
+    ClientHello, ControlEvent, HandshakeResponse, InitialOathSelectionFrame,
+    InitialOathSelectionResult, InputFrame, OathViewFrame, OathViewResult, ProgressionQueryFrame,
     ProgressionResult, ProtocolVersion, RELIABLE_FRAME_LIMIT, ReliableEvent, ReliableEventFrame,
     SIMULATION_HZ, SessionControlFrame, SessionControlResult, SnapshotChunk, WireMessage,
     WorldFlowFrame, WorldFlowResult, decode_frame, encode_frame,
@@ -211,6 +212,30 @@ pub async fn perform_progression_query(
     let event =
         perform_reliable_gameplay(connection, WireMessage::ProgressionQueryFrame(frame)).await?;
     let ReliableEvent::ProgressionResult(result) = &event.event else {
+        return Err(BotTransportError::UnexpectedMessage);
+    };
+    Ok((event.clone(), result.clone()))
+}
+
+pub async fn perform_oath_view(
+    connection: &quinn::Connection,
+    frame: OathViewFrame,
+) -> Result<(ReliableEventFrame, OathViewResult), BotTransportError> {
+    let event = perform_reliable_gameplay(connection, WireMessage::OathViewFrame(frame)).await?;
+    let ReliableEvent::OathViewResult(result) = &event.event else {
+        return Err(BotTransportError::UnexpectedMessage);
+    };
+    Ok((event.clone(), result.clone()))
+}
+
+pub async fn perform_initial_oath_selection(
+    connection: &quinn::Connection,
+    frame: InitialOathSelectionFrame,
+) -> Result<(ReliableEventFrame, InitialOathSelectionResult), BotTransportError> {
+    let event =
+        perform_reliable_gameplay(connection, WireMessage::InitialOathSelectionFrame(frame))
+            .await?;
+    let ReliableEvent::InitialOathSelectionResult(result) = &event.event else {
         return Err(BotTransportError::UnexpectedMessage);
     };
     Ok((event.clone(), result.clone()))
