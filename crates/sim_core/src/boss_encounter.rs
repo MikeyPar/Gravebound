@@ -836,6 +836,7 @@ mod tests {
             trap_id: id(trap),
             target_id: boss,
             tick: Tick(tick),
+            position: SimulationVector::new(24.0, 12.0),
             raw_damage: 18,
             snapshot_weapon_raw_damage: 20,
             frostbind_ticks: 45,

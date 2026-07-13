@@ -177,17 +177,18 @@ pub struct NailTrapRemoval {
     pub reason: NailTrapRemovalReason,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NailTrapTrigger {
     pub trap_id: EntityId,
     pub target_id: EntityId,
     pub tick: Tick,
+    pub position: SimulationVector,
     pub raw_damage: u32,
     pub snapshot_weapon_raw_damage: u32,
     pub frostbind_ticks: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct NailTrapStep {
     pub spawned: Vec<EntityId>,
     pub armed: Vec<EntityId>,
@@ -308,6 +309,7 @@ impl NailTrapField {
                         trap_id: trap.id,
                         target_id: target.entity_id,
                         tick: now,
+                        position: trap.position,
                         raw_damage: multiply_basis_points(
                             trap.snapshot_weapon_raw_damage,
                             NAILKEEPER_DAMAGE_BASIS_POINTS,

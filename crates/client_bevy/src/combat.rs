@@ -326,6 +326,9 @@ pub(crate) struct TransientEffect {
     total_seconds: f32,
 }
 
+#[derive(Debug, Component)]
+struct NailTrapPresentation(sim_core::EntityId);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 enum PrimarySequenceError {
     #[error("primary press sequence exhausted u32")]
@@ -689,6 +692,7 @@ fn simulate_combat(
     scenario: Res<EvidenceScenario>,
     mut player_transform: Single<&mut Transform, With<LocalPlayer>>,
     mut visuals: Query<(Entity, &ProjectilePresentation, &mut Transform), Without<LocalPlayer>>,
+    trap_visuals: Query<(Entity, &NailTrapPresentation)>,
     mut collision_diagnostics: ResMut<CollisionDiagnostics>,
 ) {
     if !runtime.player_can_act() {
@@ -761,10 +765,117 @@ fn simulate_combat(
     present_shots(&mut commands, &step, &arena.0);
     present_slipstep(&mut commands, &step, &arena.0, &mut collision_diagnostics);
     present_stillness(&mut commands, &step, &arena.0, &mut collision_diagnostics);
+    present_nail_traps(
+        &mut commands,
+        &step,
+        runtime.combat(),
+        &arena.0,
+        &trap_visuals,
+    );
     log_grave_mark_events(&step);
     log_slipstep_events(&step);
     log_stillness_events(&step);
     sync_projectile_visuals(runtime.combat(), &arena.0, &mut visuals);
+}
+
+fn present_nail_traps(
+    commands: &mut Commands,
+    step: &sim_core::CombatStep,
+    combat: &PlayerCombatState,
+    arena: &sim_core::ArenaGeometry,
+    visuals: &Query<(Entity, &NailTrapPresentation)>,
+) {
+    for removal in &step.nail_traps.removals {
+        despawn_nail_trap(commands, removal.trap_id, visuals);
+    }
+    for trap_id in &step.nail_traps.armed {
+        despawn_nail_trap(commands, *trap_id, visuals);
+        if let Some(trap) = combat
+            .nail_traps()
+            .traps()
+            .iter()
+            .find(|trap| trap.id() == *trap_id)
+        {
+            spawn_nail_trap(commands, trap, arena, true);
+        }
+    }
+    for trap_id in &step.nail_traps.spawned {
+        if let Some(trap) = combat
+            .nail_traps()
+            .traps()
+            .iter()
+            .find(|trap| trap.id() == *trap_id)
+        {
+            spawn_nail_trap(commands, trap, arena, false);
+        }
+    }
+    for trigger in &step.nail_traps.triggers {
+        spawn_transient(
+            commands,
+            "Nailkeeper Frostbind burst",
+            simulation_point_to_render(trigger.position, arena),
+            Color::srgba_u8(154, 238, 247, 230),
+            0.92,
+            0.34,
+        );
+        info!(
+            feature_id = "GB-M03-05C",
+            tick = trigger.tick.0,
+            trap_id = trigger.trap_id.get(),
+            target_id = trigger.target_id.get(),
+            raw_damage = trigger.raw_damage,
+            frostbind_ticks = trigger.frostbind_ticks,
+            "Nailkeeper trap triggered"
+        );
+    }
+}
+
+fn despawn_nail_trap(
+    commands: &mut Commands,
+    trap_id: sim_core::EntityId,
+    visuals: &Query<(Entity, &NailTrapPresentation)>,
+) {
+    if let Some((entity, _)) = visuals.iter().find(|(_, visual)| visual.0 == trap_id) {
+        commands.entity(entity).despawn();
+    }
+}
+
+fn spawn_nail_trap(
+    commands: &mut Commands,
+    trap: &sim_core::NailTrap,
+    arena: &sim_core::ArenaGeometry,
+    armed: bool,
+) {
+    let position = simulation_point_to_render(trap.position(), arena);
+    let color = if armed {
+        Color::srgba_u8(106, 221, 235, 225)
+    } else {
+        Color::srgba_u8(173, 141, 79, 155)
+    };
+    let entity = commands
+        .spawn((
+            Name::new(if armed {
+                "Armed nail trap"
+            } else {
+                "Arming nail trap"
+            }),
+            NailTrapPresentation(trap.id()),
+            Transform::from_xyz(position.x, position.y, FRIENDLY_PROJECTILE_Z - 0.1),
+            Visibility::default(),
+        ))
+        .id();
+    commands.entity(entity).with_children(|parent| {
+        for index in 0_u8..12 {
+            let angle = f32::from(index) * std::f32::consts::TAU / 12.0;
+            let offset =
+                Vec2::new(angle.cos(), angle.sin()) * sim_core::NAILKEEPER_TRAP_RADIUS_TILES;
+            parent.spawn((
+                Sprite::from_color(color, Vec2::new(0.07, if armed { 0.30 } else { 0.20 })),
+                Transform::from_xyz(offset.x, offset.y, 0.0)
+                    .with_rotation(Quat::from_rotation_z(angle)),
+            ));
+        }
+    });
 }
 
 fn present_collision_events(

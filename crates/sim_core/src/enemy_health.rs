@@ -762,6 +762,7 @@ mod tests {
             trap_id: id(40),
             target_id: id(100),
             tick: Tick(1),
+            position: SimulationVector::new(8.0, 3.0),
             raw_damage: 18,
             snapshot_weapon_raw_damage: 20,
             frostbind_ticks: 45,
