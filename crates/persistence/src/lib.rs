@@ -37,7 +37,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 6;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 7;
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -460,6 +460,32 @@ mod tests {
             assert!(
                 !migration.contains(prohibited),
                 "initial Oath migration leaked {prohibited}"
+            );
+        }
+    }
+
+    #[test]
+    fn durable_item_migration_is_unit_normalized_typed_and_replay_backed() {
+        let migration = include_str!("../../../migrations/0007_durable_item_lifecycle.sql");
+        for required in [
+            "character_inventories",
+            "starter_initializer_results",
+            "reward_requests",
+            "reward_result_entries",
+            "item_instances",
+            "item_ledger_events",
+            "one_equipment_per_slot",
+            "item_units_by_projected_stack",
+            "personal_ground_by_expiry",
+            "ground_expired",
+            "core-dev[.]blake3",
+        ] {
+            assert!(migration.contains(required), "migration omitted {required}");
+        }
+        for prohibited in ["JSON", "JSONB", "FLOAT", "DOUBLE PRECISION", "core.1.0.0"] {
+            assert!(
+                !migration.contains(prohibited),
+                "durable item migration leaked {prohibited}"
             );
         }
     }

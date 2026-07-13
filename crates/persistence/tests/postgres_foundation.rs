@@ -94,6 +94,7 @@ async fn migrations_are_idempotent_exact_and_ready() {
             "character_danger_checkpoints",
             "character_entry_restore_points",
             "character_instance_lineages",
+            "character_inventories",
             "character_life_outbox",
             "character_oath_mutation_results",
             "character_progression",
@@ -103,9 +104,14 @@ async fn migrations_are_idempotent_exact_and_ready() {
             "characters",
             "entry_restore_progression_v1",
             "gravebound_namespaces",
+            "item_instances",
+            "item_ledger_events",
+            "reward_requests",
+            "reward_result_entries",
+            "starter_initializer_results",
         ]
     );
-    for prohibited in ["items", "vault", "memorials", "currency_ledger"] {
+    for prohibited in ["vault", "memorials", "currency_ledger"] {
         assert!(!tables.iter().any(|table| table == prohibited));
     }
     persistence.close().await;
