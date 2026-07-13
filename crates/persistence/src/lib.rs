@@ -344,6 +344,21 @@ impl PostgresPersistence {
     pub async fn reset_disposable_identity_data(&self) -> Result<(), PersistenceError> {
         self.verify_disposable_test_database().await?;
         let mut transaction = self.begin_transaction().await?;
+        // These rows bind both the character and its danger lineage. Delete the cross-linked
+        // children explicitly before the account cascade reaches either side of that binding.
+        for statement in [
+            "DELETE FROM bargain_decision_results WHERE namespace_id = $1",
+            "DELETE FROM character_active_bargains WHERE namespace_id = $1",
+            "DELETE FROM bargain_milestone_results WHERE namespace_id = $1",
+            "DELETE FROM bargain_offer_candidates WHERE namespace_id = $1",
+            "DELETE FROM bargain_offers WHERE namespace_id = $1",
+        ] {
+            sqlx::query(statement)
+                .bind(WIPEABLE_CORE_NAMESPACE)
+                .execute(transaction.connection())
+                .await
+                .map_err(PersistenceError::Database)?;
+        }
         sqlx::query("DELETE FROM accounts WHERE namespace_id = $1")
             .bind(WIPEABLE_CORE_NAMESPACE)
             .execute(transaction.connection())
