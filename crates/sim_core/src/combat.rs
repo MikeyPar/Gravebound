@@ -4,10 +4,10 @@ use thiserror::Error;
 
 use crate::{
     ArenaGeometry, BASIS_POINTS_PER_ONE, CollisionError, CollisionTarget, EntityId,
-    EntityIdAllocator, GraveMarkDefinition, IntentMathError, MovementAction, MovementError,
-    MovementStep, PlayerMovementState, ProjectileCollisionWorld, SimulationVector,
-    SlipstepDefinition, SolidColliderId, StillnessDefinition, TICKS_PER_SECOND, Tick,
-    WeaponDefinition,
+    EntityIdAllocator, GraveArbalistOath, GraveMarkDefinition, IntentMathError, MovementAction,
+    MovementError, MovementStep, NailTrapEnemy, NailTrapField, NailTrapStep, PlayerMovementState,
+    ProjectileCollisionWorld, SimulationVector, SlipstepDefinition, SolidColliderId,
+    StillnessDefinition, TICKS_PER_SECOND, Tick, WeaponDefinition,
 };
 
 const AIM_EPSILON_SQUARED: f32 = 1.0e-12;
@@ -342,6 +342,7 @@ pub struct CombatStep {
     pub slipstep_transitions: Vec<SlipstepTransition>,
     pub direct_damage_reduction_basis_points: u32,
     pub focused_transitions: Vec<FocusedTransition>,
+    pub nail_traps: NailTrapStep,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -390,6 +391,8 @@ pub struct PlayerCombatState {
     focused: bool,
     projectile_ids: EntityIdAllocator,
     projectiles: Vec<FriendlyProjectile>,
+    oath: Option<GraveArbalistOath>,
+    nail_traps: NailTrapField,
 }
 
 impl PlayerCombatState {
@@ -439,7 +442,21 @@ impl PlayerCombatState {
             focused: false,
             projectile_ids,
             projectiles: Vec::new(),
+            oath: None,
+            nail_traps: NailTrapField::default(),
         })
+    }
+
+    pub fn with_oath(
+        weapon: WeaponDefinition,
+        grave_mark: GraveMarkDefinition,
+        slipstep: SlipstepDefinition,
+        stillness: StillnessDefinition,
+        oath: GraveArbalistOath,
+    ) -> Result<Self, CombatError> {
+        let mut state = Self::new(weapon, grave_mark, slipstep, stillness)?;
+        state.oath = Some(oath);
+        Ok(state)
     }
 
     #[must_use]
@@ -568,6 +585,16 @@ impl PlayerCombatState {
         &self.projectiles
     }
 
+    #[must_use]
+    pub const fn oath(&self) -> Option<GraveArbalistOath> {
+        self.oath
+    }
+
+    #[must_use]
+    pub fn nail_traps(&self) -> &NailTrapField {
+        &self.nail_traps
+    }
+
     /// Drains all run-owned friendly projectiles in stable identity order after local death.
     pub fn clear_projectiles_for_local_death(&mut self) -> Vec<FriendlyProjectile> {
         self.projectiles.sort_by_key(FriendlyProjectile::id);
@@ -638,12 +665,23 @@ impl PlayerCombatState {
             ..CombatStep::default()
         };
         self.advance_active_mark(&mut step.mark_transitions);
+        let trap_enemies = collision_world
+            .enemies()
+            .iter()
+            .map(|enemy| NailTrapEnemy {
+                entity_id: enemy.id(),
+                position: enemy.center(),
+                radius_tiles: enemy.radius_tiles(),
+            })
+            .collect::<Vec<_>>();
+        step.nail_traps = self.nail_traps.step(self.tick, &trap_enemies)?;
         self.advance_projectiles(
             collision_world,
             &mut step.collisions,
             &mut step.expirations,
             &mut step.raw_damage_intents,
             &mut step.mark_transitions,
+            &mut step.nail_traps,
         )?;
         self.interval_remaining_ticks = self.interval_remaining_ticks.saturating_sub(1);
         self.grave_mark_cooldown_remaining_ticks =
@@ -1149,6 +1187,7 @@ impl PlayerCombatState {
         expirations: &mut Vec<ProjectileExpired>,
         raw_damage_intents: &mut Vec<RawDamageIntent>,
         mark_transitions: &mut Vec<GraveMarkTransition>,
+        nail_trap_step: &mut NailTrapStep,
     ) -> Result<(), CombatError> {
         let mut terminal_projectiles = Vec::new();
         let mut release_target_hits = initial_release_target_hits(&self.projectiles);
@@ -1213,6 +1252,18 @@ impl PlayerCombatState {
                             raw_damage_intents,
                             mark_transitions,
                         )?;
+                        if projectile.source == FriendlyProjectileSource::GraveMark
+                            && self.oath == Some(GraveArbalistOath::Nailkeeper)
+                        {
+                            spawn_nail_trap(
+                                &mut self.projectile_ids,
+                                &mut self.nail_traps,
+                                projectile.position,
+                                self.tick,
+                                self.weapon.raw_damage(),
+                                nail_trap_step,
+                            )?;
+                        }
                         match projectile.hit_targets.binary_search(&target) {
                             Ok(_) => return Err(CombatError::DuplicateProjectileTarget(target)),
                             Err(index) => projectile.hit_targets.insert(index, target),
@@ -1228,7 +1279,21 @@ impl PlayerCombatState {
                             terminal = true;
                         }
                     }
-                    CollisionTarget::Solid(_) => terminal = true,
+                    CollisionTarget::Solid(_) => {
+                        if projectile.source == FriendlyProjectileSource::GraveMark
+                            && self.oath == Some(GraveArbalistOath::Nailkeeper)
+                        {
+                            spawn_nail_trap(
+                                &mut self.projectile_ids,
+                                &mut self.nail_traps,
+                                projectile.position,
+                                self.tick,
+                                self.weapon.raw_damage(),
+                                nail_trap_step,
+                            )?;
+                        }
+                        terminal = true;
+                    }
                 }
             }
             if terminal {
@@ -1254,6 +1319,21 @@ impl PlayerCombatState {
         }
         Ok(())
     }
+}
+
+fn spawn_nail_trap(
+    ids: &mut EntityIdAllocator,
+    field: &mut NailTrapField,
+    position: SimulationVector,
+    tick: Tick,
+    weapon_raw_damage: u32,
+    output: &mut NailTrapStep,
+) -> Result<(), CombatError> {
+    let trap_id = ids.allocate().ok_or(CombatError::ProjectileIdExhausted)?;
+    let removed = field.spawn(trap_id, position, tick, weapon_raw_damage)?;
+    output.spawned.push(trap_id);
+    output.removals.extend(removed);
+    Ok(())
 }
 
 fn capped_release_targets(
@@ -1408,6 +1488,8 @@ pub enum CombatError {
     StaleAbilityTwoPressSequence { received: u32, last: u32 },
     #[error("Slipstep requires the authoritative movement state")]
     MovementStateRequired,
+    #[error(transparent)]
+    Oath(#[from] crate::OathMechanicError),
     #[error("movement-aware combat tick did not produce a movement outcome")]
     MovementOutcomeMissing,
     #[error("projectile modifier arithmetic overflowed")]
@@ -2922,6 +3004,76 @@ mod tests {
         let damage_break = combat.break_focused_from_damage().expect("damage break");
         assert_eq!(damage_break.kind, FocusedTransitionKind::BrokenByDamage);
         assert!(!combat.focused());
+    }
+
+    #[test]
+    fn nailkeeper_grave_mark_contact_spawns_arms_and_triggers_exact_trap() {
+        let mut combat = PlayerCombatState::with_oath(
+            pine_crossbow(),
+            grave_mark(),
+            slipstep(),
+            stillness(),
+            GraveArbalistOath::Nailkeeper,
+        )
+        .unwrap();
+        let inside = world_with(
+            vec![],
+            vec![
+                EnemyHurtbox::new(
+                    EntityId::new(50).unwrap(),
+                    SimulationVector::new(10.5, 10.0),
+                    0.25,
+                )
+                .unwrap(),
+            ],
+        );
+        let away = world_with(
+            vec![],
+            vec![
+                EnemyHurtbox::new(
+                    EntityId::new(50).unwrap(),
+                    SimulationVector::new(20.0, 20.0),
+                    0.25,
+                )
+                .unwrap(),
+            ],
+        );
+        let origin = SimulationVector::new(10.0, 10.0);
+        let idle = released_with_ability(0, 1, AimDirection::east());
+        combat
+            .step(ability_press(1, AimDirection::east()), origin, &inside)
+            .unwrap();
+        let contact = combat.step(idle, origin, &inside).unwrap();
+        assert_eq!(contact.mark_transitions.len(), 1);
+        assert_eq!(contact.nail_traps.spawned.len(), 1);
+        let trap_id = contact.nail_traps.spawned[0];
+        assert_eq!(combat.nail_traps().traps()[0].id(), trap_id);
+
+        let mut armed = None;
+        while combat.tick().0 < 14 {
+            let step = combat.step(idle, origin, &inside).unwrap();
+            if !step.nail_traps.armed.is_empty() {
+                armed = Some(step);
+            }
+        }
+        assert_eq!(armed.unwrap().nail_traps.armed, vec![trap_id]);
+        assert!(
+            combat
+                .step(idle, origin, &away)
+                .unwrap()
+                .nail_traps
+                .triggers
+                .is_empty()
+        );
+        let triggered = combat.step(idle, origin, &inside).unwrap();
+        assert_eq!(triggered.nail_traps.triggers.len(), 1);
+        assert_eq!(
+            triggered.nail_traps.triggers[0].target_id,
+            EntityId::new(50).unwrap()
+        );
+        assert_eq!(triggered.nail_traps.triggers[0].raw_damage, 18);
+        assert_eq!(triggered.nail_traps.triggers[0].frostbind_ticks, 45);
+        assert!(combat.nail_traps().traps().is_empty());
     }
 
     #[test]

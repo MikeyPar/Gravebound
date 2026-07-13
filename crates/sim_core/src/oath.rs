@@ -102,6 +102,7 @@ pub fn resolve_arbalist_oath_stats(
 pub struct NailTrapEnemy {
     pub entity_id: EntityId,
     pub position: SimulationVector,
+    pub radius_tiles: f32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -173,6 +174,7 @@ pub struct NailTrapTrigger {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct NailTrapStep {
+    pub spawned: Vec<EntityId>,
     pub armed: Vec<EntityId>,
     pub triggers: Vec<NailTrapTrigger>,
     pub removals: Vec<NailTrapRemoval>,
@@ -240,7 +242,11 @@ impl NailTrapField {
         now: Tick,
         enemies: &[NailTrapEnemy],
     ) -> Result<NailTrapStep, OathMechanicError> {
-        if enemies.iter().any(|enemy| !enemy.position.is_finite()) {
+        if enemies.iter().any(|enemy| {
+            !enemy.position.is_finite()
+                || !enemy.radius_tiles.is_finite()
+                || enemy.radius_tiles <= 0.0
+        }) {
             return Err(OathMechanicError::InvalidEnemyPosition);
         }
         let mut ordered_enemies = enemies.to_vec();
@@ -266,7 +272,7 @@ impl NailTrapField {
                 trap.armed = true;
                 trap.occupants_requiring_reentry = ordered_enemies
                     .iter()
-                    .filter(|enemy| inside(&trap, enemy.position))
+                    .filter(|enemy| inside(&trap, enemy))
                     .map(|enemy| enemy.entity_id)
                     .collect();
                 output.armed.push(trap.id);
@@ -277,10 +283,10 @@ impl NailTrapField {
                     ordered_enemies
                         .iter()
                         .find(|enemy| enemy.entity_id == *entity_id)
-                        .is_some_and(|enemy| inside_position(trap_position, enemy.position))
+                        .is_some_and(|enemy| inside_enemy(trap_position, enemy))
                 });
                 if let Some(target) = ordered_enemies.iter().find(|enemy| {
-                    inside(&trap, enemy.position)
+                    inside(&trap, enemy)
                         && !trap.occupants_requiring_reentry.contains(&enemy.entity_id)
                 }) {
                     output.triggers.push(NailTrapTrigger {
@@ -308,13 +314,14 @@ impl NailTrapField {
     }
 }
 
-fn inside(trap: &NailTrap, position: SimulationVector) -> bool {
-    inside_position(trap.position, position)
+fn inside(trap: &NailTrap, enemy: &NailTrapEnemy) -> bool {
+    inside_enemy(trap.position, enemy)
 }
 
-fn inside_position(trap_position: SimulationVector, position: SimulationVector) -> bool {
-    let delta = position - trap_position;
-    delta.length_squared() <= NAILKEEPER_TRAP_RADIUS_TILES * NAILKEEPER_TRAP_RADIUS_TILES
+fn inside_enemy(trap_position: SimulationVector, enemy: &NailTrapEnemy) -> bool {
+    let delta = enemy.position - trap_position;
+    let combined_radius = NAILKEEPER_TRAP_RADIUS_TILES + enemy.radius_tiles;
+    delta.length_squared() <= combined_radius * combined_radius
 }
 
 fn multiply_basis_points(value: u32, basis_points: u32) -> Result<u32, OathMechanicError> {
@@ -362,6 +369,7 @@ mod tests {
         NailTrapEnemy {
             entity_id: entity(value),
             position: SimulationVector::new(x, 0.0),
+            radius_tiles: 0.25,
         }
     }
 
