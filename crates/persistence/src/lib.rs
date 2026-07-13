@@ -12,10 +12,15 @@ use sqlx::{
 use thiserror::Error;
 
 mod identity;
+mod oath;
 mod progression;
 mod world_flow;
 
 pub use identity::{StoredCharacter, StoredIdentityAggregate, StoredMutation};
+pub use oath::{
+    OathSelectionTransaction, OathSelectionTransactionState, StoredCharacterLifeEvent,
+    StoredOathCharacter, StoredOathMutationResult,
+};
 pub use progression::{
     ProgressionAwardTransaction, ProgressionAwardTransactionState, StoredBossFirstClear,
     StoredBossFirstClearState, StoredEncounterLifeState, StoredEncounterRecallState,
@@ -162,6 +167,14 @@ pub enum PersistenceError {
     CorruptStoredProgression,
     #[error("a fresh progression award transaction must append one typed result")]
     ProgressionAwardResultRequired,
+    #[error("stored Oath selection violates the approved schema")]
+    CorruptStoredOath,
+    #[error("Oath character does not exist for the authenticated account")]
+    OathCharacterNotFound,
+    #[error("a fresh Oath transaction must append one typed result")]
+    OathSelectionResultRequired,
+    #[error("an accepted Oath transaction must append one character-life event")]
+    OathSelectionEventRequired,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
