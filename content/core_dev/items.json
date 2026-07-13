@@ -26,8 +26,8 @@
   "required_reward_table_ids": ["reward.boss_caldus", "reward.elite_outer", "reward.miniboss_t1", "reward.normal_outer"],
   "required_material_pool_ids": ["material_pool.core.red_tonic_1", "material_pool.core.red_tonic_2"],
   "required_stage_policy_ids": ["policy.items.core"],
-  "expected_manifest_blake3": "3f1cb2c0e0638ea41b787b28fee4d108351fd6489da126359636a1f6c564519e",
+  "expected_manifest_blake3": "27818db710b7553520a162f6f8337dcd0419c459d20c6513a7e12c78fed24ebb",
   "expected_records_blake3": "1ae100ac8aa1200bb1e6d0a0ec7df3bc6a38671db2c6208509f8bdbd5e5d561d",
-  "expected_assets_blake3": "2b903260b51317d4ed73b241136b9ba15c3e491b47dcf6bc174e8823f0f6e6ef",
+  "expected_assets_blake3": "d93d760eb62c7e28e879e7b28a9f360712d593d973dbe10236d29b7a1edc964c",
   "expected_localization_blake3": "e13709e6f7656ae00b35c56a9d126d22601fd5a3cd9642cb29471b9840924cbf"
 }

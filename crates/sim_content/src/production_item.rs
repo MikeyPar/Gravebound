@@ -104,7 +104,7 @@ pub fn load_core_development_items(root: &Path) -> Result<CompiledProductionItem
     let localization: CoreWorldFlowCopyFile = parse_json(&localization_bytes, "items.en-US.json")?;
     let hashes = source_hashes(&records_bytes, &assets_bytes, &localization_bytes)?;
     validate_source_hashes(&target, &hashes)?;
-    validate_item_assets(&records, &assets)?;
+    validate_item_assets(root, &records, &assets)?;
     validate_item_localization(&records, &localization)?;
     let mut compiled = compile_production_item_catalog(&target, &records)?;
     compiled.hashes = hashes;
@@ -160,6 +160,7 @@ fn validate_source_hashes(
 }
 
 fn validate_item_assets(
+    content_root: &Path,
     records: &ProductionItemRecords,
     manifest: &ProductionItemAssetManifest,
 ) -> Result<()> {
@@ -171,12 +172,43 @@ fn validate_item_assets(
     }
     for (item, asset) in records.items.iter().zip(&manifest.assets) {
         let expected = format!("icon.{}", item.header.id);
+        let source_path = Path::new(&asset.source_path);
+        if source_path.is_absolute()
+            || asset.source_path.contains('\\')
+            || asset.source_path.split('/').any(|segment| segment == "..")
+        {
+            bail!("Core item icon source path is not normalized");
+        }
+        let source_bytes = fs::read(content_root.join("..").join(source_path))
+            .with_context(|| format!("missing Core item icon source `{}`", asset.source_path))?;
+        let actual_source_hash = blake3::hash(&source_bytes).to_hex().to_string();
         if asset.kind != ProductionItemAssetKind::ItemIcon
             || asset.source_record_id != item.header.id
             || asset.asset_id.as_str() != expected
             || item.header.asset_ids.as_slice() != [asset.asset_id.clone()]
+            || asset.source_blake3 != actual_source_hash
+            || asset.runtime_bundle.as_str() != "bundle.core.items"
+            || asset.content_dependencies.as_slice() != [item.header.id.clone()]
+            || asset.anchor.x_pixels != 32
+            || asset.anchor.y_pixels != 32
+            || asset.dimensions.width_pixels != 64
+            || asset.dimensions.height_pixels != 64
+            || asset.animation_fps != 0
+            || asset.collision_metadata_reference.is_some()
+            || asset.readability_tags.is_empty()
+            || !strictly_sorted_unique(asset.readability_tags.iter().map(String::as_str))
+            || asset.audio_priority.is_some()
+            || asset.memory_budget_bytes != 64 * 64 * 4
+            || asset
+                .platform_variants
+                .get("svg_symbol")
+                .is_none_or(String::is_empty)
+            || asset.license_source_record.trim().is_empty()
         {
-            bail!("Core item icon closure failed for `{}`", item.header.id);
+            bail!(
+                "Core item icon closure failed for `{}`; actual source hash is {actual_source_hash}",
+                item.header.id
+            );
         }
     }
     Ok(())
@@ -1389,11 +1421,11 @@ mod tests {
         assert_eq!(compiled.stage_policies().len(), 1);
         assert_eq!(
             compiled.hashes().manifest_blake3,
-            "3f1cb2c0e0638ea41b787b28fee4d108351fd6489da126359636a1f6c564519e"
+            "27818db710b7553520a162f6f8337dcd0419c459d20c6513a7e12c78fed24ebb"
         );
         assert_eq!(
             compiled.revision_label(),
-            "core-dev.blake3.3f1cb2c0e0638ea41b787b28fee4d108351fd6489da126359636a1f6c564519e"
+            "core-dev.blake3.27818db710b7553520a162f6f8337dcd0419c459d20c6513a7e12c78fed24ebb"
         );
         assert_eq!(
             compiled
@@ -1433,11 +1465,11 @@ mod tests {
             serde_json::from_slice(&fs::read(core.join("items.assets.json")).unwrap()).unwrap();
         let copy: CoreWorldFlowCopyFile =
             serde_json::from_slice(&fs::read(core.join("items.en-US.json")).unwrap()).unwrap();
-        validate_item_assets(&records, &assets).unwrap();
+        validate_item_assets(&content_root(), &records, &assets).unwrap();
         validate_item_localization(&records, &copy).unwrap();
 
         assets.assets.swap(0, 1);
-        assert!(validate_item_assets(&records, &assets).is_err());
+        assert!(validate_item_assets(&content_root(), &records, &assets).is_err());
 
         let target: ProductionItemDevelopmentTarget =
             serde_json::from_slice(&fs::read(core.join("items.json")).unwrap()).unwrap();

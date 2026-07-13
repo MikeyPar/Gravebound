@@ -3,6 +3,8 @@
 //! These types are intentionally parallel to the immutable First Playable prototype schemas.
 //! Rarity and rolled affixes belong to item instances, never shared templates.
 
+use std::collections::BTreeMap;
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -56,6 +58,33 @@ pub struct ProductionItemAssetRecord {
     pub asset_id: ContentId,
     pub source_record_id: ContentId,
     pub kind: ProductionItemAssetKind,
+    pub source_path: String,
+    pub source_blake3: String,
+    pub runtime_bundle: ContentId,
+    pub content_dependencies: Vec<ContentId>,
+    pub anchor: ProductionAssetPoint,
+    pub dimensions: ProductionAssetDimensions,
+    pub animation_fps: u16,
+    pub collision_metadata_reference: Option<ContentId>,
+    pub readability_tags: Vec<String>,
+    pub audio_priority: Option<u8>,
+    pub memory_budget_bytes: u32,
+    pub platform_variants: BTreeMap<String, String>,
+    pub license_source_record: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProductionAssetPoint {
+    pub x_pixels: u16,
+    pub y_pixels: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProductionAssetDimensions {
+    pub width_pixels: u16,
+    pub height_pixels: u16,
 }
 
 /// Exact derived icon-reference closure for a production item subset.

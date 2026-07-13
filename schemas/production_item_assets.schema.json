@@ -26,6 +26,50 @@
       "description": "Stable dot-separated content identifier.",
       "type": "string"
     },
+    "ProductionAssetDimensions": {
+      "type": "object",
+      "properties": {
+        "height_pixels": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "width_pixels": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "width_pixels",
+        "height_pixels"
+      ]
+    },
+    "ProductionAssetPoint": {
+      "type": "object",
+      "properties": {
+        "x_pixels": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "y_pixels": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "x_pixels",
+        "y_pixels"
+      ]
+    },
     "ProductionItemAssetKind": {
       "type": "string",
       "enum": [
@@ -35,11 +79,77 @@
     "ProductionItemAssetRecord": {
       "type": "object",
       "properties": {
+        "anchor": {
+          "$ref": "#/$defs/ProductionAssetPoint"
+        },
+        "animation_fps": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
         "asset_id": {
           "$ref": "#/$defs/ContentId"
         },
+        "audio_priority": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        },
+        "collision_metadata_reference": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContentId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "content_dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContentId"
+          }
+        },
+        "dimensions": {
+          "$ref": "#/$defs/ProductionAssetDimensions"
+        },
         "kind": {
           "$ref": "#/$defs/ProductionItemAssetKind"
+        },
+        "license_source_record": {
+          "type": "string"
+        },
+        "memory_budget_bytes": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "platform_variants": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "readability_tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "runtime_bundle": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "source_blake3": {
+          "type": "string"
+        },
+        "source_path": {
+          "type": "string"
         },
         "source_record_id": {
           "$ref": "#/$defs/ContentId"
@@ -49,7 +159,18 @@
       "required": [
         "asset_id",
         "source_record_id",
-        "kind"
+        "kind",
+        "source_path",
+        "source_blake3",
+        "runtime_bundle",
+        "content_dependencies",
+        "anchor",
+        "dimensions",
+        "animation_fps",
+        "readability_tags",
+        "memory_budget_bytes",
+        "platform_variants",
+        "license_source_record"
       ]
     }
   }
