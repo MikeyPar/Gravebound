@@ -6,6 +6,7 @@ use sqlx::Row;
 
 use crate::{
     PersistenceError, PostgresPersistence, StoredCharacterLifeEvent, WIPEABLE_CORE_NAMESPACE,
+    bargain_events::encode_bargain_declined,
 };
 
 const ID_BYTES: usize = 16;
@@ -556,7 +557,22 @@ async fn persist_refusal(
     state: &BargainDecisionTransactionState,
     result: &StoredBargainDecisionResult,
 ) -> Result<(), PersistenceError> {
-    update_offer(connection, &result.account_id, &state.offer).await
+    update_offer(connection, &result.account_id, &state.offer).await?;
+    let payload = encode_bargain_declined(result, &state.offer)?;
+    sqlx::query(
+        "INSERT INTO character_life_outbox (namespace_id, account_id, character_id, event_id, \
+         event_type, aggregate_version, event_payload) \
+         VALUES ($1, $2, $3, $4, 'bargain_declined', $5, $6)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(result.account_id.as_slice())
+    .bind(result.character_id.as_slice())
+    .bind(result.mutation_id.as_slice())
+    .bind(result.post_oath_bargain_version)
+    .bind(payload)
+    .execute(connection)
+    .await?;
+    Ok(())
 }
 
 async fn update_offer(

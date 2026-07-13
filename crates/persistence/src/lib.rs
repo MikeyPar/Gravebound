@@ -14,6 +14,7 @@ use thiserror::Error;
 mod ash_wallet;
 mod bargain;
 mod bargain_cleanup;
+mod bargain_events;
 mod bargain_milestone;
 mod combat_loadout;
 mod danger_checkpoint;
@@ -39,6 +40,10 @@ pub use bargain_cleanup::{
     BARGAIN_LIFE_CLEANUP_EVENT_SCHEMA_VERSION, BargainLifeCleanupCommand,
     BargainLifeCleanupEventBargainV1, BargainLifeCleanupEventV1, BargainLifeCleanupResult,
     BargainLifeEndReason, cleanup_bargains_for_life_end,
+};
+pub use bargain_events::{
+    BARGAIN_DECLINED_EVENT_SCHEMA_VERSION, BARGAIN_OFFER_EVENT_SCHEMA_VERSION,
+    BargainDeclinedEventV1, BargainEventCandidateV1, BargainOfferedEventV1,
 };
 pub use bargain_milestone::{
     CORE_BARGAIN_LAYOUT_ID, CORE_BARGAIN_MILESTONE_ID, CORE_BARGAIN_SOURCE_ID,
@@ -84,7 +89,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 22;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 23;
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -839,6 +844,20 @@ mod tests {
             assert!(
                 !migration.contains(prohibited),
                 "cleanup migration leaked {prohibited}"
+            );
+        }
+    }
+
+    #[test]
+    fn bargain_telemetry_outbox_names_are_exact_and_forward_only() {
+        let migration = include_str!("../../../migrations/0023_bargain_telemetry_outbox.sql");
+        for required in ["bargain_offered", "bargain_declined"] {
+            assert!(migration.contains(required), "migration omitted {required}");
+        }
+        for prohibited in ["DROP TABLE", "TRUNCATE", "JSON", "JSONB"] {
+            assert!(
+                !migration.contains(prohibited),
+                "telemetry migration leaked {prohibited}"
             );
         }
     }

@@ -8,6 +8,7 @@ use crate::{
     ASH_WALLET_CAP, AshMutationCode, AshMutationKind, AshMutationRequest, PersistenceError,
     StoredAshWallet, StoredBargainOffer, WIPEABLE_CORE_NAMESPACE,
     ash_wallet::apply_ash_mutation_on_connection, bargain::validate_offer,
+    bargain_events::encode_bargain_offered,
 };
 
 const ID_BYTES: usize = 16;
@@ -143,6 +144,10 @@ pub(crate) async fn persist_bargain_milestone(
     }
     if let Some(offer) = &staged.offer {
         insert_offer(connection, binding.account_id, binding.character_id, offer).await?;
+        if offer.offer_state == OPEN_OFFER_STATE {
+            insert_offered_event(connection, binding.account_id, binding.character_id, offer)
+                .await?;
+        }
     }
     if let Some(request) = &staged.ash_request {
         let outcome = apply_ash_mutation_on_connection(connection, request).await?;
@@ -151,6 +156,29 @@ pub(crate) async fn persist_bargain_milestone(
         }
     }
     insert_milestone_result(connection, &staged.result).await
+}
+
+async fn insert_offered_event(
+    connection: &mut sqlx::PgConnection,
+    account_id: &[u8; ID_BYTES],
+    character_id: &[u8; ID_BYTES],
+    offer: &StoredBargainOffer,
+) -> Result<(), PersistenceError> {
+    let payload = encode_bargain_offered(offer)?;
+    sqlx::query(
+        "INSERT INTO character_life_outbox (namespace_id, account_id, character_id, event_id, \
+         event_type, aggregate_version, event_payload) \
+         VALUES ($1, $2, $3, $4, 'bargain_offered', $5, $6)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
+    .bind(offer.offer_id.as_slice())
+    .bind(offer.created_oath_bargain_version)
+    .bind(payload)
+    .execute(connection)
+    .await?;
+    Ok(())
 }
 
 async fn insert_offer(
