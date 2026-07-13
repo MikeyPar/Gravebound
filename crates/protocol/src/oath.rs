@@ -215,7 +215,7 @@ impl InitialOathSelectionResult {
         if all_zero(&self.mutation_id) {
             return Err(OathValidationError::ZeroMutationId);
         }
-        if self.code == OathResultCode::Available || self.code == OathResultCode::LevelRequired {
+        if self.code == OathResultCode::Available {
             return Err(OathValidationError::ResultShapeMismatch);
         }
         if self.code == OathResultCode::Accepted

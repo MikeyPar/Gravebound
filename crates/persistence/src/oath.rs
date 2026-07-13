@@ -62,6 +62,52 @@ pub enum OathSelectionTransaction<T> {
 }
 
 impl PostgresPersistence {
+    /// Reads one owned character's Oath eligibility projection without mutation locks.
+    pub async fn oath_selection_snapshot(
+        &self,
+        account_id: [u8; ID_BYTES],
+        character_id: [u8; ID_BYTES],
+    ) -> Result<Option<StoredOathCharacter>, PersistenceError> {
+        if all_zero(&account_id) || all_zero(&character_id) {
+            return Err(PersistenceError::CorruptStoredOath);
+        }
+        let mut transaction = self.begin_transaction().await?;
+        let selected = sqlx::query_scalar::<_, Option<Vec<u8>>>(
+            "SELECT selected_character_id FROM accounts \
+             WHERE namespace_id = $1 AND account_id = $2",
+        )
+        .bind(WIPEABLE_CORE_NAMESPACE)
+        .bind(account_id.as_slice())
+        .fetch_optional(transaction.connection())
+        .await
+        .map_err(PersistenceError::Database)?
+        .flatten()
+        .map(fixed_bytes)
+        .transpose()?;
+        let row = sqlx::query(
+            "SELECT p.level, c.life_state, c.security_state, c.character_state_version, \
+                    c.oath_id, l.character_version AS location_character_version, \
+                    l.location_kind, l.location_content_id \
+             FROM characters c \
+             JOIN character_progression p USING (namespace_id, account_id, character_id) \
+             JOIN character_world_locations l USING (namespace_id, account_id, character_id) \
+             WHERE c.namespace_id = $1 AND c.account_id = $2 AND c.character_id = $3",
+        )
+        .bind(WIPEABLE_CORE_NAMESPACE)
+        .bind(account_id.as_slice())
+        .bind(character_id.as_slice())
+        .fetch_optional(transaction.connection())
+        .await
+        .map_err(PersistenceError::Database)?;
+        transaction.rollback().await?;
+        row.map(|value| {
+            let character = decode_character(&value, selected)?;
+            validate_character(&character)?;
+            Ok(character)
+        })
+        .transpose()
+    }
+
     /// Applies one initial-Oath mutation or returns its exact prior result.
     ///
     /// Lock order is account -> replay receipt -> character -> progression -> location. A replay

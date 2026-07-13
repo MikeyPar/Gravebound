@@ -7,6 +7,7 @@
 mod identity;
 mod instance;
 mod lifecycle;
+mod oath_selection;
 mod progression_award;
 mod progression_query;
 mod progression_service;
@@ -33,6 +34,7 @@ pub use lifecycle::{
     DirectoryTickOutput, LINK_LOST_TICKS, LifecycleError, LifecycleResponse, LogicalSessionId,
     ManagedSession, SessionDirectory, SessionOwnerId, SessionPhase, TransportId,
 };
+pub use oath_selection::PostgresOathSelectionService;
 pub use progression_award::{
     CoreProgressionRules, ProgressionAwardCode, ProgressionAwardCommand, ProgressionAwardContext,
     ProgressionAwardError, ProgressionAwardEvidence, ProgressionAwardOutcome,
