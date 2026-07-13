@@ -48,4 +48,4 @@ Approved `SPEC-CONFLICT-008` and `SPEC-CONFLICT-011` provide the exact Bell Debt
 
 ## Remaining ownership
 
-The 50-Ash Bargain purge and later 40-Ash Oath changes are not part of the roadmap's first-shrine deliverable and remain fail closed. Non-Arbalist Oaths, later milestone schedules, Core promotion, normal-route admission, unresolved rolled-affix combat, complete death/memorial/Echo/successor behavior, and telemetry export/redaction remain with their explicit roadmap packages. The next active handoff is `GB-M03-03B` composite danger-entry and PostgreSQL closure.
+The 50-Ash Bargain purge and later 40-Ash Oath changes are not part of the roadmap's first-shrine deliverable and remain fail closed. Non-Arbalist Oaths, later milestone schedules, Core promotion, normal-route admission, unresolved rolled-affix combat, complete death/memorial/Echo/successor behavior, and telemetry export/redaction remain with their explicit roadmap packages. `GB-M03-03B` subsequently closed the composite danger-entry foundation; the active world-flow handoff is `GB-M03-03C` deterministic scripted interaction/lifecycle trace and completion evidence.

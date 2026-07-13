@@ -4,7 +4,7 @@ Gravebound is a server-authoritative, permanent-death, 2D dark-fantasy bullet-he
 
 Every character life is temporary. The account remembers what happened, and exceptional deaths can return as personalized Fallen Hero Echo encounters. The design emphasizes readable combat, rapid recovery, fair monetization, solo viability, and long-term replayability without permanent account-level combat power.
 
-> **Project status:** M01 and M02 are closed under their recorded gates. `GB-M03-01`, `GB-M03-02A`, `GB-M03-02B`, `GB-M03-03A`, and `GB-M03-11` now pass: the Core Grave Arbalist identity is native, server-authoritative, and durable, and exact Hall/private-microrealm content compiles in the explicitly wipeable, unpromoted namespace. Parent `GB-M03-02` remains open for item/vault, memorial/death, and ledger aggregates; world routing, progression, permanent death, recovery, telemetry, and operations packages also remain open.
+> **Project status:** M01 and M02 are closed under their recorded gates. M03 identity, PostgreSQL foundations, exact world-flow content, atomic dormant transfers, progression through durable reward placement, the complete first Oath/Bargain package, and the minimal Ash wallet pass under their recorded audits. Parent `GB-M03-02`, `03`, and `04` remain open alongside permanent death, successor recovery, extraction/Recall, telemetry, support, Echo, platform, and final private-loop gates.
 
 ![Bell Sepulcher gameplay concept](Concept%20Art/01-bell-sepulcher-gameplay.png)
 
@@ -102,7 +102,7 @@ Concept images establish mood, hierarchy, and visual language. They are not fina
 
 ## Current Next Step
 
-`GB-M03-04A`, `GB-M03-04D`, [`GB-M03-05`](docs/milestones/GB-M03-05-audit.md), and `GB-M03-12` are complete with authorized PostgreSQL concurrency/restart evidence and completion audits. Finish `GB-M03-03B` with the remaining composite danger-entry providers and PostgreSQL closure evidence. Continue `GB-M03-04E`/`04F` and the approved `SPEC-CONFLICT-009` death foundation as their item/location dependencies become ready. Keep 50-Ash purge, paid Oath change, Core promotion, the normal player route, and affected Hall stations fail closed until their owning gates pass.
+[`GB-M03-03B`](docs/milestones/GB-M03-03B-audit.md) closes the atomic, restart-safe dormant danger-entry foundation. `GB-M03-03C` now has exact Hall/private-microrealm simulation plus inspected native standard/reduced-motion presentation; complete its deterministic scripted interaction/lifecycle trace and audit next, then continue the approved `03D`-`03F` route slices. Continue `GB-M03-04E`-`04G` and the approved `SPEC-CONFLICT-009` death foundation as their dependencies become ready. Keep 50-Ash purge, paid Oath change, Core promotion, Character Select `Play`, Realm Gate admission, the normal player route, and affected Hall stations fail closed until their owning gates pass.
 
 ## Resolved prior handoff
 
