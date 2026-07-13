@@ -230,18 +230,54 @@ impl PostgresPersistence {
         reward_event_id: [u8; ID_BYTES],
         boss_id: Option<&str>,
         contract: &StoredProgressionContract,
-        operation: F,
+        mut operation: F,
     ) -> Result<ProgressionAwardTransaction<T>, PersistenceError>
     where
         T: Send,
-        F: FnOnce(&mut ProgressionAwardTransactionState) -> Result<T, PersistenceError> + Send,
+        F: FnMut(&mut ProgressionAwardTransactionState) -> Result<T, PersistenceError> + Send,
     {
+        const MAX_SERIALIZATION_ATTEMPTS: u8 = 3;
+
         validate_nonzero_id(&reward_event_id)?;
         validate_contract(contract)?;
         if let Some(boss_id) = boss_id {
             validate_bounded_id(boss_id)?;
         }
 
+        for attempt in 1..=MAX_SERIALIZATION_ATTEMPTS {
+            match self
+                .transact_progression_award_once(
+                    account_id,
+                    character_id,
+                    reward_event_id,
+                    boss_id,
+                    contract,
+                    &mut operation,
+                )
+                .await
+            {
+                Err(error)
+                    if attempt < MAX_SERIALIZATION_ATTEMPTS
+                        && crate::is_serialization_failure(&error) => {}
+                result => return result,
+            }
+        }
+        unreachable!("bounded progression transaction loop always returns")
+    }
+
+    async fn transact_progression_award_once<T, F>(
+        &self,
+        account_id: [u8; ID_BYTES],
+        character_id: [u8; ID_BYTES],
+        reward_event_id: [u8; ID_BYTES],
+        boss_id: Option<&str>,
+        contract: &StoredProgressionContract,
+        operation: &mut F,
+    ) -> Result<ProgressionAwardTransaction<T>, PersistenceError>
+    where
+        T: Send,
+        F: FnMut(&mut ProgressionAwardTransactionState) -> Result<T, PersistenceError> + Send,
+    {
         let mut transaction = self.begin_transaction().await?;
         let selected_character_id = lock_account(transaction.connection(), &account_id).await?;
         if let Some(existing) = load_award_result(
