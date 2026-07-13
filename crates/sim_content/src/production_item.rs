@@ -87,6 +87,26 @@ pub fn compile_core_crossbow(
     item_level: u8,
     resolved_attack_interval_micros: u32,
 ) -> Result<WeaponDefinition> {
+    compile_core_crossbow_for_item(
+        catalog,
+        content_id,
+        item_level,
+        EquipmentRarity::Forged,
+        0,
+        resolved_attack_interval_micros,
+    )
+}
+
+/// Compiles an exact persisted Core crossbow, including its durable rarity and resolved weapon-W
+/// affix contribution. Cadence remains independently resolved before this final tick boundary.
+pub fn compile_core_crossbow_for_item(
+    catalog: &CompiledProductionItemCatalog,
+    content_id: &str,
+    item_level: u8,
+    rarity: EquipmentRarity,
+    weapon_w_affix_basis_points: u16,
+    resolved_attack_interval_micros: u32,
+) -> Result<WeaponDefinition> {
     let item = catalog
         .items
         .get(content_id)
@@ -139,8 +159,8 @@ pub fn compile_core_crossbow(
         raw_damage: resolve_crossbow_weapon_power(CrossbowPowerRequest {
             item_level,
             template_damage_scalar_basis_points: *template_damage_scalar_basis_points,
-            rarity: EquipmentRarity::Forged,
-            weapon_w_affix_basis_points: 0,
+            rarity,
+            weapon_w_affix_basis_points,
         })?,
         attack_interval_ticks: interval_ticks,
         range_milli_tiles: *range_milli_tiles,

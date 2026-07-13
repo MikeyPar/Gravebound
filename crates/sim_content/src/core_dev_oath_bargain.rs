@@ -10,13 +10,13 @@ use content_schema::{
 };
 use serde::{Deserialize, Serialize};
 use sim_core::{
-    GraveArbalistOath, GraveMarkDefinition, ResolvedArbalistOathStats, SlipstepDefinition,
-    StillnessDefinition, WeaponDefinition, duration_ms_to_ticks_nearest,
+    EquipmentRarity, GraveArbalistOath, GraveMarkDefinition, ResolvedArbalistOathStats,
+    SlipstepDefinition, StillnessDefinition, WeaponDefinition, duration_ms_to_ticks_nearest,
     resolve_arbalist_oath_stats,
 };
 
 use crate::{
-    CompiledProductionItemCatalog, ContentPackage, compile_core_crossbow,
+    CompiledProductionItemCatalog, ContentPackage, compile_core_crossbow_for_item,
     core_crossbow_attack_interval_micros, first_playable_grave_mark, first_playable_slipstep,
     first_playable_stillness,
 };
@@ -151,6 +151,31 @@ pub fn compile_core_oathed_combat_definitions(
     item_level: u8,
     ordinary_attack_rate_basis_points: u32,
 ) -> Result<CoreOathedCombatDefinitions> {
+    compile_core_oathed_combat_definitions_for_item(
+        class_package,
+        item_catalog,
+        oath_catalog,
+        oath_id,
+        weapon_id,
+        item_level,
+        EquipmentRarity::Forged,
+        0,
+        ordinary_attack_rate_basis_points,
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // Exact persisted item and modifier axes are intentionally explicit.
+pub fn compile_core_oathed_combat_definitions_for_item(
+    class_package: &ContentPackage,
+    item_catalog: &CompiledProductionItemCatalog,
+    oath_catalog: &CompiledOathBargainCatalog,
+    oath_id: &str,
+    weapon_id: &str,
+    item_level: u8,
+    rarity: EquipmentRarity,
+    weapon_w_affix_basis_points: u16,
+    ordinary_attack_rate_basis_points: u32,
+) -> Result<CoreOathedCombatDefinitions> {
     let base_mark = first_playable_grave_mark(class_package)?;
     let base_stillness = first_playable_stillness(class_package)?;
     let base_interval = core_crossbow_attack_interval_micros(item_catalog, weapon_id)?;
@@ -167,10 +192,12 @@ pub fn compile_core_oathed_combat_definitions(
         GraveArbalistOath::from_content_id(oath_id).map_err(|error| anyhow::anyhow!(error))?;
     Ok(CoreOathedCombatDefinitions {
         oath,
-        weapon: compile_core_crossbow(
+        weapon: compile_core_crossbow_for_item(
             item_catalog,
             weapon_id,
             item_level,
+            rarity,
+            weapon_w_affix_basis_points,
             stats.primary_interval_micros,
         )?,
         grave_mark: base_mark

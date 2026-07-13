@@ -4,6 +4,7 @@
 //! `sim_core`. It must not own rendering, client settings, gameplay rules, or persistence logic.
 //! M02 deliberately has no database dependency.
 
+mod combat_factory;
 mod ground_expiry;
 mod identity;
 mod instance;
@@ -22,6 +23,10 @@ mod starter_items;
 mod world_flow_coordinator;
 mod world_flow_gate;
 
+pub use combat_factory::{
+    CoreCharacterCombat, CoreCharacterCombatCompiler, CoreCharacterCombatFactory,
+    CoreCombatFactoryError,
+};
 pub use ground_expiry::{GROUND_EXPIRY_CONTEXT, GroundExpiryError, PostgresGroundExpiryService};
 pub use identity::{
     AccountAggregate, AccountId, AccountRepository, AccountRepositoryError, AuthenticatedAccount,

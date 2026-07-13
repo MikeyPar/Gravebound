@@ -19,10 +19,11 @@ use protocol::{
 };
 use server_app::{
     AccountId, AuthenticatedAccount, AuthenticatedNamespace, BoundCoreIdentityServer,
-    CharacterIdGenerator, CoreIdentityServerConfig, CoreIdentityServerReport, IdentityClock,
-    IdentityService, LOCAL_SERVER_NAME, LocalServerRuntimeError, NoopIdentityEventSink,
-    PostgresAccountRepository, PostgresGroundExpiryService, PostgresRewardService,
-    RewardGrantContext, RewardGrantTransaction, RewardPlacement, SecretRewardEpoch,
+    CharacterIdGenerator, CoreCharacterCombatFactory, CoreIdentityServerConfig,
+    CoreIdentityServerReport, IdentityClock, IdentityService, LOCAL_SERVER_NAME,
+    LocalServerRuntimeError, NoopIdentityEventSink, PostgresAccountRepository,
+    PostgresGroundExpiryService, PostgresRewardService, RewardGrantContext, RewardGrantTransaction,
+    RewardPlacement, SecretRewardEpoch,
 };
 use tokio::sync::oneshot;
 
@@ -536,6 +537,25 @@ async fn assert_persistent_oath_route(
         .await
         .unwrap();
     assert_eq!(replayed, selected);
+    assert_persisted_combat_factory(persistence, content_root, ticket, character_id).await;
+}
+
+async fn assert_persisted_combat_factory(
+    persistence: &PostgresPersistence,
+    content_root: &Path,
+    ticket: &[u8],
+    character_id: [u8; 16],
+) {
+    let hash = blake3::hash(ticket);
+    let account_id = <[u8; 16]>::try_from(&hash.as_bytes()[..16]).unwrap();
+    let factory = CoreCharacterCombatFactory::load(persistence.clone(), content_root).unwrap();
+    let combat = factory.build(account_id, character_id).await.unwrap();
+    assert_eq!(
+        combat.state.oath(),
+        Some(sim_core::GraveArbalistOath::LongVigil)
+    );
+    assert_eq!(combat.maximum_health_multiplier_basis_points, 9_000);
+    assert_eq!(combat.level, 10);
 }
 
 async fn assert_persisted_oath_view(
@@ -812,6 +832,7 @@ async fn postgres_real_quic_server_restart_preserves_authoritative_roster() {
     };
     assert_eq!(restored.characters.len(), 1);
     assert_persisted_oath_view(&connection, &content_root, character_id).await;
+    assert_persisted_combat_factory(&persistence, &content_root, ticket, character_id).await;
     connection.close(0_u32.into(), b"complete");
     shutdown.send(()).unwrap();
     assert!(task.await.unwrap().unwrap().persistence_enabled);
