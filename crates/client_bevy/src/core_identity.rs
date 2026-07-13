@@ -11,7 +11,11 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use bevy::{
-    app::AppExit, prelude::*, render::view::screenshot::Screenshot, window::WindowResolution,
+    app::AppExit,
+    input::mouse::{MouseScrollUnit, MouseWheel},
+    prelude::*,
+    render::view::screenshot::Screenshot,
+    window::WindowResolution,
 };
 use protocol::{
     AccountBootstrapResult, AccountErrorCode, AccountSnapshot, AuthTicket,
@@ -240,6 +244,9 @@ struct CoreOathText;
 #[derive(Component)]
 struct CoreBargainText;
 
+#[derive(Debug, Component)]
+struct CoreScrollRoot;
+
 #[derive(Debug, Clone, Resource)]
 struct CoreOathUiCopy(OathUiCopy);
 
@@ -372,6 +379,7 @@ pub fn run_core_identity(config: CoreIdentityConfig) -> Result<()> {
                 handle_core_buttons,
                 handle_oath_buttons,
                 handle_bargain_buttons,
+                scroll_core_identity,
                 automate_core_evidence,
                 update_core_identity_ui,
             )
@@ -671,6 +679,49 @@ fn handle_bargain_buttons(
     }
 }
 
+#[allow(clippy::needless_pass_by_value)] // Bevy system parameters are wrapper values.
+fn scroll_core_identity(
+    mut wheel: MessageReader<MouseWheel>,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    gamepads: Query<&Gamepad>,
+    mut root: Single<(&mut ScrollPosition, &ComputedNode), With<CoreScrollRoot>>,
+) {
+    const LINE_SCROLL: f32 = 42.0;
+    const PAGE_SCROLL: f32 = 360.0;
+
+    let mut delta = wheel
+        .read()
+        .map(|event| match event.unit {
+            MouseScrollUnit::Line => -event.y * LINE_SCROLL,
+            MouseScrollUnit::Pixel => -event.y,
+        })
+        .sum::<f32>();
+    if keyboard.just_pressed(KeyCode::PageDown)
+        || gamepads
+            .iter()
+            .any(|gamepad| gamepad.just_pressed(GamepadButton::RightTrigger))
+    {
+        delta += PAGE_SCROLL;
+    }
+    if keyboard.just_pressed(KeyCode::PageUp)
+        || gamepads
+            .iter()
+            .any(|gamepad| gamepad.just_pressed(GamepadButton::LeftTrigger))
+    {
+        delta -= PAGE_SCROLL;
+    }
+    let (scroll, computed) = &mut *root;
+    let max_offset = ((computed.content_size() - computed.size())
+        * computed.inverse_scale_factor())
+    .y
+    .max(0.0);
+    scroll.y = clamped_scroll_y(scroll.y, delta, max_offset);
+}
+
+fn clamped_scroll_y(current: f32, delta: f32, max_offset: f32) -> f32 {
+    (current + delta).clamp(0.0, max_offset.max(0.0))
+}
+
 fn submit_bargain_action(
     action: BargainUiAction,
     bridge: &CoreNetworkBridge,
@@ -906,8 +957,11 @@ fn spawn_core_identity_ui(mut commands: Commands, copy: Res<CoreUiCopy>) {
                 padding: UiRect::all(px(24)),
                 flex_direction: FlexDirection::Column,
                 row_gap: px(14),
+                overflow: Overflow::scroll_y(),
                 ..default()
             },
+            ScrollPosition::default(),
+            CoreScrollRoot,
             BackgroundColor(Color::srgb_u8(6, 8, 12)),
         ))
         .with_children(|root| {
@@ -924,6 +978,11 @@ fn spawn_core_identity_ui(mut commands: Commands, copy: Res<CoreUiCopy>) {
                 TextFont::from_font_size(16.0),
                 TextColor(Color::srgb_u8(151, 208, 201)),
                 CoreStatusText,
+            ));
+            root.spawn((
+                Text::new("SCROLL  MOUSE WHEEL / PAGE UP-DOWN / CONTROLLER LT-RT"),
+                TextFont::from_font_size(12.0),
+                TextColor(Color::srgb_u8(139, 151, 151)),
             ));
             spawn_progression_hud(root);
             spawn_oath_panel(root);
@@ -1609,5 +1668,14 @@ mod tests {
         assert!(rendered.contains("Crossbow - Fire one narrow bolt"));
         assert!(!rendered.contains('{'));
         assert!(!rendered.contains('}'));
+    }
+
+    #[test]
+    fn responsive_scroll_is_bounded_at_both_ends() {
+        let exact = |actual: f32, expected: f32| (actual - expected).abs() < f32::EPSILON;
+        assert!(exact(clamped_scroll_y(0.0, 360.0, 800.0), 360.0));
+        assert!(exact(clamped_scroll_y(360.0, 900.0, 800.0), 800.0));
+        assert!(exact(clamped_scroll_y(360.0, -900.0, 800.0), 0.0));
+        assert!(exact(clamped_scroll_y(100.0, 100.0, -1.0), 0.0));
     }
 }

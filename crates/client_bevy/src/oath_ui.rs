@@ -209,14 +209,14 @@ impl OathUiModel {
     pub(crate) fn render(&self, copy: &OathUiCopy) -> String {
         if let Some(error) = self.error {
             return format!(
-                "OATH SHRINE — {}\n{}",
+                "OATH SHRINE - {}\n{}",
                 error_label(error),
                 "No permanent choice was committed. Retry after the listed condition is resolved."
             );
         }
         let Some(projection) = &self.projection else {
             return if self.requested_character_id.is_some() {
-                "OATH SHRINE\nLoading authoritative Oath eligibility…".to_owned()
+                "OATH SHRINE\nLoading authoritative Oath eligibility...".to_owned()
             } else {
                 "OATH SHRINE\nSelect a living character to inspect Oath eligibility.".to_owned()
             };
@@ -226,7 +226,7 @@ impl OathUiModel {
                 current_level,
                 required_level,
             } => {
-                format!("OATH SHRINE — LOCKED\nLevel {current_level} / {required_level} required.")
+                format!("OATH SHRINE - LOCKED\nLevel {current_level} / {required_level} required.")
             }
             OathSelectionState::Eligible { .. } => {
                 if let Some(oath_id) = self.pending_oath_id {
@@ -238,7 +238,7 @@ impl OathUiModel {
                     )
                 } else {
                     format!(
-                        "OATH SHRINE — FIRST SELECTION IS FREE\n\n{}\n{}\n\n{}\n{}\n\nSelect one Oath to review the permanent-life warning before confirmation.",
+                        "OATH SHRINE - FIRST SELECTION IS FREE\n\n{}\n{}\n\n{}\n{}\n\nSelect one Oath to review the permanent-life warning before confirmation.",
                         copy.long_vigil_name,
                         copy.long_vigil_description,
                         copy.nailkeeper_name,
@@ -247,7 +247,7 @@ impl OathUiModel {
                 }
             }
             OathSelectionState::Selected { oath_id, .. } => format!(
-                "OATH BOUND — {}\n{}\n\nLater changes remain unavailable in this Core stage.",
+                "OATH BOUND - {}\n{}\n\nLater changes remain unavailable in this Core stage.",
                 copy.name(oath_id.as_str()),
                 copy.description(oath_id.as_str())
             ),
