@@ -35,6 +35,7 @@ mod production_item;
 mod progression;
 mod readability;
 mod rng;
+mod scene_interaction;
 mod shared_authority;
 mod telemetry;
 mod trace;
@@ -234,6 +235,10 @@ pub use readability::{
     canonical_priority_stack_is_valid, compile_hostile_readability_manifest,
 };
 pub use rng::{DeterministicRng, RngError, derive_stream_seed};
+pub use scene_interaction::{
+    SceneInteractionEvent, SceneInteractionRejection, SceneInteractionSession,
+    SceneInteractionSessionError,
+};
 pub use shared_authority::{
     SHARED_ARENA_MAX_PLAYERS, SHARED_FRIENDLY_PROJECTILE_ID_BASE,
     SHARED_FRIENDLY_PROJECTILE_ID_STRIDE, SharedArenaPlayer, SharedAuthoritativeArena,
