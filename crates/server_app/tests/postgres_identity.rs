@@ -80,6 +80,7 @@ fn service_starting_at(
 
 type TestIdentityService =
     IdentityService<PostgresAccountRepository, FixedClock, SequentialIds, NoopIdentityEventSink>;
+type StarterRow = (Vec<u8>, String, i16, i16, i16, i16, i32);
 
 fn bootstrap() -> AccountBootstrapFrame {
     AccountBootstrapFrame {
@@ -167,6 +168,87 @@ async fn world_flow_row_count(persistence: &PostgresPersistence) -> i64 {
     .unwrap();
     transaction.rollback().await.unwrap();
     count
+}
+
+async fn starter_item_uids(
+    persistence: &PostgresPersistence,
+    account_id: [u8; 16],
+    character_id: [u8; 16],
+) -> Vec<Vec<u8>> {
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let rows: Vec<StarterRow> = sqlx::query_as(
+        "SELECT item_uid, template_id, provenance_kind, salvage_band, location_kind, \
+         slot_index, salvage_value FROM item_instances WHERE namespace_id = $1 \
+         AND account_id = $2 AND character_id = $3 ORDER BY roll_index, unit_ordinal",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
+    .fetch_all(transaction.connection())
+    .await
+    .unwrap();
+    transaction.rollback().await.unwrap();
+    assert_eq!(rows.len(), 4);
+    assert_eq!(rows[0].1, server_app::STARTER_WEAPON_ID);
+    assert_eq!(rows[1].1, server_app::STARTER_RELIC_ID);
+    assert_eq!(rows[2].1, server_app::STARTER_TONIC_ID);
+    assert_eq!(rows[3].1, server_app::STARTER_TONIC_ID);
+    assert_eq!(
+        (rows[0].2, rows[0].3, rows[0].4, rows[0].5, rows[0].6),
+        (0, 0, 0, 0, 0)
+    );
+    assert_eq!(
+        (rows[1].2, rows[1].3, rows[1].4, rows[1].5, rows[1].6),
+        (0, 0, 0, 1, 0)
+    );
+    assert_eq!(
+        (rows[2].2, rows[2].3, rows[2].4, rows[2].5, rows[2].6),
+        (4, 0, 1, 0, 0)
+    );
+    assert_eq!(
+        (rows[3].2, rows[3].3, rows[3].4, rows[3].5, rows[3].6),
+        (4, 0, 1, 0, 0)
+    );
+    rows.into_iter().map(|row| row.0).collect()
+}
+
+async fn remove_starter_fixture(
+    persistence: &PostgresPersistence,
+    account_id: [u8; 16],
+    character_id: [u8; 16],
+) {
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    sqlx::query(
+        "DELETE FROM starter_initializer_results WHERE namespace_id = $1 \
+         AND account_id = $2 AND character_id = $3",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query(
+        "DELETE FROM item_instances WHERE namespace_id = $1 \
+         AND account_id = $2 AND character_id = $3",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE character_inventories SET inventory_version = 1 WHERE namespace_id = $1 \
+         AND account_id = $2 AND character_id = $3",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    transaction.commit().await.unwrap();
 }
 
 async fn assert_persistent_world_flow_is_fail_closed(
@@ -367,11 +449,23 @@ async fn postgres_identity_survives_service_restart_and_replays_exactly_once() {
     );
     let created = first_process.mutate(Some(account(91)), &create).await;
     assert!(created.accepted);
+    let original_starter_uids = starter_item_uids(&persistence, [91; 16], [1; 16]).await;
     assert_eq!(
         first_process.mutate(Some(account(91)), &create).await,
         created
     );
     let character_id = created.snapshot.as_ref().unwrap().characters[0].character_id;
+    remove_starter_fixture(&persistence, [91; 16], character_id).await;
+    let AccountBootstrapResult::Snapshot(_) = first_process
+        .bootstrap(Some(account(91)), &bootstrap())
+        .await
+    else {
+        panic!("existing-character starter backfill must succeed")
+    };
+    assert_eq!(
+        starter_item_uids(&persistence, [91; 16], character_id).await,
+        original_starter_uids
+    );
     let selected = first_process
         .mutate(
             Some(account(91)),

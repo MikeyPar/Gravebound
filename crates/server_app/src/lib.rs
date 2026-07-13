@@ -14,6 +14,7 @@ mod progression_service;
 mod restore_point;
 mod runtime;
 mod session;
+mod starter_items;
 mod world_flow_coordinator;
 mod world_flow_gate;
 
@@ -61,6 +62,10 @@ pub use session::{
     AuthoritativeSession, IngressAnomaly, IngressAnomalyKind, IngressDiagnostics, InputDisposition,
     InputRejection, MAX_CACHED_MUTATIONS, MAX_NEW_MUTATIONS_PER_TICK, MAX_RECENT_INGRESS_ANOMALIES,
     SessionError,
+};
+pub use starter_items::{
+    CORE_ITEM_CONTENT_REVISION, STARTER_RELIC_ID, STARTER_TONIC_ID, STARTER_WEAPON_ID,
+    StarterItemError, StarterItemPlan, initialize_postgres_starter,
 };
 pub use world_flow_coordinator::{
     DormantWorldFlowPlanner, PostgresDormantWorldFlowCoordinator, WorldFlowIdGenerator,

@@ -151,6 +151,12 @@ pub trait AccountRepository: Send + Sync {
         &self,
         character_id: [u8; CHARACTER_ID_BYTES],
     ) -> impl Future<Output = Result<Option<AccountId>, AccountRepositoryError>> + Send;
+
+    fn ensure_starter_items(
+        &self,
+        account_id: AccountId,
+        character_ids: Vec<[u8; CHARACTER_ID_BYTES]>,
+    ) -> impl Future<Output = Result<(), AccountRepositoryError>> + Send;
 }
 
 /// Wipeable adapter. Dropping this value (or restarting the process) destroys every aggregate.
@@ -194,6 +200,14 @@ impl AccountRepository for InMemoryAccountRepository {
                 .any(|character| character.id == character_id)
                 .then_some(*account_id)
         }))
+    }
+
+    async fn ensure_starter_items(
+        &self,
+        _account_id: AccountId,
+        _character_ids: Vec<[u8; CHARACTER_ID_BYTES]>,
+    ) -> Result<(), AccountRepositoryError> {
+        Ok(())
     }
 }
 
@@ -294,6 +308,24 @@ impl AccountRepository for PostgresAccountRepository {
             .await
             .map(|owner| owner.and_then(AccountId::new))
             .map_err(|_| AccountRepositoryError::Unavailable)
+    }
+
+    async fn ensure_starter_items(
+        &self,
+        account_id: AccountId,
+        mut character_ids: Vec<[u8; CHARACTER_ID_BYTES]>,
+    ) -> Result<(), AccountRepositoryError> {
+        character_ids.sort_unstable();
+        for character_id in character_ids {
+            crate::initialize_postgres_starter(
+                &self.persistence,
+                account_id.as_bytes(),
+                character_id,
+            )
+            .await
+            .map_err(|_| AccountRepositoryError::Unavailable)?;
+        }
+        Ok(())
     }
 }
 
@@ -490,6 +522,21 @@ where
             .await
         {
             Ok(snapshot) => {
+                if self
+                    .repository
+                    .ensure_starter_items(
+                        account.account_id,
+                        snapshot
+                            .characters
+                            .iter()
+                            .map(|character| character.character_id)
+                            .collect(),
+                    )
+                    .await
+                    .is_err()
+                {
+                    return AccountBootstrapResult::Error(AccountErrorCode::ServiceUnavailable);
+                }
                 self.events.record(IdentityEvent::AccountBootstrapped);
                 AccountBootstrapResult::Snapshot(snapshot)
             }
@@ -543,9 +590,31 @@ where
                 self.apply_mutation(aggregate, frame, foreign_owner.is_some())
             })
             .await;
-        result.unwrap_or_else(|_| {
+        let result = result.unwrap_or_else(|_| {
             result_without_snapshot(frame.mutation_id, AccountErrorCode::ServiceUnavailable)
-        })
+        });
+        let Some(snapshot) = result.snapshot.as_ref() else {
+            return result;
+        };
+        if self
+            .repository
+            .ensure_starter_items(
+                account.account_id,
+                snapshot
+                    .characters
+                    .iter()
+                    .map(|character| character.character_id)
+                    .collect(),
+            )
+            .await
+            .is_err()
+        {
+            return result_without_snapshot(
+                frame.mutation_id,
+                AccountErrorCode::ServiceUnavailable,
+            );
+        }
+        result
     }
 
     fn authorize(
