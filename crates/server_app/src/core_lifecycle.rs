@@ -603,7 +603,8 @@ mod tests {
     use persistence::{StoredCombatBargain, StoredCoreCombatLoadout, StoredEquippedWeapon};
     use protocol::{BELL_DEBT_ID, GRAVE_ARBALIST_CLASS_ID};
     use sim_core::{
-        ArenaGeometry, CombatAction, ProjectileCollisionWorld, SimulationVector, TilePoint,
+        ArenaGeometry, CombatAction, FriendlyProjectileSource, ProjectileCollisionWorld,
+        SimulationVector, TilePoint,
     };
 
     use super::*;
@@ -782,6 +783,149 @@ mod tests {
         assert_eq!(
             live.combat().state.export_bell_debt_checkpoint().unwrap(),
             before
+        );
+    }
+
+    #[test]
+    fn disconnects_on_four_five_and_pending_plus_one_plus_eight_preserve_cadence() {
+        let key = CoreLifeKey::new([1; 16], [2; 16], [3; 16]).unwrap();
+        let mut directory = CoreLiveDirectory::default();
+        directory
+            .insert(
+                key,
+                CoreLiveBindingId::new(10).unwrap(),
+                "room.bell_approach",
+                checkpoint_binding(),
+                combat(),
+            )
+            .unwrap();
+        let world = empty_world();
+        let held = CombatAction {
+            primary_held: true,
+            primary_press_sequence: 1,
+            ..CombatAction::default()
+        };
+        for _ in 0..49 {
+            directory
+                .get_mut(key)
+                .unwrap()
+                .with_combat_mutation(|combat| {
+                    combat
+                        .state
+                        .step(held, SimulationVector::new(4.0, 7.0), &world)
+                })
+                .unwrap()
+                .unwrap();
+        }
+        assert_eq!(
+            directory
+                .get(key)
+                .unwrap()
+                .combat()
+                .state
+                .bell_primary_release_count(),
+            4
+        );
+        assert!(
+            !directory
+                .get(key)
+                .unwrap()
+                .combat()
+                .state
+                .has_pending_bell_repeat()
+        );
+        directory
+            .reattach(key, CoreLiveBindingId::new(11).unwrap())
+            .unwrap();
+
+        for _ in 0..16 {
+            directory
+                .get_mut(key)
+                .unwrap()
+                .with_combat_mutation(|combat| {
+                    combat
+                        .state
+                        .step(held, SimulationVector::new(4.0, 7.0), &world)
+                })
+                .unwrap()
+                .unwrap();
+        }
+        assert_eq!(
+            directory
+                .get(key)
+                .unwrap()
+                .combat()
+                .state
+                .bell_primary_release_count(),
+            0
+        );
+        assert!(
+            directory
+                .get(key)
+                .unwrap()
+                .combat()
+                .state
+                .has_pending_bell_repeat()
+        );
+        directory
+            .reattach(key, CoreLiveBindingId::new(12).unwrap())
+            .unwrap();
+
+        let idle = CombatAction {
+            primary_press_sequence: 1,
+            ..CombatAction::default()
+        };
+        let mut advance_pending = |ticks: usize, binding_id: u64| {
+            for _ in 0..ticks {
+                let step = directory
+                    .get_mut(key)
+                    .unwrap()
+                    .with_combat_mutation(|combat| {
+                        combat
+                            .state
+                            .step(idle, SimulationVector::new(8.0, 6.0), &world)
+                    })
+                    .unwrap()
+                    .unwrap();
+                assert!(step.shots.is_empty());
+            }
+            assert!(
+                directory
+                    .get(key)
+                    .unwrap()
+                    .combat()
+                    .state
+                    .has_pending_bell_repeat()
+            );
+            directory
+                .reattach(key, CoreLiveBindingId::new(binding_id).unwrap())
+                .unwrap();
+        };
+        advance_pending(1, 13);
+        advance_pending(7, 14);
+        let repeat = directory
+            .get_mut(key)
+            .unwrap()
+            .with_combat_mutation(|combat| {
+                combat
+                    .state
+                    .step(idle, SimulationVector::new(8.0, 6.0), &world)
+            })
+            .unwrap()
+            .unwrap();
+        assert!(!repeat.shots.is_empty());
+        assert!(
+            repeat.shots.iter().all(|shot| {
+                shot.projectile.source() == FriendlyProjectileSource::BellDebtRepeat
+            })
+        );
+        assert!(
+            !directory
+                .get(key)
+                .unwrap()
+                .combat()
+                .state
+                .has_pending_bell_repeat()
         );
     }
 
