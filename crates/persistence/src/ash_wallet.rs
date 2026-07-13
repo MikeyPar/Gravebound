@@ -128,7 +128,7 @@ impl PostgresPersistence {
             match self.transact_ash_mutation_once(request).await {
                 Err(error)
                     if attempt < MAX_SERIALIZATION_ATTEMPTS
-                        && crate::is_serialization_failure(&error) => {}
+                        && crate::is_retryable_transaction_failure(&error) => {}
                 result => return result,
             }
         }

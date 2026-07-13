@@ -39,7 +39,37 @@ impl PostgresPersistence {
         result_hash: [u8; 32],
         items: &[StoredStarterItem],
     ) -> Result<StoredStarterInitialization, PersistenceError> {
+        const MAX_TRANSACTION_ATTEMPTS: u8 = 3;
+
         validate_initializer_input(request_hash, result_hash, items)?;
+        for attempt in 1..=MAX_TRANSACTION_ATTEMPTS {
+            match self
+                .initialize_starter_items_once(
+                    account_id,
+                    character_id,
+                    request_hash,
+                    result_hash,
+                    items,
+                )
+                .await
+            {
+                Err(error)
+                    if attempt < MAX_TRANSACTION_ATTEMPTS
+                        && crate::is_retryable_transaction_failure(&error) => {}
+                result => return result,
+            }
+        }
+        unreachable!("bounded starter-item transaction loop always returns")
+    }
+
+    async fn initialize_starter_items_once(
+        &self,
+        account_id: [u8; 16],
+        character_id: [u8; 16],
+        request_hash: [u8; 32],
+        result_hash: [u8; 32],
+        items: &[StoredStarterItem],
+    ) -> Result<StoredStarterInitialization, PersistenceError> {
         let mut transaction = self.begin_transaction().await?;
         let inventory_version =
             lock_or_create_inventory(transaction.connection(), account_id, character_id).await?;

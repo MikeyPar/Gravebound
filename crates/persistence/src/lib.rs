@@ -240,12 +240,21 @@ pub enum PersistenceError {
     RewardPlanningFailed,
 }
 
-pub(crate) fn is_serialization_failure(error: &PersistenceError) -> bool {
+/// Returns whether `PostgreSQL` explicitly permits the complete transaction to be retried.
+///
+/// Both serialization failures and deadlock victims are safe to replay from the transaction
+/// boundary. Retrying only `40001` leaves otherwise-correct concurrent writers dependent on
+/// which participant `PostgreSQL` selects as the `40P01` deadlock victim.
+pub(crate) fn is_retryable_transaction_failure(error: &PersistenceError) -> bool {
     matches!(
         error,
         PersistenceError::Database(sqlx::Error::Database(database))
-            if database.code().as_deref() == Some("40001")
+            if database.code().as_deref().is_some_and(is_retryable_postgres_code)
     )
+}
+
+const fn is_retryable_postgres_code(code: &str) -> bool {
+    matches!(code.as_bytes(), b"40001" | b"40P01")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -438,6 +447,15 @@ mod tests {
             config.validate().unwrap_err(),
             PersistenceConfigError::ZeroConnections
         );
+    }
+
+    #[test]
+    fn transaction_retry_policy_is_narrow_and_covers_deadlock_victims() {
+        assert!(is_retryable_postgres_code("40001"));
+        assert!(is_retryable_postgres_code("40P01"));
+        for terminal_code in ["23505", "23503", "08006", "57014"] {
+            assert!(!is_retryable_postgres_code(terminal_code));
+        }
     }
 
     #[test]
