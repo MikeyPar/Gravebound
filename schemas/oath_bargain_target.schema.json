@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "OathBargainDevelopmentTarget",
+  "type": "object",
+  "properties": {
+    "expected_assets_blake3": {
+      "type": "string"
+    },
+    "expected_localization_blake3": {
+      "type": "string"
+    },
+    "expected_manifest_blake3": {
+      "type": "string"
+    },
+    "expected_records_blake3": {
+      "type": "string"
+    },
+    "required_bargain_ids": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ContentId"
+      }
+    },
+    "required_oath_ids": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ContentId"
+      }
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "target_kind": {
+      "$ref": "#/$defs/OathBargainTargetKind"
+    },
+    "target_name": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "target_kind",
+    "target_name",
+    "required_oath_ids",
+    "required_bargain_ids",
+    "expected_manifest_blake3",
+    "expected_records_blake3",
+    "expected_assets_blake3",
+    "expected_localization_blake3"
+  ],
+  "$defs": {
+    "ContentId": {
+      "description": "Stable dot-separated content identifier.",
+      "type": "string"
+    },
+    "OathBargainTargetKind": {
+      "type": "string",
+      "enum": [
+        "unpromoted_oath_bargain_subset"
+      ]
+    }
+  }
+}

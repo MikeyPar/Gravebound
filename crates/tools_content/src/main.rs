@@ -243,6 +243,11 @@ fn generate_schemas_command(output: &std::path::Path) -> Result<()> {
         output,
         "production_item_assets.schema.json",
     )?;
+    write_schema::<content_schema::OathBargainDevelopmentTarget>(
+        output,
+        "oath_bargain_target.schema.json",
+    )?;
+    write_schema::<content_schema::OathBargainRecords>(output, "oath_bargain_records.schema.json")?;
     info!(output = %output.display(), "JSON schemas generated");
     Ok(())
 }

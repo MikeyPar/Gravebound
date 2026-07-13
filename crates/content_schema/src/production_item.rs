@@ -50,6 +50,7 @@ pub struct ProductionItemRecords {
 #[serde(rename_all = "snake_case")]
 pub enum ProductionItemAssetKind {
     ItemIcon,
+    ChoiceIcon,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

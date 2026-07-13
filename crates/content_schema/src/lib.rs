@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 mod production_item;
+mod production_oath_bargain;
 pub use production_item::*;
+pub use production_oath_bargain::*;
 
 /// Initial schema version named by `CONT-001`.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -1189,6 +1191,29 @@ mod tests {
             serde_json::from_value::<ProductionItemTemplateRecord>(prototype).is_err(),
             "First Playable item payload must not deserialize as a production template"
         );
+    }
+
+    #[test]
+    fn checked_in_oath_bargain_schemas_match_strict_contracts() {
+        let schema_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../schemas");
+        let cases = [
+            (
+                "oath_bargain_target.schema.json",
+                serde_json::to_value(schemars::schema_for!(OathBargainDevelopmentTarget))
+                    .expect("serializable Oath/Bargain target schema"),
+            ),
+            (
+                "oath_bargain_records.schema.json",
+                serde_json::to_value(schemars::schema_for!(OathBargainRecords))
+                    .expect("serializable Oath/Bargain records schema"),
+            ),
+        ];
+        for (name, generated) in cases {
+            let text = fs::read_to_string(schema_root.join(name)).expect("checked-in schema");
+            let checked_in: serde_json::Value =
+                serde_json::from_str(&text).expect("valid checked-in schema");
+            assert_eq!(checked_in, generated, "schema drift in {name}");
+        }
     }
 
     #[test]

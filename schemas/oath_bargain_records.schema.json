@@ -1,0 +1,472 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "OathBargainRecords",
+  "type": "object",
+  "properties": {
+    "bargains": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/BargainRecord"
+      }
+    },
+    "oaths": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/OathRecord"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "oaths",
+    "bargains"
+  ],
+  "$defs": {
+    "BargainBehavior": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "bargain_kind": {
+              "type": "string",
+              "const": "cinder_hunger"
+            },
+            "maximum_health_multiplier_basis_points": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            },
+            "outgoing_direct_damage_multiplier_basis_points": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "bargain_kind",
+            "outgoing_direct_damage_multiplier_basis_points",
+            "maximum_health_multiplier_basis_points"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "accepted_primary_emissions_per_repeat": {
+              "type": "integer",
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0
+            },
+            "bargain_kind": {
+              "type": "string",
+              "const": "bell_debt"
+            },
+            "cancel_pending_repeat_when_dead_transferred_or_primary_illegal": {
+              "type": "boolean"
+            },
+            "counter_persists_reconnect_and_room_change": {
+              "type": "boolean"
+            },
+            "counter_resets_on_acquisition_purge_death_retirement_or_safe_transfer": {
+              "type": "boolean"
+            },
+            "counts_legal_misses": {
+              "type": "boolean"
+            },
+            "generated_repeats_advance_counter": {
+              "type": "boolean"
+            },
+            "primary_attack_rate_multiplier_basis_points": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            },
+            "repeat_damage_multiplier_basis_points": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            },
+            "repeat_delay_millis": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "repeat_is_recursive": {
+              "type": "boolean"
+            },
+            "repeat_spends_cooldown_or_resource": {
+              "type": "boolean"
+            },
+            "snapshots_aim_and_resolved_behavior": {
+              "type": "boolean"
+            },
+            "uses_live_origin_at_repeat": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "bargain_kind",
+            "accepted_primary_emissions_per_repeat",
+            "repeat_delay_millis",
+            "repeat_damage_multiplier_basis_points",
+            "primary_attack_rate_multiplier_basis_points",
+            "counts_legal_misses",
+            "generated_repeats_advance_counter",
+            "snapshots_aim_and_resolved_behavior",
+            "uses_live_origin_at_repeat",
+            "repeat_is_recursive",
+            "repeat_spends_cooldown_or_resource",
+            "counter_persists_reconnect_and_room_change",
+            "counter_resets_on_acquisition_purge_death_retirement_or_safe_transfer",
+            "cancel_pending_repeat_when_dead_transferred_or_primary_illegal"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "active_belt_index": {
+              "type": "integer",
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0
+            },
+            "active_belt_slot_count": {
+              "type": "integer",
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0
+            },
+            "bargain_kind": {
+              "type": "string",
+              "const": "lantern_ash"
+            },
+            "inactive_slot_remains_stored_visible_locked": {
+              "type": "boolean"
+            },
+            "potion_healing_multiplier_basis_points": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "bargain_kind",
+            "potion_healing_multiplier_basis_points",
+            "active_belt_slot_count",
+            "active_belt_index",
+            "inactive_slot_remains_stored_visible_locked"
+          ]
+        }
+      ]
+    },
+    "BargainRecord": {
+      "description": "Metadata shared by unpromoted Core world-flow records.",
+      "type": "object",
+      "properties": {
+        "asset_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContentId"
+          }
+        },
+        "behavior": {
+          "$ref": "#/$defs/BargainBehavior"
+        },
+        "earliest_release_stage": {
+          "$ref": "#/$defs/ReleaseStage"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "localization_description_key": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "localization_name_key": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "maximum_active_per_character": {
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        },
+        "resolution_step": {
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "source_document_feature_id": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "schema_version",
+        "enabled",
+        "earliest_release_stage",
+        "localization_name_key",
+        "localization_description_key",
+        "asset_ids",
+        "tags",
+        "source_document_feature_id",
+        "maximum_active_per_character",
+        "resolution_step",
+        "behavior"
+      ]
+    },
+    "ContentId": {
+      "description": "Stable dot-separated content identifier.",
+      "type": "string"
+    },
+    "OathBehavior": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "focused_activation_millis": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "grave_mark_primary_bonus_basis_points": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            },
+            "grave_mark_range_bonus_milli_tiles": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "maximum_health_multiplier_basis_points": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            },
+            "oath_kind": {
+              "type": "string",
+              "const": "long_vigil"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "oath_kind",
+            "focused_activation_millis",
+            "grave_mark_range_bonus_milli_tiles",
+            "grave_mark_primary_bonus_basis_points",
+            "maximum_health_multiplier_basis_points"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "arm_delay_millis": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "consumes_on_first_legal_enemy_entry": {
+              "type": "boolean"
+            },
+            "create_on_enemy_impact": {
+              "type": "boolean"
+            },
+            "create_on_solid_impact": {
+              "type": "boolean"
+            },
+            "direct_damage_coefficient_basis_points": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            },
+            "enemy_impact_applies_grave_mark_first": {
+              "type": "boolean"
+            },
+            "frostbind_duration_millis": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "lifetime_millis": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "maximum_live_traps": {
+              "type": "integer",
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0
+            },
+            "oath_kind": {
+              "type": "string",
+              "const": "nailkeeper"
+            },
+            "overflow_order": {
+              "$ref": "#/$defs/OathTrapOverflowOrder"
+            },
+            "primary_attack_rate_multiplier_basis_points": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            },
+            "requires_exit_after_arming_for_existing_occupants": {
+              "type": "boolean"
+            },
+            "snapshots_weapon_power_at_creation": {
+              "type": "boolean"
+            },
+            "solid_impact_applies_grave_mark": {
+              "type": "boolean"
+            },
+            "trap_radius_milli_tiles": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "oath_kind",
+            "trap_radius_milli_tiles",
+            "arm_delay_millis",
+            "lifetime_millis",
+            "direct_damage_coefficient_basis_points",
+            "frostbind_duration_millis",
+            "maximum_live_traps",
+            "primary_attack_rate_multiplier_basis_points",
+            "create_on_enemy_impact",
+            "create_on_solid_impact",
+            "enemy_impact_applies_grave_mark_first",
+            "solid_impact_applies_grave_mark",
+            "requires_exit_after_arming_for_existing_occupants",
+            "consumes_on_first_legal_enemy_entry",
+            "snapshots_weapon_power_at_creation",
+            "overflow_order"
+          ]
+        }
+      ]
+    },
+    "OathRecord": {
+      "description": "Metadata shared by unpromoted Core world-flow records.",
+      "type": "object",
+      "properties": {
+        "asset_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContentId"
+          }
+        },
+        "behavior": {
+          "$ref": "#/$defs/OathBehavior"
+        },
+        "class_id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "earliest_release_stage": {
+          "$ref": "#/$defs/ReleaseStage"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "localization_description_key": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "localization_name_key": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "resolution_step": {
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "source_document_feature_id": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "unlock_level": {
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "schema_version",
+        "enabled",
+        "earliest_release_stage",
+        "localization_name_key",
+        "localization_description_key",
+        "asset_ids",
+        "tags",
+        "source_document_feature_id",
+        "class_id",
+        "unlock_level",
+        "resolution_step",
+        "behavior"
+      ]
+    },
+    "OathTrapOverflowOrder": {
+      "type": "string",
+      "enum": [
+        "created_tick_then_entity_id"
+      ]
+    },
+    "ReleaseStage": {
+      "description": "Earliest release stage that may enable a record.",
+      "type": "string",
+      "enum": [
+        "fp",
+        "core",
+        "slice",
+        "alpha",
+        "playtest",
+        "ea"
+      ]
+    }
+  }
+}

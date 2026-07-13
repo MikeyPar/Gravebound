@@ -73,7 +73,8 @@
     "ProductionItemAssetKind": {
       "type": "string",
       "enum": [
-        "item_icon"
+        "item_icon",
+        "choice_icon"
       ]
     },
     "ProductionItemAssetRecord": {
