@@ -10,9 +10,10 @@ use protocol::{
 };
 use server_app::{
     AccountId, AuthenticatedAccount, AuthenticatedNamespace, BeltStackV1, CrashRestoreContext,
-    EntryCaptureContext, EntryRestoreProvider, IdentityClock, InventorySecurityRestoreV1,
-    OathBargainRestoreV1, PostgresDormantWorldFlowCoordinator, PostgresProgressionRestoreProvider,
-    RestorePointError, WorldFlowIdGenerator,
+    DangerEntrySnapshotV1, EntryCaptureContext, EntryRestoreProvider, IdentityClock,
+    InventorySecurityRestoreV1, OathBargainRestoreV1, PostgresDormantWorldFlowCoordinator,
+    PostgresProgressionRestoreProvider, ProgressionRestoreV1, RestorePointError,
+    SafeAggregateVersionsV1, WorldFlowIdGenerator,
 };
 
 const ACCOUNT_ID: [u8; 16] = [81; 16];
@@ -364,6 +365,123 @@ async fn aggregate_counts(persistence: &PostgresPersistence) -> (i64, i64, i64, 
     counts
 }
 
+#[derive(Debug, sqlx::FromRow)]
+struct StoredRootProjection {
+    content_id: String,
+    layout_id: String,
+    source_location_id: String,
+    records_blake3: String,
+    assets_blake3: String,
+    localization_blake3: String,
+    account_version: i64,
+    character_version: i64,
+    progression_version: i64,
+    inventory_version: i64,
+    oath_bargain_version: i64,
+    component_mask: i16,
+    composite_digest: Vec<u8>,
+}
+
+async fn assert_committed_danger_root(persistence: &PostgresPersistence) {
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let root = sqlx::query_as::<_, StoredRootProjection>(
+        "SELECT l.content_id, l.layout_id, r.source_location_id, r.records_blake3, \
+                r.assets_blake3, r.localization_blake3, r.account_version, \
+                r.character_version, r.progression_version, r.inventory_version, \
+                r.oath_bargain_version, r.component_mask, r.composite_digest \
+         FROM character_instance_lineages l JOIN character_entry_restore_points r \
+         USING (namespace_id, account_id, character_id, lineage_id) \
+         WHERE l.namespace_id = $1 AND l.account_id = $2 AND l.character_id = $3",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(CHARACTER_ID.as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    transaction.rollback().await.unwrap();
+    assert_eq!(root.content_id, WORLD_ID);
+    assert_eq!(root.layout_id, LAYOUT_ID);
+    assert_eq!(root.source_location_id, HALL_ID);
+    let required_revision = revision();
+    assert_eq!(
+        root.records_blake3,
+        required_revision.records_blake3.as_str()
+    );
+    assert_eq!(root.assets_blake3, required_revision.assets_blake3.as_str());
+    assert_eq!(
+        root.localization_blake3,
+        required_revision.localization_blake3.as_str()
+    );
+    assert_eq!(
+        (
+            root.account_version,
+            root.character_version,
+            root.progression_version,
+            root.inventory_version,
+            root.oath_bargain_version,
+            root.component_mask,
+        ),
+        (1, 1, 1, 1, 1, 7)
+    );
+    assert_eq!(root.composite_digest, expected_snapshot(required_revision));
+    assert!(matches!(
+        persistence
+            .world_location(ACCOUNT_ID, CHARACTER_ID)
+            .await
+            .unwrap(),
+        Some(persistence::StoredWorldLocation::Danger {
+            character_version: 2,
+            location_content_id,
+            instance_lineage_id: LINEAGE_ID,
+            entry_restore_point_id: RESTORE_ID,
+        }) if location_content_id == WORLD_ID
+    ));
+}
+
+fn expected_snapshot(revision: WorldFlowContentRevisionV1) -> Vec<u8> {
+    DangerEntrySnapshotV1 {
+        character_id: CHARACTER_ID,
+        content_revision: revision,
+        progression: ProgressionRestoreV1 {
+            level: 1,
+            xp: 0,
+            current_health: 120,
+            progression_version: 1,
+        },
+        inventory: InventorySecurityRestoreV1 {
+            equipment: [None; 4],
+            belt: [
+                BeltStackV1 {
+                    consumable_id: None,
+                    unit_uids: vec![],
+                },
+                BeltStackV1 {
+                    consumable_id: None,
+                    unit_uids: vec![],
+                },
+            ],
+            inventory_version: 1,
+        },
+        oath_bargains: OathBargainRestoreV1 {
+            oath_id: None,
+            active_bargain_ids: vec![],
+            earned_bargain_slots: 0,
+            oath_bargain_version: 1,
+        },
+        versions: SafeAggregateVersionsV1 {
+            account_version: 1,
+            character_version: 1,
+            progression_version: 1,
+            inventory_version: 1,
+            oath_bargain_version: 1,
+        },
+    }
+    .composite_digest()
+    .unwrap()
+    .to_vec()
+}
+
 #[tokio::test]
 #[ignore = "requires explicitly authorized disposable PostgreSQL"]
 async fn danger_entry_commits_complete_root_and_replays_after_pool_restart() {
@@ -375,41 +493,7 @@ async fn danger_entry_commits_complete_root_and_replays_after_pool_restart() {
     assert_eq!(code(&accepted), WorldTransferResultCode::Accepted);
     assert_eq!(aggregate_counts(&persistence).await, (1, 1, 1, 1));
 
-    let mut transaction = persistence.begin_transaction().await.unwrap();
-    let root: (
-        String,
-        String,
-        String,
-        i64,
-        i64,
-        i64,
-        i64,
-        i64,
-        i16,
-        Vec<u8>,
-    ) = sqlx::query_as(
-        "SELECT l.content_id, l.layout_id, r.source_location_id, r.account_version, \
-                    r.character_version, r.progression_version, r.inventory_version, \
-                    r.oath_bargain_version, r.component_mask, r.composite_digest \
-             FROM character_instance_lineages l JOIN character_entry_restore_points r \
-             USING (namespace_id, account_id, character_id, lineage_id) \
-             WHERE l.namespace_id = $1 AND l.account_id = $2 AND l.character_id = $3",
-    )
-    .bind(WIPEABLE_CORE_NAMESPACE)
-    .bind(ACCOUNT_ID.as_slice())
-    .bind(CHARACTER_ID.as_slice())
-    .fetch_one(transaction.connection())
-    .await
-    .unwrap();
-    assert_eq!(root.0, WORLD_ID);
-    assert_eq!(root.1, LAYOUT_ID);
-    assert_eq!(root.2, HALL_ID);
-    assert_eq!(
-        (root.3, root.4, root.5, root.6, root.7, root.8),
-        (1, 1, 1, 1, 1, 7)
-    );
-    assert_eq!(root.9.len(), 32);
-    transaction.rollback().await.unwrap();
+    assert_committed_danger_root(&persistence).await;
 
     drop(service);
     persistence.close().await;
