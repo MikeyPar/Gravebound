@@ -229,6 +229,7 @@ fn validate_exact_core_reward_closure(catalog: &CompiledProductionItemCatalog) -
     if catalog.items.len() != 18 || equipment_count != 17 || consumable_count != 1 {
         bail!("Core item catalog must contain exactly 17 equipment templates and one consumable");
     }
+    validate_shared_red_tonic(catalog)?;
     require_exact_core_reward_payloads(catalog)?;
     let mut reachable = BTreeSet::new();
     for table in catalog.reward_tables.values() {
@@ -293,6 +294,32 @@ fn validate_exact_core_reward_closure(catalog: &CompiledProductionItemCatalog) -
         .collect::<BTreeSet<_>>();
     if reachable != equipment_ids {
         bail!("not every Core equipment template is reachable from an authored reward source");
+    }
+    Ok(())
+}
+
+fn validate_shared_red_tonic(catalog: &CompiledProductionItemCatalog) -> Result<()> {
+    let tonic = catalog
+        .items
+        .get("consumable.red_tonic")
+        .context("Core catalog is missing the shared Red Tonic")?;
+    if tonic.header.earliest_release_stage != content_schema::ReleaseStage::Fp
+        || tonic.header.tags != ["belt", "consumable", "item"]
+        || !matches!(
+            tonic.payload,
+            ProductionItemTemplatePayload::Consumable {
+                stack_cap: 6,
+                behavior: content_schema::ProductionConsumableBehavior::RedTonic {
+                    restore_maximum_health_basis_points: 3_000,
+                    restore_duration_millis: 400,
+                    shared_cooldown_millis: 2_000,
+                    damage_interrupts_restore: false,
+                    consumed_on_use: true,
+                },
+            }
+        )
+    {
+        bail!("Core Red Tonic differs from its stable First Playable lineage");
     }
     Ok(())
 }
@@ -1362,11 +1389,11 @@ mod tests {
         assert_eq!(compiled.stage_policies().len(), 1);
         assert_eq!(
             compiled.hashes().manifest_blake3,
-            "8c340462c1ac7d3339d892bb35f34d0ffe5f662eb7221a232c06f24ea8f5959c"
+            "3f1cb2c0e0638ea41b787b28fee4d108351fd6489da126359636a1f6c564519e"
         );
         assert_eq!(
             compiled.revision_label(),
-            "core-dev.blake3.8c340462c1ac7d3339d892bb35f34d0ffe5f662eb7221a232c06f24ea8f5959c"
+            "core-dev.blake3.3f1cb2c0e0638ea41b787b28fee4d108351fd6489da126359636a1f6c564519e"
         );
         assert_eq!(
             compiled

@@ -1,9 +1,9 @@
 {
   "items": [
     {
-      "id": "consumable.red_tonic", "schema_version": 1, "enabled": true, "earliest_release_stage": "core",
+      "id": "consumable.red_tonic", "schema_version": 1, "enabled": true, "earliest_release_stage": "fp",
       "localization_name_key": "consumable.red_tonic.name", "localization_description_key": "consumable.red_tonic.description",
-      "asset_ids": ["icon.consumable.red_tonic"], "tags": ["consumable", "item"], "source_document_feature_id": "LOOT-032",
+      "asset_ids": ["icon.consumable.red_tonic"], "tags": ["belt", "consumable", "item"], "source_document_feature_id": "LOOT-032",
       "payload": {"item_kind": "consumable", "stack_cap": 6, "behavior": {"effect_kind": "red_tonic", "restore_maximum_health_basis_points": 3000, "restore_duration_millis": 400, "shared_cooldown_millis": 2000, "damage_interrupts_restore": false, "consumed_on_use": true}}
     },
     {
