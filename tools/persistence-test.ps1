@@ -20,6 +20,14 @@ function Invoke-PersistenceTests {
     if ($LASTEXITCODE -ne 0) {
         throw "PostgreSQL identity tests failed with exit code $LASTEXITCODE"
     }
+    & cargo test --locked -p server_app --test postgres_progression_restore -- --ignored --test-threads=1
+    if ($LASTEXITCODE -ne 0) {
+        throw "PostgreSQL progression restore tests failed with exit code $LASTEXITCODE"
+    }
+    & cargo test --locked -p server_app --test postgres_ash_wallet -- --ignored --test-threads=1
+    if ($LASTEXITCODE -ne 0) {
+        throw "PostgreSQL Ash wallet tests failed with exit code $LASTEXITCODE"
+    }
 }
 
 try {
