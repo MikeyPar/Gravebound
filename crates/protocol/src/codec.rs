@@ -23,6 +23,8 @@ pub fn encode_m02_compatibility_frame(message: &WireMessage) -> Result<Vec<u8>, 
             | MessageKind::ProgressionQueryFrame
             | MessageKind::OathViewFrame
             | MessageKind::InitialOathSelectionFrame
+            | MessageKind::BargainViewFrame
+            | MessageKind::BargainDecisionFrame
     ) {
         return Err(WireCodecError::MessageUnavailableAtVersion);
     }
@@ -122,6 +124,8 @@ const fn message_kind_byte(kind: MessageKind) -> u8 {
         MessageKind::ProgressionQueryFrame => 12,
         MessageKind::OathViewFrame => 13,
         MessageKind::InitialOathSelectionFrame => 14,
+        MessageKind::BargainViewFrame => 15,
+        MessageKind::BargainDecisionFrame => 16,
     }
 }
 
@@ -141,6 +145,8 @@ const fn message_kind_from_byte(value: u8) -> Result<MessageKind, WireCodecError
         12 => Ok(MessageKind::ProgressionQueryFrame),
         13 => Ok(MessageKind::OathViewFrame),
         14 => Ok(MessageKind::InitialOathSelectionFrame),
+        15 => Ok(MessageKind::BargainViewFrame),
+        16 => Ok(MessageKind::BargainDecisionFrame),
         other => Err(WireCodecError::UnknownMessageKind(other)),
     }
 }
@@ -202,7 +208,7 @@ mod tests {
         assert_eq!(decode_frame(&frame).unwrap(), input_message());
         assert_eq!(
             blake3::hash(&frame).to_hex().to_string(),
-            "a6ef4e3a46b3715814f4322a39c13fab60e5ed0dc3cbac3ff1ac94b305f1ac9d"
+            "98eb4f38b3982dd27d9859b3e85780f4f90336e1589200ba62c7b2893af748e6"
         );
         let m02 = encode_m02_compatibility_frame(&input_message()).unwrap();
         assert_eq!(
@@ -345,6 +351,45 @@ mod tests {
         assert_eq!(decode_frame(&frame), Ok(selection.clone()));
         assert_eq!(
             encode_m02_compatibility_frame(&selection),
+            Err(WireCodecError::MessageUnavailableAtVersion)
+        );
+    }
+
+    #[test]
+    fn protocol_1_10_appends_bounded_bargain_control_and_mutation_kinds() {
+        let revision = crate::BargainContentRevisionV1 {
+            records_blake3: ManifestHash::new("1".repeat(64)).unwrap(),
+            assets_blake3: ManifestHash::new("2".repeat(64)).unwrap(),
+            localization_blake3: ManifestHash::new("3".repeat(64)).unwrap(),
+        };
+        let view = WireMessage::BargainViewFrame(crate::BargainViewFrame {
+            sequence: 11,
+            character_id: [5; 16],
+            content_revision: revision.clone(),
+        });
+        let frame = encode_frame(&view).unwrap();
+        assert_eq!(frame[8], 15);
+        assert_eq!(decode_frame(&frame), Ok(view));
+
+        let payload = crate::BargainDecisionPayload {
+            character_id: [5; 16],
+            offer_id: [6; 16],
+            decision: crate::BargainDecision::Refuse,
+            content_revision: revision,
+            confirmed: true,
+        };
+        let decision = WireMessage::BargainDecisionFrame(crate::BargainDecisionFrame {
+            mutation_id: [7; 16],
+            expected_oath_bargain_version: 2,
+            payload_hash: payload.canonical_hash(),
+            issued_at_unix_millis: 1,
+            payload,
+        });
+        let frame = encode_frame(&decision).unwrap();
+        assert_eq!(frame[8], 16);
+        assert_eq!(decode_frame(&frame), Ok(decision.clone()));
+        assert_eq!(
+            encode_m02_compatibility_frame(&decision),
             Err(WireCodecError::MessageUnavailableAtVersion)
         );
     }

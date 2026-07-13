@@ -5,6 +5,7 @@
 //! or persistence. `GB-M02-01` supplies the bounded handshake, gameplay envelopes, and codec.
 
 mod account;
+mod bargain;
 mod bounded;
 mod codec;
 mod handshake;
@@ -20,6 +21,14 @@ pub use account::{
     CharacterMutationPayload, CharacterMutationResult, CharacterSecurityState, CharacterSnapshot,
     GRAVE_ARBALIST_CLASS_ID, MAX_ACCOUNT_CHARACTERS, MAX_CORE_CHARACTER_LEVEL, MUTATION_ID_BYTES,
     PAYLOAD_HASH_BYTES,
+};
+pub use bargain::{
+    BARGAIN_CHARACTER_ID_BYTES, BARGAIN_ID_BYTES, BARGAIN_MUTATION_ID_BYTES,
+    BARGAIN_OFFER_ID_BYTES, BARGAIN_PAYLOAD_HASH_BYTES, BELL_DEBT_ID, BargainContentRevisionV1,
+    BargainDecision, BargainDecisionFrame, BargainDecisionPayload, BargainDecisionResult,
+    BargainOfferCell, BargainOfferProjection, BargainOfferState, BargainProjection,
+    BargainResultCode, BargainStatComparison, BargainValidationError, BargainViewFrame,
+    BargainViewResult, CINDER_HUNGER_ID, LANTERN_ASH_ID,
 };
 pub use bounded::{AuthTicket, BoundedValueError, ManifestHash, WireText};
 pub use codec::{
@@ -61,7 +70,9 @@ use thiserror::Error;
 /// First incompatible protocol generation.
 pub const PROTOCOL_MAJOR: u16 = 1;
 /// Backward-compatible feature generation within [`PROTOCOL_MAJOR`].
-pub const PROTOCOL_MINOR: u16 = 9;
+pub const PROTOCOL_MINOR: u16 = 10;
+/// Exact Oath generation retained while Bargain messages are appended.
+pub const OATH_PROTOCOL_MINOR: u16 = 9;
 /// Exact progression projection generation retained while Oath messages are appended.
 pub const PROGRESSION_PROTOCOL_MINOR: u16 = 8;
 /// Exact world-flow generation retained while progression projection is appended.

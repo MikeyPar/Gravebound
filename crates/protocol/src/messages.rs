@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    AccountBootstrapFrame, AccountBootstrapResult, CharacterMutationFrame, CharacterMutationResult,
+    AccountBootstrapFrame, AccountBootstrapResult, BargainDecisionFrame, BargainDecisionResult,
+    BargainViewFrame, BargainViewResult, CharacterMutationFrame, CharacterMutationResult,
     ClientHello, HandshakeResponse, InitialOathSelectionFrame, InitialOathSelectionResult,
     NetworkChannel, OathViewFrame, OathViewResult, ProgressionQueryFrame, ProgressionResult,
     WireText, WorldFlowFrame, WorldFlowResult,
@@ -35,6 +36,8 @@ pub enum MessageKind {
     ProgressionQueryFrame,
     OathViewFrame,
     InitialOathSelectionFrame,
+    BargainViewFrame,
+    BargainDecisionFrame,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -434,6 +437,8 @@ pub enum ReliableEvent {
     ProgressionResult(ProgressionResult),
     OathViewResult(OathViewResult),
     InitialOathSelectionResult(InitialOathSelectionResult),
+    BargainViewResult(BargainViewResult),
+    BargainDecisionResult(BargainDecisionResult),
 }
 
 impl ReliableEvent {
@@ -444,12 +449,14 @@ impl ReliableEvent {
             Self::PatternStarted(_) => NetworkChannel::Pattern,
             Self::MutationResult(_)
             | Self::CharacterMutationResult(_)
-            | Self::InitialOathSelectionResult(_) => NetworkChannel::Mutation,
+            | Self::InitialOathSelectionResult(_)
+            | Self::BargainDecisionResult(_) => NetworkChannel::Mutation,
             Self::Control(_)
             | Self::AccountBootstrapResult(_)
             | Self::WorldFlowResult(_)
             | Self::ProgressionResult(_)
-            | Self::OathViewResult(_) => NetworkChannel::Control,
+            | Self::OathViewResult(_)
+            | Self::BargainViewResult(_) => NetworkChannel::Control,
             Self::SocialPing { .. } => NetworkChannel::Social,
         }
     }
@@ -482,6 +489,12 @@ impl ReliableEvent {
             Self::InitialOathSelectionResult(result) => {
                 result.validate().map_err(|_| MessageValidationError::Oath)
             }
+            Self::BargainViewResult(result) => result
+                .validate()
+                .map_err(|_| MessageValidationError::Bargain),
+            Self::BargainDecisionResult(result) => result
+                .validate()
+                .map_err(|_| MessageValidationError::Bargain),
             _ => Ok(()),
         }
     }
@@ -520,6 +533,8 @@ pub enum WireMessage {
     ProgressionQueryFrame(ProgressionQueryFrame),
     OathViewFrame(OathViewFrame),
     InitialOathSelectionFrame(InitialOathSelectionFrame),
+    BargainViewFrame(BargainViewFrame),
+    BargainDecisionFrame(BargainDecisionFrame),
 }
 
 impl WireMessage {
@@ -540,6 +555,8 @@ impl WireMessage {
             Self::ProgressionQueryFrame(_) => MessageKind::ProgressionQueryFrame,
             Self::OathViewFrame(_) => MessageKind::OathViewFrame,
             Self::InitialOathSelectionFrame(_) => MessageKind::InitialOathSelectionFrame,
+            Self::BargainViewFrame(_) => MessageKind::BargainViewFrame,
+            Self::BargainDecisionFrame(_) => MessageKind::BargainDecisionFrame,
         }
     }
 
@@ -552,14 +569,16 @@ impl WireMessage {
             | Self::AccountBootstrapFrame(_)
             | Self::WorldFlowFrame(_)
             | Self::ProgressionQueryFrame(_)
-            | Self::OathViewFrame(_) => NetworkChannel::Control,
+            | Self::OathViewFrame(_)
+            | Self::BargainViewFrame(_) => NetworkChannel::Control,
             Self::InputFrame(_) => NetworkChannel::Input,
             Self::ActionFrame(_) => NetworkChannel::Action,
             Self::SnapshotChunk(_) => NetworkChannel::Snapshot,
             Self::ReliableEvent(frame) => frame.event.channel(),
             Self::MutationRequest(_)
             | Self::CharacterMutationFrame(_)
-            | Self::InitialOathSelectionFrame(_) => NetworkChannel::Mutation,
+            | Self::InitialOathSelectionFrame(_)
+            | Self::BargainDecisionFrame(_) => NetworkChannel::Mutation,
         }
     }
 
@@ -600,6 +619,12 @@ impl WireMessage {
             Self::InitialOathSelectionFrame(value) => {
                 value.validate().map_err(|_| MessageValidationError::Oath)
             }
+            Self::BargainViewFrame(value) => value
+                .validate()
+                .map_err(|_| MessageValidationError::Bargain),
+            Self::BargainDecisionFrame(value) => value
+                .validate()
+                .map_err(|_| MessageValidationError::Bargain),
         }
     }
 }
@@ -614,6 +639,8 @@ pub enum MessageValidationError {
     Progression,
     #[error("oath message failed semantic validation")]
     Oath,
+    #[error("Bargain message failed semantic validation")]
+    Bargain,
     #[error("message sequence must be nonzero")]
     ZeroSequence,
     #[error("fixed-point vector component must remain within -1000..=1000")]
