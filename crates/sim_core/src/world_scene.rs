@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -68,6 +68,148 @@ pub struct WorldRoad {
     pub points: Vec<TilePoint>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SceneDisplacement {
+    pub x_milli_tiles: i32,
+    pub y_milli_tiles: i32,
+}
+
+impl SceneDisplacement {
+    #[must_use]
+    pub const fn new(x_milli_tiles: i32, y_milli_tiles: i32) -> Self {
+        Self {
+            x_milli_tiles,
+            y_milli_tiles,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SceneAccessContext<'a> {
+    pub enabled_integration_gates: &'a BTreeSet<String>,
+    pub microrealm_cleared: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SceneInteractionAccess {
+    Available,
+    StageDisabled,
+    ConditionUnmet,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SceneInteractionProjection {
+    pub object_id: String,
+    pub hold_ticks: u16,
+    pub access: SceneInteractionAccess,
+    pub distance_squared_milli_tiles: i128,
+}
+
+/// Player-owned fixed-point navigation state for one immutable scene definition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorldScenePlayer {
+    scene_id: String,
+    position: TilePoint,
+    maximum_step_milli_tiles: i32,
+}
+
+impl WorldScenePlayer {
+    pub fn new(
+        scene: &WorldSceneDefinition,
+        position: TilePoint,
+        maximum_step_milli_tiles: i32,
+    ) -> Result<Self, WorldSceneError> {
+        if maximum_step_milli_tiles <= 0 {
+            return Err(WorldSceneError::InvalidMovementStep);
+        }
+        if !scene.can_occupy(position) {
+            return Err(WorldSceneError::BlockedPlayerSpawn);
+        }
+        Ok(Self {
+            scene_id: scene.id.clone(),
+            position,
+            maximum_step_milli_tiles,
+        })
+    }
+
+    #[must_use]
+    pub const fn position(&self) -> TilePoint {
+        self.position
+    }
+
+    pub fn step_movement(
+        &mut self,
+        scene: &WorldSceneDefinition,
+        displacement: SceneDisplacement,
+    ) -> Result<TilePoint, WorldSceneError> {
+        self.require_scene(scene)?;
+        let dx = i64::from(displacement.x_milli_tiles);
+        let dy = i64::from(displacement.y_milli_tiles);
+        let maximum = i64::from(self.maximum_step_milli_tiles);
+        if dx * dx + dy * dy > maximum * maximum {
+            return Err(WorldSceneError::MovementStepExceeded);
+        }
+        let horizontal = TilePoint::new(
+            self.position
+                .x_milli_tiles
+                .checked_add(displacement.x_milli_tiles)
+                .ok_or(WorldSceneError::Overflow)?,
+            self.position.y_milli_tiles,
+        );
+        if scene.can_occupy(horizontal) {
+            self.position = horizontal;
+        }
+        let vertical = TilePoint::new(
+            self.position.x_milli_tiles,
+            self.position
+                .y_milli_tiles
+                .checked_add(displacement.y_milli_tiles)
+                .ok_or(WorldSceneError::Overflow)?,
+        );
+        if scene.can_occupy(vertical) {
+            self.position = vertical;
+        }
+        Ok(self.position)
+    }
+
+    pub fn nearest_interaction(
+        &self,
+        scene: &WorldSceneDefinition,
+        context: SceneAccessContext<'_>,
+    ) -> Result<Option<SceneInteractionProjection>, WorldSceneError> {
+        self.require_scene(scene)?;
+        Ok(scene
+            .objects
+            .iter()
+            .filter_map(|object| {
+                let interaction = object.interaction?;
+                let SceneObjectGeometry::PointInteractable { point, .. } = object.geometry else {
+                    return None;
+                };
+                let distance_squared = squared_distance(self.position, point);
+                let range = i128::from(interaction.range_milli_tiles);
+                (distance_squared <= range * range).then(|| SceneInteractionProjection {
+                    object_id: object.id.clone(),
+                    hold_ticks: interaction.hold_ticks,
+                    access: object_access(object, context),
+                    distance_squared_milli_tiles: distance_squared,
+                })
+            })
+            .min_by(|left, right| {
+                left.distance_squared_milli_tiles
+                    .cmp(&right.distance_squared_milli_tiles)
+                    .then_with(|| left.object_id.cmp(&right.object_id))
+            }))
+    }
+
+    fn require_scene(&self, scene: &WorldSceneDefinition) -> Result<(), WorldSceneError> {
+        if self.scene_id != scene.id {
+            return Err(WorldSceneError::SceneMismatch);
+        }
+        Ok(())
+    }
+}
+
 /// Renderer-independent immutable scene definition.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorldSceneDefinition {
@@ -106,6 +248,51 @@ impl WorldSceneDefinition {
         self.validate_invariants()?;
         let bytes = postcard::to_stdvec(self).map_err(|_| WorldSceneError::Serialization)?;
         Ok(*blake3::hash(&bytes).as_bytes())
+    }
+
+    #[must_use]
+    pub fn allows_creation(&self, kind: SceneCreationKind) -> bool {
+        !self.prohibited_creation.contains(&kind)
+    }
+
+    /// Proves grid-connected radius-aware navigation between two authored points.
+    pub fn has_grid_path(
+        &self,
+        start: TilePoint,
+        goal: TilePoint,
+        grid_step_milli_tiles: i32,
+    ) -> Result<bool, WorldSceneError> {
+        if grid_step_milli_tiles <= 0 {
+            return Err(WorldSceneError::InvalidNavigationStep);
+        }
+        if !self.can_occupy(start) || !self.can_occupy(goal) {
+            return Ok(false);
+        }
+        let mut open = VecDeque::from([start]);
+        let mut visited = BTreeSet::from([start]);
+        while let Some(point) = open.pop_front() {
+            if point == goal {
+                return Ok(true);
+            }
+            for (dx, dy) in [
+                (grid_step_milli_tiles, 0),
+                (-grid_step_milli_tiles, 0),
+                (0, grid_step_milli_tiles),
+                (0, -grid_step_milli_tiles),
+            ] {
+                let (Some(x), Some(y)) = (
+                    point.x_milli_tiles.checked_add(dx),
+                    point.y_milli_tiles.checked_add(dy),
+                ) else {
+                    continue;
+                };
+                let neighbor = TilePoint::new(x, y);
+                if self.can_occupy(neighbor) && visited.insert(neighbor) {
+                    open.push_back(neighbor);
+                }
+            }
+        }
+        Ok(false)
     }
 
     fn validate_invariants(&self) -> Result<(), WorldSceneError> {
@@ -168,6 +355,14 @@ impl WorldSceneDefinition {
             }
             if let Some(interaction) = object.interaction
                 && interaction.range_milli_tiles <= 0
+            {
+                return Err(WorldSceneError::InvalidInteraction(object.id.clone()));
+            }
+            if object.interaction.is_some()
+                && !matches!(
+                    object.geometry,
+                    SceneObjectGeometry::PointInteractable { .. }
+                )
             {
                 return Err(WorldSceneError::InvalidInteraction(object.id.clone()));
             }
@@ -276,6 +471,31 @@ impl WorldSceneDefinition {
     }
 }
 
+fn object_access(
+    object: &WorldSceneObject,
+    context: SceneAccessContext<'_>,
+) -> SceneInteractionAccess {
+    if object
+        .integration_gate
+        .as_ref()
+        .is_some_and(|gate| !context.enabled_integration_gates.contains(gate))
+    {
+        SceneInteractionAccess::StageDisabled
+    } else if object.condition == SceneObjectCondition::RequiresMicrorealmCleared
+        && !context.microrealm_cleared
+    {
+        SceneInteractionAccess::ConditionUnmet
+    } else {
+        SceneInteractionAccess::Available
+    }
+}
+
+fn squared_distance(left: TilePoint, right: TilePoint) -> i128 {
+    let dx = i128::from(left.x_milli_tiles) - i128::from(right.x_milli_tiles);
+    let dy = i128::from(left.y_milli_tiles) - i128::from(right.y_milli_tiles);
+    dx * dx + dy * dy
+}
+
 fn validate_rectangle(
     rectangle: TileRectangle,
     width_milli_tiles: i32,
@@ -340,6 +560,14 @@ pub enum WorldSceneError {
     InvalidInteraction(String),
     #[error("scene object `{0}` has an empty integration gate")]
     InvalidIntegrationGate(String),
+    #[error("scene player maximum step must be positive")]
+    InvalidMovementStep,
+    #[error("scene player displacement exceeded its authoritative maximum")]
+    MovementStepExceeded,
+    #[error("scene player was used with a different scene definition")]
+    SceneMismatch,
+    #[error("navigation grid step must be positive")]
+    InvalidNavigationStep,
     #[error("road {index} is invalid")]
     InvalidRoad { index: usize },
     #[error("road {index} contains a diagonal segment")]
@@ -376,7 +604,10 @@ mod tests {
             }],
             objects: vec![WorldSceneObject {
                 id: "station.test".to_owned(),
-                geometry: SceneObjectGeometry::Point(TilePoint::new(10_000, 3_000)),
+                geometry: SceneObjectGeometry::PointInteractable {
+                    point: TilePoint::new(10_000, 3_000),
+                    clear_radius_milli_tiles: 2_000,
+                },
                 interaction: Some(InteractionDefinition {
                     range_milli_tiles: 1_500,
                     hold_ticks: 15,
@@ -433,6 +664,90 @@ mod tests {
         assert_eq!(
             diagonal.validated(),
             Err(WorldSceneError::NonAxisAlignedRoad { index: 0 })
+        );
+    }
+
+    #[test]
+    fn fixed_point_movement_slides_without_crossing_collision() {
+        let scene = sample();
+        let mut player =
+            WorldScenePlayer::new(&scene, TilePoint::new(7_600, 8_200), 250).expect("player");
+        assert_eq!(
+            player
+                .step_movement(&scene, SceneDisplacement::new(200, -100))
+                .expect("bounded movement"),
+            TilePoint::new(7_600, 8_100)
+        );
+        assert_eq!(
+            player.step_movement(&scene, SceneDisplacement::new(251, 0)),
+            Err(WorldSceneError::MovementStepExceeded)
+        );
+    }
+
+    #[test]
+    fn interaction_projection_is_range_ordered_and_authority_gated() {
+        let scene = sample();
+        let player =
+            WorldScenePlayer::new(&scene, TilePoint::new(10_000, 4_400), 200).expect("player");
+        let disabled = player
+            .nearest_interaction(
+                &scene,
+                SceneAccessContext {
+                    enabled_integration_gates: &BTreeSet::new(),
+                    microrealm_cleared: false,
+                },
+            )
+            .expect("projection")
+            .expect("near station");
+        assert_eq!(disabled.object_id, "station.test");
+        assert_eq!(disabled.access, SceneInteractionAccess::StageDisabled);
+        assert_eq!(disabled.hold_ticks, 15);
+
+        let enabled = BTreeSet::from(["core_world_flow_integration".to_owned()]);
+        assert_eq!(
+            player
+                .nearest_interaction(
+                    &scene,
+                    SceneAccessContext {
+                        enabled_integration_gates: &enabled,
+                        microrealm_cleared: false,
+                    },
+                )
+                .expect("projection")
+                .expect("near station")
+                .access,
+            SceneInteractionAccess::Available
+        );
+    }
+
+    #[test]
+    fn navigation_and_safe_creation_policy_are_explicit() {
+        let scene = sample();
+        assert!(
+            scene
+                .has_grid_path(
+                    TilePoint::new(10_000, 13_000),
+                    TilePoint::new(10_000, 3_000),
+                    500,
+                )
+                .expect("path query")
+        );
+        for prohibited in [
+            SceneCreationKind::Hostile,
+            SceneCreationKind::Damage,
+            SceneCreationKind::Projectile,
+            SceneCreationKind::Pickup,
+            SceneCreationKind::Drop,
+        ] {
+            assert!(!scene.allows_creation(prohibited));
+        }
+        assert_eq!(
+            scene.has_grid_path(
+                TilePoint::new(10_000, 13_000),
+                TilePoint::new(10_000, 3_000),
+                0,
+            ),
+            Err(WorldSceneError::InvalidNavigationStep)
         );
     }
 }

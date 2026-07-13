@@ -254,8 +254,10 @@ pub use trace::{
 };
 pub use weapon::{WeaponDefinition, WeaponDefinitionError, WeaponDefinitionParameters};
 pub use world_scene::{
-    InteractionDefinition, SceneCreationKind, SceneObjectCondition, SceneObjectGeometry, WorldRoad,
-    WorldSceneDefinition, WorldSceneError, WorldSceneKind, WorldSceneObject,
+    InteractionDefinition, SceneAccessContext, SceneCreationKind, SceneDisplacement,
+    SceneInteractionAccess, SceneInteractionProjection, SceneObjectCondition, SceneObjectGeometry,
+    WorldRoad, WorldSceneDefinition, WorldSceneError, WorldSceneKind, WorldSceneObject,
+    WorldScenePlayer,
 };
 
 /// Authoritative simulation frequency required by `TECH-070` and `GB-M00-05`.

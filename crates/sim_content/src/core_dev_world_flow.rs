@@ -1065,6 +1065,51 @@ mod tests {
         assert_eq!(hall.prohibited_creation.len(), 5);
         assert!(!hall.can_occupy(TilePoint::new(30_000, 24_000)));
         assert!(hall.can_occupy(TilePoint::new(32_000, 42_000)));
+        let return_spawn = hall
+            .objects
+            .iter()
+            .find_map(|object| {
+                (object.id == "spawn.hub.character_select_return").then_some(object.geometry)
+            })
+            .and_then(|geometry| match geometry {
+                SceneObjectGeometry::Point(point) => Some(point),
+                _ => None,
+            })
+            .expect("character-select return spawn");
+        for station in hall
+            .objects
+            .iter()
+            .filter(|object| object.interaction.is_some())
+        {
+            let SceneObjectGeometry::PointInteractable { point, .. } = station.geometry else {
+                panic!("station {} must be point-interactable", station.id);
+            };
+            assert!(
+                hall.has_grid_path(hall.player_spawn, point, 500)
+                    .expect("default-spawn path"),
+                "{} is unreachable from default spawn",
+                station.id
+            );
+            assert!(
+                hall.has_grid_path(return_spawn, point, 500)
+                    .expect("return-spawn path"),
+                "{} is unreachable from character-select return",
+                station.id
+            );
+            assert_eq!(
+                station.integration_gate.as_deref(),
+                Some("core_world_flow_integration")
+            );
+            let hold_ticks = station.interaction.expect("interaction").hold_ticks;
+            if matches!(
+                station.id.as_str(),
+                "station.realm_gate" | "station.vault" | "station.overflow"
+            ) {
+                assert_eq!(hold_ticks, 0, "{} must be instant", station.id);
+            } else {
+                assert_eq!(hold_ticks, 15, "{} must use the 500 ms hold", station.id);
+            }
+        }
 
         let microrealm = compiled
             .compile_microrealm_scene()
