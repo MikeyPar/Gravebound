@@ -5322,6 +5322,8 @@ dependencies = [
  "postcard",
  "protocol",
  "quinn",
+ "rand_chacha",
+ "rand_core",
  "rcgen",
  "rustls",
  "serde",
