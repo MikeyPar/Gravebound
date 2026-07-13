@@ -6,6 +6,7 @@
 
 mod ash_wallet;
 mod bargain_milestone;
+mod bargain_selection;
 mod combat_factory;
 mod ground_expiry;
 mod identity;
@@ -30,6 +31,7 @@ pub use ash_wallet::{
     AshWalletMutationResult, AshWalletProjection, AshWalletResultCode, AshWalletServiceError,
     PostgresAshWalletService,
 };
+pub use bargain_selection::{CoreBargainAuthority, PostgresBargainService};
 pub use combat_factory::{
     CoreCharacterCombat, CoreCharacterCombatCompiler, CoreCharacterCombatFactory,
     CoreCombatFactoryError,
