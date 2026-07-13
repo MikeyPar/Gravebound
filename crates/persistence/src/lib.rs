@@ -11,6 +11,7 @@ use sqlx::{
 };
 use thiserror::Error;
 
+mod combat_loadout;
 mod ground_expiry;
 mod identity;
 mod items;
@@ -20,6 +21,7 @@ mod progression_restore;
 mod reward;
 mod world_flow;
 
+pub use combat_loadout::{StoredCoreCombatLoadout, StoredEquippedWeapon};
 pub use ground_expiry::{MAX_GROUND_EXPIRY_BATCH, StoredGroundExpiry, StoredGroundExpiryCandidate};
 pub use identity::{StoredCharacter, StoredIdentityAggregate, StoredMutation};
 pub use items::{
