@@ -193,7 +193,9 @@ impl OathUiModel {
         }
         let eligible = matches!(
             self.projection.as_ref().map(|value| &value.state),
-            Some(OathSelectionState::Eligible { current_level: 10 })
+            Some(OathSelectionState::Eligible {
+                current_level: 10..=20
+            })
         );
         match action {
             OathUiAction::LongVigil | OathUiAction::Nailkeeper => {

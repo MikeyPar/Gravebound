@@ -303,6 +303,18 @@ async fn persist_aggregate(
         .execute(transaction.connection())
         .await
         .map_err(PersistenceError::Database)?;
+        sqlx::query(
+            "INSERT INTO character_oath_bargain_state \
+             (namespace_id, account_id, character_id, earned_bargain_slots, \
+              oath_bargain_version) VALUES ($1, $2, $3, 0, 1) \
+             ON CONFLICT (namespace_id, account_id, character_id) DO NOTHING",
+        )
+        .bind(WIPEABLE_CORE_NAMESPACE)
+        .bind(account_id.as_slice())
+        .bind(character.character_id.as_slice())
+        .execute(transaction.connection())
+        .await
+        .map_err(PersistenceError::Database)?;
     }
     for mutation in &aggregate.mutations {
         sqlx::query(

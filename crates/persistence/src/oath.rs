@@ -22,6 +22,7 @@ pub struct StoredOathCharacter {
     pub life_state: i16,
     pub security_state: i16,
     pub character_state_version: i64,
+    pub oath_bargain_version: i64,
     pub oath_id: Option<String>,
     pub location_character_version: i64,
     pub location_kind: i16,
@@ -95,11 +96,14 @@ impl PostgresPersistence {
         .transpose()?;
         let row = sqlx::query(
             "SELECT p.level, c.life_state, c.security_state, c.character_state_version, \
+                    ob.oath_bargain_version, \
                     c.oath_id, l.character_version AS location_character_version, \
                     l.location_kind, l.location_content_id \
              FROM characters c \
              JOIN character_progression p USING (namespace_id, account_id, character_id) \
              JOIN character_world_locations l USING (namespace_id, account_id, character_id) \
+             JOIN character_oath_bargain_state ob \
+                  USING (namespace_id, account_id, character_id) \
              WHERE c.namespace_id = $1 AND c.account_id = $2 AND c.character_id = $3",
         )
         .bind(WIPEABLE_CORE_NAMESPACE)
@@ -179,31 +183,13 @@ impl PostgresPersistence {
         )?;
 
         if result.result_code == ACCEPTED_RESULT_CODE {
-            sqlx::query(
-                "UPDATE characters SET oath_id = $1, character_state_version = $2, \
-                        updated_at = transaction_timestamp() \
-                 WHERE namespace_id = $3 AND account_id = $4 AND character_id = $5",
+            persist_accepted_oath_state(
+                transaction.connection(),
+                &account_id,
+                &character_id,
+                &state.character,
             )
-            .bind(&state.character.oath_id)
-            .bind(state.character.character_state_version)
-            .bind(WIPEABLE_CORE_NAMESPACE)
-            .bind(account_id.as_slice())
-            .bind(character_id.as_slice())
-            .execute(transaction.connection())
-            .await
-            .map_err(PersistenceError::Database)?;
-            sqlx::query(
-                "UPDATE character_world_locations SET character_version = $1, \
-                        updated_at = transaction_timestamp() \
-                 WHERE namespace_id = $2 AND account_id = $3 AND character_id = $4",
-            )
-            .bind(state.character.location_character_version)
-            .bind(WIPEABLE_CORE_NAMESPACE)
-            .bind(account_id.as_slice())
-            .bind(character_id.as_slice())
-            .execute(transaction.connection())
-            .await
-            .map_err(PersistenceError::Database)?;
+            .await?;
         }
         insert_result(transaction.connection(), result).await?;
         if let Some(event) = &state.new_event {
@@ -226,6 +212,52 @@ impl PostgresPersistence {
         transaction.commit().await?;
         Ok(OathSelectionTransaction::Committed(output))
     }
+}
+
+async fn persist_accepted_oath_state(
+    connection: &mut sqlx::PgConnection,
+    account_id: &[u8; ID_BYTES],
+    character_id: &[u8; ID_BYTES],
+    character: &StoredOathCharacter,
+) -> Result<(), PersistenceError> {
+    sqlx::query(
+        "UPDATE characters SET oath_id = $1, character_state_version = $2, \
+                updated_at = transaction_timestamp() \
+         WHERE namespace_id = $3 AND account_id = $4 AND character_id = $5",
+    )
+    .bind(&character.oath_id)
+    .bind(character.character_state_version)
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
+    .execute(&mut *connection)
+    .await
+    .map_err(PersistenceError::Database)?;
+    sqlx::query(
+        "UPDATE character_world_locations SET character_version = $1, \
+                updated_at = transaction_timestamp() \
+         WHERE namespace_id = $2 AND account_id = $3 AND character_id = $4",
+    )
+    .bind(character.location_character_version)
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
+    .execute(&mut *connection)
+    .await
+    .map_err(PersistenceError::Database)?;
+    sqlx::query(
+        "UPDATE character_oath_bargain_state SET oath_bargain_version = $1, \
+                updated_at = transaction_timestamp() \
+         WHERE namespace_id = $2 AND account_id = $3 AND character_id = $4",
+    )
+    .bind(character.oath_bargain_version)
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
+    .execute(connection)
+    .await
+    .map_err(PersistenceError::Database)?;
+    Ok(())
 }
 
 async fn lock_inventory_safety(
@@ -329,13 +361,15 @@ async fn lock_character(
 ) -> Result<StoredOathCharacter, PersistenceError> {
     let row = sqlx::query(
         "SELECT p.level, c.life_state, c.security_state, c.character_state_version, \
+                ob.oath_bargain_version, \
                 c.oath_id, l.character_version AS location_character_version, \
                 l.location_kind, l.location_content_id \
          FROM characters c \
          JOIN character_progression p USING (namespace_id, account_id, character_id) \
          JOIN character_world_locations l USING (namespace_id, account_id, character_id) \
+         JOIN character_oath_bargain_state ob USING (namespace_id, account_id, character_id) \
          WHERE c.namespace_id = $1 AND c.account_id = $2 AND c.character_id = $3 \
-         FOR UPDATE OF c, p, l",
+         FOR UPDATE OF c, p, l, ob",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(account_id.as_slice())
@@ -363,6 +397,9 @@ fn decode_character(
             .map_err(PersistenceError::Database)?,
         character_state_version: row
             .try_get("character_state_version")
+            .map_err(PersistenceError::Database)?,
+        oath_bargain_version: row
+            .try_get("oath_bargain_version")
             .map_err(PersistenceError::Database)?,
         oath_id: row.try_get("oath_id").map_err(PersistenceError::Database)?,
         location_character_version: row
@@ -469,7 +506,7 @@ fn validate_transition(
         if original.oath_id.is_some()
             || !original_inventory.is_safe
             || original.selected_character_id != Some(*character_id)
-            || original.level != 10
+            || !(10..=20).contains(&original.level)
             || original.life_state != 0
             || original.security_state != 0
             || original.location_kind != 1
@@ -484,10 +521,11 @@ fn validate_transition(
             || &state.inventory != original_inventory
             || state.character.oath_id.as_deref() != Some(result.oath_id.as_str())
             || state.character.character_state_version != original.character_state_version + 1
+            || state.character.oath_bargain_version != original.oath_bargain_version + 1
             || state.character.location_character_version != state.character.character_state_version
             || result.post_character_state_version != state.character.character_state_version
             || event.event_id != *mutation_id
-            || event.aggregate_version != state.character.character_state_version
+            || event.aggregate_version != state.character.oath_bargain_version
             || event.event_payload.is_empty()
             || event.event_payload.len() > MAX_RESULT_PAYLOAD_BYTES
         {
@@ -515,10 +553,11 @@ fn validate_inventory(inventory: &StoredOathInventory) -> Result<(), Persistence
 }
 
 fn validate_character(character: &StoredOathCharacter) -> Result<(), PersistenceError> {
-    if !(1..=10).contains(&character.level)
+    if !(1..=20).contains(&character.level)
         || !matches!(character.life_state, 0..=1)
         || !matches!(character.security_state, 0..=1)
         || character.character_state_version < 1
+        || character.oath_bargain_version < 1
         || character.location_character_version < 1
         || !matches!(character.location_kind, 0..=2)
         || character
@@ -583,6 +622,7 @@ mod tests {
             life_state: 0,
             security_state: 0,
             character_state_version: 7,
+            oath_bargain_version: 4,
             oath_id: None,
             location_character_version: 7,
             location_kind: 1,
@@ -610,6 +650,7 @@ mod tests {
         let mut selected = original.clone();
         selected.oath_id = Some(LONG_VIGIL_ID.into());
         selected.character_state_version = 8;
+        selected.oath_bargain_version = 5;
         selected.location_character_version = 8;
         let state = OathSelectionTransactionState {
             character: selected,
@@ -620,7 +661,7 @@ mod tests {
             new_result: Some(result(ACCEPTED_RESULT_CODE)),
             new_event: Some(StoredCharacterLifeEvent {
                 event_id: [3; 16],
-                aggregate_version: 8,
+                aggregate_version: 5,
                 event_payload: vec![1],
             }),
         };

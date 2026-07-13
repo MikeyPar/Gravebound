@@ -175,6 +175,7 @@ fn plan_selection(
     if code == OathResultCode::Accepted {
         state.character.oath_id = Some(frame.payload.oath_id.as_str().to_owned());
         state.character.character_state_version += 1;
+        state.character.oath_bargain_version += 1;
         state.character.location_character_version += 1;
     }
     let projection = projection(frame.payload.character_id, &state.character)
@@ -205,7 +206,7 @@ fn plan_selection(
     if code == OathResultCode::Accepted {
         state.new_event = Some(StoredCharacterLifeEvent {
             event_id: frame.mutation_id,
-            aggregate_version: state.character.character_state_version,
+            aggregate_version: state.character.oath_bargain_version,
             event_payload: result_payload,
         });
     }
@@ -376,6 +377,7 @@ mod tests {
                 life_state: 0,
                 security_state: 0,
                 character_state_version: 7,
+                oath_bargain_version: 4,
                 oath_id: None,
                 location_character_version: 7,
                 location_kind: 1,

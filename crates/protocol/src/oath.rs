@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{ManifestHash, NetworkChannel, WireText};
+use crate::{MAX_CORE_CHARACTER_LEVEL, ManifestHash, NetworkChannel, WireText};
 
 pub const OATH_CHARACTER_ID_BYTES: usize = 16;
 pub const OATH_MUTATION_ID_BYTES: usize = 16;
@@ -144,11 +144,13 @@ impl OathProjection {
                 current_level,
                 required_level: 10,
             } if (1..10).contains(current_level) => {}
-            OathSelectionState::Eligible { current_level: 10 } => {}
+            OathSelectionState::Eligible { current_level }
+                if (10..=MAX_CORE_CHARACTER_LEVEL).contains(current_level) => {}
             OathSelectionState::Selected {
-                current_level: 10,
+                current_level,
                 oath_id,
-            } if legal_oath_id(oath_id.as_str()) => {}
+            } if (10..=MAX_CORE_CHARACTER_LEVEL).contains(current_level)
+                && legal_oath_id(oath_id.as_str()) => {}
             _ => return Err(OathValidationError::InvalidProjectionState),
         }
         if !self.later_change_stage_disabled {
@@ -355,6 +357,17 @@ mod tests {
             .validate()
             .unwrap();
         }
+        OathProjection {
+            character_id: [1; 16],
+            character_version: 1,
+            state: OathSelectionState::Selected {
+                current_level: MAX_CORE_CHARACTER_LEVEL,
+                oath_id: WireText::new(LONG_VIGIL_ID).unwrap(),
+            },
+            later_change_stage_disabled: true,
+        }
+        .validate()
+        .unwrap();
         let mut illegal = payload();
         illegal.confirmed = false;
         assert_eq!(
