@@ -7,6 +7,7 @@ mod bargain_ui;
 mod combat;
 mod consumable;
 mod core_identity;
+mod core_world_showcase;
 mod death;
 mod debug_overlay;
 mod developer_tools;
@@ -55,6 +56,9 @@ pub use combat::AbilityTwoBindings;
 pub use combat::{AbilityOneBindings, CombatInputGate, PrimaryFireBindings};
 pub use core_identity::{
     CoreIdentityConfig, CoreIdentityModel, CoreIdentityPhase, run_core_identity,
+};
+pub use core_world_showcase::{
+    CoreWorldShowcaseConfig, CoreWorldShowcaseScene, run_core_world_showcase,
 };
 pub use network_play::{NetworkPlayConfig, run_network_playtest};
 pub use network_prediction::{

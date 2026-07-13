@@ -1,6 +1,12 @@
 use std::{net::SocketAddr, path::PathBuf};
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CoreWorldSceneArg {
+    Hall,
+    Microrealm,
+}
 
 #[derive(Debug, Parser)]
 #[command(name = "client_bevy", about = "Gravebound native client")]
@@ -37,6 +43,15 @@ enum Command {
         #[arg(long, default_value = "content")]
         content_root: PathBuf,
     },
+    /// Open the disposable GB-M03 Core Hall or private-microrealm graybox showcase.
+    CoreWorldShowcase {
+        #[arg(long, value_enum, default_value_t = CoreWorldSceneArg::Hall)]
+        scene: CoreWorldSceneArg,
+        #[arg(long, default_value = "content")]
+        content_root: PathBuf,
+        #[arg(long)]
+        reduced_motion: bool,
+    },
 }
 
 fn main() {
@@ -63,6 +78,18 @@ fn main() {
             certificate_path: certificate,
             test_token: identity,
             content_root,
+        }),
+        Command::CoreWorldShowcase {
+            scene,
+            content_root,
+            reduced_motion,
+        } => client_bevy::run_core_world_showcase(client_bevy::CoreWorldShowcaseConfig {
+            content_root,
+            scene: match scene {
+                CoreWorldSceneArg::Hall => client_bevy::CoreWorldShowcaseScene::Hall,
+                CoreWorldSceneArg::Microrealm => client_bevy::CoreWorldShowcaseScene::Microrealm,
+            },
+            reduced_motion,
         }),
     };
     if let Err(error) = result {
