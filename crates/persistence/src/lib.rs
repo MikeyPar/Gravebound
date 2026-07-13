@@ -65,7 +65,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 18;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 19;
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -687,6 +687,28 @@ mod tests {
                 "Bargain resolution migration leaked {prohibited}"
             );
         }
+    }
+
+    #[test]
+    fn core_bargain_milestone_is_source_bound_once_per_life_and_cross_domain_owned() {
+        let migration = include_str!("../../../migrations/0019_bind_core_bargain_milestone.sql");
+        for required in [
+            "milestone.core.sepulcher_knight_first_clear",
+            "miniboss.sepulcher_knight",
+            "layout.core_private_life_01",
+            "bargain_milestone_once_per_life",
+            "bargain_milestone_offer_is_source",
+            "bargain_milestone_slot_transition_exact",
+            "pre_earned_bargain_slots",
+            "post_earned_bargain_slots",
+            "bargain_milestone_lineage_owned",
+            "bargain_milestone_restore_owned",
+            "bargain_milestone_ash_result_owned",
+            "bargain_milestone_offer_owned",
+        ] {
+            assert!(migration.contains(required), "migration omitted {required}");
+        }
+        assert!(migration.contains("requires dormant pre-route Bargain milestone tables"));
     }
 
     #[test]
