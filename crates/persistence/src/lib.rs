@@ -15,6 +15,7 @@ mod ash_wallet;
 mod bargain;
 mod bargain_milestone;
 mod combat_loadout;
+mod danger_checkpoint;
 mod ground_expiry;
 mod identity;
 mod items;
@@ -40,6 +41,7 @@ pub use bargain_milestone::{
 pub use combat_loadout::{
     StoredCombatBargain, StoredCombatBeltStack, StoredCoreCombatLoadout, StoredEquippedWeapon,
 };
+pub use danger_checkpoint::{DangerCheckpointWrite, StoredDangerCheckpoint};
 pub use ground_expiry::{MAX_GROUND_EXPIRY_BATCH, StoredGroundExpiry, StoredGroundExpiryCandidate};
 pub use identity::{StoredCharacter, StoredIdentityAggregate, StoredMutation};
 pub use items::{
@@ -74,7 +76,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 20;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 21;
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -240,6 +242,14 @@ pub enum PersistenceError {
     BargainSelectionEventRequired,
     #[error("authoritative reward planning failed before commit")]
     RewardPlanningFailed,
+    #[error("stored danger checkpoint violates its bounded durable contract")]
+    CorruptStoredDangerCheckpoint,
+    #[error("danger checkpoint character or aggregate binding does not exist")]
+    DangerCheckpointCharacterNotFound,
+    #[error("danger checkpoint was superseded by authoritative aggregate state")]
+    StaleDangerCheckpoint,
+    #[error("danger checkpoint tick was replayed with different material")]
+    DangerCheckpointReplayConflict,
 }
 
 /// Returns whether `PostgreSQL` explicitly permits the complete transaction to be retried.
@@ -770,6 +780,26 @@ mod tests {
             assert!(
                 !migration.contains(prohibited),
                 "layout binding leaked {prohibited}"
+            );
+        }
+    }
+
+    #[test]
+    fn bell_debt_checkpoint_migration_is_bounded_versioned_and_component_complete() {
+        let migration = include_str!("../../../migrations/0021_bell_debt_danger_checkpoint.sql");
+        for required in [
+            "0021 requires dormant danger checkpoint rows",
+            "component_mask = 15",
+            "checkpoint_schema_version = 1",
+            "octet_length(checkpoint_payload) BETWEEN 1 AND 4096",
+            "checkpoint_payload_digest",
+        ] {
+            assert!(migration.contains(required), "migration omitted {required}");
+        }
+        for prohibited in ["DROP TABLE", "TRUNCATE", "JSON", "JSONB"] {
+            assert!(
+                !migration.contains(prohibited),
+                "checkpoint migration leaked {prohibited}"
             );
         }
     }
