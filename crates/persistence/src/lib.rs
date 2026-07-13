@@ -16,6 +16,7 @@ mod identity;
 mod items;
 mod oath;
 mod progression;
+mod progression_restore;
 mod reward;
 mod world_flow;
 
@@ -35,6 +36,9 @@ pub use progression::{
     StoredEncounterTrustState, StoredEncounterXpEvidence, StoredLockedProgressionCharacter,
     StoredOrdinaryXpEvidence, StoredProgression, StoredProgressionContract,
     StoredProgressionSnapshot, StoredXpAwardResult, StoredXpEligibilityEvidence,
+};
+pub use progression_restore::{
+    StoredProgressionCrashRestore, capture_progression_restore, restore_progression_after_crash,
 };
 pub use reward::{
     RewardPlanningState, RewardTransaction, StoredPendingItem, StoredRewardCommit,
@@ -179,6 +183,10 @@ pub enum PersistenceError {
     CorruptStoredProgression,
     #[error("a fresh progression award transaction must append one typed result")]
     ProgressionAwardResultRequired,
+    #[error("progression restore point does not exist for the character")]
+    ProgressionRestorePointNotFound,
+    #[error("a committed death, extraction, or other final resolution superseded crash restore")]
+    ProgressionRestoreSuperseded,
     #[error("stored Oath selection violates the approved schema")]
     CorruptStoredOath,
     #[error("Oath character does not exist for the authenticated account")]

@@ -11,6 +11,7 @@ mod lifecycle;
 mod oath_selection;
 mod progression_award;
 mod progression_query;
+mod progression_restore_provider;
 mod progression_service;
 mod restore_point;
 mod reward_rng;
@@ -50,6 +51,7 @@ pub use progression_query::{
     ProgressionQueryRepository, ProgressionQueryRepositoryError, ProgressionQueryService,
     ProgressionQuerySnapshot,
 };
+pub use progression_restore_provider::PostgresProgressionRestoreProvider;
 pub use progression_service::PostgresProgressionAwardService;
 pub use restore_point::{
     BeltStackV1, CrashRestoreContext, DangerEntrySnapshotV1, EntryCaptureContext,

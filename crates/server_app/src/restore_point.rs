@@ -344,6 +344,8 @@ pub enum RestorePointError {
     IncompleteRestorePoint,
     #[error("restore-point persistence failed")]
     Persistence,
+    #[error("a committed death or extraction superseded crash restoration")]
+    RestoreSuperseded,
 }
 
 fn validate_context(
