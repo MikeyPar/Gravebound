@@ -169,6 +169,7 @@ pub struct NailTrapTrigger {
     pub target_id: EntityId,
     pub tick: Tick,
     pub raw_damage: u32,
+    pub snapshot_weapon_raw_damage: u32,
     pub frostbind_ticks: u32,
 }
 
@@ -297,6 +298,7 @@ impl NailTrapField {
                             trap.snapshot_weapon_raw_damage,
                             NAILKEEPER_DAMAGE_BASIS_POINTS,
                         )?,
+                        snapshot_weapon_raw_damage: trap.snapshot_weapon_raw_damage,
                         frostbind_ticks: NAILKEEPER_FROSTBIND_TICKS,
                     });
                     output.removals.push(NailTrapRemoval {

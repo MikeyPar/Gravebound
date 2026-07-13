@@ -425,9 +425,28 @@ fn validate_boss_intents(
             return Err(BellProctorEncounterError::InvalidFriendlyIntentOrder);
         }
         previous = Some(key);
+        if intent.source == RawDamageIntentSource::NailTrap {
+            let count = combat
+                .nail_traps
+                .triggers
+                .iter()
+                .filter(|trigger| {
+                    trigger.tick == intent.tick
+                        && trigger.trap_id == intent.projectile_id
+                        && trigger.target_id == boss
+                        && trigger.snapshot_weapon_raw_damage == intent.base_raw_damage
+                        && trigger.raw_damage == intent.resolved_raw_damage
+                })
+                .count();
+            if count != 1 {
+                return Err(BellProctorEncounterError::InvalidFriendlyIntent);
+            }
+            continue;
+        }
         let source = match intent.source {
             RawDamageIntentSource::Primary => FriendlyProjectileSource::Primary,
             RawDamageIntentSource::GraveMark => FriendlyProjectileSource::GraveMark,
+            RawDamageIntentSource::NailTrap => unreachable!("handled above"),
         };
         let count = combat
             .collisions

@@ -205,6 +205,7 @@ pub struct ProjectileCollision {
 pub enum RawDamageIntentSource {
     Primary,
     GraveMark,
+    NailTrap,
 }
 
 /// Pre-`COM-002` damage fact. This ticket intentionally performs no health mutation.
@@ -665,16 +666,7 @@ impl PlayerCombatState {
             ..CombatStep::default()
         };
         self.advance_active_mark(&mut step.mark_transitions);
-        let trap_enemies = collision_world
-            .enemies()
-            .iter()
-            .map(|enemy| NailTrapEnemy {
-                entity_id: enemy.id(),
-                position: enemy.center(),
-                radius_tiles: enemy.radius_tiles(),
-            })
-            .collect::<Vec<_>>();
-        step.nail_traps = self.nail_traps.step(self.tick, &trap_enemies)?;
+        self.advance_nail_traps(collision_world, &mut step)?;
         self.advance_projectiles(
             collision_world,
             &mut step.collisions,
@@ -752,6 +744,40 @@ impl PlayerCombatState {
 
         self.resolve_primary(action, player_position, &mut step)?;
         Ok((step, movement_step))
+    }
+
+    fn advance_nail_traps(
+        &mut self,
+        collision_world: &ProjectileCollisionWorld,
+        step: &mut CombatStep,
+    ) -> Result<(), CombatError> {
+        let enemies = collision_world
+            .enemies()
+            .iter()
+            .map(|enemy| NailTrapEnemy {
+                entity_id: enemy.id(),
+                position: enemy.center(),
+                radius_tiles: enemy.radius_tiles(),
+            })
+            .collect::<Vec<_>>();
+        step.nail_traps = self.nail_traps.step(self.tick, &enemies)?;
+        step.raw_damage_intents
+            .extend(
+                step.nail_traps
+                    .triggers
+                    .iter()
+                    .map(|trigger| RawDamageIntent {
+                        tick: trigger.tick,
+                        projectile_id: trigger.trap_id,
+                        source: RawDamageIntentSource::NailTrap,
+                        target: trigger.target_id,
+                        base_raw_damage: trigger.snapshot_weapon_raw_damage,
+                        multiplier_basis_points: crate::NAILKEEPER_DAMAGE_BASIS_POINTS,
+                        resolved_raw_damage: trigger.raw_damage,
+                        contact_ordinal: 0,
+                    }),
+            );
+        Ok(())
     }
 
     fn resolve_primary(
@@ -3073,6 +3099,12 @@ mod tests {
         );
         assert_eq!(triggered.nail_traps.triggers[0].raw_damage, 18);
         assert_eq!(triggered.nail_traps.triggers[0].frostbind_ticks, 45);
+        assert_eq!(triggered.raw_damage_intents.len(), 1);
+        assert_eq!(
+            triggered.raw_damage_intents[0].source,
+            RawDamageIntentSource::NailTrap
+        );
+        assert_eq!(triggered.raw_damage_intents[0].resolved_raw_damage, 18);
         assert!(combat.nail_traps().traps().is_empty());
     }
 

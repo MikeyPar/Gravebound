@@ -114,9 +114,10 @@ pub use enemy::{
     ProjectileAttackDefinition,
 };
 pub use enemy_health::{
-    EnemyDamageEvent, EnemyDeathEvent, EnemyHealthActor, EnemyHealthError, EnemyHealthSimulation,
-    EnemyHealthSnapshot, EnemyHealthStep, FirstPlayableEnemyKind, IgnoredFriendlyIntent,
-    IgnoredIntentReason, NORMAL_REWARD_DROP_DELAY_TICKS, NormalRewardDropEvent,
+    EnemyDamageEvent, EnemyDeathEvent, EnemyFrostbindEvent, EnemyHealthActor, EnemyHealthError,
+    EnemyHealthSimulation, EnemyHealthSnapshot, EnemyHealthStep, FirstPlayableEnemyKind,
+    IgnoredFriendlyIntent, IgnoredIntentReason, NORMAL_REWARD_DROP_DELAY_TICKS,
+    NormalRewardDropEvent,
 };
 pub use enemy_lab::{
     ActiveEnemyLane, ClearedEnemyHostiles, EnemyActorGroup, EnemyLab, EnemyLabActorIds,

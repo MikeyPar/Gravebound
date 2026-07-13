@@ -49,6 +49,7 @@ pub struct EnemyHealthActor {
     reward_table_id: &'static str,
     alive: bool,
     death_tick: Option<Tick>,
+    frostbind_expires_tick: Option<Tick>,
 }
 
 impl EnemyHealthActor {
@@ -127,6 +128,7 @@ impl EnemyHealthActor {
             reward_table_id: NORMAL_ENEMY_REWARD_TABLE_ID,
             alive: true,
             death_tick: None,
+            frostbind_expires_tick: None,
         }
     }
 
@@ -169,6 +171,11 @@ impl EnemyHealthActor {
     pub const fn death_tick(&self) -> Option<Tick> {
         self.death_tick
     }
+
+    #[must_use]
+    pub const fn frostbind_expires_tick(&self) -> Option<Tick> {
+        self.frostbind_expires_tick
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -180,6 +187,7 @@ pub struct EnemyHealthSnapshot {
     pub armor: u32,
     pub alive: bool,
     pub death_tick: Option<Tick>,
+    pub frostbind_expires_tick: Option<Tick>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -248,6 +256,16 @@ pub struct EnemyHealthStep {
     pub damage_events: Vec<EnemyDamageEvent>,
     pub death_events: Vec<EnemyDeathEvent>,
     pub ignored_intents: Vec<IgnoredFriendlyIntent>,
+    pub frostbind_events: Vec<EnemyFrostbindEvent>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EnemyFrostbindEvent {
+    pub tick: Tick,
+    pub source_trap_id: EntityId,
+    pub target: EntityId,
+    pub duration_ticks: u32,
+    pub expires_tick: Tick,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -293,6 +311,7 @@ impl EnemyHealthSimulation {
                 armor: actor.armor,
                 alive: actor.alive,
                 death_tick: actor.death_tick,
+                frostbind_expires_tick: actor.frostbind_expires_tick,
             })
             .collect()
     }
@@ -400,6 +419,7 @@ impl EnemyHealthSimulation {
                 resolved_raw_damage: intent.resolved_raw_damage,
                 damage: damage.clone(),
             });
+            apply_nail_trap_frostbind(actor, step, intent, damage.lethal, &mut output)?;
             if damage.lethal {
                 actor.alive = false;
                 actor.death_tick = Some(step.tick);
@@ -460,6 +480,40 @@ impl EnemyHealthSimulation {
     }
 }
 
+fn apply_nail_trap_frostbind(
+    actor: &mut EnemyHealthActor,
+    step: &CombatStep,
+    intent: RawDamageIntent,
+    lethal: bool,
+    output: &mut EnemyHealthStep,
+) -> Result<(), EnemyHealthError> {
+    if intent.source != RawDamageIntentSource::NailTrap || lethal {
+        return Ok(());
+    }
+    let trigger = step
+        .nail_traps
+        .triggers
+        .iter()
+        .find(|trigger| {
+            trigger.trap_id == intent.projectile_id && trigger.target_id == intent.target
+        })
+        .ok_or(EnemyHealthError::InvalidCollisionProvenance {
+            projectile_id: intent.projectile_id,
+            contact_ordinal: intent.contact_ordinal,
+            matches: 0,
+        })?;
+    let expires_tick = add_ticks(step.tick, trigger.frostbind_ticks)?;
+    actor.frostbind_expires_tick = Some(expires_tick);
+    output.frostbind_events.push(EnemyFrostbindEvent {
+        tick: step.tick,
+        source_trap_id: trigger.trap_id,
+        target: trigger.target_id,
+        duration_ticks: trigger.frostbind_ticks,
+        expires_tick,
+    });
+    Ok(())
+}
+
 fn validate_intent_order_and_provenance(step: &CombatStep) -> Result<(), EnemyHealthError> {
     let mut previous = None;
     let mut seen = BTreeSet::new();
@@ -481,9 +535,32 @@ fn validate_intent_order_and_provenance(step: &CombatStep) -> Result<(), EnemyHe
                 contact_ordinal: intent.contact_ordinal,
             });
         }
+        if intent.source == RawDamageIntentSource::NailTrap {
+            let matching = step
+                .nail_traps
+                .triggers
+                .iter()
+                .filter(|trigger| {
+                    trigger.tick == intent.tick
+                        && trigger.trap_id == intent.projectile_id
+                        && trigger.target_id == intent.target
+                        && trigger.snapshot_weapon_raw_damage == intent.base_raw_damage
+                        && trigger.raw_damage == intent.resolved_raw_damage
+                })
+                .count();
+            if matching != 1 {
+                return Err(EnemyHealthError::InvalidCollisionProvenance {
+                    projectile_id: intent.projectile_id,
+                    contact_ordinal: intent.contact_ordinal,
+                    matches: matching,
+                });
+            }
+            continue;
+        }
         let expected_source = match intent.source {
             RawDamageIntentSource::Primary => FriendlyProjectileSource::Primary,
             RawDamageIntentSource::GraveMark => FriendlyProjectileSource::GraveMark,
+            RawDamageIntentSource::NailTrap => unreachable!("handled above"),
         };
         let matching: Vec<_> = step
             .collisions
@@ -625,6 +702,9 @@ mod tests {
             source: match intent.source {
                 RawDamageIntentSource::Primary => FriendlyProjectileSource::Primary,
                 RawDamageIntentSource::GraveMark => FriendlyProjectileSource::GraveMark,
+                RawDamageIntentSource::NailTrap => {
+                    panic!("test projectile collision cannot represent a nail trap")
+                }
             },
             target: CollisionTarget::Enemy(intent.target),
             final_position: SimulationVector::new(8.0, 3.0),
@@ -673,6 +753,53 @@ mod tests {
             vec![65, 112, 285]
         );
         assert_eq!(simulation.alive_hurtboxes().expect("hurtboxes").len(), 3);
+    }
+
+    #[test]
+    fn nailkeeper_trigger_applies_physical_damage_and_full_normal_frostbind() {
+        let mut simulation = simulation();
+        let trigger = crate::NailTrapTrigger {
+            trap_id: id(40),
+            target_id: id(100),
+            tick: Tick(1),
+            raw_damage: 18,
+            snapshot_weapon_raw_damage: 20,
+            frostbind_ticks: 45,
+        };
+        let combat = CombatStep {
+            tick: Tick(1),
+            raw_damage_intents: vec![intent(
+                1,
+                40,
+                RawDamageIntentSource::NailTrap,
+                100,
+                20,
+                9_000,
+                18,
+                0,
+            )],
+            nail_traps: crate::NailTrapStep {
+                triggers: vec![trigger],
+                ..crate::NailTrapStep::default()
+            },
+            ..CombatStep::default()
+        };
+        let output = simulation.apply_combat_step(&combat).unwrap();
+        assert_eq!(output.damage_events[0].damage.health_damage_applied, 18);
+        assert_eq!(
+            output.frostbind_events,
+            vec![EnemyFrostbindEvent {
+                tick: Tick(1),
+                source_trap_id: id(40),
+                target: id(100),
+                duration_ticks: 45,
+                expires_tick: Tick(46),
+            }]
+        );
+        assert_eq!(
+            simulation.snapshots()[0].frostbind_expires_tick,
+            Some(Tick(46))
+        );
     }
 
     #[test]
@@ -879,7 +1006,7 @@ mod tests {
         let first = replay();
         assert_eq!(
             first.to_string(),
-            "91f1848cbbe7c8cdd8ee228744098feebf890b4a4d62f8c5e7332b82f91fd27f"
+            "6542260da7100ff09eeb9dc30996a67f674980530c75517da74ec289a70a47ed"
         );
         assert_eq!(first, replay());
     }
