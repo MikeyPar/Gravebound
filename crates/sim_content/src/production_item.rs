@@ -793,7 +793,7 @@ fn validate_charm_behavior(effect: &content_schema::ProductionCharmEffect) -> Re
 }
 
 fn validate_rarity_profile(record: &ProductionRarityProfileRecord) -> Result<()> {
-    validate_header(&record.header)?;
+    validate_infrastructure_header(&record.header)?;
     if record.ordered_weights.is_empty() {
         bail!("rarity profile `{}` has no weights", record.header.id);
     }
@@ -818,7 +818,7 @@ fn validate_material_pool(
     record: &ProductionMaterialPoolRecord,
     items: &BTreeMap<String, ProductionItemTemplateRecord>,
 ) -> Result<()> {
-    validate_header(&record.header)?;
+    validate_infrastructure_header(&record.header)?;
     if record.ordered_outcomes.is_empty() {
         bail!("material pool `{}` is empty", record.header.id);
     }
@@ -854,7 +854,7 @@ fn validate_reward(
     rarity_profiles: &BTreeMap<String, ProductionRarityProfileRecord>,
     material_pools: &BTreeMap<String, ProductionMaterialPoolRecord>,
 ) -> Result<()> {
-    validate_header(&record.header)?;
+    validate_infrastructure_header(&record.header)?;
     if record.ordered_rolls.is_empty() {
         bail!("reward table `{}` is empty", record.header.id);
     }
@@ -911,7 +911,7 @@ fn validate_core_policy(
     record: &ProductionItemStagePolicyRecord,
     rarity_profiles: &BTreeMap<String, ProductionRarityProfileRecord>,
 ) -> Result<()> {
-    validate_header(&record.header)?;
+    validate_infrastructure_header(&record.header)?;
     if record.current_class_weapon_relic_basis_points != 8_500
         || record.other_class_weapon_relic_basis_points != 0
         || record.universal_armor_charm_basis_points != 1_500
@@ -954,6 +954,22 @@ fn validate_header(header: &content_schema::CoreDevelopmentHeader) -> Result<()>
     Ok(())
 }
 
+fn validate_infrastructure_header(
+    header: &content_schema::ProductionInfrastructureHeader,
+) -> Result<()> {
+    if header.schema_version != SCHEMA_VERSION
+        || !header.enabled
+        || header.source_document_feature_id.trim().is_empty()
+        || !strictly_sorted_unique(header.tags.iter().map(String::as_str))
+    {
+        bail!(
+            "production infrastructure header `{}` is invalid",
+            header.id
+        );
+    }
+    Ok(())
+}
+
 fn strictly_sorted_unique<T: Ord>(values: impl IntoIterator<Item = T>) -> bool {
     let mut previous = None;
     for value in values {
@@ -987,8 +1003,8 @@ fn valid_blake3(value: &str) -> bool {
 mod tests {
     use content_schema::{
         ContentId, CoreDevelopmentHeader, ProductionConsumableBehavior,
-        ProductionItemStagePolicyRecord, ProductionItemTargetKind, ProductionMaterialPoolOutcome,
-        ProductionRarityWeight, ReleaseStage,
+        ProductionInfrastructureHeader, ProductionItemStagePolicyRecord, ProductionItemTargetKind,
+        ProductionMaterialPoolOutcome, ProductionRarityWeight, ReleaseStage,
     };
 
     use super::*;
@@ -1008,6 +1024,17 @@ mod tests {
             asset_ids: vec![id(&format!("icon.{value}"))],
             tags: vec!["item".to_owned()],
             source_document_feature_id: "CONT-CATALOG-002".to_owned(),
+        }
+    }
+
+    fn infrastructure_header(value: &str) -> ProductionInfrastructureHeader {
+        ProductionInfrastructureHeader {
+            id: id(value),
+            schema_version: 1,
+            enabled: true,
+            earliest_release_stage: ReleaseStage::Core,
+            tags: vec!["compiler_infrastructure".to_owned()],
+            source_document_feature_id: "CONT-REWARD-004".to_owned(),
         }
     }
 
@@ -1106,14 +1133,14 @@ mod tests {
         ];
         let rarity_profiles = vec![
             ProductionRarityProfileRecord {
-                header: header("rarity.core_fixed"),
+                header: infrastructure_header("rarity.core_fixed"),
                 ordered_weights: vec![ProductionRarityWeight {
                     rarity: ProductionItemRarity::Forged,
                     weight_basis_points: 10_000,
                 }],
             },
             ProductionRarityProfileRecord {
-                header: header("rarity.normal_outer"),
+                header: infrastructure_header("rarity.normal_outer"),
                 ordered_weights: vec![
                     ProductionRarityWeight {
                         rarity: ProductionItemRarity::Forged,
@@ -1131,7 +1158,7 @@ mod tests {
             },
         ];
         let material_pools = vec![ProductionMaterialPoolRecord {
-            header: header("material.core_tonic"),
+            header: infrastructure_header("material.core_tonic"),
             ordered_outcomes: vec![ProductionMaterialPoolOutcome {
                 item_id: id("consumable.red_tonic"),
                 quantity: 1,
@@ -1140,7 +1167,7 @@ mod tests {
         }];
         let reward_tables = vec![
             ProductionRewardTableRecord {
-                header: header("reward.elite_outer"),
+                header: infrastructure_header("reward.elite_outer"),
                 ordered_rolls: vec![ProductionRewardRoll::Equipment {
                     presence_basis_points: 10_000,
                     count: 1,
@@ -1150,7 +1177,7 @@ mod tests {
                 }],
             },
             ProductionRewardTableRecord {
-                header: header("reward.normal_outer"),
+                header: infrastructure_header("reward.normal_outer"),
                 ordered_rolls: vec![
                     ProductionRewardRoll::UniversalItem {
                         presence_basis_points: 800,
@@ -1168,7 +1195,7 @@ mod tests {
             },
         ];
         let stage_policies = vec![ProductionItemStagePolicyRecord {
-            header: header("policy.items.core"),
+            header: infrastructure_header("policy.items.core"),
             current_class_weapon_relic_basis_points: 8_500,
             other_class_weapon_relic_basis_points: 0,
             universal_armor_charm_basis_points: 1_500,

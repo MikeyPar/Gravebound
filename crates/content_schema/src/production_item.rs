@@ -6,7 +6,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::{ContentId, CoreDevelopmentHeader, EquipmentSlot};
+use crate::{ContentId, CoreDevelopmentHeader, EquipmentSlot, ReleaseStage};
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
@@ -64,6 +64,18 @@ pub struct ProductionItemAssetRecord {
 pub struct ProductionItemAssetManifest {
     pub schema_version: u32,
     pub assets: Vec<ProductionItemAssetRecord>,
+}
+
+/// Non-presentational metadata for compiler infrastructure records.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProductionInfrastructureHeader {
+    pub id: ContentId,
+    pub schema_version: u32,
+    pub enabled: bool,
+    pub earliest_release_stage: ReleaseStage,
+    pub tags: Vec<String>,
+    pub source_document_feature_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -280,7 +292,7 @@ pub struct ProductionRarityWeight {
 #[serde(deny_unknown_fields)]
 pub struct ProductionRarityProfileRecord {
     #[serde(flatten)]
-    pub header: CoreDevelopmentHeader,
+    pub header: ProductionInfrastructureHeader,
     pub ordered_weights: Vec<ProductionRarityWeight>,
 }
 
@@ -288,7 +300,7 @@ pub struct ProductionRarityProfileRecord {
 #[serde(deny_unknown_fields)]
 pub struct ProductionRewardTableRecord {
     #[serde(flatten)]
-    pub header: CoreDevelopmentHeader,
+    pub header: ProductionInfrastructureHeader,
     pub ordered_rolls: Vec<ProductionRewardRoll>,
 }
 
@@ -328,7 +340,7 @@ pub struct ProductionMaterialPoolOutcome {
 #[serde(deny_unknown_fields)]
 pub struct ProductionMaterialPoolRecord {
     #[serde(flatten)]
-    pub header: CoreDevelopmentHeader,
+    pub header: ProductionInfrastructureHeader,
     pub ordered_outcomes: Vec<ProductionMaterialPoolOutcome>,
 }
 
@@ -336,7 +348,7 @@ pub struct ProductionMaterialPoolRecord {
 #[serde(deny_unknown_fields)]
 pub struct ProductionItemStagePolicyRecord {
     #[serde(flatten)]
-    pub header: CoreDevelopmentHeader,
+    pub header: ProductionInfrastructureHeader,
     pub current_class_weapon_relic_basis_points: u16,
     pub other_class_weapon_relic_basis_points: u16,
     pub universal_armor_charm_basis_points: u16,

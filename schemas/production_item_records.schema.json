@@ -675,7 +675,7 @@
       ]
     },
     "ProductionItemStagePolicyRecord": {
-      "description": "Metadata shared by unpromoted Core world-flow records.",
+      "description": "Non-presentational metadata for compiler infrastructure records.",
       "type": "object",
       "properties": {
         "affix_manifest_id": {
@@ -686,12 +686,6 @@
           "format": "uint16",
           "maximum": 65535,
           "minimum": 0
-        },
-        "asset_ids": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/ContentId"
-          }
         },
         "current_class_weapon_relic_basis_points": {
           "type": "integer",
@@ -722,12 +716,6 @@
           ]
         },
         "id": {
-          "$ref": "#/$defs/ContentId"
-        },
-        "localization_description_key": {
-          "$ref": "#/$defs/ContentId"
-        },
-        "localization_name_key": {
           "$ref": "#/$defs/ContentId"
         },
         "maximum_item_level": {
@@ -775,9 +763,6 @@
         "schema_version",
         "enabled",
         "earliest_release_stage",
-        "localization_name_key",
-        "localization_description_key",
-        "asset_ids",
         "tags",
         "source_document_feature_id",
         "current_class_weapon_relic_basis_points",
@@ -1009,15 +994,9 @@
       ]
     },
     "ProductionMaterialPoolRecord": {
-      "description": "Metadata shared by unpromoted Core world-flow records.",
+      "description": "Non-presentational metadata for compiler infrastructure records.",
       "type": "object",
       "properties": {
-        "asset_ids": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/ContentId"
-          }
-        },
         "earliest_release_stage": {
           "$ref": "#/$defs/ReleaseStage"
         },
@@ -1025,12 +1004,6 @@
           "type": "boolean"
         },
         "id": {
-          "$ref": "#/$defs/ContentId"
-        },
-        "localization_description_key": {
-          "$ref": "#/$defs/ContentId"
-        },
-        "localization_name_key": {
           "$ref": "#/$defs/ContentId"
         },
         "ordered_outcomes": {
@@ -1060,9 +1033,6 @@
         "schema_version",
         "enabled",
         "earliest_release_stage",
-        "localization_name_key",
-        "localization_description_key",
-        "asset_ids",
         "tags",
         "source_document_feature_id",
         "ordered_outcomes"
@@ -1081,15 +1051,9 @@
       ]
     },
     "ProductionRarityProfileRecord": {
-      "description": "Metadata shared by unpromoted Core world-flow records.",
+      "description": "Non-presentational metadata for compiler infrastructure records.",
       "type": "object",
       "properties": {
-        "asset_ids": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/ContentId"
-          }
-        },
         "earliest_release_stage": {
           "$ref": "#/$defs/ReleaseStage"
         },
@@ -1097,12 +1061,6 @@
           "type": "boolean"
         },
         "id": {
-          "$ref": "#/$defs/ContentId"
-        },
-        "localization_description_key": {
-          "$ref": "#/$defs/ContentId"
-        },
-        "localization_name_key": {
           "$ref": "#/$defs/ContentId"
         },
         "ordered_weights": {
@@ -1132,9 +1090,6 @@
         "schema_version",
         "enabled",
         "earliest_release_stage",
-        "localization_name_key",
-        "localization_description_key",
-        "asset_ids",
         "tags",
         "source_document_feature_id",
         "ordered_weights"
@@ -1285,15 +1240,9 @@
       ]
     },
     "ProductionRewardTableRecord": {
-      "description": "Metadata shared by unpromoted Core world-flow records.",
+      "description": "Non-presentational metadata for compiler infrastructure records.",
       "type": "object",
       "properties": {
-        "asset_ids": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/ContentId"
-          }
-        },
         "earliest_release_stage": {
           "$ref": "#/$defs/ReleaseStage"
         },
@@ -1301,12 +1250,6 @@
           "type": "boolean"
         },
         "id": {
-          "$ref": "#/$defs/ContentId"
-        },
-        "localization_description_key": {
-          "$ref": "#/$defs/ContentId"
-        },
-        "localization_name_key": {
           "$ref": "#/$defs/ContentId"
         },
         "ordered_rolls": {
@@ -1336,9 +1279,6 @@
         "schema_version",
         "enabled",
         "earliest_release_stage",
-        "localization_name_key",
-        "localization_description_key",
-        "asset_ids",
         "tags",
         "source_document_feature_id",
         "ordered_rolls"
