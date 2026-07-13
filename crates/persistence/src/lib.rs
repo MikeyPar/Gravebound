@@ -15,6 +15,7 @@ mod identity;
 mod items;
 mod oath;
 mod progression;
+mod reward;
 mod world_flow;
 
 pub use identity::{StoredCharacter, StoredIdentityAggregate, StoredMutation};
@@ -32,6 +33,10 @@ pub use progression::{
     StoredEncounterTrustState, StoredEncounterXpEvidence, StoredLockedProgressionCharacter,
     StoredOrdinaryXpEvidence, StoredProgression, StoredProgressionContract,
     StoredProgressionSnapshot, StoredXpAwardResult, StoredXpEligibilityEvidence,
+};
+pub use reward::{
+    RewardPlanningState, RewardTransaction, StoredPendingItem, StoredRewardCommit,
+    StoredRewardEntry, StoredRewardItem, StoredRewardOutcome, StoredRewardRequest,
 };
 pub use world_flow::{
     StoredSafeArrival, StoredWorldFlowCharacter, StoredWorldFlowRevisionV1, StoredWorldLocation,

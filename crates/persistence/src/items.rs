@@ -122,7 +122,7 @@ impl PostgresPersistence {
     }
 }
 
-async fn lock_or_create_inventory(
+pub(crate) async fn lock_or_create_inventory(
     connection: &mut sqlx::PgConnection,
     account_id: [u8; 16],
     character_id: [u8; 16],
