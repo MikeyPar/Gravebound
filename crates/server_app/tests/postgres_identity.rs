@@ -826,7 +826,7 @@ async fn postgres_real_quic_server_restart_preserves_authoritative_roster() {
             .await
             .unwrap();
     let AccountBootstrapResult::Snapshot(restored) = restored else {
-        panic!("restored durable snapshot expected")
+        panic!("restored durable snapshot expected, received {restored:?}")
     };
     assert_eq!(restored.characters.len(), 1);
     assert_persisted_oath_view(&connection, &content_root, character_id).await;
