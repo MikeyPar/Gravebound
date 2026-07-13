@@ -1,7 +1,11 @@
 use std::env;
 
 use anyhow::{Result, bail};
-use bevy::{log::info, prelude::*, window::PrimaryWindow};
+use bevy::{
+    log::{info, warn},
+    prelude::*,
+    window::PrimaryWindow,
+};
 use sim_core::{
     AimDirection, CollisionTarget, CombatAction, EnemyHurtbox, EntityId, FriendlyProjectileSource,
     HurtboxError, MILLI_TILES_PER_TILE, PlayerCombatState, ProjectileCollisionWorld,
@@ -342,6 +346,7 @@ pub(crate) fn configure(app: &mut App) {
         .insert_resource(CombatInputGate::default())
         .insert_resource(CombatInputSampler::default())
         .insert_resource(AimPresentation::default())
+        .insert_resource(crate::oath_feedback::OathAudioCue::start())
         .insert_resource(CollisionDiagnostics::default())
         .add_systems(Startup, spawn_combat_presentation)
         .add_systems(
@@ -690,6 +695,8 @@ fn simulate_combat(
     arena: Res<LoadedArena>,
     movement: Res<LatestMovementAction>,
     scenario: Res<EvidenceScenario>,
+    accessibility: Res<crate::accessibility::AccessibilitySettings>,
+    oath_audio: Res<crate::oath_feedback::OathAudioCue>,
     mut player_transform: Single<&mut Transform, With<LocalPlayer>>,
     mut visuals: Query<(Entity, &ProjectilePresentation, &mut Transform), Without<LocalPlayer>>,
     trap_visuals: Query<(Entity, &NailTrapPresentation)>,
@@ -771,6 +778,8 @@ fn simulate_combat(
         runtime.combat(),
         &arena.0,
         &trap_visuals,
+        *accessibility,
+        &oath_audio,
     );
     log_grave_mark_events(&step);
     log_slipstep_events(&step);
@@ -784,11 +793,19 @@ fn present_nail_traps(
     combat: &PlayerCombatState,
     arena: &sim_core::ArenaGeometry,
     visuals: &Query<(Entity, &NailTrapPresentation)>,
+    accessibility: crate::accessibility::AccessibilitySettings,
+    oath_audio: &crate::oath_feedback::OathAudioCue,
 ) {
     for removal in &step.nail_traps.removals {
         despawn_nail_trap(commands, removal.trap_id, visuals);
     }
     for trap_id in &step.nail_traps.armed {
+        if !oath_audio.play(crate::oath_feedback::OathAudioCueKind::TrapArmed) {
+            warn!(
+                feature_id = "GB-M03-05C",
+                "Nailkeeper arm cue was unavailable"
+            );
+        }
         despawn_nail_trap(commands, *trap_id, visuals);
         if let Some(trap) = combat
             .nail_traps()
@@ -796,7 +813,7 @@ fn present_nail_traps(
             .iter()
             .find(|trap| trap.id() == *trap_id)
         {
-            spawn_nail_trap(commands, trap, arena, true);
+            spawn_nail_trap(commands, trap, arena, true, accessibility);
         }
     }
     for trap_id in &step.nail_traps.spawned {
@@ -806,10 +823,16 @@ fn present_nail_traps(
             .iter()
             .find(|trap| trap.id() == *trap_id)
         {
-            spawn_nail_trap(commands, trap, arena, false);
+            spawn_nail_trap(commands, trap, arena, false, accessibility);
         }
     }
     for trigger in &step.nail_traps.triggers {
+        if !oath_audio.play(crate::oath_feedback::OathAudioCueKind::TrapTriggered) {
+            warn!(
+                feature_id = "GB-M03-05C",
+                "Nailkeeper trigger cue was unavailable"
+            );
+        }
         spawn_transient(
             commands,
             "Nailkeeper Frostbind burst",
@@ -845,9 +868,11 @@ fn spawn_nail_trap(
     trap: &sim_core::NailTrap,
     arena: &sim_core::ArenaGeometry,
     armed: bool,
+    accessibility: crate::accessibility::AccessibilitySettings,
 ) {
+    let plan = nail_trap_visual_plan(armed, accessibility.reduced_motion);
     let position = simulation_point_to_render(trap.position(), arena);
-    let color = if armed {
+    let color = if plan.armed {
         Color::srgba_u8(106, 221, 235, 225)
     } else {
         Color::srgba_u8(173, 141, 79, 155)
@@ -865,17 +890,45 @@ fn spawn_nail_trap(
         ))
         .id();
     commands.entity(entity).with_children(|parent| {
-        for index in 0_u8..12 {
-            let angle = f32::from(index) * std::f32::consts::TAU / 12.0;
+        for index in 0..plan.segment_count {
+            let angle = f32::from(index) * std::f32::consts::TAU / f32::from(plan.segment_count);
             let offset =
                 Vec2::new(angle.cos(), angle.sin()) * sim_core::NAILKEEPER_TRAP_RADIUS_TILES;
             parent.spawn((
-                Sprite::from_color(color, Vec2::new(0.07, if armed { 0.30 } else { 0.20 })),
+                Sprite::from_color(color, Vec2::new(plan.segment_width, plan.segment_length)),
                 Transform::from_xyz(offset.x, offset.y, 0.0)
                     .with_rotation(Quat::from_rotation_z(angle)),
             ));
         }
+        let marker_rotations: &[f32] = if plan.armed {
+            &[0.0, std::f32::consts::FRAC_PI_2]
+        } else {
+            &[std::f32::consts::FRAC_PI_4]
+        };
+        for rotation in marker_rotations {
+            parent.spawn((
+                Sprite::from_color(color, Vec2::new(0.34, 0.08)),
+                Transform::from_rotation(Quat::from_rotation_z(*rotation)),
+            ));
+        }
     });
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct NailTrapVisualPlan {
+    armed: bool,
+    segment_count: u8,
+    segment_width: f32,
+    segment_length: f32,
+}
+
+fn nail_trap_visual_plan(armed: bool, reduced_motion: bool) -> NailTrapVisualPlan {
+    NailTrapVisualPlan {
+        armed,
+        segment_count: if reduced_motion { 8 } else { 12 },
+        segment_width: if reduced_motion { 0.10 } else { 0.07 },
+        segment_length: if armed { 0.30 } else { 0.20 },
+    }
 }
 
 fn present_collision_events(
@@ -1614,6 +1667,7 @@ fn draw_collision_debug(
 #[allow(clippy::needless_pass_by_value)] // Bevy system parameters are wrapper values.
 fn update_transient_effects(
     time: Res<Time>,
+    accessibility: Res<crate::accessibility::AccessibilitySettings>,
     mut commands: Commands,
     mut effects: Query<(Entity, &mut TransientEffect, &mut Transform)>,
 ) {
@@ -1622,7 +1676,11 @@ fn update_transient_effects(
         if effect.remaining_seconds <= 0.0 {
             commands.entity(entity).despawn();
         } else {
-            let scale = (effect.remaining_seconds / effect.total_seconds).clamp(0.0, 1.0);
+            let scale = if accessibility.reduced_motion {
+                1.0
+            } else {
+                (effect.remaining_seconds / effect.total_seconds).clamp(0.0, 1.0)
+            };
             transform.scale = Vec3::splat(scale);
         }
     }
@@ -1689,6 +1747,19 @@ mod tests {
                 gamepad: GamepadButton::RightTrigger,
             }
         );
+    }
+
+    #[test]
+    fn reduced_motion_traps_preserve_radius_shape_and_armed_distinction() {
+        let arming = nail_trap_visual_plan(false, true);
+        let armed = nail_trap_visual_plan(true, true);
+        assert_eq!(arming.segment_count, 8);
+        assert_eq!(armed.segment_count, 8);
+        assert!((arming.segment_width - 0.10).abs() < f32::EPSILON);
+        assert!((armed.segment_width - 0.10).abs() < f32::EPSILON);
+        assert!(armed.segment_length > arming.segment_length);
+        assert!(!arming.armed);
+        assert!(armed.armed);
     }
 
     #[test]

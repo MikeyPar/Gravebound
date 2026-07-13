@@ -17,7 +17,9 @@ use sim_core::{
 };
 
 use crate::{
-    FixedSimulationSet, FrameSet, LoadedArena, arena_view::simulation_point_to_render,
+    FixedSimulationSet, FrameSet, LoadedArena,
+    arena_view::simulation_point_to_render,
+    oath_feedback::{OathAudioCue, OathAudioCueKind},
     player::PlayerSimulation,
 };
 
@@ -1094,6 +1096,7 @@ fn present_enemy_steps(
     arena: Res<LoadedArena>,
     mut runtime: ResMut<EnemyLabRuntime>,
     mut presentation: ResMut<EnemyPresentationState>,
+    oath_audio: Res<OathAudioCue>,
 ) {
     for step in runtime.drain_normal_steps() {
         presentation.approach_moves = presentation
@@ -1170,6 +1173,17 @@ fn present_enemy_steps(
                     presentation.lane_activations += 1;
                 }
                 _ => {}
+            }
+        }
+        for immunity in &step.status_immunities {
+            if immunity.status == sim_core::BellProctorImmuneStatus::Frostbind {
+                presentation.last_attack = "FROSTBIND IMMUNE";
+                if !oath_audio.play(OathAudioCueKind::FrostbindImmune) {
+                    warn!(
+                        feature_id = "GB-M03-05C",
+                        "Frostbind immunity cue was unavailable"
+                    );
+                }
             }
         }
         for event in &step.hostile_step.events {
