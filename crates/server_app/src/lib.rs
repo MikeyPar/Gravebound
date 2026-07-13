@@ -5,6 +5,7 @@
 //! M02 deliberately has no database dependency.
 
 mod ash_wallet;
+mod bargain_milestone;
 mod combat_factory;
 mod ground_expiry;
 mod identity;

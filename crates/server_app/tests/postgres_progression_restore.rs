@@ -424,8 +424,14 @@ async fn danger_xp_restore_is_exact_replay_safe_and_final_resolution_aware() {
     reset_fixture(&persistence).await;
     let progression_content =
         sim_content::load_core_development_progression(&content_root()).unwrap();
-    let awards =
-        PostgresProgressionAwardService::new(persistence.clone(), &progression_content).unwrap();
+    let oath_bargain_content =
+        sim_content::load_core_development_oaths_bargains(&content_root()).unwrap();
+    let awards = PostgresProgressionAwardService::new(
+        persistence.clone(),
+        &progression_content,
+        &oath_bargain_content,
+    )
+    .unwrap();
     let restores = PostgresProgressionRestoreProvider::new(&progression_content).unwrap();
 
     begin_danger_entry(

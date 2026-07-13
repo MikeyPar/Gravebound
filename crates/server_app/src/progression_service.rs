@@ -12,7 +12,7 @@ use sim_core::{CoreProgressionState, RewardLifeState, RewardRecallState, RewardT
 use crate::{
     AuthenticatedAccount, AuthenticatedNamespace, CoreProgressionRules, ProgressionAwardCode,
     ProgressionAwardCommand, ProgressionAwardContext, ProgressionAwardEvidence,
-    ProgressionAwardOutcome, ProgressionAwardPlan,
+    ProgressionAwardOutcome, ProgressionAwardPlan, bargain_milestone::CoreBargainMilestonePlanner,
 };
 
 #[derive(Debug, Clone)]
@@ -20,12 +20,14 @@ pub struct PostgresProgressionAwardService {
     persistence: PostgresPersistence,
     rules: CoreProgressionRules,
     contract: StoredProgressionContract,
+    bargain_milestone: CoreBargainMilestonePlanner,
 }
 
 impl PostgresProgressionAwardService {
     pub fn new(
         persistence: PostgresPersistence,
         content: &sim_content::CoreDevelopmentProgression,
+        oath_bargain_content: &sim_content::CompiledOathBargainCatalog,
     ) -> Result<Self, crate::ProgressionAwardError> {
         let rules = CoreProgressionRules::from_content(content)?;
         let cumulative_xp = rules
@@ -41,6 +43,8 @@ impl PostgresProgressionAwardService {
             persistence,
             rules,
             contract: StoredProgressionContract { cumulative_xp },
+            bargain_milestone: CoreBargainMilestonePlanner::new(oath_bargain_content)
+                .map_err(|_| crate::ProgressionAwardError::InvalidContent)?,
         })
     }
 
@@ -134,6 +138,8 @@ impl PostgresProgressionAwardService {
             .plan_fresh(command, context)
             .map_err(|_| PersistenceError::CorruptStoredProgression)?;
         stage_plan(state, command, account_id, before, &plan)?;
+        self.bargain_milestone
+            .stage_if_qualifying(state, command, before.level, &plan)?;
         Ok(plan.outcome)
     }
 }
