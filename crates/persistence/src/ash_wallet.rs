@@ -153,48 +153,61 @@ impl PostgresPersistence {
             transaction.rollback().await?;
             return Err(PersistenceError::AshAccountNotFound);
         }
-        if let Some(result) = load_result(transaction.connection(), request).await? {
-            transaction.rollback().await?;
-            if result.payload_hash != request.payload_hash {
-                return Err(PersistenceError::AshIdempotencyConflict);
-            }
-            return Ok(AshWalletTransaction::Replayed(result));
+        let outcome = apply_ash_mutation_on_connection(transaction.connection(), request).await?;
+        match outcome {
+            AshWalletTransaction::Committed(_) => transaction.commit().await?,
+            AshWalletTransaction::Replayed(_) => transaction.rollback().await?,
         }
-        sqlx::query(
-            "INSERT INTO ash_wallets (namespace_id, account_id) VALUES ($1, $2) \
-             ON CONFLICT DO NOTHING",
-        )
-        .bind(WIPEABLE_CORE_NAMESPACE)
-        .bind(request.account_id.as_slice())
-        .execute(transaction.connection())
-        .await?;
-        let row = sqlx::query(
-            "SELECT balance, wallet_version FROM ash_wallets \
-             WHERE namespace_id = $1 AND account_id = $2 FOR UPDATE",
-        )
-        .bind(WIPEABLE_CORE_NAMESPACE)
-        .bind(request.account_id.as_slice())
-        .fetch_one(transaction.connection())
-        .await?;
-        let wallet = decode_wallet(&row)?;
-        let result = resolve(request, wallet)?;
-        insert_result(transaction.connection(), request, &result).await?;
-        if result.code == AshMutationCode::Accepted {
-            sqlx::query(
-                "UPDATE ash_wallets SET balance = $1, wallet_version = $2, \
-                 updated_at = transaction_timestamp() WHERE namespace_id = $3 AND account_id = $4",
-            )
-            .bind(result.after_balance)
-            .bind(result.post_wallet_version)
-            .bind(WIPEABLE_CORE_NAMESPACE)
-            .bind(request.account_id.as_slice())
-            .execute(transaction.connection())
-            .await?;
-            insert_ledger_event(transaction.connection(), request, &result).await?;
-        }
-        transaction.commit().await?;
-        Ok(AshWalletTransaction::Committed(result))
+        Ok(outcome)
     }
+}
+
+/// Applies an Ash mutation inside an existing serializable transaction whose account row is
+/// already locked. This is the cross-domain seam for atomic milestone/fallback commits.
+pub(crate) async fn apply_ash_mutation_on_connection(
+    connection: &mut sqlx::PgConnection,
+    request: &AshMutationRequest,
+) -> Result<AshWalletTransaction, PersistenceError> {
+    validate_request(request)?;
+    if let Some(result) = load_result(connection, request).await? {
+        if result.payload_hash != request.payload_hash {
+            return Err(PersistenceError::AshIdempotencyConflict);
+        }
+        return Ok(AshWalletTransaction::Replayed(result));
+    }
+    sqlx::query(
+        "INSERT INTO ash_wallets (namespace_id, account_id) VALUES ($1, $2) \
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(request.account_id.as_slice())
+    .execute(&mut *connection)
+    .await?;
+    let row = sqlx::query(
+        "SELECT balance, wallet_version FROM ash_wallets \
+         WHERE namespace_id = $1 AND account_id = $2 FOR UPDATE",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(request.account_id.as_slice())
+    .fetch_one(&mut *connection)
+    .await?;
+    let wallet = decode_wallet(&row)?;
+    let result = resolve(request, wallet)?;
+    insert_result(&mut *connection, request, &result).await?;
+    if result.code == AshMutationCode::Accepted {
+        sqlx::query(
+            "UPDATE ash_wallets SET balance = $1, wallet_version = $2, \
+             updated_at = transaction_timestamp() WHERE namespace_id = $3 AND account_id = $4",
+        )
+        .bind(result.after_balance)
+        .bind(result.post_wallet_version)
+        .bind(WIPEABLE_CORE_NAMESPACE)
+        .bind(request.account_id.as_slice())
+        .execute(&mut *connection)
+        .await?;
+        insert_ledger_event(connection, request, &result).await?;
+    }
+    Ok(AshWalletTransaction::Committed(result))
 }
 
 fn validate_request(request: &AshMutationRequest) -> Result<(), PersistenceError> {
