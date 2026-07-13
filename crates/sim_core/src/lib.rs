@@ -6,6 +6,7 @@
 mod ability;
 mod arena;
 mod authority;
+mod bargain_offer;
 mod boss;
 mod boss_encounter;
 mod clock;
@@ -50,6 +51,11 @@ pub use authority::{
     AuthorityError, AuthorityInput, AuthorityPhase, AuthorityRecallCommit, AuthorityStep,
     EMERGENCY_RECALL_CHANNEL_TICKS, EMERGENCY_RECALL_MOVEMENT_BASIS_POINTS, EmergencyRecallState,
     PickupEligibility,
+};
+pub use bargain_offer::{
+    BARGAIN_CONTENT_ID_MAX_BYTES, BargainOfferError, MAX_ACTIVE_BARGAINS,
+    MAX_BARGAIN_OFFER_CANDIDATES, ScoredBargainCandidate, plan_bargain_offer,
+    validate_bargain_life_state,
 };
 pub use boss::{
     BELL_PROCTOR_CROSS_ID, BELL_PROCTOR_FAN_ID, BELL_PROCTOR_ID, BELL_PROCTOR_REWARD_ID,
