@@ -103,6 +103,15 @@ impl StillnessDefinition {
             .ok_or(IntentMathError::Overflow)?;
         multiply_basis_points(raw_damage, multiplier)
     }
+
+    pub fn with_activation_ticks(
+        &self,
+        activation_ticks: u32,
+    ) -> Result<Self, AbilityDefinitionError> {
+        let mut parameters = self.parameters.clone();
+        parameters.activation_ticks = activation_ticks;
+        Self::new(parameters)
+    }
 }
 
 impl SlipstepDefinition {
@@ -401,6 +410,17 @@ impl GraveMarkDefinition {
             .checked_add(self.parameters.marked_primary_bonus_basis_points)
             .ok_or(IntentMathError::Overflow)?;
         multiply_basis_points(weapon_raw_damage, multiplier)
+    }
+
+    pub fn with_range_and_marked_primary_bonus(
+        &self,
+        range_milli_tiles: u32,
+        marked_primary_bonus_basis_points: u32,
+    ) -> Result<Self, AbilityDefinitionError> {
+        let mut parameters = self.parameters.clone();
+        parameters.range_milli_tiles = range_milli_tiles;
+        parameters.marked_primary_bonus_basis_points = marked_primary_bonus_basis_points;
+        Self::new(parameters)
     }
 }
 

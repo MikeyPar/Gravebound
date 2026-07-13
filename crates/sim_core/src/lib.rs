@@ -163,7 +163,7 @@ pub use oath::{
     NAILKEEPER_PRIMARY_INTERVAL_MULTIPLIER_BASIS_POINTS, NAILKEEPER_TRAP_RADIUS_MILLI_TILES,
     NAILKEEPER_TRAP_RADIUS_TILES, NailTrap, NailTrapEnemy, NailTrapField, NailTrapRemoval,
     NailTrapRemovalReason, NailTrapStep, NailTrapTrigger, OathMechanicError,
-    ResolvedArbalistOathStats, resolve_arbalist_oath_stats,
+    ResolvedArbalistOathStats, resolve_arbalist_oath_stats, resolve_oath_maximum_health,
 };
 pub use pattern::{
     CombatColorFamily, FirstPlayableMinSpeedPaths, FixedTimelineEvent, MinimumSpeedRouteEvidence,

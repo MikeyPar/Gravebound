@@ -16,6 +16,10 @@ use content_schema::{
     ProductionRewardTableRecord, SCHEMA_VERSION,
 };
 use serde::{Deserialize, Serialize};
+use sim_core::{
+    CrossbowPowerRequest, EquipmentRarity, WeaponDefinition, WeaponDefinitionParameters,
+    resolve_crossbow_weapon_power,
+};
 use thiserror::Error;
 
 const BASIS_POINTS: u32 = 10_000;
@@ -73,6 +77,105 @@ impl CompiledProductionItemCatalog {
     pub const fn stage_policies(&self) -> &BTreeMap<String, ProductionItemStagePolicyRecord> {
         &self.stage_policies
     }
+}
+
+/// Compiles one exact Core production crossbow after all cadence modifiers are resolved in
+/// microseconds. Tick conversion occurs only at this final simulation boundary.
+pub fn compile_core_crossbow(
+    catalog: &CompiledProductionItemCatalog,
+    content_id: &str,
+    item_level: u8,
+    resolved_attack_interval_micros: u32,
+) -> Result<WeaponDefinition> {
+    let item = catalog
+        .items
+        .get(content_id)
+        .with_context(|| format!("Core item `{content_id}` is unavailable"))?;
+    let ProductionItemTemplatePayload::Equipment {
+        family: ProductionEquipmentFamily::Crossbow,
+        behavior:
+            ProductionEquipmentBehavior::Crossbow {
+                template_damage_scalar_basis_points,
+                range_milli_tiles,
+                projectile_speed_milli_tiles_per_second,
+                projectile_radius_milli_tiles,
+                bolt_angles_milli_degrees,
+                maximum_hits_per_target_per_release,
+                pierce_count,
+                ..
+            },
+        minimum_item_level,
+        maximum_item_level,
+        core_maximum_item_level_override,
+        ..
+    } = &item.payload
+    else {
+        bail!("Core item `{content_id}` is not a crossbow");
+    };
+    let maximum = core_maximum_item_level_override.unwrap_or(*maximum_item_level);
+    if item_level < *minimum_item_level
+        || item_level > maximum
+        || resolved_attack_interval_micros == 0
+    {
+        bail!("Core crossbow `{content_id}` has an illegal level or interval");
+    }
+    let directions = bolt_angles_milli_degrees
+        .iter()
+        .map(|angle| match angle {
+            -12_000 => Ok((978_148, -207_912)),
+            0 => Ok((1_000_000, 0)),
+            12_000 => Ok((978_148, 207_912)),
+            _ => bail!("Core crossbow `{content_id}` has unsupported bolt angle `{angle}`"),
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let interval_ticks = u64::from(resolved_attack_interval_micros)
+        .checked_mul(30)
+        .and_then(|value| value.checked_add(500_000))
+        .map(|value| value / 1_000_000)
+        .and_then(|value| u32::try_from(value).ok())
+        .context("Core crossbow interval exceeds simulation tick range")?;
+    WeaponDefinition::new(WeaponDefinitionParameters {
+        content_id: content_id.to_owned(),
+        raw_damage: resolve_crossbow_weapon_power(CrossbowPowerRequest {
+            item_level,
+            template_damage_scalar_basis_points: *template_damage_scalar_basis_points,
+            rarity: EquipmentRarity::Forged,
+            weapon_w_affix_basis_points: 0,
+        })?,
+        attack_interval_ticks: interval_ticks,
+        range_milli_tiles: *range_milli_tiles,
+        projectile_speed_milli_tiles_per_second: *projectile_speed_milli_tiles_per_second,
+        projectile_radius_milli_tiles: u32::from(*projectile_radius_milli_tiles),
+        projectile_count: u32::try_from(directions.len()).context("Core bolt count exceeds u32")?,
+        projectile_directions_millionths: directions,
+        max_projectiles_per_target: u32::from(*maximum_hits_per_target_per_release),
+        pierce: u32::from(*pierce_count),
+        stops_on_first_enemy: *pierce_count == 0,
+    })
+    .with_context(|| format!("Core crossbow `{content_id}` failed simulation validation"))
+}
+
+pub fn core_crossbow_attack_interval_micros(
+    catalog: &CompiledProductionItemCatalog,
+    content_id: &str,
+) -> Result<u32> {
+    let item = catalog
+        .items
+        .get(content_id)
+        .with_context(|| format!("Core item `{content_id}` is unavailable"))?;
+    let ProductionItemTemplatePayload::Equipment {
+        family: ProductionEquipmentFamily::Crossbow,
+        behavior:
+            ProductionEquipmentBehavior::Crossbow {
+                attack_interval_micros,
+                ..
+            },
+        ..
+    } = &item.payload
+    else {
+        bail!("Core item `{content_id}` is not a crossbow");
+    };
+    Ok(*attack_interval_micros)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1419,6 +1522,12 @@ mod tests {
         assert_eq!(compiled.material_pools().len(), 2);
         assert_eq!(compiled.rarity_profiles().len(), 1);
         assert_eq!(compiled.stage_policies().len(), 1);
+        let pine =
+            compile_core_crossbow(&compiled, "item.weapon.crossbow.pine_crossbow", 1, 490_909)
+                .unwrap();
+        assert_eq!(pine.raw_damage(), 15);
+        assert_eq!(pine.attack_interval_ticks(), 15);
+        assert_eq!(pine.projectile_speed_milli_tiles_per_second(), 14_000);
         assert_eq!(
             compiled.hashes().manifest_blake3,
             "27818db710b7553520a162f6f8337dcd0419c459d20c6513a7e12c78fed24ebb"

@@ -10,8 +10,15 @@ use content_schema::{
 };
 use serde::{Deserialize, Serialize};
 use sim_core::{
-    GraveArbalistOath, ResolvedArbalistOathStats, duration_ms_to_ticks_nearest,
+    GraveArbalistOath, GraveMarkDefinition, ResolvedArbalistOathStats, SlipstepDefinition,
+    StillnessDefinition, WeaponDefinition, duration_ms_to_ticks_nearest,
     resolve_arbalist_oath_stats,
+};
+
+use crate::{
+    CompiledProductionItemCatalog, ContentPackage, compile_core_crossbow,
+    core_crossbow_attack_interval_micros, first_playable_grave_mark, first_playable_slipstep,
+    first_playable_stillness,
 };
 
 const INITIAL_WARNING_KEY: &str = "ui.oath.initial_warning";
@@ -117,6 +124,61 @@ pub fn resolve_core_arbalist_oath_stats(
         ordinary_attack_rate_basis_points,
     )
     .map_err(|error| anyhow::anyhow!(error))
+}
+
+#[derive(Debug, Clone)]
+pub struct CoreOathedCombatDefinitions {
+    pub oath: GraveArbalistOath,
+    pub weapon: WeaponDefinition,
+    pub grave_mark: GraveMarkDefinition,
+    pub slipstep: SlipstepDefinition,
+    pub stillness: StillnessDefinition,
+    pub maximum_health_multiplier_basis_points: u32,
+}
+
+pub fn compile_core_oathed_combat_definitions(
+    class_package: &ContentPackage,
+    item_catalog: &CompiledProductionItemCatalog,
+    oath_catalog: &CompiledOathBargainCatalog,
+    oath_id: &str,
+    weapon_id: &str,
+    item_level: u8,
+    ordinary_attack_rate_basis_points: u32,
+) -> Result<CoreOathedCombatDefinitions> {
+    let base_mark = first_playable_grave_mark(class_package)?;
+    let base_stillness = first_playable_stillness(class_package)?;
+    let base_interval = core_crossbow_attack_interval_micros(item_catalog, weapon_id)?;
+    let stats = resolve_core_arbalist_oath_stats(
+        oath_catalog,
+        oath_id,
+        base_stillness.activation_ticks(),
+        base_mark.range_milli_tiles(),
+        base_mark.marked_primary_bonus_basis_points(),
+        base_interval,
+        ordinary_attack_rate_basis_points,
+    )?;
+    let oath =
+        GraveArbalistOath::from_content_id(oath_id).map_err(|error| anyhow::anyhow!(error))?;
+    Ok(CoreOathedCombatDefinitions {
+        oath,
+        weapon: compile_core_crossbow(
+            item_catalog,
+            weapon_id,
+            item_level,
+            stats.primary_interval_micros,
+        )?,
+        grave_mark: base_mark
+            .with_range_and_marked_primary_bonus(
+                stats.grave_mark_range_milli_tiles,
+                stats.marked_primary_bonus_basis_points,
+            )
+            .context("resolved Oath Grave Mark is invalid")?,
+        slipstep: first_playable_slipstep(class_package)?,
+        stillness: base_stillness
+            .with_activation_ticks(stats.focused_activation_ticks)
+            .context("resolved Oath Stillness is invalid")?,
+        maximum_health_multiplier_basis_points: stats.maximum_health_multiplier_basis_points,
+    })
 }
 
 #[derive(Serialize)]
@@ -653,6 +715,44 @@ mod tests {
         )
         .unwrap();
         assert_eq!(nailkeeper.primary_interval_micros, 490_909);
+
+        let (class_package, _) = crate::load_and_validate(&content_root()).unwrap();
+        let items = crate::load_core_development_items(&content_root()).unwrap();
+        let vigil_definitions = compile_core_oathed_combat_definitions(
+            &class_package,
+            &items,
+            &compiled,
+            "oath.arbalist.long_vigil",
+            "item.weapon.crossbow.pine_crossbow",
+            1,
+            10_000,
+        )
+        .unwrap();
+        assert_eq!(vigil_definitions.stillness.activation_ticks(), 11);
+        assert_eq!(vigil_definitions.grave_mark.range_milli_tiles(), 13_000);
+        assert_eq!(
+            vigil_definitions
+                .grave_mark
+                .marked_primary_bonus_basis_points(),
+            2_000
+        );
+        assert_eq!(vigil_definitions.weapon.attack_interval_ticks(), 14);
+        assert_eq!(
+            vigil_definitions.maximum_health_multiplier_basis_points,
+            9_000
+        );
+        let nail_definitions = compile_core_oathed_combat_definitions(
+            &class_package,
+            &items,
+            &compiled,
+            "oath.arbalist.nailkeeper",
+            "item.weapon.crossbow.pine_crossbow",
+            1,
+            10_000,
+        )
+        .unwrap();
+        assert_eq!(nail_definitions.weapon.attack_interval_ticks(), 15);
+        assert_eq!(nail_definitions.oath, GraveArbalistOath::Nailkeeper);
     }
 
     #[test]

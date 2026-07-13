@@ -98,6 +98,20 @@ pub fn resolve_arbalist_oath_stats(
     })
 }
 
+pub fn resolve_oath_maximum_health(
+    base_maximum_health: u32,
+    multiplier_basis_points: u32,
+) -> Result<u32, OathMechanicError> {
+    if base_maximum_health == 0 || multiplier_basis_points == 0 {
+        return Err(OathMechanicError::InvalidResolvedStatInput);
+    }
+    let resolved = round_half_up_ratio(
+        u64::from(base_maximum_health) * u64::from(multiplier_basis_points),
+        10_000,
+    )?;
+    u32::try_from(resolved).map_err(|_| OathMechanicError::ArithmeticOverflow)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NailTrapEnemy {
     pub entity_id: EntityId,
@@ -391,6 +405,7 @@ mod tests {
         assert_eq!(vigil.marked_primary_bonus_basis_points, 2_000);
         assert_eq!(vigil.maximum_health_multiplier_basis_points, 9_000);
         assert_eq!(vigil.primary_interval_micros, 534_759);
+        assert_eq!(resolve_oath_maximum_health(120, 9_000), Ok(108));
 
         let nailkeeper = resolve_arbalist_oath_stats(
             GraveArbalistOath::Nailkeeper,

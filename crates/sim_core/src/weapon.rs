@@ -154,6 +154,15 @@ impl WeaponDefinition {
     pub fn projectile_radius_tiles(&self) -> f32 {
         milli_tiles_to_tiles(self.parameters.projectile_radius_milli_tiles)
     }
+
+    pub fn with_attack_interval_ticks(
+        &self,
+        attack_interval_ticks: u32,
+    ) -> Result<Self, WeaponDefinitionError> {
+        let mut parameters = self.parameters.clone();
+        parameters.attack_interval_ticks = attack_interval_ticks;
+        Self::new(parameters)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
