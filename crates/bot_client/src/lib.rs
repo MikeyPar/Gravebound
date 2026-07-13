@@ -8,7 +8,8 @@ mod journey;
 pub use journey::*;
 
 use protocol::{
-    AccountBootstrapFrame, AccountBootstrapResult, CharacterMutationFrame, CharacterMutationResult,
+    AccountBootstrapFrame, AccountBootstrapResult, BargainDecisionFrame, BargainDecisionResult,
+    BargainViewFrame, BargainViewResult, CharacterMutationFrame, CharacterMutationResult,
     ClientHello, ControlEvent, HandshakeResponse, InitialOathSelectionFrame,
     InitialOathSelectionResult, InputFrame, OathViewFrame, OathViewResult, ProgressionQueryFrame,
     ProgressionResult, ProtocolVersion, RELIABLE_FRAME_LIMIT, ReliableEvent, ReliableEventFrame,
@@ -236,6 +237,29 @@ pub async fn perform_initial_oath_selection(
         perform_reliable_gameplay(connection, WireMessage::InitialOathSelectionFrame(frame))
             .await?;
     let ReliableEvent::InitialOathSelectionResult(result) = &event.event else {
+        return Err(BotTransportError::UnexpectedMessage);
+    };
+    Ok((event.clone(), result.clone()))
+}
+
+pub async fn perform_bargain_view(
+    connection: &quinn::Connection,
+    frame: BargainViewFrame,
+) -> Result<(ReliableEventFrame, BargainViewResult), BotTransportError> {
+    let event = perform_reliable_gameplay(connection, WireMessage::BargainViewFrame(frame)).await?;
+    let ReliableEvent::BargainViewResult(result) = &event.event else {
+        return Err(BotTransportError::UnexpectedMessage);
+    };
+    Ok((event.clone(), result.clone()))
+}
+
+pub async fn perform_bargain_decision(
+    connection: &quinn::Connection,
+    frame: BargainDecisionFrame,
+) -> Result<(ReliableEventFrame, BargainDecisionResult), BotTransportError> {
+    let event =
+        perform_reliable_gameplay(connection, WireMessage::BargainDecisionFrame(frame)).await?;
+    let ReliableEvent::BargainDecisionResult(result) = &event.event else {
         return Err(BotTransportError::UnexpectedMessage);
     };
     Ok((event.clone(), result.clone()))

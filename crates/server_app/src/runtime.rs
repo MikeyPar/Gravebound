@@ -31,13 +31,14 @@ use tracing::{debug, info, warn};
 
 use crate::{
     AccountId, AccountRepository, AdmissionState, AuthenticatedAccount, AuthenticatedNamespace,
-    AuthenticationDecision, CharacterIdGenerator, CoreOathSelectionAuthority,
+    AuthenticationDecision, CharacterIdGenerator, CoreBargainAuthority, CoreOathSelectionAuthority,
     DisabledProgressionQueryRepository, HandshakePolicy, IdentityClock, IdentityService,
     InMemoryAccountRepository, InstanceError, InstanceScheduler, NoopIdentityEventSink,
-    PostgresAccountRepository, PostgresOathSelectionService, PostgresProgressionQueryRepository,
-    PostgresWorldFlowLocationRepository, ProgressionQueryRepository, ProgressionQueryService,
-    SERVER_SHUTDOWN_CLOSE_CODE, SessionOwnerId, TransportId, WorldFlowGateService,
-    WorldFlowLocationRepository, close_transport, serve_core_reliable,
+    PostgresAccountRepository, PostgresBargainService, PostgresOathSelectionService,
+    PostgresProgressionQueryRepository, PostgresWorldFlowLocationRepository,
+    ProgressionQueryRepository, ProgressionQueryService, SERVER_SHUTDOWN_CLOSE_CODE,
+    SessionOwnerId, TransportId, WorldFlowGateService, WorldFlowLocationRepository,
+    close_transport, serve_core_reliable,
 };
 
 pub const LOCAL_BUILD_ID: &str = M02_LOCAL_BUILD_ID;
@@ -494,6 +495,11 @@ pub struct CoreIdentityServerReport {
 type CoreIdentityAuthority<R> =
     IdentityService<R, SystemIdentityClock, ProcessCharacterIds, NoopIdentityEventSink>;
 
+struct CoreShrineAuthorities {
+    oath: CoreOathSelectionAuthority<SystemIdentityClock>,
+    bargain: CoreBargainAuthority<SystemIdentityClock>,
+}
+
 /// Explicit Core-development endpoint. It never creates an [`InstanceScheduler`] and therefore
 /// cannot silently route identity clients into the M02 combat laboratory.
 pub struct BoundCoreIdentityServer<
@@ -509,6 +515,7 @@ pub struct BoundCoreIdentityServer<
     world_flow: Arc<WorldFlowGateService<W, SystemIdentityClock>>,
     progression: Arc<ProgressionQueryService<P>>,
     oath: Arc<CoreOathSelectionAuthority<SystemIdentityClock>>,
+    bargain: Arc<CoreBargainAuthority<SystemIdentityClock>>,
     persistence_enabled: bool,
 }
 
@@ -534,7 +541,10 @@ impl BoundCoreIdentityServer {
             repository,
             DisabledProgressionQueryRepository,
             &progression_content,
-            CoreOathSelectionAuthority::disabled(),
+            CoreShrineAuthorities {
+                oath: CoreOathSelectionAuthority::disabled(),
+                bargain: CoreBargainAuthority::disabled(),
+            },
             false,
         )
     }
@@ -561,17 +571,23 @@ impl
                 .map_err(|error| LocalServerRuntimeError::Content(error.to_string()))?;
         let oath_content = sim_content::load_core_development_oaths_bargains(&config.content_root)
             .map_err(|error| LocalServerRuntimeError::Content(error.to_string()))?;
-        let oath =
-            PostgresOathSelectionService::new(persistence, SystemIdentityClock, &oath_content)
-                .map(CoreOathSelectionAuthority::persistent)
-                .map_err(|error| LocalServerRuntimeError::Content(error.to_string()))?;
+        let oath = PostgresOathSelectionService::new(
+            persistence.clone(),
+            SystemIdentityClock,
+            &oath_content,
+        )
+        .map(CoreOathSelectionAuthority::persistent)
+        .map_err(|error| LocalServerRuntimeError::Content(error.to_string()))?;
+        let bargain = PostgresBargainService::new(persistence, SystemIdentityClock, &oath_content)
+            .map(CoreBargainAuthority::persistent)
+            .map_err(|error| LocalServerRuntimeError::Content(error.to_string()))?;
         Self::bind_with_repositories(
             config,
             repository,
             world_flow,
             progression,
             &progression_content,
-            oath,
+            CoreShrineAuthorities { oath, bargain },
             true,
         )
     }
@@ -589,7 +605,7 @@ where
         world_flow_repository: W,
         progression_repository: P,
         progression_content: &sim_content::CoreDevelopmentProgression,
-        oath: CoreOathSelectionAuthority<SystemIdentityClock>,
+        shrines: CoreShrineAuthorities,
         persistence_enabled: bool,
     ) -> Result<Self, LocalServerRuntimeError> {
         sim_content::load_core_development_identity(&config.content_root)
@@ -640,7 +656,8 @@ where
             ProgressionQueryService::new(progression_repository, progression_content)
                 .map_err(|error| LocalServerRuntimeError::Content(error.to_string()))?,
         );
-        let oath = Arc::new(oath);
+        let oath = Arc::new(shrines.oath);
+        let bargain = Arc::new(shrines.bargain);
         Ok(Self {
             endpoint,
             certificate,
@@ -650,6 +667,7 @@ where
             world_flow,
             progression,
             oath,
+            bargain,
             persistence_enabled,
         })
     }
@@ -692,10 +710,11 @@ where
                     let world_flow = Arc::clone(&self.world_flow);
                     let progression = Arc::clone(&self.progression);
                     let oath = Arc::clone(&self.oath);
+                    let bargain = Arc::clone(&self.bargain);
                     let accepted = Arc::clone(&accepted);
                     let rejected = Arc::clone(&rejected);
                     workers.spawn(async move {
-                        match serve_core_identity_connection(incoming, policy, authority, world_flow, progression, oath).await {
+                        match serve_core_identity_connection(incoming, policy, authority, world_flow, progression, oath, bargain).await {
                             Ok(true) => { accepted.fetch_add(1, Ordering::Relaxed); }
                             Ok(false) => { rejected.fetch_add(1, Ordering::Relaxed); }
                             Err(error) => warn!(%error, "Core identity connection ended"),
@@ -731,6 +750,7 @@ async fn serve_core_identity_connection<R, W, P>(
     world_flow: Arc<WorldFlowGateService<W, SystemIdentityClock>>,
     progression: Arc<ProgressionQueryService<P>>,
     oath: Arc<CoreOathSelectionAuthority<SystemIdentityClock>>,
+    bargain: Arc<CoreBargainAuthority<SystemIdentityClock>>,
 ) -> Result<bool, LocalServerRuntimeError>
 where
     R: AccountRepository,
@@ -776,6 +796,7 @@ where
             world_flow.as_ref(),
             progression.as_ref(),
             oath.as_ref(),
+            bargain.as_ref(),
             authenticated,
             response_sequence,
             0,

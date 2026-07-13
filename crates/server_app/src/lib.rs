@@ -461,12 +461,13 @@ where
 /// World-flow messages share the reliable transport but cannot mutate identity state, and the
 /// normal world-flow authority remains fail-closed until its downstream packages are complete.
 #[allow(clippy::too_many_arguments)]
-pub async fn serve_core_reliable<R, C, G, E, W, WC, P, OC>(
+pub async fn serve_core_reliable<R, C, G, E, W, WC, P, OC, BC>(
     connection: &quinn::Connection,
     identity: &IdentityService<R, C, G, E>,
     world_flow: &WorldFlowGateService<W, WC>,
     progression: &ProgressionQueryService<P>,
     oath: &CoreOathSelectionAuthority<OC>,
+    bargain: &CoreBargainAuthority<BC>,
     authenticated: AuthenticatedAccount,
     response_sequence: u32,
     server_tick: u64,
@@ -480,6 +481,7 @@ where
     WC: IdentityClock,
     P: ProgressionQueryRepository,
     OC: IdentityClock,
+    BC: IdentityClock,
 {
     if response_sequence == 0 {
         return Err(ServerTransportError::UnexpectedMessage);
@@ -517,6 +519,12 @@ where
                 oath.select(authenticated, &frame).await,
             )
         }
+        WireMessage::BargainViewFrame(frame) => {
+            protocol::ReliableEvent::BargainViewResult(bargain.view(authenticated, &frame).await)
+        }
+        WireMessage::BargainDecisionFrame(frame) => protocol::ReliableEvent::BargainDecisionResult(
+            bargain.decide(authenticated, &frame).await,
+        ),
         _ => return Err(ServerTransportError::UnexpectedMessage),
     };
     let response = protocol::ReliableEventFrame {
