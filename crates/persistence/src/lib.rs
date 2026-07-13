@@ -53,7 +53,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 12;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 13;
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -449,6 +449,27 @@ mod tests {
             assert!(
                 !migration.contains(prohibited),
                 "progression crash-restore migration leaked {prohibited}"
+            );
+        }
+    }
+
+    #[test]
+    fn xp_revocation_shape_rejects_null_three_valued_logic_edges() {
+        let migration =
+            include_str!("../../../migrations/0013_strict_xp_crash_revocation_shape.sql");
+        for required in [
+            "DROP CONSTRAINT xp_crash_revocation_shape",
+            "entry_restore_point_id IS NOT NULL",
+            "revoked_by_restore_point_id IS NOT NULL",
+            "revocation_progression_version IS NOT NULL",
+            "revoked_by_restore_point_id = entry_restore_point_id",
+        ] {
+            assert!(migration.contains(required), "migration omitted {required}");
+        }
+        for prohibited in ["DELETE", "DROP TABLE", "JSON", "JSONB"] {
+            assert!(
+                !migration.contains(prohibited),
+                "strict XP revocation migration leaked {prohibited}"
             );
         }
     }
