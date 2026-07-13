@@ -239,6 +239,7 @@ mod tests {
                 life_state: 0,
                 security_state: 0,
                 character_state_version: 8,
+                progression_version: 3,
                 inventory_version: Some(4),
                 equipped_weapon: Some(StoredEquippedWeapon {
                     item_uid: [3; 16],

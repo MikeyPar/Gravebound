@@ -42,6 +42,7 @@ pub struct StoredCoreCombatLoadout {
     pub life_state: i16,
     pub security_state: i16,
     pub character_state_version: i64,
+    pub progression_version: i64,
     pub inventory_version: Option<i64>,
     pub equipped_weapon: Option<StoredEquippedWeapon>,
     pub belt_slots: [Option<StoredCombatBeltStack>; 2],
@@ -59,7 +60,8 @@ impl PostgresPersistence {
             return Err(PersistenceError::CorruptStoredItems);
         }
         let row = sqlx::query(
-            "SELECT a.selected_character_id, c.class_id, p.level, p.current_health, c.oath_id, \
+            "SELECT a.selected_character_id, c.class_id, p.level, p.current_health, \
+                    p.progression_version, c.oath_id, \
                     ob.oath_bargain_version, \
                     ARRAY(SELECT ab.bargain_id FROM character_active_bargains ab \
                           WHERE ab.namespace_id = c.namespace_id AND ab.account_id = c.account_id \
@@ -159,6 +161,7 @@ fn decode_loadout(
         life_state: row.try_get("life_state")?,
         security_state: row.try_get("security_state")?,
         character_state_version: row.try_get("character_state_version")?,
+        progression_version: row.try_get("progression_version")?,
         inventory_version: row.try_get("inventory_version")?,
         equipped_weapon,
         belt_slots,
@@ -289,6 +292,7 @@ fn validate_loadout_shape(loadout: &StoredCoreCombatLoadout) -> Result<(), Persi
         || !(1..=10).contains(&loadout.level)
         || loadout.current_health <= 0
         || loadout.character_state_version <= 0
+        || loadout.progression_version <= 0
         || loadout.oath_bargain_version <= 0
         || loadout.inventory_version.is_some_and(|value| value <= 0)
         || loadout.equipped_weapon.as_ref().is_some_and(|weapon| {
@@ -346,6 +350,7 @@ mod tests {
             life_state: 0,
             security_state: 0,
             character_state_version: 4,
+            progression_version: 3,
             inventory_version: Some(2),
             equipped_weapon: Some(StoredEquippedWeapon {
                 item_uid: [2; 16],

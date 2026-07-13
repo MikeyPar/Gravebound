@@ -14,6 +14,7 @@ use thiserror::Error;
 pub struct CoreCharacterCombat {
     pub character_id: [u8; 16],
     pub character_state_version: u64,
+    pub progression_version: u64,
     pub inventory_version: u64,
     pub oath_bargain_version: u64,
     pub level: u16,
@@ -123,10 +124,8 @@ impl CoreCharacterCombatCompiler {
         if snapshot.security_state != 0 {
             return Err(CoreCombatFactoryError::UnresolvedMutation);
         }
-        let inventory_version = snapshot
-            .inventory_version
-            .and_then(|value| u64::try_from(value).ok())
-            .ok_or(CoreCombatFactoryError::InventoryUnavailable)?;
+        let (character_state_version, progression_version, inventory_version, oath_bargain_version) =
+            compile_aggregate_versions(snapshot)?;
         let weapon = snapshot
             .equipped_weapon
             .as_ref()
@@ -199,11 +198,10 @@ impl CoreCharacterCombatCompiler {
         .map_err(|_| CoreCombatFactoryError::InvalidContent)?;
         Ok(CoreCharacterCombat {
             character_id: snapshot.character_id,
-            character_state_version: u64::try_from(snapshot.character_state_version)
-                .map_err(|_| CoreCombatFactoryError::InvalidContent)?,
+            character_state_version,
+            progression_version,
             inventory_version,
-            oath_bargain_version: u64::try_from(snapshot.oath_bargain_version)
-                .map_err(|_| CoreCombatFactoryError::InvalidContent)?,
+            oath_bargain_version,
             level,
             maximum_health,
             bargains: definitions.bargains,
@@ -214,6 +212,21 @@ impl CoreCharacterCombatCompiler {
             consumables,
         })
     }
+}
+
+fn compile_aggregate_versions(
+    snapshot: &StoredCoreCombatLoadout,
+) -> Result<(u64, u64, u64, u64), CoreCombatFactoryError> {
+    let convert = |value| u64::try_from(value).map_err(|_| CoreCombatFactoryError::InvalidContent);
+    Ok((
+        convert(snapshot.character_state_version)?,
+        convert(snapshot.progression_version)?,
+        snapshot
+            .inventory_version
+            .and_then(|value| u64::try_from(value).ok())
+            .ok_or(CoreCombatFactoryError::InventoryUnavailable)?,
+        convert(snapshot.oath_bargain_version)?,
+    ))
 }
 
 fn compile_consumables(
@@ -294,6 +307,7 @@ mod tests {
             life_state: 0,
             security_state: 0,
             character_state_version: 8,
+            progression_version: 3,
             inventory_version: Some(4),
             equipped_weapon: Some(StoredEquippedWeapon {
                 item_uid: [3; 16],
