@@ -246,6 +246,7 @@ fn sample_second_button(
 fn simulate_consumable(
     input: Res<ConsumableInputSampler>,
     audio_cue: Res<TonicAudioCue>,
+    bargain_audio: Res<crate::bargain_feedback::BargainAudioCue>,
     mut runtime: ResMut<EnemyLabRuntime>,
     mut diagnostics: ResMut<ConsumableDiagnostics>,
 ) {
@@ -285,6 +286,14 @@ fn simulate_consumable(
                 diagnostics.feedback = match reason {
                     sim_core::TonicUseRejection::EmptyQSlot => "NO TONIC IN Q SLOT",
                     sim_core::TonicUseRejection::InactiveBeltSlot { .. } => {
+                        if !bargain_audio
+                            .play(crate::bargain_feedback::BargainAudioCueKind::BeltLocked)
+                        {
+                            warn!(
+                                feature_id = "GB-M03-05E",
+                                "Lantern Ash locked-belt cue was unavailable"
+                            );
+                        }
                         "E SLOT LOCKED BY LANTERN ASH"
                     }
                     sim_core::TonicUseRejection::InvalidBeltSlot { .. } => "INVALID BELT SLOT",

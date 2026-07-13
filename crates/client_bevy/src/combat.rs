@@ -347,6 +347,7 @@ pub(crate) fn configure(app: &mut App) {
         .insert_resource(CombatInputSampler::default())
         .insert_resource(AimPresentation::default())
         .insert_resource(crate::oath_feedback::OathAudioCue::start())
+        .insert_resource(crate::bargain_feedback::BargainAudioCue::start())
         .insert_resource(CollisionDiagnostics::default())
         .add_systems(Startup, spawn_combat_presentation)
         .add_systems(
@@ -697,6 +698,7 @@ fn simulate_combat(
     scenario: Res<EvidenceScenario>,
     accessibility: Res<crate::accessibility::AccessibilitySettings>,
     oath_audio: Res<crate::oath_feedback::OathAudioCue>,
+    bargain_audio: Res<crate::bargain_feedback::BargainAudioCue>,
     mut player_transform: Single<&mut Transform, With<LocalPlayer>>,
     mut visuals: Query<(Entity, &ProjectilePresentation, &mut Transform), Without<LocalPlayer>>,
     trap_visuals: Query<(Entity, &NailTrapPresentation)>,
@@ -769,7 +771,13 @@ fn simulate_combat(
         &mut collision_diagnostics,
     );
     present_expirations(&mut commands, &step, &arena.0, &mut visuals);
-    present_shots(&mut commands, &step, &arena.0);
+    present_shots(
+        &mut commands,
+        &step,
+        &arena.0,
+        accessibility.reduced_motion,
+        &bargain_audio,
+    );
     present_slipstep(&mut commands, &step, &arena.0, &mut collision_diagnostics);
     present_stillness(&mut commands, &step, &arena.0, &mut collision_diagnostics);
     present_nail_traps(
@@ -1042,9 +1050,11 @@ fn present_shots(
     commands: &mut Commands,
     step: &sim_core::CombatStep,
     arena: &sim_core::ArenaGeometry,
+    reduced_motion: bool,
+    bargain_audio: &crate::bargain_feedback::BargainAudioCue,
 ) {
     for shot in &step.shots {
-        spawn_projectile(commands, &shot.projectile, arena);
+        spawn_projectile(commands, &shot.projectile, arena, reduced_motion);
         let direction = simulation_direction_to_render(shot.projectile.direction().vector());
         let origin = simulation_point_to_render(shot.projectile.origin(), arena);
         let muzzle_color = match shot.projectile.source() {
@@ -1060,6 +1070,25 @@ fn present_shots(
             0.24,
             0.07,
         );
+        if shot.projectile.source() == FriendlyProjectileSource::BellDebtRepeat {
+            let plan = crate::bargain_feedback::bell_repeat_visual_plan(reduced_motion);
+            if !bargain_audio.play(crate::bargain_feedback::BargainAudioCueKind::BellRepeat) {
+                warn!(
+                    feature_id = "GB-M03-05E",
+                    "Bell Debt repeat cue was unavailable"
+                );
+            }
+            if plan.animated_pulse {
+                spawn_transient(
+                    commands,
+                    "Bell echo pulse",
+                    origin,
+                    Color::srgba_u8(255, 239, 178, 190),
+                    0.38,
+                    0.12,
+                );
+            }
+        }
         info!(
             feature_id = "GB-M01-02C",
             tick = shot.tick.0,
@@ -1271,6 +1300,7 @@ fn spawn_projectile(
     commands: &mut Commands,
     projectile: &sim_core::FriendlyProjectile,
     arena: &sim_core::ArenaGeometry,
+    reduced_motion: bool,
 ) {
     let (name, outer_color, core_color, length) = match projectile.source() {
         FriendlyProjectileSource::Primary => (
@@ -1304,10 +1334,10 @@ fn spawn_projectile(
             },
         ),
         FriendlyProjectileSource::BellDebtRepeat => (
-            "Bell echo bolt",
+            crate::bargain_feedback::bell_repeat_visual_plan(reduced_motion).label,
             Color::srgb_u8(245, 183, 79),
             Color::srgb_u8(255, 239, 178),
-            0.28,
+            crate::bargain_feedback::bell_repeat_visual_plan(reduced_motion).body_length,
         ),
         FriendlyProjectileSource::GraveMark => (
             "Grave Mark bolt",
@@ -1316,21 +1346,31 @@ fn spawn_projectile(
             0.46,
         ),
     };
-    commands
-        .spawn((
-            Name::new(format!("{name} {}", projectile.id())),
-            ProjectilePresentation(projectile.id()),
+    let mut presentation = commands.spawn((
+        Name::new(format!("{name} {}", projectile.id())),
+        ProjectilePresentation(projectile.id()),
+        Sprite::from_color(
+            outer_color,
+            Vec2::new(length, projectile.radius_tiles() * 2.0),
+        ),
+        projectile_transform(projectile, arena),
+    ));
+    presentation.with_child((
+        Name::new(format!("{name} core")),
+        Sprite::from_color(core_color, Vec2::new(length * 0.55, 0.035)),
+        Transform::from_xyz(0.03, 0.0, 0.1),
+    ));
+    if projectile.source() == FriendlyProjectileSource::BellDebtRepeat {
+        let plan = crate::bargain_feedback::bell_repeat_visual_plan(reduced_motion);
+        presentation.with_child((
+            Name::new("Bell echo notch"),
             Sprite::from_color(
-                outer_color,
-                Vec2::new(length, projectile.radius_tiles() * 2.0),
+                Color::srgb_u8(255, 239, 178),
+                Vec2::new(0.035, plan.notch_length),
             ),
-            projectile_transform(projectile, arena),
-        ))
-        .with_child((
-            Name::new(format!("{name} core")),
-            Sprite::from_color(core_color, Vec2::new(length * 0.55, 0.035)),
-            Transform::from_xyz(0.03, 0.0, 0.1),
+            Transform::from_xyz(-0.04, 0.0, 0.12),
         ));
+    }
 }
 
 fn projectile_transform(
