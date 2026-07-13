@@ -7,10 +7,10 @@
 use std::{collections::BTreeMap, future::Future};
 
 use persistence::{
-    DangerCheckpointWrite, PersistenceError, PostgresPersistence, StoredDangerCheckpoint,
-    StoredWorldFlowRevisionV1,
+    DangerCheckpointDelete, DangerCheckpointWrite, PersistenceError, PostgresPersistence,
+    StoredDangerCheckpoint, StoredWorldFlowRevisionV1,
 };
-use sim_core::{BELL_DEBT_CHECKPOINT_SCHEMA_VERSION, BellDebtCheckpoint};
+use sim_core::{BELL_DEBT_CHECKPOINT_SCHEMA_VERSION, BellDebtCheckpoint, BellDebtResetReason};
 use thiserror::Error;
 
 use crate::CoreCharacterCombat;
@@ -231,6 +231,14 @@ impl CoreLiveCharacter {
         Ok(checkpoint)
     }
 
+    fn complete_safe_transfer(&mut self) {
+        self.combat
+            .state
+            .reset_bell_debt(BellDebtResetReason::SafeTransfer);
+        self.checkpoint_dirty = false;
+        self.last_checkpoint_tick = 0;
+    }
+
     fn validate_stored_checkpoint(
         &self,
         checkpoint: &StoredDangerCheckpoint,
@@ -297,6 +305,13 @@ pub trait CoreDangerCheckpointRepository: Send + Sync {
         account_id: [u8; ID_BYTES],
         character_id: [u8; ID_BYTES],
     ) -> impl Future<Output = Result<Option<StoredDangerCheckpoint>, PersistenceError>> + Send;
+
+    fn delete_after_safe_transfer(
+        &self,
+        account_id: [u8; ID_BYTES],
+        character_id: [u8; ID_BYTES],
+        lineage_id: [u8; ID_BYTES],
+    ) -> impl Future<Output = Result<DangerCheckpointDelete, PersistenceError>> + Send;
 }
 
 impl CoreDangerCheckpointRepository for PostgresPersistence {
@@ -313,6 +328,16 @@ impl CoreDangerCheckpointRepository for PostgresPersistence {
         character_id: [u8; ID_BYTES],
     ) -> Result<Option<StoredDangerCheckpoint>, PersistenceError> {
         self.danger_checkpoint(account_id, character_id).await
+    }
+
+    async fn delete_after_safe_transfer(
+        &self,
+        account_id: [u8; ID_BYTES],
+        character_id: [u8; ID_BYTES],
+        lineage_id: [u8; ID_BYTES],
+    ) -> Result<DangerCheckpointDelete, PersistenceError> {
+        self.delete_danger_checkpoint_after_safe_transfer(account_id, character_id, lineage_id)
+            .await
     }
 }
 
@@ -372,6 +397,19 @@ where
             checkpoint_tick: u64::try_from(checkpoint.checkpoint_tick)
                 .map_err(|_| CoreLiveError::InvalidCheckpoint)?,
         })
+    }
+
+    pub async fn finalize_safe_transfer(
+        &self,
+        live: &mut CoreLiveCharacter,
+    ) -> Result<DangerCheckpointDelete, CoreCheckpointServiceError> {
+        let key = live.key();
+        let outcome = self
+            .repository
+            .delete_after_safe_transfer(key.account_id, key.character_id, key.lineage_id)
+            .await?;
+        live.complete_safe_transfer();
+        Ok(outcome)
     }
 
     async fn persist_and_confirm(
@@ -575,6 +613,7 @@ mod tests {
     struct MemoryCheckpointRepository {
         stored: Mutex<Option<StoredDangerCheckpoint>>,
         writes: Mutex<u32>,
+        safe_transfer_committed: Mutex<bool>,
     }
 
     impl CoreDangerCheckpointRepository for MemoryCheckpointRepository {
@@ -599,6 +638,22 @@ mod tests {
             _character_id: [u8; ID_BYTES],
         ) -> Result<Option<StoredDangerCheckpoint>, PersistenceError> {
             Ok(self.stored.lock().unwrap().clone())
+        }
+
+        async fn delete_after_safe_transfer(
+            &self,
+            _account_id: [u8; ID_BYTES],
+            _character_id: [u8; ID_BYTES],
+            _lineage_id: [u8; ID_BYTES],
+        ) -> Result<DangerCheckpointDelete, PersistenceError> {
+            if !*self.safe_transfer_committed.lock().unwrap() {
+                return Err(PersistenceError::DangerCheckpointFinalizationNotCommitted);
+            }
+            Ok(if self.stored.lock().unwrap().take().is_some() {
+                DangerCheckpointDelete::Deleted
+            } else {
+                DangerCheckpointDelete::Absent
+            })
         }
     }
 
@@ -1023,6 +1078,95 @@ mod tests {
                 .export_bell_debt_checkpoint()
                 .unwrap(),
             expected
+        );
+    }
+
+    #[tokio::test]
+    async fn safe_transfer_resets_only_after_durable_cleanup_and_replays_idempotently() {
+        let key = CoreLifeKey::new([1; 16], [2; 16], [3; 16]).unwrap();
+        let mut directory = CoreLiveDirectory::default();
+        directory
+            .insert(
+                key,
+                CoreLiveBindingId::new(10).unwrap(),
+                "room.sepulcher",
+                checkpoint_binding(),
+                combat(),
+            )
+            .unwrap();
+        let world = empty_world();
+        directory
+            .get_mut(key)
+            .unwrap()
+            .with_combat_mutation(|combat| {
+                combat.state.step(
+                    CombatAction {
+                        primary_held: true,
+                        primary_press_sequence: 1,
+                        ..CombatAction::default()
+                    },
+                    SimulationVector::new(4.0, 7.0),
+                    &world,
+                )
+            })
+            .unwrap()
+            .unwrap();
+        let service = CoreDangerCheckpointService::new(MemoryCheckpointRepository::default());
+        service
+            .flush_lifecycle_boundary(directory.get_mut(key).unwrap())
+            .await
+            .unwrap();
+        let before = directory
+            .get(key)
+            .unwrap()
+            .combat()
+            .state
+            .export_bell_debt_checkpoint()
+            .unwrap();
+        assert_ne!(before.primary_release_count(), 0);
+
+        assert!(matches!(
+            service
+                .finalize_safe_transfer(directory.get_mut(key).unwrap())
+                .await,
+            Err(CoreCheckpointServiceError::Persistence(
+                PersistenceError::DangerCheckpointFinalizationNotCommitted
+            ))
+        ));
+        assert_eq!(
+            directory
+                .get(key)
+                .unwrap()
+                .combat()
+                .state
+                .export_bell_debt_checkpoint()
+                .unwrap(),
+            before
+        );
+
+        *service.repository().safe_transfer_committed.lock().unwrap() = true;
+        assert_eq!(
+            service
+                .finalize_safe_transfer(directory.get_mut(key).unwrap())
+                .await
+                .unwrap(),
+            DangerCheckpointDelete::Deleted
+        );
+        let reset = directory
+            .get(key)
+            .unwrap()
+            .combat()
+            .state
+            .export_bell_debt_checkpoint()
+            .unwrap();
+        assert_eq!(reset.primary_release_count(), 0);
+        assert!(!reset.has_pending_repeat());
+        assert_eq!(
+            service
+                .finalize_safe_transfer(directory.get_mut(key).unwrap())
+                .await
+                .unwrap(),
+            DangerCheckpointDelete::Absent
         );
     }
 }
