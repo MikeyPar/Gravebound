@@ -1,8 +1,8 @@
 //! Typed `PostgreSQL` transaction boundary for initial Oath selection.
 //!
 //! This repository owns lock order, durable replay, the character-life version update, and the
-//! transactional outbox. Gameplay eligibility remains server-owned. Until inventory persistence
-//! joins this transaction, the server must keep acceptance fail-closed.
+//! transactional outbox. Gameplay eligibility remains server-owned; this boundary also locks the
+//! durable inventory aggregate and exposes a conservative safety projection to that authority.
 
 use sqlx::Row;
 
@@ -49,8 +49,17 @@ pub struct StoredCharacterLifeEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredOathInventory {
+    /// Missing until the starter-item initializer creates the aggregate.
+    pub inventory_version: Option<i64>,
+    /// True only when every live item is in a safe equipped or belt location.
+    pub is_safe: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OathSelectionTransactionState {
     pub character: StoredOathCharacter,
+    pub inventory: StoredOathInventory,
     pub new_result: Option<StoredOathMutationResult>,
     pub new_event: Option<StoredCharacterLifeEvent>,
 }
@@ -110,8 +119,9 @@ impl PostgresPersistence {
 
     /// Applies one initial-Oath mutation or returns its exact prior result.
     ///
-    /// Lock order is account -> replay receipt -> character -> progression -> location. A replay
-    /// never invokes `operation`, so current character state cannot change its response.
+    /// Lock order is account -> replay receipt -> character/progression/location -> inventory ->
+    /// item UID. A replay never invokes `operation`, so current aggregate state cannot change its
+    /// response. Inventory writers use the same character -> inventory order.
     pub async fn transact_initial_oath_selection<T, F>(
         &self,
         account_id: [u8; ID_BYTES],
@@ -142,9 +152,14 @@ impl PostgresPersistence {
         )
         .await?;
         validate_character(&character)?;
+        let inventory =
+            lock_inventory_safety(transaction.connection(), &account_id, &character_id).await?;
+        validate_inventory(&inventory)?;
         let original = character.clone();
+        let original_inventory = inventory.clone();
         let mut state = OathSelectionTransactionState {
             character,
+            inventory,
             new_result: None,
             new_event: None,
         };
@@ -154,7 +169,14 @@ impl PostgresPersistence {
             .as_ref()
             .ok_or(PersistenceError::OathSelectionResultRequired)?;
         validate_result(result)?;
-        validate_transition(&account_id, &character_id, &mutation_id, &original, &state)?;
+        validate_transition(
+            &account_id,
+            &character_id,
+            &mutation_id,
+            &original,
+            &original_inventory,
+            &state,
+        )?;
 
         if result.result_code == ACCEPTED_RESULT_CODE {
             sqlx::query(
@@ -204,6 +226,53 @@ impl PostgresPersistence {
         transaction.commit().await?;
         Ok(OathSelectionTransaction::Committed(output))
     }
+}
+
+async fn lock_inventory_safety(
+    connection: &mut sqlx::PgConnection,
+    account_id: &[u8; ID_BYTES],
+    character_id: &[u8; ID_BYTES],
+) -> Result<StoredOathInventory, PersistenceError> {
+    let inventory_version = sqlx::query_scalar::<_, i64>(
+        "SELECT inventory_version FROM character_inventories WHERE namespace_id = $1 \
+         AND account_id = $2 AND character_id = $3 FOR UPDATE",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(PersistenceError::Database)?;
+    let Some(inventory_version) = inventory_version else {
+        return Ok(StoredOathInventory {
+            inventory_version: None,
+            is_safe: false,
+        });
+    };
+    let rows = sqlx::query(
+        "SELECT security_state, location_kind FROM item_instances WHERE namespace_id = $1 \
+         AND account_id = $2 AND character_id = $3 ORDER BY item_uid FOR UPDATE",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
+    .fetch_all(connection)
+    .await
+    .map_err(PersistenceError::Database)?;
+    let mut is_safe = true;
+    for row in rows {
+        let security_state = row
+            .try_get::<i16, _>("security_state")
+            .map_err(PersistenceError::Database)?;
+        let location_kind = row
+            .try_get::<i16, _>("location_kind")
+            .map_err(PersistenceError::Database)?;
+        is_safe &= matches!((security_state, location_kind), (0, 0 | 1) | (3, 4));
+    }
+    Ok(StoredOathInventory {
+        inventory_version: Some(inventory_version),
+        is_safe,
+    })
 }
 
 async fn lock_account(
@@ -377,9 +446,11 @@ fn validate_transition(
     character_id: &[u8; ID_BYTES],
     mutation_id: &[u8; ID_BYTES],
     original: &StoredOathCharacter,
+    original_inventory: &StoredOathInventory,
     state: &OathSelectionTransactionState,
 ) -> Result<(), PersistenceError> {
     validate_character(&state.character)?;
+    validate_inventory(&state.inventory)?;
     let result = state
         .new_result
         .as_ref()
@@ -398,6 +469,7 @@ fn validate_transition(
             .as_ref()
             .ok_or(PersistenceError::OathSelectionEventRequired)?;
         if original.oath_id.is_some()
+            || !original_inventory.is_safe
             || original.selected_character_id != Some(*character_id)
             || original.level != 10
             || original.life_state != 0
@@ -411,6 +483,7 @@ fn validate_transition(
             || state.character.security_state != original.security_state
             || state.character.location_kind != original.location_kind
             || state.character.location_content_id != original.location_content_id
+            || &state.inventory != original_inventory
             || state.character.oath_id.as_deref() != Some(result.oath_id.as_str())
             || state.character.character_state_version != original.character_state_version + 1
             || state.character.location_character_version != state.character.character_state_version
@@ -423,8 +496,20 @@ fn validate_transition(
             return Err(PersistenceError::CorruptStoredOath);
         }
     } else if &state.character != original
+        || &state.inventory != original_inventory
         || state.new_event.is_some()
         || result.post_character_state_version != original.character_state_version
+    {
+        return Err(PersistenceError::CorruptStoredOath);
+    }
+    Ok(())
+}
+
+fn validate_inventory(inventory: &StoredOathInventory) -> Result<(), PersistenceError> {
+    if inventory
+        .inventory_version
+        .is_some_and(|version| version < 1)
+        || (inventory.is_safe && inventory.inventory_version.is_none())
     {
         return Err(PersistenceError::CorruptStoredOath);
     }
@@ -530,6 +615,10 @@ mod tests {
         selected.location_character_version = 8;
         let state = OathSelectionTransactionState {
             character: selected,
+            inventory: StoredOathInventory {
+                inventory_version: Some(4),
+                is_safe: true,
+            },
             new_result: Some(result(ACCEPTED_RESULT_CODE)),
             new_event: Some(StoredCharacterLifeEvent {
                 event_id: [3; 16],
@@ -537,11 +626,23 @@ mod tests {
                 event_payload: vec![1],
             }),
         };
-        assert!(validate_transition(&[1; 16], &[2; 16], &[3; 16], &original, &state).is_ok());
+        let inventory = state.inventory.clone();
+        assert!(
+            validate_transition(&[1; 16], &[2; 16], &[3; 16], &original, &inventory, &state)
+                .is_ok()
+        );
         let mut missing_event = state;
         missing_event.new_event = None;
         assert!(
-            validate_transition(&[1; 16], &[2; 16], &[3; 16], &original, &missing_event).is_err()
+            validate_transition(
+                &[1; 16],
+                &[2; 16],
+                &[3; 16],
+                &original,
+                &inventory,
+                &missing_event
+            )
+            .is_err()
         );
     }
 
@@ -550,12 +651,43 @@ mod tests {
         let original = character();
         let clean = OathSelectionTransactionState {
             character: original.clone(),
+            inventory: StoredOathInventory {
+                inventory_version: Some(4),
+                is_safe: true,
+            },
             new_result: Some(result(10)),
             new_event: None,
         };
-        assert!(validate_transition(&[1; 16], &[2; 16], &[3; 16], &original, &clean).is_ok());
+        let inventory = clean.inventory.clone();
+        assert!(
+            validate_transition(&[1; 16], &[2; 16], &[3; 16], &original, &inventory, &clean)
+                .is_ok()
+        );
         let mut changed = clean;
         changed.character.oath_id = Some(NAILKEEPER_ID.into());
-        assert!(validate_transition(&[1; 16], &[2; 16], &[3; 16], &original, &changed).is_err());
+        assert!(
+            validate_transition(
+                &[1; 16], &[2; 16], &[3; 16], &original, &inventory, &changed
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn safe_inventory_requires_an_initialized_positive_version() {
+        assert!(
+            validate_inventory(&StoredOathInventory {
+                inventory_version: Some(1),
+                is_safe: true,
+            })
+            .is_ok()
+        );
+        assert!(
+            validate_inventory(&StoredOathInventory {
+                inventory_version: None,
+                is_safe: true,
+            })
+            .is_err()
+        );
     }
 }

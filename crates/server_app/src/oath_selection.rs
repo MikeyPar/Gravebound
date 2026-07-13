@@ -13,13 +13,6 @@ use crate::{AuthenticatedAccount, AuthenticatedNamespace, IdentityClock};
 
 const LANTERN_HALLS_ID: &str = "hub.lantern_halls_01";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AtomicInventoryStatus {
-    /// Item persistence has not yet joined the character-life transaction.
-    Unavailable,
-    Safe,
-}
-
 #[derive(Debug, Clone)]
 pub struct PostgresOathSelectionService<Clock> {
     persistence: PostgresPersistence,
@@ -86,10 +79,7 @@ where
         }
     }
 
-    /// Handles the mutation while inventory remains deliberately fail-closed.
-    ///
-    /// `GB-M03-04D/04F` will replace `Unavailable` with inventory state loaded under the same
-    /// serializable transaction. There is intentionally no public switch that can bypass it.
+    /// Handles the mutation with character and inventory eligibility locked atomically.
     pub async fn select(
         &self,
         authenticated: AuthenticatedAccount,
@@ -115,7 +105,6 @@ where
                         authenticated.account_id.as_bytes(),
                         frame,
                         &self.content_revision,
-                        AtomicInventoryStatus::Unavailable,
                     )
                 },
             )
@@ -136,9 +125,8 @@ fn plan_selection(
     account_id: [u8; 16],
     frame: &InitialOathSelectionFrame,
     required_revision: &OathContentRevisionV1,
-    inventory: AtomicInventoryStatus,
 ) -> Result<InitialOathSelectionResult, PersistenceError> {
-    let code = selection_code(state, frame, required_revision, inventory);
+    let code = selection_code(state, frame, required_revision);
     if code == OathResultCode::Accepted {
         state.character.oath_id = Some(frame.payload.oath_id.as_str().to_owned());
         state.character.character_state_version += 1;
@@ -183,7 +171,6 @@ fn selection_code(
     state: &OathSelectionTransactionState,
     frame: &InitialOathSelectionFrame,
     required_revision: &OathContentRevisionV1,
-    inventory: AtomicInventoryStatus,
 ) -> OathResultCode {
     let character = &state.character;
     if character.selected_character_id != Some(frame.payload.character_id) {
@@ -212,7 +199,7 @@ fn selection_code(
         OathResultCode::LocationRequired
     } else if &frame.payload.content_revision != required_revision {
         OathResultCode::ContentMismatch
-    } else if inventory != AtomicInventoryStatus::Safe {
+    } else if !state.inventory.is_safe {
         OathResultCode::InventoryNotSafe
     } else {
         OathResultCode::Accepted
@@ -349,35 +336,26 @@ mod tests {
                 location_kind: 1,
                 location_content_id: Some(LANTERN_HALLS_ID.into()),
             },
+            inventory: persistence::StoredOathInventory {
+                inventory_version: Some(4),
+                is_safe: true,
+            },
             new_result: None,
             new_event: None,
         }
     }
 
     #[test]
-    fn initial_selection_is_fail_closed_until_inventory_joins_transaction() {
+    fn initial_selection_requires_safe_atomic_inventory_projection() {
         let mut unavailable = state();
-        let rejected = plan_selection(
-            &mut unavailable,
-            [1; 16],
-            &frame(),
-            &revision(),
-            AtomicInventoryStatus::Unavailable,
-        )
-        .unwrap();
+        unavailable.inventory.is_safe = false;
+        let rejected = plan_selection(&mut unavailable, [1; 16], &frame(), &revision()).unwrap();
         assert_eq!(rejected.code, OathResultCode::InventoryNotSafe);
         assert_eq!(unavailable.character.character_state_version, 7);
         assert!(unavailable.new_event.is_none());
 
         let mut safe = state();
-        let accepted = plan_selection(
-            &mut safe,
-            [1; 16],
-            &frame(),
-            &revision(),
-            AtomicInventoryStatus::Safe,
-        )
-        .unwrap();
+        let accepted = plan_selection(&mut safe, [1; 16], &frame(), &revision()).unwrap();
         assert_eq!(accepted.code, OathResultCode::Accepted);
         assert_eq!(safe.character.character_state_version, 8);
         assert!(safe.new_event.is_some());
@@ -397,14 +375,7 @@ mod tests {
         stale.character.location_character_version = 8;
         cases.push((stale, OathResultCode::StateVersionMismatch));
         for (mut candidate, expected) in cases {
-            let result = plan_selection(
-                &mut candidate,
-                [1; 16],
-                &frame(),
-                &revision(),
-                AtomicInventoryStatus::Safe,
-            )
-            .unwrap();
+            let result = plan_selection(&mut candidate, [1; 16], &frame(), &revision()).unwrap();
             assert_eq!(result.code, expected);
             assert!(candidate.new_event.is_none());
         }

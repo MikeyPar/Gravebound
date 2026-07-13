@@ -27,7 +27,7 @@ pub use items::{
 };
 pub use oath::{
     OathSelectionTransaction, OathSelectionTransactionState, StoredCharacterLifeEvent,
-    StoredOathCharacter, StoredOathMutationResult,
+    StoredOathCharacter, StoredOathInventory, StoredOathMutationResult,
 };
 pub use progression::{
     ProgressionAwardTransaction, ProgressionAwardTransactionState, StoredBossFirstClear,
