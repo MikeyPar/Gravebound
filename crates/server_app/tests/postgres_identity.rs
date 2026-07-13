@@ -772,12 +772,145 @@ async fn assert_persistent_bargain_route(
     (frame, selected)
 }
 
-async fn assert_persisted_combat_factory(
+async fn stage_complete_core_combat_package(
     persistence: &PostgresPersistence,
     content_root: &Path,
     ticket: &[u8],
     character_id: [u8; 16],
 ) {
+    let hash = blake3::hash(ticket);
+    let account_id = <[u8; 16]>::try_from(&hash.as_bytes()[..16]).unwrap();
+    let catalog = sim_content::load_core_development_oaths_bargains(content_root).unwrap();
+    let hashes = catalog.hashes();
+    let bargains = [
+        protocol::CINDER_HUNGER_ID,
+        protocol::BELL_DEBT_ID,
+        protocol::LANTERN_ASH_ID,
+    ];
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    sqlx::query(
+        "DELETE FROM character_active_bargains WHERE namespace_id = $1 AND account_id = $2 \
+         AND character_id = $3",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    for (index, bargain_id) in bargains.iter().enumerate() {
+        let ordinal = i16::try_from(index + 1).unwrap();
+        let created_version = i64::from(ordinal) + 3;
+        let offer_id = [u8::try_from(81 + index).unwrap(); 16];
+        let reward_id = [u8::try_from(84 + index).unwrap(); 16];
+        sqlx::query(
+            "INSERT INTO bargain_offers (namespace_id, account_id, character_id, offer_id, \
+             source_reward_event_id, content_version, records_blake3, assets_blake3, \
+             localization_blake3, offer_state, selected_bargain_id, \
+             created_oath_bargain_version, resolved_oath_bargain_version, resolved_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 1, $10, $11, $12, \
+             transaction_timestamp())",
+        )
+        .bind(WIPEABLE_CORE_NAMESPACE)
+        .bind(account_id.as_slice())
+        .bind(character_id.as_slice())
+        .bind(offer_id.as_slice())
+        .bind(reward_id.as_slice())
+        .bind(catalog.revision_label())
+        .bind(&hashes.records_blake3)
+        .bind(&hashes.assets_blake3)
+        .bind(&hashes.localization_blake3)
+        .bind(*bargain_id)
+        .bind(created_version)
+        .bind(created_version + 1)
+        .execute(transaction.connection())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO character_active_bargains (namespace_id, account_id, character_id, \
+             bargain_id, acquisition_ordinal, acquired_by_offer_id) \
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(WIPEABLE_CORE_NAMESPACE)
+        .bind(account_id.as_slice())
+        .bind(character_id.as_slice())
+        .bind(*bargain_id)
+        .bind(ordinal)
+        .bind(offer_id.as_slice())
+        .execute(transaction.connection())
+        .await
+        .unwrap();
+    }
+    sqlx::query(
+        "UPDATE character_oath_bargain_state SET earned_bargain_slots = 3, \
+         oath_bargain_version = 7, updated_at = transaction_timestamp() \
+         WHERE namespace_id = $1 AND account_id = $2 AND character_id = $3",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE character_progression SET level = 20, current_health = 100, \
+         updated_at = transaction_timestamp() WHERE namespace_id = $1 AND account_id = $2 \
+         AND character_id = $3",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    transaction.commit().await.unwrap();
+    stage_two_slot_belt(persistence, account_id, character_id).await;
+}
+
+async fn stage_two_slot_belt(
+    persistence: &PostgresPersistence,
+    account_id: [u8; 16],
+    character_id: [u8; 16],
+) {
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let moved = sqlx::query(
+        "UPDATE item_instances SET slot_index = 1, updated_at = transaction_timestamp() \
+         WHERE namespace_id = $1 AND item_uid = (SELECT item_uid FROM item_instances \
+         WHERE namespace_id = $1 AND account_id = $2 AND character_id = $3 \
+         AND template_id = $4 AND location_kind = 1 AND slot_index = 0 \
+         ORDER BY item_uid LIMIT 1)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
+    .bind(server_app::STARTER_TONIC_ID)
+    .execute(transaction.connection())
+    .await
+    .unwrap()
+    .rows_affected();
+    assert_eq!(moved, 1);
+    transaction.commit().await.unwrap();
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct PersistedCombatSignature {
+    oath_bargain_version: u64,
+    level: u16,
+    maximum_health: u32,
+    bargain_modifiers: sim_core::ResolvedCoreBargainModifiers,
+    maximum_health_multiplier_basis_points: u32,
+    oath: Option<sim_core::GraveArbalistOath>,
+    outgoing_direct_damage_basis_points: u32,
+    belt: sim_core::TonicBelt,
+    belt_policy: sim_core::TonicBeltPolicy,
+}
+
+async fn assert_persisted_combat_factory(
+    persistence: &PostgresPersistence,
+    content_root: &Path,
+    ticket: &[u8],
+    character_id: [u8; 16],
+) -> PersistedCombatSignature {
     let hash = blake3::hash(ticket);
     let account_id = <[u8; 16]>::try_from(&hash.as_bytes()[..16]).unwrap();
     let snapshot = persistence
@@ -793,11 +926,10 @@ async fn assert_persisted_combat_factory(
             .iter()
             .all(|bargain| { bargain.acquiring_offer_content_version == choices.revision_label() })
     );
-    assert!(matches!(
-        &snapshot.belt_slots,
-        [Some(stack), None]
-            if stack.template_id == "consumable.red_tonic" && stack.quantity == 2
-    ));
+    assert!(snapshot.belt_slots.iter().all(|slot| matches!(
+        slot,
+        Some(stack) if stack.template_id == "consumable.red_tonic" && stack.quantity == 1
+    )));
     let factory = CoreCharacterCombatFactory::load(persistence.clone(), content_root).unwrap();
     let combat = factory.build(account_id, character_id).await.unwrap();
     assert_eq!(
@@ -812,8 +944,49 @@ async fn assert_persisted_combat_factory(
         combat.state.oath(),
         Some(sim_core::GraveArbalistOath::LongVigil)
     );
-    assert_eq!(combat.maximum_health_multiplier_basis_points, 9_000);
-    assert_eq!(combat.level, 10);
+    assert_eq!(combat.bargains.definitions().len(), 3);
+    assert!(combat.bargains.bell_debt().is_some());
+    assert!(combat.bargains.lantern_ash().is_some());
+    assert_eq!(
+        combat.bargain_modifiers.ordinary_attack_rate_basis_points,
+        8_500
+    );
+    assert_eq!(
+        combat.bargain_modifiers.outgoing_direct_damage_basis_points,
+        11_800
+    );
+    assert_eq!(
+        combat
+            .bargain_modifiers
+            .maximum_health_multiplier_basis_points,
+        8_800
+    );
+    assert_eq!(
+        combat
+            .bargain_modifiers
+            .potion_healing_multiplier_basis_points,
+        14_000
+    );
+    assert_eq!(combat.bargain_modifiers.active_belt_slots, 1);
+    assert_eq!(combat.maximum_health_multiplier_basis_points, 7_920);
+    assert_eq!(combat.level, 20);
+    assert_eq!(
+        combat.consumables.belt().slots(),
+        &[sim_core::BeltSlot::RedTonic(1); 2]
+    );
+    assert!(combat.consumables.belt_policy().is_active(0));
+    assert!(!combat.consumables.belt_policy().is_active(1));
+    PersistedCombatSignature {
+        oath_bargain_version: combat.oath_bargain_version,
+        level: combat.level,
+        maximum_health: combat.maximum_health,
+        bargain_modifiers: combat.bargain_modifiers,
+        maximum_health_multiplier_basis_points: combat.maximum_health_multiplier_basis_points,
+        oath: combat.state.oath(),
+        outgoing_direct_damage_basis_points: combat.state.outgoing_direct_damage_basis_points(),
+        belt: *combat.consumables.belt(),
+        belt_policy: combat.consumables.belt_policy(),
+    }
 }
 
 async fn assert_persisted_oath_view(
@@ -1070,6 +1243,9 @@ async fn postgres_real_quic_server_restart_preserves_authoritative_roster() {
         character_id,
     )
     .await;
+    stage_complete_core_combat_package(&persistence, &content_root, ticket, character_id).await;
+    let combat_before_restart =
+        assert_persisted_combat_factory(&persistence, &content_root, ticket, character_id).await;
     connection.close(0_u32.into(), b"durable restart");
     shutdown.send(()).unwrap();
     let report = task.await.unwrap().unwrap();
@@ -1113,10 +1289,12 @@ async fn postgres_real_quic_server_restart_preserves_authoritative_roster() {
     .unwrap();
     assert_eq!(bargain_view.code, BargainResultCode::NoOffer);
     let bargain_projection = bargain_view.projection.unwrap();
-    assert_eq!(bargain_projection.active_bargain_ids.len(), 1);
-    assert_eq!(bargain_projection.earned_bargain_slots, 1);
-    assert_eq!(bargain_projection.oath_bargain_version, 4);
-    assert_persisted_combat_factory(&persistence, &content_root, ticket, character_id).await;
+    assert_eq!(bargain_projection.active_bargain_ids.len(), 3);
+    assert_eq!(bargain_projection.earned_bargain_slots, 3);
+    assert_eq!(bargain_projection.oath_bargain_version, 7);
+    let combat_after_restart =
+        assert_persisted_combat_factory(&persistence, &content_root, ticket, character_id).await;
+    assert_eq!(combat_after_restart, combat_before_restart);
     connection.close(0_u32.into(), b"complete");
     shutdown.send(()).unwrap();
     assert!(task.await.unwrap().unwrap().persistence_enabled);
