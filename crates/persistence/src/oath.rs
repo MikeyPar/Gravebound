@@ -351,12 +351,10 @@ fn decode_character(
     row: &sqlx::postgres::PgRow,
     selected_character_id: Option<[u8; ID_BYTES]>,
 ) -> Result<StoredOathCharacter, PersistenceError> {
-    let level: i32 = row.try_get("level").map_err(PersistenceError::Database)?;
+    let level: i16 = row.try_get("level").map_err(PersistenceError::Database)?;
     Ok(StoredOathCharacter {
         selected_character_id,
-        level: level
-            .try_into()
-            .map_err(|_| PersistenceError::CorruptStoredOath)?,
+        level,
         life_state: row
             .try_get("life_state")
             .map_err(PersistenceError::Database)?,

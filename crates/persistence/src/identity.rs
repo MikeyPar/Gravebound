@@ -152,11 +152,12 @@ async fn load_characters(
     .map_err(PersistenceError::Database)?;
     rows.into_iter()
         .map(|row| {
-            let level: i32 = row.try_get("level").map_err(PersistenceError::Database)?;
+            let progression_level: i16 =
+                row.try_get("level").map_err(PersistenceError::Database)?;
             let identity_level: i32 = row
                 .try_get("identity_level")
                 .map_err(PersistenceError::Database)?;
-            if identity_level != level {
+            if identity_level != i32::from(progression_level) {
                 return Err(PersistenceError::CorruptStoredIdentity);
             }
             Ok(StoredCharacter {
@@ -170,7 +171,7 @@ async fn load_characters(
                 class_id: row
                     .try_get("class_id")
                     .map_err(PersistenceError::Database)?,
-                level,
+                level: identity_level,
                 oath_id: row.try_get("oath_id").map_err(PersistenceError::Database)?,
                 life_state: row
                     .try_get("life_state")
