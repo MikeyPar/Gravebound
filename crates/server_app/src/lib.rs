@@ -38,7 +38,9 @@ pub use combat_factory::{
     CoreCombatFactoryError,
 };
 pub use core_lifecycle::{
-    CoreLifeKey, CoreLiveBindingId, CoreLiveCharacter, CoreLiveDirectory, CoreLiveError,
+    CoreCheckpointBinding, CoreCheckpointServiceError, CoreDangerCheckpointRepository,
+    CoreDangerCheckpointService, CoreLifeKey, CoreLiveBindingId, CoreLiveCharacter,
+    CoreLiveDirectory, CoreLiveError, CoreResumeOutcome, DANGER_CHECKPOINT_INTERVAL_TICKS,
 };
 pub use ground_expiry::{GROUND_EXPIRY_CONTEXT, GroundExpiryError, PostgresGroundExpiryService};
 pub use identity::{
