@@ -40,6 +40,93 @@ pub struct CrossbowPowerRequest {
     pub weapon_w_affix_basis_points: u16,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArmorBaseRequest {
+    pub item_level: u8,
+    pub rarity: EquipmentRarity,
+    pub raw_health_base_hundredths: u16,
+    pub raw_health_per_level_hundredths: u16,
+    pub raw_armor_base_hundredths: u16,
+    pub raw_armor_per_level_hundredths: u16,
+    pub raw_resistance_base_basis_points: u16,
+    pub raw_resistance_per_level_basis_points: u16,
+    pub barrier_raw_base_health_hundredths: Option<u16>,
+    pub barrier_raw_health_per_level_hundredths: Option<u16>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedArmorBase {
+    pub maximum_health: u32,
+    pub armor: u32,
+    /// Resistance rounded to the nearest 0.1 percentage point (10 basis points).
+    pub resistance_basis_points: u16,
+    pub direct_hit_barrier_health: Option<u32>,
+}
+
+/// Resolves the authored armor-family formulas and rarity scaling using integer arithmetic only.
+pub fn resolve_armor_base(
+    request: ArmorBaseRequest,
+) -> Result<ResolvedArmorBase, ProductionItemMathError> {
+    if !(1..=20).contains(&request.item_level)
+        || request.barrier_raw_base_health_hundredths.is_some()
+            != request.barrier_raw_health_per_level_hundredths.is_some()
+    {
+        return Err(ProductionItemMathError::InvalidArmorRequest);
+    }
+    let level = u128::from(request.item_level);
+    let rarity = u128::from(request.rarity.base_multiplier_basis_points());
+    let scaled_whole = |base: u16, per_level: u16| {
+        let raw_hundredths =
+            u128::from(base).checked_add(u128::from(per_level).checked_mul(level)?)?;
+        round_half_up_ratio(
+            raw_hundredths.checked_mul(rarity)?,
+            CENTI_UNITS_PER_ONE * BASIS_POINTS,
+        )
+        .ok()
+    };
+    let maximum_health = scaled_whole(
+        request.raw_health_base_hundredths,
+        request.raw_health_per_level_hundredths,
+    )
+    .ok_or(ProductionItemMathError::ArithmeticOverflow)?;
+    let armor = scaled_whole(
+        request.raw_armor_base_hundredths,
+        request.raw_armor_per_level_hundredths,
+    )
+    .ok_or(ProductionItemMathError::ArithmeticOverflow)?;
+    let raw_resistance = u128::from(request.raw_resistance_base_basis_points)
+        .checked_add(
+            u128::from(request.raw_resistance_per_level_basis_points)
+                .checked_mul(level)
+                .ok_or(ProductionItemMathError::ArithmeticOverflow)?,
+        )
+        .ok_or(ProductionItemMathError::ArithmeticOverflow)?;
+    let resistance_tenths = round_half_up_ratio(
+        raw_resistance
+            .checked_mul(rarity)
+            .ok_or(ProductionItemMathError::ArithmeticOverflow)?,
+        BASIS_POINTS * 10,
+    )?;
+    let direct_hit_barrier_health = request
+        .barrier_raw_base_health_hundredths
+        .zip(request.barrier_raw_health_per_level_hundredths)
+        .map(|(base, per_level)| {
+            scaled_whole(base, per_level).ok_or(ProductionItemMathError::ArithmeticOverflow)
+        })
+        .transpose()?;
+    Ok(ResolvedArmorBase {
+        maximum_health: u32::try_from(maximum_health)
+            .map_err(|_| ProductionItemMathError::ArithmeticOverflow)?,
+        armor: u32::try_from(armor).map_err(|_| ProductionItemMathError::ArithmeticOverflow)?,
+        resistance_basis_points: u16::try_from(resistance_tenths * 10)
+            .map_err(|_| ProductionItemMathError::ArithmeticOverflow)?,
+        direct_hit_barrier_health: direct_hit_barrier_health
+            .map(u32::try_from)
+            .transpose()
+            .map_err(|_| ProductionItemMathError::ArithmeticOverflow)?,
+    })
+}
+
 /// Resolves displayed Crossbow `W` with one final round-half-up operation.
 pub fn resolve_crossbow_weapon_power(
     request: CrossbowPowerRequest,
@@ -82,6 +169,8 @@ fn round_half_up_ratio(
 pub enum ProductionItemMathError {
     #[error("production weapon request is outside the authored item contract")]
     InvalidWeaponRequest,
+    #[error("production armor request is outside the authored item contract")]
+    InvalidArmorRequest,
     #[error("production item arithmetic overflowed")]
     ArithmeticOverflow,
 }
@@ -149,6 +238,63 @@ mod tests {
                 weapon_w_affix_basis_points: 0,
             }),
             Err(ProductionItemMathError::InvalidWeaponRequest)
+        );
+    }
+
+    #[test]
+    fn forged_armor_formulas_round_exactly_at_core_boundaries() {
+        let resolve = |level| {
+            resolve_armor_base(ArmorBaseRequest {
+                item_level: level,
+                rarity: EquipmentRarity::Forged,
+                raw_health_base_hundredths: 600,
+                raw_health_per_level_hundredths: 80,
+                raw_armor_base_hundredths: 50,
+                raw_armor_per_level_hundredths: 8,
+                raw_resistance_base_basis_points: 400,
+                raw_resistance_per_level_basis_points: 30,
+                barrier_raw_base_health_hundredths: None,
+                barrier_raw_health_per_level_hundredths: None,
+            })
+            .unwrap()
+        };
+        assert_eq!(
+            resolve(1),
+            ResolvedArmorBase {
+                maximum_health: 7,
+                armor: 1,
+                resistance_basis_points: 430,
+                direct_hit_barrier_health: None,
+            }
+        );
+        assert_eq!(resolve(6).maximum_health, 11);
+        assert_eq!(resolve(10).resistance_basis_points, 700);
+    }
+
+    #[test]
+    fn bellguard_barrier_and_malformed_pair_are_explicit() {
+        let request = ArmorBaseRequest {
+            item_level: 10,
+            rarity: EquipmentRarity::Forged,
+            raw_health_base_hundredths: 800,
+            raw_health_per_level_hundredths: 100,
+            raw_armor_base_hundredths: 100,
+            raw_armor_per_level_hundredths: 22,
+            raw_resistance_base_basis_points: 0,
+            raw_resistance_per_level_basis_points: 0,
+            barrier_raw_base_health_hundredths: Some(500),
+            barrier_raw_health_per_level_hundredths: Some(100),
+        };
+        let resolved = resolve_armor_base(request).unwrap();
+        assert_eq!(resolved.maximum_health, 18);
+        assert_eq!(resolved.armor, 3);
+        assert_eq!(resolved.direct_hit_barrier_health, Some(15));
+        assert_eq!(
+            resolve_armor_base(ArmorBaseRequest {
+                barrier_raw_health_per_level_hundredths: None,
+                ..request
+            }),
+            Err(ProductionItemMathError::InvalidArmorRequest)
         );
     }
 }

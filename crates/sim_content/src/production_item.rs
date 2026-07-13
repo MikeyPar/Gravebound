@@ -1426,6 +1426,66 @@ mod tests {
         assert!(validate_exact_core_reward_closure(&compiled).is_err());
     }
 
+    #[test]
+    fn all_six_authored_armor_families_resolve_exactly_at_core_level_ten() {
+        let compiled = load_core_development_items(&content_root()).unwrap();
+        let expected = [
+            ("item.armor.ashplate.t1", 16, 5, 0, None),
+            ("item.armor.bellguard.t1", 18, 3, 0, Some(15)),
+            ("item.armor.gravehide.t1", 32, 2, 0, None),
+            ("item.armor.pilgrim.t1", 14, 1, 0, None),
+            ("item.armor.rootweave.t1", 24, 2, 0, None),
+            ("item.armor.saltglass.t1", 14, 1, 700, None),
+        ];
+        for (id, health, armor, resistance, barrier) in expected {
+            let item = &compiled.items()[id];
+            let ProductionItemTemplatePayload::Equipment {
+                behavior:
+                    ProductionEquipmentBehavior::Armor {
+                        raw_health_base_hundredths,
+                        raw_health_per_level_hundredths,
+                        raw_armor_base_hundredths,
+                        raw_armor_per_level_hundredths,
+                        raw_resistance_base_basis_points,
+                        raw_resistance_per_level_basis_points,
+                        direct_hit_barrier,
+                        ..
+                    },
+                ..
+            } = &item.payload
+            else {
+                panic!("exact Core armor payload");
+            };
+            let resolved = sim_core::resolve_armor_base(sim_core::ArmorBaseRequest {
+                item_level: 10,
+                rarity: sim_core::EquipmentRarity::Forged,
+                raw_health_base_hundredths: *raw_health_base_hundredths,
+                raw_health_per_level_hundredths: *raw_health_per_level_hundredths,
+                raw_armor_base_hundredths: *raw_armor_base_hundredths,
+                raw_armor_per_level_hundredths: *raw_armor_per_level_hundredths,
+                raw_resistance_base_basis_points: *raw_resistance_base_basis_points,
+                raw_resistance_per_level_basis_points: *raw_resistance_per_level_basis_points,
+                barrier_raw_base_health_hundredths: direct_hit_barrier
+                    .as_ref()
+                    .map(|value| value.raw_base_health_hundredths),
+                barrier_raw_health_per_level_hundredths: direct_hit_barrier
+                    .as_ref()
+                    .map(|value| value.raw_health_per_level_hundredths),
+            })
+            .unwrap();
+            assert_eq!(
+                (
+                    resolved.maximum_health,
+                    resolved.armor,
+                    resolved.resistance_basis_points,
+                    resolved.direct_hit_barrier_health,
+                ),
+                (health, armor, resistance, barrier),
+                "{id}"
+            );
+        }
+    }
+
     #[allow(clippy::too_many_lines)] // The complete cross-record fixture is intentionally visible.
     fn fixture() -> (ProductionItemDevelopmentTarget, ProductionItemRecords) {
         let items = vec![

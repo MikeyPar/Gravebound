@@ -169,7 +169,8 @@ pub use performance::{
     run_bell_proctor_reliability_fixture,
 };
 pub use production_item::{
-    CrossbowPowerRequest, EquipmentRarity, ProductionItemMathError, resolve_crossbow_weapon_power,
+    ArmorBaseRequest, CrossbowPowerRequest, EquipmentRarity, ProductionItemMathError,
+    ResolvedArmorBase, resolve_armor_base, resolve_crossbow_weapon_power,
 };
 pub use progression::{
     CORE_LEVEL_COUNT, CoreProgressionError, CoreProgressionGrant, CoreProgressionState,
