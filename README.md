@@ -102,7 +102,7 @@ Concept images establish mood, hierarchy, and visual language. They are not fina
 
 ## Current Next Step
 
-`GB-M03-04A`, `GB-M03-04D`, `GB-M03-05B`, `GB-M03-05D`, `GB-M03-05E`, [`GB-M03-05F`](docs/tasks/GB-M03-05F.md), and `GB-M03-12` are complete with authorized PostgreSQL concurrency/restart evidence and completion audits. Close `GB-M03-05C` after the remaining inspected Nailkeeper/Frostbind audiovisual evidence, then audit parent `GB-M03-05`. Finish `GB-M03-03B` with the remaining composite danger-entry providers and PostgreSQL closure evidence. Continue `GB-M03-04E`/`04F` and the approved `SPEC-CONFLICT-009` death foundation as their item/location dependencies become ready. Keep 50-Ash purge, paid Oath change, Core promotion, the normal player route, and affected Hall stations fail closed until their owning gates pass.
+`GB-M03-04A`, `GB-M03-04D`, `GB-M03-05B`, [`GB-M03-05C`](docs/tasks/GB-M03-05C.md), `GB-M03-05D`, `GB-M03-05E`, [`GB-M03-05F`](docs/tasks/GB-M03-05F.md), and `GB-M03-12` are complete with authorized PostgreSQL concurrency/restart evidence and completion audits. Audit parent `GB-M03-05` across completed slices `05A`–`05F`, including tester-completable shrine-flow traceability. Finish `GB-M03-03B` with the remaining composite danger-entry providers and PostgreSQL closure evidence. Continue `GB-M03-04E`/`04F` and the approved `SPEC-CONFLICT-009` death foundation as their item/location dependencies become ready. Keep 50-Ash purge, paid Oath change, Core promotion, the normal player route, and affected Hall stations fail closed until their owning gates pass.
 
 ## Resolved prior handoff
 
