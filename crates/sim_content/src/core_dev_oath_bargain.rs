@@ -9,6 +9,10 @@ use content_schema::{
     ProductionItemAssetManifest, ReleaseStage, SCHEMA_VERSION,
 };
 use serde::{Deserialize, Serialize};
+use sim_core::{
+    GraveArbalistOath, ResolvedArbalistOathStats, duration_ms_to_ticks_nearest,
+    resolve_arbalist_oath_stats,
+};
 
 const INITIAL_WARNING_KEY: &str = "ui.oath.initial_warning";
 const INITIAL_WARNING_VALUE: &str = "This oath persists for this character’s life. Changing it later costs 40 Ash and requires confirmation in Lantern Halls.";
@@ -83,6 +87,36 @@ impl CompiledOathBargainCatalog {
     pub const fn bargains(&self) -> &BTreeMap<String, BargainRecord> {
         &self.bargains
     }
+}
+
+/// Resolves one compiled Core Oath against authored base class/item values.
+pub fn resolve_core_arbalist_oath_stats(
+    catalog: &CompiledOathBargainCatalog,
+    oath_id: &str,
+    base_focused_activation_ticks: u32,
+    base_grave_mark_range_milli_tiles: u32,
+    base_marked_primary_bonus_basis_points: u32,
+    base_primary_interval_micros: u32,
+    ordinary_attack_rate_basis_points: u32,
+) -> Result<ResolvedArbalistOathStats> {
+    let record = catalog
+        .oaths
+        .get(oath_id)
+        .with_context(|| format!("Core Oath `{oath_id}` is unavailable"))?;
+    if !record.header.enabled {
+        bail!("Core Oath `{oath_id}` is disabled");
+    }
+    let oath =
+        GraveArbalistOath::from_content_id(oath_id).map_err(|error| anyhow::anyhow!(error))?;
+    resolve_arbalist_oath_stats(
+        oath,
+        base_focused_activation_ticks,
+        base_grave_mark_range_milli_tiles,
+        base_marked_primary_bonus_basis_points,
+        base_primary_interval_micros,
+        ordinary_attack_rate_basis_points,
+    )
+    .map_err(|error| anyhow::anyhow!(error))
 }
 
 #[derive(Serialize)]
@@ -303,6 +337,56 @@ fn validate_oaths(oaths: &BTreeMap<String, OathRecord>) -> Result<()> {
             })
     {
         bail!("Nailkeeper payload is not exact");
+    }
+    validate_runtime_oath_constants(long, nail)?;
+    Ok(())
+}
+
+fn validate_runtime_oath_constants(long: &OathRecord, nail: &OathRecord) -> Result<()> {
+    let OathBehavior::LongVigil {
+        focused_activation_millis,
+        grave_mark_range_bonus_milli_tiles,
+        grave_mark_primary_bonus_basis_points,
+        maximum_health_multiplier_basis_points,
+    } = long.behavior
+    else {
+        bail!("Long Vigil runtime binding has the wrong behavior kind");
+    };
+    let OathBehavior::Nailkeeper {
+        trap_radius_milli_tiles,
+        arm_delay_millis,
+        lifetime_millis,
+        direct_damage_coefficient_basis_points,
+        frostbind_duration_millis,
+        maximum_live_traps,
+        primary_interval_multiplier_basis_points,
+        ..
+    } = nail.behavior
+    else {
+        bail!("Nailkeeper runtime binding has the wrong behavior kind");
+    };
+    if duration_ms_to_ticks_nearest(u64::from(focused_activation_millis))
+        != u64::from(sim_core::LONG_VIGIL_FOCUSED_ACTIVATION_TICKS)
+        || grave_mark_range_bonus_milli_tiles
+            != sim_core::LONG_VIGIL_GRAVE_MARK_RANGE_BONUS_MILLI_TILES
+        || u32::from(grave_mark_primary_bonus_basis_points)
+            != sim_core::LONG_VIGIL_MARKED_PRIMARY_BONUS_BASIS_POINTS
+        || u32::from(maximum_health_multiplier_basis_points)
+            != sim_core::LONG_VIGIL_MAX_HEALTH_MULTIPLIER_BASIS_POINTS
+        || trap_radius_milli_tiles != sim_core::NAILKEEPER_TRAP_RADIUS_MILLI_TILES
+        || duration_ms_to_ticks_nearest(u64::from(arm_delay_millis))
+            != u64::from(sim_core::NAILKEEPER_ARM_TICKS)
+        || duration_ms_to_ticks_nearest(u64::from(lifetime_millis))
+            != u64::from(sim_core::NAILKEEPER_LIFETIME_TICKS)
+        || u32::from(direct_damage_coefficient_basis_points)
+            != sim_core::NAILKEEPER_DAMAGE_BASIS_POINTS
+        || duration_ms_to_ticks_nearest(u64::from(frostbind_duration_millis))
+            != u64::from(sim_core::NAILKEEPER_FROSTBIND_TICKS)
+        || usize::from(maximum_live_traps) != sim_core::NAILKEEPER_MAXIMUM_ACTIVE_TRAPS
+        || u32::from(primary_interval_multiplier_basis_points)
+            != sim_core::NAILKEEPER_PRIMARY_INTERVAL_MULTIPLIER_BASIS_POINTS
+    {
+        bail!("Core Oath content and simulation constants diverged");
     }
     Ok(())
 }
@@ -545,6 +629,30 @@ mod tests {
         assert_eq!(compiled.bargains().len(), 3);
         assert!(compiled.revision_label().starts_with("core-dev.blake3."));
         assert!(!compiled.revision_label().contains("core.1.0.0"));
+        let vigil = resolve_core_arbalist_oath_stats(
+            &compiled,
+            "oath.arbalist.long_vigil",
+            18,
+            11_000,
+            1_500,
+            454_545,
+            10_000,
+        )
+        .unwrap();
+        assert_eq!(vigil.focused_activation_ticks, 11);
+        assert_eq!(vigil.grave_mark_range_milli_tiles, 13_000);
+        assert_eq!(vigil.marked_primary_bonus_basis_points, 2_000);
+        let nailkeeper = resolve_core_arbalist_oath_stats(
+            &compiled,
+            "oath.arbalist.nailkeeper",
+            18,
+            11_000,
+            1_500,
+            454_545,
+            10_000,
+        )
+        .unwrap();
+        assert_eq!(nailkeeper.primary_interval_micros, 490_909);
     }
 
     #[test]

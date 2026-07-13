@@ -24,6 +24,7 @@ mod hostile;
 mod inventory;
 mod movement;
 mod normal_wave;
+mod oath;
 mod pattern;
 mod performance;
 mod production_item;
@@ -151,6 +152,17 @@ pub use normal_wave::{
     NormalWaveLaneEvent, NormalWavePhase, NormalWaveSimulation, NormalWaveSpawn, NormalWaveStep,
     NormalWaveTimelineEvent, RUN_ENTITY_ID_STRIDE, normal_wave_entity_id,
     normal_wave_projectile_allocator,
+};
+pub use oath::{
+    GraveArbalistOath, LONG_VIGIL_FOCUSED_ACTIVATION_TICKS,
+    LONG_VIGIL_GRAVE_MARK_RANGE_BONUS_MILLI_TILES, LONG_VIGIL_ID,
+    LONG_VIGIL_MARKED_PRIMARY_BONUS_BASIS_POINTS, LONG_VIGIL_MAX_HEALTH_MULTIPLIER_BASIS_POINTS,
+    NAILKEEPER_ARM_TICKS, NAILKEEPER_DAMAGE_BASIS_POINTS, NAILKEEPER_FROSTBIND_TICKS,
+    NAILKEEPER_ID, NAILKEEPER_LIFETIME_TICKS, NAILKEEPER_MAXIMUM_ACTIVE_TRAPS,
+    NAILKEEPER_PRIMARY_INTERVAL_MULTIPLIER_BASIS_POINTS, NAILKEEPER_TRAP_RADIUS_MILLI_TILES,
+    NAILKEEPER_TRAP_RADIUS_TILES, NailTrap, NailTrapEnemy, NailTrapField, NailTrapRemoval,
+    NailTrapRemovalReason, NailTrapStep, NailTrapTrigger, OathMechanicError,
+    ResolvedArbalistOathStats, resolve_arbalist_oath_stats,
 };
 pub use pattern::{
     CombatColorFamily, FirstPlayableMinSpeedPaths, FixedTimelineEvent, MinimumSpeedRouteEvidence,
