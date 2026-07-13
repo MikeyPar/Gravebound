@@ -637,10 +637,7 @@ async fn assert_concurrent_stale_writer(persistence: &PostgresPersistence) {
     } else {
         &first_result
     };
-    assert!(matches!(
-        rejected.error,
-        Some(AccountErrorCode::StateVersionMismatch | AccountErrorCode::ServiceUnavailable)
-    ));
+    assert_eq!(rejected.error, Some(AccountErrorCode::StateVersionMismatch));
     let AccountBootstrapResult::Snapshot(committed) = concurrent_first
         .bootstrap(Some(account(93)), &bootstrap())
         .await

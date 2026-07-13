@@ -145,7 +145,7 @@ pub trait AccountRepository: Send + Sync {
     ) -> impl Future<Output = Result<T, AccountRepositoryError>> + Send
     where
         T: Send,
-        F: FnOnce(&mut AccountAggregate) -> T + Send;
+        F: FnMut(&mut AccountAggregate) -> T + Send;
 
     fn character_owner(
         &self,
@@ -169,11 +169,11 @@ impl AccountRepository for InMemoryAccountRepository {
     async fn transact<T, F>(
         &self,
         account_id: AccountId,
-        operation: F,
+        mut operation: F,
     ) -> Result<T, AccountRepositoryError>
     where
         T: Send,
-        F: FnOnce(&mut AccountAggregate) -> T + Send,
+        F: FnMut(&mut AccountAggregate) -> T + Send,
     {
         let mut accounts = self
             .accounts
@@ -277,11 +277,11 @@ impl AccountRepository for PostgresAccountRepository {
     async fn transact<T, F>(
         &self,
         account_id: AccountId,
-        operation: F,
+        mut operation: F,
     ) -> Result<T, AccountRepositoryError>
     where
         T: Send,
-        F: FnOnce(&mut AccountAggregate) -> T + Send,
+        F: FnMut(&mut AccountAggregate) -> T + Send,
     {
         self.persistence
             .transact_identity(

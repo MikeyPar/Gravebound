@@ -218,6 +218,14 @@ pub enum PersistenceError {
     RewardPlanningFailed,
 }
 
+pub(crate) fn is_serialization_failure(error: &PersistenceError) -> bool {
+    matches!(
+        error,
+        PersistenceError::Database(sqlx::Error::Database(database))
+            if database.code().as_deref() == Some("40001")
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadinessReport {
     pub schema_version: i64,

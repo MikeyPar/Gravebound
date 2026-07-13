@@ -41,11 +41,43 @@ impl PostgresPersistence {
         account_id: [u8; ID_BYTES],
         initial_state_version: i64,
         slot_capacity: i16,
-        operation: F,
+        mut operation: F,
     ) -> Result<T, PersistenceError>
     where
         T: Send,
-        F: FnOnce(&mut StoredIdentityAggregate) -> Result<T, PersistenceError> + Send,
+        F: FnMut(&mut StoredIdentityAggregate) -> Result<T, PersistenceError> + Send,
+    {
+        const MAX_SERIALIZATION_ATTEMPTS: u8 = 3;
+
+        for attempt in 1..=MAX_SERIALIZATION_ATTEMPTS {
+            match self
+                .transact_identity_once(
+                    account_id,
+                    initial_state_version,
+                    slot_capacity,
+                    &mut operation,
+                )
+                .await
+            {
+                Err(error)
+                    if attempt < MAX_SERIALIZATION_ATTEMPTS
+                        && crate::is_serialization_failure(&error) => {}
+                result => return result,
+            }
+        }
+        unreachable!("bounded identity transaction loop always returns")
+    }
+
+    async fn transact_identity_once<T, F>(
+        &self,
+        account_id: [u8; ID_BYTES],
+        initial_state_version: i64,
+        slot_capacity: i16,
+        operation: &mut F,
+    ) -> Result<T, PersistenceError>
+    where
+        T: Send,
+        F: FnMut(&mut StoredIdentityAggregate) -> Result<T, PersistenceError> + Send,
     {
         let mut transaction = self.begin_transaction().await?;
         ensure_account(
