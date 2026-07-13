@@ -1,0 +1,17 @@
+{
+  "schema_version":1,
+  "locale":"en-US",
+  "entries":[
+    {"key":"bargain.bell_debt.description","value":"Every fifth primary attack repeats after 300 ms for 50% damage; Primary attack rate -15%"},
+    {"key":"bargain.bell_debt.name","value":"Bell Debt"},
+    {"key":"bargain.cinder_hunger.description","value":"+18% direct outgoing damage; -12% max health"},
+    {"key":"bargain.cinder_hunger.name","value":"Cinder Hunger"},
+    {"key":"bargain.lantern_ash.description","value":"Potion healing +40%; Only one consumable belt slot is active"},
+    {"key":"bargain.lantern_ash.name","value":"Lantern Ash"},
+    {"key":"oath.arbalist.long_vigil.description","value":"Focused activates after 350 ms rather than 600 ms; Grave Mark range increases by 2 tiles and mark bonus becomes 20%; Max health is reduced by 10%."},
+    {"key":"oath.arbalist.long_vigil.name","value":"Long Vigil"},
+    {"key":"oath.arbalist.nailkeeper.description","value":"Grave Mark creates a 1.25 tile nail trap at the first enemy or wall impact; Trap arms after 400 ms, lasts 5 seconds, deals 0.9W, and Frostbinds for 1.5 seconds; Maximum two active traps per Arbalist; oldest is removed when a third is created; Primary attack rate is reduced by 8%."},
+    {"key":"oath.arbalist.nailkeeper.name","value":"Nailkeeper"},
+    {"key":"ui.oath.initial_warning","value":"This oath persists for this character’s life. Changing it later costs 40 Ash and requires confirmation in Lantern Halls."}
+  ]
+}

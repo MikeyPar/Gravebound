@@ -332,7 +332,7 @@
             "overflow_order": {
               "$ref": "#/$defs/OathTrapOverflowOrder"
             },
-            "primary_attack_rate_multiplier_basis_points": {
+            "primary_interval_multiplier_basis_points": {
               "type": "integer",
               "format": "uint16",
               "maximum": 65535,
@@ -362,7 +362,7 @@
             "direct_damage_coefficient_basis_points",
             "frostbind_duration_millis",
             "maximum_live_traps",
-            "primary_attack_rate_multiplier_basis_points",
+            "primary_interval_multiplier_basis_points",
             "create_on_enemy_impact",
             "create_on_solid_impact",
             "enemy_impact_applies_grave_mark_first",

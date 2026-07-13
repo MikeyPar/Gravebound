@@ -1,0 +1,41 @@
+{
+  "oaths": [
+    {
+      "id":"oath.arbalist.long_vigil","schema_version":1,"enabled":true,"earliest_release_stage":"core",
+      "localization_name_key":"oath.arbalist.long_vigil.name","localization_description_key":"oath.arbalist.long_vigil.description",
+      "asset_ids":["icon.oath.arbalist.long_vigil"],"tags":["ability.mark","class.grave_arbalist","max_health_mod","oath","passive.stillness"],"source_document_feature_id":"CLS-020",
+      "class_id":"class.grave_arbalist","unlock_level":10,"resolution_step":8,
+      "behavior":{"oath_kind":"long_vigil","focused_activation_millis":350,"grave_mark_range_bonus_milli_tiles":2000,"grave_mark_primary_bonus_basis_points":2000,"maximum_health_multiplier_basis_points":9000}
+    },
+    {
+      "id":"oath.arbalist.nailkeeper","schema_version":1,"enabled":true,"earliest_release_stage":"core",
+      "localization_name_key":"oath.arbalist.nailkeeper.name","localization_description_key":"oath.arbalist.nailkeeper.description",
+      "asset_ids":["icon.oath.arbalist.nailkeeper"],"tags":["ability.mark","class.grave_arbalist","oath","outgoing.status","primary_cadence","trap"],"source_document_feature_id":"CLS-020",
+      "class_id":"class.grave_arbalist","unlock_level":10,"resolution_step":8,
+      "behavior":{"oath_kind":"nailkeeper","trap_radius_milli_tiles":1250,"arm_delay_millis":400,"lifetime_millis":5000,"direct_damage_coefficient_basis_points":9000,"frostbind_duration_millis":1500,"maximum_live_traps":2,"primary_interval_multiplier_basis_points":10800,"create_on_enemy_impact":true,"create_on_solid_impact":true,"enemy_impact_applies_grave_mark_first":true,"solid_impact_applies_grave_mark":false,"requires_exit_after_arming_for_existing_occupants":true,"consumes_on_first_legal_enemy_entry":true,"snapshots_weapon_power_at_creation":true,"overflow_order":"created_tick_then_entity_id"}
+    }
+  ],
+  "bargains": [
+    {
+      "id":"bargain.bell_debt","schema_version":1,"enabled":true,"earliest_release_stage":"core",
+      "localization_name_key":"bargain.bell_debt.name","localization_description_key":"bargain.bell_debt.description",
+      "asset_ids":["icon.bargain.bell_debt"],"tags":["bargain","primary.repeat","primary_cadence","voluntary_risk"],"source_document_feature_id":"BRG-003",
+      "maximum_active_per_character":3,"resolution_step":8,
+      "behavior":{"bargain_kind":"bell_debt","accepted_primary_emissions_per_repeat":5,"repeat_delay_millis":300,"repeat_damage_multiplier_basis_points":5000,"primary_attack_rate_multiplier_basis_points":8500,"counts_legal_misses":true,"generated_repeats_advance_counter":false,"snapshots_aim_and_resolved_behavior":true,"uses_live_origin_at_repeat":true,"repeat_is_recursive":false,"repeat_spends_cooldown_or_resource":false,"counter_persists_reconnect_and_room_change":true,"counter_resets_on_acquisition_purge_death_retirement_or_safe_transfer":true,"cancel_pending_repeat_when_dead_transferred_or_primary_illegal":true}
+    },
+    {
+      "id":"bargain.cinder_hunger","schema_version":1,"enabled":true,"earliest_release_stage":"core",
+      "localization_name_key":"bargain.cinder_hunger.name","localization_description_key":"bargain.cinder_hunger.description",
+      "asset_ids":["icon.bargain.cinder_hunger"],"tags":["bargain","direct_output","max_health_mod","voluntary_risk"],"source_document_feature_id":"BRG-003",
+      "maximum_active_per_character":3,"resolution_step":8,
+      "behavior":{"bargain_kind":"cinder_hunger","outgoing_direct_damage_multiplier_basis_points":11800,"maximum_health_multiplier_basis_points":8800}
+    },
+    {
+      "id":"bargain.lantern_ash","schema_version":1,"enabled":true,"earliest_release_stage":"core",
+      "localization_name_key":"bargain.lantern_ash.name","localization_description_key":"bargain.lantern_ash.description",
+      "asset_ids":["icon.bargain.lantern_ash"],"tags":["bargain","belt_constraint","potion_output","voluntary_risk"],"source_document_feature_id":"BRG-003",
+      "maximum_active_per_character":3,"resolution_step":8,
+      "behavior":{"bargain_kind":"lantern_ash","potion_healing_multiplier_basis_points":14000,"active_belt_slot_count":1,"active_belt_index":0,"inactive_slot_remains_stored_visible_locked":true}
+    }
+  ]
+}

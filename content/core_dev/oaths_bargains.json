@@ -1,0 +1,11 @@
+{
+  "schema_version":1,
+  "target_kind":"unpromoted_oath_bargain_subset",
+  "target_name":"core-dev-oaths-bargains",
+  "required_oath_ids":["oath.arbalist.long_vigil","oath.arbalist.nailkeeper"],
+  "required_bargain_ids":["bargain.bell_debt","bargain.cinder_hunger","bargain.lantern_ash"],
+  "expected_manifest_blake3":"91b1a3ab2157371d18dc2c8f48124b4f25c59cc6cf0be46b871274357b285533",
+  "expected_records_blake3":"75a2d3805120dfb6f9dca2e47b567b95ba734922a2be7afb51b9784264970a66",
+  "expected_assets_blake3":"304cfe5a691faa05ead1b2afdb15130898ba24d3d0ed82bbe3bc3b6f557efa20",
+  "expected_localization_blake3":"a0a54258b4dc78c549e669f8f5bce8558189621c4231fcab59c51c2a423ef4b8"
+}

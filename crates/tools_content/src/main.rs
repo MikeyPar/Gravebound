@@ -56,6 +56,12 @@ enum Command {
         #[arg(long, default_value = "content")]
         root: PathBuf,
     },
+    /// Validate the independently hashed, non-promotable Core Oath/Bargain target.
+    ValidateCoreOathsBargains {
+        /// Content root containing the `core_dev` Oath/Bargain sources.
+        #[arg(long, default_value = "content")]
+        root: PathBuf,
+    },
     /// Regenerate checked-in JSON Schema contracts.
     GenerateSchemas {
         /// Destination directory for generated schemas.
@@ -90,9 +96,25 @@ fn main() -> Result<()> {
         Command::ValidateCoreWorldFlow { root } => validate_core_world_flow_command(&root)?,
         Command::ValidateCoreProgression { root } => validate_core_progression_command(&root)?,
         Command::ValidateCoreItems { root } => validate_core_items_command(&root)?,
+        Command::ValidateCoreOathsBargains { root } => {
+            validate_core_oaths_bargains_command(&root)?;
+        }
         Command::GenerateSchemas { output } => generate_schemas_command(&output)?,
     }
 
+    Ok(())
+}
+
+fn validate_core_oaths_bargains_command(root: &std::path::Path) -> Result<()> {
+    let compiled = sim_content::load_core_development_oaths_bargains(root)?;
+    info!(
+        target = compiled.target_name(),
+        revision = compiled.revision_label(),
+        oaths = compiled.oaths().len(),
+        bargains = compiled.bargains().len(),
+        manifest_blake3 = compiled.hashes().manifest_blake3,
+        "unpromoted Core Oath/Bargain target is valid"
+    );
     Ok(())
 }
 

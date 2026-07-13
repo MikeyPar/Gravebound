@@ -59,7 +59,7 @@ pub enum OathBehavior {
         direct_damage_coefficient_basis_points: u16,
         frostbind_duration_millis: u32,
         maximum_live_traps: u8,
-        primary_attack_rate_multiplier_basis_points: u16,
+        primary_interval_multiplier_basis_points: u16,
         create_on_enemy_impact: bool,
         create_on_solid_impact: bool,
         enemy_impact_applies_grave_mark_first: bool,

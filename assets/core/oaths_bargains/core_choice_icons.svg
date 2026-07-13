@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 64" role="img" aria-labelledby="title desc">
+  <title id="title">Gravebound Core Oath and Bargain icons</title>
+  <desc id="desc">Five editable sixty-four-pixel vector icons for Core character-life choices.</desc>
+  <defs>
+    <linearGradient id="brass" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#efc870"/><stop offset="1" stop-color="#785121"/></linearGradient>
+    <linearGradient id="ember" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#ffad52"/><stop offset="1" stop-color="#8e2925"/></linearGradient>
+    <style>.bg{fill:#17191d;stroke:#4b4540;stroke-width:2}.ink{fill:none;stroke:#e6e0d2;stroke-width:3;stroke-linecap:round;stroke-linejoin:round}.dim{fill:none;stroke:#79746b;stroke-width:2}.glow{fill:#efc870}.red{fill:url(#ember);stroke:#f2a35c;stroke-width:2}.brass{fill:url(#brass);stroke:#3e2d19;stroke-width:2}</style>
+    <symbol id="long-vigil" viewBox="0 0 64 64"><rect class="bg" x="2" y="2" width="60" height="60" rx="10"/><circle class="dim" cx="32" cy="32" r="20"/><circle class="ink" cx="32" cy="32" r="10"/><circle class="glow" cx="32" cy="32" r="4"/><path class="ink" d="M32 8v8M32 48v8M8 32h8M48 32h8"/></symbol>
+    <symbol id="nailkeeper" viewBox="0 0 64 64"><rect class="bg" x="2" y="2" width="60" height="60" rx="10"/><path class="brass" d="M28 9h8l-1 30-3 14-3-14z"/><path class="ink" d="M19 18h26M17 42l8-7m22 7l-8-7M18 50l10-8m18 8l-10-8"/><circle class="glow" cx="32" cy="39" r="4"/></symbol>
+    <symbol id="bell-debt" viewBox="0 0 64 64"><rect class="bg" x="2" y="2" width="60" height="60" rx="10"/><path class="brass" d="M21 39h22l-4-6V24c0-6-2-10-7-10s-7 4-7 10v9z"/><path class="ink" d="M18 39h28M27 44c1 6 9 6 10 0M32 14V9"/><path stroke="#d85f4e" stroke-width="3" d="M13 14l38 38M51 14L13 52"/></symbol>
+    <symbol id="cinder-hunger" viewBox="0 0 64 64"><rect class="bg" x="2" y="2" width="60" height="60" rx="10"/><path class="red" d="M32 8c8 10 15 17 15 27 0 9-7 17-15 17s-15-8-15-17c0-7 4-13 10-20 0 9 5 10 5 10 4-7 3-12 0-17z"/><path class="ink" d="M32 31c5 5 7 8 7 12 0 4-3 7-7 7s-7-3-7-7c0-3 2-7 7-12z"/></symbol>
+    <symbol id="lantern-ash" viewBox="0 0 64 64"><rect class="bg" x="2" y="2" width="60" height="60" rx="10"/><path class="brass" d="M20 22h24v30H20z"/><path class="ink" d="M24 22v-7h16v7M17 28h30M25 52v4m14-4v4"/><path class="red" d="M32 27c6 7 8 11 8 16H24c0-5 2-9 8-16z"/><path class="dim" d="M13 14l8 8m30-8l-8 8"/></symbol>
+  </defs>
+  <use href="#long-vigil" x="0" width="64" height="64"/><use href="#nailkeeper" x="64" width="64" height="64"/><use href="#bell-debt" x="128" width="64" height="64"/><use href="#cinder-hunger" x="192" width="64" height="64"/><use href="#lantern-ash" x="256" width="64" height="64"/>
+</svg>
