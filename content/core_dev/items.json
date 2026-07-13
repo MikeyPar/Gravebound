@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "target_kind": "unpromoted_item_reward_subset",
+  "target_name": "core-dev-items",
+  "required_item_ids": [
+    "consumable.red_tonic",
+    "item.armor.ashplate.t1",
+    "item.armor.bellguard.t1",
+    "item.armor.gravehide.t1",
+    "item.armor.pilgrim.t1",
+    "item.armor.rootweave.t1",
+    "item.armor.saltglass.t1",
+    "item.charm.bell_locket.t1",
+    "item.charm.ember_tooth.t1",
+    "item.charm.salt_knot.t1",
+    "item.relic.arbalist.barbed_ledger",
+    "item.relic.arbalist.cracked_mark_lens",
+    "item.relic.arbalist.long_lens",
+    "item.relic.arbalist.slip_clasp",
+    "item.weapon.crossbow.grave_repeater",
+    "item.weapon.crossbow.mourners_fan",
+    "item.weapon.crossbow.pilgrim_longbolt",
+    "item.weapon.crossbow.pine_crossbow"
+  ],
+  "required_rarity_profile_ids": ["rarity.core_fixed"],
+  "required_reward_table_ids": ["reward.boss_caldus", "reward.elite_outer", "reward.miniboss_t1", "reward.normal_outer"],
+  "required_material_pool_ids": ["material_pool.core.red_tonic_1", "material_pool.core.red_tonic_2"],
+  "required_stage_policy_ids": ["policy.items.core"],
+  "expected_manifest_blake3": "8c340462c1ac7d3339d892bb35f34d0ffe5f662eb7221a232c06f24ea8f5959c",
+  "expected_records_blake3": "ab8ac98131984d33e03d33e720fd9b5395803d37e503396d246a0f7eca4c5bea",
+  "expected_assets_blake3": "2b903260b51317d4ed73b241136b9ba15c3e491b47dcf6bc174e8823f0f6e6ef",
+  "expected_localization_blake3": "e13709e6f7656ae00b35c56a9d126d22601fd5a3cd9642cb29471b9840924cbf"
+}

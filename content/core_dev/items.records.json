@@ -1,0 +1,128 @@
+{
+  "items": [
+    {
+      "id": "consumable.red_tonic", "schema_version": 1, "enabled": true, "earliest_release_stage": "core",
+      "localization_name_key": "consumable.red_tonic.name", "localization_description_key": "consumable.red_tonic.description",
+      "asset_ids": ["icon.consumable.red_tonic"], "tags": ["consumable", "item"], "source_document_feature_id": "LOOT-032",
+      "payload": {"item_kind": "consumable", "stack_cap": 6, "behavior": {"effect_kind": "red_tonic", "restore_maximum_health_basis_points": 3000, "restore_duration_millis": 400, "shared_cooldown_millis": 2000, "damage_interrupts_restore": false, "consumed_on_use": true}}
+    },
+    {
+      "id": "item.armor.ashplate.t1", "schema_version": 1, "enabled": true, "earliest_release_stage": "core",
+      "localization_name_key": "item.armor.ashplate.t1.name", "localization_description_key": "item.armor.ashplate.t1.description",
+      "asset_ids": ["icon.item.armor.ashplate.t1"], "tags": ["family.ashplate", "item", "slot.armor"], "source_document_feature_id": "CONT-CATALOG-040",
+      "payload": {"item_kind": "equipment", "slot": "armor", "class_id": null, "family": "ashplate", "minimum_item_level": 1, "maximum_item_level": 6, "core_maximum_item_level_override": 10, "capability_tags": ["modifiable.defense", "modifiable.mobility", "modifiable.utility", "slot.armor"], "affix_exclusion_ids": [], "behavior": {"behavior_kind": "armor", "family": "ashplate", "raw_health_base_hundredths": 600, "raw_health_per_level_hundredths": 100, "raw_armor_base_hundredths": 200, "raw_armor_per_level_hundredths": 30, "raw_resistance_base_basis_points": 0, "raw_resistance_per_level_basis_points": 0, "fixed_movement_basis_points": -300, "fixed_healing_received_basis_points": 0, "negative_status_duration_reduction_basis_points": 0, "affected_negative_statuses": [], "excluded_negative_statuses": [], "direct_hit_barrier": null}}
+    },
+    {
+      "id": "item.armor.bellguard.t1", "schema_version": 1, "enabled": true, "earliest_release_stage": "core",
+      "localization_name_key": "item.armor.bellguard.t1.name", "localization_description_key": "item.armor.bellguard.t1.description",
+      "asset_ids": ["icon.item.armor.bellguard.t1"], "tags": ["family.bellguard", "item", "slot.armor"], "source_document_feature_id": "CONT-CATALOG-040",
+      "payload": {"item_kind": "equipment", "slot": "armor", "class_id": null, "family": "bellguard", "minimum_item_level": 1, "maximum_item_level": 6, "core_maximum_item_level_override": 10, "capability_tags": ["modifiable.defense", "modifiable.mobility", "modifiable.utility", "slot.armor"], "affix_exclusion_ids": [], "behavior": {"behavior_kind": "armor", "family": "bellguard", "raw_health_base_hundredths": 800, "raw_health_per_level_hundredths": 100, "raw_armor_base_hundredths": 100, "raw_armor_per_level_hundredths": 22, "raw_resistance_base_basis_points": 0, "raw_resistance_per_level_basis_points": 0, "fixed_movement_basis_points": 0, "fixed_healing_received_basis_points": 0, "negative_status_duration_reduction_basis_points": 0, "affected_negative_statuses": [], "excluded_negative_statuses": [], "direct_hit_barrier": {"triggering_damage_bands": ["major", "severe"], "raw_base_health_hundredths": 500, "raw_health_per_level_hundredths": 100, "duration_millis": 3000, "internal_cooldown_millis": 12000, "cannot_retrigger_while_active": true}}}
+    },
+    {
+      "id": "item.armor.gravehide.t1", "schema_version": 1, "enabled": true, "earliest_release_stage": "core",
+      "localization_name_key": "item.armor.gravehide.t1.name", "localization_description_key": "item.armor.gravehide.t1.description",
+      "asset_ids": ["icon.item.armor.gravehide.t1"], "tags": ["family.gravehide", "item", "slot.armor"], "source_document_feature_id": "CONT-CATALOG-040",
+      "payload": {"item_kind": "equipment", "slot": "armor", "class_id": null, "family": "gravehide", "minimum_item_level": 1, "maximum_item_level": 6, "core_maximum_item_level_override": 10, "capability_tags": ["modifiable.defense", "modifiable.mobility", "modifiable.utility", "slot.armor"], "affix_exclusion_ids": [], "behavior": {"behavior_kind": "armor", "family": "gravehide", "raw_health_base_hundredths": 1400, "raw_health_per_level_hundredths": 180, "raw_armor_base_hundredths": 50, "raw_armor_per_level_hundredths": 10, "raw_resistance_base_basis_points": 0, "raw_resistance_per_level_basis_points": 0, "fixed_movement_basis_points": 0, "fixed_healing_received_basis_points": 0, "negative_status_duration_reduction_basis_points": 0, "affected_negative_statuses": [], "excluded_negative_statuses": [], "direct_hit_barrier": null}}
+    },
+    {
+      "id": "item.armor.pilgrim.t1", "schema_version": 1, "enabled": true, "earliest_release_stage": "core",
+      "localization_name_key": "item.armor.pilgrim.t1.name", "localization_description_key": "item.armor.pilgrim.t1.description",
+      "asset_ids": ["icon.item.armor.pilgrim.t1"], "tags": ["family.pilgrim", "item", "slot.armor"], "source_document_feature_id": "CONT-CATALOG-040",
+      "payload": {"item_kind": "equipment", "slot": "armor", "class_id": null, "family": "pilgrim", "minimum_item_level": 1, "maximum_item_level": 6, "core_maximum_item_level_override": 10, "capability_tags": ["modifiable.defense", "modifiable.mobility", "modifiable.utility", "slot.armor"], "affix_exclusion_ids": [], "behavior": {"behavior_kind": "armor", "family": "pilgrim", "raw_health_base_hundredths": 600, "raw_health_per_level_hundredths": 80, "raw_armor_base_hundredths": 0, "raw_armor_per_level_hundredths": 5, "raw_resistance_base_basis_points": 0, "raw_resistance_per_level_basis_points": 0, "fixed_movement_basis_points": 400, "fixed_healing_received_basis_points": 0, "negative_status_duration_reduction_basis_points": 0, "affected_negative_statuses": [], "excluded_negative_statuses": [], "direct_hit_barrier": null}}
+    },
+    {
+      "id": "item.armor.rootweave.t1", "schema_version": 1, "enabled": true, "earliest_release_stage": "core",
+      "localization_name_key": "item.armor.rootweave.t1.name", "localization_description_key": "item.armor.rootweave.t1.description",
+      "asset_ids": ["icon.item.armor.rootweave.t1"], "tags": ["family.rootweave", "item", "slot.armor"], "source_document_feature_id": "CONT-CATALOG-040",
+      "payload": {"item_kind": "equipment", "slot": "armor", "class_id": null, "family": "rootweave", "minimum_item_level": 1, "maximum_item_level": 6, "core_maximum_item_level_override": 10, "capability_tags": ["modifiable.defense", "modifiable.mobility", "modifiable.utility", "slot.armor"], "affix_exclusion_ids": [], "behavior": {"behavior_kind": "armor", "family": "rootweave", "raw_health_base_hundredths": 1000, "raw_health_per_level_hundredths": 140, "raw_armor_base_hundredths": 50, "raw_armor_per_level_hundredths": 10, "raw_resistance_base_basis_points": 0, "raw_resistance_per_level_basis_points": 0, "fixed_movement_basis_points": 0, "fixed_healing_received_basis_points": 0, "negative_status_duration_reduction_basis_points": 1200, "affected_negative_statuses": ["bleed", "frostbind", "silence", "hex", "guardbreak"], "excluded_negative_statuses": ["exhaustion", "encounter_marked"], "direct_hit_barrier": null}}
+    },
+    {
+      "id": "item.armor.saltglass.t1", "schema_version": 1, "enabled": true, "earliest_release_stage": "core",
+      "localization_name_key": "item.armor.saltglass.t1.name", "localization_description_key": "item.armor.saltglass.t1.description",
+      "asset_ids": ["icon.item.armor.saltglass.t1"], "tags": ["family.saltglass", "item", "slot.armor"], "source_document_feature_id": "CONT-CATALOG-040",
+      "payload": {"item_kind": "equipment", "slot": "armor", "class_id": null, "family": "saltglass", "minimum_item_level": 1, "maximum_item_level": 6, "core_maximum_item_level_override": 10, "capability_tags": ["modifiable.defense", "modifiable.mobility", "modifiable.utility", "slot.armor"], "affix_exclusion_ids": [], "behavior": {"behavior_kind": "armor", "family": "saltglass", "raw_health_base_hundredths": 600, "raw_health_per_level_hundredths": 80, "raw_armor_base_hundredths": 50, "raw_armor_per_level_hundredths": 8, "raw_resistance_base_basis_points": 400, "raw_resistance_per_level_basis_points": 30, "fixed_movement_basis_points": 0, "fixed_healing_received_basis_points": -800, "negative_status_duration_reduction_basis_points": 0, "affected_negative_statuses": [], "excluded_negative_statuses": [], "direct_hit_barrier": null}}
+    },
+    {
+      "id": "item.charm.bell_locket.t1", "schema_version": 1, "enabled": true, "earliest_release_stage": "core",
+      "localization_name_key": "item.charm.bell_locket.t1.name", "localization_description_key": "item.charm.bell_locket.t1.description",
+      "asset_ids": ["icon.item.charm.bell_locket.t1"], "tags": ["family.charm", "item", "slot.charm"], "source_document_feature_id": "CONT-CATALOG-050",
+      "payload": {"item_kind": "equipment", "slot": "charm", "class_id": null, "family": "charm", "minimum_item_level": 1, "maximum_item_level": 6, "core_maximum_item_level_override": 10, "capability_tags": ["modifiable.ability", "modifiable.defense", "modifiable.mobility", "modifiable.offense", "modifiable.utility", "slot.charm"], "affix_exclusion_ids": [], "behavior": {"behavior_kind": "charm", "effect": {"effect_kind": "potion_healing", "bonus_basis_points": 1000}}}
+    },
+    {
+      "id": "item.charm.ember_tooth.t1", "schema_version": 1, "enabled": true, "earliest_release_stage": "core",
+      "localization_name_key": "item.charm.ember_tooth.t1.name", "localization_description_key": "item.charm.ember_tooth.t1.description",
+      "asset_ids": ["icon.item.charm.ember_tooth.t1"], "tags": ["family.charm", "item", "slot.charm"], "source_document_feature_id": "CONT-CATALOG-050",
+      "payload": {"item_kind": "equipment", "slot": "charm", "class_id": null, "family": "charm", "minimum_item_level": 1, "maximum_item_level": 6, "core_maximum_item_level_override": 10, "capability_tags": ["modifiable.ability", "modifiable.defense", "modifiable.mobility", "modifiable.offense", "modifiable.utility", "slot.charm"], "affix_exclusion_ids": [], "behavior": {"behavior_kind": "charm", "effect": {"effect_kind": "rested_primary_damage", "idle_millis": 2000, "bonus_basis_points": 1500, "consumed_on_release_regardless_of_hit": true}}}
+    },
+    {
+      "id": "item.charm.salt_knot.t1", "schema_version": 1, "enabled": true, "earliest_release_stage": "core",
+      "localization_name_key": "item.charm.salt_knot.t1.name", "localization_description_key": "item.charm.salt_knot.t1.description",
+      "asset_ids": ["icon.item.charm.salt_knot.t1"], "tags": ["family.charm", "item", "slot.charm"], "source_document_feature_id": "CONT-CATALOG-050",
+      "payload": {"item_kind": "equipment", "slot": "charm", "class_id": null, "family": "charm", "minimum_item_level": 1, "maximum_item_level": 6, "core_maximum_item_level_override": 10, "capability_tags": ["modifiable.ability", "modifiable.defense", "modifiable.mobility", "modifiable.offense", "modifiable.utility", "slot.charm"], "affix_exclusion_ids": [], "behavior": {"behavior_kind": "charm", "effect": {"effect_kind": "named_negative_status_duration", "reduction_basis_points": 1000, "affected_statuses": ["bleed", "frostbind", "silence", "hex", "guardbreak"], "excluded_statuses": ["exhaustion", "encounter_marked"]}}}
+    },
+    {
+      "id": "item.relic.arbalist.barbed_ledger", "schema_version": 1, "enabled": true, "earliest_release_stage": "core",
+      "localization_name_key": "item.relic.arbalist.barbed_ledger.name", "localization_description_key": "item.relic.arbalist.barbed_ledger.description",
+      "asset_ids": ["icon.item.relic.arbalist.barbed_ledger"], "tags": ["class.grave_arbalist", "family.arbalist_relic", "item", "slot.relic"], "source_document_feature_id": "CONT-CATALOG-021",
+      "payload": {"item_kind": "equipment", "slot": "relic", "class_id": "class.grave_arbalist", "family": "arbalist_relic", "minimum_item_level": 7, "maximum_item_level": 20, "core_maximum_item_level_override": null, "capability_tags": ["ability.mark", "ability.slip", "modifiable.positive_duration", "outgoing.status", "passive.stillness", "self_mark_bonus"], "affix_exclusion_ids": [], "behavior": {"behavior_kind": "arbalist_relic", "mark": {"range_milli_tiles": null, "projectile_speed_milli_tiles_per_second": null, "direct_damage_coefficient_basis_points": 14500, "duration_millis": 6000, "primary_bonus_basis_points": 2000}, "slipstep": null, "stillness": null}}
+    },
+    {
+      "id": "item.relic.arbalist.cracked_mark_lens", "schema_version": 1, "enabled": true, "earliest_release_stage": "core",
+      "localization_name_key": "item.relic.arbalist.cracked_mark_lens.name", "localization_description_key": "item.relic.arbalist.cracked_mark_lens.description",
+      "asset_ids": ["icon.item.relic.arbalist.cracked_mark_lens"], "tags": ["class.grave_arbalist", "family.arbalist_relic", "item", "slot.relic"], "source_document_feature_id": "CONT-CATALOG-021",
+      "payload": {"item_kind": "equipment", "slot": "relic", "class_id": "class.grave_arbalist", "family": "arbalist_relic", "minimum_item_level": 1, "maximum_item_level": 20, "core_maximum_item_level_override": null, "capability_tags": ["ability.mark", "ability.slip", "modifiable.positive_duration", "outgoing.status", "passive.stillness", "self_mark_bonus"], "affix_exclusion_ids": [], "behavior": {"behavior_kind": "arbalist_relic", "mark": null, "slipstep": null, "stillness": null}}
+    },
+    {
+      "id": "item.relic.arbalist.long_lens", "schema_version": 1, "enabled": true, "earliest_release_stage": "core",
+      "localization_name_key": "item.relic.arbalist.long_lens.name", "localization_description_key": "item.relic.arbalist.long_lens.description",
+      "asset_ids": ["icon.item.relic.arbalist.long_lens"], "tags": ["class.grave_arbalist", "family.arbalist_relic", "item", "slot.relic"], "source_document_feature_id": "CONT-CATALOG-021",
+      "payload": {"item_kind": "equipment", "slot": "relic", "class_id": "class.grave_arbalist", "family": "arbalist_relic", "minimum_item_level": 4, "maximum_item_level": 20, "core_maximum_item_level_override": null, "capability_tags": ["ability.mark", "ability.slip", "modifiable.positive_duration", "outgoing.status", "passive.stillness", "self_mark_bonus"], "affix_exclusion_ids": [], "behavior": {"behavior_kind": "arbalist_relic", "mark": {"range_milli_tiles": 13000, "projectile_speed_milli_tiles_per_second": 15000, "direct_damage_coefficient_basis_points": 15500, "duration_millis": null, "primary_bonus_basis_points": null}, "slipstep": null, "stillness": null}}
+    },
+    {
+      "id": "item.relic.arbalist.slip_clasp", "schema_version": 1, "enabled": true, "earliest_release_stage": "core",
+      "localization_name_key": "item.relic.arbalist.slip_clasp.name", "localization_description_key": "item.relic.arbalist.slip_clasp.description",
+      "asset_ids": ["icon.item.relic.arbalist.slip_clasp"], "tags": ["class.grave_arbalist", "family.arbalist_relic", "item", "slot.relic"], "source_document_feature_id": "CONT-CATALOG-021",
+      "payload": {"item_kind": "equipment", "slot": "relic", "class_id": "class.grave_arbalist", "family": "arbalist_relic", "minimum_item_level": 10, "maximum_item_level": 20, "core_maximum_item_level_override": null, "capability_tags": ["ability.mark", "ability.slip", "modifiable.positive_duration", "outgoing.status", "passive.stillness", "self_mark_bonus"], "affix_exclusion_ids": [], "behavior": {"behavior_kind": "arbalist_relic", "mark": null, "slipstep": {"distance_milli_tiles": 2500, "duration_millis": 220, "damage_reduction_basis_points": 2000, "cooldown_millis": 9000}, "stillness": null}}
+    },
+    {
+      "id": "item.weapon.crossbow.grave_repeater", "schema_version": 1, "enabled": true, "earliest_release_stage": "core",
+      "localization_name_key": "item.weapon.crossbow.grave_repeater.name", "localization_description_key": "item.weapon.crossbow.grave_repeater.description",
+      "asset_ids": ["icon.item.weapon.crossbow.grave_repeater"], "tags": ["class.grave_arbalist", "family.crossbow", "item", "slot.weapon"], "source_document_feature_id": "CONT-CATALOG-020",
+      "payload": {"item_kind": "equipment", "slot": "weapon", "class_id": "class.grave_arbalist", "family": "crossbow", "minimum_item_level": 4, "maximum_item_level": 20, "core_maximum_item_level_override": null, "capability_tags": ["modifiable.W", "modifiable.interval", "modifiable.projectile_speed", "modifiable.range", "permits_pierce", "primary.projectile"], "affix_exclusion_ids": [], "behavior": {"behavior_kind": "crossbow", "template_damage_scalar_basis_points": 8400, "attack_interval_micros": 382000, "range_milli_tiles": 8500, "projectile_speed_milli_tiles_per_second": 14000, "projectile_radius_milli_tiles": 100, "bolt_angles_milli_degrees": [0], "maximum_hits_per_target_per_release": 1, "pierce_count": 0, "second_target_damage_basis_points": null}}
+    },
+    {
+      "id": "item.weapon.crossbow.mourners_fan", "schema_version": 1, "enabled": true, "earliest_release_stage": "core",
+      "localization_name_key": "item.weapon.crossbow.mourners_fan.name", "localization_description_key": "item.weapon.crossbow.mourners_fan.description",
+      "asset_ids": ["icon.item.weapon.crossbow.mourners_fan"], "tags": ["class.grave_arbalist", "family.crossbow", "item", "slot.weapon"], "source_document_feature_id": "CONT-CATALOG-020",
+      "payload": {"item_kind": "equipment", "slot": "weapon", "class_id": "class.grave_arbalist", "family": "crossbow", "minimum_item_level": 10, "maximum_item_level": 20, "core_maximum_item_level_override": null, "capability_tags": ["modifiable.W", "modifiable.interval", "modifiable.projectile_speed", "modifiable.range", "primary.projectile"], "affix_exclusion_ids": [], "behavior": {"behavior_kind": "crossbow", "template_damage_scalar_basis_points": 8200, "attack_interval_micros": 520000, "range_milli_tiles": 7500, "projectile_speed_milli_tiles_per_second": 14000, "projectile_radius_milli_tiles": 100, "bolt_angles_milli_degrees": [-12000, 0, 12000], "maximum_hits_per_target_per_release": 1, "pierce_count": 0, "second_target_damage_basis_points": null}}
+    },
+    {
+      "id": "item.weapon.crossbow.pilgrim_longbolt", "schema_version": 1, "enabled": true, "earliest_release_stage": "core",
+      "localization_name_key": "item.weapon.crossbow.pilgrim_longbolt.name", "localization_description_key": "item.weapon.crossbow.pilgrim_longbolt.description",
+      "asset_ids": ["icon.item.weapon.crossbow.pilgrim_longbolt"], "tags": ["class.grave_arbalist", "family.crossbow", "item", "slot.weapon"], "source_document_feature_id": "CONT-CATALOG-020",
+      "payload": {"item_kind": "equipment", "slot": "weapon", "class_id": "class.grave_arbalist", "family": "crossbow", "minimum_item_level": 7, "maximum_item_level": 20, "core_maximum_item_level_override": null, "capability_tags": ["modifiable.W", "modifiable.interval", "modifiable.projectile_speed", "modifiable.range", "permits_pierce", "primary.projectile"], "affix_exclusion_ids": [], "behavior": {"behavior_kind": "crossbow", "template_damage_scalar_basis_points": 11000, "attack_interval_micros": 550000, "range_milli_tiles": 11500, "projectile_speed_milli_tiles_per_second": 17000, "projectile_radius_milli_tiles": 90, "bolt_angles_milli_degrees": [0], "maximum_hits_per_target_per_release": 1, "pierce_count": 0, "second_target_damage_basis_points": null}}
+    },
+    {
+      "id": "item.weapon.crossbow.pine_crossbow", "schema_version": 1, "enabled": true, "earliest_release_stage": "core",
+      "localization_name_key": "item.weapon.crossbow.pine_crossbow.name", "localization_description_key": "item.weapon.crossbow.pine_crossbow.description",
+      "asset_ids": ["icon.item.weapon.crossbow.pine_crossbow"], "tags": ["class.grave_arbalist", "family.crossbow", "item", "slot.weapon"], "source_document_feature_id": "CONT-CATALOG-020",
+      "payload": {"item_kind": "equipment", "slot": "weapon", "class_id": "class.grave_arbalist", "family": "crossbow", "minimum_item_level": 1, "maximum_item_level": 20, "core_maximum_item_level_override": null, "capability_tags": ["modifiable.W", "modifiable.interval", "modifiable.projectile_speed", "modifiable.range", "permits_pierce", "primary.projectile"], "affix_exclusion_ids": [], "behavior": {"behavior_kind": "crossbow", "template_damage_scalar_basis_points": 10000, "attack_interval_micros": 454545, "range_milli_tiles": 9500, "projectile_speed_milli_tiles_per_second": 14000, "projectile_radius_milli_tiles": 100, "bolt_angles_milli_degrees": [0], "maximum_hits_per_target_per_release": 1, "pierce_count": 0, "second_target_damage_basis_points": null}}
+    }
+  ],
+  "rarity_profiles": [
+    {"id": "rarity.core_fixed", "schema_version": 1, "enabled": true, "earliest_release_stage": "core", "tags": ["core", "fixed_rarity"], "source_document_feature_id": "CONT-REWARD-004", "ordered_weights": [{"rarity": "forged", "weight_basis_points": 10000}]}
+  ],
+  "reward_tables": [
+    {"id": "reward.boss_caldus", "schema_version": 1, "enabled": true, "earliest_release_stage": "core", "tags": ["boss", "personal_reward"], "source_document_feature_id": "CONT-REWARD-003", "ordered_rolls": [{"roll_kind": "equipment", "presence_basis_points": 10000, "count": 2, "minimum_item_level": 8, "maximum_item_level": 10, "rarity_profile_id": "rarity.core_fixed"}, {"roll_kind": "material", "presence_basis_points": 10000, "count": 1, "material_pool_id": "material_pool.core.red_tonic_2"}]},
+    {"id": "reward.elite_outer", "schema_version": 1, "enabled": true, "earliest_release_stage": "core", "tags": ["elite", "personal_reward"], "source_document_feature_id": "CONT-REWARD-003", "ordered_rolls": [{"roll_kind": "equipment", "presence_basis_points": 10000, "count": 1, "minimum_item_level": 2, "maximum_item_level": 8, "rarity_profile_id": "rarity.core_fixed"}, {"roll_kind": "material", "presence_basis_points": 2500, "count": 1, "material_pool_id": "material_pool.core.red_tonic_1"}]},
+    {"id": "reward.miniboss_t1", "schema_version": 1, "enabled": true, "earliest_release_stage": "core", "tags": ["miniboss", "personal_reward"], "source_document_feature_id": "CONT-REWARD-003", "ordered_rolls": [{"roll_kind": "equipment", "presence_basis_points": 10000, "count": 1, "minimum_item_level": 5, "maximum_item_level": 10, "rarity_profile_id": "rarity.core_fixed"}, {"roll_kind": "equipment", "presence_basis_points": 3500, "count": 1, "minimum_item_level": 5, "maximum_item_level": 10, "rarity_profile_id": "rarity.core_fixed"}]},
+    {"id": "reward.normal_outer", "schema_version": 1, "enabled": true, "earliest_release_stage": "core", "tags": ["normal", "personal_reward"], "source_document_feature_id": "CONT-REWARD-003", "ordered_rolls": [{"roll_kind": "universal_item", "presence_basis_points": 800, "count": 1, "minimum_item_level": 1, "maximum_item_level": 6, "rarity_profile_id": "rarity.core_fixed"}, {"roll_kind": "material", "presence_basis_points": 1200, "count": 1, "material_pool_id": "material_pool.core.red_tonic_1"}]}
+  ],
+  "material_pools": [
+    {"id": "material_pool.core.red_tonic_1", "schema_version": 1, "enabled": true, "earliest_release_stage": "core", "tags": ["consumable_pool", "core"], "source_document_feature_id": "CONT-REWARD-004", "ordered_outcomes": [{"item_id": "consumable.red_tonic", "quantity": 1, "weight": 100}]},
+    {"id": "material_pool.core.red_tonic_2", "schema_version": 1, "enabled": true, "earliest_release_stage": "core", "tags": ["consumable_pool", "core"], "source_document_feature_id": "CONT-REWARD-004", "ordered_outcomes": [{"item_id": "consumable.red_tonic", "quantity": 2, "weight": 100}]}
+  ],
+  "stage_policies": [
+    {"id": "policy.items.core", "schema_version": 1, "enabled": true, "earliest_release_stage": "core", "tags": ["core", "wipeable"], "source_document_feature_id": "CONT-REWARD-004", "current_class_weapon_relic_basis_points": 8500, "other_class_weapon_relic_basis_points": 0, "universal_armor_charm_basis_points": 1500, "weapon_within_class_basis_points": 5000, "armor_within_universal_basis_points": 5000, "maximum_item_level": 10, "fixed_rarity_profile_id": "rarity.core_fixed", "affix_manifest_id": "manifest.affixes.core", "enabled_family_fragment_checks": false, "enabled_cosmetic_checks": false}
+  ]
+}

@@ -50,6 +50,12 @@ enum Command {
         #[arg(long, default_value = "content")]
         root: PathBuf,
     },
+    /// Validate the independently hashed, non-promotable Core item/reward target.
+    ValidateCoreItems {
+        /// Content root containing the `core_dev` item sources.
+        #[arg(long, default_value = "content")]
+        root: PathBuf,
+    },
     /// Regenerate checked-in JSON Schema contracts.
     GenerateSchemas {
         /// Destination directory for generated schemas.
@@ -83,9 +89,23 @@ fn main() -> Result<()> {
         Command::Validate { root } => validate_content_command(&root)?,
         Command::ValidateCoreWorldFlow { root } => validate_core_world_flow_command(&root)?,
         Command::ValidateCoreProgression { root } => validate_core_progression_command(&root)?,
+        Command::ValidateCoreItems { root } => validate_core_items_command(&root)?,
         Command::GenerateSchemas { output } => generate_schemas_command(&output)?,
     }
 
+    Ok(())
+}
+
+fn validate_core_items_command(root: &std::path::Path) -> Result<()> {
+    let compiled = sim_content::load_core_development_items(root)?;
+    info!(
+        target = compiled.target_name(),
+        revision = compiled.revision_label(),
+        items = compiled.items().len(),
+        reward_tables = compiled.reward_tables().len(),
+        manifest_blake3 = compiled.hashes().manifest_blake3,
+        "unpromoted Core item/reward target is valid"
+    );
     Ok(())
 }
 

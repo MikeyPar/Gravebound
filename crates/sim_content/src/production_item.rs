@@ -1,10 +1,15 @@
 //! Semantic compiler for the unpromoted production-style item/reward contracts.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::Path,
+};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use content_schema::{
-    EquipmentSlot, ProductionArmorFamily, ProductionEquipmentBehavior, ProductionEquipmentFamily,
+    CoreWorldFlowCopyFile, EquipmentSlot, ProductionArmorFamily, ProductionEquipmentBehavior,
+    ProductionEquipmentFamily, ProductionItemAssetKind, ProductionItemAssetManifest,
     ProductionItemDevelopmentTarget, ProductionItemRarity, ProductionItemRecords,
     ProductionItemStagePolicyRecord, ProductionItemTemplatePayload, ProductionItemTemplateRecord,
     ProductionMaterialPoolRecord, ProductionRarityProfileRecord, ProductionRewardRoll,
@@ -18,6 +23,8 @@ const CORE_AFFIX_MANIFEST_ID: &str = "manifest.affixes.core";
 
 #[derive(Debug, Clone)]
 pub struct CompiledProductionItemCatalog {
+    target_name: String,
+    hashes: ProductionItemSourceHashes,
     revision_label: String,
     items: BTreeMap<String, ProductionItemTemplateRecord>,
     rarity_profiles: BTreeMap<String, ProductionRarityProfileRecord>,
@@ -27,6 +34,16 @@ pub struct CompiledProductionItemCatalog {
 }
 
 impl CompiledProductionItemCatalog {
+    #[must_use]
+    pub fn target_name(&self) -> &str {
+        &self.target_name
+    }
+
+    #[must_use]
+    pub const fn hashes(&self) -> &ProductionItemSourceHashes {
+        &self.hashes
+    }
+
     #[must_use]
     pub fn revision_label(&self) -> &str {
         &self.revision_label
@@ -56,6 +73,271 @@ impl CompiledProductionItemCatalog {
     pub const fn stage_policies(&self) -> &BTreeMap<String, ProductionItemStagePolicyRecord> {
         &self.stage_policies
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProductionItemSourceHashes {
+    pub manifest_blake3: String,
+    pub records_blake3: String,
+    pub assets_blake3: String,
+    pub localization_blake3: String,
+}
+
+#[derive(Serialize)]
+struct ProductionItemManifestDigest<'a> {
+    schema_version: u32,
+    records_blake3: &'a str,
+    assets_blake3: &'a str,
+    localization_blake3: &'a str,
+}
+
+/// Loads and verifies the independently hashed, non-promotable Core item target.
+pub fn load_core_development_items(root: &Path) -> Result<CompiledProductionItemCatalog> {
+    let core = root.join("core_dev");
+    let target_bytes = read_bytes(&core.join("items.json"))?;
+    let records_bytes = read_bytes(&core.join("items.records.json"))?;
+    let assets_bytes = read_bytes(&core.join("items.assets.json"))?;
+    let localization_bytes = read_bytes(&core.join("items.en-US.json"))?;
+    let target: ProductionItemDevelopmentTarget = parse_json(&target_bytes, "items.json")?;
+    let records: ProductionItemRecords = parse_json(&records_bytes, "items.records.json")?;
+    let assets: ProductionItemAssetManifest = parse_json(&assets_bytes, "items.assets.json")?;
+    let localization: CoreWorldFlowCopyFile = parse_json(&localization_bytes, "items.en-US.json")?;
+    let hashes = source_hashes(&records_bytes, &assets_bytes, &localization_bytes)?;
+    validate_source_hashes(&target, &hashes)?;
+    validate_item_assets(&records, &assets)?;
+    validate_item_localization(&records, &localization)?;
+    let mut compiled = compile_production_item_catalog(&target, &records)?;
+    compiled.hashes = hashes;
+    validate_exact_core_reward_closure(&compiled)?;
+    Ok(compiled)
+}
+
+fn read_bytes(path: &Path) -> Result<Vec<u8>> {
+    fs::read(path).with_context(|| format!("failed to read {}", path.display()))
+}
+
+fn parse_json<T: for<'de> Deserialize<'de>>(bytes: &[u8], name: &str) -> Result<T> {
+    serde_json::from_slice(bytes).with_context(|| format!("invalid Core item source {name}"))
+}
+
+fn source_hashes(
+    records: &[u8],
+    assets: &[u8],
+    localization: &[u8],
+) -> Result<ProductionItemSourceHashes> {
+    let records_blake3 = blake3::hash(records).to_hex().to_string();
+    let assets_blake3 = blake3::hash(assets).to_hex().to_string();
+    let localization_blake3 = blake3::hash(localization).to_hex().to_string();
+    let digest = ProductionItemManifestDigest {
+        schema_version: SCHEMA_VERSION,
+        records_blake3: &records_blake3,
+        assets_blake3: &assets_blake3,
+        localization_blake3: &localization_blake3,
+    };
+    let manifest_bytes = serde_json::to_vec(&digest).context("failed to encode item manifest")?;
+    Ok(ProductionItemSourceHashes {
+        manifest_blake3: blake3::hash(&manifest_bytes).to_hex().to_string(),
+        records_blake3,
+        assets_blake3,
+        localization_blake3,
+    })
+}
+
+fn validate_source_hashes(
+    target: &ProductionItemDevelopmentTarget,
+    actual: &ProductionItemSourceHashes,
+) -> Result<()> {
+    let expected = ProductionItemSourceHashes {
+        manifest_blake3: target.expected_manifest_blake3.clone(),
+        records_blake3: target.expected_records_blake3.clone(),
+        assets_blake3: target.expected_assets_blake3.clone(),
+        localization_blake3: target.expected_localization_blake3.clone(),
+    };
+    if expected != *actual {
+        bail!("Core item source hash mismatch: expected {expected:?}; actual {actual:?}");
+    }
+    Ok(())
+}
+
+fn validate_item_assets(
+    records: &ProductionItemRecords,
+    manifest: &ProductionItemAssetManifest,
+) -> Result<()> {
+    if manifest.schema_version != SCHEMA_VERSION
+        || !strictly_sorted_unique(manifest.assets.iter().map(|asset| asset.asset_id.as_str()))
+        || manifest.assets.len() != records.items.len()
+    {
+        bail!("Core item asset manifest metadata is invalid");
+    }
+    for (item, asset) in records.items.iter().zip(&manifest.assets) {
+        let expected = format!("icon.{}", item.header.id);
+        if asset.kind != ProductionItemAssetKind::ItemIcon
+            || asset.source_record_id != item.header.id
+            || asset.asset_id.as_str() != expected
+            || item.header.asset_ids.as_slice() != [asset.asset_id.clone()]
+        {
+            bail!("Core item icon closure failed for `{}`", item.header.id);
+        }
+    }
+    Ok(())
+}
+
+fn validate_item_localization(
+    records: &ProductionItemRecords,
+    copy: &CoreWorldFlowCopyFile,
+) -> Result<()> {
+    let required = records
+        .items
+        .iter()
+        .flat_map(|item| {
+            [
+                item.header.localization_description_key.as_str(),
+                item.header.localization_name_key.as_str(),
+            ]
+        })
+        .collect::<Vec<_>>();
+    if copy.schema_version != SCHEMA_VERSION
+        || copy.locale != "en-US"
+        || copy.entries.len() != required.len()
+        || !strictly_sorted_unique(copy.entries.iter().map(|entry| entry.key.as_str()))
+        || copy.entries.iter().zip(required).any(|(entry, key)| {
+            entry.key.as_str() != key
+                || entry.value.trim().is_empty()
+                || entry
+                    .value
+                    .chars()
+                    .any(|character| character.is_control() && character != '\n')
+        })
+    {
+        bail!("Core item localization closure is invalid");
+    }
+    Ok(())
+}
+
+fn validate_exact_core_reward_closure(catalog: &CompiledProductionItemCatalog) -> Result<()> {
+    let equipment_count = catalog
+        .items
+        .values()
+        .filter(|item| {
+            matches!(
+                item.payload,
+                ProductionItemTemplatePayload::Equipment { .. }
+            )
+        })
+        .count();
+    let consumable_count = catalog.items.len() - equipment_count;
+    if catalog.items.len() != 18 || equipment_count != 17 || consumable_count != 1 {
+        bail!("Core item catalog must contain exactly 17 equipment templates and one consumable");
+    }
+    require_exact_core_reward_payloads(catalog)?;
+    let mut reachable = BTreeSet::new();
+    for table in catalog.reward_tables.values() {
+        for roll in &table.ordered_rolls {
+            let (minimum, maximum, pools): (u8, u8, &[PlannedEquipmentPool]) = match roll {
+                ProductionRewardRoll::Equipment {
+                    minimum_item_level,
+                    maximum_item_level,
+                    ..
+                } => (
+                    *minimum_item_level,
+                    *maximum_item_level,
+                    &[
+                        PlannedEquipmentPool::CurrentClass(EquipmentSlot::Weapon),
+                        PlannedEquipmentPool::CurrentClass(EquipmentSlot::Relic),
+                        PlannedEquipmentPool::Universal(EquipmentSlot::Armor),
+                        PlannedEquipmentPool::Universal(EquipmentSlot::Charm),
+                    ],
+                ),
+                ProductionRewardRoll::UniversalItem {
+                    minimum_item_level,
+                    maximum_item_level,
+                    ..
+                } => (
+                    *minimum_item_level,
+                    *maximum_item_level,
+                    &[
+                        PlannedEquipmentPool::Universal(EquipmentSlot::Armor),
+                        PlannedEquipmentPool::Universal(EquipmentSlot::Charm),
+                    ],
+                ),
+                ProductionRewardRoll::Material { .. } => continue,
+            };
+            for level in minimum..=maximum {
+                for pool in pools {
+                    let candidates = catalog
+                        .items
+                        .iter()
+                        .filter(|(_, item)| {
+                            legal_equipment_candidate(item, *pool, level, "class.grave_arbalist")
+                        })
+                        .map(|(id, _)| id.as_str())
+                        .collect::<Vec<_>>();
+                    if candidates.is_empty() {
+                        bail!("Core reward pool has no candidate at item level {level}");
+                    }
+                    reachable.extend(candidates);
+                }
+            }
+        }
+    }
+    let equipment_ids = catalog
+        .items
+        .iter()
+        .filter(|(_, item)| {
+            matches!(
+                item.payload,
+                ProductionItemTemplatePayload::Equipment { .. }
+            )
+        })
+        .map(|(id, _)| id.as_str())
+        .collect::<BTreeSet<_>>();
+    if reachable != equipment_ids {
+        bail!("not every Core equipment template is reachable from an authored reward source");
+    }
+    Ok(())
+}
+
+fn require_exact_core_reward_payloads(catalog: &CompiledProductionItemCatalog) -> Result<()> {
+    let expected = [
+        (
+            "reward.boss_caldus",
+            serde_json::json!([
+                {"roll_kind":"equipment","presence_basis_points":10000,"count":2,"minimum_item_level":8,"maximum_item_level":10,"rarity_profile_id":"rarity.core_fixed"},
+                {"roll_kind":"material","presence_basis_points":10000,"count":1,"material_pool_id":"material_pool.core.red_tonic_2"}
+            ]),
+        ),
+        (
+            "reward.elite_outer",
+            serde_json::json!([
+                {"roll_kind":"equipment","presence_basis_points":10000,"count":1,"minimum_item_level":2,"maximum_item_level":8,"rarity_profile_id":"rarity.core_fixed"},
+                {"roll_kind":"material","presence_basis_points":2500,"count":1,"material_pool_id":"material_pool.core.red_tonic_1"}
+            ]),
+        ),
+        (
+            "reward.miniboss_t1",
+            serde_json::json!([
+                {"roll_kind":"equipment","presence_basis_points":10000,"count":1,"minimum_item_level":5,"maximum_item_level":10,"rarity_profile_id":"rarity.core_fixed"},
+                {"roll_kind":"equipment","presence_basis_points":3500,"count":1,"minimum_item_level":5,"maximum_item_level":10,"rarity_profile_id":"rarity.core_fixed"}
+            ]),
+        ),
+        (
+            "reward.normal_outer",
+            serde_json::json!([
+                {"roll_kind":"universal_item","presence_basis_points":800,"count":1,"minimum_item_level":1,"maximum_item_level":6,"rarity_profile_id":"rarity.core_fixed"},
+                {"roll_kind":"material","presence_basis_points":1200,"count":1,"material_pool_id":"material_pool.core.red_tonic_1"}
+            ]),
+        ),
+    ];
+    for (id, expected_rolls) in expected {
+        let actual = catalog
+            .reward_tables
+            .get(id)
+            .with_context(|| format!("missing exact Core reward table `{id}`"))?;
+        if serde_json::to_value(&actual.ordered_rolls)? != expected_rolls {
+            bail!("Core reward table `{id}` differs from the exact stage override");
+        }
+    }
+    Ok(())
 }
 
 pub trait ProductionRewardDrawSource {
@@ -456,6 +738,13 @@ pub fn compile_production_item_catalog(
         validate_core_policy(policy, &rarity_profiles)?;
     }
     Ok(CompiledProductionItemCatalog {
+        target_name: target.target_name.clone(),
+        hashes: ProductionItemSourceHashes {
+            manifest_blake3: target.expected_manifest_blake3.clone(),
+            records_blake3: target.expected_records_blake3.clone(),
+            assets_blake3: target.expected_assets_blake3.clone(),
+            localization_blake3: target.expected_localization_blake3.clone(),
+        },
         revision_label: format!("core-dev.blake3.{}", target.expected_manifest_blake3),
         items,
         rarity_profiles,
@@ -1001,6 +1290,8 @@ fn valid_blake3(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use content_schema::{
         ContentId, CoreDevelopmentHeader, ProductionConsumableBehavior,
         ProductionInfrastructureHeader, ProductionItemStagePolicyRecord, ProductionItemTargetKind,
@@ -1054,6 +1345,85 @@ mod tests {
             excluded_negative_statuses: vec![],
             direct_hit_barrier: None,
         }
+    }
+
+    fn content_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../content")
+    }
+
+    #[test]
+    fn checked_in_core_item_target_has_exact_manifest_and_reward_closure() {
+        let compiled = load_core_development_items(&content_root()).unwrap();
+        assert_eq!(compiled.target_name(), "core-dev-items");
+        assert_eq!(compiled.items().len(), 18);
+        assert_eq!(compiled.reward_tables().len(), 4);
+        assert_eq!(compiled.material_pools().len(), 2);
+        assert_eq!(compiled.rarity_profiles().len(), 1);
+        assert_eq!(compiled.stage_policies().len(), 1);
+        assert_eq!(
+            compiled.hashes().manifest_blake3,
+            "8c340462c1ac7d3339d892bb35f34d0ffe5f662eb7221a232c06f24ea8f5959c"
+        );
+        assert_eq!(
+            compiled.revision_label(),
+            "core-dev.blake3.8c340462c1ac7d3339d892bb35f34d0ffe5f662eb7221a232c06f24ea8f5959c"
+        );
+        assert_eq!(
+            compiled
+                .items()
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            [
+                "consumable.red_tonic",
+                "item.armor.ashplate.t1",
+                "item.armor.bellguard.t1",
+                "item.armor.gravehide.t1",
+                "item.armor.pilgrim.t1",
+                "item.armor.rootweave.t1",
+                "item.armor.saltglass.t1",
+                "item.charm.bell_locket.t1",
+                "item.charm.ember_tooth.t1",
+                "item.charm.salt_knot.t1",
+                "item.relic.arbalist.barbed_ledger",
+                "item.relic.arbalist.cracked_mark_lens",
+                "item.relic.arbalist.long_lens",
+                "item.relic.arbalist.slip_clasp",
+                "item.weapon.crossbow.grave_repeater",
+                "item.weapon.crossbow.mourners_fan",
+                "item.weapon.crossbow.pilgrim_longbolt",
+                "item.weapon.crossbow.pine_crossbow",
+            ]
+        );
+    }
+
+    #[test]
+    fn core_source_closure_rejects_asset_copy_and_reward_drift() {
+        let core = content_root().join("core_dev");
+        let records: ProductionItemRecords =
+            serde_json::from_slice(&fs::read(core.join("items.records.json")).unwrap()).unwrap();
+        let mut assets: ProductionItemAssetManifest =
+            serde_json::from_slice(&fs::read(core.join("items.assets.json")).unwrap()).unwrap();
+        let copy: CoreWorldFlowCopyFile =
+            serde_json::from_slice(&fs::read(core.join("items.en-US.json")).unwrap()).unwrap();
+        validate_item_assets(&records, &assets).unwrap();
+        validate_item_localization(&records, &copy).unwrap();
+
+        assets.assets.swap(0, 1);
+        assert!(validate_item_assets(&records, &assets).is_err());
+
+        let target: ProductionItemDevelopmentTarget =
+            serde_json::from_slice(&fs::read(core.join("items.json")).unwrap()).unwrap();
+        let mut drifted = records;
+        let ProductionRewardRoll::Equipment {
+            maximum_item_level, ..
+        } = &mut drifted.reward_tables[0].ordered_rolls[0]
+        else {
+            panic!("Caldus equipment roll");
+        };
+        *maximum_item_level = 9;
+        let compiled = compile_production_item_catalog(&target, &drifted).unwrap();
+        assert!(validate_exact_core_reward_closure(&compiled).is_err());
     }
 
     #[allow(clippy::too_many_lines)] // The complete cross-record fixture is intentionally visible.

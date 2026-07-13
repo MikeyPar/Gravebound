@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "assets": [
+    {"asset_id": "icon.consumable.red_tonic", "source_record_id": "consumable.red_tonic", "kind": "item_icon"},
+    {"asset_id": "icon.item.armor.ashplate.t1", "source_record_id": "item.armor.ashplate.t1", "kind": "item_icon"},
+    {"asset_id": "icon.item.armor.bellguard.t1", "source_record_id": "item.armor.bellguard.t1", "kind": "item_icon"},
+    {"asset_id": "icon.item.armor.gravehide.t1", "source_record_id": "item.armor.gravehide.t1", "kind": "item_icon"},
+    {"asset_id": "icon.item.armor.pilgrim.t1", "source_record_id": "item.armor.pilgrim.t1", "kind": "item_icon"},
+    {"asset_id": "icon.item.armor.rootweave.t1", "source_record_id": "item.armor.rootweave.t1", "kind": "item_icon"},
+    {"asset_id": "icon.item.armor.saltglass.t1", "source_record_id": "item.armor.saltglass.t1", "kind": "item_icon"},
+    {"asset_id": "icon.item.charm.bell_locket.t1", "source_record_id": "item.charm.bell_locket.t1", "kind": "item_icon"},
+    {"asset_id": "icon.item.charm.ember_tooth.t1", "source_record_id": "item.charm.ember_tooth.t1", "kind": "item_icon"},
+    {"asset_id": "icon.item.charm.salt_knot.t1", "source_record_id": "item.charm.salt_knot.t1", "kind": "item_icon"},
+    {"asset_id": "icon.item.relic.arbalist.barbed_ledger", "source_record_id": "item.relic.arbalist.barbed_ledger", "kind": "item_icon"},
+    {"asset_id": "icon.item.relic.arbalist.cracked_mark_lens", "source_record_id": "item.relic.arbalist.cracked_mark_lens", "kind": "item_icon"},
+    {"asset_id": "icon.item.relic.arbalist.long_lens", "source_record_id": "item.relic.arbalist.long_lens", "kind": "item_icon"},
+    {"asset_id": "icon.item.relic.arbalist.slip_clasp", "source_record_id": "item.relic.arbalist.slip_clasp", "kind": "item_icon"},
+    {"asset_id": "icon.item.weapon.crossbow.grave_repeater", "source_record_id": "item.weapon.crossbow.grave_repeater", "kind": "item_icon"},
+    {"asset_id": "icon.item.weapon.crossbow.mourners_fan", "source_record_id": "item.weapon.crossbow.mourners_fan", "kind": "item_icon"},
+    {"asset_id": "icon.item.weapon.crossbow.pilgrim_longbolt", "source_record_id": "item.weapon.crossbow.pilgrim_longbolt", "kind": "item_icon"},
+    {"asset_id": "icon.item.weapon.crossbow.pine_crossbow", "source_record_id": "item.weapon.crossbow.pine_crossbow", "kind": "item_icon"}
+  ]
+}
