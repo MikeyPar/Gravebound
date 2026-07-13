@@ -16,6 +16,8 @@ persistence = { path = "../persistence" }
 postcard.workspace = true
 protocol = { path = "../protocol" }
 quinn.workspace = true
+rand_chacha.workspace = true
+rand_core.workspace = true
 rcgen.workspace = true
 rustls.workspace = true
 serde.workspace = true

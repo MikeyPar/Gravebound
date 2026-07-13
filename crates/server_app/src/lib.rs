@@ -12,6 +12,7 @@ mod progression_award;
 mod progression_query;
 mod progression_service;
 mod restore_point;
+mod reward_rng;
 mod runtime;
 mod session;
 mod starter_items;
@@ -51,6 +52,10 @@ pub use restore_point::{
     BeltStackV1, CrashRestoreContext, DangerEntrySnapshotV1, EntryCaptureContext,
     EntryRestoreProvider, InventorySecurityRestoreV1, ItemUid, OathBargainRestoreV1,
     ProgressionRestoreV1, RestorePointError, RestorePointProviders, SafeAggregateVersionsV1,
+};
+pub use reward_rng::{
+    ProductionRewardRng, REWARD_AUDIT_CONTEXT, REWARD_EPOCH_ID_ENV, REWARD_EPOCH_SECRET_ENV,
+    REWARD_PLAN_CONTEXT, RewardRngError, RewardSeedMaterial, SecretRewardEpoch,
 };
 pub use runtime::{
     BoundCoreIdentityServer, BoundLocalServer, CORE_IDENTITY_BUILD_ID,
