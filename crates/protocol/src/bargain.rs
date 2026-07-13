@@ -305,7 +305,17 @@ impl BargainViewResult {
         if self.sequence == 0 {
             return Err(BargainValidationError::ZeroSequence);
         }
-        if (self.code == BargainResultCode::Available) != self.projection.is_some() {
+        let projects = matches!(
+            self.code,
+            BargainResultCode::Available | BargainResultCode::NoOffer
+        );
+        if projects != self.projection.is_some()
+            || (self.code == BargainResultCode::NoOffer
+                && self
+                    .projection
+                    .as_ref()
+                    .is_some_and(|value| value.offer.is_some()))
+        {
             return Err(BargainValidationError::ResultShapeMismatch);
         }
         self.projection
