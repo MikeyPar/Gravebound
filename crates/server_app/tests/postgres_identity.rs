@@ -10,7 +10,9 @@ use std::{
 use persistence::{PersistenceConfig, PostgresPersistence, WIPEABLE_CORE_NAMESPACE};
 use protocol::{
     AccountBootstrapFrame, AccountBootstrapRequest, AccountBootstrapResult, AccountErrorCode,
-    AuthTicket, CharacterMutationFrame, CharacterMutationPayload, ClientHello, Compression,
+    AuthTicket, BargainContentRevisionV1, BargainDecision, BargainDecisionFrame,
+    BargainDecisionPayload, BargainDecisionResult, BargainOfferCell, BargainResultCode,
+    BargainViewFrame, CharacterMutationFrame, CharacterMutationPayload, ClientHello, Compression,
     HandshakeResponse, InitialOathSelectionFrame, InitialOathSelectionPayload, ManifestHash,
     OathContentRevisionV1, OathResultCode, OathSelectionState, OathViewFrame, Platform,
     ProgressionQueryFrame, ProgressionResult, ProtocolVersion, WireText, WorldFlowFrame,
@@ -20,11 +22,14 @@ use protocol::{
 use server_app::{
     AccountId, AuthenticatedAccount, AuthenticatedNamespace, BoundCoreIdentityServer,
     CharacterIdGenerator, CoreCharacterCombatFactory, CoreIdentityServerConfig,
-    CoreIdentityServerReport, IdentityClock, IdentityService, LOCAL_SERVER_NAME,
-    LocalServerRuntimeError, NoopIdentityEventSink, PostgresAccountRepository,
-    PostgresGroundExpiryService, PostgresRewardService, RewardGrantContext, RewardGrantTransaction,
-    RewardPlacement, SecretRewardEpoch,
+    CoreIdentityServerReport, EntryCaptureContext, EntryRestoreProvider, IdentityClock,
+    IdentityService, LOCAL_SERVER_NAME, LocalServerRuntimeError, NoopIdentityEventSink,
+    PostgresAccountRepository, PostgresGroundExpiryService, PostgresProgressionAwardService,
+    PostgresProgressionRestoreProvider, PostgresRewardService, ProgressionAwardCode,
+    ProgressionAwardCommand, ProgressionAwardEvidence, ProgressionAwardPayload, RewardGrantContext,
+    RewardGrantTransaction, RewardPlacement, SecretRewardEpoch,
 };
+use sim_core::{EncounterXpEvidence, RewardLifeState, RewardRecallState, RewardTrustState};
 use tokio::sync::oneshot;
 
 #[derive(Debug, Clone, Copy)]
@@ -148,6 +153,16 @@ fn oath_revision(content_root: &Path) -> OathContentRevisionV1 {
         assets_blake3: ManifestHash::new(compiled.hashes().assets_blake3.clone()).unwrap(),
         localization_blake3: ManifestHash::new(compiled.hashes().localization_blake3.clone())
             .unwrap(),
+    }
+}
+
+fn bargain_revision(content_root: &Path) -> BargainContentRevisionV1 {
+    let compiled = sim_content::load_core_development_oaths_bargains(content_root).unwrap();
+    let hashes = compiled.hashes();
+    BargainContentRevisionV1 {
+        records_blake3: ManifestHash::new(hashes.records_blake3.clone()).unwrap(),
+        assets_blake3: ManifestHash::new(hashes.assets_blake3.clone()).unwrap(),
+        localization_blake3: ManifestHash::new(hashes.localization_blake3.clone()).unwrap(),
     }
 }
 
@@ -540,6 +555,223 @@ async fn assert_persistent_oath_route(
     assert_persisted_combat_factory(persistence, content_root, ticket, character_id).await;
 }
 
+#[allow(clippy::too_many_lines)] // Explicit cross-domain fixture rows keep the authority boundary auditable.
+async fn stage_real_quic_bargain_offer(
+    persistence: &PostgresPersistence,
+    content_root: &Path,
+    ticket: &[u8],
+    character_id: [u8; 16],
+) -> ([u8; 16], [u8; 16]) {
+    const LINEAGE_ID: [u8; 16] = [75; 16];
+    const RESTORE_ID: [u8; 16] = [76; 16];
+    const REWARD_ID: [u8; 16] = [77; 16];
+    let hash = blake3::hash(ticket);
+    let account_id = <[u8; 16]>::try_from(&hash.as_bytes()[..16]).unwrap();
+    let progression = sim_content::load_core_development_progression(content_root).unwrap();
+    let oath_bargain = sim_content::load_core_development_oaths_bargains(content_root).unwrap();
+    let world = sim_content::load_core_development_world_flow(content_root).unwrap();
+    let restores = PostgresProgressionRestoreProvider::new(&progression).unwrap();
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let versions: (i64, i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT a.state_version, c.character_state_version, p.progression_version, \
+                i.inventory_version, ob.oath_bargain_version FROM accounts a \
+         JOIN characters c USING (namespace_id, account_id) \
+         JOIN character_progression p USING (namespace_id, account_id, character_id) \
+         JOIN character_inventories i USING (namespace_id, account_id, character_id) \
+         JOIN character_oath_bargain_state ob USING (namespace_id, account_id, character_id) \
+         WHERE a.namespace_id = $1 AND a.account_id = $2 AND c.character_id = $3",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    let hashes = world.hashes();
+    sqlx::query(
+        "INSERT INTO character_instance_lineages (namespace_id, account_id, character_id, \
+         lineage_id, content_id, layout_id, lineage_state, records_blake3, assets_blake3, \
+         localization_blake3) VALUES ($1, $2, $3, $4, 'world.core_microrealm_01', \
+         'layout.core_private_life_01', 0, $5, $6, $7)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
+    .bind(LINEAGE_ID.as_slice())
+    .bind(&hashes.records_blake3)
+    .bind(&hashes.assets_blake3)
+    .bind(&hashes.localization_blake3)
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO character_entry_restore_points (namespace_id, account_id, character_id, \
+         restore_point_id, lineage_id, source_location_id, restore_location_id, \
+         snapshot_contract_version, account_version, character_version, progression_version, \
+         inventory_version, oath_bargain_version, component_mask, composite_digest, \
+         restore_state, records_blake3, assets_blake3, localization_blake3) \
+         VALUES ($1, $2, $3, $4, $5, 'hub.lantern_halls_01', 'hub.lantern_halls_01', \
+         1, $6, $7, $8, $9, $10, 7, $11, 0, $12, $13, $14)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
+    .bind(RESTORE_ID.as_slice())
+    .bind(LINEAGE_ID.as_slice())
+    .bind(versions.0)
+    .bind(versions.1)
+    .bind(versions.2)
+    .bind(versions.3)
+    .bind(versions.4)
+    .bind([91_u8; 32].as_slice())
+    .bind(&hashes.records_blake3)
+    .bind(&hashes.assets_blake3)
+    .bind(&hashes.localization_blake3)
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    restores
+        .capture(
+            &mut transaction,
+            EntryCaptureContext {
+                account_id,
+                character_id,
+                transfer_id: RESTORE_ID,
+            },
+        )
+        .await
+        .unwrap();
+    let danger_version = versions.1 + 1;
+    sqlx::query(
+        "UPDATE characters SET character_state_version = $1 WHERE namespace_id = $2 \
+         AND account_id = $3 AND character_id = $4",
+    )
+    .bind(danger_version)
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE character_world_locations SET character_version = $1, location_kind = 2, \
+         location_content_id = 'world.core_microrealm_01', safe_arrival_kind = NULL, \
+         instance_lineage_id = $2, entry_restore_point_id = $3 WHERE namespace_id = $4 \
+         AND account_id = $5 AND character_id = $6",
+    )
+    .bind(danger_version)
+    .bind(LINEAGE_ID.as_slice())
+    .bind(RESTORE_ID.as_slice())
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    transaction.commit().await.unwrap();
+
+    let payload = ProgressionAwardPayload {
+        character_id,
+        expected_progression_version: u64::try_from(versions.2).unwrap(),
+        source_content_id: "miniboss.sepulcher_knight".to_owned(),
+        progression_content_revision: ManifestHash::new(
+            progression.hashes().records_blake3.clone(),
+        )
+        .unwrap(),
+        evidence: ProgressionAwardEvidence::Encounter(EncounterXpEvidence {
+            active_ticks: 600,
+            present_ticks: 600,
+            longest_inactivity_ticks: 0,
+            encounter_contribution_reference_health: 4_200,
+            direct_damage: 420,
+            effective_healing_to_others: 0,
+            damage_prevented_on_others: 0,
+            qualifying_objective_credits: 0,
+            life_state: RewardLifeState::Living,
+            recall_state: RewardRecallState::Eligible,
+            trust_state: RewardTrustState::Valid,
+        }),
+    };
+    let awards =
+        PostgresProgressionAwardService::new(persistence.clone(), &progression, &oath_bargain)
+            .unwrap();
+    let awarded = awards
+        .award(
+            AuthenticatedAccount {
+                account_id: AccountId::new(account_id).unwrap(),
+                namespace: AuthenticatedNamespace::WipeableTest,
+            },
+            &ProgressionAwardCommand {
+                reward_event_id: REWARD_ID,
+                payload_hash: payload.canonical_hash(),
+                payload,
+            },
+        )
+        .await;
+    assert_eq!(awarded.code, ProgressionAwardCode::Accepted);
+    (REWARD_ID, account_id)
+}
+
+async fn assert_persistent_bargain_route(
+    persistence: &PostgresPersistence,
+    connection: &quinn::Connection,
+    content_root: &Path,
+    ticket: &[u8],
+    character_id: [u8; 16],
+) -> (BargainDecisionFrame, BargainDecisionResult) {
+    let (offer_id, _) =
+        stage_real_quic_bargain_offer(persistence, content_root, ticket, character_id).await;
+    let revision = bargain_revision(content_root);
+    let (_, view) = bot_client::perform_bargain_view(
+        connection,
+        BargainViewFrame {
+            sequence: 6,
+            character_id,
+            content_revision: revision.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(view.code, BargainResultCode::Available);
+    let offer = view.projection.unwrap().offer.unwrap();
+    let bargain_id = offer
+        .cells
+        .iter()
+        .find_map(|cell| match cell {
+            BargainOfferCell::Available { bargain_id, .. } => Some(bargain_id.clone()),
+            BargainOfferCell::Unavailable => None,
+        })
+        .expect("Core offer has an available Bargain");
+    let payload = BargainDecisionPayload {
+        character_id,
+        offer_id,
+        decision: BargainDecision::Select { bargain_id },
+        content_revision: revision,
+        confirmed: true,
+    };
+    let frame = BargainDecisionFrame {
+        mutation_id: [78; 16],
+        expected_oath_bargain_version: 3,
+        payload_hash: payload.canonical_hash(),
+        issued_at_unix_millis: current_unix_millis(),
+        payload,
+    };
+    let (_, selected) = bot_client::perform_bargain_decision(connection, frame.clone())
+        .await
+        .unwrap();
+    assert_eq!(selected.code, BargainResultCode::Accepted);
+    assert_eq!(
+        selected
+            .projection
+            .as_ref()
+            .unwrap()
+            .active_bargain_ids
+            .len(),
+        1
+    );
+    (frame, selected)
+}
+
 async fn assert_persisted_combat_factory(
     persistence: &PostgresPersistence,
     content_root: &Path,
@@ -741,6 +973,7 @@ async fn postgres_identity_survives_service_restart_and_replays_exactly_once() {
 
 #[tokio::test]
 #[ignore = "requires explicitly authorized disposable PostgreSQL"]
+#[allow(clippy::too_many_lines)] // The pre/post-restart network journey remains visible end to end.
 async fn postgres_real_quic_server_restart_preserves_authoritative_roster() {
     let config = PersistenceConfig::from_test_environment().unwrap();
     let persistence = PostgresPersistence::connect(&config).await.unwrap();
@@ -803,6 +1036,14 @@ async fn postgres_real_quic_server_restart_preserves_authoritative_roster() {
         character_id,
     )
     .await;
+    let (bargain_frame, bargain_result) = assert_persistent_bargain_route(
+        &persistence,
+        &connection,
+        &content_root,
+        ticket,
+        character_id,
+    )
+    .await;
     connection.close(0_u32.into(), b"durable restart");
     shutdown.send(()).unwrap();
     let report = task.await.unwrap().unwrap();
@@ -830,6 +1071,25 @@ async fn postgres_real_quic_server_restart_preserves_authoritative_roster() {
     };
     assert_eq!(restored.characters.len(), 1);
     assert_persisted_oath_view(&connection, &content_root, character_id).await;
+    let (_, replayed_bargain) = bot_client::perform_bargain_decision(&connection, bargain_frame)
+        .await
+        .unwrap();
+    assert_eq!(replayed_bargain, bargain_result);
+    let (_, bargain_view) = bot_client::perform_bargain_view(
+        &connection,
+        BargainViewFrame {
+            sequence: 4,
+            character_id,
+            content_revision: bargain_revision(&content_root),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(bargain_view.code, BargainResultCode::NoOffer);
+    let bargain_projection = bargain_view.projection.unwrap();
+    assert_eq!(bargain_projection.active_bargain_ids.len(), 1);
+    assert_eq!(bargain_projection.earned_bargain_slots, 1);
+    assert_eq!(bargain_projection.oath_bargain_version, 4);
     assert_persisted_combat_factory(&persistence, &content_root, ticket, character_id).await;
     connection.close(0_u32.into(), b"complete");
     shutdown.send(()).unwrap();
