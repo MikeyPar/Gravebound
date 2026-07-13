@@ -18,6 +18,8 @@ use crate::{FixedSimulationSet, FrameSet, combat::CombatInputGate, enemies::Enem
 pub struct ConsumableBindings {
     pub keyboard: KeyCode,
     pub gamepad: GamepadButton,
+    pub second_keyboard: KeyCode,
+    pub second_gamepad: GamepadButton,
 }
 
 impl Default for ConsumableBindings {
@@ -25,6 +27,8 @@ impl Default for ConsumableBindings {
         Self {
             keyboard: KeyCode::KeyQ,
             gamepad: GamepadButton::West,
+            second_keyboard: KeyCode::KeyE,
+            second_gamepad: GamepadButton::North,
         }
     }
 }
@@ -33,6 +37,7 @@ impl Default for ConsumableBindings {
 pub(crate) struct ConsumableInputSampler {
     latest: ConsumableAction,
     q: SequencedButtonState,
+    second: SequencedButtonState,
 }
 
 #[derive(Debug, Default)]
@@ -170,6 +175,15 @@ fn sample_consumable_input(
         gate.blocked,
     )
     .expect("consumable sequence space must not exhaust during LocalLab");
+    let second_gamepad_pressed = gamepads
+        .iter()
+        .any(|gamepad| gamepad.pressed(bindings.second_gamepad));
+    sample_second_button(
+        &mut sampler,
+        keyboard.pressed(bindings.second_keyboard) || second_gamepad_pressed,
+        gate.blocked,
+    )
+    .expect("second consumable sequence space must not exhaust during LocalLab");
 }
 
 fn sample_q_button(
@@ -197,6 +211,34 @@ fn sample_q_button(
             .ok_or(ConsumableSequenceError::Exhausted)?;
     }
     sampler.q.was_pressed = physically_pressed;
+    Ok(())
+}
+
+fn sample_second_button(
+    sampler: &mut ConsumableInputSampler,
+    physically_pressed: bool,
+    blocked: bool,
+) -> Result<(), ConsumableSequenceError> {
+    if blocked {
+        sampler.second.suppressed_until_release |= physically_pressed;
+        sampler.second.was_pressed = physically_pressed;
+        return Ok(());
+    }
+    if sampler.second.suppressed_until_release {
+        if !physically_pressed {
+            sampler.second.suppressed_until_release = false;
+        }
+        sampler.second.was_pressed = physically_pressed;
+        return Ok(());
+    }
+    if physically_pressed && !sampler.second.was_pressed {
+        sampler.latest.use_second_slot_press_sequence = sampler
+            .latest
+            .use_second_slot_press_sequence
+            .checked_add(1)
+            .ok_or(ConsumableSequenceError::Exhausted)?;
+    }
+    sampler.second.was_pressed = physically_pressed;
     Ok(())
 }
 
@@ -242,6 +284,10 @@ fn simulate_consumable(
             ConsumableEvent::UseRejected { reason, .. } => {
                 diagnostics.feedback = match reason {
                     sim_core::TonicUseRejection::EmptyQSlot => "NO TONIC IN Q SLOT",
+                    sim_core::TonicUseRejection::InactiveBeltSlot { .. } => {
+                        "E SLOT LOCKED BY LANTERN ASH"
+                    }
+                    sim_core::TonicUseRejection::InvalidBeltSlot { .. } => "INVALID BELT SLOT",
                     sim_core::TonicUseRejection::SharedCooldown { .. } => "POTION COOLING DOWN",
                     sim_core::TonicUseRejection::FullHealth => "HEALTH ALREADY FULL",
                     sim_core::TonicUseRejection::NoEffectiveHealing => "TONIC HAS NO EFFECT",
@@ -261,16 +307,27 @@ fn update_consumable_hud(
     mut hud: Single<&mut Text, With<ConsumableHud>>,
 ) {
     let vitals = runtime.consumables().vitals();
-    let count = runtime
+    let first_count = runtime
         .consumables()
         .belt()
         .slot(0)
         .unwrap_or(BeltSlot::Empty)
         .tonic_count();
+    let second_count = runtime
+        .consumables()
+        .belt()
+        .slot(1)
+        .unwrap_or(BeltSlot::Empty)
+        .tonic_count();
+    let second_state = if runtime.consumables().belt_policy().is_active(1) {
+        "READY"
+    } else {
+        "LOCKED"
+    };
     let cooldown = runtime.consumables().shared_cooldown_remaining_ticks();
     let restore = runtime.consumables().active_restore_remaining_ticks();
     hud.0 = format!(
-        "Q  RED TONIC  x{count}\nHEALTH  {}/{}\nRESTORE  {:02}t   COOLDOWN  {:02}t   +{}\n{}  |  CUE {}",
+        "Q  SLOT 1  x{first_count}     E  SLOT 2  x{second_count}  [{second_state}]\nHEALTH  {}/{}\nRESTORE  {:02}t   COOLDOWN  {:02}t   +{}\n{}  |  CUE {}",
         vitals.current_health(),
         vitals.maximum_health(),
         restore,
@@ -347,6 +404,20 @@ mod tests {
         let binding = ConsumableBindings::default();
         assert_eq!(binding.keyboard, KeyCode::KeyQ);
         assert_eq!(binding.gamepad, GamepadButton::West);
+        assert_eq!(binding.second_keyboard, KeyCode::KeyE);
+        assert_eq!(binding.second_gamepad, GamepadButton::North);
+    }
+
+    #[test]
+    fn second_belt_press_is_independently_sequenced() {
+        let mut sampler = ConsumableInputSampler::default();
+        sample_second_button(&mut sampler, true, false).unwrap();
+        sample_second_button(&mut sampler, true, false).unwrap();
+        assert_eq!(sampler.latest.use_second_slot_press_sequence, 1);
+        assert_eq!(sampler.latest.use_q_press_sequence, 0);
+        sample_second_button(&mut sampler, false, false).unwrap();
+        sample_second_button(&mut sampler, true, false).unwrap();
+        assert_eq!(sampler.latest.use_second_slot_press_sequence, 2);
     }
 
     #[test]

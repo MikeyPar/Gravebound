@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-use crate::Tick;
+use crate::{LanternAshDefinition, Tick};
 
 pub const RED_TONIC_CONTENT_ID: &str = "consumable.red_tonic";
 pub const RED_TONIC_STACK_CAP: u8 = 6;
@@ -138,8 +138,23 @@ impl RedTonicDefinition {
         self.parameters.consumed_on_use
     }
 
-    fn scheduled_restore(&self, maximum_health: u32) -> Result<u32, ConsumableError> {
-        multiply_basis_points(maximum_health, self.restore_max_health_basis_points())
+    fn scheduled_restore(
+        &self,
+        maximum_health: u32,
+        potion_healing_multiplier_basis_points: u32,
+    ) -> Result<u32, ConsumableError> {
+        let numerator = u64::from(maximum_health)
+            .checked_mul(u64::from(self.restore_max_health_basis_points()))
+            .and_then(|value| value.checked_mul(u64::from(potion_healing_multiplier_basis_points)))
+            .ok_or(ConsumableError::HealingArithmeticOverflow)?;
+        let denominator = u64::from(BASIS_POINTS_PER_ONE)
+            .checked_mul(u64::from(BASIS_POINTS_PER_ONE))
+            .ok_or(ConsumableError::HealingArithmeticOverflow)?;
+        let rounded = numerator
+            .checked_add(denominator / 2)
+            .ok_or(ConsumableError::HealingArithmeticOverflow)?
+            / denominator;
+        u32::try_from(rounded).map_err(|_| ConsumableError::HealingArithmeticOverflow)
     }
 }
 
@@ -290,15 +305,19 @@ impl TonicBelt {
         }
     }
 
-    fn consume_q_slot(&mut self) -> Result<(), TonicUseRejection> {
-        match self.slots[0] {
+    fn consume_slot(&mut self, index: usize) -> Result<(), TonicUseRejection> {
+        let slot = self
+            .slots
+            .get_mut(index)
+            .ok_or(TonicUseRejection::InvalidBeltSlot { index })?;
+        match *slot {
             BeltSlot::Empty | BeltSlot::RedTonic(0) => Err(TonicUseRejection::EmptyQSlot),
             BeltSlot::RedTonic(1) => {
-                self.slots[0] = BeltSlot::Empty;
+                *slot = BeltSlot::Empty;
                 Ok(())
             }
             BeltSlot::RedTonic(count) => {
-                self.slots[0] = BeltSlot::RedTonic(count - 1);
+                *slot = BeltSlot::RedTonic(count - 1);
                 Ok(())
             }
         }
@@ -345,6 +364,48 @@ pub enum BeltError {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ConsumableAction {
     pub use_q_press_sequence: u32,
+    pub use_second_slot_press_sequence: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TonicBeltPolicy {
+    active_slots: [bool; BELT_SLOT_COUNT],
+    potion_healing_multiplier_basis_points: u32,
+}
+
+impl TonicBeltPolicy {
+    #[must_use]
+    pub const fn normal() -> Self {
+        Self {
+            active_slots: [true, true],
+            potion_healing_multiplier_basis_points: BASIS_POINTS_PER_ONE,
+        }
+    }
+
+    pub fn lantern_ash(definition: LanternAshDefinition) -> Result<Self, ConsumableError> {
+        if definition.active_belt_slot_count != 1
+            || definition.active_belt_index != 0
+            || !definition.inactive_slot_remains_stored_visible_locked
+            || definition.potion_healing_multiplier_basis_points < BASIS_POINTS_PER_ONE
+        {
+            return Err(ConsumableError::InvalidBeltPolicy);
+        }
+        Ok(Self {
+            active_slots: [true, false],
+            potion_healing_multiplier_basis_points: definition
+                .potion_healing_multiplier_basis_points,
+        })
+    }
+
+    #[must_use]
+    pub const fn is_active(self, index: usize) -> bool {
+        index < BELT_SLOT_COUNT && self.active_slots[index]
+    }
+
+    #[must_use]
+    pub const fn potion_healing_multiplier_basis_points(self) -> u32 {
+        self.potion_healing_multiplier_basis_points
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -363,6 +424,8 @@ pub struct RedTonicSimulation {
     belt: TonicBelt,
     tick: Tick,
     last_use_q_press_sequence: u32,
+    last_use_second_slot_press_sequence: u32,
+    belt_policy: TonicBeltPolicy,
     shared_cooldown_remaining_ticks: u32,
     active_restore: Option<ActiveRestore>,
     cumulative_damage_taken: u64,
@@ -375,6 +438,15 @@ impl RedTonicSimulation {
         vitals: PlayerVitals,
         belt: TonicBelt,
     ) -> Result<Self, ConsumableError> {
+        Self::with_policy(definition, vitals, belt, TonicBeltPolicy::normal())
+    }
+
+    pub fn with_policy(
+        definition: RedTonicDefinition,
+        vitals: PlayerVitals,
+        belt: TonicBelt,
+        belt_policy: TonicBeltPolicy,
+    ) -> Result<Self, ConsumableError> {
         belt.validate()?;
         Ok(Self {
             definition,
@@ -382,6 +454,8 @@ impl RedTonicSimulation {
             belt,
             tick: Tick(0),
             last_use_q_press_sequence: 0,
+            last_use_second_slot_press_sequence: 0,
+            belt_policy,
             shared_cooldown_remaining_ticks: 0,
             active_restore: None,
             cumulative_damage_taken: 0,
@@ -427,6 +501,11 @@ impl RedTonicSimulation {
     #[must_use]
     pub const fn last_use_q_press_sequence(&self) -> u32 {
         self.last_use_q_press_sequence
+    }
+
+    #[must_use]
+    pub const fn belt_policy(&self) -> TonicBeltPolicy {
+        self.belt_policy
     }
 
     #[must_use]
@@ -487,6 +566,12 @@ impl RedTonicSimulation {
                 last: self.last_use_q_press_sequence,
             });
         }
+        if action.use_second_slot_press_sequence < self.last_use_second_slot_press_sequence {
+            return Err(ConsumableError::StaleUseSequence {
+                received: action.use_second_slot_press_sequence,
+                last: self.last_use_second_slot_press_sequence,
+            });
+        }
         self.belt.validate()?;
         self.tick = self
             .tick
@@ -509,17 +594,24 @@ impl RedTonicSimulation {
 
         if action.use_q_press_sequence > self.last_use_q_press_sequence {
             self.last_use_q_press_sequence = action.use_q_press_sequence;
-            self.attempt_use(action.use_q_press_sequence, &mut result.events)?;
+            self.attempt_use(0, action.use_q_press_sequence, &mut result.events)?;
+        }
+        if action.use_second_slot_press_sequence > self.last_use_second_slot_press_sequence {
+            self.last_use_second_slot_press_sequence = action.use_second_slot_press_sequence;
+            self.attempt_use(1, action.use_second_slot_press_sequence, &mut result.events)?;
         }
         Ok(result)
     }
 
     fn attempt_use(
         &mut self,
+        slot_index: usize,
         press_sequence: u32,
         events: &mut Vec<ConsumableEvent>,
     ) -> Result<(), ConsumableError> {
-        let rejection = if self.belt.slots[0].tonic_count() == 0 {
+        let rejection = if !self.belt_policy.is_active(slot_index) {
+            Some(TonicUseRejection::InactiveBeltSlot { index: slot_index })
+        } else if self.belt.slots[slot_index].tonic_count() == 0 {
             Some(TonicUseRejection::EmptyQSlot)
         } else if self.shared_cooldown_remaining_ticks > 0 {
             Some(TonicUseRejection::SharedCooldown {
@@ -540,9 +632,10 @@ impl RedTonicSimulation {
             return Ok(());
         }
 
-        let scheduled_total = self
-            .definition
-            .scheduled_restore(self.vitals.maximum_health())?;
+        let scheduled_total = self.definition.scheduled_restore(
+            self.vitals.maximum_health(),
+            self.belt_policy.potion_healing_multiplier_basis_points(),
+        )?;
         if scheduled_total == 0 {
             events.push(ConsumableEvent::UseRejected {
                 tick: self.tick,
@@ -552,7 +645,7 @@ impl RedTonicSimulation {
             return Ok(());
         }
         self.belt
-            .consume_q_slot()
+            .consume_slot(slot_index)
             .map_err(ConsumableError::InvariantUseRejection)?;
         self.shared_cooldown_remaining_ticks = self.definition.shared_cooldown_ticks();
         self.active_restore = Some(ActiveRestore {
@@ -565,8 +658,8 @@ impl RedTonicSimulation {
         events.push(ConsumableEvent::UseAccepted {
             tick: self.tick,
             press_sequence,
-            consumed_from_slot: 0,
-            slot_remaining: self.belt.slots[0].tonic_count(),
+            consumed_from_slot: slot_index,
+            slot_remaining: self.belt.slots[slot_index].tonic_count(),
             scheduled_healing: scheduled_total,
             restore_ticks: self.definition.restore_duration_ticks(),
             shared_cooldown_ticks: self.definition.shared_cooldown_ticks(),
@@ -667,6 +760,10 @@ pub enum ConsumableEvent {
 pub enum TonicUseRejection {
     #[error("Q belt slot is empty")]
     EmptyQSlot,
+    #[error("belt slot {index} is stored and visible but inactive")]
+    InactiveBeltSlot { index: usize },
+    #[error("belt slot {index} does not exist")]
+    InvalidBeltSlot { index: usize },
     #[error("shared potion cooldown has {remaining_ticks} ticks remaining")]
     SharedCooldown { remaining_ticks: u32 },
     #[error("health is already full")]
@@ -685,6 +782,8 @@ pub enum ConsumableError {
     Belt(#[from] BeltError),
     #[error("accepted use violated a prevalidated belt invariant: {0}")]
     InvariantUseRejection(TonicUseRejection),
+    #[error("consumable belt policy is invalid")]
+    InvalidBeltPolicy,
     #[error("healing arithmetic overflowed")]
     HealingArithmeticOverflow,
     #[error("cumulative healing schedule regressed")]
@@ -728,15 +827,6 @@ fn merge_existing_tonic(slot: &mut BeltSlot, remaining: &mut u32) -> u8 {
     added
 }
 
-fn multiply_basis_points(value: u32, basis_points: u32) -> Result<u32, ConsumableError> {
-    let numerator = u64::from(value)
-        .checked_mul(u64::from(basis_points))
-        .and_then(|product| product.checked_add(u64::from(BASIS_POINTS_PER_ONE / 2)))
-        .ok_or(ConsumableError::HealingArithmeticOverflow)?;
-    u32::try_from(numerator / u64::from(BASIS_POINTS_PER_ONE))
-        .map_err(|_| ConsumableError::HealingArithmeticOverflow)
-}
-
 fn cumulative_half_up(total: u32, elapsed: u32, duration: u32) -> Result<u32, ConsumableError> {
     let numerator = u64::from(total)
         .checked_mul(u64::from(elapsed))
@@ -760,13 +850,86 @@ mod tests {
     fn press(sequence: u32) -> ConsumableAction {
         ConsumableAction {
             use_q_press_sequence: sequence,
+            ..ConsumableAction::default()
         }
     }
 
     fn no_press(sequence: u32) -> ConsumableAction {
         ConsumableAction {
             use_q_press_sequence: sequence,
+            ..ConsumableAction::default()
         }
+    }
+
+    fn lantern_policy() -> TonicBeltPolicy {
+        TonicBeltPolicy::lantern_ash(LanternAshDefinition {
+            potion_healing_multiplier_basis_points: 14_000,
+            active_belt_slot_count: 1,
+            active_belt_index: 0,
+            inactive_slot_remains_stored_visible_locked: true,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn lantern_healing_rounds_once_after_item_effect_and_keeps_authored_timing() {
+        let mut simulation = RedTonicSimulation::with_policy(
+            RedTonicDefinition::first_playable(),
+            PlayerVitals::new(1, 4).unwrap(),
+            TonicBelt::from_slots([BeltSlot::RedTonic(2), BeltSlot::Empty]).unwrap(),
+            lantern_policy(),
+        )
+        .unwrap();
+        let step = simulation.step(press(1)).unwrap();
+        assert!(step.events.contains(&ConsumableEvent::UseAccepted {
+            tick: Tick(1),
+            press_sequence: 1,
+            consumed_from_slot: 0,
+            slot_remaining: 1,
+            scheduled_healing: 2,
+            restore_ticks: 12,
+            shared_cooldown_ticks: 60,
+        }));
+    }
+
+    #[test]
+    fn lantern_keeps_second_slot_visible_locked_and_never_falls_through() {
+        let belt = TonicBelt::from_slots([BeltSlot::RedTonic(2), BeltSlot::RedTonic(2)]).unwrap();
+        let mut simulation = RedTonicSimulation::with_policy(
+            RedTonicDefinition::first_playable(),
+            PlayerVitals::new(60, 120).unwrap(),
+            belt,
+            lantern_policy(),
+        )
+        .unwrap();
+        let rejected = simulation
+            .step(ConsumableAction {
+                use_second_slot_press_sequence: 1,
+                ..ConsumableAction::default()
+            })
+            .unwrap();
+        assert!(rejected.events.contains(&ConsumableEvent::UseRejected {
+            tick: Tick(1),
+            press_sequence: 1,
+            reason: TonicUseRejection::InactiveBeltSlot { index: 1 },
+        }));
+        assert_eq!(simulation.belt().slot(1), Some(BeltSlot::RedTonic(2)));
+        assert!(!simulation.belt_policy().is_active(1));
+
+        let mut empty_first = RedTonicSimulation::with_policy(
+            RedTonicDefinition::first_playable(),
+            PlayerVitals::new(60, 120).unwrap(),
+            TonicBelt::from_slots([BeltSlot::Empty, BeltSlot::RedTonic(2)]).unwrap(),
+            lantern_policy(),
+        )
+        .unwrap();
+        let rejected = empty_first.step(press(1)).unwrap();
+        assert!(rejected.events.contains(&ConsumableEvent::UseRejected {
+            tick: Tick(1),
+            press_sequence: 1,
+            reason: TonicUseRejection::EmptyQSlot,
+        }));
+        assert_eq!(empty_first.belt().slot(1), Some(BeltSlot::RedTonic(2)));
     }
 
     #[test]

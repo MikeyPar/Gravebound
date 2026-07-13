@@ -98,8 +98,8 @@ pub use consumable::{
     DamageAppliedEvent, PlayerVitals, RED_TONIC_CONTENT_ID, RED_TONIC_RESTORE_BASIS_POINTS,
     RED_TONIC_RESTORE_TICKS, RED_TONIC_SHARED_COOLDOWN_TICKS, RED_TONIC_STACK_CAP,
     RedTonicDefinition, RedTonicDefinitionError, RedTonicDefinitionParameters, RedTonicSimulation,
-    TonicBelt, TonicMergeResult, TonicUseRejection, UNDERTAKER_KNOT_RESTORE_BASIS_POINTS,
-    UNDERTAKER_KNOT_SHARED_COOLDOWN_TICKS, VitalsError,
+    TonicBelt, TonicBeltPolicy, TonicMergeResult, TonicUseRejection,
+    UNDERTAKER_KNOT_RESTORE_BASIS_POINTS, UNDERTAKER_KNOT_SHARED_COOLDOWN_TICKS, VitalsError,
 };
 pub use damage::{
     DamageBand, DamageBandError, DamageError, DamageEvent, DamageType, DirectHitParameters,

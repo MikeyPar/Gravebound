@@ -35,6 +35,7 @@ pub struct StoredCoreCombatLoadout {
     pub selected_character_id: Option<[u8; 16]>,
     pub class_id: String,
     pub level: i16,
+    pub current_health: i32,
     pub oath_id: Option<String>,
     pub oath_bargain_version: i64,
     pub active_bargains: Vec<StoredCombatBargain>,
@@ -58,7 +59,7 @@ impl PostgresPersistence {
             return Err(PersistenceError::CorruptStoredItems);
         }
         let row = sqlx::query(
-            "SELECT a.selected_character_id, c.class_id, p.level, c.oath_id, \
+            "SELECT a.selected_character_id, c.class_id, p.level, p.current_health, c.oath_id, \
                     ob.oath_bargain_version, \
                     ARRAY(SELECT ab.bargain_id FROM character_active_bargains ab \
                           WHERE ab.namespace_id = c.namespace_id AND ab.account_id = c.account_id \
@@ -151,6 +152,7 @@ fn decode_loadout(
         selected_character_id,
         class_id: row.try_get("class_id")?,
         level: row.try_get("level")?,
+        current_health: row.try_get("current_health")?,
         oath_id: row.try_get("oath_id")?,
         oath_bargain_version: row.try_get("oath_bargain_version")?,
         active_bargains,
@@ -285,6 +287,7 @@ fn validate_loadout_shape(loadout: &StoredCoreCombatLoadout) -> Result<(), Persi
     if loadout.character_id == [0; 16]
         || loadout.class_id.is_empty()
         || !(1..=10).contains(&loadout.level)
+        || loadout.current_health <= 0
         || loadout.character_state_version <= 0
         || loadout.oath_bargain_version <= 0
         || loadout.inventory_version.is_some_and(|value| value <= 0)
@@ -331,6 +334,7 @@ mod tests {
             selected_character_id: Some([1; 16]),
             class_id: "class.grave_arbalist".into(),
             level: 10,
+            current_health: 120,
             oath_id: Some("oath.arbalist.long_vigil".into()),
             oath_bargain_version: 2,
             active_bargains: vec![StoredCombatBargain {
