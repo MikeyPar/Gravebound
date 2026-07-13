@@ -1,12 +1,15 @@
 use std::collections::BTreeSet;
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Fixed-point scale used at the authored-content boundary.
 pub const MILLI_TILES_PER_TILE: i32 = 1_000;
 
 /// Exact northwest-origin authored point in milli-tiles.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 pub struct TilePoint {
     pub x_milli_tiles: i32,
     pub y_milli_tiles: i32,
@@ -23,7 +26,7 @@ impl TilePoint {
 }
 
 /// Exact northwest-origin authored rectangle in milli-tiles.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TileRectangle {
     pub x_milli_tiles: i32,
     pub y_milli_tiles: i32,
@@ -47,11 +50,11 @@ impl TileRectangle {
         }
     }
 
-    fn right(self) -> Option<i32> {
+    pub(crate) fn right(self) -> Option<i32> {
         self.x_milli_tiles.checked_add(self.width_milli_tiles)
     }
 
-    fn bottom(self) -> Option<i32> {
+    pub(crate) fn bottom(self) -> Option<i32> {
         self.y_milli_tiles.checked_add(self.height_milli_tiles)
     }
 

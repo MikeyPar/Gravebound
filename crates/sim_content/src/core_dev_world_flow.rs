@@ -1,6 +1,10 @@
 //! Fail-closed compiler for the unpromoted `GB-M03-03A` world-flow subset.
 
-use std::{collections::BTreeSet, fs, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::Path,
+};
 
 use anyhow::{Context, Result, bail};
 use content_schema::{
@@ -10,6 +14,12 @@ use content_schema::{
     CoreWorldFlowTargetKind, CoreWorldObjectGeometry, CoreWorldObjectRecord, CoreWorldRecord,
     CoreWorldTerrain, MilliTileCircle, MilliTilePoint, MilliTileRectangle, ReleaseStage,
     SCHEMA_VERSION,
+};
+use sim_core::{
+    InteractionDefinition, MILLI_TILES_PER_TILE, PLAYER_COLLISION_RADIUS_MILLI_TILES,
+    SceneCreationKind, SceneObjectCondition, SceneObjectGeometry, TilePoint, TileRectangle,
+    WorldRoad, WorldSceneDefinition, WorldSceneKind, WorldSceneObject,
+    duration_ms_to_ticks_nearest,
 };
 
 pub const CORE_WORLD_FLOW_TARGET_NAME: &str = "core-dev-world-flow";
@@ -87,6 +97,7 @@ pub struct CoreDevelopmentWorldFlow {
     world: CoreWorldRecord,
     objects: Vec<CoreWorldObjectRecord>,
     hashes: CoreWorldFlowHashes,
+    localization: BTreeMap<String, String>,
 }
 
 impl CoreDevelopmentWorldFlow {
@@ -113,6 +124,91 @@ impl CoreDevelopmentWorldFlow {
     #[must_use]
     pub const fn hashes(&self) -> &CoreWorldFlowHashes {
         &self.hashes
+    }
+
+    #[must_use]
+    pub fn localized(&self, key: &str) -> Option<&str> {
+        self.localization.get(key).map(String::as_str)
+    }
+
+    /// Compiles the validated Lantern Halls record into renderer-independent simulation data.
+    pub fn compile_hall_scene(&self) -> Result<WorldSceneDefinition> {
+        let hub = &self.hub;
+        WorldSceneDefinition {
+            id: hub.header.id.to_string(),
+            kind: WorldSceneKind::SafeHub,
+            width_milli_tiles: tiles_to_milli(hub.width_tiles, "Hall width")?,
+            height_milli_tiles: tiles_to_milli(hub.height_tiles, "Hall height")?,
+            shell_thickness_milli_tiles: tiles_to_milli(hub.solid_shell_tiles, "Hall shell")?,
+            player_radius_milli_tiles: positive_i32(
+                hub.player_radius_milli_tiles,
+                "Hall player radius",
+            )?,
+            capacity: None,
+            player_spawn: simulation_point(hub.default_spawn),
+            solid_rectangles: hub
+                .solid_rectangles
+                .iter()
+                .copied()
+                .map(simulation_rectangle)
+                .collect::<Result<Vec<_>>>()?,
+            roads: Vec::new(),
+            objects: self.compile_scene_objects(hub.header.id.as_str())?,
+            prohibited_creation: hub
+                .prohibited_creation
+                .iter()
+                .copied()
+                .map(simulation_prohibition)
+                .collect(),
+        }
+        .validated()
+        .context("compiled Lantern Halls scene is invalid")
+    }
+
+    /// Compiles the validated capacity-one Core microrealm into simulation data.
+    pub fn compile_microrealm_scene(&self) -> Result<WorldSceneDefinition> {
+        let world = &self.world;
+        WorldSceneDefinition {
+            id: world.header.id.to_string(),
+            kind: WorldSceneKind::PrivateDanger,
+            width_milli_tiles: tiles_to_milli(world.width_tiles, "microrealm width")?,
+            height_milli_tiles: tiles_to_milli(world.height_tiles, "microrealm height")?,
+            shell_thickness_milli_tiles: tiles_to_milli(
+                world.solid_shell_tiles,
+                "microrealm shell",
+            )?,
+            player_radius_milli_tiles: PLAYER_COLLISION_RADIUS_MILLI_TILES,
+            capacity: Some(
+                u16::try_from(world.capacity).context("microrealm capacity exceeds u16")?,
+            ),
+            player_spawn: simulation_point(world.player_spawn),
+            solid_rectangles: Vec::new(),
+            roads: world
+                .roads
+                .iter()
+                .map(|road| {
+                    Ok(WorldRoad {
+                        width_milli_tiles: positive_i32(
+                            road.width_milli_tiles,
+                            "microrealm road width",
+                        )?,
+                        points: road.points.iter().copied().map(simulation_point).collect(),
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?,
+            objects: self.compile_scene_objects(world.header.id.as_str())?,
+            prohibited_creation: BTreeSet::new(),
+        }
+        .validated()
+        .context("compiled Core microrealm scene is invalid")
+    }
+
+    fn compile_scene_objects(&self, parent_id: &str) -> Result<Vec<WorldSceneObject>> {
+        self.objects
+            .iter()
+            .filter(|object| object.parent_id.as_str() == parent_id)
+            .map(compile_scene_object)
+            .collect()
     }
 }
 
@@ -163,6 +259,11 @@ pub fn compile_core_development_world_flow(
         world: world.clone(),
         objects: records.objects.clone(),
         hashes: hashes.clone(),
+        localization: copy
+            .entries
+            .iter()
+            .map(|entry| (entry.key.to_string(), entry.value.clone()))
+            .collect(),
     })
 }
 
@@ -804,6 +905,102 @@ fn hash_file(path: &Path) -> Result<String> {
     Ok(blake3::hash(&bytes).to_hex().to_string())
 }
 
+fn compile_scene_object(object: &CoreWorldObjectRecord) -> Result<WorldSceneObject> {
+    let id = object.header.id.as_str();
+    let (geometry, interaction) = match object.geometry {
+        CoreWorldObjectGeometry::PointInteractable {
+            point,
+            clear_radius_milli_tiles,
+        } => {
+            let hold_ticks = match id {
+                "station.realm_gate" | "station.vault" | "station.overflow" => 0,
+                "station.memorial_wall" | "station.oath_shrine" => {
+                    u16::try_from(duration_ms_to_ticks_nearest(500))
+                        .context("500 ms Hall interaction exceeds u16 ticks")?
+                }
+                _ => bail!("unauthorized Core point interactable {id}"),
+            };
+            (
+                SceneObjectGeometry::PointInteractable {
+                    point: simulation_point(point),
+                    clear_radius_milli_tiles: positive_i32(
+                        clear_radius_milli_tiles,
+                        "station clear radius",
+                    )?,
+                },
+                Some(InteractionDefinition {
+                    range_milli_tiles: 1_500,
+                    hold_ticks,
+                }),
+            )
+        }
+        CoreWorldObjectGeometry::RectangleLandmark { rectangle }
+        | CoreWorldObjectGeometry::RectanglePortal { rectangle } => (
+            SceneObjectGeometry::Rectangle(simulation_rectangle(rectangle)?),
+            None,
+        ),
+        CoreWorldObjectGeometry::CircleLandmark { circle }
+        | CoreWorldObjectGeometry::CirclePortal { circle } => (
+            SceneObjectGeometry::Circle {
+                center: simulation_point(circle.center),
+                radius_milli_tiles: positive_i32(circle.radius, "scene circle radius")?,
+            },
+            None,
+        ),
+        CoreWorldObjectGeometry::SpawnAnchor { point } => {
+            (SceneObjectGeometry::Point(simulation_point(point)), None)
+        }
+    };
+    Ok(WorldSceneObject {
+        id: id.to_owned(),
+        geometry,
+        interaction,
+        integration_gate: object.integration_gate.clone(),
+        condition: if id == "portal.dungeon.bell_sepulcher" {
+            SceneObjectCondition::RequiresMicrorealmCleared
+        } else {
+            SceneObjectCondition::Always
+        },
+    })
+}
+
+const fn simulation_point(point: MilliTilePoint) -> TilePoint {
+    TilePoint::new(point.x, point.y)
+}
+
+fn simulation_rectangle(rectangle: MilliTileRectangle) -> Result<TileRectangle> {
+    Ok(TileRectangle::new(
+        rectangle.x,
+        rectangle.y,
+        positive_i32(rectangle.width, "scene rectangle width")?,
+        positive_i32(rectangle.height, "scene rectangle height")?,
+    ))
+}
+
+fn simulation_prohibition(value: CoreProhibitedCreation) -> SceneCreationKind {
+    match value {
+        CoreProhibitedCreation::Hostile => SceneCreationKind::Hostile,
+        CoreProhibitedCreation::Damage => SceneCreationKind::Damage,
+        CoreProhibitedCreation::Projectile => SceneCreationKind::Projectile,
+        CoreProhibitedCreation::Pickup => SceneCreationKind::Pickup,
+        CoreProhibitedCreation::Drop => SceneCreationKind::Drop,
+    }
+}
+
+fn tiles_to_milli(tiles: u32, field: &str) -> Result<i32> {
+    positive_i32(tiles, field)?
+        .checked_mul(MILLI_TILES_PER_TILE)
+        .with_context(|| format!("{field} overflows milli-tile scale"))
+}
+
+fn positive_i32(value: u32, field: &str) -> Result<i32> {
+    let converted = i32::try_from(value).with_context(|| format!("{field} exceeds i32"))?;
+    if converted <= 0 {
+        bail!("{field} must be positive");
+    }
+    Ok(converted)
+}
+
 const fn point(x: i32, y: i32) -> MilliTilePoint {
     MilliTilePoint { x, y }
 }
@@ -849,6 +1046,63 @@ mod tests {
         ] {
             assert!(!content_root().join(forbidden).exists());
         }
+    }
+
+    #[test]
+    fn exact_hall_and_microrealm_compile_for_simulation_without_runtime_defaults() {
+        let compiled =
+            load_core_development_world_flow(&content_root()).expect("valid Core world flow");
+        let hall = compiled.compile_hall_scene().expect("Hall scene");
+        assert_eq!(hall.id, "hub.lantern_halls_01");
+        assert_eq!(
+            (hall.width_milli_tiles, hall.height_milli_tiles),
+            (64_000, 48_000)
+        );
+        assert_eq!(hall.player_spawn, TilePoint::new(32_000, 42_000));
+        assert_eq!(hall.capacity, None);
+        assert_eq!(hall.solid_rectangles.len(), 5);
+        assert_eq!(hall.objects.len(), 6);
+        assert_eq!(hall.prohibited_creation.len(), 5);
+        assert!(!hall.can_occupy(TilePoint::new(30_000, 24_000)));
+        assert!(hall.can_occupy(TilePoint::new(32_000, 42_000)));
+
+        let microrealm = compiled
+            .compile_microrealm_scene()
+            .expect("microrealm scene");
+        assert_eq!(microrealm.id, "world.core_microrealm_01");
+        assert_eq!(
+            (microrealm.width_milli_tiles, microrealm.height_milli_tiles),
+            (48_000, 48_000)
+        );
+        assert_eq!(microrealm.player_spawn, TilePoint::new(8_500, 40_500));
+        assert_eq!(microrealm.capacity, Some(1));
+        assert_eq!(microrealm.roads.len(), 1);
+        assert_eq!(microrealm.roads[0].width_milli_tiles, 5_000);
+        assert_eq!(microrealm.objects.len(), 4);
+
+        let bell_portal = microrealm
+            .objects
+            .iter()
+            .find(|object| object.id == "portal.dungeon.bell_sepulcher")
+            .expect("Bell portal");
+        assert_eq!(
+            bell_portal.condition,
+            SceneObjectCondition::RequiresMicrorealmCleared
+        );
+        assert_eq!(
+            bell_portal.integration_gate.as_deref(),
+            Some("core_world_flow_integration")
+        );
+        assert_eq!(
+            compiled.localized("hub.lantern_halls_01.name"),
+            Some("Lantern Halls")
+        );
+        assert_ne!(
+            hall.deterministic_digest().expect("Hall digest"),
+            microrealm
+                .deterministic_digest()
+                .expect("microrealm digest")
+        );
     }
 
     #[test]

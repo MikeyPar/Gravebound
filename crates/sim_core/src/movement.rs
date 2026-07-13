@@ -8,6 +8,7 @@ use crate::{
 /// Grave Arbalist movement speed from `CLS-020`.
 pub const GRAVE_ARBALIST_SPEED_TILES_PER_SECOND: f32 = 5.1;
 /// Physical player collision radius from `SIM-005`.
+pub const PLAYER_COLLISION_RADIUS_MILLI_TILES: i32 = 300;
 pub const PLAYER_COLLISION_RADIUS_TILES: f32 = 0.30;
 /// `60 ms` rounded to the nearest 30 Hz duration under `CONT-010`.
 pub const MOVEMENT_RESPONSE_TICKS: u32 = 2;

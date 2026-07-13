@@ -38,6 +38,7 @@ mod shared_authority;
 mod telemetry;
 mod trace;
 mod weapon;
+mod world_scene;
 
 pub use ability::{
     AbilityDefinitionError, BASIS_POINTS_PER_ONE, GraveMarkDefinition,
@@ -167,8 +168,9 @@ pub use item_lifecycle::{
 };
 pub use movement::{
     ForcedMovementStep, GRAVE_ARBALIST_SPEED_TILES_PER_SECOND, MOVEMENT_RESPONSE_TICKS,
-    MovementAction, MovementError, MovementStep, PLAYER_COLLISION_RADIUS_TILES,
-    PlayerMovementConfig, PlayerMovementState, SimulationVector, tile_point_to_simulation,
+    MovementAction, MovementError, MovementStep, PLAYER_COLLISION_RADIUS_MILLI_TILES,
+    PLAYER_COLLISION_RADIUS_TILES, PlayerMovementConfig, PlayerMovementState, SimulationVector,
+    tile_point_to_simulation,
 };
 pub use normal_wave::{
     FIRST_PLAYABLE_SPAWN_TELEGRAPH_TICKS, HOSTILE_PROJECTILE_ID_OFFSET,
@@ -245,6 +247,10 @@ pub use trace::{
     TraceReport, run_trace,
 };
 pub use weapon::{WeaponDefinition, WeaponDefinitionError, WeaponDefinitionParameters};
+pub use world_scene::{
+    InteractionDefinition, SceneCreationKind, SceneObjectCondition, SceneObjectGeometry, WorldRoad,
+    WorldSceneDefinition, WorldSceneError, WorldSceneKind, WorldSceneObject,
+};
 
 /// Authoritative simulation frequency required by `TECH-070` and `GB-M00-05`.
 pub const TICKS_PER_SECOND: u32 = TICK_RATE_HZ;
