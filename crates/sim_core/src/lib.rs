@@ -22,6 +22,7 @@ mod enemy_lab;
 mod entity;
 mod hostile;
 mod inventory;
+mod item_lifecycle;
 mod movement;
 mod normal_wave;
 mod oath;
@@ -140,6 +141,12 @@ pub use inventory::{
     INTERACT_PICKUP_RADIUS_TILES, InventoryError, InventoryStack, ItemContentId, ItemInstanceId,
     OwnedItemLocation, PROTOTYPE_BACKPACK_CAPACITY, PickupOutcome, PlacementChoice,
     PrototypeInventory, RecallCleanup, RestartCleanup, RewardChoice, RewardOutcome,
+};
+pub use item_lifecycle::{
+    ConsumablePlacementPlan, DURABLE_CONSUMABLE_STACK_CAP, EquipmentPlacementPlan, ITEM_UID_BYTES,
+    ITEM_UID_CONTEXT, ItemLifecycleError, ItemUid, RUN_BACKPACK_CAPACITY, RunBackpackSlot,
+    STARTER_UID_CONTEXT, StackPlacement, derive_reward_item_uid, derive_starter_item_uid,
+    plan_consumable_reward_placement, plan_equipment_reward_placement,
 };
 pub use movement::{
     ForcedMovementStep, GRAVE_ARBALIST_SPEED_TILES_PER_SECOND, MOVEMENT_RESPONSE_TICKS,
