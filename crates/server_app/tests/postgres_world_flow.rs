@@ -538,16 +538,36 @@ async fn concurrent_entry_has_one_lineage_and_provider_failure_rolls_back_every_
         first.handle(authenticated(ACCOUNT_ID), &first_frame),
         second.handle(authenticated(ACCOUNT_ID), &second_frame),
     );
-    assert!(matches!(
-        (code(&left), code(&right)),
-        (
-            WorldTransferResultCode::Accepted,
-            WorldTransferResultCode::StateVersionMismatch
-        ) | (
+    let left_code = code(&left);
+    let right_code = code(&right);
+    assert!(
+        matches!(
+            (left_code, right_code),
+            (
+                WorldTransferResultCode::Accepted,
+                WorldTransferResultCode::StateVersionMismatch
+                    | WorldTransferResultCode::ServiceUnavailable
+            ) | (
+                WorldTransferResultCode::StateVersionMismatch
+                    | WorldTransferResultCode::ServiceUnavailable,
+                WorldTransferResultCode::Accepted
+            )
+        ),
+        "unexpected concurrent results: left={left_code:?}, right={right_code:?}"
+    );
+    let transient_frame = match (left_code, right_code) {
+        (WorldTransferResultCode::ServiceUnavailable, _) => Some(&first_frame),
+        (_, WorldTransferResultCode::ServiceUnavailable) => Some(&second_frame),
+        _ => None,
+    };
+    if let Some(frame) = transient_frame {
+        let retried = first.handle(authenticated(ACCOUNT_ID), frame).await;
+        assert_eq!(
+            code(&retried),
             WorldTransferResultCode::StateVersionMismatch,
-            WorldTransferResultCode::Accepted
-        )
-    ));
+            "a serialization loser must become a durable state-version rejection on retry"
+        );
+    }
     assert_eq!(aggregate_counts(&persistence).await, (1, 1, 1, 2));
 
     reset_fixture(&persistence).await;
