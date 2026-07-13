@@ -608,6 +608,31 @@ mod tests {
     }
 
     #[test]
+    fn bargain_offer_migration_is_normalized_replay_backed_and_restore_aligned() {
+        let migration = include_str!("../../../migrations/0016_deterministic_bargain_offers.sql");
+        for required in [
+            "character_oath_bargain_state",
+            "earned_bargain_slots BETWEEN 0 AND 3",
+            "oath_bargain_version",
+            "bargain_offers",
+            "bargain_offer_candidates",
+            "character_active_bargains",
+            "bargain_milestone_results",
+            "bargain_decision_results",
+            "bargain_selected",
+            "open_bargain_offers_by_character",
+        ] {
+            assert!(migration.contains(required), "migration omitted {required}");
+        }
+        for prohibited in ["JSON", "JSONB", "FLOAT", "DOUBLE PRECISION", "premium"] {
+            assert!(
+                !migration.contains(prohibited),
+                "Bargain offer migration leaked {prohibited}"
+            );
+        }
+    }
+
+    #[test]
     fn durable_item_migration_is_unit_normalized_typed_and_replay_backed() {
         let migration = include_str!("../../../migrations/0007_durable_item_lifecycle.sql");
         for required in [
