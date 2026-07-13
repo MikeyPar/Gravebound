@@ -726,6 +726,55 @@ mod tests {
         ProjectileCollisionWorld::new(&arena, vec![]).unwrap()
     }
 
+    fn step_live(
+        directory: &mut CoreLiveDirectory,
+        key: CoreLifeKey,
+        action: CombatAction,
+        position: SimulationVector,
+        world: &ProjectileCollisionWorld,
+    ) -> sim_core::CombatStep {
+        directory
+            .get_mut(key)
+            .unwrap()
+            .with_combat_mutation(|combat| combat.state.step(action, position, world))
+            .unwrap()
+            .unwrap()
+    }
+
+    fn reattach_live(directory: &mut CoreLiveDirectory, key: CoreLifeKey, binding_id: u64) {
+        directory
+            .reattach(key, CoreLiveBindingId::new(binding_id).unwrap())
+            .unwrap();
+    }
+
+    fn core_live_directory() -> (CoreLifeKey, CoreLiveDirectory) {
+        let key = CoreLifeKey::new([1; 16], [2; 16], [3; 16]).unwrap();
+        let mut directory = CoreLiveDirectory::default();
+        directory
+            .insert(
+                key,
+                CoreLiveBindingId::new(10).unwrap(),
+                "room.bell_approach",
+                checkpoint_binding(),
+                combat(),
+            )
+            .unwrap();
+        (key, directory)
+    }
+
+    fn advance_live(
+        directory: &mut CoreLiveDirectory,
+        key: CoreLifeKey,
+        ticks: usize,
+        action: CombatAction,
+        position: SimulationVector,
+        world: &ProjectileCollisionWorld,
+    ) {
+        for _ in 0..ticks {
+            step_live(directory, key, action, position, world);
+        }
+    }
+
     #[test]
     fn reconnect_and_room_handoff_preserve_one_exact_bell_aggregate() {
         let key = CoreLifeKey::new([1; 16], [2; 16], [3; 16]).unwrap();
@@ -788,35 +837,21 @@ mod tests {
 
     #[test]
     fn disconnects_on_four_five_and_pending_plus_one_plus_eight_preserve_cadence() {
-        let key = CoreLifeKey::new([1; 16], [2; 16], [3; 16]).unwrap();
-        let mut directory = CoreLiveDirectory::default();
-        directory
-            .insert(
-                key,
-                CoreLiveBindingId::new(10).unwrap(),
-                "room.bell_approach",
-                checkpoint_binding(),
-                combat(),
-            )
-            .unwrap();
+        let (key, mut directory) = core_live_directory();
         let world = empty_world();
         let held = CombatAction {
             primary_held: true,
             primary_press_sequence: 1,
             ..CombatAction::default()
         };
-        for _ in 0..49 {
-            directory
-                .get_mut(key)
-                .unwrap()
-                .with_combat_mutation(|combat| {
-                    combat
-                        .state
-                        .step(held, SimulationVector::new(4.0, 7.0), &world)
-                })
-                .unwrap()
-                .unwrap();
-        }
+        advance_live(
+            &mut directory,
+            key,
+            49,
+            held,
+            SimulationVector::new(4.0, 7.0),
+            &world,
+        );
         assert_eq!(
             directory
                 .get(key)
@@ -834,22 +869,16 @@ mod tests {
                 .state
                 .has_pending_bell_repeat()
         );
-        directory
-            .reattach(key, CoreLiveBindingId::new(11).unwrap())
-            .unwrap();
+        reattach_live(&mut directory, key, 11);
 
-        for _ in 0..16 {
-            directory
-                .get_mut(key)
-                .unwrap()
-                .with_combat_mutation(|combat| {
-                    combat
-                        .state
-                        .step(held, SimulationVector::new(4.0, 7.0), &world)
-                })
-                .unwrap()
-                .unwrap();
-        }
+        advance_live(
+            &mut directory,
+            key,
+            16,
+            held,
+            SimulationVector::new(4.0, 7.0),
+            &world,
+        );
         assert_eq!(
             directory
                 .get(key)
@@ -867,9 +896,7 @@ mod tests {
                 .state
                 .has_pending_bell_repeat()
         );
-        directory
-            .reattach(key, CoreLiveBindingId::new(12).unwrap())
-            .unwrap();
+        reattach_live(&mut directory, key, 12);
 
         let idle = CombatAction {
             primary_press_sequence: 1,
@@ -877,16 +904,13 @@ mod tests {
         };
         let mut advance_pending = |ticks: usize, binding_id: u64| {
             for _ in 0..ticks {
-                let step = directory
-                    .get_mut(key)
-                    .unwrap()
-                    .with_combat_mutation(|combat| {
-                        combat
-                            .state
-                            .step(idle, SimulationVector::new(8.0, 6.0), &world)
-                    })
-                    .unwrap()
-                    .unwrap();
+                let step = step_live(
+                    &mut directory,
+                    key,
+                    idle,
+                    SimulationVector::new(8.0, 6.0),
+                    &world,
+                );
                 assert!(step.shots.is_empty());
             }
             assert!(
@@ -897,22 +921,17 @@ mod tests {
                     .state
                     .has_pending_bell_repeat()
             );
-            directory
-                .reattach(key, CoreLiveBindingId::new(binding_id).unwrap())
-                .unwrap();
+            reattach_live(&mut directory, key, binding_id);
         };
         advance_pending(1, 13);
         advance_pending(7, 14);
-        let repeat = directory
-            .get_mut(key)
-            .unwrap()
-            .with_combat_mutation(|combat| {
-                combat
-                    .state
-                    .step(idle, SimulationVector::new(8.0, 6.0), &world)
-            })
-            .unwrap()
-            .unwrap();
+        let repeat = step_live(
+            &mut directory,
+            key,
+            idle,
+            SimulationVector::new(8.0, 6.0),
+            &world,
+        );
         assert!(!repeat.shots.is_empty());
         assert!(
             repeat.shots.iter().all(|shot| {
