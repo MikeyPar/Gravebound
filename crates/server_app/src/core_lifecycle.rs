@@ -775,6 +775,17 @@ mod tests {
         }
     }
 
+    fn assert_bell_state(
+        directory: &CoreLiveDirectory,
+        key: CoreLifeKey,
+        primary_release_count: u8,
+        has_pending_repeat: bool,
+    ) {
+        let state = &directory.get(key).unwrap().combat().state;
+        assert_eq!(state.bell_primary_release_count(), primary_release_count);
+        assert_eq!(state.has_pending_bell_repeat(), has_pending_repeat);
+    }
+
     #[test]
     fn reconnect_and_room_handoff_preserve_one_exact_bell_aggregate() {
         let key = CoreLifeKey::new([1; 16], [2; 16], [3; 16]).unwrap();
@@ -852,23 +863,7 @@ mod tests {
             SimulationVector::new(4.0, 7.0),
             &world,
         );
-        assert_eq!(
-            directory
-                .get(key)
-                .unwrap()
-                .combat()
-                .state
-                .bell_primary_release_count(),
-            4
-        );
-        assert!(
-            !directory
-                .get(key)
-                .unwrap()
-                .combat()
-                .state
-                .has_pending_bell_repeat()
-        );
+        assert_bell_state(&directory, key, 4, false);
         reattach_live(&mut directory, key, 11);
 
         advance_live(
@@ -879,23 +874,7 @@ mod tests {
             SimulationVector::new(4.0, 7.0),
             &world,
         );
-        assert_eq!(
-            directory
-                .get(key)
-                .unwrap()
-                .combat()
-                .state
-                .bell_primary_release_count(),
-            0
-        );
-        assert!(
-            directory
-                .get(key)
-                .unwrap()
-                .combat()
-                .state
-                .has_pending_bell_repeat()
-        );
+        assert_bell_state(&directory, key, 0, true);
         reattach_live(&mut directory, key, 12);
 
         let idle = CombatAction {
