@@ -12,11 +12,16 @@ use sqlx::{
 use thiserror::Error;
 
 mod identity;
+mod items;
 mod oath;
 mod progression;
 mod world_flow;
 
 pub use identity::{StoredCharacter, StoredIdentityAggregate, StoredMutation};
+pub use items::{
+    STARTER_INITIALIZER_REVISION, STARTER_ITEM_COUNT, StoredStarterInitialization,
+    StoredStarterItem,
+};
 pub use oath::{
     OathSelectionTransaction, OathSelectionTransactionState, StoredCharacterLifeEvent,
     StoredOathCharacter, StoredOathMutationResult,
@@ -37,7 +42,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 7;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 8;
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -142,7 +147,7 @@ pub enum PersistenceError {
     #[error(transparent)]
     Config(#[from] PersistenceConfigError),
     #[error("PostgreSQL connection or query failed")]
-    Database(#[source] sqlx::Error),
+    Database(#[from] sqlx::Error),
     #[error("PostgreSQL migration failed")]
     Migration(#[source] MigrateError),
     #[error("database schema version {actual} is incompatible; expected {expected}")]
@@ -175,6 +180,12 @@ pub enum PersistenceError {
     OathSelectionResultRequired,
     #[error("an accepted Oath transaction must append one character-life event")]
     OathSelectionEventRequired,
+    #[error("item character does not exist for the authenticated account")]
+    ItemCharacterNotFound,
+    #[error("stored item state violates the approved durable item contract")]
+    CorruptStoredItems,
+    #[error("item request ID was reused with different canonical material")]
+    ItemIdempotencyConflict,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -486,6 +497,24 @@ mod tests {
             assert!(
                 !migration.contains(prohibited),
                 "durable item migration leaked {prohibited}"
+            );
+        }
+    }
+
+    #[test]
+    fn item_ledger_ownership_allows_only_explicit_wipeable_cascade() {
+        let migration = include_str!("../../../migrations/0008_wipeable_item_ledger_ownership.sql");
+        for required in [
+            "item_ledger_item_owned",
+            "item_ledger_character_owned",
+            "ON DELETE CASCADE",
+        ] {
+            assert!(migration.contains(required), "migration omitted {required}");
+        }
+        for prohibited in ["DROP TABLE", "TRUNCATE", "JSON", "JSONB"] {
+            assert!(
+                !migration.contains(prohibited),
+                "ledger ownership migration leaked {prohibited}"
             );
         }
     }
