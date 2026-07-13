@@ -42,7 +42,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 9;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 10;
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -536,6 +536,28 @@ mod tests {
             assert!(
                 !migration.contains(prohibited),
                 "item provenance migration leaked {prohibited}"
+            );
+        }
+    }
+
+    #[test]
+    fn reward_request_can_be_reserved_before_planning_and_only_commits_complete() {
+        let migration =
+            include_str!("../../../migrations/0010_reward_request_planning_state.sql");
+        for required in [
+            "request_state",
+            "request_state = 0",
+            "plan_hash IS NULL",
+            "request_state = 1",
+            "post_inventory_version = pre_inventory_version + 1",
+            "ALTER COLUMN request_state DROP DEFAULT",
+        ] {
+            assert!(migration.contains(required), "migration omitted {required}");
+        }
+        for prohibited in ["JSON", "JSONB", "DROP TABLE", "TRUNCATE"] {
+            assert!(
+                !migration.contains(prohibited),
+                "reward request state migration leaked {prohibited}"
             );
         }
     }
