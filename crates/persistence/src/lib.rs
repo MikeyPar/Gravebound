@@ -42,7 +42,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 8;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 9;
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -515,6 +515,27 @@ mod tests {
             assert!(
                 !migration.contains(prohibited),
                 "ledger ownership migration leaked {prohibited}"
+            );
+        }
+    }
+
+    #[test]
+    fn item_provenance_and_salvage_are_typed_independent_axes() {
+        let migration = include_str!("../../../migrations/0009_item_provenance_and_salvage.sql");
+        for required in [
+            "provenance_kind",
+            "salvage_band",
+            "salvage_value",
+            "item_creation_provenance_shape",
+            "item_zero_salvage_shape",
+            "ALTER COLUMN provenance_kind DROP DEFAULT",
+        ] {
+            assert!(migration.contains(required), "migration omitted {required}");
+        }
+        for prohibited in ["JSON", "JSONB", "FLOAT", "DOUBLE PRECISION"] {
+            assert!(
+                !migration.contains(prohibited),
+                "item provenance migration leaked {prohibited}"
             );
         }
     }

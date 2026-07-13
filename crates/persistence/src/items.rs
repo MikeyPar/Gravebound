@@ -172,8 +172,10 @@ async fn insert_starter_item(
         "INSERT INTO item_instances \
          (namespace_id, item_uid, account_id, character_id, template_id, content_revision, \
           item_kind, item_level, rarity, creation_kind, creation_request_id, roll_index, \
-          unit_ordinal, item_version, security_state, location_kind, slot_index) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0, $4, $10, $11, 1, 0, $12, $13)",
+          unit_ordinal, item_version, security_state, location_kind, slot_index, provenance_kind, \
+          salvage_band, salvage_value) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0, $4, $10, $11, 1, 0, $12, $13, \
+          $14, 0, 0)",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(item.item_uid.as_slice())
@@ -188,6 +190,7 @@ async fn insert_starter_item(
     .bind(item.unit_ordinal)
     .bind(item.location_kind)
     .bind(item.slot_index)
+    .bind(if item.item_kind == 0 { 0_i16 } else { 4_i16 })
     .execute(&mut *connection)
     .await
     .map_err(PersistenceError::Database)?;
@@ -267,7 +270,7 @@ fn validate_initializer_input(
         validate_starter_item(item)?;
     }
     let expected = [
-        ("item.weapon.crossbow.pine", 0, 0, 0, 0, 0),
+        ("item.weapon.crossbow.pine_crossbow", 0, 0, 0, 0, 0),
         ("item.relic.arbalist.cracked_mark_lens", 0, 0, 1, 1, 0),
         ("consumable.red_tonic", 1, 1, 0, 2, 0),
         ("consumable.red_tonic", 1, 1, 0, 2, 1),
@@ -324,7 +327,7 @@ mod tests {
             StoredStarterItem {
                 item_uid: [1; 16],
                 ledger_event_id: [11; 16],
-                template_id: "item.weapon.crossbow.pine".to_owned(),
+                template_id: "item.weapon.crossbow.pine_crossbow".to_owned(),
                 item_kind: 0,
                 item_level: Some(1),
                 rarity: Some(0),
