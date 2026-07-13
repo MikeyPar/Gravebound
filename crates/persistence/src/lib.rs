@@ -60,7 +60,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 16;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 17;
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -628,6 +628,28 @@ mod tests {
             assert!(
                 !migration.contains(prohibited),
                 "Bargain offer migration leaked {prohibited}"
+            );
+        }
+    }
+
+    #[test]
+    fn bargain_offer_source_binding_is_forward_only_and_instance_exact() {
+        let migration = include_str!("../../../migrations/0017_bind_bargain_offer_source.sql");
+        for required in [
+            "0017 requires dormant pre-route Bargain offer tables",
+            "miniboss.sepulcher_knight",
+            "layout.core_private_life_01",
+            "instance_lineage_id",
+            "entry_restore_point_id",
+            "bargain_offer_lineage_owned",
+            "bargain_offer_restore_owned",
+        ] {
+            assert!(migration.contains(required), "migration omitted {required}");
+        }
+        for prohibited in ["DROP TABLE", "TRUNCATE", "JSON", "JSONB"] {
+            assert!(
+                !migration.contains(prohibited),
+                "Bargain source binding leaked {prohibited}"
             );
         }
     }
