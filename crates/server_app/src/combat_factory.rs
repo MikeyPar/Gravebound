@@ -191,6 +191,8 @@ mod tests {
             class_id: GRAVE_ARBALIST_CLASS_ID.into(),
             level: 10,
             oath_id: Some(oath_id.into()),
+            oath_bargain_version: 1,
+            active_bargains: Vec::new(),
             life_state: 0,
             security_state: 0,
             character_state_version: 8,
@@ -202,6 +204,7 @@ mod tests {
                 item_level: 1,
                 rarity: 0,
             }),
+            belt_slots: [None, None],
         }
     }
 

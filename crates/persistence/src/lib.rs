@@ -37,7 +37,9 @@ pub use bargain_milestone::{
     CORE_BARGAIN_LAYOUT_ID, CORE_BARGAIN_MILESTONE_ID, CORE_BARGAIN_SOURCE_ID,
     StagedBargainMilestone, StoredBargainMilestoneLife, StoredBargainMilestoneResult,
 };
-pub use combat_loadout::{StoredCoreCombatLoadout, StoredEquippedWeapon};
+pub use combat_loadout::{
+    StoredCombatBargain, StoredCombatBeltStack, StoredCoreCombatLoadout, StoredEquippedWeapon,
+};
 pub use ground_expiry::{MAX_GROUND_EXPIRY_BATCH, StoredGroundExpiry, StoredGroundExpiryCandidate};
 pub use identity::{StoredCharacter, StoredIdentityAggregate, StoredMutation};
 pub use items::{

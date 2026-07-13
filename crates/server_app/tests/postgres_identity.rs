@@ -780,6 +780,24 @@ async fn assert_persisted_combat_factory(
 ) {
     let hash = blake3::hash(ticket);
     let account_id = <[u8; 16]>::try_from(&hash.as_bytes()[..16]).unwrap();
+    let snapshot = persistence
+        .core_combat_loadout_snapshot(account_id, character_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let choices = sim_content::load_core_development_oaths_bargains(content_root).unwrap();
+    assert!(snapshot.oath_bargain_version > 0);
+    assert!(
+        snapshot
+            .active_bargains
+            .iter()
+            .all(|bargain| { bargain.acquiring_offer_content_version == choices.revision_label() })
+    );
+    assert!(matches!(
+        &snapshot.belt_slots,
+        [Some(stack), None]
+            if stack.template_id == "consumable.red_tonic" && stack.quantity == 2
+    ));
     let factory = CoreCharacterCombatFactory::load(persistence.clone(), content_root).unwrap();
     let combat = factory.build(account_id, character_id).await.unwrap();
     assert_eq!(
