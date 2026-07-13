@@ -4,6 +4,8 @@ use crate::{PersistenceError, PostgresPersistence, WIPEABLE_CORE_NAMESPACE};
 
 pub const STARTER_INITIALIZER_REVISION: &str = "starter.core-dev.v1";
 pub const STARTER_ITEM_COUNT: usize = 4;
+pub const CORE_ITEM_CONTENT_REVISION: &str =
+    "core-dev.blake3.27818db710b7553520a162f6f8337dcd0419c459d20c6513a7e12c78fed24ebb";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredStarterItem {
@@ -252,10 +254,8 @@ async fn load_starter_items(
 
 fn starter_content_revision(item: &StoredStarterItem) -> Result<&'static str, PersistenceError> {
     // The exact hash is the approved 04C manifest revision; no mutable development label is legal.
-    const REVISION: &str =
-        "core-dev.blake3.27818db710b7553520a162f6f8337dcd0419c459d20c6513a7e12c78fed24";
     validate_starter_item(item)?;
-    Ok(REVISION)
+    Ok(CORE_ITEM_CONTENT_REVISION)
 }
 
 fn validate_initializer_input(

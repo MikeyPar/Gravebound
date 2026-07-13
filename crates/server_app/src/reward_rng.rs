@@ -219,7 +219,7 @@ mod tests {
     }
 
     const CORE_REVISION: &str =
-        "core-dev.blake3.27818db710b7553520a162f6f8337dcd0419c459d20c6513a7e12c78fed24";
+        "core-dev.blake3.27818db710b7553520a162f6f8337dcd0419c459d20c6513a7e12c78fed24ebb";
 
     #[test]
     fn reward_stream_and_audit_are_stable_and_domain_separated() {

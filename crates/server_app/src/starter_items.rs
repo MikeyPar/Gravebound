@@ -1,9 +1,8 @@
+pub use persistence::CORE_ITEM_CONTENT_REVISION;
 use persistence::{STARTER_INITIALIZER_REVISION, StoredStarterInitialization, StoredStarterItem};
 use sim_core::derive_starter_item_uid;
 use thiserror::Error;
 
-pub const CORE_ITEM_CONTENT_REVISION: &str =
-    "core-dev.blake3.27818db710b7553520a162f6f8337dcd0419c459d20c6513a7e12c78fed24";
 pub const STARTER_WEAPON_ID: &str = "item.weapon.crossbow.pine_crossbow";
 pub const STARTER_RELIC_ID: &str = "item.relic.arbalist.cracked_mark_lens";
 pub const STARTER_TONIC_ID: &str = "consumable.red_tonic";
@@ -142,10 +141,17 @@ fn canonical_hash(context: &str, fields: &[&[u8]]) -> Result<[u8; 32], StarterIt
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
 
     #[test]
     fn exact_starter_plan_has_distinct_units_and_stable_receipts() {
+        let content = sim_content::load_core_development_items(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content"),
+        )
+        .unwrap();
+        assert_eq!(CORE_ITEM_CONTENT_REVISION, content.revision_label());
         let plan = StarterItemPlan::for_character([0x31; 16]).unwrap();
         assert_eq!(plan.items.len(), 4);
         assert_eq!(plan.items[0].template_id, STARTER_WEAPON_ID);
