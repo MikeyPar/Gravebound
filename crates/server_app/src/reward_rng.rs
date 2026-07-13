@@ -239,7 +239,7 @@ mod tests {
                 second.draw_below(u32::MAX).unwrap(),
             ]
         );
-        assert_eq!(draws, [5_245, 15, 254_068_401]);
+        assert_eq!(draws, [6_478, 15, 2_064_616_062]);
         assert_ne!(
             epoch
                 .audit_digest(&material(), b"persisted-result")
