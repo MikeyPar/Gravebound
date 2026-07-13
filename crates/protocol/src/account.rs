@@ -4,6 +4,7 @@ use serde::{
 };
 use thiserror::Error;
 
+use crate::oath::{LONG_VIGIL_ID, NAILKEEPER_ID};
 use crate::{ManifestHash, NetworkChannel, WireText};
 
 pub const CHARACTER_ID_BYTES: usize = 16;
@@ -13,6 +14,7 @@ pub const CORE_CHARACTER_SLOT_CAPACITY: u8 = 2;
 pub const MAX_ACCOUNT_CHARACTERS: usize = CORE_CHARACTER_SLOT_CAPACITY as usize;
 pub const CLASS_ID_MAX_BYTES: usize = 96;
 pub const GRAVE_ARBALIST_CLASS_ID: &str = "class.grave_arbalist";
+pub const MAX_CORE_CHARACTER_LEVEL: u16 = 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -53,9 +55,12 @@ impl CharacterSnapshot {
         if !(1..=CORE_CHARACTER_SLOT_CAPACITY).contains(&self.roster_ordinal) {
             return Err(AccountMessageValidationError::InvalidRosterOrdinal);
         }
+        let legal_oath = self.oath_id.as_ref().is_none_or(|oath| {
+            self.level >= 10 && matches!(oath.as_str(), LONG_VIGIL_ID | NAILKEEPER_ID)
+        });
         if self.class_id.as_str() != GRAVE_ARBALIST_CLASS_ID
-            || self.level != 1
-            || self.oath_id.is_some()
+            || !(1..=MAX_CORE_CHARACTER_LEVEL).contains(&self.level)
+            || !legal_oath
             || self.life_state != CharacterLifeState::Living
             || self.security_state != CharacterSecurityState::SafeCharacterSelect
         {
@@ -359,9 +364,36 @@ mod tests {
         let oversized_bytes = postcard::to_stdvec(&oversized).unwrap();
         assert!(postcard::from_bytes::<AccountSnapshot>(&oversized_bytes).is_err());
         let mut illegal = snapshot;
-        illegal.characters[0].oath_id = Some(WireText::new("oath.arbalist.long_vigil").unwrap());
+        illegal.characters[0].oath_id = Some(WireText::new(LONG_VIGIL_ID).unwrap());
         assert_eq!(
             illegal.validate(),
+            Err(AccountMessageValidationError::IllegalCoreCharacterState)
+        );
+    }
+
+    #[test]
+    fn progressed_core_character_accepts_only_level_appropriate_exact_oaths() {
+        let mut progressed = character(1, 1);
+        progressed.level = 10;
+        progressed.oath_id = Some(WireText::new(LONG_VIGIL_ID).unwrap());
+        assert_eq!(progressed.validate(), Ok(()));
+
+        progressed.oath_id = Some(WireText::new(NAILKEEPER_ID).unwrap());
+        assert_eq!(progressed.validate(), Ok(()));
+
+        progressed.level = MAX_CORE_CHARACTER_LEVEL;
+        assert_eq!(progressed.validate(), Ok(()));
+
+        progressed.level = MAX_CORE_CHARACTER_LEVEL + 1;
+        assert_eq!(
+            progressed.validate(),
+            Err(AccountMessageValidationError::IllegalCoreCharacterState)
+        );
+
+        progressed.level = 10;
+        progressed.oath_id = Some(WireText::new("oath.arbalist.unavailable").unwrap());
+        assert_eq!(
+            progressed.validate(),
             Err(AccountMessageValidationError::IllegalCoreCharacterState)
         );
     }

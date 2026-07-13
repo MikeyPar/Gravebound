@@ -18,7 +18,8 @@ pub use account::{
     AccountMessageValidationError, AccountNamespace, AccountSnapshot, CHARACTER_ID_BYTES,
     CLASS_ID_MAX_BYTES, CORE_CHARACTER_SLOT_CAPACITY, CharacterLifeState, CharacterMutationFrame,
     CharacterMutationPayload, CharacterMutationResult, CharacterSecurityState, CharacterSnapshot,
-    GRAVE_ARBALIST_CLASS_ID, MAX_ACCOUNT_CHARACTERS, MUTATION_ID_BYTES, PAYLOAD_HASH_BYTES,
+    GRAVE_ARBALIST_CLASS_ID, MAX_ACCOUNT_CHARACTERS, MAX_CORE_CHARACTER_LEVEL, MUTATION_ID_BYTES,
+    PAYLOAD_HASH_BYTES,
 };
 pub use bounded::{AuthTicket, BoundedValueError, ManifestHash, WireText};
 pub use codec::{
