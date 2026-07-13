@@ -823,8 +823,9 @@ async fn postgres_real_quic_server_restart_preserves_authoritative_roster() {
     bot_client::perform_handshake(&connection, wire_hello(&content_root, ticket))
         .await
         .unwrap();
+    // Reliable request sequences restart with the new connection; durable account state does not.
     let (_, restored) =
-        bot_client::perform_account_bootstrap(&connection, wire_bootstrap(&content_root, 2))
+        bot_client::perform_account_bootstrap(&connection, wire_bootstrap(&content_root, 1))
             .await
             .unwrap();
     let AccountBootstrapResult::Snapshot(restored) = restored else {
