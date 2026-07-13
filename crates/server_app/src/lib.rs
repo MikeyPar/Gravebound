@@ -8,6 +8,7 @@ mod ash_wallet;
 mod bargain_milestone;
 mod bargain_selection;
 mod combat_factory;
+mod core_lifecycle;
 mod ground_expiry;
 mod identity;
 mod instance;
@@ -35,6 +36,9 @@ pub use bargain_selection::{CoreBargainAuthority, PostgresBargainService};
 pub use combat_factory::{
     CoreCharacterCombat, CoreCharacterCombatCompiler, CoreCharacterCombatFactory,
     CoreCombatFactoryError,
+};
+pub use core_lifecycle::{
+    CoreLifeKey, CoreLiveBindingId, CoreLiveCharacter, CoreLiveDirectory, CoreLiveError,
 };
 pub use ground_expiry::{GROUND_EXPIRY_CONTEXT, GroundExpiryError, PostgresGroundExpiryService};
 pub use identity::{
