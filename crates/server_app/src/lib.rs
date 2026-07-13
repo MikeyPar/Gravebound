@@ -13,6 +13,7 @@ mod progression_query;
 mod progression_service;
 mod restore_point;
 mod reward_rng;
+mod reward_service;
 mod runtime;
 mod session;
 mod starter_items;
@@ -56,6 +57,10 @@ pub use restore_point::{
 pub use reward_rng::{
     ProductionRewardRng, REWARD_AUDIT_CONTEXT, REWARD_EPOCH_ID_ENV, REWARD_EPOCH_SECRET_ENV,
     REWARD_PLAN_CONTEXT, RewardRngError, RewardSeedMaterial, SecretRewardEpoch,
+};
+pub use reward_service::{
+    PostgresRewardService, RewardGrantContext, RewardGrantError, RewardGrantResult,
+    RewardGrantTransaction, RewardGrantedItem, RewardPlacement, replay_result,
 };
 pub use runtime::{
     BoundCoreIdentityServer, BoundLocalServer, CORE_IDENTITY_BUILD_ID,
