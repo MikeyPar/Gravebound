@@ -11,6 +11,7 @@ use sqlx::{
 };
 use thiserror::Error;
 
+mod ash_wallet;
 mod combat_loadout;
 mod ground_expiry;
 mod identity;
@@ -21,6 +22,10 @@ mod progression_restore;
 mod reward;
 mod world_flow;
 
+pub use ash_wallet::{
+    ASH_CURRENCY_ID, ASH_WALLET_CAP, AshMutationCode, AshMutationKind, AshMutationRequest,
+    AshWalletTransaction, StoredAshMutationResult, StoredAshWallet,
+};
 pub use combat_loadout::{StoredCoreCombatLoadout, StoredEquippedWeapon};
 pub use ground_expiry::{MAX_GROUND_EXPIRY_BATCH, StoredGroundExpiry, StoredGroundExpiryCandidate};
 pub use identity::{StoredCharacter, StoredIdentityAggregate, StoredMutation};
@@ -55,7 +60,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 13;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 14;
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -203,6 +208,12 @@ pub enum PersistenceError {
     CorruptStoredItems,
     #[error("item request ID was reused with different canonical material")]
     ItemIdempotencyConflict,
+    #[error("stored Ash wallet or currency ledger violates the approved contract")]
+    CorruptStoredAsh,
+    #[error("Ash wallet account does not exist")]
+    AshAccountNotFound,
+    #[error("Ash mutation ID was reused with different canonical material")]
+    AshIdempotencyConflict,
     #[error("authoritative reward planning failed before commit")]
     RewardPlanningFailed,
 }
@@ -539,6 +550,30 @@ mod tests {
             assert!(
                 !migration.contains(prohibited),
                 "initial Oath migration leaked {prohibited}"
+            );
+        }
+    }
+
+    #[test]
+    fn minimal_ash_wallet_migration_is_bounded_replay_first_and_ledger_backed() {
+        let migration = include_str!("../../../migrations/0014_minimal_ash_wallet.sql");
+        for required in [
+            "ash_wallets",
+            "ash_mutation_results",
+            "currency_ledger_events",
+            "currency.ash_shards",
+            "ash_wallet_balance_bounded",
+            "ash_result_arithmetic",
+            "ash_result_rejection_kind",
+            "currency_ledger_arithmetic",
+            "currency_ledger_account_history",
+        ] {
+            assert!(migration.contains(required), "migration omitted {required}");
+        }
+        for prohibited in ["JSON", "JSONB", "FLOAT", "DOUBLE PRECISION", "premium"] {
+            assert!(
+                !migration.contains(prohibited),
+                "Ash wallet migration leaked {prohibited}"
             );
         }
     }
