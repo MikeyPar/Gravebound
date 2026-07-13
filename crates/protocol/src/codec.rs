@@ -13,7 +13,7 @@ pub fn encode_frame(message: &WireMessage) -> Result<Vec<u8>, WireCodecError> {
 }
 
 /// Reproduces canonical M02 bytes for immutable fixtures and package verification. These frames
-/// are not accepted by the exact-minor 1.6 live decoder.
+/// are not accepted by the current exact-minor live decoder.
 pub fn encode_m02_compatibility_frame(message: &WireMessage) -> Result<Vec<u8>, WireCodecError> {
     if matches!(
         message.kind(),
@@ -21,6 +21,8 @@ pub fn encode_m02_compatibility_frame(message: &WireMessage) -> Result<Vec<u8>, 
             | MessageKind::CharacterMutationFrame
             | MessageKind::WorldFlowFrame
             | MessageKind::ProgressionQueryFrame
+            | MessageKind::OathViewFrame
+            | MessageKind::InitialOathSelectionFrame
     ) {
         return Err(WireCodecError::MessageUnavailableAtVersion);
     }
@@ -118,6 +120,8 @@ const fn message_kind_byte(kind: MessageKind) -> u8 {
         MessageKind::CharacterMutationFrame => 10,
         MessageKind::WorldFlowFrame => 11,
         MessageKind::ProgressionQueryFrame => 12,
+        MessageKind::OathViewFrame => 13,
+        MessageKind::InitialOathSelectionFrame => 14,
     }
 }
 
@@ -135,6 +139,8 @@ const fn message_kind_from_byte(value: u8) -> Result<MessageKind, WireCodecError
         10 => Ok(MessageKind::CharacterMutationFrame),
         11 => Ok(MessageKind::WorldFlowFrame),
         12 => Ok(MessageKind::ProgressionQueryFrame),
+        13 => Ok(MessageKind::OathViewFrame),
+        14 => Ok(MessageKind::InitialOathSelectionFrame),
         other => Err(WireCodecError::UnknownMessageKind(other)),
     }
 }
@@ -196,7 +202,7 @@ mod tests {
         assert_eq!(decode_frame(&frame).unwrap(), input_message());
         assert_eq!(
             blake3::hash(&frame).to_hex().to_string(),
-            "ece8840cb3fb69b07847973f8b50ff81c39c7e72c900db3845bfc9aee5c9634f"
+            "a6ef4e3a46b3715814f4322a39c13fab60e5ed0dc3cbac3ff1ac94b305f1ac9d"
         );
         let m02 = encode_m02_compatibility_frame(&input_message()).unwrap();
         assert_eq!(
@@ -301,6 +307,44 @@ mod tests {
         assert_eq!(decode_frame(&frame), Ok(query.clone()));
         assert_eq!(
             encode_m02_compatibility_frame(&query),
+            Err(WireCodecError::MessageUnavailableAtVersion)
+        );
+    }
+
+    #[test]
+    fn protocol_1_9_appends_bounded_oath_control_and_mutation_kinds() {
+        let revision = crate::OathContentRevisionV1 {
+            records_blake3: ManifestHash::new("d".repeat(64)).unwrap(),
+            assets_blake3: ManifestHash::new("e".repeat(64)).unwrap(),
+            localization_blake3: ManifestHash::new("f".repeat(64)).unwrap(),
+        };
+        let view = WireMessage::OathViewFrame(crate::OathViewFrame {
+            sequence: 10,
+            character_id: [3; 16],
+            content_revision: revision.clone(),
+        });
+        let frame = encode_frame(&view).unwrap();
+        assert_eq!(frame[8], 13);
+        assert_eq!(decode_frame(&frame), Ok(view));
+
+        let payload = crate::InitialOathSelectionPayload {
+            character_id: [3; 16],
+            oath_id: WireText::new(crate::LONG_VIGIL_ID).unwrap(),
+            content_revision: revision,
+            confirmed: true,
+        };
+        let selection = WireMessage::InitialOathSelectionFrame(crate::InitialOathSelectionFrame {
+            mutation_id: [4; 16],
+            expected_character_version: 1,
+            payload_hash: payload.canonical_hash(),
+            issued_at_unix_millis: 1,
+            payload,
+        });
+        let frame = encode_frame(&selection).unwrap();
+        assert_eq!(frame[8], 14);
+        assert_eq!(decode_frame(&frame), Ok(selection.clone()));
+        assert_eq!(
+            encode_m02_compatibility_frame(&selection),
             Err(WireCodecError::MessageUnavailableAtVersion)
         );
     }

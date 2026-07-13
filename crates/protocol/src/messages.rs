@@ -5,7 +5,8 @@ use thiserror::Error;
 
 use crate::{
     AccountBootstrapFrame, AccountBootstrapResult, CharacterMutationFrame, CharacterMutationResult,
-    ClientHello, HandshakeResponse, NetworkChannel, ProgressionQueryFrame, ProgressionResult,
+    ClientHello, HandshakeResponse, InitialOathSelectionFrame, InitialOathSelectionResult,
+    NetworkChannel, OathViewFrame, OathViewResult, ProgressionQueryFrame, ProgressionResult,
     WireText, WorldFlowFrame, WorldFlowResult,
 };
 
@@ -32,6 +33,8 @@ pub enum MessageKind {
     CharacterMutationFrame,
     WorldFlowFrame,
     ProgressionQueryFrame,
+    OathViewFrame,
+    InitialOathSelectionFrame,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -429,6 +432,8 @@ pub enum ReliableEvent {
     CharacterMutationResult(CharacterMutationResult),
     WorldFlowResult(WorldFlowResult),
     ProgressionResult(ProgressionResult),
+    OathViewResult(OathViewResult),
+    InitialOathSelectionResult(InitialOathSelectionResult),
 }
 
 impl ReliableEvent {
@@ -437,11 +442,14 @@ impl ReliableEvent {
         match self {
             Self::ActionResult { .. } => NetworkChannel::Action,
             Self::PatternStarted(_) => NetworkChannel::Pattern,
-            Self::MutationResult(_) | Self::CharacterMutationResult(_) => NetworkChannel::Mutation,
+            Self::MutationResult(_)
+            | Self::CharacterMutationResult(_)
+            | Self::InitialOathSelectionResult(_) => NetworkChannel::Mutation,
             Self::Control(_)
             | Self::AccountBootstrapResult(_)
             | Self::WorldFlowResult(_)
-            | Self::ProgressionResult(_) => NetworkChannel::Control,
+            | Self::ProgressionResult(_)
+            | Self::OathViewResult(_) => NetworkChannel::Control,
             Self::SocialPing { .. } => NetworkChannel::Social,
         }
     }
@@ -468,6 +476,12 @@ impl ReliableEvent {
             Self::ProgressionResult(result) => result
                 .validate()
                 .map_err(|_| MessageValidationError::Progression),
+            Self::OathViewResult(result) => {
+                result.validate().map_err(|_| MessageValidationError::Oath)
+            }
+            Self::InitialOathSelectionResult(result) => {
+                result.validate().map_err(|_| MessageValidationError::Oath)
+            }
             _ => Ok(()),
         }
     }
@@ -504,6 +518,8 @@ pub enum WireMessage {
     CharacterMutationFrame(CharacterMutationFrame),
     WorldFlowFrame(WorldFlowFrame),
     ProgressionQueryFrame(ProgressionQueryFrame),
+    OathViewFrame(OathViewFrame),
+    InitialOathSelectionFrame(InitialOathSelectionFrame),
 }
 
 impl WireMessage {
@@ -522,6 +538,8 @@ impl WireMessage {
             Self::CharacterMutationFrame(_) => MessageKind::CharacterMutationFrame,
             Self::WorldFlowFrame(_) => MessageKind::WorldFlowFrame,
             Self::ProgressionQueryFrame(_) => MessageKind::ProgressionQueryFrame,
+            Self::OathViewFrame(_) => MessageKind::OathViewFrame,
+            Self::InitialOathSelectionFrame(_) => MessageKind::InitialOathSelectionFrame,
         }
     }
 
@@ -533,12 +551,15 @@ impl WireMessage {
             | Self::SessionControlFrame(_)
             | Self::AccountBootstrapFrame(_)
             | Self::WorldFlowFrame(_)
-            | Self::ProgressionQueryFrame(_) => NetworkChannel::Control,
+            | Self::ProgressionQueryFrame(_)
+            | Self::OathViewFrame(_) => NetworkChannel::Control,
             Self::InputFrame(_) => NetworkChannel::Input,
             Self::ActionFrame(_) => NetworkChannel::Action,
             Self::SnapshotChunk(_) => NetworkChannel::Snapshot,
             Self::ReliableEvent(frame) => frame.event.channel(),
-            Self::MutationRequest(_) | Self::CharacterMutationFrame(_) => NetworkChannel::Mutation,
+            Self::MutationRequest(_)
+            | Self::CharacterMutationFrame(_)
+            | Self::InitialOathSelectionFrame(_) => NetworkChannel::Mutation,
         }
     }
 
@@ -573,6 +594,12 @@ impl WireMessage {
             Self::ProgressionQueryFrame(value) => value
                 .validate()
                 .map_err(|_| MessageValidationError::Progression),
+            Self::OathViewFrame(value) => {
+                value.validate().map_err(|_| MessageValidationError::Oath)
+            }
+            Self::InitialOathSelectionFrame(value) => {
+                value.validate().map_err(|_| MessageValidationError::Oath)
+            }
         }
     }
 }
@@ -585,6 +612,8 @@ pub enum MessageValidationError {
     WorldFlow,
     #[error("progression message failed semantic validation")]
     Progression,
+    #[error("oath message failed semantic validation")]
+    Oath,
     #[error("message sequence must be nonzero")]
     ZeroSequence,
     #[error("fixed-point vector component must remain within -1000..=1000")]

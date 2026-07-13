@@ -9,6 +9,7 @@ mod bounded;
 mod codec;
 mod handshake;
 mod messages;
+mod oath;
 mod progression;
 mod world_flow;
 
@@ -36,6 +37,12 @@ pub use messages::{
     SessionControlResult, SessionControlResultCode, SessionDestination, SnapshotChunk,
     SocialPingKind, WireMessage,
 };
+pub use oath::{
+    InitialOathSelectionFrame, InitialOathSelectionPayload, InitialOathSelectionResult,
+    LONG_VIGIL_ID, NAILKEEPER_ID, OATH_CHARACTER_ID_BYTES, OATH_ID_BYTES, OATH_MUTATION_ID_BYTES,
+    OATH_PAYLOAD_HASH_BYTES, OathContentRevisionV1, OathProjection, OathResultCode,
+    OathSelectionState, OathValidationError, OathViewFrame, OathViewResult,
+};
 pub use progression::{
     PROGRESSION_REWARD_EVENT_ID_BYTES, ProgressionCapState, ProgressionProjection,
     ProgressionQueryFrame, ProgressionResult, ProgressionResultCode, ProgressionValidationError,
@@ -53,7 +60,9 @@ use thiserror::Error;
 /// First incompatible protocol generation.
 pub const PROTOCOL_MAJOR: u16 = 1;
 /// Backward-compatible feature generation within [`PROTOCOL_MAJOR`].
-pub const PROTOCOL_MINOR: u16 = 8;
+pub const PROTOCOL_MINOR: u16 = 9;
+/// Exact progression projection generation retained while Oath messages are appended.
+pub const PROGRESSION_PROTOCOL_MINOR: u16 = 8;
 /// Exact world-flow generation retained while progression projection is appended.
 pub const WORLD_FLOW_PROTOCOL_MINOR: u16 = 7;
 /// Exact Core identity wire generation retained while world-flow messages are appended.
