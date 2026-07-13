@@ -8,6 +8,13 @@ enum CoreWorldSceneArg {
     Microrealm,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CoreWorldEvidenceStateArg {
+    HallStageDisabled,
+    MicrorealmWarning,
+    MicrorealmCleared,
+}
+
 #[derive(Debug, Parser)]
 #[command(name = "client_bevy", about = "Gravebound native client")]
 struct Cli {
@@ -51,6 +58,9 @@ enum Command {
         content_root: PathBuf,
         #[arg(long)]
         reduced_motion: bool,
+        /// Prepare a deterministic disposable runtime state for screenshot inspection.
+        #[arg(long, value_enum)]
+        evidence_state: Option<CoreWorldEvidenceStateArg>,
     },
 }
 
@@ -83,6 +93,7 @@ fn main() {
             scene,
             content_root,
             reduced_motion,
+            evidence_state,
         } => client_bevy::run_core_world_showcase(client_bevy::CoreWorldShowcaseConfig {
             content_root,
             scene: match scene {
@@ -90,6 +101,17 @@ fn main() {
                 CoreWorldSceneArg::Microrealm => client_bevy::CoreWorldShowcaseScene::Microrealm,
             },
             reduced_motion,
+            evidence_state: evidence_state.map(|state| match state {
+                CoreWorldEvidenceStateArg::HallStageDisabled => {
+                    client_bevy::CoreWorldShowcaseEvidenceState::HallStageDisabled
+                }
+                CoreWorldEvidenceStateArg::MicrorealmWarning => {
+                    client_bevy::CoreWorldShowcaseEvidenceState::MicrorealmWarning
+                }
+                CoreWorldEvidenceStateArg::MicrorealmCleared => {
+                    client_bevy::CoreWorldShowcaseEvidenceState::MicrorealmCleared
+                }
+            }),
         }),
     };
     if let Err(error) = result {

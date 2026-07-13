@@ -58,7 +58,8 @@ pub use core_identity::{
     CoreIdentityConfig, CoreIdentityModel, CoreIdentityPhase, run_core_identity,
 };
 pub use core_world_showcase::{
-    CoreWorldShowcaseConfig, CoreWorldShowcaseScene, run_core_world_showcase,
+    CoreWorldShowcaseConfig, CoreWorldShowcaseEvidenceState, CoreWorldShowcaseScene,
+    run_core_world_showcase,
 };
 pub use network_play::{NetworkPlayConfig, run_network_playtest};
 pub use network_prediction::{

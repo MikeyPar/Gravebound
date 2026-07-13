@@ -21,6 +21,7 @@ use sim_core::{
     SceneInteractionRejection, SceneInteractionSession, SceneObjectCondition, SceneObjectGeometry,
     Tick, TilePoint, TileRectangle, WorldSceneDefinition, WorldSceneKind, WorldScenePlayer,
 };
+use thiserror::Error;
 
 const VIEW_HEIGHT_TILES: f32 = 20.0;
 const Z_FLOOR: f32 = 0.0;
@@ -31,6 +32,7 @@ const Z_OBJECT: f32 = 4.0;
 const Z_LABEL: f32 = 5.0;
 const Z_PLAYER: f32 = 6.0;
 const LABEL_SCALE: f32 = 0.024;
+const HUD_GLOBAL_Z_INDEX: i32 = 100;
 const EVIDENCE_SETTLE_FRAMES: u8 = 30;
 const CARDINAL_STEP_MILLI_TILES: i32 = 170;
 const DIAGONAL_STEP_MILLI_TILES: i32 = 120;
@@ -41,11 +43,19 @@ pub enum CoreWorldShowcaseScene {
     Microrealm,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoreWorldShowcaseEvidenceState {
+    HallStageDisabled,
+    MicrorealmWarning,
+    MicrorealmCleared,
+}
+
 #[derive(Debug, Clone)]
 pub struct CoreWorldShowcaseConfig {
     pub content_root: PathBuf,
     pub scene: CoreWorldShowcaseScene,
     pub reduced_motion: bool,
+    pub evidence_state: Option<CoreWorldShowcaseEvidenceState>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -116,6 +126,58 @@ struct ShowcaseRuntime {
     prompt: String,
     state: String,
     faulted: bool,
+    frozen_for_evidence: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ShowcaseFrameInput {
+    horizontal: i32,
+    vertical: i32,
+    interaction: ShowcaseInteractionInput,
+    microrealm_action: ShowcaseMicrorealmAction,
+    living_participants: u16,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum ShowcaseInteractionInput {
+    #[default]
+    None,
+    Held,
+    ClosePanel,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum ShowcaseMicrorealmAction {
+    #[default]
+    None,
+    PrimaryReleased,
+    SupplyDisposableClear,
+}
+
+impl Default for ShowcaseFrameInput {
+    fn default() -> Self {
+        Self {
+            horizontal: 0,
+            vertical: 0,
+            interaction: ShowcaseInteractionInput::None,
+            microrealm_action: ShowcaseMicrorealmAction::None,
+            living_participants: 1,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+enum ShowcaseRuntimeError {
+    #[error("authoritative tick overflow")]
+    TickOverflow,
+    #[error("movement authority rejected a bounded step")]
+    MovementRejected,
+    #[error("interaction projection failed closed")]
+    InteractionProjection,
+    #[error("interaction authority overflowed")]
+    InteractionSession,
+    #[error("microrealm lifecycle failed closed")]
+    MicrorealmLifecycle,
 }
 
 #[derive(Debug, Component)]
@@ -168,33 +230,19 @@ pub fn run_core_world_showcase(config: CoreWorldShowcaseConfig) -> Result<()> {
     let screenshot_request = env::var_os("GRAVEBOUND_SCREENSHOT_PATH").map(PathBuf::from);
     let (window_width, window_height) = crate::configured_window_size()?;
     let mut app = App::new();
-    let player = WorldScenePlayer::new(
-        &definition,
-        definition.player_spawn,
-        CARDINAL_STEP_MILLI_TILES,
-    )
-    .context("Core showcase player spawn is invalid")?;
-    let microrealm = (definition.kind == WorldSceneKind::PrivateDanger)
-        .then(|| CoreMicrorealmSimulation::new(definition.player_spawn));
+    let scene = ShowcaseScene {
+        definition,
+        labels,
+        revision,
+        reduced_motion: config.reduced_motion,
+    };
+    let runtime = prepare_showcase_runtime(&scene, config.evidence_state)?;
     app.insert_resource(ClearColor(Color::srgb_u8(7, 9, 12)))
         .insert_resource(Time::<Fixed>::from_hz(f64::from(
             sim_core::TICKS_PER_SECOND,
         )))
-        .insert_resource(ShowcaseScene {
-            definition,
-            labels,
-            revision,
-            reduced_motion: config.reduced_motion,
-        })
-        .insert_resource(ShowcaseRuntime {
-            player,
-            interaction: SceneInteractionSession::default(),
-            microrealm,
-            tick: Tick(0),
-            prompt: "MOVE WITH WASD OR ARROWS".to_owned(),
-            state: "AUTHORITATIVE SCENE READY".to_owned(),
-            faulted: false,
-        })
+        .insert_resource(scene)
+        .insert_resource(runtime)
         .add_plugins(
             DefaultPlugins
                 .set(ImagePlugin::default_nearest())
@@ -230,6 +278,136 @@ pub fn run_core_world_showcase(config: CoreWorldShowcaseConfig) -> Result<()> {
     }
     app.run();
     Ok(())
+}
+
+fn prepare_showcase_runtime(
+    scene: &ShowcaseScene,
+    evidence_state: Option<CoreWorldShowcaseEvidenceState>,
+) -> Result<ShowcaseRuntime> {
+    match evidence_state {
+        None => new_showcase_runtime(&scene.definition, scene.definition.player_spawn)
+            .context("Core showcase player spawn is invalid"),
+        Some(CoreWorldShowcaseEvidenceState::HallStageDisabled) => {
+            prepare_hall_stage_disabled_runtime(scene)
+        }
+        Some(CoreWorldShowcaseEvidenceState::MicrorealmWarning) => {
+            prepare_microrealm_warning_runtime(scene)
+        }
+        Some(CoreWorldShowcaseEvidenceState::MicrorealmCleared) => {
+            prepare_microrealm_cleared_runtime(scene)
+        }
+    }
+}
+
+fn prepare_hall_stage_disabled_runtime(scene: &ShowcaseScene) -> Result<ShowcaseRuntime> {
+    anyhow::ensure!(
+        scene.definition.kind == WorldSceneKind::SafeHub,
+        "Hall StageDisabled evidence requires the Hall scene"
+    );
+    let realm_gate_position = scene
+        .definition
+        .objects
+        .iter()
+        .find_map(|object| (object.id == "station.realm_gate").then_some(object.geometry))
+        .and_then(|geometry| match geometry {
+            SceneObjectGeometry::PointInteractable { point, .. } => Some(point),
+            _ => None,
+        })
+        .context("compiled Hall is missing its Realm Gate interaction point")?;
+    let mut runtime = new_showcase_runtime(&scene.definition, realm_gate_position)?;
+    advance_showcase_runtime(
+        scene,
+        &mut runtime,
+        ShowcaseFrameInput {
+            interaction: ShowcaseInteractionInput::Held,
+            ..ShowcaseFrameInput::default()
+        },
+    )?;
+    anyhow::ensure!(
+        runtime.prompt.ends_with("STAGE_DISABLED"),
+        "Hall evidence did not fail closed"
+    );
+    runtime.frozen_for_evidence = true;
+    Ok(runtime)
+}
+
+fn prepare_microrealm_warning_runtime(scene: &ShowcaseScene) -> Result<ShowcaseRuntime> {
+    anyhow::ensure!(
+        scene.definition.kind == WorldSceneKind::PrivateDanger,
+        "microrealm warning evidence requires the microrealm scene"
+    );
+    let mut runtime = new_showcase_runtime(&scene.definition, scene.definition.player_spawn)?;
+    advance_showcase_runtime(
+        scene,
+        &mut runtime,
+        ShowcaseFrameInput {
+            microrealm_action: ShowcaseMicrorealmAction::PrimaryReleased,
+            ..ShowcaseFrameInput::default()
+        },
+    )?;
+    for _ in 0..30 {
+        advance_showcase_runtime(scene, &mut runtime, ShowcaseFrameInput::default())?;
+    }
+    anyhow::ensure!(
+        runtime.state.starts_with("PACK.BELL.01 WARNING REQUESTED"),
+        "microrealm evidence did not reach the exact warning transition"
+    );
+    runtime.frozen_for_evidence = true;
+    Ok(runtime)
+}
+
+fn prepare_microrealm_cleared_runtime(scene: &ShowcaseScene) -> Result<ShowcaseRuntime> {
+    let mut runtime = prepare_microrealm_warning_runtime(scene)?;
+    runtime.frozen_for_evidence = false;
+    advance_showcase_runtime(
+        scene,
+        &mut runtime,
+        ShowcaseFrameInput {
+            microrealm_action: ShowcaseMicrorealmAction::SupplyDisposableClear,
+            ..ShowcaseFrameInput::default()
+        },
+    )?;
+    for (horizontal, vertical, ticks) in [(1, 0, 94), (0, -1, 94), (1, 0, 94), (0, -1, 94)] {
+        for _ in 0..ticks {
+            advance_showcase_runtime(
+                scene,
+                &mut runtime,
+                ShowcaseFrameInput {
+                    horizontal,
+                    vertical,
+                    ..ShowcaseFrameInput::default()
+                },
+            )?;
+        }
+    }
+    anyhow::ensure!(
+        runtime
+            .microrealm
+            .as_ref()
+            .is_some_and(CoreMicrorealmSimulation::bell_portal_available),
+        "microrealm clear evidence did not open the Bell portal condition"
+    );
+    runtime.frozen_for_evidence = true;
+    Ok(runtime)
+}
+
+fn new_showcase_runtime(
+    definition: &WorldSceneDefinition,
+    player_spawn: TilePoint,
+) -> Result<ShowcaseRuntime> {
+    let player = WorldScenePlayer::new(definition, player_spawn, CARDINAL_STEP_MILLI_TILES)?;
+    let microrealm = (definition.kind == WorldSceneKind::PrivateDanger)
+        .then(|| CoreMicrorealmSimulation::new(player_spawn));
+    Ok(ShowcaseRuntime {
+        player,
+        interaction: SceneInteractionSession::default(),
+        microrealm,
+        tick: Tick(0),
+        prompt: "MOVE WITH WASD OR ARROWS".to_owned(),
+        state: "AUTHORITATIVE SCENE READY".to_owned(),
+        faulted: false,
+        frozen_for_evidence: false,
+    })
 }
 
 fn scene_labels(
@@ -761,6 +939,7 @@ fn spawn_hud(commands: &mut Commands, scene: &ShowcaseScene) {
         )),
         TextFont::from_font_size(15.0),
         TextColor(Color::srgb_u8(232, 225, 203)),
+        GlobalZIndex(HUD_GLOBAL_Z_INDEX),
         Node {
             position_type: PositionType::Absolute,
             top: px(14),
@@ -777,6 +956,7 @@ fn spawn_hud(commands: &mut Commands, scene: &ShowcaseScene) {
         Text::new("DISPOSABLE CORE SHOWCASE  •  NORMAL PLAYER ROUTE DISABLED\nWASD / ARROWS MOVE  •  E INTERACT  •  ESC CLOSE  •  NORTHWEST AUTHORED ORIGIN"),
         TextFont::from_font_size(13.0),
         TextColor(Color::srgb_u8(199, 203, 196)),
+        GlobalZIndex(HUD_GLOBAL_Z_INDEX),
         Node {
             position_type: PositionType::Absolute,
             bottom: px(14),
@@ -794,6 +974,7 @@ fn spawn_hud(commands: &mut Commands, scene: &ShowcaseScene) {
         Text::new("AUTHORITATIVE SCENE READY"),
         TextFont::from_font_size(14.0),
         TextColor(Color::srgb_u8(226, 186, 91)),
+        GlobalZIndex(HUD_GLOBAL_Z_INDEX),
         Node {
             position_type: PositionType::Absolute,
             top: px(120),
@@ -811,6 +992,7 @@ fn spawn_hud(commands: &mut Commands, scene: &ShowcaseScene) {
         Text::new("MOVE WITH WASD OR ARROWS"),
         TextFont::from_font_size(14.0),
         TextColor(Color::srgb_u8(232, 225, 203)),
+        GlobalZIndex(HUD_GLOBAL_Z_INDEX),
         Node {
             position_type: PositionType::Absolute,
             bottom: px(14),
@@ -831,75 +1013,91 @@ fn step_world_showcase(
     scene: Res<ShowcaseScene>,
     mut runtime: ResMut<ShowcaseRuntime>,
 ) {
-    if runtime.faulted {
+    if runtime.faulted || runtime.frozen_for_evidence {
         return;
     }
-    let Some(next_tick) = runtime.tick.checked_next() else {
-        fail_showcase(&mut runtime, "authoritative tick overflow");
-        return;
-    };
-    runtime.tick = next_tick;
-    if runtime.interaction.open_panel_object_id().is_none() {
-        let horizontal = key_axis(
+    let input = ShowcaseFrameInput {
+        horizontal: key_axis(
             &keyboard,
             [KeyCode::KeyA, KeyCode::ArrowLeft],
             [KeyCode::KeyD, KeyCode::ArrowRight],
-        );
-        let vertical = key_axis(
+        ),
+        vertical: key_axis(
             &keyboard,
             [KeyCode::KeyW, KeyCode::ArrowUp],
             [KeyCode::KeyS, KeyCode::ArrowDown],
-        );
-        let diagonal = horizontal != 0 && vertical != 0;
+        ),
+        interaction: if keyboard.just_pressed(KeyCode::Escape) {
+            ShowcaseInteractionInput::ClosePanel
+        } else if keyboard.pressed(KeyCode::KeyE) || keyboard.pressed(KeyCode::Enter) {
+            ShowcaseInteractionInput::Held
+        } else {
+            ShowcaseInteractionInput::None
+        },
+        microrealm_action: if keyboard.just_pressed(KeyCode::KeyC) {
+            ShowcaseMicrorealmAction::SupplyDisposableClear
+        } else if mouse.just_released(MouseButton::Left) {
+            ShowcaseMicrorealmAction::PrimaryReleased
+        } else {
+            ShowcaseMicrorealmAction::None
+        },
+        living_participants: 1,
+    };
+    if let Err(error) = advance_showcase_runtime(&scene, &mut runtime, input) {
+        fail_showcase(&mut runtime, &error.to_string());
+    }
+}
+
+fn advance_showcase_runtime(
+    scene: &ShowcaseScene,
+    runtime: &mut ShowcaseRuntime,
+    input: ShowcaseFrameInput,
+) -> Result<(), ShowcaseRuntimeError> {
+    runtime.tick = runtime
+        .tick
+        .checked_next()
+        .ok_or(ShowcaseRuntimeError::TickOverflow)?;
+    if runtime.interaction.open_panel_object_id().is_none() {
+        let diagonal = input.horizontal != 0 && input.vertical != 0;
         let step = if diagonal {
             DIAGONAL_STEP_MILLI_TILES
         } else {
             CARDINAL_STEP_MILLI_TILES
         };
-        if runtime
+        runtime
             .player
             .step_movement(
                 &scene.definition,
-                SceneDisplacement::new(horizontal * step, vertical * step),
+                SceneDisplacement::new(input.horizontal * step, input.vertical * step),
             )
-            .is_err()
-        {
-            fail_showcase(&mut runtime, "movement authority rejected a bounded step");
-            return;
-        }
+            .map_err(|_| ShowcaseRuntimeError::MovementRejected)?;
     }
 
-    step_microrealm(&keyboard, &mouse, &mut runtime);
+    step_microrealm(input, runtime)?;
     let gates = BTreeSet::new();
-    let Ok(projection) = runtime.player.nearest_interaction(
-        &scene.definition,
-        SceneAccessContext {
-            enabled_integration_gates: &gates,
-            microrealm_cleared: runtime
-                .microrealm
-                .as_ref()
-                .is_some_and(CoreMicrorealmSimulation::bell_portal_available),
-        },
-    ) else {
-        fail_showcase(&mut runtime, "interaction projection failed closed");
-        return;
-    };
-    let interact_held = keyboard.pressed(KeyCode::KeyE) || keyboard.pressed(KeyCode::Enter);
-    let close_panel = keyboard.just_pressed(KeyCode::Escape);
-    let Ok(interaction_events) =
-        runtime
-            .interaction
-            .step(projection.as_ref(), interact_held, close_panel)
-    else {
-        fail_showcase(&mut runtime, "interaction authority overflowed");
-        return;
-    };
-    update_interaction_copy(
-        &scene,
-        &mut runtime,
-        projection.as_ref(),
-        &interaction_events,
-    );
+    let projection = runtime
+        .player
+        .nearest_interaction(
+            &scene.definition,
+            SceneAccessContext {
+                enabled_integration_gates: &gates,
+                microrealm_cleared: runtime
+                    .microrealm
+                    .as_ref()
+                    .is_some_and(CoreMicrorealmSimulation::bell_portal_available),
+            },
+        )
+        .map_err(|_| ShowcaseRuntimeError::InteractionProjection)?;
+    let interaction_events = runtime
+        .interaction
+        .step(
+            projection.as_ref(),
+            input.interaction == ShowcaseInteractionInput::Held,
+            input.interaction == ShowcaseInteractionInput::ClosePanel,
+        )
+        .map_err(|_| ShowcaseRuntimeError::InteractionSession)?;
+    update_interaction_copy(scene, runtime, projection.as_ref(), &interaction_events);
+    Ok(())
 }
 
 fn key_axis(
@@ -913,24 +1111,24 @@ fn key_axis(
 }
 
 fn step_microrealm(
-    keyboard: &ButtonInput<KeyCode>,
-    mouse: &ButtonInput<MouseButton>,
+    input: ShowcaseFrameInput,
     runtime: &mut ShowcaseRuntime,
-) {
+) -> Result<(), ShowcaseRuntimeError> {
     let Some(simulation) = &mut runtime.microrealm else {
         "SAFE NONCOMBAT AUTHORITY".clone_into(&mut runtime.state);
-        return;
+        return Ok(());
     };
-    let pack_cleared =
-        simulation.phase() == CoreMicrorealmPhase::Active && keyboard.just_pressed(KeyCode::KeyC);
-    let input = CoreMicrorealmInput {
+    let pack_cleared = simulation.phase() == CoreMicrorealmPhase::Active
+        && input.microrealm_action == ShowcaseMicrorealmAction::SupplyDisposableClear;
+    let simulation_input = CoreMicrorealmInput {
         entrant_position: runtime.player.position(),
-        primary_released: mouse.just_released(MouseButton::Left),
-        living_participants: 1,
+        primary_released: input.microrealm_action == ShowcaseMicrorealmAction::PrimaryReleased,
+        living_participants: input.living_participants,
         pack_cleared,
     };
-    match simulation.step(runtime.tick, input) {
+    match simulation.step(runtime.tick, simulation_input) {
         Ok(events) => {
+            let had_event = !events.is_empty();
             for event in events {
                 runtime.state = match event {
                     CoreMicrorealmEvent::BeginPackWarning { warning_ticks } => format!(
@@ -942,17 +1140,18 @@ fn step_microrealm(
                     }
                 };
             }
-            if simulation.phase() == CoreMicrorealmPhase::Active && !pack_cleared {
+            if !had_event && simulation.phase() == CoreMicrorealmPhase::Active && !pack_cleared {
                 "PACK.BELL.01 ACTIVE SEAM  /  PRESS C TO SUPPLY DISPOSABLE 03D CLEAR"
                     .clone_into(&mut runtime.state);
-            } else if simulation.phase() == CoreMicrorealmPhase::Waiting {
+            } else if !had_event && simulation.phase() == CoreMicrorealmPhase::Waiting {
                 "ENTRY TRIGGERED  /  1 SECOND PACK DELAY".clone_into(&mut runtime.state);
-            } else if simulation.phase() == CoreMicrorealmPhase::Dormant {
+            } else if !had_event && simulation.phase() == CoreMicrorealmPhase::Dormant {
                 "DORMANT  /  MOVE BEYOND 1 TILE OR RELEASE PRIMARY TO TRIGGER"
                     .clone_into(&mut runtime.state);
             }
+            Ok(())
         }
-        Err(_) => fail_showcase(runtime, "microrealm lifecycle failed closed"),
+        Err(_) => Err(ShowcaseRuntimeError::MicrorealmLifecycle),
     }
 }
 
@@ -1135,6 +1334,83 @@ mod tests {
         .expect("world flow")
     }
 
+    fn showcase_scene(
+        compiled: &CoreDevelopmentWorldFlow,
+        definition: WorldSceneDefinition,
+    ) -> ShowcaseScene {
+        ShowcaseScene {
+            labels: scene_labels(compiled, &definition).expect("labels"),
+            definition,
+            revision: compiled.hashes().records_blake3[..12].to_owned(),
+            reduced_motion: false,
+        }
+    }
+
+    #[derive(Debug)]
+    struct TraceSnapshot {
+        scene_id: String,
+        tick: u64,
+        position: TilePoint,
+        phase: Option<CoreMicrorealmPhase>,
+        bell_portal_available: bool,
+        prompt: String,
+        state: String,
+        open_panel: Option<String>,
+    }
+
+    fn trace_snapshot(scene: &ShowcaseScene, runtime: &ShowcaseRuntime) -> TraceSnapshot {
+        TraceSnapshot {
+            scene_id: scene.definition.id.clone(),
+            tick: runtime.tick.0,
+            position: runtime.player.position(),
+            phase: runtime
+                .microrealm
+                .as_ref()
+                .map(CoreMicrorealmSimulation::phase),
+            bell_portal_available: runtime
+                .microrealm
+                .as_ref()
+                .is_some_and(CoreMicrorealmSimulation::bell_portal_available),
+            prompt: runtime.prompt.clone(),
+            state: runtime.state.clone(),
+            open_panel: runtime
+                .interaction
+                .open_panel_object_id()
+                .map(str::to_owned),
+        }
+    }
+
+    fn update_trace_text(hasher: &mut blake3::Hasher, value: &str) {
+        let length = u32::try_from(value.len()).expect("trace text length");
+        hasher.update(&length.to_le_bytes());
+        hasher.update(value.as_bytes());
+    }
+
+    fn trace_digest(trace: &[TraceSnapshot]) -> String {
+        let mut hasher = blake3::Hasher::new();
+        for snapshot in trace {
+            update_trace_text(&mut hasher, &snapshot.scene_id);
+            hasher.update(&snapshot.tick.to_le_bytes());
+            hasher.update(&snapshot.position.x_milli_tiles.to_le_bytes());
+            hasher.update(&snapshot.position.y_milli_tiles.to_le_bytes());
+            hasher.update(&[match snapshot.phase {
+                None => 0,
+                Some(CoreMicrorealmPhase::Dormant) => 1,
+                Some(CoreMicrorealmPhase::Waiting) => 2,
+                Some(CoreMicrorealmPhase::Active) => 3,
+                Some(CoreMicrorealmPhase::Cleared) => 4,
+            }]);
+            hasher.update(&[u8::from(snapshot.bell_portal_available)]);
+            update_trace_text(&mut hasher, &snapshot.prompt);
+            update_trace_text(&mut hasher, &snapshot.state);
+            update_trace_text(
+                &mut hasher,
+                snapshot.open_panel.as_deref().unwrap_or_default(),
+            );
+        }
+        hasher.finalize().to_hex().to_string()
+    }
+
     #[test]
     fn hall_plan_is_derived_from_exact_compiled_geometry() {
         let scene = compiled().compile_hall_scene().expect("Hall");
@@ -1225,5 +1501,164 @@ mod tests {
             aspect
         ));
         assert!(!label_focus_is_visible(Vec2::new(0.0, 0.0), camera, aspect));
+    }
+
+    fn disabled_hall_trace(compiled: &CoreDevelopmentWorldFlow) -> Vec<TraceSnapshot> {
+        let hall = showcase_scene(compiled, compiled.compile_hall_scene().expect("Hall"));
+        let realm_gate_position = hall
+            .definition
+            .objects
+            .iter()
+            .find_map(|object| (object.id == "station.realm_gate").then_some(object.geometry))
+            .and_then(|geometry| match geometry {
+                SceneObjectGeometry::PointInteractable { point, .. } => Some(point),
+                _ => None,
+            })
+            .expect("Realm Gate interaction point");
+        let mut hall_runtime =
+            new_showcase_runtime(&hall.definition, realm_gate_position).expect("Hall runtime");
+        let mut trace = vec![trace_snapshot(&hall, &hall_runtime)];
+        advance_showcase_runtime(
+            &hall,
+            &mut hall_runtime,
+            ShowcaseFrameInput {
+                interaction: ShowcaseInteractionInput::Held,
+                ..ShowcaseFrameInput::default()
+            },
+        )
+        .expect("typed disabled interaction");
+        assert_eq!(
+            hall_runtime.prompt,
+            "Realm Gate  /  AVAILABLE IN A LATER TEST  /  STAGE_DISABLED"
+        );
+        assert_eq!(hall_runtime.state, "SAFE NONCOMBAT AUTHORITY");
+        assert_eq!(hall_runtime.interaction.open_panel_object_id(), None);
+        trace.push(trace_snapshot(&hall, &hall_runtime));
+        trace
+    }
+
+    fn terminal_microrealm_trace(compiled: &CoreDevelopmentWorldFlow) -> Vec<TraceSnapshot> {
+        let microrealm = showcase_scene(
+            compiled,
+            compiled.compile_microrealm_scene().expect("microrealm"),
+        );
+        let mut microrealm_runtime =
+            new_showcase_runtime(&microrealm.definition, microrealm.definition.player_spawn)
+                .expect("microrealm runtime");
+        let mut trace = vec![trace_snapshot(&microrealm, &microrealm_runtime)];
+        advance_showcase_runtime(
+            &microrealm,
+            &mut microrealm_runtime,
+            ShowcaseFrameInput {
+                microrealm_action: ShowcaseMicrorealmAction::PrimaryReleased,
+                ..ShowcaseFrameInput::default()
+            },
+        )
+        .expect("primary-release trigger");
+        assert_eq!(
+            microrealm_runtime
+                .microrealm
+                .as_ref()
+                .map(CoreMicrorealmSimulation::phase),
+            Some(CoreMicrorealmPhase::Waiting)
+        );
+        trace.push(trace_snapshot(&microrealm, &microrealm_runtime));
+        for _ in 0..29 {
+            advance_showcase_runtime(
+                &microrealm,
+                &mut microrealm_runtime,
+                ShowcaseFrameInput::default(),
+            )
+            .expect("waiting tick");
+        }
+        trace.push(trace_snapshot(&microrealm, &microrealm_runtime));
+        advance_showcase_runtime(
+            &microrealm,
+            &mut microrealm_runtime,
+            ShowcaseFrameInput::default(),
+        )
+        .expect("warning transition");
+        assert_eq!(
+            microrealm_runtime.state,
+            "PACK.BELL.01 WARNING REQUESTED  /  27 TICKS  /  03D ENTITY SPAWN DEFERRED"
+        );
+        trace.push(trace_snapshot(&microrealm, &microrealm_runtime));
+        advance_showcase_runtime(
+            &microrealm,
+            &mut microrealm_runtime,
+            ShowcaseFrameInput {
+                microrealm_action: ShowcaseMicrorealmAction::SupplyDisposableClear,
+                ..ShowcaseFrameInput::default()
+            },
+        )
+        .expect("disposable clear seam");
+        assert_eq!(
+            microrealm_runtime
+                .microrealm
+                .as_ref()
+                .map(CoreMicrorealmSimulation::phase),
+            Some(CoreMicrorealmPhase::Cleared)
+        );
+        assert!(
+            microrealm_runtime
+                .microrealm
+                .as_ref()
+                .is_some_and(CoreMicrorealmSimulation::bell_portal_available)
+        );
+        assert_eq!(
+            microrealm_runtime.state,
+            "MICROREALM CLEARED  /  BELL PORTAL CONDITION SATISFIED"
+        );
+        trace.push(trace_snapshot(&microrealm, &microrealm_runtime));
+
+        trace
+    }
+
+    #[test]
+    fn fixed_runtime_trace_pins_disabled_hall_and_terminal_microrealm_states() {
+        let compiled = compiled();
+        let mut trace = disabled_hall_trace(&compiled);
+        trace.extend(terminal_microrealm_trace(&compiled));
+        assert_eq!(
+            trace_digest(&trace),
+            "25403408dac36184b2166a8454adbf22a7bb8db66df3eebbca9fa3d920f41bf9"
+        );
+    }
+
+    #[test]
+    fn disposable_evidence_states_are_scene_typed_and_reach_exact_endpoints() {
+        let compiled = compiled();
+        let hall = showcase_scene(&compiled, compiled.compile_hall_scene().expect("Hall"));
+        let hall_runtime = prepare_hall_stage_disabled_runtime(&hall).expect("disabled Hall");
+        assert!(hall_runtime.prompt.ends_with("STAGE_DISABLED"));
+        assert!(hall_runtime.frozen_for_evidence);
+
+        let microrealm = showcase_scene(
+            &compiled,
+            compiled.compile_microrealm_scene().expect("microrealm"),
+        );
+        let warning = prepare_microrealm_warning_runtime(&microrealm).expect("warning");
+        assert_eq!(warning.tick, Tick(31));
+        assert!(warning.frozen_for_evidence);
+        assert_eq!(
+            warning
+                .microrealm
+                .as_ref()
+                .map(CoreMicrorealmSimulation::phase),
+            Some(CoreMicrorealmPhase::Active)
+        );
+        let cleared = prepare_microrealm_cleared_runtime(&microrealm).expect("cleared");
+        assert_eq!(cleared.tick, Tick(408));
+        assert!(cleared.frozen_for_evidence);
+        assert_eq!(cleared.player.position(), TilePoint::new(40_460, 8_540));
+        assert!(
+            cleared
+                .microrealm
+                .as_ref()
+                .is_some_and(CoreMicrorealmSimulation::bell_portal_available)
+        );
+
+        assert!(prepare_hall_stage_disabled_runtime(&microrealm).is_err());
+        assert!(prepare_microrealm_warning_runtime(&hall).is_err());
     }
 }
