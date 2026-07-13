@@ -219,6 +219,23 @@ pub fn compose_maximum_health_multiplier(
         .max(MINIMUM_MAXIMUM_HEALTH_BASIS_POINTS))
 }
 
+pub fn resolve_primary_interval_micros(
+    base_interval_micros: u32,
+    attack_rate_basis_points: u32,
+) -> Result<u32, CoreBargainError> {
+    if base_interval_micros == 0 || attack_rate_basis_points == 0 {
+        return Err(CoreBargainError::InvalidPrimaryInterval);
+    }
+    let numerator = u64::from(base_interval_micros)
+        .checked_mul(u64::from(BASIS_POINTS_PER_ONE))
+        .ok_or(CoreBargainError::ArithmeticOverflow)?;
+    let rounded = numerator
+        .checked_add(u64::from(attack_rate_basis_points / 2))
+        .ok_or(CoreBargainError::ArithmeticOverflow)?
+        / u64::from(attack_rate_basis_points);
+    u32::try_from(rounded).map_err(|_| CoreBargainError::ArithmeticOverflow)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum CoreBargainError {
     #[error("more than three active Core Bargains were supplied")]
@@ -233,6 +250,8 @@ pub enum CoreBargainError {
     InvalidLanternAsh,
     #[error("a maximum-health multiplier must be positive")]
     InvalidMaximumHealthMultiplier,
+    #[error("base primary interval and attack rate must be positive")]
+    InvalidPrimaryInterval,
     #[error("Core Bargain fixed-point arithmetic overflowed")]
     ArithmeticOverflow,
 }
@@ -322,5 +341,6 @@ mod tests {
     fn health_composition_rounds_once_and_enforces_the_global_floor() {
         assert_eq!(compose_maximum_health_multiplier(9_000, 8_800), Ok(7_920));
         assert_eq!(compose_maximum_health_multiplier(7_000, 7_000), Ok(7_000));
+        assert_eq!(resolve_primary_interval_micros(454_545, 8_500), Ok(534_759));
     }
 }

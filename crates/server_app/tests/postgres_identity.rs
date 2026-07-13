@@ -801,6 +801,14 @@ async fn assert_persisted_combat_factory(
     let factory = CoreCharacterCombatFactory::load(persistence.clone(), content_root).unwrap();
     let combat = factory.build(account_id, character_id).await.unwrap();
     assert_eq!(
+        combat.oath_bargain_version,
+        u64::try_from(snapshot.oath_bargain_version).unwrap()
+    );
+    assert_eq!(
+        combat.bargains.definitions().len(),
+        snapshot.active_bargains.len()
+    );
+    assert_eq!(
         combat.state.oath(),
         Some(sim_core::GraveArbalistOath::LongVigil)
     );

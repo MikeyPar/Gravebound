@@ -4,17 +4,20 @@ use std::path::Path;
 
 use persistence::{PostgresPersistence, StoredCoreCombatLoadout};
 use protocol::GRAVE_ARBALIST_CLASS_ID;
-use sim_core::{EquipmentRarity, PlayerCombatState};
+use sim_core::{
+    CoreBargainLoadout, EquipmentRarity, PlayerCombatState, ResolvedCoreBargainModifiers,
+};
 use thiserror::Error;
-
-const UNMODIFIED_ATTACK_RATE_BASIS_POINTS: u32 = 10_000;
 
 #[derive(Debug, Clone)]
 pub struct CoreCharacterCombat {
     pub character_id: [u8; 16],
     pub character_state_version: u64,
     pub inventory_version: u64,
+    pub oath_bargain_version: u64,
     pub level: u16,
+    pub bargains: CoreBargainLoadout,
+    pub bargain_modifiers: ResolvedCoreBargainModifiers,
     pub maximum_health_multiplier_basis_points: u32,
     pub state: PlayerCombatState,
 }
@@ -44,8 +47,6 @@ pub enum CoreCombatFactoryError {
     LifeUnavailable,
     #[error("character mutation is unresolved")]
     UnresolvedMutation,
-    #[error("character has no selected Oath")]
-    OathRequired,
     #[error("durable inventory is unavailable")]
     InventoryUnavailable,
     #[error("equipped weapon is unavailable")]
@@ -115,10 +116,6 @@ impl CoreCharacterCombatCompiler {
         if snapshot.security_state != 0 {
             return Err(CoreCombatFactoryError::UnresolvedMutation);
         }
-        let oath_id = snapshot
-            .oath_id
-            .as_deref()
-            .ok_or(CoreCombatFactoryError::OathRequired)?;
         let inventory_version = snapshot
             .inventory_version
             .and_then(|value| u64::try_from(value).ok())
@@ -130,38 +127,62 @@ impl CoreCharacterCombatCompiler {
         if weapon.content_revision != self.items.revision_label() {
             return Err(CoreCombatFactoryError::ContentMismatch);
         }
+        if snapshot
+            .active_bargains
+            .iter()
+            .any(|bargain| bargain.acquiring_offer_content_version != self.oaths.revision_label())
+        {
+            return Err(CoreCombatFactoryError::ContentMismatch);
+        }
         // Durable affix identities/resolved values are owned by 04F. Until that projection exists,
         // only the exact Worn starter weapon is safe to construct; rolled rewards fail closed.
         if weapon.rarity != 0 {
             return Err(CoreCombatFactoryError::RolledWeaponStageDisabled);
         }
-        let definitions = sim_content::compile_core_oathed_combat_definitions_for_item(
+        let bargain_ids = snapshot
+            .active_bargains
+            .iter()
+            .map(|bargain| bargain.bargain_id.as_str())
+            .collect::<Vec<_>>();
+        let definitions = sim_content::compile_core_combat_definitions_for_item(
             &self.class_package,
             &self.items,
             &self.oaths,
-            oath_id,
+            snapshot.oath_id.as_deref(),
+            &bargain_ids,
             &weapon.template_id,
             u8::try_from(weapon.item_level).map_err(|_| CoreCombatFactoryError::InvalidContent)?,
             EquipmentRarity::Worn,
             0,
-            UNMODIFIED_ATTACK_RATE_BASIS_POINTS,
         )
         .map_err(|_| CoreCombatFactoryError::InvalidContent)?;
-        let state = PlayerCombatState::with_oath(
-            definitions.weapon,
-            definitions.grave_mark,
-            definitions.slipstep,
-            definitions.stillness,
-            definitions.oath,
-        )
+        let state = match definitions.oath {
+            Some(oath) => PlayerCombatState::with_oath(
+                definitions.weapon,
+                definitions.grave_mark,
+                definitions.slipstep,
+                definitions.stillness,
+                oath,
+            ),
+            None => PlayerCombatState::new(
+                definitions.weapon,
+                definitions.grave_mark,
+                definitions.slipstep,
+                definitions.stillness,
+            ),
+        }
         .map_err(|_| CoreCombatFactoryError::InvalidContent)?;
         Ok(CoreCharacterCombat {
             character_id: snapshot.character_id,
             character_state_version: u64::try_from(snapshot.character_state_version)
                 .map_err(|_| CoreCombatFactoryError::InvalidContent)?,
             inventory_version,
+            oath_bargain_version: u64::try_from(snapshot.oath_bargain_version)
+                .map_err(|_| CoreCombatFactoryError::InvalidContent)?,
             level: u16::try_from(snapshot.level)
                 .map_err(|_| CoreCombatFactoryError::InvalidContent)?,
+            bargains: definitions.bargains,
+            bargain_modifiers: definitions.bargain_modifiers,
             maximum_health_multiplier_basis_points: definitions
                 .maximum_health_multiplier_basis_points,
             state,
@@ -173,7 +194,7 @@ impl CoreCharacterCombatCompiler {
 mod tests {
     use std::path::PathBuf;
 
-    use persistence::StoredEquippedWeapon;
+    use persistence::{StoredCombatBargain, StoredEquippedWeapon};
     use protocol::{LONG_VIGIL_ID, NAILKEEPER_ID};
     use sim_core::GraveArbalistOath;
 
@@ -232,10 +253,9 @@ mod tests {
         let compiler = compiler();
         let mut value = snapshot(&compiler, LONG_VIGIL_ID);
         value.oath_id = None;
-        assert_eq!(
-            compiler.build_from_snapshot(&value).unwrap_err(),
-            CoreCombatFactoryError::OathRequired
-        );
+        value.level = 5;
+        let no_oath = compiler.build_from_snapshot(&value).unwrap();
+        assert_eq!(no_oath.state.oath(), None);
         value = snapshot(&compiler, "oath.arbalist.unknown");
         assert_eq!(
             compiler.build_from_snapshot(&value).unwrap_err(),
@@ -246,6 +266,37 @@ mod tests {
         assert_eq!(
             compiler.build_from_snapshot(&value).unwrap_err(),
             CoreCombatFactoryError::RolledWeaponStageDisabled
+        );
+    }
+
+    #[test]
+    fn level_five_cinder_loadout_uses_the_acquiring_content_revision_without_an_oath() {
+        let compiler = compiler();
+        let mut value = snapshot(&compiler, LONG_VIGIL_ID);
+        value.level = 5;
+        value.oath_id = None;
+        value.oath_bargain_version = 2;
+        value.active_bargains.push(StoredCombatBargain {
+            bargain_id: "bargain.cinder_hunger".into(),
+            acquisition_ordinal: 1,
+            acquired_by_offer_id: [4; 16],
+            acquiring_offer_content_version: compiler.oaths.revision_label().into(),
+        });
+        let combat = compiler.build_from_snapshot(&value).unwrap();
+        assert_eq!(combat.state.oath(), None);
+        assert_eq!(combat.oath_bargain_version, 2);
+        assert_eq!(combat.bargains.definitions().len(), 1);
+        assert_eq!(combat.maximum_health_multiplier_basis_points, 8_800);
+        assert_eq!(
+            combat.bargain_modifiers.outgoing_direct_damage_basis_points,
+            11_800
+        );
+        value.active_bargains[0]
+            .acquiring_offer_content_version
+            .push_str(".drift");
+        assert_eq!(
+            compiler.build_from_snapshot(&value).unwrap_err(),
+            CoreCombatFactoryError::ContentMismatch
         );
     }
 }

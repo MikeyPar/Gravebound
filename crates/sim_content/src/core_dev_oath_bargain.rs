@@ -12,8 +12,9 @@ use serde::{Deserialize, Serialize};
 use sim_core::{
     BellDebtDefinition, CinderHungerDefinition, CoreBargainDefinition, CoreBargainLoadout,
     EquipmentRarity, GraveArbalistOath, GraveMarkDefinition, LanternAshDefinition,
-    ResolvedArbalistOathStats, SlipstepDefinition, StillnessDefinition, WeaponDefinition,
-    duration_ms_to_ticks_nearest, resolve_arbalist_oath_stats,
+    ResolvedArbalistOathStats, ResolvedCoreBargainModifiers, SlipstepDefinition,
+    StillnessDefinition, WeaponDefinition, duration_ms_to_ticks_nearest,
+    resolve_arbalist_oath_stats,
 };
 
 use crate::{
@@ -227,6 +228,99 @@ pub struct CoreOathedCombatDefinitions {
     pub slipstep: SlipstepDefinition,
     pub stillness: StillnessDefinition,
     pub maximum_health_multiplier_basis_points: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct CoreCombatDefinitions {
+    pub oath: Option<GraveArbalistOath>,
+    pub bargains: CoreBargainLoadout,
+    pub bargain_modifiers: ResolvedCoreBargainModifiers,
+    pub weapon: WeaponDefinition,
+    pub grave_mark: GraveMarkDefinition,
+    pub slipstep: SlipstepDefinition,
+    pub stillness: StillnessDefinition,
+    pub maximum_health_multiplier_basis_points: u32,
+}
+
+#[allow(clippy::too_many_arguments)] // Every persisted item and immutable choice axis is explicit.
+pub fn compile_core_combat_definitions_for_item(
+    class_package: &ContentPackage,
+    item_catalog: &CompiledProductionItemCatalog,
+    oath_catalog: &CompiledOathBargainCatalog,
+    oath_id: Option<&str>,
+    bargain_ids: &[&str],
+    weapon_id: &str,
+    item_level: u8,
+    rarity: EquipmentRarity,
+    weapon_w_affix_basis_points: u16,
+) -> Result<CoreCombatDefinitions> {
+    let bargains = compile_core_bargain_loadout(oath_catalog, bargain_ids)?;
+    let bargain_modifiers = sim_core::resolve_core_bargain_modifiers(&bargains);
+    let base_mark = first_playable_grave_mark(class_package)?;
+    let base_stillness = first_playable_stillness(class_package)?;
+    let base_interval = core_crossbow_attack_interval_micros(item_catalog, weapon_id)?;
+    let (oath, grave_mark, stillness, oath_health, primary_interval_micros) = match oath_id {
+        Some(oath_id) => {
+            let stats = resolve_core_arbalist_oath_stats(
+                oath_catalog,
+                oath_id,
+                base_stillness.activation_ticks(),
+                base_mark.range_milli_tiles(),
+                base_mark.marked_primary_bonus_basis_points(),
+                base_interval,
+                bargain_modifiers.ordinary_attack_rate_basis_points,
+            )?;
+            let oath = GraveArbalistOath::from_content_id(oath_id)
+                .map_err(|error| anyhow::anyhow!(error))?;
+            (
+                Some(oath),
+                base_mark
+                    .with_range_and_marked_primary_bonus(
+                        stats.grave_mark_range_milli_tiles,
+                        stats.marked_primary_bonus_basis_points,
+                    )
+                    .context("resolved Oath Grave Mark is invalid")?,
+                base_stillness
+                    .with_activation_ticks(stats.focused_activation_ticks)
+                    .context("resolved Oath Stillness is invalid")?,
+                stats.maximum_health_multiplier_basis_points,
+                stats.primary_interval_micros,
+            )
+        }
+        None => (
+            None,
+            base_mark,
+            base_stillness,
+            10_000,
+            sim_core::resolve_primary_interval_micros(
+                base_interval,
+                bargain_modifiers.ordinary_attack_rate_basis_points,
+            )
+            .map_err(|error| anyhow::anyhow!(error))?,
+        ),
+    };
+    let maximum_health_multiplier_basis_points = sim_core::compose_maximum_health_multiplier(
+        oath_health,
+        bargain_modifiers.maximum_health_multiplier_basis_points,
+    )
+    .map_err(|error| anyhow::anyhow!(error))?;
+    Ok(CoreCombatDefinitions {
+        oath,
+        bargains,
+        bargain_modifiers,
+        weapon: compile_core_crossbow_for_item(
+            item_catalog,
+            weapon_id,
+            item_level,
+            rarity,
+            weapon_w_affix_basis_points,
+            primary_interval_micros,
+        )?,
+        grave_mark,
+        slipstep: first_playable_slipstep(class_package)?,
+        stillness,
+        maximum_health_multiplier_basis_points,
+    })
 }
 
 pub fn compile_core_oathed_combat_definitions(
