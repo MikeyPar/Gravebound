@@ -1,7 +1,7 @@
 use persistence::{
-    DangerCheckpointWrite, EXPECTED_SCHEMA_VERSION, PersistenceConfig, PersistenceError,
-    PersistenceTransaction, PostgresPersistence, StoredCharacter, StoredDangerCheckpoint,
-    StoredMutation, StoredWorldFlowRevisionV1, WIPEABLE_CORE_NAMESPACE,
+    DangerCheckpointDelete, DangerCheckpointWrite, EXPECTED_SCHEMA_VERSION, PersistenceConfig,
+    PersistenceError, PersistenceTransaction, PostgresPersistence, StoredCharacter,
+    StoredDangerCheckpoint, StoredMutation, StoredWorldFlowRevisionV1, WIPEABLE_CORE_NAMESPACE,
 };
 const ACCOUNT_A: [u8; 16] = [1; 16];
 const ACCOUNT_B: [u8; 16] = [2; 16];
@@ -200,6 +200,7 @@ async fn typed_identity_store_round_trips_under_one_lock() {
 
 #[tokio::test]
 #[ignore = "requires explicitly authorized disposable PostgreSQL"]
+#[allow(clippy::too_many_lines)] // Keep the pre/post-safe durable ordering visible end to end.
 async fn danger_checkpoints_are_version_bound_replay_safe_and_monotonic() {
     let persistence = disposable_database().await;
     clear_accounts(&persistence).await;
@@ -258,6 +259,23 @@ async fn danger_checkpoints_are_version_bound_replay_safe_and_monotonic() {
             .unwrap(),
         Some(higher_concurrent)
     );
+    assert!(matches!(
+        persistence
+            .delete_danger_checkpoint_after_safe_transfer(
+                ACCOUNT_A,
+                CHARACTER_A,
+                CHECKPOINT_LINEAGE,
+            )
+            .await,
+        Err(PersistenceError::DangerCheckpointFinalizationNotCommitted)
+    ));
+    assert!(
+        persistence
+            .danger_checkpoint(ACCOUNT_A, CHARACTER_A)
+            .await
+            .unwrap()
+            .is_some()
+    );
 
     let mut stale_version = danger_checkpoint(1_020, vec![12]);
     stale_version.inventory_version += 1;
@@ -283,6 +301,63 @@ async fn danger_checkpoints_are_version_bound_replay_safe_and_monotonic() {
         persistence.danger_checkpoint(ACCOUNT_A, CHARACTER_A).await,
         Err(PersistenceError::CorruptStoredDangerCheckpoint)
     ));
+
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    sqlx::query(
+        "UPDATE character_danger_checkpoints SET checkpoint_payload = $1 \
+         WHERE namespace_id = $2 AND account_id = $3 AND character_id = $4",
+    )
+    .bind([11_u8].as_slice())
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_A.as_slice())
+    .bind(CHARACTER_A.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE character_world_locations SET location_kind = 1, \
+         location_content_id = 'hub.lantern_halls_01', safe_arrival_kind = 0, \
+         instance_lineage_id = NULL, entry_restore_point_id = NULL WHERE namespace_id = $1 \
+         AND account_id = $2 AND character_id = $3",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_A.as_slice())
+    .bind(CHARACTER_A.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE character_instance_lineages SET lineage_state = 2, \
+         closed_at = transaction_timestamp() WHERE namespace_id = $1 AND lineage_id = $2",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(CHECKPOINT_LINEAGE.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    transaction.commit().await.unwrap();
+    assert_eq!(
+        persistence
+            .delete_danger_checkpoint_after_safe_transfer(
+                ACCOUNT_A,
+                CHARACTER_A,
+                CHECKPOINT_LINEAGE,
+            )
+            .await
+            .unwrap(),
+        DangerCheckpointDelete::Deleted
+    );
+    assert_eq!(
+        persistence
+            .delete_danger_checkpoint_after_safe_transfer(
+                ACCOUNT_A,
+                CHARACTER_A,
+                CHECKPOINT_LINEAGE,
+            )
+            .await
+            .unwrap(),
+        DangerCheckpointDelete::Absent
+    );
     persistence.close().await;
 }
 

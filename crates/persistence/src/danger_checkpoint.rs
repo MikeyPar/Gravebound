@@ -37,6 +37,12 @@ pub enum DangerCheckpointWrite {
     Replayed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DangerCheckpointDelete {
+    Deleted,
+    Absent,
+}
+
 impl PostgresPersistence {
     pub async fn danger_checkpoint(
         &self,
@@ -71,6 +77,65 @@ impl PostgresPersistence {
             }
         }
         unreachable!("bounded danger-checkpoint transaction loop always returns")
+    }
+
+    pub async fn delete_danger_checkpoint_after_safe_transfer(
+        &self,
+        account_id: [u8; ID_BYTES],
+        character_id: [u8; ID_BYTES],
+        lineage_id: [u8; ID_BYTES],
+    ) -> Result<DangerCheckpointDelete, PersistenceError> {
+        if all_zero(&account_id) || all_zero(&character_id) || all_zero(&lineage_id) {
+            return Err(PersistenceError::CorruptStoredDangerCheckpoint);
+        }
+        let mut transaction = self.begin_transaction().await?;
+        let location = sqlx::query(
+            "SELECT location_kind, instance_lineage_id FROM character_world_locations \
+             WHERE namespace_id = $1 AND account_id = $2 AND character_id = $3 FOR UPDATE",
+        )
+        .bind(WIPEABLE_CORE_NAMESPACE)
+        .bind(account_id.as_slice())
+        .bind(character_id.as_slice())
+        .fetch_optional(transaction.connection())
+        .await?
+        .ok_or(PersistenceError::DangerCheckpointCharacterNotFound)?;
+        let location_kind: i16 = location.try_get("location_kind")?;
+        let active_lineage: Option<Vec<u8>> = location.try_get("instance_lineage_id")?;
+        if !matches!(location_kind, 0 | 1) || active_lineage.is_some() {
+            return Err(PersistenceError::DangerCheckpointFinalizationNotCommitted);
+        }
+        let stored_lineage: Option<Vec<u8>> = sqlx::query_scalar(
+            "SELECT lineage_id FROM character_danger_checkpoints WHERE namespace_id = $1 \
+             AND account_id = $2 AND character_id = $3 FOR UPDATE",
+        )
+        .bind(WIPEABLE_CORE_NAMESPACE)
+        .bind(account_id.as_slice())
+        .bind(character_id.as_slice())
+        .fetch_optional(transaction.connection())
+        .await?;
+        let Some(stored_lineage) = stored_lineage else {
+            transaction.rollback().await?;
+            return Ok(DangerCheckpointDelete::Absent);
+        };
+        if fixed_bytes::<ID_BYTES>(stored_lineage)? != lineage_id {
+            return Err(PersistenceError::StaleDangerCheckpoint);
+        }
+        let deleted = sqlx::query(
+            "DELETE FROM character_danger_checkpoints WHERE namespace_id = $1 AND account_id = $2 \
+             AND character_id = $3 AND lineage_id = $4",
+        )
+        .bind(WIPEABLE_CORE_NAMESPACE)
+        .bind(account_id.as_slice())
+        .bind(character_id.as_slice())
+        .bind(lineage_id.as_slice())
+        .execute(transaction.connection())
+        .await?
+        .rows_affected();
+        if deleted != 1 {
+            return Err(PersistenceError::CorruptStoredDangerCheckpoint);
+        }
+        transaction.commit().await?;
+        Ok(DangerCheckpointDelete::Deleted)
     }
 
     async fn write_danger_checkpoint_once(

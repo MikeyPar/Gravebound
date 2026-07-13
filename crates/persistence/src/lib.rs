@@ -41,7 +41,9 @@ pub use bargain_milestone::{
 pub use combat_loadout::{
     StoredCombatBargain, StoredCombatBeltStack, StoredCoreCombatLoadout, StoredEquippedWeapon,
 };
-pub use danger_checkpoint::{DangerCheckpointWrite, StoredDangerCheckpoint};
+pub use danger_checkpoint::{
+    DangerCheckpointDelete, DangerCheckpointWrite, StoredDangerCheckpoint,
+};
 pub use ground_expiry::{MAX_GROUND_EXPIRY_BATCH, StoredGroundExpiry, StoredGroundExpiryCandidate};
 pub use identity::{StoredCharacter, StoredIdentityAggregate, StoredMutation};
 pub use items::{
@@ -250,6 +252,8 @@ pub enum PersistenceError {
     StaleDangerCheckpoint,
     #[error("danger checkpoint tick was replayed with different material")]
     DangerCheckpointReplayConflict,
+    #[error("danger checkpoint cleanup requires a committed safe location")]
+    DangerCheckpointFinalizationNotCommitted,
 }
 
 /// Returns whether `PostgreSQL` explicitly permits the complete transaction to be retried.
