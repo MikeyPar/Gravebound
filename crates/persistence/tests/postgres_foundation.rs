@@ -94,6 +94,8 @@ async fn migrations_are_idempotent_exact_and_ready() {
             "character_danger_checkpoints",
             "character_entry_restore_points",
             "character_instance_lineages",
+            "character_life_outbox",
+            "character_oath_mutation_results",
             "character_progression",
             "character_world_locations",
             "character_world_transfer_results",

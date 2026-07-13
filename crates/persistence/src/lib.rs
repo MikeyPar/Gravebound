@@ -32,7 +32,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 5;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 6;
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -425,6 +425,28 @@ mod tests {
             assert!(
                 !migration.contains(prohibited),
                 "world-flow revision migration leaked {prohibited}"
+            );
+        }
+    }
+
+    #[test]
+    fn initial_oath_migration_is_exact_idempotent_and_outbox_backed() {
+        let migration = include_str!("../../../migrations/0006_initial_oath_selection.sql");
+        for required in [
+            "character_oath_id_core",
+            "character_initial_oath_level",
+            "character_oath_mutation_results",
+            "character_life_outbox",
+            "oath_selected",
+            "one_oath_selected_event_per_character",
+            "unpublished_character_life_events",
+        ] {
+            assert!(migration.contains(required), "migration omitted {required}");
+        }
+        for prohibited in ["JSON", "JSONB", "FLOAT", "DOUBLE PRECISION"] {
+            assert!(
+                !migration.contains(prohibited),
+                "initial Oath migration leaked {prohibited}"
             );
         }
     }
