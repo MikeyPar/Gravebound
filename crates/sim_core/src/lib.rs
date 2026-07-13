@@ -14,6 +14,7 @@ mod clock;
 mod collision;
 mod combat;
 mod consumable;
+mod core_microrealm;
 mod damage;
 mod death;
 mod debug_state;
@@ -103,6 +104,11 @@ pub use consumable::{
     RedTonicDefinition, RedTonicDefinitionError, RedTonicDefinitionParameters, RedTonicSimulation,
     TonicBelt, TonicBeltPolicy, TonicMergeResult, TonicUseRejection,
     UNDERTAKER_KNOT_RESTORE_BASIS_POINTS, UNDERTAKER_KNOT_SHARED_COOLDOWN_TICKS, VitalsError,
+};
+pub use core_microrealm::{
+    CORE_MICROREALM_EMPTY_RESET_TICKS, CORE_MICROREALM_PACK_WARNING_TICKS,
+    CORE_MICROREALM_TRIGGER_DELAY_TICKS, CoreMicrorealmError, CoreMicrorealmEvent,
+    CoreMicrorealmInput, CoreMicrorealmPhase, CoreMicrorealmSimulation,
 };
 pub use damage::{
     DamageBand, DamageBandError, DamageError, DamageEvent, DamageType, DirectHitParameters,
