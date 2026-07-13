@@ -60,7 +60,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 14;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 15;
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -574,6 +574,27 @@ mod tests {
             assert!(
                 !migration.contains(prohibited),
                 "Ash wallet migration leaked {prohibited}"
+            );
+        }
+    }
+
+    #[test]
+    fn ash_wallet_forward_migration_adds_locked_expected_version_results() {
+        let migration = include_str!("../../../migrations/0015_ash_expected_wallet_version.sql");
+        for required in [
+            "expected_wallet_version",
+            "pre_wallet_version",
+            "ash_result_expected_version_positive",
+            "ash_result_expected_version_match",
+            "result_code BETWEEN 0 AND 3",
+            "result_code IN (0, 3)",
+        ] {
+            assert!(migration.contains(required), "migration omitted {required}");
+        }
+        for prohibited in ["DROP TABLE", "TRUNCATE", "JSON", "JSONB"] {
+            assert!(
+                !migration.contains(prohibited),
+                "Ash wallet forward migration leaked {prohibited}"
             );
         }
     }
