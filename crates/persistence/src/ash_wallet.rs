@@ -122,6 +122,23 @@ impl PostgresPersistence {
         &self,
         request: &AshMutationRequest,
     ) -> Result<AshWalletTransaction, PersistenceError> {
+        const MAX_SERIALIZATION_ATTEMPTS: u8 = 3;
+
+        for attempt in 1..=MAX_SERIALIZATION_ATTEMPTS {
+            match self.transact_ash_mutation_once(request).await {
+                Err(error)
+                    if attempt < MAX_SERIALIZATION_ATTEMPTS && is_serialization_failure(&error) => {
+                }
+                result => return result,
+            }
+        }
+        unreachable!("bounded Ash transaction loop always returns")
+    }
+
+    async fn transact_ash_mutation_once(
+        &self,
+        request: &AshMutationRequest,
+    ) -> Result<AshWalletTransaction, PersistenceError> {
         validate_request(request)?;
         let mut transaction = self.begin_transaction().await?;
         let account_exists = sqlx::query_scalar::<_, i32>(
@@ -178,6 +195,14 @@ impl PostgresPersistence {
         transaction.commit().await?;
         Ok(AshWalletTransaction::Committed(result))
     }
+}
+
+fn is_serialization_failure(error: &PersistenceError) -> bool {
+    matches!(
+        error,
+        PersistenceError::Database(sqlx::Error::Database(database))
+            if database.code().as_deref() == Some("40001")
+    )
 }
 
 fn validate_request(request: &AshMutationRequest) -> Result<(), PersistenceError> {
