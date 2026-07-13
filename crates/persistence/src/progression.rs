@@ -1376,6 +1376,21 @@ mod tests {
     }
 
     #[test]
+    fn revoked_award_requires_the_exact_bound_restore_and_later_version() {
+        let mut result = ordinary_result();
+        result.entry_restore_point_id = Some([5; 16]);
+        result.revoked_by_restore_point_id = Some([5; 16]);
+        result.revocation_progression_version = Some(9);
+        assert!(validate_award_result(&result, &contract()).is_ok());
+
+        result.revoked_by_restore_point_id = Some([6; 16]);
+        assert!(validate_award_result(&result, &contract()).is_err());
+        result.revoked_by_restore_point_id = Some([5; 16]);
+        result.revocation_progression_version = Some(result.post_progression_version);
+        assert!(validate_award_result(&result, &contract()).is_err());
+    }
+
+    #[test]
     fn only_rejected_awards_may_omit_an_xp_profile() {
         let mut rejected = ordinary_result();
         rejected.xp_profile_id = None;

@@ -75,6 +75,8 @@ pub enum ProgressionAwardCode {
     IdempotencyConflict = 10,
     ServiceUnavailable = 11,
     CharacterNotFound = 12,
+    #[serde(rename = "revoked_by_crash_restore")]
+    RevokedByCrashRestore = 13,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -588,5 +590,14 @@ mod tests {
                 .code,
             ProgressionAwardCode::IdempotencyConflict
         );
+    }
+
+    #[test]
+    fn crash_restore_revocation_has_an_exact_typed_code() {
+        assert_eq!(
+            serde_json::to_string(&ProgressionAwardCode::RevokedByCrashRestore).unwrap(),
+            "\"revoked_by_crash_restore\""
+        );
+        assert_eq!(ProgressionAwardCode::RevokedByCrashRestore as i16, 13);
     }
 }

@@ -69,7 +69,23 @@ impl PostgresProgressionAwardService {
             .await;
         match transaction {
             Ok(ProgressionAwardTransaction::Committed(outcome)) => outcome,
-            Ok(ProgressionAwardTransaction::Replayed(stored)) => self
+            Ok(ProgressionAwardTransaction::Replayed(stored)) => self.replay(command, &stored),
+            Err(PersistenceError::ProgressionCharacterNotFound) => {
+                terminal_outcome(command, ProgressionAwardCode::CharacterNotFound)
+            }
+            Err(_) => terminal_outcome(command, ProgressionAwardCode::ServiceUnavailable),
+        }
+    }
+
+    fn replay(
+        &self,
+        command: &ProgressionAwardCommand,
+        stored: &StoredXpAwardResult,
+    ) -> ProgressionAwardOutcome {
+        if stored.character_id != command.payload.character_id
+            || stored.payload_hash != command.payload_hash
+        {
+            return self
                 .rules
                 .replay(
                     command,
@@ -79,12 +95,19 @@ impl PostgresProgressionAwardService {
                 )
                 .unwrap_or_else(|_| {
                     terminal_outcome(command, ProgressionAwardCode::ServiceUnavailable)
-                }),
-            Err(PersistenceError::ProgressionCharacterNotFound) => {
-                terminal_outcome(command, ProgressionAwardCode::CharacterNotFound)
-            }
-            Err(_) => terminal_outcome(command, ProgressionAwardCode::ServiceUnavailable),
+                });
         }
+        if stored.revoked_by_restore_point_id.is_some() {
+            return terminal_outcome(command, ProgressionAwardCode::RevokedByCrashRestore);
+        }
+        self.rules
+            .replay(
+                command,
+                stored.character_id,
+                stored.payload_hash,
+                &stored.result_payload,
+            )
+            .unwrap_or_else(|_| terminal_outcome(command, ProgressionAwardCode::ServiceUnavailable))
     }
 
     fn plan_and_stage(
