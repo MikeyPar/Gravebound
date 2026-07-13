@@ -59,7 +59,8 @@ pub use boss::{
 pub use boss_encounter::{
     BELL_PROCTOR_ENTITY_ID_OFFSET, BellProctorClearedHostiles, BellProctorDamageEvent,
     BellProctorDefeat, BellProctorEncounterError, BellProctorEncounterSimulation,
-    BellProctorEncounterSnapshot, BellProctorEncounterStep, BellProctorLaneContact,
+    BellProctorEncounterSnapshot, BellProctorEncounterStep, BellProctorImmuneStatus,
+    BellProctorLaneContact, BellProctorStatusImmunityEvent,
 };
 pub use clock::{
     FixedStepClock, TICK_RATE_HZ, Tick, duration_ms_to_ticks_ceil, duration_ms_to_ticks_nearest,

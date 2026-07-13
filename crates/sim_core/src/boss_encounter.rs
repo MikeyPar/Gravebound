@@ -40,6 +40,19 @@ pub struct BellProctorDefeat {
     pub lethal_contact_ordinal: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BellProctorStatusImmunityEvent {
+    pub tick: Tick,
+    pub source_trap_id: EntityId,
+    pub target: EntityId,
+    pub status: BellProctorImmuneStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BellProctorImmuneStatus {
+    Frostbind,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct BellProctorLaneContact {
     pub tick: Tick,
@@ -61,6 +74,7 @@ pub struct BellProctorEncounterStep {
     pub lane_contacts: Vec<BellProctorLaneContact>,
     pub hostile_step: HostileStep,
     pub friendly_damage: Vec<BellProctorDamageEvent>,
+    pub status_immunities: Vec<BellProctorStatusImmunityEvent>,
     pub defeat: Option<BellProctorDefeat>,
     pub cleared_hostiles: Option<BellProctorClearedHostiles>,
 }
@@ -243,6 +257,18 @@ impl BellProctorEncounterSimulation {
             });
         }
         let (friendly_damage, defeat) = self.apply_friendly_damage(combat)?;
+        let status_immunities = combat
+            .nail_traps
+            .triggers
+            .iter()
+            .filter(|trigger| trigger.target_id == self.entity_id)
+            .map(|trigger| BellProctorStatusImmunityEvent {
+                tick: combat.tick,
+                source_trap_id: trigger.trap_id,
+                target: trigger.target_id,
+                status: BellProctorImmuneStatus::Frostbind,
+            })
+            .collect();
         let aim = aim_from_positions(self.position, self.player.target.position)?;
         let mut scheduler_events = self.scheduler.advance(BossInput {
             current_health: self.current_health,
@@ -345,6 +371,7 @@ impl BellProctorEncounterSimulation {
             lane_contacts,
             hostile_step,
             friendly_damage,
+            status_immunities,
             defeat,
             cleared_hostiles,
         })
@@ -802,6 +829,62 @@ mod tests {
             raw_damage_intents: vec![intent],
             ..CombatStep::default()
         }
+    }
+
+    fn nail_trap_damage_step(tick: u64, boss: EntityId, trap: u64) -> CombatStep {
+        let trigger = crate::NailTrapTrigger {
+            trap_id: id(trap),
+            target_id: boss,
+            tick: Tick(tick),
+            raw_damage: 18,
+            snapshot_weapon_raw_damage: 20,
+            frostbind_ticks: 45,
+        };
+        CombatStep {
+            tick: Tick(tick),
+            raw_damage_intents: vec![crate::RawDamageIntent {
+                tick: Tick(tick),
+                projectile_id: id(trap),
+                source: RawDamageIntentSource::NailTrap,
+                target: boss,
+                base_raw_damage: 20,
+                multiplier_basis_points: 9_000,
+                resolved_raw_damage: 18,
+                contact_ordinal: 0,
+            }],
+            nail_traps: crate::NailTrapStep {
+                triggers: vec![trigger],
+                ..crate::NailTrapStep::default()
+            },
+            ..CombatStep::default()
+        }
+    }
+
+    #[test]
+    fn nailkeeper_damages_boss_but_frostbind_emits_immune_feedback() {
+        let mut simulation = BellProctorEncounterSimulation::new(
+            BellProctorDefinition::first_playable(),
+            arena(),
+            handoff(),
+            1,
+            Tick(100),
+        )
+        .unwrap();
+        let boss = simulation.entity_id();
+        let step = simulation
+            .step(&nail_trap_damage_step(100, boss, 60))
+            .unwrap();
+        assert_eq!(step.friendly_damage.len(), 1);
+        assert!(step.friendly_damage[0].damage.health_damage_applied > 0);
+        assert_eq!(
+            step.status_immunities,
+            vec![BellProctorStatusImmunityEvent {
+                tick: Tick(100),
+                source_trap_id: id(60),
+                target: boss,
+                status: BellProctorImmuneStatus::Frostbind,
+            }]
+        );
     }
 
     #[test]
