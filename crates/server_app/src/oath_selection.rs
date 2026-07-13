@@ -13,6 +13,51 @@ use crate::{AuthenticatedAccount, AuthenticatedNamespace, IdentityClock};
 
 const LANTERN_HALLS_ID: &str = "hub.lantern_halls_01";
 
+/// Route-level Oath authority. Process-local Core builds recognize the protocol but remain typed
+/// and fail-closed; persistent builds own the real serializable service.
+#[derive(Debug, Clone)]
+pub enum CoreOathSelectionAuthority<Clock> {
+    Disabled,
+    Persistent(PostgresOathSelectionService<Clock>),
+}
+
+impl<Clock> CoreOathSelectionAuthority<Clock>
+where
+    Clock: IdentityClock,
+{
+    pub const fn disabled() -> Self {
+        Self::Disabled
+    }
+
+    pub const fn persistent(service: PostgresOathSelectionService<Clock>) -> Self {
+        Self::Persistent(service)
+    }
+
+    pub async fn view(
+        &self,
+        authenticated: AuthenticatedAccount,
+        frame: &OathViewFrame,
+    ) -> OathViewResult {
+        match self {
+            Self::Disabled => view_error(frame.sequence, OathResultCode::ServiceUnavailable),
+            Self::Persistent(service) => service.view(authenticated, frame).await,
+        }
+    }
+
+    pub async fn select(
+        &self,
+        authenticated: AuthenticatedAccount,
+        frame: &InitialOathSelectionFrame,
+    ) -> InitialOathSelectionResult {
+        match self {
+            Self::Disabled => {
+                selection_error(frame.mutation_id, OathResultCode::ServiceUnavailable)
+            }
+            Self::Persistent(service) => service.select(authenticated, frame).await,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PostgresOathSelectionService<Clock> {
     persistence: PostgresPersistence,
@@ -378,6 +423,39 @@ mod tests {
             let result = plan_selection(&mut candidate, [1; 16], &frame(), &revision()).unwrap();
             assert_eq!(result.code, expected);
             assert!(candidate.new_event.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn disabled_route_authority_recognizes_oath_frames_but_fails_closed() {
+        let authority = CoreOathSelectionAuthority::<FixedClock>::disabled();
+        let authenticated = AuthenticatedAccount {
+            account_id: crate::AccountId::new([1; 16]).unwrap(),
+            namespace: AuthenticatedNamespace::WipeableTest,
+        };
+        let view = authority
+            .view(
+                authenticated,
+                &OathViewFrame {
+                    sequence: 7,
+                    character_id: [2; 16],
+                    content_revision: revision(),
+                },
+            )
+            .await;
+        assert_eq!(view.code, OathResultCode::ServiceUnavailable);
+        assert!(view.projection.is_none());
+        let selection = authority.select(authenticated, &frame()).await;
+        assert_eq!(selection.code, OathResultCode::ServiceUnavailable);
+        assert!(selection.projection.is_none());
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct FixedClock;
+
+    impl IdentityClock for FixedClock {
+        fn unix_millis(&self) -> u64 {
+            10_000
         }
     }
 }

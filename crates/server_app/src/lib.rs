@@ -40,7 +40,7 @@ pub use lifecycle::{
     DirectoryTickOutput, LINK_LOST_TICKS, LifecycleError, LifecycleResponse, LogicalSessionId,
     ManagedSession, SessionDirectory, SessionOwnerId, SessionPhase, TransportId,
 };
-pub use oath_selection::PostgresOathSelectionService;
+pub use oath_selection::{CoreOathSelectionAuthority, PostgresOathSelectionService};
 pub use progression_award::{
     CoreProgressionRules, ProgressionAwardCode, ProgressionAwardCommand, ProgressionAwardContext,
     ProgressionAwardError, ProgressionAwardEvidence, ProgressionAwardOutcome,
@@ -447,11 +447,12 @@ where
 /// World-flow messages share the reliable transport but cannot mutate identity state, and the
 /// normal world-flow authority remains fail-closed until its downstream packages are complete.
 #[allow(clippy::too_many_arguments)]
-pub async fn serve_core_reliable<R, C, G, E, W, WC, P>(
+pub async fn serve_core_reliable<R, C, G, E, W, WC, P, OC>(
     connection: &quinn::Connection,
     identity: &IdentityService<R, C, G, E>,
     world_flow: &WorldFlowGateService<W, WC>,
     progression: &ProgressionQueryService<P>,
+    oath: &CoreOathSelectionAuthority<OC>,
     authenticated: AuthenticatedAccount,
     response_sequence: u32,
     server_tick: u64,
@@ -464,6 +465,7 @@ where
     W: WorldFlowLocationRepository,
     WC: IdentityClock,
     P: ProgressionQueryRepository,
+    OC: IdentityClock,
 {
     if response_sequence == 0 {
         return Err(ServerTransportError::UnexpectedMessage);
@@ -493,6 +495,14 @@ where
         WireMessage::ProgressionQueryFrame(frame) => protocol::ReliableEvent::ProgressionResult(
             progression.handle(authenticated, &frame).await,
         ),
+        WireMessage::OathViewFrame(frame) => {
+            protocol::ReliableEvent::OathViewResult(oath.view(authenticated, &frame).await)
+        }
+        WireMessage::InitialOathSelectionFrame(frame) => {
+            protocol::ReliableEvent::InitialOathSelectionResult(
+                oath.select(authenticated, &frame).await,
+            )
+        }
         _ => return Err(ServerTransportError::UnexpectedMessage),
     };
     let response = protocol::ReliableEventFrame {
