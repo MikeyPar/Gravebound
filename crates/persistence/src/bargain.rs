@@ -74,6 +74,12 @@ pub struct StoredBargainOffer {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredBargainSnapshot {
+    pub life: StoredBargainLife,
+    pub open_offer: Option<StoredBargainOffer>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredBargainDecisionResult {
     pub account_id: [u8; ID_BYTES],
     pub character_id: [u8; ID_BYTES],
@@ -103,6 +109,56 @@ pub enum BargainDecisionTransaction<T> {
 }
 
 impl PostgresPersistence {
+    /// Reads the current life aggregate and its only open offer, if one exists.
+    pub async fn bargain_snapshot(
+        &self,
+        account_id: [u8; ID_BYTES],
+        character_id: [u8; ID_BYTES],
+    ) -> Result<StoredBargainSnapshot, PersistenceError> {
+        if [account_id, character_id].iter().any(all_zero) {
+            return Err(PersistenceError::CorruptStoredBargain);
+        }
+        let mut transaction = self.begin_transaction().await?;
+        let selected_character_id = lock_account(transaction.connection(), &account_id).await?;
+        let life = lock_life(
+            transaction.connection(),
+            &account_id,
+            &character_id,
+            selected_character_id,
+        )
+        .await?;
+        validate_life(&life)?;
+        let offer_ids = sqlx::query_scalar::<_, Vec<u8>>(
+            "SELECT offer_id FROM bargain_offers WHERE namespace_id = $1 AND account_id = $2 \
+             AND character_id = $3 AND offer_state = 0 ORDER BY created_at, offer_id FOR UPDATE",
+        )
+        .bind(WIPEABLE_CORE_NAMESPACE)
+        .bind(account_id.as_slice())
+        .bind(character_id.as_slice())
+        .fetch_all(transaction.connection())
+        .await?;
+        if offer_ids.len() > 1 {
+            return Err(PersistenceError::CorruptStoredBargain);
+        }
+        let open_offer = match offer_ids.into_iter().next() {
+            None => None,
+            Some(bytes) => {
+                let offer_id = fixed_bytes(bytes)?;
+                let offer = lock_offer(
+                    transaction.connection(),
+                    &account_id,
+                    &character_id,
+                    &offer_id,
+                )
+                .await?;
+                validate_offer(&offer)?;
+                Some(offer)
+            }
+        };
+        transaction.rollback().await?;
+        Ok(StoredBargainSnapshot { life, open_offer })
+    }
+
     /// Applies one offer selection/refusal or returns the exact stored result before inspecting
     /// current character, location, offer, or active-Bargain state.
     pub async fn transact_bargain_decision<T, F>(

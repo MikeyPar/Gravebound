@@ -31,6 +31,7 @@ pub use ash_wallet::{
 pub use bargain::{
     BargainDecisionTransaction, BargainDecisionTransactionState, StoredActiveBargain,
     StoredBargainCandidate, StoredBargainDecisionResult, StoredBargainLife, StoredBargainOffer,
+    StoredBargainSnapshot,
 };
 pub use bargain_milestone::{
     CORE_BARGAIN_LAYOUT_ID, CORE_BARGAIN_MILESTONE_ID, CORE_BARGAIN_SOURCE_ID,
