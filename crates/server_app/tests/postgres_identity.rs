@@ -19,7 +19,8 @@ use server_app::{
     AccountId, AuthenticatedAccount, AuthenticatedNamespace, BoundCoreIdentityServer,
     CharacterIdGenerator, CoreIdentityServerConfig, CoreIdentityServerReport, IdentityClock,
     IdentityService, LOCAL_SERVER_NAME, LocalServerRuntimeError, NoopIdentityEventSink,
-    PostgresAccountRepository,
+    PostgresAccountRepository, PostgresGroundExpiryService, PostgresRewardService,
+    RewardGrantContext, RewardGrantTransaction, RewardPlacement, SecretRewardEpoch,
 };
 use tokio::sync::oneshot;
 
@@ -251,6 +252,105 @@ async fn remove_starter_fixture(
     transaction.commit().await.unwrap();
 }
 
+async fn assert_durable_reward_and_expiry_lifecycle(
+    persistence: &PostgresPersistence,
+    character_id: [u8; 16],
+) {
+    let rewards = PostgresRewardService::load(
+        persistence.clone(),
+        &content_root(),
+        SecretRewardEpoch::new("test-epoch", [0x5a; 32]).unwrap(),
+    )
+    .unwrap();
+    let mut last_context = None;
+    let mut last_result = None;
+    for ordinal in 0_u8..4 {
+        let context = RewardGrantContext {
+            reward_request_id: [101 + ordinal; 16],
+            account_id: [91; 16],
+            character_id,
+            source_instance_id: [88; 16],
+            reward_table_id: "reward.boss_caldus",
+            current_tick: 1_000,
+        };
+        let RewardGrantTransaction::Fresh { result, durable } =
+            rewards.grant(context).await.unwrap()
+        else {
+            panic!("first reward request must be fresh")
+        };
+        assert!(!durable.replayed);
+        last_context = Some(context);
+        last_result = Some(result);
+    }
+    let context = last_context.unwrap();
+    let expected = last_result.unwrap();
+    let rotated_rewards = PostgresRewardService::load(
+        persistence.clone(),
+        &content_root(),
+        SecretRewardEpoch::new("test-epoch-rotated", [0xa5; 32]).unwrap(),
+    )
+    .unwrap();
+    let RewardGrantTransaction::Replay { result, durable } =
+        rotated_rewards.grant(context).await.unwrap()
+    else {
+        panic!("identical reward request must replay")
+    };
+    assert!(durable.replayed);
+    assert_eq!(result, expected);
+    assert!(result.items.iter().any(|item| matches!(
+        item.placement,
+        RewardPlacement::PersonalGround {
+            expires_at_tick: 2_800,
+            ..
+        }
+    )));
+
+    let expiry = PostgresGroundExpiryService::new(persistence.clone());
+    assert!(
+        expiry
+            .expire_due([88; 16], 2_799, 256)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let expired = expiry.expire_due([88; 16], 2_800, 256).await.unwrap();
+    assert!(!expired.is_empty());
+    assert!(
+        expiry
+            .expire_due([88; 16], 2_800, 256)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let mut verification = persistence.begin_transaction().await.unwrap();
+    let destroyed: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM item_instances WHERE namespace_id = $1 AND account_id = $2 \
+         AND character_id = $3 AND location_kind = 4 AND security_state = 3 \
+         AND destruction_reason = 'ground_expired'",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind([91_u8; 16].as_slice())
+    .bind(character_id.as_slice())
+    .fetch_one(verification.connection())
+    .await
+    .unwrap();
+    let expiry_ledger: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM item_ledger_events WHERE namespace_id = $1 \
+         AND account_id = $2 AND character_id = $3 AND event_kind = 2 \
+         AND reason = 'ground_expired'",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind([91_u8; 16].as_slice())
+    .bind(character_id.as_slice())
+    .fetch_one(verification.connection())
+    .await
+    .unwrap();
+    verification.rollback().await.unwrap();
+    assert_eq!(destroyed, i64::try_from(expired.len()).unwrap());
+    assert_eq!(expiry_ledger, destroyed);
+}
+
 async fn assert_persistent_world_flow_is_fail_closed(
     persistence: &PostgresPersistence,
     connection: &quinn::Connection,
@@ -466,6 +566,7 @@ async fn postgres_identity_survives_service_restart_and_replays_exactly_once() {
         starter_item_uids(&persistence, [91; 16], character_id).await,
         original_starter_uids
     );
+    assert_durable_reward_and_expiry_lifecycle(&persistence, character_id).await;
     let selected = first_process
         .mutate(
             Some(account(91)),
