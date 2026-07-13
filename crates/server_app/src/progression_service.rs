@@ -154,6 +154,9 @@ fn stage_plan(
             .progression_content_revision
             .as_str()
             .to_owned(),
+        entry_restore_point_id: state.entry_restore_point_id,
+        revoked_by_restore_point_id: None,
+        revocation_progression_version: None,
         evidence: stored_evidence(command.payload.evidence)?,
         eligible: plan.eligible,
         first_clear_awarded: plan.outcome.first_clear_awarded,

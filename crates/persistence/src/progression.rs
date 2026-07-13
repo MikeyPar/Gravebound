@@ -95,6 +95,11 @@ pub struct StoredXpAwardResult {
     pub xp_profile_id: Option<String>,
     /// Exact lowercase BLAKE3 manifest digest, without a mutable development label.
     pub progression_content_revision: String,
+    /// Present only when the award was resolved while this restore point was active in danger.
+    pub entry_restore_point_id: Option<[u8; ID_BYTES]>,
+    /// Set by TECH-023 restoration; the immutable award evidence and original result remain.
+    pub revoked_by_restore_point_id: Option<[u8; ID_BYTES]>,
+    pub revocation_progression_version: Option<i64>,
     pub evidence: StoredXpEligibilityEvidence,
     pub eligible: bool,
     pub first_clear_awarded: bool,
@@ -141,6 +146,7 @@ pub struct ProgressionAwardTransactionState {
     pub selected_character_id: Option<[u8; ID_BYTES]>,
     pub character: StoredLockedProgressionCharacter,
     pub progression: StoredProgression,
+    pub entry_restore_point_id: Option<[u8; ID_BYTES]>,
     pub boss_first_clear: StoredBossFirstClearState,
     pub new_result: Option<StoredXpAwardResult>,
     pub new_boss_first_clear: Option<StoredBossFirstClear>,
@@ -214,7 +220,7 @@ impl PostgresPersistence {
 
     /// Applies one XP award or returns its exact prior result.
     ///
-    /// Lock order for a fresh award is account -> character -> progression. The account-wide
+    /// Lock order for a fresh award is account -> character -> location -> progression. The account-wide
     /// reward key is checked immediately after the account lock so a replay never depends on the
     /// character's current state and never reaches the mutation closure.
     pub async fn transact_progression_award<T, F>(
@@ -258,23 +264,14 @@ impl PostgresPersistence {
             }
             None => None,
         };
-        let locked_character = lock_character(
-            transaction.connection(),
-            &account_id,
-            &character_id,
-            contract,
-        )
-        .await?;
-        let initial_progression = lock_progression(
-            transaction.connection(),
-            &account_id,
-            &character_id,
-            contract,
-        )
-        .await?;
-        if locked_character.cached_level != initial_progression.level {
-            return Err(PersistenceError::CorruptStoredProgression);
-        }
+        let (locked_character, entry_restore_point_id, initial_progression) =
+            lock_fresh_award_aggregates(
+                transaction.connection(),
+                &account_id,
+                &character_id,
+                contract,
+            )
+            .await?;
         let boss_first_clear = match boss_id {
             None => StoredBossFirstClearState::NotApplicable,
             Some(boss_id) => load_first_clear(transaction.connection(), &account_id, boss_id)
@@ -290,6 +287,7 @@ impl PostgresPersistence {
             selected_character_id,
             character: locked_character.clone(),
             progression: initial_progression.clone(),
+            entry_restore_point_id,
             boss_first_clear,
             new_result: None,
             new_boss_first_clear: None,
@@ -305,6 +303,7 @@ impl PostgresPersistence {
                 initial_progression: &initial_progression,
                 initial_character: &locked_character,
                 initial_selected_character_id: selected_character_id,
+                initial_entry_restore_point_id: entry_restore_point_id,
                 account_id: &account_id,
                 character_id: &character_id,
                 reward_event_id: &reward_event_id,
@@ -329,6 +328,74 @@ impl PostgresPersistence {
         transaction.commit().await?;
         Ok(ProgressionAwardTransaction::Committed(value))
     }
+}
+
+async fn lock_fresh_award_aggregates(
+    connection: &mut sqlx::PgConnection,
+    account_id: &[u8; ID_BYTES],
+    character_id: &[u8; ID_BYTES],
+    contract: &StoredProgressionContract,
+) -> Result<
+    (
+        StoredLockedProgressionCharacter,
+        Option<[u8; ID_BYTES]>,
+        StoredProgression,
+    ),
+    PersistenceError,
+> {
+    let character = lock_character(connection, account_id, character_id, contract).await?;
+    let entry_restore_point_id = lock_award_location(
+        connection,
+        account_id,
+        character_id,
+        character.character_state_version,
+    )
+    .await?;
+    let progression = lock_progression(connection, account_id, character_id, contract).await?;
+    if character.cached_level != progression.level {
+        return Err(PersistenceError::CorruptStoredProgression);
+    }
+    Ok((character, entry_restore_point_id, progression))
+}
+
+async fn lock_award_location(
+    connection: &mut sqlx::PgConnection,
+    account_id: &[u8; ID_BYTES],
+    character_id: &[u8; ID_BYTES],
+    character_state_version: i64,
+) -> Result<Option<[u8; ID_BYTES]>, PersistenceError> {
+    let row = sqlx::query(
+        "SELECT character_version, location_kind, entry_restore_point_id \
+         FROM character_world_locations WHERE namespace_id = $1 AND account_id = $2 \
+         AND character_id = $3 FOR UPDATE",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
+    .fetch_optional(connection)
+    .await
+    .map_err(PersistenceError::Database)?
+    .ok_or(PersistenceError::ProgressionCharacterNotFound)?;
+    let location_version: i64 = row
+        .try_get("character_version")
+        .map_err(PersistenceError::Database)?;
+    let location_kind: i16 = row
+        .try_get("location_kind")
+        .map_err(PersistenceError::Database)?;
+    let restore_point_id = row
+        .try_get::<Option<Vec<u8>>, _>("entry_restore_point_id")
+        .map_err(PersistenceError::Database)?
+        .map(fixed_bytes)
+        .transpose()?;
+    if location_version != character_state_version
+        || !matches!(
+            (location_kind, restore_point_id),
+            (0 | 1, None) | (2, Some(_))
+        )
+    {
+        return Err(PersistenceError::CorruptStoredProgression);
+    }
+    Ok(restore_point_id)
 }
 
 async fn lock_account(
@@ -424,7 +491,9 @@ async fn load_award_result(
                 encounter_objective_credits, encounter_life_state, encounter_recall_state, \
                 encounter_trust_state, first_clear_awarded, base_xp, bonus_xp, requested_xp, \
                 applied_xp, discarded_xp, pre_total_xp, post_total_xp, pre_level, post_level, \
-                pre_progression_version, post_progression_version, result_code, result_payload \
+                pre_progression_version, post_progression_version, result_code, result_payload, \
+                entry_restore_point_id, revoked_by_restore_point_id, \
+                revocation_progression_version \
          FROM character_xp_award_results \
          WHERE namespace_id = $1 AND account_id = $2 AND reward_event_id = $3",
     )
@@ -520,6 +589,19 @@ fn decode_award_result(
             .map_err(PersistenceError::Database)?,
         progression_content_revision: row
             .try_get("progression_content_revision")
+            .map_err(PersistenceError::Database)?,
+        entry_restore_point_id: row
+            .try_get::<Option<Vec<u8>>, _>("entry_restore_point_id")
+            .map_err(PersistenceError::Database)?
+            .map(fixed_bytes)
+            .transpose()?,
+        revoked_by_restore_point_id: row
+            .try_get::<Option<Vec<u8>>, _>("revoked_by_restore_point_id")
+            .map_err(PersistenceError::Database)?
+            .map(fixed_bytes)
+            .transpose()?,
+        revocation_progression_version: row
+            .try_get("revocation_progression_version")
             .map_err(PersistenceError::Database)?,
         evidence,
         eligible: row
@@ -756,10 +838,11 @@ async fn insert_award_result(
           encounter_damage_prevented, encounter_objective_credits, encounter_life_state, \
           encounter_recall_state, encounter_trust_state, first_clear_awarded, base_xp, bonus_xp, \
           requested_xp, applied_xp, discarded_xp, pre_total_xp, post_total_xp, pre_level, \
-          post_level, pre_progression_version, post_progression_version, result_code, result_payload) \
+          post_level, pre_progression_version, post_progression_version, result_code, result_payload, \
+          entry_restore_point_id) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, \
                  $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, \
-                 $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41)",
+                 $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42)",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(result.account_id.as_slice())
@@ -802,6 +885,12 @@ async fn insert_award_result(
     .bind(result.post_progression_version)
     .bind(result.result_code)
     .bind(&result.result_payload)
+    .bind(
+        result
+            .entry_restore_point_id
+            .as_ref()
+            .map(<[u8; ID_BYTES]>::as_slice),
+    )
     .execute(connection)
     .await
     .map_err(PersistenceError::Database)?;
@@ -901,6 +990,7 @@ struct FreshAwardBinding<'a> {
     initial_progression: &'a StoredProgression,
     initial_character: &'a StoredLockedProgressionCharacter,
     initial_selected_character_id: Option<[u8; ID_BYTES]>,
+    initial_entry_restore_point_id: Option<[u8; ID_BYTES]>,
     account_id: &'a [u8; ID_BYTES],
     character_id: &'a [u8; ID_BYTES],
     reward_event_id: &'a [u8; ID_BYTES],
@@ -919,10 +1009,14 @@ fn validate_fresh_state(
         .ok_or(PersistenceError::ProgressionAwardResultRequired)?;
     validate_award_result(result, binding.contract)?;
     if state.selected_character_id != binding.initial_selected_character_id
+        || state.entry_restore_point_id != binding.initial_entry_restore_point_id
         || &state.character != binding.initial_character
         || &result.account_id != binding.account_id
         || &result.character_id != binding.character_id
         || &result.reward_event_id != binding.reward_event_id
+        || result.entry_restore_point_id != binding.initial_entry_restore_point_id
+        || result.revoked_by_restore_point_id.is_some()
+        || result.revocation_progression_version.is_some()
         || result.pre_total_xp != binding.initial_progression.total_xp
         || result.pre_level != binding.initial_progression.level
         || result.pre_progression_version != binding.initial_progression.progression_version
@@ -1035,6 +1129,23 @@ fn validate_award_result(
                 || result.applied_xp != 0
                 || result.discarded_xp != 0))
         || (result.first_clear_awarded && result.bonus_xp == 0)
+        || result
+            .entry_restore_point_id
+            .is_some_and(|id| id == [0; ID_BYTES])
+        || result
+            .revoked_by_restore_point_id
+            .is_some_and(|id| id == [0; ID_BYTES])
+        || match (
+            result.entry_restore_point_id,
+            result.revoked_by_restore_point_id,
+            result.revocation_progression_version,
+        ) {
+            (_, None, None) => false,
+            (Some(entry), Some(revoked), Some(version)) => {
+                entry != revoked || version <= result.post_progression_version
+            }
+            _ => true,
+        }
     {
         return Err(PersistenceError::CorruptStoredProgression);
     }
@@ -1194,6 +1305,9 @@ mod tests {
             source_content_id: "enemy.drowned_pilgrim".to_owned(),
             xp_profile_id: Some("xp.normal_t1".to_owned()),
             progression_content_revision: "a".repeat(64),
+            entry_restore_point_id: None,
+            revoked_by_restore_point_id: None,
+            revocation_progression_version: None,
             evidence: StoredXpEligibilityEvidence::Ordinary(StoredOrdinaryXpEvidence {
                 delta_x_milli_tiles: 1_000,
                 delta_y_milli_tiles: -2_000,
@@ -1335,6 +1449,7 @@ mod tests {
                 current_health: 120,
                 progression_version: 2,
             },
+            entry_restore_point_id: None,
             boss_first_clear: StoredBossFirstClearState::Vacant {
                 boss_id: marker.boss_id.clone(),
             },
@@ -1348,6 +1463,7 @@ mod tests {
                     initial_progression: &initial,
                     initial_character: &locked_character,
                     initial_selected_character_id: Some(result.character_id),
+                    initial_entry_restore_point_id: None,
                     account_id: &result.account_id,
                     character_id: &result.character_id,
                     reward_event_id: &result.reward_event_id,
@@ -1364,6 +1480,7 @@ mod tests {
                     initial_progression: &initial,
                     initial_character: &locked_character,
                     initial_selected_character_id: Some(result.character_id),
+                    initial_entry_restore_point_id: None,
                     account_id: &result.account_id,
                     character_id: &result.character_id,
                     reward_event_id: &result.reward_event_id,
