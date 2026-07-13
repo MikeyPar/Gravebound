@@ -102,22 +102,7 @@ struct AccessibilityEvidence(bool);
 pub(crate) fn configure(app: &mut App) {
     let evidence_preset = env::var(ACCESSIBILITY_EVIDENCE_ENV).ok();
     let evidence = evidence_preset.is_some();
-    let settings = if evidence {
-        AccessibilitySettings {
-            screen_shake_percent: 0,
-            flash_intensity_percent: 0,
-            friendly_opacity_percent: 10,
-            reduced_motion: true,
-            high_contrast_telegraphs: evidence_preset.as_deref() != Some("thick_outline"),
-            hostile_theme: if evidence_preset.as_deref() == Some("thick_outline") {
-                HostileTheme::ThickOutline
-            } else {
-                HostileTheme::ColorblindSafe
-            },
-        }
-    } else {
-        AccessibilitySettings::default()
-    };
+    let settings = settings_for_evidence_preset(evidence_preset.as_deref());
     app.insert_resource(settings)
         .insert_resource(AccessibilityEvidence(evidence))
         .add_systems(Startup, spawn_overlay)
@@ -127,6 +112,30 @@ pub(crate) fn configure(app: &mut App) {
                 .chain()
                 .in_set(FrameSet::Presentation),
         );
+}
+
+fn settings_for_evidence_preset(preset: Option<&str>) -> AccessibilitySettings {
+    if preset == Some("reduced_motion") {
+        AccessibilitySettings {
+            reduced_motion: true,
+            ..AccessibilitySettings::default()
+        }
+    } else if preset.is_some() {
+        AccessibilitySettings {
+            screen_shake_percent: 0,
+            flash_intensity_percent: 0,
+            friendly_opacity_percent: 10,
+            reduced_motion: true,
+            high_contrast_telegraphs: preset != Some("thick_outline"),
+            hostile_theme: if preset == Some("thick_outline") {
+                HostileTheme::ThickOutline
+            } else {
+                HostileTheme::ColorblindSafe
+            },
+        }
+    } else {
+        AccessibilitySettings::default()
+    }
 }
 
 #[allow(clippy::needless_pass_by_value)] // Bevy system parameters are wrapper values.
@@ -301,5 +310,16 @@ mod tests {
         assert_eq!(cycle_percent(10, 10, 35, 60), 35);
         assert_eq!(cycle_percent(35, 10, 35, 60), 60);
         assert_eq!(cycle_percent(60, 10, 35, 60), 10);
+    }
+
+    #[test]
+    fn reduced_motion_evidence_isolates_motion_from_other_settings() {
+        let settings = settings_for_evidence_preset(Some("reduced_motion"));
+        assert!(settings.reduced_motion);
+        assert_eq!(settings.screen_shake_percent, 50);
+        assert_eq!(settings.flash_intensity_percent, 50);
+        assert_eq!(settings.friendly_opacity_percent, 35);
+        assert!(!settings.high_contrast_telegraphs);
+        assert_eq!(settings.hostile_theme, HostileTheme::ShapeAndColor);
     }
 }

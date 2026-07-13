@@ -193,8 +193,18 @@ pub fn run_local_lab() -> Result<()> {
         PlayerMovementState::at_arena_spawn(&arena)
             .context("failed to construct the Grave Arbalist movement state")?
     };
-    let combat_state = PlayerCombatState::new(weapon, grave_mark, slipstep, stillness)
-        .context("failed to construct the Grave Arbalist combat state")?;
+    let combat_state = if evidence_scenario == combat::EvidenceScenario::NailkeeperShowcase {
+        PlayerCombatState::with_oath(
+            weapon,
+            grave_mark,
+            slipstep,
+            stillness,
+            sim_core::GraveArbalistOath::Nailkeeper,
+        )
+    } else {
+        PlayerCombatState::new(weapon, grave_mark, slipstep, stillness)
+    }
+    .context("failed to construct the Grave Arbalist combat state")?;
     let debug_hurtboxes = combat::first_playable_debug_hurtboxes()
         .context("failed to construct LocalLab debug enemy hurtboxes")?;
     let collision_world = ProjectileCollisionWorld::new(&arena, debug_hurtboxes)
@@ -372,6 +382,7 @@ fn capture_requested_screenshot(
     player_simulation: Res<player::PlayerSimulation>,
     debug_overlay: Res<debug_overlay::DebugOverlayState>,
     developer_tools: Res<developer_tools::DeveloperToolsState>,
+    nailkeeper_evidence: Res<combat::NailkeeperEvidenceState>,
     stress: Option<Res<stress_benchmark::StressBenchmarkState>>,
     mut progress: Local<CaptureProgress>,
 ) {
@@ -386,6 +397,8 @@ fn capture_requested_screenshot(
         collision_diagnostics.showcase_ready()
     } else if *scenario == combat::EvidenceScenario::GraveMarkShowcase {
         collision_diagnostics.grave_mark_showcase_ready()
+    } else if *scenario == combat::EvidenceScenario::NailkeeperShowcase {
+        nailkeeper_evidence.ready()
     } else if *scenario == combat::EvidenceScenario::SlipstepShowcase {
         collision_diagnostics.slipstep_showcase_ready()
     } else if *scenario == combat::EvidenceScenario::StillnessShowcase {

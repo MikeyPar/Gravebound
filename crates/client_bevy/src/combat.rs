@@ -4,6 +4,7 @@ use anyhow::{Result, bail};
 use bevy::{
     log::{info, warn},
     prelude::*,
+    sprite::Anchor,
     window::PrimaryWindow,
 };
 use sim_core::{
@@ -24,6 +25,7 @@ const EVIDENCE_SCENARIO_ENV: &str = "GRAVEBOUND_EVIDENCE_SCENARIO";
 const PRIMARY_FIRE_EAST_SCENARIO: &str = "primary_fire_east";
 const COLLISION_SHOWCASE_SCENARIO: &str = "collision_showcase";
 const GRAVE_MARK_SHOWCASE_SCENARIO: &str = "grave_mark_showcase";
+const NAILKEEPER_SHOWCASE_SCENARIO: &str = "nailkeeper_showcase";
 const SLIPSTEP_SHOWCASE_SCENARIO: &str = "slipstep_showcase";
 const STILLNESS_SHOWCASE_SCENARIO: &str = "stillness_showcase";
 const RED_TONIC_SHOWCASE_SCENARIO: &str = "red_tonic_showcase";
@@ -110,6 +112,7 @@ pub(crate) enum EvidenceScenario {
     PrimaryFireEast,
     CollisionShowcase,
     GraveMarkShowcase,
+    NailkeeperShowcase,
     SlipstepShowcase,
     StillnessShowcase,
     RedTonicShowcase,
@@ -144,6 +147,9 @@ impl EvidenceScenario {
             }
             Some(GRAVE_MARK_SHOWCASE_SCENARIO) if screenshot_requested => {
                 Ok(Self::GraveMarkShowcase)
+            }
+            Some(NAILKEEPER_SHOWCASE_SCENARIO) if screenshot_requested => {
+                Ok(Self::NailkeeperShowcase)
             }
             Some(SLIPSTEP_SHOWCASE_SCENARIO) if screenshot_requested => Ok(Self::SlipstepShowcase),
             Some(STILLNESS_SHOWCASE_SCENARIO) if screenshot_requested => {
@@ -330,6 +336,18 @@ pub(crate) struct TransientEffect {
     total_seconds: f32,
 }
 
+#[derive(Debug, Default, Resource)]
+pub(crate) struct NailkeeperEvidenceState {
+    elapsed_ticks: u8,
+    cues_played: u8,
+}
+
+impl NailkeeperEvidenceState {
+    pub(crate) const fn ready(&self) -> bool {
+        self.cues_played == 3 && self.elapsed_ticks >= 22
+    }
+}
+
 #[derive(Debug, Component)]
 struct NailTrapPresentation(sim_core::EntityId);
 
@@ -349,10 +367,16 @@ pub(crate) fn configure(app: &mut App) {
         .insert_resource(crate::oath_feedback::OathAudioCue::start())
         .insert_resource(crate::bargain_feedback::BargainAudioCue::start())
         .insert_resource(CollisionDiagnostics::default())
-        .add_systems(Startup, spawn_combat_presentation)
+        .insert_resource(NailkeeperEvidenceState::default())
+        .add_systems(
+            Startup,
+            (spawn_combat_presentation, spawn_nailkeeper_showcase).chain(),
+        )
         .add_systems(
             FixedUpdate,
-            simulate_combat.in_set(FixedSimulationSet::Combat),
+            (simulate_combat, sequence_nailkeeper_evidence_audio)
+                .chain()
+                .in_set(FixedSimulationSet::Combat),
         )
         .add_systems(
             Update,
@@ -404,6 +428,7 @@ fn spawn_combat_presentation(
             | EvidenceScenario::BossCompletionShowcase
             | EvidenceScenario::StressFull
             | EvidenceScenario::StressReduced
+            | EvidenceScenario::NailkeeperShowcase
     ) {
         spawn_debug_targets(&mut commands, &arena.0, &collision_world.0);
     }
@@ -472,6 +497,112 @@ fn spawn_combat_presentation(
         grave_mark_duration_ticks = grave_mark.duration_ticks(),
         "Grave Arbalist combat presentation initialized"
     );
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn spawn_nailkeeper_showcase(
+    mut commands: Commands,
+    arena: Res<LoadedArena>,
+    scenario: Res<EvidenceScenario>,
+    accessibility: Res<crate::accessibility::AccessibilitySettings>,
+) {
+    if *scenario != EvidenceScenario::NailkeeperShowcase {
+        return;
+    }
+    let stages = [("ARMING", 6.5, false), ("ARMED", 10.0, true)];
+    for (index, (label, x, armed)) in stages.into_iter().enumerate() {
+        let position = SimulationVector::new(x, 14.0);
+        spawn_nail_trap_at(
+            &mut commands,
+            EntityId::new(90_001 + u64::try_from(index).expect("bounded evidence index"))
+                .expect("nonzero evidence trap ID"),
+            position,
+            &arena.0,
+            armed,
+            *accessibility,
+        );
+        spawn_world_label(&mut commands, label, position, &arena.0);
+    }
+    let trigger_position = SimulationVector::new(13.5, 14.0);
+    let trigger_render = simulation_point_to_render(trigger_position, &arena.0);
+    spawn_frostbind_burst(
+        &mut commands,
+        "Nailkeeper Frostbind evidence burst",
+        trigger_render,
+        5.0,
+    );
+    spawn_world_label(
+        &mut commands,
+        "TRIGGER / IMMUNE",
+        trigger_position,
+        &arena.0,
+    );
+    commands.spawn((
+        Name::new("Nailkeeper evidence legend"),
+        Text::new(format!(
+            "NAILKEEPER READABILITY QA  |  EXACT RADIUS 1.25 TILES\nARM 400 MS  /  LIFE 5.0 S  /  HIT 0.9W  /  FROSTBIND 1.5 S\nMOTION {}  |  AUDIO SEQUENCE: ARM -> TRIGGER -> FROSTBIND IMMUNE",
+            if accessibility.reduced_motion {
+                "REDUCED (THICK 8-SEGMENT RINGS)"
+            } else {
+                "STANDARD (12-SEGMENT RINGS)"
+            }
+        )),
+        TextFont::from_font_size(16.0),
+        TextColor(Color::srgb_u8(235, 239, 226)),
+        Node {
+            position_type: PositionType::Absolute,
+            bottom: px(18),
+            left: px(310),
+            border: UiRect::all(px(2)),
+            padding: UiRect::all(px(10)),
+            ..default()
+        },
+        BackgroundColor(Color::srgba_u8(5, 9, 13, 240)),
+        BorderColor::all(Color::srgba_u8(154, 238, 247, 220)),
+    ));
+}
+
+fn spawn_world_label(
+    commands: &mut Commands,
+    label: &str,
+    position: SimulationVector,
+    arena: &sim_core::ArenaGeometry,
+) {
+    let render = simulation_point_to_render(position, arena);
+    commands.spawn((
+        Name::new(format!("{label} label")),
+        Text2d::new(label),
+        TextFont::from_font_size(14.0),
+        TextColor(Color::srgb_u8(224, 219, 202)),
+        Transform::from_xyz(render.x, render.y - 1.75, FRIENDLY_PROJECTILE_Z + 0.4)
+            .with_scale(Vec3::splat(0.022)),
+        Anchor::CENTER,
+    ));
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn sequence_nailkeeper_evidence_audio(
+    scenario: Res<EvidenceScenario>,
+    oath_audio: Res<crate::oath_feedback::OathAudioCue>,
+    mut evidence: ResMut<NailkeeperEvidenceState>,
+) {
+    if *scenario != EvidenceScenario::NailkeeperShowcase || evidence.ready() {
+        return;
+    }
+    evidence.elapsed_ticks = evidence.elapsed_ticks.saturating_add(1);
+    let cue = match evidence.elapsed_ticks {
+        1 => Some(crate::oath_feedback::OathAudioCueKind::TrapArmed),
+        8 => Some(crate::oath_feedback::OathAudioCueKind::TrapTriggered),
+        15 => Some(crate::oath_feedback::OathAudioCueKind::FrostbindImmune),
+        _ => None,
+    };
+    if let Some(cue) = cue {
+        assert!(
+            oath_audio.play(cue),
+            "Nailkeeper evidence audio worker closed"
+        );
+        evidence.cues_played = evidence.cues_played.saturating_add(1);
+    }
 }
 
 fn spawn_debug_targets(
@@ -841,12 +972,10 @@ fn present_nail_traps(
                 "Nailkeeper trigger cue was unavailable"
             );
         }
-        spawn_transient(
+        spawn_frostbind_burst(
             commands,
             "Nailkeeper Frostbind burst",
             simulation_point_to_render(trigger.position, arena),
-            Color::srgba_u8(154, 238, 247, 230),
-            0.92,
             0.34,
         );
         info!(
@@ -878,8 +1007,26 @@ fn spawn_nail_trap(
     armed: bool,
     accessibility: crate::accessibility::AccessibilitySettings,
 ) {
+    spawn_nail_trap_at(
+        commands,
+        trap.id(),
+        trap.position(),
+        arena,
+        armed,
+        accessibility,
+    );
+}
+
+fn spawn_nail_trap_at(
+    commands: &mut Commands,
+    trap_id: sim_core::EntityId,
+    trap_position: SimulationVector,
+    arena: &sim_core::ArenaGeometry,
+    armed: bool,
+    accessibility: crate::accessibility::AccessibilitySettings,
+) {
     let plan = nail_trap_visual_plan(armed, accessibility.reduced_motion);
-    let position = simulation_point_to_render(trap.position(), arena);
+    let position = simulation_point_to_render(trap_position, arena);
     let color = if plan.armed {
         Color::srgba_u8(106, 221, 235, 225)
     } else {
@@ -892,7 +1039,7 @@ fn spawn_nail_trap(
             } else {
                 "Arming nail trap"
             }),
-            NailTrapPresentation(trap.id()),
+            NailTrapPresentation(trap_id),
             Transform::from_xyz(position.x, position.y, FRIENDLY_PROJECTILE_Z - 0.1),
             Visibility::default(),
         ))
@@ -1403,6 +1550,39 @@ fn spawn_transient(
     ));
 }
 
+fn spawn_frostbind_burst(commands: &mut Commands, name: &str, position: Vec2, duration: f32) {
+    let root = commands
+        .spawn((
+            Name::new(name.to_owned()),
+            TransientEffect {
+                remaining_seconds: duration,
+                total_seconds: duration,
+            },
+            Transform::from_xyz(position.x, position.y, FRIENDLY_PROJECTILE_Z + 0.2),
+            Visibility::default(),
+        ))
+        .id();
+    commands.entity(root).with_children(|parent| {
+        let radius = 0.46;
+        for index in 0_u8..6 {
+            let angle = f32::from(index) * std::f32::consts::TAU / 6.0;
+            let offset = Vec2::new(angle.cos(), angle.sin()) * radius;
+            parent.spawn((
+                Sprite::from_color(
+                    Color::srgba_u8(154, 238, 247, 230),
+                    Vec2::new(radius, 0.085),
+                ),
+                Transform::from_xyz(offset.x, offset.y, 0.0)
+                    .with_rotation(Quat::from_rotation_z(angle + std::f32::consts::FRAC_PI_2)),
+            ));
+        }
+        parent.spawn((
+            Sprite::from_color(Color::srgba_u8(224, 251, 255, 215), Vec2::splat(0.20)),
+            Transform::from_rotation(Quat::from_rotation_z(std::f32::consts::FRAC_PI_4)),
+        ));
+    });
+}
+
 #[allow(
     clippy::needless_pass_by_value,
     clippy::type_complexity // Disjoint Bevy filters prove mutable query compatibility.
@@ -1643,6 +1823,7 @@ fn draw_collision_debug(
                 | EvidenceScenario::DamageGraceShowcase
                 | EvidenceScenario::DeathRestartShowcase
                 | EvidenceScenario::DeathRecapShowcase
+                | EvidenceScenario::NailkeeperShowcase
         )
     }) {
         gizmos
@@ -1705,6 +1886,7 @@ fn draw_collision_debug(
                 | EvidenceScenario::DamageGraceShowcase
                 | EvidenceScenario::DeathRestartShowcase
                 | EvidenceScenario::DeathRecapShowcase
+                | EvidenceScenario::NailkeeperShowcase
         ) {
         0
     } else {
@@ -1932,6 +2114,11 @@ mod tests {
             EvidenceScenario::from_value(Some(GRAVE_MARK_SHOWCASE_SCENARIO), true)
                 .expect("Grave Mark scenario"),
             EvidenceScenario::GraveMarkShowcase
+        );
+        assert_eq!(
+            EvidenceScenario::from_value(Some(NAILKEEPER_SHOWCASE_SCENARIO), true)
+                .expect("Nailkeeper scenario"),
+            EvidenceScenario::NailkeeperShowcase
         );
         assert_eq!(
             EvidenceScenario::from_value(Some(SLIPSTEP_SHOWCASE_SCENARIO), true)

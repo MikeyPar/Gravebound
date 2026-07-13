@@ -101,6 +101,16 @@ $env:GRAVEBOUND_EVIDENCE_SCENARIO = 'primary_fire_east'
 
 Unknown scenario names and scenario use without `GRAVEBOUND_SCREENSHOT_PATH` fail at startup.
 
+For the production Nailkeeper readability tableau and sequential arm, trigger, and immunity cues:
+
+```powershell
+$env:GRAVEBOUND_EVIDENCE_SCENARIO = 'nailkeeper_showcase'
+$env:GRAVEBOUND_SCREENSHOT_PATH = (Join-Path $PWD 'tmp\nailkeeper-showcase.png')
+cargo run --release -p client_bevy
+```
+
+Set `GRAVEBOUND_ACCESSIBILITY_EVIDENCE=reduced_motion` and use a second output path to capture the isolated reduced-motion form. The exact-radius ring, non-color arming/armed notches, trigger burst, immunity label, and audio sequence remain present while transient scaling is suppressed; unrelated opacity and hostile-theme settings retain their defaults.
+
 `GB-M01-02B` adds a deterministic collision showcase. It fires first toward the west shell and then toward the nearest nondamageable debug enemy. Capture is not requested until authoritative diagnostics have recorded at least one solid block and one enemy hit; the renderer then settles for 60 complete presentation frames before atomic publication:
 
 ```powershell
