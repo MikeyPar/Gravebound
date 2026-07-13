@@ -1,5 +1,6 @@
 //! Transaction participant for future death and retirement aggregate owners.
 
+use serde::{Deserialize, Serialize};
 use sqlx::Row;
 
 use crate::{
@@ -8,8 +9,9 @@ use crate::{
 
 const ID_BYTES: usize = 16;
 const MAX_EVENT_PAYLOAD_BYTES: usize = 65_536;
+pub const BARGAIN_LIFE_CLEANUP_EVENT_SCHEMA_VERSION: u16 = 1;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BargainLifeEndReason {
     Death,
     Retirement,
@@ -31,8 +33,6 @@ pub struct BargainLifeCleanupCommand {
     pub event_id: [u8; ID_BYTES],
     pub reason: BargainLifeEndReason,
     pub expected_oath_bargain_version: i64,
-    /// Canonical owner-produced payload containing the ordered Bargain snapshot and final result.
-    pub event_payload: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,6 +41,40 @@ pub struct BargainLifeCleanupResult {
     pub pre_oath_bargain_version: i64,
     pub post_oath_bargain_version: i64,
     pub removed_danger_checkpoint: bool,
+    pub event_payload: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BargainLifeCleanupEventV1 {
+    pub schema_version: u16,
+    pub reason: BargainLifeEndReason,
+    pub pre_oath_bargain_version: i64,
+    pub post_oath_bargain_version: i64,
+    pub active_bargains: Vec<BargainLifeCleanupEventBargainV1>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BargainLifeCleanupEventBargainV1 {
+    pub bargain_id: String,
+    pub acquisition_ordinal: i16,
+    pub acquired_by_offer_id: [u8; ID_BYTES],
+}
+
+impl BargainLifeCleanupEventV1 {
+    pub fn decode(bytes: &[u8]) -> Result<Self, PersistenceError> {
+        if bytes.is_empty() || bytes.len() > MAX_EVENT_PAYLOAD_BYTES {
+            return Err(PersistenceError::CorruptBargainCleanup);
+        }
+        let event: Self =
+            postcard::from_bytes(bytes).map_err(|_| PersistenceError::CorruptBargainCleanup)?;
+        if event.schema_version != BARGAIN_LIFE_CLEANUP_EVENT_SCHEMA_VERSION
+            || postcard::to_stdvec(&event).map_err(|_| PersistenceError::CorruptBargainCleanup)?
+                != bytes
+        {
+            return Err(PersistenceError::CorruptBargainCleanup);
+        }
+        Ok(event)
+    }
 }
 
 pub async fn cleanup_bargains_for_life_end(
@@ -85,6 +119,8 @@ pub async fn cleanup_bargains_for_life_end(
     let post_version = version
         .checked_add(1)
         .ok_or(PersistenceError::CorruptBargainCleanup)?;
+    let event_payload =
+        encode_cleanup_event(command.reason, version, post_version, &active_bargains)?;
     sqlx::query(
         "DELETE FROM character_active_bargains WHERE namespace_id = $1 AND account_id = $2 \
          AND character_id = $3",
@@ -131,7 +167,7 @@ pub async fn cleanup_bargains_for_life_end(
     .bind(command.event_id.as_slice())
     .bind(command.reason.event_type())
     .bind(post_version)
-    .bind(&command.event_payload)
+    .bind(&event_payload)
     .execute(transaction.connection())
     .await?;
     Ok(BargainLifeCleanupResult {
@@ -139,7 +175,31 @@ pub async fn cleanup_bargains_for_life_end(
         pre_oath_bargain_version: version,
         post_oath_bargain_version: post_version,
         removed_danger_checkpoint,
+        event_payload,
     })
+}
+
+fn encode_cleanup_event(
+    reason: BargainLifeEndReason,
+    pre_oath_bargain_version: i64,
+    post_oath_bargain_version: i64,
+    active_bargains: &[StoredActiveBargain],
+) -> Result<Vec<u8>, PersistenceError> {
+    postcard::to_stdvec(&BargainLifeCleanupEventV1 {
+        schema_version: BARGAIN_LIFE_CLEANUP_EVENT_SCHEMA_VERSION,
+        reason,
+        pre_oath_bargain_version,
+        post_oath_bargain_version,
+        active_bargains: active_bargains
+            .iter()
+            .map(|bargain| BargainLifeCleanupEventBargainV1 {
+                bargain_id: bargain.bargain_id.clone(),
+                acquisition_ordinal: bargain.acquisition_ordinal,
+                acquired_by_offer_id: bargain.acquired_by_offer_id,
+            })
+            .collect(),
+    })
+    .map_err(|_| PersistenceError::CorruptBargainCleanup)
 }
 
 fn validate_command(command: &BargainLifeCleanupCommand) -> Result<(), PersistenceError> {
@@ -147,8 +207,6 @@ fn validate_command(command: &BargainLifeCleanupCommand) -> Result<(), Persisten
         .iter()
         .any(|value| value.iter().all(|byte| *byte == 0))
         || command.expected_oath_bargain_version <= 0
-        || command.event_payload.is_empty()
-        || command.event_payload.len() > MAX_EVENT_PAYLOAD_BYTES
     {
         return Err(PersistenceError::CorruptBargainCleanup);
     }
@@ -159,7 +217,10 @@ fn validate_ordered_bargains(values: &[StoredActiveBargain]) -> Result<(), Persi
     if values.len() > 3
         || values.iter().enumerate().any(|(index, bargain)| {
             bargain.acquisition_ordinal != i16::try_from(index + 1).unwrap_or(i16::MAX)
-                || bargain.bargain_id.is_empty()
+                || !matches!(
+                    bargain.bargain_id.as_str(),
+                    "bargain.bell_debt" | "bargain.cinder_hunger" | "bargain.lantern_ash"
+                )
                 || bargain.acquired_by_offer_id == [0; ID_BYTES]
         })
     {
@@ -186,14 +247,27 @@ mod tests {
             event_id: [3; ID_BYTES],
             reason: BargainLifeEndReason::Death,
             expected_oath_bargain_version: 4,
-            event_payload: vec![1],
         };
         validate_command(&command).unwrap();
-        command.event_payload.clear();
+        command.event_id = [0; ID_BYTES];
         assert!(matches!(
             validate_command(&command),
             Err(PersistenceError::CorruptBargainCleanup)
         ));
+
+        let event = BargainLifeCleanupEventV1 {
+            schema_version: BARGAIN_LIFE_CLEANUP_EVENT_SCHEMA_VERSION,
+            reason: BargainLifeEndReason::Retirement,
+            pre_oath_bargain_version: 4,
+            post_oath_bargain_version: 5,
+            active_bargains: vec![BargainLifeCleanupEventBargainV1 {
+                bargain_id: "bargain.bell_debt".into(),
+                acquisition_ordinal: 1,
+                acquired_by_offer_id: [4; ID_BYTES],
+            }],
+        };
+        let encoded = postcard::to_stdvec(&event).unwrap();
+        assert_eq!(BargainLifeCleanupEventV1::decode(&encoded).unwrap(), event);
         assert!(matches!(
             validate_ordered_bargains(&[StoredActiveBargain {
                 bargain_id: "bargain.bell_debt".into(),

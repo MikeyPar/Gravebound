@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use persistence::{
-    BargainLifeCleanupCommand, BargainLifeEndReason, PersistenceConfig, PersistenceError,
-    PostgresPersistence, WIPEABLE_CORE_NAMESPACE, cleanup_bargains_for_life_end,
+    BargainLifeCleanupCommand, BargainLifeCleanupEventV1, BargainLifeEndReason, PersistenceConfig,
+    PersistenceError, PostgresPersistence, WIPEABLE_CORE_NAMESPACE, cleanup_bargains_for_life_end,
 };
 use protocol::{
     BargainContentRevisionV1, BargainDecision, BargainDecisionFrame, BargainDecisionPayload,
@@ -637,7 +637,6 @@ async fn assert_life_cleanup_participant(
         event_id: [91; 16],
         reason: BargainLifeEndReason::Death,
         expected_oath_bargain_version: 3,
-        event_payload: b"ordered-bargain-snapshot-v1".to_vec(),
     };
     let mut stale = command.clone();
     stale.expected_oath_bargain_version = 2;
@@ -658,6 +657,8 @@ async fn assert_life_cleanup_participant(
     assert_eq!(result.active_bargains.len(), 1);
     assert_eq!(result.active_bargains[0].bargain_id, selected_id);
     assert_eq!(result.active_bargains[0].acquisition_ordinal, 1);
+    let acquired_by_offer_id = result.active_bargains[0].acquired_by_offer_id;
+    let expected_event_payload = result.event_payload.clone();
     transaction.commit().await.unwrap();
 
     let mut verification = persistence.begin_transaction().await.unwrap();
@@ -691,12 +692,23 @@ async fn assert_life_cleanup_participant(
     .unwrap();
     verification.rollback().await.unwrap();
     assert_eq!(life, (4, 0, 1, 1));
+    let decoded_event = BargainLifeCleanupEventV1::decode(&cleanup_event.2).unwrap();
+    assert_eq!(decoded_event.reason, BargainLifeEndReason::Death);
+    assert_eq!(decoded_event.pre_oath_bargain_version, 3);
+    assert_eq!(decoded_event.post_oath_bargain_version, 4);
+    assert_eq!(decoded_event.active_bargains.len(), 1);
+    assert_eq!(decoded_event.active_bargains[0].bargain_id, selected_id);
+    assert_eq!(decoded_event.active_bargains[0].acquisition_ordinal, 1);
+    assert_eq!(
+        decoded_event.active_bargains[0].acquired_by_offer_id,
+        acquired_by_offer_id
+    );
     assert_eq!(
         cleanup_event,
         (
             "bargains_cleared_death".to_owned(),
             4,
-            command.event_payload
+            expected_event_payload
         )
     );
 }

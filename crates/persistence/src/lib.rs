@@ -36,8 +36,9 @@ pub use bargain::{
     StoredBargainSnapshot,
 };
 pub use bargain_cleanup::{
-    BargainLifeCleanupCommand, BargainLifeCleanupResult, BargainLifeEndReason,
-    cleanup_bargains_for_life_end,
+    BARGAIN_LIFE_CLEANUP_EVENT_SCHEMA_VERSION, BargainLifeCleanupCommand,
+    BargainLifeCleanupEventBargainV1, BargainLifeCleanupEventV1, BargainLifeCleanupResult,
+    BargainLifeEndReason, cleanup_bargains_for_life_end,
 };
 pub use bargain_milestone::{
     CORE_BARGAIN_LAYOUT_ID, CORE_BARGAIN_MILESTONE_ID, CORE_BARGAIN_SOURCE_ID,
