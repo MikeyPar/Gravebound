@@ -11,9 +11,11 @@ use persistence::{PersistenceConfig, PostgresPersistence, WIPEABLE_CORE_NAMESPAC
 use protocol::{
     AccountBootstrapFrame, AccountBootstrapRequest, AccountBootstrapResult, AccountErrorCode,
     AuthTicket, CharacterMutationFrame, CharacterMutationPayload, ClientHello, Compression,
-    HandshakeResponse, ManifestHash, Platform, ProgressionQueryFrame, ProgressionResult,
-    ProtocolVersion, WireText, WorldFlowFrame, WorldFlowRequest, WorldFlowResult,
-    WorldTransferCommand, WorldTransferMutation, WorldTransferPayload, WorldTransferResultCode,
+    HandshakeResponse, InitialOathSelectionFrame, InitialOathSelectionPayload, ManifestHash,
+    OathContentRevisionV1, OathResultCode, OathSelectionState, OathViewFrame, Platform,
+    ProgressionQueryFrame, ProgressionResult, ProtocolVersion, WireText, WorldFlowFrame,
+    WorldFlowRequest, WorldFlowResult, WorldTransferCommand, WorldTransferMutation,
+    WorldTransferPayload, WorldTransferResultCode,
 };
 use server_app::{
     AccountId, AuthenticatedAccount, AuthenticatedNamespace, BoundCoreIdentityServer,
@@ -131,6 +133,16 @@ fn wire_bootstrap(content_root: &Path, sequence: u32) -> AccountBootstrapFrame {
 fn world_flow_revision(content_root: &Path) -> protocol::WorldFlowContentRevisionV1 {
     let compiled = sim_content::load_core_development_world_flow(content_root).unwrap();
     protocol::WorldFlowContentRevisionV1 {
+        records_blake3: ManifestHash::new(compiled.hashes().records_blake3.clone()).unwrap(),
+        assets_blake3: ManifestHash::new(compiled.hashes().assets_blake3.clone()).unwrap(),
+        localization_blake3: ManifestHash::new(compiled.hashes().localization_blake3.clone())
+            .unwrap(),
+    }
+}
+
+fn oath_revision(content_root: &Path) -> OathContentRevisionV1 {
+    let compiled = sim_content::load_core_development_oaths_bargains(content_root).unwrap();
+    OathContentRevisionV1 {
         records_blake3: ManifestHash::new(compiled.hashes().records_blake3.clone()).unwrap(),
         assets_blake3: ManifestHash::new(compiled.hashes().assets_blake3.clone()).unwrap(),
         localization_blake3: ManifestHash::new(compiled.hashes().localization_blake3.clone())
@@ -436,6 +448,118 @@ async fn assert_persistent_world_flow_is_fail_closed(
     assert_eq!(world_flow_row_count(persistence).await, 0);
 }
 
+async fn assert_persistent_oath_route(
+    persistence: &PostgresPersistence,
+    connection: &quinn::Connection,
+    content_root: &Path,
+    ticket: &[u8],
+    character_id: [u8; 16],
+) {
+    let hash = blake3::hash(ticket);
+    let account_id = &hash.as_bytes()[..16];
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    sqlx::query(
+        "UPDATE characters SET level = 10 WHERE namespace_id = $1 AND account_id = $2 \
+         AND character_id = $3",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id)
+    .bind(character_id.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE character_progression SET total_xp = 2700, level = 10, current_health = 156, \
+         progression_version = progression_version + 1 WHERE namespace_id = $1 \
+         AND account_id = $2 AND character_id = $3",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id)
+    .bind(character_id.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE character_world_locations SET location_kind = 1, \
+         location_content_id = 'hub.lantern_halls_01', safe_arrival_kind = 0, \
+         safe_spawn_id = NULL, instance_lineage_id = NULL, entry_restore_point_id = NULL \
+         WHERE namespace_id = $1 AND account_id = $2 AND character_id = $3",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id)
+    .bind(character_id.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    transaction.commit().await.unwrap();
+
+    let revision = oath_revision(content_root);
+    let (_, view) = bot_client::perform_oath_view(
+        connection,
+        OathViewFrame {
+            sequence: 5,
+            character_id,
+            content_revision: revision.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(view.code, OathResultCode::Available);
+    assert!(matches!(
+        view.projection.as_ref().map(|value| &value.state),
+        Some(OathSelectionState::Eligible { current_level: 10 })
+    ));
+
+    let payload = InitialOathSelectionPayload {
+        character_id,
+        oath_id: WireText::new(protocol::LONG_VIGIL_ID).unwrap(),
+        content_revision: revision,
+        confirmed: true,
+    };
+    let frame = InitialOathSelectionFrame {
+        mutation_id: [74; 16],
+        expected_character_version: 1,
+        payload_hash: payload.canonical_hash(),
+        issued_at_unix_millis: current_unix_millis(),
+        payload,
+    };
+    let (_, selected) = bot_client::perform_initial_oath_selection(connection, frame.clone())
+        .await
+        .unwrap();
+    assert_eq!(selected.code, OathResultCode::Accepted);
+    assert!(matches!(
+        selected.projection.as_ref().map(|value| &value.state),
+        Some(OathSelectionState::Selected { oath_id, .. })
+            if oath_id.as_str() == protocol::LONG_VIGIL_ID
+    ));
+    let (_, replayed) = bot_client::perform_initial_oath_selection(connection, frame)
+        .await
+        .unwrap();
+    assert_eq!(replayed, selected);
+}
+
+async fn assert_persisted_oath_view(
+    connection: &quinn::Connection,
+    content_root: &Path,
+    character_id: [u8; 16],
+) {
+    let (_, oath) = bot_client::perform_oath_view(
+        connection,
+        OathViewFrame {
+            sequence: 3,
+            character_id,
+            content_revision: oath_revision(content_root),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        oath.projection.as_ref().map(|value| &value.state),
+        Some(OathSelectionState::Selected { oath_id, .. })
+            if oath_id.as_str() == protocol::LONG_VIGIL_ID
+    ));
+}
+
 type ServerTask =
     tokio::task::JoinHandle<Result<CoreIdentityServerReport, LocalServerRuntimeError>>;
 
@@ -653,6 +777,15 @@ async fn postgres_real_quic_server_restart_preserves_authoritative_roster() {
     assert!(created.accepted);
     assert_persistent_world_flow_is_fail_closed(&persistence, &connection, &content_root, &created)
         .await;
+    let character_id = created.snapshot.as_ref().unwrap().characters[0].character_id;
+    assert_persistent_oath_route(
+        &persistence,
+        &connection,
+        &content_root,
+        ticket,
+        character_id,
+    )
+    .await;
     connection.close(0_u32.into(), b"durable restart");
     shutdown.send(()).unwrap();
     let report = task.await.unwrap().unwrap();
@@ -678,6 +811,7 @@ async fn postgres_real_quic_server_restart_preserves_authoritative_roster() {
         panic!("restored durable snapshot expected")
     };
     assert_eq!(restored.characters.len(), 1);
+    assert_persisted_oath_view(&connection, &content_root, character_id).await;
     connection.close(0_u32.into(), b"complete");
     shutdown.send(()).unwrap();
     assert!(task.await.unwrap().unwrap().persistence_enabled);
