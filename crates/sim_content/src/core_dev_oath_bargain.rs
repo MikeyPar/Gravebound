@@ -790,4 +790,63 @@ mod tests {
         copy.entries.last_mut().unwrap().value.push('!');
         assert!(validate_copy(&exact_oaths, &bargains, &copy).is_err());
     }
+
+    #[test]
+    fn every_core_oath_bargain_crossbow_combination_respects_caps_and_cadence() {
+        let (class_package, _) = crate::load_and_validate(&content_root()).unwrap();
+        let items = crate::load_core_development_items(&content_root()).unwrap();
+        let choices = load_core_development_oaths_bargains(&content_root()).unwrap();
+        let weapons = [
+            ("item.weapon.crossbow.grave_repeater", 4),
+            ("item.weapon.crossbow.mourners_fan", 10),
+            ("item.weapon.crossbow.pilgrim_longbolt", 7),
+            ("item.weapon.crossbow.pine_crossbow", 1),
+        ];
+        let bargains = [
+            sim_core::CoreBargainModifier::CinderHunger,
+            sim_core::CoreBargainModifier::BellDebt,
+            sim_core::CoreBargainModifier::LanternAsh,
+        ];
+        for (oath_id, oath) in [
+            (
+                "oath.arbalist.long_vigil",
+                sim_core::GraveArbalistOath::LongVigil,
+            ),
+            (
+                "oath.arbalist.nailkeeper",
+                sim_core::GraveArbalistOath::Nailkeeper,
+            ),
+        ] {
+            for mask in 0_u8..8 {
+                let active = bargains
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, bargain)| (mask & (1 << index) != 0).then_some(*bargain))
+                    .collect::<Vec<_>>();
+                let modifiers = sim_core::resolve_core_choice_modifiers(oath, &active).unwrap();
+                assert!(modifiers.maximum_health_multiplier_basis_points >= 7_000);
+                assert!(
+                    sim_core::resolve_oath_maximum_health(
+                        120,
+                        modifiers.maximum_health_multiplier_basis_points,
+                    )
+                    .unwrap()
+                        >= 84
+                );
+                for (weapon_id, minimum_level) in weapons {
+                    let definitions = compile_core_oathed_combat_definitions(
+                        &class_package,
+                        &items,
+                        &choices,
+                        oath_id,
+                        weapon_id,
+                        minimum_level,
+                        modifiers.ordinary_attack_rate_basis_points,
+                    )
+                    .unwrap();
+                    assert!(definitions.weapon.attack_interval_ticks() > 0);
+                }
+            }
+        }
+    }
 }
