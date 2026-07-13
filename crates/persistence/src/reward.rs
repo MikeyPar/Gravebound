@@ -74,6 +74,8 @@ pub struct StoredRewardCommit {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredRewardOutcome {
     pub replayed: bool,
+    pub reward_request_id: [u8; 16],
+    pub epoch_id: String,
     pub pre_inventory_version: i64,
     pub post_inventory_version: i64,
     pub plan_hash: [u8; 32],
@@ -140,6 +142,8 @@ impl PostgresPersistence {
             service_result,
             outcome: StoredRewardOutcome {
                 replayed: false,
+                reward_request_id: request.reward_request_id,
+                epoch_id: request.epoch_id,
                 pre_inventory_version: inventory_version,
                 post_inventory_version,
                 plan_hash: commit.plan_hash,
@@ -212,7 +216,6 @@ async fn load_replay(
         || fixed_bytes::<16>(row.try_get("source_instance_id")?)? != request.source_instance_id
         || row.try_get::<String, _>("reward_table_id")? != request.reward_table_id
         || row.try_get::<String, _>("content_revision")? != request.content_revision
-        || row.try_get::<String, _>("epoch_id")? != request.epoch_id
         || fixed_bytes::<32>(row.try_get("canonical_request_hash")?)?
             != request.canonical_request_hash
     {
@@ -223,6 +226,8 @@ async fn load_replay(
     }
     let outcome = StoredRewardOutcome {
         replayed: true,
+        reward_request_id: request.reward_request_id,
+        epoch_id: row.try_get("epoch_id")?,
         pre_inventory_version: row.try_get("pre_inventory_version")?,
         post_inventory_version: row.try_get("post_inventory_version")?,
         plan_hash: fixed_bytes(row.try_get("plan_hash")?)?,
@@ -567,7 +572,8 @@ fn valid_reward_item(request: &StoredRewardRequest, item: &StoredRewardItem) -> 
 }
 
 fn validate_outcome(outcome: &StoredRewardOutcome) -> Result<(), PersistenceError> {
-    if outcome.pre_inventory_version <= 0
+    if !(1..=64).contains(&outcome.epoch_id.len())
+        || outcome.pre_inventory_version <= 0
         || outcome.post_inventory_version
             != outcome.pre_inventory_version + i64::from(!outcome.items.is_empty())
     {
@@ -664,6 +670,8 @@ mod tests {
         assert!(
             validate_outcome(&StoredRewardOutcome {
                 replayed: false,
+                reward_request_id: [1; 16],
+                epoch_id: "test-epoch".to_owned(),
                 pre_inventory_version: 3,
                 post_inventory_version: 3,
                 plan_hash: commit.plan_hash,

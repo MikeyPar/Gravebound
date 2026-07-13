@@ -191,6 +191,8 @@ pub enum PersistenceError {
     CorruptStoredItems,
     #[error("item request ID was reused with different canonical material")]
     ItemIdempotencyConflict,
+    #[error("authoritative reward planning failed before commit")]
+    RewardPlanningFailed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
