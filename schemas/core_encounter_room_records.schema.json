@@ -4,6 +4,18 @@
   "description": "Complete strict authoring set for the first `GB-M03-03D` compiler layer.",
   "type": "object",
   "properties": {
+    "authored_behaviors": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CoreAuthoredEnemyBehaviorRecord"
+      }
+    },
+    "authored_patterns": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CoreAuthoredPatternRecord"
+      }
+    },
     "layouts": {
       "type": "array",
       "items": {
@@ -38,6 +50,8 @@
   "required": [
     "schema_version",
     "roster",
+    "authored_behaviors",
+    "authored_patterns",
     "rooms",
     "packs",
     "layouts"
@@ -46,6 +60,509 @@
     "ContentId": {
       "description": "Stable dot-separated content identifier.",
       "type": "string"
+    },
+    "CoreAttackGroupRule": {
+      "type": "string",
+      "enum": [
+        "distinct_projectile_hit_groups",
+        "one_contact_hit_per_cast"
+      ]
+    },
+    "CoreAuthoredEnemyBehaviorRecord": {
+      "description": "Exact authored behavior for the five Core actors not reused from immutable FP definitions.",
+      "type": "object",
+      "properties": {
+        "aggro_radius_milli_tiles": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "armor": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "collision_radius_milli_tiles": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "contact_damage": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "drop_reward_on_reset": {
+          "type": "boolean"
+        },
+        "hurtbox_radius_milli_tiles": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "introduction_milliseconds": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "leash_radius_milli_tiles": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "locomotion": {
+          "$ref": "#/$defs/CoreEnemyLocomotion"
+        },
+        "maximum_health": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "no_target_reset_milliseconds": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "owner_id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "pattern_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContentId"
+          }
+        },
+        "role": {
+          "$ref": "#/$defs/CoreEnemyRole"
+        },
+        "spawn_invulnerability_milliseconds": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "spawn_warning_milliseconds": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "state_sequence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CoreEnemyStateStage"
+          }
+        },
+        "target_reacquire_milliseconds": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "target_selection": {
+          "$ref": "#/$defs/CoreTargetSelection"
+        },
+        "telegraph_lock": {
+          "$ref": "#/$defs/CoreTelegraphLock"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "owner_id",
+        "role",
+        "state_sequence",
+        "target_selection",
+        "telegraph_lock",
+        "maximum_health",
+        "armor",
+        "collision_radius_milli_tiles",
+        "hurtbox_radius_milli_tiles",
+        "aggro_radius_milli_tiles",
+        "leash_radius_milli_tiles",
+        "target_reacquire_milliseconds",
+        "no_target_reset_milliseconds",
+        "spawn_warning_milliseconds",
+        "spawn_invulnerability_milliseconds",
+        "introduction_milliseconds",
+        "contact_damage",
+        "drop_reward_on_reset",
+        "locomotion",
+        "pattern_ids"
+      ]
+    },
+    "CoreAuthoredPatternGeometry": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "distance_milli_tiles": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "duration_milliseconds": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "geometry_kind": {
+              "type": "string",
+              "const": "charge"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "geometry_kind",
+            "distance_milli_tiles",
+            "duration_milliseconds"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "first_offsets_milli_degrees": {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "format": "int32"
+              }
+            },
+            "geometry_kind": {
+              "type": "string",
+              "const": "alternating_fan"
+            },
+            "projectile_radius_milli_tiles": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "projectile_speed_milli_tiles_per_second": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "range_milli_tiles": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "second_offsets_milli_degrees": {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "format": "int32"
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "geometry_kind",
+            "first_offsets_milli_degrees",
+            "second_offsets_milli_degrees",
+            "projectile_speed_milli_tiles_per_second",
+            "range_milli_tiles",
+            "projectile_radius_milli_tiles"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "active_duration_milliseconds": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "arm_count": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            },
+            "clockwise_milli_degrees_per_second": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "emission_interval_milliseconds": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "geometry_kind": {
+              "type": "string",
+              "const": "rotating_arms"
+            },
+            "projectile_radius_milli_tiles": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "projectile_speed_milli_tiles_per_second": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "range_milli_tiles": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "geometry_kind",
+            "arm_count",
+            "clockwise_milli_degrees_per_second",
+            "emission_interval_milliseconds",
+            "active_duration_milliseconds",
+            "projectile_speed_milli_tiles_per_second",
+            "range_milli_tiles",
+            "projectile_radius_milli_tiles"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "charge_duration_milliseconds": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "geometry_kind": {
+              "type": "string",
+              "const": "charge_lane"
+            },
+            "length_milli_tiles": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "width_milli_tiles": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "geometry_kind",
+            "width_milli_tiles",
+            "length_milli_tiles",
+            "charge_duration_milliseconds"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "geometry_kind": {
+              "type": "string",
+              "const": "radial_gap"
+            },
+            "index_count": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            },
+            "omitted_adjacent_count": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            },
+            "projectile_radius_milli_tiles": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "projectile_speed_milli_tiles_per_second": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "range_milli_tiles": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "relation": {
+              "$ref": "#/$defs/CoreRadialGapRelation"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "geometry_kind",
+            "index_count",
+            "omitted_adjacent_count",
+            "relation",
+            "projectile_speed_milli_tiles_per_second",
+            "range_milli_tiles",
+            "projectile_radius_milli_tiles"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "geometry_kind": {
+              "type": "string",
+              "const": "projectile_fan"
+            },
+            "projectile_radius_milli_tiles": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "projectile_speed_milli_tiles_per_second": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "range_milli_tiles": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "shot_count": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            },
+            "total_arc_milli_degrees": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "geometry_kind",
+            "shot_count",
+            "total_arc_milli_degrees",
+            "projectile_speed_milli_tiles_per_second",
+            "range_milli_tiles",
+            "projectile_radius_milli_tiles"
+          ]
+        }
+      ]
+    },
+    "CoreAuthoredPatternRecord": {
+      "description": "Fully normalized authored hostile pattern. Reused FP patterns remain in the immutable package.",
+      "type": "object",
+      "properties": {
+        "acceleration_milli_tiles_per_second_squared": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "attack_group_rule": {
+          "$ref": "#/$defs/CoreAttackGroupRule"
+        },
+        "audio_cue_id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "cancel_on_phase_change": {
+          "type": "boolean"
+        },
+        "counterplay": {
+          "$ref": "#/$defs/CorePatternCounterplay"
+        },
+        "cycle_milliseconds": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "damage_band": {
+          "$ref": "#/$defs/DamageBand"
+        },
+        "damage_type": {
+          "$ref": "#/$defs/DamageType"
+        },
+        "disposition": {
+          "$ref": "#/$defs/CorePatternDisposition"
+        },
+        "geometry": {
+          "$ref": "#/$defs/CoreAuthoredPatternGeometry"
+        },
+        "id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "major_audio_cue_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContentId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "maximum_active_instances": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "memory_family": {
+          "$ref": "#/$defs/CorePatternMemoryFamily"
+        },
+        "owner_id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "pierces_players": {
+          "type": "boolean"
+        },
+        "quiet_milliseconds": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "raw_damage": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "statuses": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContentId"
+          }
+        },
+        "telegraph_id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "threat_cost": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "warning": {
+          "$ref": "#/$defs/CorePatternWarning"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "owner_id",
+        "telegraph_id",
+        "audio_cue_id",
+        "damage_type",
+        "damage_band",
+        "raw_damage",
+        "threat_cost",
+        "warning",
+        "cycle_milliseconds",
+        "quiet_milliseconds",
+        "geometry",
+        "counterplay",
+        "memory_family",
+        "disposition",
+        "attack_group_rule",
+        "acceleration_milli_tiles_per_second_squared",
+        "pierces_players",
+        "statuses",
+        "cancel_on_phase_change",
+        "maximum_active_instances"
+      ]
     },
     "CoreEncounterPackMember": {
       "type": "object",
@@ -248,6 +765,168 @@
       "enum": [
         "immutable_first_playable",
         "authored_core"
+      ]
+    },
+    "CoreEnemyLocomotion": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "approach_speed_milli_tiles_per_second": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "charge_distance_milli_tiles": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "charge_duration_milliseconds": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "movement_kind": {
+              "type": "string",
+              "const": "rush_retreat"
+            },
+            "retreat_duration_milliseconds": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "retreat_speed_milli_tiles_per_second": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "trigger_distance_milli_tiles": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "movement_kind",
+            "approach_speed_milli_tiles_per_second",
+            "trigger_distance_milli_tiles",
+            "charge_distance_milli_tiles",
+            "charge_duration_milliseconds",
+            "retreat_speed_milli_tiles_per_second",
+            "retreat_duration_milliseconds"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "movement_kind": {
+              "type": "string",
+              "const": "maintain_distance"
+            },
+            "movement_speed_milli_tiles_per_second": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "preferred_distance_milli_tiles": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "movement_kind",
+            "movement_speed_milli_tiles_per_second",
+            "preferred_distance_milli_tiles"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "movement_kind": {
+              "type": "string",
+              "const": "orbit_anchor"
+            },
+            "movement_speed_milli_tiles_per_second": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "orbit_radius_milli_tiles": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "movement_kind",
+            "movement_speed_milli_tiles_per_second",
+            "orbit_radius_milli_tiles"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "movement_kind": {
+              "type": "string",
+              "const": "pursue_stop_charge_home"
+            },
+            "movement_speed_milli_tiles_per_second": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "stop_distance_milli_tiles": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "movement_kind",
+            "movement_speed_milli_tiles_per_second",
+            "stop_distance_milli_tiles"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "movement_kind": {
+              "type": "string",
+              "const": "stationary"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "movement_kind"
+          ]
+        }
+      ]
+    },
+    "CoreEnemyRole": {
+      "type": "string",
+      "enum": [
+        "fodder",
+        "pressure",
+        "disruptor",
+        "anchor",
+        "elite"
+      ]
+    },
+    "CoreEnemyStateStage": {
+      "type": "string",
+      "enum": [
+        "spawn_telegraph",
+        "acquire",
+        "move_or_position",
+        "telegraph",
+        "attack",
+        "recover"
       ]
     },
     "CoreFixedLayoutEdge": {
@@ -455,6 +1134,102 @@
         "members",
         "base_budget",
         "warning_milliseconds"
+      ]
+    },
+    "CorePatternCounterplay": {
+      "type": "string",
+      "enum": [
+        "strafe",
+        "follow_gap",
+        "leave_telegraph"
+      ]
+    },
+    "CorePatternDisposition": {
+      "type": "string",
+      "enum": [
+        "one_contact_hit_per_cast",
+        "consume_on_player_or_solid"
+      ]
+    },
+    "CorePatternMemoryFamily": {
+      "type": "string",
+      "enum": [
+        "charge_or_contact",
+        "fan_projectile",
+        "rotating_projectile",
+        "radial_projectile"
+      ]
+    },
+    "CorePatternWarning": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "first_milliseconds": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "repeated_milliseconds": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "warning_kind": {
+              "type": "string",
+              "const": "standalone"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "warning_kind",
+            "first_milliseconds",
+            "repeated_milliseconds"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "warning_kind": {
+              "type": "string",
+              "const": "parent_only"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "warning_kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "duration_milliseconds": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "major_audio": {
+              "type": "boolean"
+            },
+            "warning_kind": {
+              "type": "string",
+              "const": "recovery_preview"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "warning_kind",
+            "duration_milliseconds",
+            "major_audio"
+          ]
+        }
+      ]
+    },
+    "CoreRadialGapRelation": {
+      "type": "string",
+      "enum": [
+        "target_opposite",
+        "target_facing"
       ]
     },
     "CoreRoomAnchor": {
@@ -732,6 +1507,33 @@
         "walkable_boundary",
         "pattern_lane",
         "objective_area"
+      ]
+    },
+    "CoreTargetSelection": {
+      "type": "string",
+      "enum": [
+        "nearest_living_damageable_in_aggro_tie_lowest_entity_id"
+      ]
+    },
+    "CoreTelegraphLock": {
+      "type": "string",
+      "enum": [
+        "aim_and_position_at_telegraph_start"
+      ]
+    },
+    "DamageBand": {
+      "type": "string",
+      "enum": [
+        "chip",
+        "pressure",
+        "major"
+      ]
+    },
+    "DamageType": {
+      "type": "string",
+      "enum": [
+        "physical",
+        "veil"
       ]
     },
     "MilliTileCircle": {

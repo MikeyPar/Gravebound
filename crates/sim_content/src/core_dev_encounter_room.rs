@@ -11,7 +11,8 @@ use content_schema::{
     SCHEMA_VERSION,
 };
 use sim_core::{
-    DungeonAnchorKind, DungeonCorridor, DungeonDoorDefinition, DungeonDoorSide, DungeonRoomAnchor,
+    BellReedDefinition, ChainSentryDefinition, DrownedPilgrimDefinition, DungeonAnchorKind,
+    DungeonCorridor, DungeonDoorDefinition, DungeonDoorSide, DungeonRoomAnchor,
     DungeonRoomDefinition, DungeonRoomVolume, DungeonRoomVolumeGeometry, DungeonRoomVolumeKind,
     FixedDungeonLayoutDefinition, MILLI_TILES_PER_TILE, PLAYER_COLLISION_RADIUS_MILLI_TILES,
     PlacedDungeonRoom,
@@ -51,6 +52,27 @@ const PATTERN_IDS: [&str; 11] = [
     "miniboss.choir_abbot.rotor",
     "miniboss.choir_abbot.recovery_ring",
 ];
+const AUTHORED_BEHAVIOR_IDS: [&str; 5] = [
+    "enemy.mire_leech",
+    "enemy.bell_acolyte",
+    "enemy.choir_skull",
+    "miniboss.sepulcher_knight",
+    "miniboss.choir_abbot",
+];
+const AUTHORED_PATTERN_IDS: [&str; 8] = [
+    "pattern.enemy.mire_leech.charge",
+    "pattern.enemy.bell_acolyte.alternating_fan",
+    "pattern.enemy.choir_skull.rotor",
+    "miniboss.sepulcher_knight.charge_lane",
+    "miniboss.sepulcher_knight.stop_ring",
+    "miniboss.sepulcher_knight.shield_fan",
+    "miniboss.choir_abbot.rotor",
+    "miniboss.choir_abbot.recovery_ring",
+];
+const MAJOR_PATTERN_IDS: [&str; 2] = [
+    "miniboss.sepulcher_knight.charge_lane",
+    "miniboss.choir_abbot.recovery_ring",
+];
 const ROOM_IDS: [&str; 9] = [
     "room.bell.vestibule_01",
     "room.bell.cross_01",
@@ -84,11 +106,61 @@ pub struct CoreEncounterRoomHashes {
     pub localization_blake3: String,
 }
 
+/// Validated behavior payload selected without constructing a runtime entity.
+#[derive(Debug, Clone)]
+pub enum CoreEncounterBehaviorDefinition {
+    ImmutableDrownedPilgrim(DrownedPilgrimDefinition),
+    ImmutableBellReed(BellReedDefinition),
+    ImmutableChainSentry(ChainSentryDefinition),
+    Authored {
+        behavior: content_schema::CoreAuthoredEnemyBehaviorRecord,
+        patterns: Vec<content_schema::CoreAuthoredPatternRecord>,
+    },
+}
+
+/// One roster-ordered actor definition with its immutable reward and XP bindings.
+#[derive(Debug, Clone)]
+pub struct CoreEncounterActorDefinition {
+    id: ContentId,
+    rank: CoreEncounterRank,
+    reward_profile_id: ContentId,
+    xp_profile_id: ContentId,
+    behavior: CoreEncounterBehaviorDefinition,
+}
+
+impl CoreEncounterActorDefinition {
+    #[must_use]
+    pub const fn id(&self) -> &ContentId {
+        &self.id
+    }
+
+    #[must_use]
+    pub const fn rank(&self) -> CoreEncounterRank {
+        self.rank
+    }
+
+    #[must_use]
+    pub const fn reward_profile_id(&self) -> &ContentId {
+        &self.reward_profile_id
+    }
+
+    #[must_use]
+    pub const fn xp_profile_id(&self) -> &ContentId {
+        &self.xp_profile_id
+    }
+
+    #[must_use]
+    pub const fn behavior(&self) -> &CoreEncounterBehaviorDefinition {
+        &self.behavior
+    }
+}
+
 /// Immutable compiled view. It intentionally exposes no release or promotion operation.
 #[derive(Debug, Clone)]
 pub struct CoreDevelopmentEncounterRooms {
     target_name: String,
     records: CoreEncounterRoomRecords,
+    actor_definitions: Vec<CoreEncounterActorDefinition>,
     hashes: CoreEncounterRoomHashes,
     localization: std::collections::BTreeMap<String, String>,
 }
@@ -102,6 +174,11 @@ impl CoreDevelopmentEncounterRooms {
     #[must_use]
     pub fn roster(&self) -> &[content_schema::CoreEncounterRosterMember] {
         &self.records.roster
+    }
+
+    #[must_use]
+    pub fn actor_definitions(&self) -> &[CoreEncounterActorDefinition] {
+        &self.actor_definitions
     }
 
     #[must_use]
@@ -216,9 +293,11 @@ pub fn compile_core_development_encounter_rooms(
     validate_records(source, items, progression, target, records)?;
     validate_assets(target, records, assets)?;
     validate_copy(target, records, copy)?;
+    let actor_definitions = compile_actor_definitions(source, records)?;
     let compiled = CoreDevelopmentEncounterRooms {
         target_name: target.target_name.clone(),
         records: records.clone(),
+        actor_definitions,
         hashes: hashes.clone(),
         localization: copy
             .entries
@@ -228,6 +307,77 @@ pub fn compile_core_development_encounter_rooms(
     };
     compiled.compile_fixed_layout_definition()?;
     Ok(compiled)
+}
+
+fn compile_actor_definitions(
+    source: &ContentPackage,
+    records: &CoreEncounterRoomRecords,
+) -> Result<Vec<CoreEncounterActorDefinition>> {
+    let authored = records
+        .authored_behaviors
+        .iter()
+        .map(|behavior| (behavior.owner_id.as_str(), behavior))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    records
+        .roster
+        .iter()
+        .map(|member| {
+            let behavior = match member.source_kind {
+                CoreEncounterSourceKind::ImmutableFirstPlayable => {
+                    match member.header.id.as_str() {
+                        "enemy.drowned_pilgrim" => {
+                            CoreEncounterBehaviorDefinition::ImmutableDrownedPilgrim(
+                                first_playable_drowned_pilgrim(source)?,
+                            )
+                        }
+                        "enemy.bell_reed" => CoreEncounterBehaviorDefinition::ImmutableBellReed(
+                            first_playable_bell_reed(source)?,
+                        ),
+                        "enemy.chain_sentry" => {
+                            CoreEncounterBehaviorDefinition::ImmutableChainSentry(
+                                first_playable_chain_sentry(source)?,
+                            )
+                        }
+                        id => bail!("{id} has no immutable First Playable behavior adapter"),
+                    }
+                }
+                CoreEncounterSourceKind::AuthoredCore => {
+                    let authored_behavior =
+                        authored.get(member.header.id.as_str()).with_context(|| {
+                            format!("{} has no authored behavior", member.header.id)
+                        })?;
+                    let patterns = authored_behavior
+                        .pattern_ids
+                        .iter()
+                        .map(|pattern_id| {
+                            records
+                                .authored_patterns
+                                .iter()
+                                .find(|pattern| pattern.id == *pattern_id)
+                                .cloned()
+                                .with_context(|| {
+                                    format!(
+                                        "{} has no authored pattern {}",
+                                        member.header.id, pattern_id
+                                    )
+                                })
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    CoreEncounterBehaviorDefinition::Authored {
+                        behavior: (*authored_behavior).clone(),
+                        patterns,
+                    }
+                }
+            };
+            Ok(CoreEncounterActorDefinition {
+                id: member.header.id.clone(),
+                rank: member.rank,
+                reward_profile_id: member.reward_profile_id.clone(),
+                xp_profile_id: member.xp_profile_id.clone(),
+                behavior,
+            })
+        })
+        .collect()
 }
 
 fn compile_room(record: &CoreRoomTemplateRecord) -> Result<DungeonRoomDefinition> {
@@ -624,12 +774,367 @@ fn validate_records(
     if flattened_patterns != PATTERN_IDS {
         bail!("Core encounter roster pattern closure is not exact");
     }
+    validate_authored_behaviors(records)?;
 
     validate_rooms(target, &records.rooms)?;
     validate_pack(&records.packs)?;
     validate_layout(&records.layouts, &records.rooms)?;
     validate_encounter_anchor_capacity(records)?;
     Ok(())
+}
+
+fn validate_authored_behaviors(records: &CoreEncounterRoomRecords) -> Result<()> {
+    let behavior_ids = records
+        .authored_behaviors
+        .iter()
+        .map(|record| record.owner_id.as_str())
+        .collect::<Vec<_>>();
+    if behavior_ids != AUTHORED_BEHAVIOR_IDS {
+        bail!("Core authored behavior allowlist is not exact");
+    }
+    let health = [70, 160, 150, 1_600, 1_900];
+    let armor = [0, 2, 1, 8, 6];
+    let roles = [
+        content_schema::CoreEnemyRole::Fodder,
+        content_schema::CoreEnemyRole::Pressure,
+        content_schema::CoreEnemyRole::Disruptor,
+        content_schema::CoreEnemyRole::Elite,
+        content_schema::CoreEnemyRole::Elite,
+    ];
+    let state_sequence = [
+        content_schema::CoreEnemyStateStage::SpawnTelegraph,
+        content_schema::CoreEnemyStateStage::Acquire,
+        content_schema::CoreEnemyStateStage::MoveOrPosition,
+        content_schema::CoreEnemyStateStage::Telegraph,
+        content_schema::CoreEnemyStateStage::Attack,
+        content_schema::CoreEnemyStateStage::Recover,
+        content_schema::CoreEnemyStateStage::Acquire,
+    ];
+    for (index, behavior) in records.authored_behaviors.iter().enumerate() {
+        let miniboss = index >= 3;
+        if behavior.role != roles[index]
+            || behavior.state_sequence != state_sequence
+            || behavior.target_selection
+                != content_schema::CoreTargetSelection::NearestLivingDamageableInAggroTieLowestEntityId
+            || behavior.telegraph_lock
+                != content_schema::CoreTelegraphLock::AimAndPositionAtTelegraphStart
+            || behavior.maximum_health != health[index]
+            || behavior.armor != armor[index]
+            || behavior.collision_radius_milli_tiles != if miniboss { 550 } else { 350 }
+            || behavior.hurtbox_radius_milli_tiles != if miniboss { 480 } else { 300 }
+            || behavior.aggro_radius_milli_tiles != 12_000
+            || behavior.leash_radius_milli_tiles != 16_000
+            || behavior.target_reacquire_milliseconds != 250
+            || behavior.no_target_reset_milliseconds != 5_000
+            || behavior.spawn_warning_milliseconds != 900
+            || behavior.spawn_invulnerability_milliseconds != 1_000
+            || behavior.introduction_milliseconds != if miniboss { 3_000 } else { 0 }
+            || behavior.contact_damage != 0
+            || behavior.drop_reward_on_reset
+            || !locomotion_is_exact(index, &behavior.locomotion)
+        {
+            bail!(
+                "authored behavior {} drifted from its exact Core row",
+                behavior.owner_id
+            );
+        }
+    }
+    let flattened = records
+        .authored_behaviors
+        .iter()
+        .flat_map(|behavior| behavior.pattern_ids.iter())
+        .map(ContentId::as_str)
+        .collect::<Vec<_>>();
+    if flattened != AUTHORED_PATTERN_IDS {
+        bail!("Core authored behavior pattern ownership is not exact");
+    }
+    validate_authored_patterns(&records.authored_patterns)
+}
+
+fn locomotion_is_exact(index: usize, locomotion: &content_schema::CoreEnemyLocomotion) -> bool {
+    match (index, locomotion) {
+        (
+            0,
+            content_schema::CoreEnemyLocomotion::RushRetreat {
+                approach_speed_milli_tiles_per_second,
+                trigger_distance_milli_tiles,
+                charge_distance_milli_tiles,
+                charge_duration_milliseconds,
+                retreat_speed_milli_tiles_per_second,
+                retreat_duration_milliseconds,
+            },
+        ) => {
+            *approach_speed_milli_tiles_per_second == 3_000
+                && *trigger_distance_milli_tiles == 2_500
+                && *charge_distance_milli_tiles == 2_000
+                && *charge_duration_milliseconds == 500
+                && *retreat_speed_milli_tiles_per_second == 3_500
+                && *retreat_duration_milliseconds == 1_500
+        }
+        (
+            1,
+            content_schema::CoreEnemyLocomotion::MaintainDistance {
+                movement_speed_milli_tiles_per_second,
+                preferred_distance_milli_tiles,
+            },
+        ) => {
+            *movement_speed_milli_tiles_per_second == 3_000
+                && *preferred_distance_milli_tiles == 6_000
+        }
+        (
+            2,
+            content_schema::CoreEnemyLocomotion::OrbitAnchor {
+                movement_speed_milli_tiles_per_second,
+                orbit_radius_milli_tiles,
+            },
+        ) => *movement_speed_milli_tiles_per_second == 2_800 && *orbit_radius_milli_tiles == 3_000,
+        (
+            3,
+            content_schema::CoreEnemyLocomotion::PursueStopChargeHome {
+                movement_speed_milli_tiles_per_second,
+                stop_distance_milli_tiles,
+            },
+        ) => *movement_speed_milli_tiles_per_second == 2_400 && *stop_distance_milli_tiles == 3_500,
+        (4, content_schema::CoreEnemyLocomotion::Stationary) => true,
+        _ => false,
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn validate_authored_patterns(
+    patterns: &[content_schema::CoreAuthoredPatternRecord],
+) -> Result<()> {
+    let ids = patterns
+        .iter()
+        .map(|pattern| pattern.id.as_str())
+        .collect::<Vec<_>>();
+    if ids != AUTHORED_PATTERN_IDS {
+        bail!("Core authored pattern allowlist is not exact");
+    }
+    let owners = [
+        "enemy.mire_leech",
+        "enemy.bell_acolyte",
+        "enemy.choir_skull",
+        "miniboss.sepulcher_knight",
+        "miniboss.sepulcher_knight",
+        "miniboss.sepulcher_knight",
+        "miniboss.choir_abbot",
+        "miniboss.choir_abbot",
+    ];
+    let damage_types = [
+        content_schema::DamageType::Physical,
+        content_schema::DamageType::Veil,
+        content_schema::DamageType::Veil,
+        content_schema::DamageType::Physical,
+        content_schema::DamageType::Physical,
+        content_schema::DamageType::Physical,
+        content_schema::DamageType::Veil,
+        content_schema::DamageType::Veil,
+    ];
+    let bands = [
+        content_schema::DamageBand::Pressure,
+        content_schema::DamageBand::Pressure,
+        content_schema::DamageBand::Pressure,
+        content_schema::DamageBand::Major,
+        content_schema::DamageBand::Pressure,
+        content_schema::DamageBand::Pressure,
+        content_schema::DamageBand::Pressure,
+        content_schema::DamageBand::Major,
+    ];
+    let damage = [12, 16, 14, 34, 20, 18, 18, 26];
+    let threat = [2, 7, 10, 8, 8, 5, 12, 12];
+    let cycle = [2_500, 1_800, 6_000, 6_000, 6_000, 2_200, 6_000, 6_000];
+    let quiet = [1_500, 0, 2_000, 0, 0, 0, 2_500, 0];
+    let active = [1, 5, 8, 1, 8, 5, 10, 12];
+    let counterplay = [
+        content_schema::CorePatternCounterplay::LeaveTelegraph,
+        content_schema::CorePatternCounterplay::Strafe,
+        content_schema::CorePatternCounterplay::Strafe,
+        content_schema::CorePatternCounterplay::LeaveTelegraph,
+        content_schema::CorePatternCounterplay::FollowGap,
+        content_schema::CorePatternCounterplay::Strafe,
+        content_schema::CorePatternCounterplay::Strafe,
+        content_schema::CorePatternCounterplay::FollowGap,
+    ];
+    let memories = [
+        content_schema::CorePatternMemoryFamily::ChargeOrContact,
+        content_schema::CorePatternMemoryFamily::FanProjectile,
+        content_schema::CorePatternMemoryFamily::RotatingProjectile,
+        content_schema::CorePatternMemoryFamily::ChargeOrContact,
+        content_schema::CorePatternMemoryFamily::RadialProjectile,
+        content_schema::CorePatternMemoryFamily::FanProjectile,
+        content_schema::CorePatternMemoryFamily::RotatingProjectile,
+        content_schema::CorePatternMemoryFamily::RadialProjectile,
+    ];
+    for (index, pattern) in patterns.iter().enumerate() {
+        let charge = matches!(index, 0 | 3);
+        let pattern_id = pattern.id.as_str();
+        let expected_telegraph = format!("{pattern_id}.telegraph");
+        let expected_warning = format!("{pattern_id}.warning");
+        let expected_major_warning = format!("{expected_warning}.major");
+        if pattern.owner_id.as_str() != owners[index]
+            || pattern.telegraph_id.as_str() != expected_telegraph
+            || pattern.audio_cue_id.as_str() != expected_warning
+            || pattern.major_audio_cue_id.as_ref().map(ContentId::as_str)
+                != bands[index]
+                    .eq(&content_schema::DamageBand::Major)
+                    .then_some(expected_major_warning.as_str())
+            || pattern.damage_type != damage_types[index]
+            || pattern.damage_band != bands[index]
+            || pattern.raw_damage != damage[index]
+            || pattern.threat_cost != threat[index]
+            || pattern.cycle_milliseconds != cycle[index]
+            || pattern.quiet_milliseconds != quiet[index]
+            || pattern.counterplay != counterplay[index]
+            || pattern.memory_family != memories[index]
+            || pattern.disposition
+                != if charge {
+                    content_schema::CorePatternDisposition::OneContactHitPerCast
+                } else {
+                    content_schema::CorePatternDisposition::ConsumeOnPlayerOrSolid
+                }
+            || pattern.attack_group_rule
+                != if charge {
+                    content_schema::CoreAttackGroupRule::OneContactHitPerCast
+                } else {
+                    content_schema::CoreAttackGroupRule::DistinctProjectileHitGroups
+                }
+            || pattern.acceleration_milli_tiles_per_second_squared != 0
+            || pattern.pierces_players
+            || !pattern.statuses.is_empty()
+            || !pattern.cancel_on_phase_change
+            || pattern.maximum_active_instances != active[index]
+            || !warning_is_exact(index, &pattern.warning)
+            || !pattern_geometry_is_exact(index, &pattern.geometry)
+        {
+            bail!(
+                "authored pattern {} drifted from its exact Core row",
+                pattern.id
+            );
+        }
+    }
+    Ok(())
+}
+
+fn warning_is_exact(index: usize, warning: &content_schema::CorePatternWarning) -> bool {
+    matches!(
+        (index, warning),
+        (
+            0 | 1 | 5,
+            content_schema::CorePatternWarning::Standalone {
+                first_milliseconds: 400,
+                repeated_milliseconds: 300,
+            },
+        ) | (
+            2 | 6,
+            content_schema::CorePatternWarning::Standalone {
+                first_milliseconds: 650,
+                repeated_milliseconds: 500,
+            },
+        ) | (
+            3,
+            content_schema::CorePatternWarning::Standalone {
+                first_milliseconds: 900,
+                repeated_milliseconds: 900,
+            },
+        ) | (4, content_schema::CorePatternWarning::ParentOnly)
+            | (
+                7,
+                content_schema::CorePatternWarning::RecoveryPreview {
+                    duration_milliseconds: 650,
+                    major_audio: true,
+                },
+            )
+    )
+}
+
+#[allow(clippy::too_many_lines)]
+fn pattern_geometry_is_exact(
+    index: usize,
+    geometry: &content_schema::CoreAuthoredPatternGeometry,
+) -> bool {
+    if let (
+        1,
+        content_schema::CoreAuthoredPatternGeometry::AlternatingFan {
+            first_offsets_milli_degrees,
+            second_offsets_milli_degrees,
+            projectile_speed_milli_tiles_per_second: 6_000,
+            range_milli_tiles: 9_000,
+            projectile_radius_milli_tiles: 110,
+        },
+    ) = (index, geometry)
+    {
+        return first_offsets_milli_degrees == &[-50_000, -35_000, -20_000, -5_000, 10_000]
+            && second_offsets_milli_degrees == &[-10_000, 5_000, 20_000, 35_000, 50_000];
+    }
+    matches!(
+        (index, geometry),
+        (
+            0,
+            content_schema::CoreAuthoredPatternGeometry::Charge {
+                distance_milli_tiles: 2_000,
+                duration_milliseconds: 500,
+            },
+        ) | (
+            3,
+            content_schema::CoreAuthoredPatternGeometry::ChargeLane {
+                width_milli_tiles: 1_000,
+                length_milli_tiles: 5_000,
+                charge_duration_milliseconds: 550,
+            },
+        ) | (
+            5,
+            content_schema::CoreAuthoredPatternGeometry::ProjectileFan {
+                shot_count: 5,
+                total_arc_milli_degrees: 50_000,
+                projectile_speed_milli_tiles_per_second: 6_000,
+                range_milli_tiles: 8_000,
+                projectile_radius_milli_tiles: 120,
+            },
+        ) | (
+            2,
+            content_schema::CoreAuthoredPatternGeometry::RotatingArms {
+                arm_count: 2,
+                clockwise_milli_degrees_per_second: 35_000,
+                emission_interval_milliseconds: 400,
+                active_duration_milliseconds: 4_000,
+                projectile_speed_milli_tiles_per_second: 4_500,
+                range_milli_tiles: 7_000,
+                projectile_radius_milli_tiles: 120,
+            },
+        ) | (
+            6,
+            content_schema::CoreAuthoredPatternGeometry::RotatingArms {
+                arm_count: 2,
+                clockwise_milli_degrees_per_second: 35_000,
+                emission_interval_milliseconds: 350,
+                active_duration_milliseconds: 3_500,
+                projectile_speed_milli_tiles_per_second: 4_500,
+                range_milli_tiles: 7_000,
+                projectile_radius_milli_tiles: 120,
+            },
+        ) | (
+            4,
+            content_schema::CoreAuthoredPatternGeometry::RadialGap {
+                index_count: 10,
+                omitted_adjacent_count: 2,
+                relation: content_schema::CoreRadialGapRelation::TargetOpposite,
+                projectile_speed_milli_tiles_per_second: 5_000,
+                range_milli_tiles: 8_000,
+                projectile_radius_milli_tiles: 120,
+            },
+        ) | (
+            7,
+            content_schema::CoreAuthoredPatternGeometry::RadialGap {
+                index_count: 16,
+                omitted_adjacent_count: 4,
+                relation: content_schema::CoreRadialGapRelation::TargetFacing,
+                projectile_speed_milli_tiles_per_second: 4_500,
+                range_milli_tiles: 8_000,
+                projectile_radius_milli_tiles: 120,
+            },
+        )
+    )
 }
 
 fn validate_encounter_anchor_capacity(records: &CoreEncounterRoomRecords) -> Result<()> {
@@ -1042,6 +1547,7 @@ fn validate_assets(
             bail!("asset {} has an unresolved source record", asset.asset_id);
         }
         let id = asset.asset_id.as_str();
+        let source_id = asset.source_record_id.as_str();
         let kind_matches = match asset.kind {
             content_schema::CoreEncounterRoomAssetKind::EnemySilhouette => {
                 id.starts_with("sprite.enemy.")
@@ -1058,14 +1564,42 @@ fn validate_assets(
             content_schema::CoreEncounterRoomAssetKind::RoomTilemap => {
                 id.starts_with("tilemap.room.") || id.starts_with("tilemap.arena.")
             }
-            content_schema::CoreEncounterRoomAssetKind::Telegraph => id.starts_with("telegraph."),
+            content_schema::CoreEncounterRoomAssetKind::Telegraph => {
+                id == format!("{source_id}.telegraph")
+            }
             content_schema::CoreEncounterRoomAssetKind::WarningAudio => {
-                id.starts_with("audio.") && id.ends_with(".warning")
+                id == format!("{source_id}.warning")
+            }
+            content_schema::CoreEncounterRoomAssetKind::MajorWarningAudio => {
+                MAJOR_PATTERN_IDS.contains(&source_id) && id == format!("{source_id}.warning.major")
             }
         };
         if !kind_matches {
             bail!("asset {} has an incompatible typed role", asset.asset_id);
         }
+    }
+    let pattern_asset_sources = |kind| {
+        assets
+            .assets
+            .iter()
+            .filter(|asset| asset.kind == kind)
+            .map(|asset| asset.source_record_id.as_str())
+            .collect::<Vec<_>>()
+    };
+    if pattern_asset_sources(content_schema::CoreEncounterRoomAssetKind::Telegraph) != PATTERN_IDS
+        || pattern_asset_sources(content_schema::CoreEncounterRoomAssetKind::WarningAudio)
+            != PATTERN_IDS
+    {
+        bail!("Core pattern telegraph and warning-audio closure is not exact");
+    }
+    let major_sources = assets
+        .assets
+        .iter()
+        .filter(|asset| asset.kind == content_schema::CoreEncounterRoomAssetKind::MajorWarningAudio)
+        .map(|asset| asset.source_record_id.as_str())
+        .collect::<Vec<_>>();
+    if major_sources != MAJOR_PATTERN_IDS {
+        bail!("Core Major pattern audio closure is not exact");
     }
     Ok(())
 }
@@ -1243,6 +1777,39 @@ mod tests {
         let compiled = load_core_development_encounter_rooms(&content_root())
             .expect("checked-in encounter rooms");
         assert_eq!(compiled.roster().len(), 8);
+        assert_eq!(compiled.actor_definitions().len(), 8);
+        assert_eq!(
+            compiled
+                .actor_definitions()
+                .iter()
+                .map(|definition| definition.id().as_str())
+                .collect::<Vec<_>>(),
+            NORMAL_IDS
+                .into_iter()
+                .chain(MINIBOSS_IDS)
+                .collect::<Vec<_>>()
+        );
+        assert!(matches!(
+            compiled.actor_definitions()[0].behavior(),
+            CoreEncounterBehaviorDefinition::ImmutableDrownedPilgrim(_)
+        ));
+        assert!(matches!(
+            compiled.actor_definitions()[2].behavior(),
+            CoreEncounterBehaviorDefinition::ImmutableBellReed(_)
+        ));
+        assert!(matches!(
+            compiled.actor_definitions()[4].behavior(),
+            CoreEncounterBehaviorDefinition::ImmutableChainSentry(_)
+        ));
+        let authored_pattern_counts = compiled
+            .actor_definitions()
+            .iter()
+            .filter_map(|definition| match definition.behavior() {
+                CoreEncounterBehaviorDefinition::Authored { patterns, .. } => Some(patterns.len()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(authored_pattern_counts, [1, 1, 1, 3, 2]);
         assert_eq!(compiled.rooms().len(), 9);
         assert_eq!(compiled.pack_bell_01().base_budget, 12);
         assert_eq!(compiled.fixed_layout().main_chain_node_ids, MAIN_CHAIN);
@@ -1305,6 +1872,58 @@ mod tests {
         let mut case = fixture();
         case.records.roster[3].required_pattern_ids[0] =
             ContentId::parse("pattern.enemy.bell_acolyte.invented").expect("test ID");
+        assert!(compile_fixture(&case).is_err());
+    }
+
+    #[test]
+    fn compiler_rejects_authored_behavior_and_pattern_drift() {
+        let mut case = fixture();
+        case.records.authored_behaviors[0].spawn_invulnerability_milliseconds += 1;
+        assert!(compile_fixture(&case).is_err());
+
+        let mut case = fixture();
+        case.records.authored_behaviors[0].state_sequence.swap(3, 4);
+        assert!(compile_fixture(&case).is_err());
+
+        let mut case = fixture();
+        case.records.authored_behaviors[1].locomotion =
+            content_schema::CoreEnemyLocomotion::Stationary;
+        assert!(compile_fixture(&case).is_err());
+
+        let mut case = fixture();
+        case.records.authored_patterns[0].raw_damage += 1;
+        assert!(compile_fixture(&case).is_err());
+
+        let mut case = fixture();
+        case.records.authored_patterns[0].attack_group_rule =
+            content_schema::CoreAttackGroupRule::DistinctProjectileHitGroups;
+        assert!(compile_fixture(&case).is_err());
+
+        let mut case = fixture();
+        case.records.authored_patterns[1].telegraph_id =
+            ContentId::parse("pattern.enemy.bell_acolyte.alternating_fan.invented")
+                .expect("test ID");
+        assert!(compile_fixture(&case).is_err());
+
+        let mut case = fixture();
+        case.records.authored_patterns[2].warning = content_schema::CorePatternWarning::ParentOnly;
+        assert!(compile_fixture(&case).is_err());
+
+        let mut case = fixture();
+        case.records.authored_patterns[3].geometry =
+            content_schema::CoreAuthoredPatternGeometry::ChargeLane {
+                width_milli_tiles: 1_001,
+                length_milli_tiles: 5_000,
+                charge_duration_milliseconds: 550,
+            };
+        assert!(compile_fixture(&case).is_err());
+
+        let mut case = fixture();
+        case.records.authored_patterns[6].maximum_active_instances += 1;
+        assert!(compile_fixture(&case).is_err());
+
+        let mut case = fixture();
+        case.records.authored_patterns[7].major_audio_cue_id = None;
         assert!(compile_fixture(&case).is_err());
     }
 

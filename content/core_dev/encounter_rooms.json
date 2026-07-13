@@ -36,17 +36,17 @@
     "tilemap.room.bell.choir_01", "tilemap.room.bell.knight_01",
     "tilemap.room.bell.rest_01", "tilemap.room.bell.secret_01",
     "tilemap.arena.boss.caldus_01",
-    "telegraph.pattern.enemy.drowned_pilgrim.fan", "audio.pattern.enemy.drowned_pilgrim.fan.warning",
-    "telegraph.pattern.enemy.mire_leech.charge", "audio.pattern.enemy.mire_leech.charge.warning",
-    "telegraph.pattern.enemy.bell_reed.gap_ring", "audio.pattern.enemy.bell_reed.gap_ring.warning",
-    "telegraph.pattern.enemy.bell_acolyte.alternating_fan", "audio.pattern.enemy.bell_acolyte.alternating_fan.warning",
-    "telegraph.pattern.enemy.chain_sentry.cross_lanes", "audio.pattern.enemy.chain_sentry.cross_lanes.warning",
-    "telegraph.pattern.enemy.choir_skull.rotor", "audio.pattern.enemy.choir_skull.rotor.warning",
-    "telegraph.miniboss.sepulcher_knight.charge_lane", "audio.miniboss.sepulcher_knight.charge_lane.warning",
-    "telegraph.miniboss.sepulcher_knight.stop_ring", "audio.miniboss.sepulcher_knight.stop_ring.warning",
-    "telegraph.miniboss.sepulcher_knight.shield_fan", "audio.miniboss.sepulcher_knight.shield_fan.warning",
-    "telegraph.miniboss.choir_abbot.rotor", "audio.miniboss.choir_abbot.rotor.warning",
-    "telegraph.miniboss.choir_abbot.recovery_ring", "audio.miniboss.choir_abbot.recovery_ring.warning"
+    "pattern.enemy.drowned_pilgrim.fan.telegraph", "pattern.enemy.drowned_pilgrim.fan.warning",
+    "pattern.enemy.mire_leech.charge.telegraph", "pattern.enemy.mire_leech.charge.warning",
+    "pattern.enemy.bell_reed.gap_ring.telegraph", "pattern.enemy.bell_reed.gap_ring.warning",
+    "pattern.enemy.bell_acolyte.alternating_fan.telegraph", "pattern.enemy.bell_acolyte.alternating_fan.warning",
+    "pattern.enemy.chain_sentry.cross_lanes.telegraph", "pattern.enemy.chain_sentry.cross_lanes.warning",
+    "pattern.enemy.choir_skull.rotor.telegraph", "pattern.enemy.choir_skull.rotor.warning",
+    "miniboss.sepulcher_knight.charge_lane.telegraph", "miniboss.sepulcher_knight.charge_lane.warning", "miniboss.sepulcher_knight.charge_lane.warning.major",
+    "miniboss.sepulcher_knight.stop_ring.telegraph", "miniboss.sepulcher_knight.stop_ring.warning",
+    "miniboss.sepulcher_knight.shield_fan.telegraph", "miniboss.sepulcher_knight.shield_fan.warning",
+    "miniboss.choir_abbot.rotor.telegraph", "miniboss.choir_abbot.rotor.warning",
+    "miniboss.choir_abbot.recovery_ring.telegraph", "miniboss.choir_abbot.recovery_ring.warning", "miniboss.choir_abbot.recovery_ring.warning.major"
   ],
   "required_localization_keys": [
     "enemy.drowned_pilgrim.name", "enemy.drowned_pilgrim.description",
@@ -69,7 +69,7 @@
     "pack.bell.01.name", "pack.bell.01.description",
     "layout.core_private_life_01.name", "layout.core_private_life_01.description"
   ],
-  "expected_records_blake3": "29fb444cb26735e95f3fa7f218551201163a283e7db2de9f844190b897d42537",
-  "expected_assets_blake3": "29ea74489c5e35690cb78739056a82a8bff590fe0cd6fbd17f459e9e8cdf27c3",
+  "expected_records_blake3": "4adcda952d9ade607f533542dc4dbd8f03615cc06ad07b55d97ac621ff76ac90",
+  "expected_assets_blake3": "5c812601bc15317d96a7ea978b3f734570976fb37cfc724d3e24b168937d3bd8",
   "expected_localization_blake3": "a84a300b67f95e886f4c1046a46dd25121c80f883836181fd8340d0a1ec2c6b1"
 }

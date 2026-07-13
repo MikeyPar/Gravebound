@@ -54,7 +54,8 @@
         "miniboss_portrait",
         "room_tilemap",
         "telegraph",
-        "warning_audio"
+        "warning_audio",
+        "major_warning_audio"
       ]
     }
   }

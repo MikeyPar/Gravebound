@@ -4,8 +4,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ContentId, CoreDevelopmentHeader, CoreLocalizedCopyEntry, MilliTileCircle, MilliTilePoint,
-    MilliTileRectangle,
+    ContentId, CoreDevelopmentHeader, CoreLocalizedCopyEntry, DamageBand, DamageType,
+    MilliTileCircle, MilliTilePoint, MilliTileRectangle,
 };
 
 /// Identifies a compiler input that cannot be loaded or promoted as a release bundle.
@@ -62,6 +62,216 @@ pub struct CoreEncounterRosterMember {
     pub reward_profile_id: ContentId,
     pub xp_profile_id: ContentId,
     pub authored_core_enabled: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CoreEnemyRole {
+    Fodder,
+    Pressure,
+    Disruptor,
+    Anchor,
+    Elite,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CoreEnemyStateStage {
+    SpawnTelegraph,
+    Acquire,
+    MoveOrPosition,
+    Telegraph,
+    Attack,
+    Recover,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CoreTargetSelection {
+    NearestLivingDamageableInAggroTieLowestEntityId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CoreTelegraphLock {
+    AimAndPositionAtTelegraphStart,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "movement_kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CoreEnemyLocomotion {
+    RushRetreat {
+        approach_speed_milli_tiles_per_second: u32,
+        trigger_distance_milli_tiles: u32,
+        charge_distance_milli_tiles: u32,
+        charge_duration_milliseconds: u32,
+        retreat_speed_milli_tiles_per_second: u32,
+        retreat_duration_milliseconds: u32,
+    },
+    MaintainDistance {
+        movement_speed_milli_tiles_per_second: u32,
+        preferred_distance_milli_tiles: u32,
+    },
+    OrbitAnchor {
+        movement_speed_milli_tiles_per_second: u32,
+        orbit_radius_milli_tiles: u32,
+    },
+    PursueStopChargeHome {
+        movement_speed_milli_tiles_per_second: u32,
+        stop_distance_milli_tiles: u32,
+    },
+    Stationary,
+}
+
+/// Exact authored behavior for the five Core actors not reused from immutable FP definitions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CoreAuthoredEnemyBehaviorRecord {
+    pub owner_id: ContentId,
+    pub role: CoreEnemyRole,
+    pub state_sequence: Vec<CoreEnemyStateStage>,
+    pub target_selection: CoreTargetSelection,
+    pub telegraph_lock: CoreTelegraphLock,
+    pub maximum_health: u32,
+    pub armor: u16,
+    pub collision_radius_milli_tiles: u32,
+    pub hurtbox_radius_milli_tiles: u32,
+    pub aggro_radius_milli_tiles: u32,
+    pub leash_radius_milli_tiles: u32,
+    pub target_reacquire_milliseconds: u32,
+    pub no_target_reset_milliseconds: u32,
+    pub spawn_warning_milliseconds: u32,
+    pub spawn_invulnerability_milliseconds: u32,
+    pub introduction_milliseconds: u32,
+    pub contact_damage: u32,
+    pub drop_reward_on_reset: bool,
+    pub locomotion: CoreEnemyLocomotion,
+    pub pattern_ids: Vec<ContentId>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CorePatternCounterplay {
+    Strafe,
+    FollowGap,
+    LeaveTelegraph,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CorePatternMemoryFamily {
+    ChargeOrContact,
+    FanProjectile,
+    RotatingProjectile,
+    RadialProjectile,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CorePatternDisposition {
+    OneContactHitPerCast,
+    ConsumeOnPlayerOrSolid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CoreAttackGroupRule {
+    DistinctProjectileHitGroups,
+    OneContactHitPerCast,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "warning_kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CorePatternWarning {
+    Standalone {
+        first_milliseconds: u32,
+        repeated_milliseconds: u32,
+    },
+    ParentOnly,
+    RecoveryPreview {
+        duration_milliseconds: u32,
+        major_audio: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CoreRadialGapRelation {
+    TargetOpposite,
+    TargetFacing,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "geometry_kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CoreAuthoredPatternGeometry {
+    Charge {
+        distance_milli_tiles: u32,
+        duration_milliseconds: u32,
+    },
+    AlternatingFan {
+        first_offsets_milli_degrees: Vec<i32>,
+        second_offsets_milli_degrees: Vec<i32>,
+        projectile_speed_milli_tiles_per_second: u32,
+        range_milli_tiles: u32,
+        projectile_radius_milli_tiles: u32,
+    },
+    RotatingArms {
+        arm_count: u16,
+        clockwise_milli_degrees_per_second: u32,
+        emission_interval_milliseconds: u32,
+        active_duration_milliseconds: u32,
+        projectile_speed_milli_tiles_per_second: u32,
+        range_milli_tiles: u32,
+        projectile_radius_milli_tiles: u32,
+    },
+    ChargeLane {
+        width_milli_tiles: u32,
+        length_milli_tiles: u32,
+        charge_duration_milliseconds: u32,
+    },
+    RadialGap {
+        index_count: u16,
+        omitted_adjacent_count: u16,
+        relation: CoreRadialGapRelation,
+        projectile_speed_milli_tiles_per_second: u32,
+        range_milli_tiles: u32,
+        projectile_radius_milli_tiles: u32,
+    },
+    ProjectileFan {
+        shot_count: u16,
+        total_arc_milli_degrees: u32,
+        projectile_speed_milli_tiles_per_second: u32,
+        range_milli_tiles: u32,
+        projectile_radius_milli_tiles: u32,
+    },
+}
+
+/// Fully normalized authored hostile pattern. Reused FP patterns remain in the immutable package.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CoreAuthoredPatternRecord {
+    pub id: ContentId,
+    pub owner_id: ContentId,
+    pub telegraph_id: ContentId,
+    pub audio_cue_id: ContentId,
+    pub major_audio_cue_id: Option<ContentId>,
+    pub damage_type: DamageType,
+    pub damage_band: DamageBand,
+    pub raw_damage: u32,
+    pub threat_cost: u16,
+    pub warning: CorePatternWarning,
+    pub cycle_milliseconds: u32,
+    pub quiet_milliseconds: u32,
+    pub geometry: CoreAuthoredPatternGeometry,
+    pub counterplay: CorePatternCounterplay,
+    pub memory_family: CorePatternMemoryFamily,
+    pub disposition: CorePatternDisposition,
+    pub attack_group_rule: CoreAttackGroupRule,
+    pub acceleration_milli_tiles_per_second_squared: u32,
+    pub pierces_players: bool,
+    pub statuses: Vec<ContentId>,
+    pub cancel_on_phase_change: bool,
+    pub maximum_active_instances: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -236,6 +446,8 @@ pub struct CoreFixedLayoutRecord {
 pub struct CoreEncounterRoomRecords {
     pub schema_version: u32,
     pub roster: Vec<CoreEncounterRosterMember>,
+    pub authored_behaviors: Vec<CoreAuthoredEnemyBehaviorRecord>,
+    pub authored_patterns: Vec<CoreAuthoredPatternRecord>,
     pub rooms: Vec<CoreRoomTemplateRecord>,
     pub packs: Vec<CoreEncounterPackRecord>,
     pub layouts: Vec<CoreFixedLayoutRecord>,
@@ -251,6 +463,7 @@ pub enum CoreEncounterRoomAssetKind {
     RoomTilemap,
     Telegraph,
     WarningAudio,
+    MajorWarningAudio,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

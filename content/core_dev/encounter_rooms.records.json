@@ -90,6 +90,144 @@
       "authored_core_enabled": true
     }
   ],
+  "authored_behaviors": [
+    {
+      "owner_id":"enemy.mire_leech", "role":"fodder", "maximum_health":70, "armor":0,
+      "state_sequence":["spawn_telegraph","acquire","move_or_position","telegraph","attack","recover","acquire"], "target_selection":"nearest_living_damageable_in_aggro_tie_lowest_entity_id", "telegraph_lock":"aim_and_position_at_telegraph_start",
+      "collision_radius_milli_tiles":350, "hurtbox_radius_milli_tiles":300,
+      "aggro_radius_milli_tiles":12000, "leash_radius_milli_tiles":16000,
+      "target_reacquire_milliseconds":250, "no_target_reset_milliseconds":5000,
+      "spawn_warning_milliseconds":900, "spawn_invulnerability_milliseconds":1000,
+      "introduction_milliseconds":0, "contact_damage":0, "drop_reward_on_reset":false,
+      "locomotion":{"movement_kind":"rush_retreat","approach_speed_milli_tiles_per_second":3000,"trigger_distance_milli_tiles":2500,"charge_distance_milli_tiles":2000,"charge_duration_milliseconds":500,"retreat_speed_milli_tiles_per_second":3500,"retreat_duration_milliseconds":1500},
+      "pattern_ids":["pattern.enemy.mire_leech.charge"]
+    },
+    {
+      "owner_id":"enemy.bell_acolyte", "role":"pressure", "maximum_health":160, "armor":2,
+      "state_sequence":["spawn_telegraph","acquire","move_or_position","telegraph","attack","recover","acquire"], "target_selection":"nearest_living_damageable_in_aggro_tie_lowest_entity_id", "telegraph_lock":"aim_and_position_at_telegraph_start",
+      "collision_radius_milli_tiles":350, "hurtbox_radius_milli_tiles":300,
+      "aggro_radius_milli_tiles":12000, "leash_radius_milli_tiles":16000,
+      "target_reacquire_milliseconds":250, "no_target_reset_milliseconds":5000,
+      "spawn_warning_milliseconds":900, "spawn_invulnerability_milliseconds":1000,
+      "introduction_milliseconds":0, "contact_damage":0, "drop_reward_on_reset":false,
+      "locomotion":{"movement_kind":"maintain_distance","movement_speed_milli_tiles_per_second":3000,"preferred_distance_milli_tiles":6000},
+      "pattern_ids":["pattern.enemy.bell_acolyte.alternating_fan"]
+    },
+    {
+      "owner_id":"enemy.choir_skull", "role":"disruptor", "maximum_health":150, "armor":1,
+      "state_sequence":["spawn_telegraph","acquire","move_or_position","telegraph","attack","recover","acquire"], "target_selection":"nearest_living_damageable_in_aggro_tie_lowest_entity_id", "telegraph_lock":"aim_and_position_at_telegraph_start",
+      "collision_radius_milli_tiles":350, "hurtbox_radius_milli_tiles":300,
+      "aggro_radius_milli_tiles":12000, "leash_radius_milli_tiles":16000,
+      "target_reacquire_milliseconds":250, "no_target_reset_milliseconds":5000,
+      "spawn_warning_milliseconds":900, "spawn_invulnerability_milliseconds":1000,
+      "introduction_milliseconds":0, "contact_damage":0, "drop_reward_on_reset":false,
+      "locomotion":{"movement_kind":"orbit_anchor","movement_speed_milli_tiles_per_second":2800,"orbit_radius_milli_tiles":3000},
+      "pattern_ids":["pattern.enemy.choir_skull.rotor"]
+    },
+    {
+      "owner_id":"miniboss.sepulcher_knight", "role":"elite", "maximum_health":1600, "armor":8,
+      "state_sequence":["spawn_telegraph","acquire","move_or_position","telegraph","attack","recover","acquire"], "target_selection":"nearest_living_damageable_in_aggro_tie_lowest_entity_id", "telegraph_lock":"aim_and_position_at_telegraph_start",
+      "collision_radius_milli_tiles":550, "hurtbox_radius_milli_tiles":480,
+      "aggro_radius_milli_tiles":12000, "leash_radius_milli_tiles":16000,
+      "target_reacquire_milliseconds":250, "no_target_reset_milliseconds":5000,
+      "spawn_warning_milliseconds":900, "spawn_invulnerability_milliseconds":1000,
+      "introduction_milliseconds":3000, "contact_damage":0, "drop_reward_on_reset":false,
+      "locomotion":{"movement_kind":"pursue_stop_charge_home","movement_speed_milli_tiles_per_second":2400,"stop_distance_milli_tiles":3500},
+      "pattern_ids":["miniboss.sepulcher_knight.charge_lane","miniboss.sepulcher_knight.stop_ring","miniboss.sepulcher_knight.shield_fan"]
+    },
+    {
+      "owner_id":"miniboss.choir_abbot", "role":"elite", "maximum_health":1900, "armor":6,
+      "state_sequence":["spawn_telegraph","acquire","move_or_position","telegraph","attack","recover","acquire"], "target_selection":"nearest_living_damageable_in_aggro_tie_lowest_entity_id", "telegraph_lock":"aim_and_position_at_telegraph_start",
+      "collision_radius_milli_tiles":550, "hurtbox_radius_milli_tiles":480,
+      "aggro_radius_milli_tiles":12000, "leash_radius_milli_tiles":16000,
+      "target_reacquire_milliseconds":250, "no_target_reset_milliseconds":5000,
+      "spawn_warning_milliseconds":900, "spawn_invulnerability_milliseconds":1000,
+      "introduction_milliseconds":3000, "contact_damage":0, "drop_reward_on_reset":false,
+      "locomotion":{"movement_kind":"stationary"},
+      "pattern_ids":["miniboss.choir_abbot.rotor","miniboss.choir_abbot.recovery_ring"]
+    }
+  ],
+  "authored_patterns": [
+    {
+      "id":"pattern.enemy.mire_leech.charge", "owner_id":"enemy.mire_leech",
+      "telegraph_id":"pattern.enemy.mire_leech.charge.telegraph", "audio_cue_id":"pattern.enemy.mire_leech.charge.warning", "major_audio_cue_id":null,
+      "damage_type":"physical", "damage_band":"pressure", "raw_damage":12, "threat_cost":2,
+      "warning":{"warning_kind":"standalone","first_milliseconds":400,"repeated_milliseconds":300},
+      "cycle_milliseconds":2500, "quiet_milliseconds":1500,
+      "geometry":{"geometry_kind":"charge","distance_milli_tiles":2000,"duration_milliseconds":500},
+      "counterplay":"leave_telegraph", "memory_family":"charge_or_contact", "disposition":"one_contact_hit_per_cast", "attack_group_rule":"one_contact_hit_per_cast",
+      "acceleration_milli_tiles_per_second_squared":0, "pierces_players":false, "statuses":[], "cancel_on_phase_change":true, "maximum_active_instances":1
+    },
+    {
+      "id":"pattern.enemy.bell_acolyte.alternating_fan", "owner_id":"enemy.bell_acolyte",
+      "telegraph_id":"pattern.enemy.bell_acolyte.alternating_fan.telegraph", "audio_cue_id":"pattern.enemy.bell_acolyte.alternating_fan.warning", "major_audio_cue_id":null,
+      "damage_type":"veil", "damage_band":"pressure", "raw_damage":16, "threat_cost":7,
+      "warning":{"warning_kind":"standalone","first_milliseconds":400,"repeated_milliseconds":300},
+      "cycle_milliseconds":1800, "quiet_milliseconds":0,
+      "geometry":{"geometry_kind":"alternating_fan","first_offsets_milli_degrees":[-50000,-35000,-20000,-5000,10000],"second_offsets_milli_degrees":[-10000,5000,20000,35000,50000],"projectile_speed_milli_tiles_per_second":6000,"range_milli_tiles":9000,"projectile_radius_milli_tiles":110},
+      "counterplay":"strafe", "memory_family":"fan_projectile", "disposition":"consume_on_player_or_solid", "attack_group_rule":"distinct_projectile_hit_groups",
+      "acceleration_milli_tiles_per_second_squared":0, "pierces_players":false, "statuses":[], "cancel_on_phase_change":true, "maximum_active_instances":5
+    },
+    {
+      "id":"pattern.enemy.choir_skull.rotor", "owner_id":"enemy.choir_skull",
+      "telegraph_id":"pattern.enemy.choir_skull.rotor.telegraph", "audio_cue_id":"pattern.enemy.choir_skull.rotor.warning", "major_audio_cue_id":null,
+      "damage_type":"veil", "damage_band":"pressure", "raw_damage":14, "threat_cost":10,
+      "warning":{"warning_kind":"standalone","first_milliseconds":650,"repeated_milliseconds":500},
+      "cycle_milliseconds":6000, "quiet_milliseconds":2000,
+      "geometry":{"geometry_kind":"rotating_arms","arm_count":2,"clockwise_milli_degrees_per_second":35000,"emission_interval_milliseconds":400,"active_duration_milliseconds":4000,"projectile_speed_milli_tiles_per_second":4500,"range_milli_tiles":7000,"projectile_radius_milli_tiles":120},
+      "counterplay":"strafe", "memory_family":"rotating_projectile", "disposition":"consume_on_player_or_solid", "attack_group_rule":"distinct_projectile_hit_groups",
+      "acceleration_milli_tiles_per_second_squared":0, "pierces_players":false, "statuses":[], "cancel_on_phase_change":true, "maximum_active_instances":8
+    },
+    {
+      "id":"miniboss.sepulcher_knight.charge_lane", "owner_id":"miniboss.sepulcher_knight",
+      "telegraph_id":"miniboss.sepulcher_knight.charge_lane.telegraph", "audio_cue_id":"miniboss.sepulcher_knight.charge_lane.warning", "major_audio_cue_id":"miniboss.sepulcher_knight.charge_lane.warning.major",
+      "damage_type":"physical", "damage_band":"major", "raw_damage":34, "threat_cost":8,
+      "warning":{"warning_kind":"standalone","first_milliseconds":900,"repeated_milliseconds":900},
+      "cycle_milliseconds":6000, "quiet_milliseconds":0,
+      "geometry":{"geometry_kind":"charge_lane","width_milli_tiles":1000,"length_milli_tiles":5000,"charge_duration_milliseconds":550},
+      "counterplay":"leave_telegraph", "memory_family":"charge_or_contact", "disposition":"one_contact_hit_per_cast", "attack_group_rule":"one_contact_hit_per_cast",
+      "acceleration_milli_tiles_per_second_squared":0, "pierces_players":false, "statuses":[], "cancel_on_phase_change":true, "maximum_active_instances":1
+    },
+    {
+      "id":"miniboss.sepulcher_knight.stop_ring", "owner_id":"miniboss.sepulcher_knight",
+      "telegraph_id":"miniboss.sepulcher_knight.stop_ring.telegraph", "audio_cue_id":"miniboss.sepulcher_knight.stop_ring.warning", "major_audio_cue_id":null,
+      "damage_type":"physical", "damage_band":"pressure", "raw_damage":20, "threat_cost":8,
+      "warning":{"warning_kind":"parent_only"}, "cycle_milliseconds":6000, "quiet_milliseconds":0,
+      "geometry":{"geometry_kind":"radial_gap","index_count":10,"omitted_adjacent_count":2,"relation":"target_opposite","projectile_speed_milli_tiles_per_second":5000,"range_milli_tiles":8000,"projectile_radius_milli_tiles":120},
+      "counterplay":"follow_gap", "memory_family":"radial_projectile", "disposition":"consume_on_player_or_solid", "attack_group_rule":"distinct_projectile_hit_groups",
+      "acceleration_milli_tiles_per_second_squared":0, "pierces_players":false, "statuses":[], "cancel_on_phase_change":true, "maximum_active_instances":8
+    },
+    {
+      "id":"miniboss.sepulcher_knight.shield_fan", "owner_id":"miniboss.sepulcher_knight",
+      "telegraph_id":"miniboss.sepulcher_knight.shield_fan.telegraph", "audio_cue_id":"miniboss.sepulcher_knight.shield_fan.warning", "major_audio_cue_id":null,
+      "damage_type":"physical", "damage_band":"pressure", "raw_damage":18, "threat_cost":5,
+      "warning":{"warning_kind":"standalone","first_milliseconds":400,"repeated_milliseconds":300},
+      "cycle_milliseconds":2200, "quiet_milliseconds":0,
+      "geometry":{"geometry_kind":"projectile_fan","shot_count":5,"total_arc_milli_degrees":50000,"projectile_speed_milli_tiles_per_second":6000,"range_milli_tiles":8000,"projectile_radius_milli_tiles":120},
+      "counterplay":"strafe", "memory_family":"fan_projectile", "disposition":"consume_on_player_or_solid", "attack_group_rule":"distinct_projectile_hit_groups",
+      "acceleration_milli_tiles_per_second_squared":0, "pierces_players":false, "statuses":[], "cancel_on_phase_change":true, "maximum_active_instances":5
+    },
+    {
+      "id":"miniboss.choir_abbot.rotor", "owner_id":"miniboss.choir_abbot",
+      "telegraph_id":"miniboss.choir_abbot.rotor.telegraph", "audio_cue_id":"miniboss.choir_abbot.rotor.warning", "major_audio_cue_id":null,
+      "damage_type":"veil", "damage_band":"pressure", "raw_damage":18, "threat_cost":12,
+      "warning":{"warning_kind":"standalone","first_milliseconds":650,"repeated_milliseconds":500},
+      "cycle_milliseconds":6000, "quiet_milliseconds":2500,
+      "geometry":{"geometry_kind":"rotating_arms","arm_count":2,"clockwise_milli_degrees_per_second":35000,"emission_interval_milliseconds":350,"active_duration_milliseconds":3500,"projectile_speed_milli_tiles_per_second":4500,"range_milli_tiles":7000,"projectile_radius_milli_tiles":120},
+      "counterplay":"strafe", "memory_family":"rotating_projectile", "disposition":"consume_on_player_or_solid", "attack_group_rule":"distinct_projectile_hit_groups",
+      "acceleration_milli_tiles_per_second_squared":0, "pierces_players":false, "statuses":[], "cancel_on_phase_change":true, "maximum_active_instances":10
+    },
+    {
+      "id":"miniboss.choir_abbot.recovery_ring", "owner_id":"miniboss.choir_abbot",
+      "telegraph_id":"miniboss.choir_abbot.recovery_ring.telegraph", "audio_cue_id":"miniboss.choir_abbot.recovery_ring.warning", "major_audio_cue_id":"miniboss.choir_abbot.recovery_ring.warning.major",
+      "damage_type":"veil", "damage_band":"major", "raw_damage":26, "threat_cost":12,
+      "warning":{"warning_kind":"recovery_preview","duration_milliseconds":650,"major_audio":true},
+      "cycle_milliseconds":6000, "quiet_milliseconds":0,
+      "geometry":{"geometry_kind":"radial_gap","index_count":16,"omitted_adjacent_count":4,"relation":"target_facing","projectile_speed_milli_tiles_per_second":4500,"range_milli_tiles":8000,"projectile_radius_milli_tiles":120},
+      "counterplay":"follow_gap", "memory_family":"radial_projectile", "disposition":"consume_on_player_or_solid", "attack_group_rule":"distinct_projectile_hit_groups",
+      "acceleration_milli_tiles_per_second_squared":0, "pierces_players":false, "statuses":[], "cancel_on_phase_change":true, "maximum_active_instances":12
+    }
+  ],
   "rooms": [
     {
       "id": "room.bell.vestibule_01", "schema_version": 1, "enabled": true,
