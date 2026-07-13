@@ -22,7 +22,8 @@ use protocol::{
 };
 use sim_content::{
     CoreDevelopmentIdentityCopy, load_and_validate, load_core_development_identity,
-    load_core_development_identity_copy, load_core_development_progression,
+    load_core_development_identity_copy, load_core_development_oaths_bargains,
+    load_core_development_progression,
 };
 
 use crate::{
@@ -30,6 +31,7 @@ use crate::{
     network_transport::{
         NetworkStartup, NetworkTransportConfig, NetworkWorkerHandle, TransportEvent,
     },
+    oath_ui::{OathUiAction, OathUiCopy, OathUiModel},
     progression_hud::ProgressionHudModel,
     save_screenshot_atomically,
 };
@@ -231,6 +233,18 @@ struct CoreDetailText;
 #[derive(Component)]
 struct CoreProgressionHudText;
 
+#[derive(Component)]
+struct CoreOathText;
+
+#[derive(Debug, Clone, Resource)]
+struct CoreOathUiCopy(OathUiCopy);
+
+#[derive(Debug, Default, Resource)]
+struct CoreOathUiState(OathUiModel);
+
+#[derive(Debug, Clone, Copy, Component)]
+struct CoreOathActionLabel(OathUiAction);
+
 #[derive(Debug, Resource)]
 struct CoreProgressionQueryState {
     content_revision: ManifestHash,
@@ -265,10 +279,8 @@ pub fn run_core_identity(config: CoreIdentityConfig) -> Result<()> {
         .context("unpromoted Core identity content failed validation")?;
     let identity_copy = load_core_development_identity_copy(&config.content_root)
         .context("Core identity UI copy failed validation")?;
-    let progression_content = load_core_development_progression(&config.content_root)
-        .context("Core progression content failed validation")?;
-    let progression_content_revision =
-        ManifestHash::new(progression_content.hashes().records_blake3.clone())?;
+    let (progression_content_revision, oath_copy) =
+        load_core_supporting_content(&config.content_root)?;
     let (_, source_report) = load_and_validate(&config.content_root)
         .context("Core identity source package failed validation")?;
     if identity_content.class().header.id.as_str() != GRAVE_ARBALIST_CLASS_ID {
@@ -295,8 +307,7 @@ pub fn run_core_identity(config: CoreIdentityConfig) -> Result<()> {
         },
     })?;
 
-    let screenshot_request = std::env::var_os("GRAVEBOUND_SCREENSHOT_PATH").map(PathBuf::from);
-    let (window_width, window_height) = crate::configured_window_size()?;
+    let (screenshot_request, window_width, window_height) = core_window_configuration()?;
     let mut model = CoreIdentityModel {
         phase: CoreIdentityPhase::PatchCheck,
         ..default()
@@ -311,6 +322,8 @@ pub fn run_core_identity(config: CoreIdentityConfig) -> Result<()> {
         .insert_resource(CoreMutationSequencer::default())
         .insert_resource(CoreUiCopy(identity_copy.clone()))
         .insert_resource(ProgressionHudModel::default())
+        .insert_resource(CoreOathUiCopy(oath_copy))
+        .insert_resource(CoreOathUiState::default())
         .insert_resource(CoreProgressionQueryState {
             content_revision: progression_content_revision,
             requested_character_id: None,
@@ -335,8 +348,11 @@ pub fn run_core_identity(config: CoreIdentityConfig) -> Result<()> {
             (
                 poll_core_transport,
                 request_selected_progression,
+                request_selected_oath,
                 handle_core_keyboard,
+                handle_oath_keyboard,
                 handle_core_buttons,
+                handle_oath_buttons,
                 automate_core_evidence,
                 update_core_identity_ui,
             )
@@ -354,6 +370,25 @@ pub fn run_core_identity(config: CoreIdentityConfig) -> Result<()> {
     Ok(())
 }
 
+fn load_core_supporting_content(
+    content_root: &std::path::Path,
+) -> Result<(ManifestHash, OathUiCopy)> {
+    let progression = load_core_development_progression(content_root)
+        .context("Core progression content failed validation")?;
+    let progression_revision = ManifestHash::new(progression.hashes().records_blake3.clone())?;
+    let oaths = load_core_development_oaths_bargains(content_root)
+        .context("Core Oath content failed validation")?;
+    let oath_copy =
+        OathUiCopy::from_catalog(&oaths).context("Core Oath UI copy failed validation")?;
+    Ok((progression_revision, oath_copy))
+}
+
+fn core_window_configuration() -> Result<(Option<PathBuf>, u32, u32)> {
+    let screenshot_request = std::env::var_os("GRAVEBOUND_SCREENSHOT_PATH").map(PathBuf::from);
+    let (width, height) = crate::configured_window_size()?;
+    Ok((screenshot_request, width, height))
+}
+
 #[derive(Debug, Resource)]
 struct CoreEvidenceAutomation(bool);
 
@@ -362,6 +397,7 @@ fn poll_core_transport(
     bridge: Res<CoreNetworkBridge>,
     mut model: ResMut<CoreIdentityModel>,
     mut progression: ResMut<ProgressionHudModel>,
+    mut oath: ResMut<CoreOathUiState>,
 ) {
     for event in bridge.0.drain_events() {
         match event {
@@ -371,6 +407,8 @@ fn poll_core_transport(
                 ReliableEvent::AccountBootstrapResult(result) => model.apply_bootstrap(result),
                 ReliableEvent::CharacterMutationResult(result) => model.apply_mutation(result),
                 ReliableEvent::ProgressionResult(result) => progression.apply(result),
+                ReliableEvent::OathViewResult(result) => oath.0.apply_view(result),
+                ReliableEvent::InitialOathSelectionResult(result) => oath.0.apply_selection(result),
                 _ => model.transport_failed(),
             },
             TransportEvent::LinkLost
@@ -378,6 +416,32 @@ fn poll_core_transport(
             | TransportEvent::TransportClosed => model.disconnected(),
             TransportEvent::Fatal(_) => model.transport_failed(),
         }
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)] // Bevy system parameters are wrapper values.
+fn request_selected_oath(
+    bridge: Res<CoreNetworkBridge>,
+    model: Res<CoreIdentityModel>,
+    copy: Res<CoreOathUiCopy>,
+    mut oath: ResMut<CoreOathUiState>,
+) {
+    let selected = model
+        .snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.selected_character_id);
+    let Some(frame) = oath
+        .0
+        .request_for_selected(selected, copy.0.revision.clone())
+    else {
+        return;
+    };
+    if bridge
+        .0
+        .queue_reliable(WireMessage::OathViewFrame(frame))
+        .is_err()
+    {
+        oath.0.request_failed();
     }
 }
 
@@ -427,8 +491,11 @@ fn handle_core_keyboard(
     bridge: Res<CoreNetworkBridge>,
     mut model: ResMut<CoreIdentityModel>,
     mut sequencer: ResMut<CoreMutationSequencer>,
+    oath: Res<CoreOathUiState>,
 ) {
-    let action = if keyboard.just_pressed(KeyCode::Enter) {
+    let action = if keyboard.just_pressed(KeyCode::Enter)
+        && !oath.0.action_available(OathUiAction::Confirm)
+    {
         Some(CoreAction::Create)
     } else if keyboard.just_pressed(KeyCode::Escape)
         && model.phase == CoreIdentityPhase::CharacterCreation
@@ -452,6 +519,30 @@ fn handle_core_keyboard(
 }
 
 #[allow(clippy::needless_pass_by_value)] // Bevy system parameters are wrapper values.
+fn handle_oath_keyboard(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    bridge: Res<CoreNetworkBridge>,
+    copy: Res<CoreOathUiCopy>,
+    mut oath: ResMut<CoreOathUiState>,
+    mut sequencer: ResMut<CoreMutationSequencer>,
+) {
+    let action = if keyboard.just_pressed(KeyCode::KeyL) {
+        Some(OathUiAction::LongVigil)
+    } else if keyboard.just_pressed(KeyCode::KeyN) {
+        Some(OathUiAction::Nailkeeper)
+    } else if keyboard.just_pressed(KeyCode::Enter) {
+        Some(OathUiAction::Confirm)
+    } else if keyboard.just_pressed(KeyCode::Escape) {
+        Some(OathUiAction::Cancel)
+    } else {
+        None
+    };
+    if let Some(action) = action {
+        submit_oath_action(action, &bridge, &copy, &mut oath, &mut sequencer);
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)] // Bevy system parameters are wrapper values.
 fn handle_core_buttons(
     interactions: Query<(&Interaction, &CoreActionLabel), Changed<Interaction>>,
     bridge: Res<CoreNetworkBridge>,
@@ -461,6 +552,61 @@ fn handle_core_buttons(
     for (interaction, action) in &interactions {
         if *interaction == Interaction::Pressed {
             submit_core_action(action.0, &bridge, &mut model, &mut sequencer);
+        }
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)] // Bevy system parameters are wrapper values.
+fn handle_oath_buttons(
+    interactions: Query<(&Interaction, &CoreOathActionLabel), Changed<Interaction>>,
+    bridge: Res<CoreNetworkBridge>,
+    copy: Res<CoreOathUiCopy>,
+    mut oath: ResMut<CoreOathUiState>,
+    mut sequencer: ResMut<CoreMutationSequencer>,
+) {
+    for (interaction, action) in &interactions {
+        if *interaction == Interaction::Pressed {
+            submit_oath_action(action.0, &bridge, &copy, &mut oath, &mut sequencer);
+        }
+    }
+}
+
+fn submit_oath_action(
+    action: OathUiAction,
+    bridge: &CoreNetworkBridge,
+    copy: &CoreOathUiCopy,
+    oath: &mut CoreOathUiState,
+    sequencer: &mut CoreMutationSequencer,
+) {
+    match action {
+        OathUiAction::LongVigil | OathUiAction::Nailkeeper => oath.0.choose(action),
+        OathUiAction::Cancel => oath.0.cancel(),
+        OathUiAction::Confirm => {
+            let Some(mutation_id) = sequencer.next_id() else {
+                oath.0.mutation_failed();
+                return;
+            };
+            let issued_at_unix_millis = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .ok()
+                .and_then(|duration| u64::try_from(duration.as_millis()).ok());
+            let Some(issued_at_unix_millis) = issued_at_unix_millis else {
+                oath.0.mutation_failed();
+                return;
+            };
+            let Some(frame) =
+                oath.0
+                    .confirm(mutation_id, issued_at_unix_millis, copy.0.revision.clone())
+            else {
+                return;
+            };
+            if bridge
+                .0
+                .queue_reliable(WireMessage::InitialOathSelectionFrame(frame))
+                .is_err()
+            {
+                oath.0.mutation_failed();
+            }
         }
     }
 }
@@ -640,6 +786,7 @@ fn spawn_core_identity_ui(mut commands: Commands, copy: Res<CoreUiCopy>) {
                 CoreStatusText,
             ));
             spawn_progression_hud(root);
+            spawn_oath_panel(root);
             root.spawn((
                 Text::new(&authored.loading_roster),
                 TextFont::from_font_size(18.0),
@@ -697,6 +844,71 @@ fn spawn_core_identity_ui(mut commands: Commands, copy: Res<CoreUiCopy>) {
                 TextColor(Color::srgb_u8(164, 169, 164)),
             ));
         });
+}
+
+fn spawn_oath_panel(parent: &mut ChildSpawnerCommands) {
+    parent
+        .spawn((
+            Node {
+                width: percent(100),
+                min_height: px(190),
+                padding: UiRect::all(px(14)),
+                border: UiRect::all(px(2)),
+                flex_direction: FlexDirection::Column,
+                row_gap: px(10),
+                ..default()
+            },
+            BackgroundColor(Color::srgba_u8(22, 17, 16, 245)),
+            BorderColor::all(Color::srgb_u8(175, 139, 76)),
+        ))
+        .with_children(|panel| {
+            panel.spawn((
+                Text::new("OATH SHRINE\nSelect a living character to inspect Oath eligibility."),
+                TextFont::from_font_size(15.0),
+                TextColor(Color::srgb_u8(239, 224, 190)),
+                CoreOathText,
+            ));
+            panel
+                .spawn((Node {
+                    flex_direction: FlexDirection::Row,
+                    flex_wrap: FlexWrap::Wrap,
+                    column_gap: px(10),
+                    row_gap: px(8),
+                    ..default()
+                },))
+                .with_children(|actions| {
+                    spawn_oath_button(actions, OathUiAction::LongVigil, "LONG VIGIL [L]");
+                    spawn_oath_button(actions, OathUiAction::Nailkeeper, "NAILKEEPER [N]");
+                    spawn_oath_button(
+                        actions,
+                        OathUiAction::Confirm,
+                        "CONFIRM PERMANENT OATH [ENTER]",
+                    );
+                    spawn_oath_button(actions, OathUiAction::Cancel, "CANCEL [ESC]");
+                });
+        });
+}
+
+fn spawn_oath_button(parent: &mut ChildSpawnerCommands, action: OathUiAction, label: &str) {
+    parent
+        .spawn((
+            Button,
+            Node {
+                min_width: px(184),
+                min_height: px(44),
+                padding: UiRect::axes(px(12), px(8)),
+                border: UiRect::all(px(2)),
+                ..default()
+            },
+            BackgroundColor(Color::srgb_u8(31, 27, 25)),
+            BorderColor::all(Color::srgb_u8(88, 75, 58)),
+            CoreOathActionLabel(action),
+        ))
+        .with_child((
+            Text::new(label),
+            TextFont::from_font_size(13.0),
+            TextColor(Color::srgb_u8(239, 224, 190)),
+        ));
 }
 
 fn spawn_progression_hud(parent: &mut ChildSpawnerCommands) {
@@ -813,6 +1025,8 @@ fn update_core_identity_ui(
     model: Res<CoreIdentityModel>,
     copy: Res<CoreUiCopy>,
     progression: Res<ProgressionHudModel>,
+    oath: Res<CoreOathUiState>,
+    oath_copy: Res<CoreOathUiCopy>,
     mut status: Single<&mut Text, With<CoreStatusText>>,
     mut roster: Single<&mut Text, (With<CoreRosterText>, Without<CoreStatusText>)>,
     mut details: Single<
@@ -830,9 +1044,27 @@ fn update_core_identity_ui(
             Without<CoreStatusText>,
             Without<CoreRosterText>,
             Without<CoreDetailText>,
+            Without<CoreOathText>,
         ),
     >,
-    mut actions: Query<(&CoreActionLabel, &mut BackgroundColor, &mut BorderColor)>,
+    mut oath_text: Single<
+        &mut Text,
+        (
+            With<CoreOathText>,
+            Without<CoreStatusText>,
+            Without<CoreRosterText>,
+            Without<CoreDetailText>,
+            Without<CoreProgressionHudText>,
+        ),
+    >,
+    mut actions: Query<
+        (&CoreActionLabel, &mut BackgroundColor, &mut BorderColor),
+        Without<CoreOathActionLabel>,
+    >,
+    mut oath_actions: Query<
+        (&CoreOathActionLabel, &mut BackgroundColor, &mut BorderColor),
+        Without<CoreActionLabel>,
+    >,
 ) {
     let authored = copy.0.copy();
     let error = model
@@ -856,6 +1088,7 @@ fn update_core_identity_ui(
         ],
     ));
     **progression_text = Text::new(progression.render());
+    **oath_text = Text::new(oath.0.render(&oath_copy.0));
 
     let mut rows = Vec::with_capacity(2);
     for ordinal in 1..=2 {
@@ -902,6 +1135,15 @@ fn update_core_identity_ui(
         } else {
             *background = BackgroundColor(Color::srgb_u8(25, 29, 33));
             *border = BorderColor::all(Color::srgb_u8(74, 82, 84));
+        }
+    }
+    for (action, mut background, mut border) in &mut oath_actions {
+        if oath.0.action_available(action.0) {
+            *background = BackgroundColor(Color::srgb_u8(58, 42, 29));
+            *border = BorderColor::all(Color::srgb_u8(210, 168, 88));
+        } else {
+            *background = BackgroundColor(Color::srgb_u8(31, 27, 25));
+            *border = BorderColor::all(Color::srgb_u8(88, 75, 58));
         }
     }
 }

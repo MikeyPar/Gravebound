@@ -16,6 +16,7 @@ mod network_play;
 mod network_prediction;
 mod network_session;
 mod network_transport;
+mod oath_ui;
 mod player;
 mod progression_hud;
 mod stress_benchmark;
