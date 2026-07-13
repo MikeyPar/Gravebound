@@ -12,6 +12,7 @@ use sqlx::{
 use thiserror::Error;
 
 mod ash_wallet;
+mod bargain;
 mod combat_loadout;
 mod ground_expiry;
 mod identity;
@@ -25,6 +26,10 @@ mod world_flow;
 pub use ash_wallet::{
     ASH_CURRENCY_ID, ASH_WALLET_CAP, AshMutationCode, AshMutationKind, AshMutationRequest,
     AshWalletTransaction, StoredAshMutationResult, StoredAshWallet,
+};
+pub use bargain::{
+    BargainDecisionTransaction, BargainDecisionTransactionState, StoredActiveBargain,
+    StoredBargainCandidate, StoredBargainDecisionResult, StoredBargainLife, StoredBargainOffer,
 };
 pub use combat_loadout::{StoredCoreCombatLoadout, StoredEquippedWeapon};
 pub use ground_expiry::{MAX_GROUND_EXPIRY_BATCH, StoredGroundExpiry, StoredGroundExpiryCandidate};
@@ -214,6 +219,16 @@ pub enum PersistenceError {
     AshAccountNotFound,
     #[error("Ash mutation ID was reused with different canonical material")]
     AshIdempotencyConflict,
+    #[error("stored Bargain offer or life state violates the approved contract")]
+    CorruptStoredBargain,
+    #[error("Bargain character does not exist for the authenticated account")]
+    BargainCharacterNotFound,
+    #[error("Bargain offer does not exist for the authenticated character")]
+    BargainOfferNotFound,
+    #[error("a fresh Bargain decision transaction must append one typed result")]
+    BargainDecisionResultRequired,
+    #[error("an accepted Bargain selection must append one character-life event")]
+    BargainSelectionEventRequired,
     #[error("authoritative reward planning failed before commit")]
     RewardPlanningFailed,
 }
