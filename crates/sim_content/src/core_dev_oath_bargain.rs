@@ -67,6 +67,7 @@ pub struct CompiledOathBargainCatalog {
     hashes: OathBargainSourceHashes,
     oaths: BTreeMap<String, OathRecord>,
     bargains: BTreeMap<String, BargainRecord>,
+    localization: BTreeMap<String, String>,
 }
 
 impl CompiledOathBargainCatalog {
@@ -93,6 +94,11 @@ impl CompiledOathBargainCatalog {
     #[must_use]
     pub const fn bargains(&self) -> &BTreeMap<String, BargainRecord> {
         &self.bargains
+    }
+
+    #[must_use]
+    pub fn localized(&self, key: &str) -> Option<&str> {
+        self.localization.get(key).map(String::as_str)
     }
 }
 
@@ -286,6 +292,11 @@ fn compile(
         hashes,
         oaths,
         bargains,
+        localization: localization
+            .entries
+            .iter()
+            .map(|entry| (entry.key.as_str().to_owned(), entry.value.clone()))
+            .collect(),
     })
 }
 
@@ -689,6 +700,14 @@ mod tests {
         assert_eq!(compiled.target_name(), "core-dev-oaths-bargains");
         assert_eq!(compiled.oaths().len(), 2);
         assert_eq!(compiled.bargains().len(), 3);
+        assert_eq!(
+            compiled.localized("oath.arbalist.long_vigil.name"),
+            Some("Long Vigil")
+        );
+        assert_eq!(
+            compiled.localized(INITIAL_WARNING_KEY),
+            Some(INITIAL_WARNING_VALUE)
+        );
         assert!(compiled.revision_label().starts_with("core-dev.blake3."));
         assert!(!compiled.revision_label().contains("core.1.0.0"));
         let vigil = resolve_core_arbalist_oath_stats(
