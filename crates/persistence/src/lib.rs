@@ -13,6 +13,7 @@ use thiserror::Error;
 
 mod ash_wallet;
 mod bargain;
+mod bargain_milestone;
 mod combat_loadout;
 mod ground_expiry;
 mod identity;
@@ -31,6 +32,10 @@ pub use bargain::{
     BargainDecisionTransaction, BargainDecisionTransactionState, StoredActiveBargain,
     StoredBargainCandidate, StoredBargainDecisionResult, StoredBargainLife, StoredBargainOffer,
 };
+pub use bargain_milestone::{
+    CORE_BARGAIN_LAYOUT_ID, CORE_BARGAIN_MILESTONE_ID, CORE_BARGAIN_SOURCE_ID,
+    StagedBargainMilestone, StoredBargainMilestoneLife, StoredBargainMilestoneResult,
+};
 pub use combat_loadout::{StoredCoreCombatLoadout, StoredEquippedWeapon};
 pub use ground_expiry::{MAX_GROUND_EXPIRY_BATCH, StoredGroundExpiry, StoredGroundExpiryCandidate};
 pub use identity::{StoredCharacter, StoredIdentityAggregate, StoredMutation};
@@ -46,8 +51,9 @@ pub use progression::{
     ProgressionAwardTransaction, ProgressionAwardTransactionState, StoredBossFirstClear,
     StoredBossFirstClearState, StoredEncounterLifeState, StoredEncounterRecallState,
     StoredEncounterTrustState, StoredEncounterXpEvidence, StoredLockedProgressionCharacter,
-    StoredOrdinaryXpEvidence, StoredProgression, StoredProgressionContract,
-    StoredProgressionSnapshot, StoredXpAwardResult, StoredXpEligibilityEvidence,
+    StoredOrdinaryXpEvidence, StoredProgression, StoredProgressionAwardLocation,
+    StoredProgressionContract, StoredProgressionSnapshot, StoredXpAwardResult,
+    StoredXpEligibilityEvidence,
 };
 pub use progression_restore::{
     StoredProgressionCrashRestore, capture_progression_restore, restore_progression_after_crash,

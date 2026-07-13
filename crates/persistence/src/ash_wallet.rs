@@ -175,23 +175,7 @@ pub(crate) async fn apply_ash_mutation_on_connection(
         }
         return Ok(AshWalletTransaction::Replayed(result));
     }
-    sqlx::query(
-        "INSERT INTO ash_wallets (namespace_id, account_id) VALUES ($1, $2) \
-         ON CONFLICT DO NOTHING",
-    )
-    .bind(WIPEABLE_CORE_NAMESPACE)
-    .bind(request.account_id.as_slice())
-    .execute(&mut *connection)
-    .await?;
-    let row = sqlx::query(
-        "SELECT balance, wallet_version FROM ash_wallets \
-         WHERE namespace_id = $1 AND account_id = $2 FOR UPDATE",
-    )
-    .bind(WIPEABLE_CORE_NAMESPACE)
-    .bind(request.account_id.as_slice())
-    .fetch_one(&mut *connection)
-    .await?;
-    let wallet = decode_wallet(&row)?;
+    let wallet = lock_ash_wallet_on_connection(connection, &request.account_id).await?;
     let result = resolve(request, wallet)?;
     insert_result(&mut *connection, request, &result).await?;
     if result.code == AshMutationCode::Accepted {
@@ -208,6 +192,29 @@ pub(crate) async fn apply_ash_mutation_on_connection(
         insert_ledger_event(connection, request, &result).await?;
     }
     Ok(AshWalletTransaction::Committed(result))
+}
+
+pub(crate) async fn lock_ash_wallet_on_connection(
+    connection: &mut sqlx::PgConnection,
+    account_id: &[u8; 16],
+) -> Result<StoredAshWallet, PersistenceError> {
+    sqlx::query(
+        "INSERT INTO ash_wallets (namespace_id, account_id) VALUES ($1, $2) \
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .execute(&mut *connection)
+    .await?;
+    let row = sqlx::query(
+        "SELECT balance, wallet_version FROM ash_wallets \
+         WHERE namespace_id = $1 AND account_id = $2 FOR UPDATE",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .fetch_one(connection)
+    .await?;
+    decode_wallet(&row)
 }
 
 fn validate_request(request: &AshMutationRequest) -> Result<(), PersistenceError> {

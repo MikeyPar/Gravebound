@@ -689,7 +689,7 @@ fn validate_life(life: &StoredBargainLife) -> Result<(), PersistenceError> {
     Ok(())
 }
 
-fn validate_offer(offer: &StoredBargainOffer) -> Result<(), PersistenceError> {
+pub(crate) fn validate_offer(offer: &StoredBargainOffer) -> Result<(), PersistenceError> {
     let revision_valid = [
         &offer.records_blake3,
         &offer.assets_blake3,

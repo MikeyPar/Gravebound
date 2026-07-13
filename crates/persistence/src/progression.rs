@@ -6,7 +6,14 @@
 
 use sqlx::Row;
 
-use crate::{PersistenceError, PostgresPersistence, WIPEABLE_CORE_NAMESPACE};
+use crate::{
+    PersistenceError, PostgresPersistence, StagedBargainMilestone, StoredAshWallet,
+    StoredBargainMilestoneLife, WIPEABLE_CORE_NAMESPACE,
+    ash_wallet::lock_ash_wallet_on_connection,
+    bargain_milestone::{
+        BargainMilestoneBinding, lock_bargain_milestone_life, persist_bargain_milestone,
+    },
+};
 
 const ID_BYTES: usize = 16;
 const HASH_BYTES: usize = 32;
@@ -140,6 +147,15 @@ pub struct StoredLockedProgressionCharacter {
     pub character_state_version: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredProgressionAwardLocation {
+    pub location_kind: i16,
+    pub location_content_id: Option<String>,
+    pub layout_id: Option<String>,
+    pub instance_lineage_id: Option<[u8; ID_BYTES]>,
+    pub entry_restore_point_id: Option<[u8; ID_BYTES]>,
+}
+
 /// Mutable state exposed only for a fresh reward event under one serializable transaction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProgressionAwardTransactionState {
@@ -147,9 +163,13 @@ pub struct ProgressionAwardTransactionState {
     pub character: StoredLockedProgressionCharacter,
     pub progression: StoredProgression,
     pub entry_restore_point_id: Option<[u8; ID_BYTES]>,
+    pub location: StoredProgressionAwardLocation,
     pub boss_first_clear: StoredBossFirstClearState,
+    pub bargain_life: StoredBargainMilestoneLife,
+    pub ash_wallet: StoredAshWallet,
     pub new_result: Option<StoredXpAwardResult>,
     pub new_boss_first_clear: Option<StoredBossFirstClear>,
+    pub new_bargain_milestone: Option<StagedBargainMilestone>,
 }
 
 /// Replay is a deliberate no-op: no caller closure runs and no timestamp-bearing row is written.
@@ -300,14 +320,19 @@ impl PostgresPersistence {
             }
             None => None,
         };
-        let (locked_character, entry_restore_point_id, initial_progression) =
-            lock_fresh_award_aggregates(
-                transaction.connection(),
-                &account_id,
-                &character_id,
-                contract,
-            )
-            .await?;
+        let (locked_character, location, initial_progression) = lock_fresh_award_aggregates(
+            transaction.connection(),
+            &account_id,
+            &character_id,
+            contract,
+        )
+        .await?;
+        let entry_restore_point_id = location.entry_restore_point_id;
+        let bargain_life =
+            lock_bargain_milestone_life(transaction.connection(), &account_id, &character_id)
+                .await?;
+        let ash_wallet =
+            lock_ash_wallet_on_connection(transaction.connection(), &account_id).await?;
         let boss_first_clear = match boss_id {
             None => StoredBossFirstClearState::NotApplicable,
             Some(boss_id) => load_first_clear(transaction.connection(), &account_id, boss_id)
@@ -324,15 +349,15 @@ impl PostgresPersistence {
             character: locked_character.clone(),
             progression: initial_progression.clone(),
             entry_restore_point_id,
+            location: location.clone(),
             boss_first_clear,
+            bargain_life: bargain_life.clone(),
+            ash_wallet,
             new_result: None,
             new_boss_first_clear: None,
+            new_bargain_milestone: None,
         };
         let value = operation(&mut state)?;
-        let result = state
-            .new_result
-            .as_ref()
-            .ok_or(PersistenceError::ProgressionAwardResultRequired)?;
         validate_fresh_state(
             &state,
             &FreshAwardBinding {
@@ -347,23 +372,79 @@ impl PostgresPersistence {
             },
         )?;
 
-        if state.progression != initial_progression {
-            persist_progression(
-                transaction.connection(),
-                &account_id,
-                &character_id,
-                &state.progression,
+        persist_fresh_award(
+            transaction.connection(),
+            &state,
+            FreshAwardCommitBinding {
+                account_id: &account_id,
+                character_id: &character_id,
+                reward_event_id: &reward_event_id,
+                initial_progression: &initial_progression,
+                initial_bargain_life: &bargain_life,
+                location: &location,
+                ash_wallet,
                 contract,
-            )
-            .await?;
-        }
-        insert_award_result(transaction.connection(), result, contract).await?;
-        if let Some(marker) = &state.new_boss_first_clear {
-            insert_first_clear(transaction.connection(), &account_id, marker).await?;
-        }
+            },
+        )
+        .await?;
         transaction.commit().await?;
         Ok(ProgressionAwardTransaction::Committed(value))
     }
+}
+
+struct FreshAwardCommitBinding<'a> {
+    account_id: &'a [u8; ID_BYTES],
+    character_id: &'a [u8; ID_BYTES],
+    reward_event_id: &'a [u8; ID_BYTES],
+    initial_progression: &'a StoredProgression,
+    initial_bargain_life: &'a StoredBargainMilestoneLife,
+    location: &'a StoredProgressionAwardLocation,
+    ash_wallet: StoredAshWallet,
+    contract: &'a StoredProgressionContract,
+}
+
+async fn persist_fresh_award(
+    connection: &mut sqlx::PgConnection,
+    state: &ProgressionAwardTransactionState,
+    binding: FreshAwardCommitBinding<'_>,
+) -> Result<(), PersistenceError> {
+    if state.progression != *binding.initial_progression {
+        persist_progression(
+            connection,
+            binding.account_id,
+            binding.character_id,
+            &state.progression,
+            binding.contract,
+        )
+        .await?;
+    }
+    let result = state
+        .new_result
+        .as_ref()
+        .ok_or(PersistenceError::ProgressionAwardResultRequired)?;
+    if let Some(staged) = &state.new_bargain_milestone {
+        persist_bargain_milestone(
+            connection,
+            staged,
+            BargainMilestoneBinding {
+                account_id: binding.account_id,
+                character_id: binding.character_id,
+                reward_event_id: binding.reward_event_id,
+                reward_payload_hash: &result.payload_hash,
+                layout_id: binding.location.layout_id.as_deref(),
+                instance_lineage_id: binding.location.instance_lineage_id.as_ref(),
+                entry_restore_point_id: binding.location.entry_restore_point_id.as_ref(),
+                initial_life: binding.initial_bargain_life,
+                locked_wallet: binding.ash_wallet,
+            },
+        )
+        .await?;
+    }
+    insert_award_result(connection, result, binding.contract).await?;
+    if let Some(marker) = &state.new_boss_first_clear {
+        insert_first_clear(connection, binding.account_id, marker).await?;
+    }
+    Ok(())
 }
 
 async fn lock_fresh_award_aggregates(
@@ -374,13 +455,13 @@ async fn lock_fresh_award_aggregates(
 ) -> Result<
     (
         StoredLockedProgressionCharacter,
-        Option<[u8; ID_BYTES]>,
+        StoredProgressionAwardLocation,
         StoredProgression,
     ),
     PersistenceError,
 > {
     let character = lock_character(connection, account_id, character_id, contract).await?;
-    let entry_restore_point_id = lock_award_location(
+    let location = lock_award_location(
         connection,
         account_id,
         character_id,
@@ -391,7 +472,7 @@ async fn lock_fresh_award_aggregates(
     if character.cached_level != progression.level {
         return Err(PersistenceError::CorruptStoredProgression);
     }
-    Ok((character, entry_restore_point_id, progression))
+    Ok((character, location, progression))
 }
 
 async fn lock_award_location(
@@ -399,16 +480,17 @@ async fn lock_award_location(
     account_id: &[u8; ID_BYTES],
     character_id: &[u8; ID_BYTES],
     character_state_version: i64,
-) -> Result<Option<[u8; ID_BYTES]>, PersistenceError> {
+) -> Result<StoredProgressionAwardLocation, PersistenceError> {
     let row = sqlx::query(
-        "SELECT character_version, location_kind, entry_restore_point_id \
+        "SELECT character_version, location_kind, location_content_id, instance_lineage_id, \
+                entry_restore_point_id \
          FROM character_world_locations WHERE namespace_id = $1 AND account_id = $2 \
          AND character_id = $3 FOR UPDATE",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(account_id.as_slice())
     .bind(character_id.as_slice())
-    .fetch_optional(connection)
+    .fetch_optional(&mut *connection)
     .await
     .map_err(PersistenceError::Database)?
     .ok_or(PersistenceError::ProgressionCharacterNotFound)?;
@@ -423,15 +505,70 @@ async fn lock_award_location(
         .map_err(PersistenceError::Database)?
         .map(fixed_bytes)
         .transpose()?;
+    let instance_lineage_id = row
+        .try_get::<Option<Vec<u8>>, _>("instance_lineage_id")
+        .map_err(PersistenceError::Database)?
+        .map(fixed_bytes)
+        .transpose()?;
     if location_version != character_state_version
         || !matches!(
             (location_kind, restore_point_id),
             (0 | 1, None) | (2, Some(_))
         )
+        || matches!(location_kind, 0 | 1) && instance_lineage_id.is_some()
+        || location_kind == 2 && instance_lineage_id.is_none()
     {
         return Err(PersistenceError::CorruptStoredProgression);
     }
-    Ok(restore_point_id)
+    let layout_id = match instance_lineage_id {
+        None => None,
+        Some(lineage_id) => {
+            let row = sqlx::query(
+                "SELECT layout_id, lineage_state FROM character_instance_lineages \
+                 WHERE namespace_id = $1 AND account_id = $2 AND character_id = $3 \
+                 AND lineage_id = $4 FOR UPDATE",
+            )
+            .bind(WIPEABLE_CORE_NAMESPACE)
+            .bind(account_id.as_slice())
+            .bind(character_id.as_slice())
+            .bind(lineage_id.as_slice())
+            .fetch_optional(&mut *connection)
+            .await?
+            .ok_or(PersistenceError::CorruptStoredProgression)?;
+            let lineage_state: i16 = row.try_get("lineage_state")?;
+            if !matches!(lineage_state, 0 | 1) {
+                return Err(PersistenceError::CorruptStoredProgression);
+            }
+            let restore_state: i16 = sqlx::query_scalar(
+                "SELECT restore_state FROM character_entry_restore_points \
+                 WHERE namespace_id = $1 AND account_id = $2 AND character_id = $3 \
+                 AND restore_point_id = $4 AND lineage_id = $5 FOR UPDATE",
+            )
+            .bind(WIPEABLE_CORE_NAMESPACE)
+            .bind(account_id.as_slice())
+            .bind(character_id.as_slice())
+            .bind(
+                restore_point_id
+                    .ok_or(PersistenceError::CorruptStoredProgression)?
+                    .as_slice(),
+            )
+            .bind(lineage_id.as_slice())
+            .fetch_optional(&mut *connection)
+            .await?
+            .ok_or(PersistenceError::CorruptStoredProgression)?;
+            if restore_state != 0 {
+                return Err(PersistenceError::CorruptStoredProgression);
+            }
+            row.try_get("layout_id")?
+        }
+    };
+    Ok(StoredProgressionAwardLocation {
+        location_kind,
+        location_content_id: row.try_get("location_content_id")?,
+        layout_id,
+        instance_lineage_id,
+        entry_restore_point_id: restore_point_id,
+    })
 }
 
 async fn lock_account(
@@ -1446,6 +1583,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn fresh_state_requires_exact_projection_and_first_clear_marker_binding() {
         let initial = StoredProgression {
             total_xp: 0,
@@ -1501,11 +1639,29 @@ mod tests {
                 progression_version: 2,
             },
             entry_restore_point_id: None,
+            location: StoredProgressionAwardLocation {
+                location_kind: 1,
+                location_content_id: Some("hub.lantern_halls_01".into()),
+                layout_id: None,
+                instance_lineage_id: None,
+                entry_restore_point_id: None,
+            },
             boss_first_clear: StoredBossFirstClearState::Vacant {
                 boss_id: marker.boss_id.clone(),
             },
+            bargain_life: StoredBargainMilestoneLife {
+                earned_bargain_slots: 0,
+                oath_bargain_version: 1,
+                active_bargain_ids: Vec::new(),
+                core_milestone_awarded: false,
+            },
+            ash_wallet: StoredAshWallet {
+                balance: 0,
+                wallet_version: 1,
+            },
             new_result: Some(result.clone()),
             new_boss_first_clear: Some(marker),
+            new_bargain_milestone: None,
         };
         assert!(
             validate_fresh_state(
