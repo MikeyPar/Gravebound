@@ -167,18 +167,52 @@ impl PostgresPersistence {
         character_id: [u8; ID_BYTES],
         offer_id: [u8; ID_BYTES],
         mutation_id: [u8; ID_BYTES],
-        operation: F,
+        mut operation: F,
     ) -> Result<BargainDecisionTransaction<T>, PersistenceError>
     where
         T: Send,
-        F: FnOnce(&mut BargainDecisionTransactionState) -> Result<T, PersistenceError> + Send,
+        F: FnMut(&mut BargainDecisionTransactionState) -> Result<T, PersistenceError> + Send,
     {
+        const MAX_SERIALIZATION_ATTEMPTS: u8 = 3;
+
         if [account_id, character_id, offer_id, mutation_id]
             .iter()
             .any(all_zero)
         {
             return Err(PersistenceError::CorruptStoredBargain);
         }
+        for attempt in 1..=MAX_SERIALIZATION_ATTEMPTS {
+            match self
+                .transact_bargain_decision_once(
+                    account_id,
+                    character_id,
+                    offer_id,
+                    mutation_id,
+                    &mut operation,
+                )
+                .await
+            {
+                Err(error)
+                    if attempt < MAX_SERIALIZATION_ATTEMPTS
+                        && crate::is_serialization_failure(&error) => {}
+                result => return result,
+            }
+        }
+        unreachable!("bounded Bargain decision transaction loop always returns")
+    }
+
+    async fn transact_bargain_decision_once<T, F>(
+        &self,
+        account_id: [u8; ID_BYTES],
+        character_id: [u8; ID_BYTES],
+        offer_id: [u8; ID_BYTES],
+        mutation_id: [u8; ID_BYTES],
+        operation: &mut F,
+    ) -> Result<BargainDecisionTransaction<T>, PersistenceError>
+    where
+        T: Send,
+        F: FnMut(&mut BargainDecisionTransactionState) -> Result<T, PersistenceError> + Send,
+    {
         let mut transaction = self.begin_transaction().await?;
         let selected_character_id = lock_account(transaction.connection(), &account_id).await?;
         if let Some(result) =
