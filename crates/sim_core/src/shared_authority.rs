@@ -12,8 +12,8 @@ use crate::{
     AuthorityPhase, AuthorityRecallCommit, CombatAction, CombatStep, ConsumableAction,
     EnemyLabPlayer, EntityId, EntityIdAllocator, FieldPickup, FieldPickupAccess, FieldPickupId,
     InventoryStack, MovementStep, NormalWaveSimulation, NormalWaveSpawn, NormalWaveStep,
-    PickupEligibility, PickupOutcome, PlacementChoice, PlayerCombatState, PlayerMovementState,
-    PlayerVitals, PrototypeInventory, RedTonicSimulation, SimulationVector, Tick, TonicBelt,
+    PickupEligibility, PickupOutcome, PlacementChoice, PlayerMovementState, PlayerVitals,
+    PrototypeInventory, RedTonicSimulation, SimulationVector, Tick, TonicBelt,
 };
 
 pub const SHARED_ARENA_MAX_PLAYERS: usize = 4;
@@ -113,11 +113,7 @@ impl SharedAuthoritativeArena {
                 )
                 .and_then(NonZeroU64::new)
                 .ok_or(SharedAuthorityError::IdentityOverflow)?;
-            let combat = PlayerCombatState::with_projectile_allocator(
-                definitions.combat.weapon().clone(),
-                definitions.combat.grave_mark_definition().clone(),
-                definitions.combat.slipstep_definition().clone(),
-                definitions.combat.stillness_definition().clone(),
+            let combat = definitions.combat.fresh_arena_with_projectile_allocator(
                 EntityIdAllocator::starting_at(projectile_start),
             )?;
             wave_players.push(EnemyLabPlayer {
@@ -617,11 +613,12 @@ fn shared_tiles_to_milli(value: f32) -> Result<i32, SharedAuthorityError> {
 mod tests {
     use super::*;
     use crate::{
-        AimDirection, ArenaGeometry, GraveMarkDefinition, GraveMarkDefinitionParameters,
-        MovementAction, NormalWaveDefinitions, NormalWaveEnemyKind, RedTonicDefinition,
-        SimulationVector, SlipstepDefinition, SlipstepDefinitionParameters, SpawnInstanceId,
-        StillnessDefinition, StillnessDefinitionParameters, TilePoint, WeaponDefinition,
-        WeaponDefinitionParameters, normal_wave_projectile_allocator,
+        AimDirection, ArenaGeometry, GraveArbalistOath, GraveMarkDefinition,
+        GraveMarkDefinitionParameters, MovementAction, NormalWaveDefinitions, NormalWaveEnemyKind,
+        PlayerCombatState, RedTonicDefinition, SimulationVector, SlipstepDefinition,
+        SlipstepDefinitionParameters, SpawnInstanceId, StillnessDefinition,
+        StillnessDefinitionParameters, TilePoint, WeaponDefinition, WeaponDefinitionParameters,
+        normal_wave_projectile_allocator,
     };
 
     fn id(value: u64) -> EntityId {
@@ -765,6 +762,46 @@ mod tests {
             arena.players()[&id(10_001)].movement().position().x
                 > SimulationVector::new(16.0, 12.0).x
         );
+    }
+
+    #[test]
+    fn shared_construction_preserves_compiled_core_combat_configuration() {
+        let mut definitions = definitions();
+        definitions.combat = PlayerCombatState::with_core_choices(
+            definitions.combat.weapon().clone(),
+            definitions.combat.grave_mark_definition().clone(),
+            definitions.combat.slipstep_definition().clone(),
+            definitions.combat.stillness_definition().clone(),
+            Some(GraveArbalistOath::Nailkeeper),
+            11_800,
+            None,
+        )
+        .unwrap();
+        let player_id = id(10_000);
+        let arena = SharedAuthoritativeArena::new(
+            definitions,
+            vec![player_id],
+            vec![NormalWaveSpawn {
+                instance_id: SpawnInstanceId {
+                    run_ordinal: 1,
+                    spawn_ordinal: 1,
+                },
+                kind: NormalWaveEnemyKind::DrownedPilgrim,
+                position_milli_tiles: (8_000, 3_000),
+            }],
+            PickupEligibility {
+                valid_session: true,
+                reward_eligible: true,
+            },
+            normal_wave_projectile_allocator(1).unwrap(),
+        )
+        .unwrap();
+        let combat = &arena.wave.players()[&player_id].combat;
+
+        assert_eq!(combat.oath(), Some(GraveArbalistOath::Nailkeeper));
+        assert_eq!(combat.outgoing_direct_damage_basis_points(), 11_800);
+        assert_eq!(combat.tick(), Tick(0));
+        assert!(combat.projectiles().is_empty());
     }
 
     #[test]

@@ -560,6 +560,26 @@ impl PlayerCombatState {
         Ok(state)
     }
 
+    /// Starts a new arena with the same validated character configuration and no live combat
+    /// state. Oath and Bargain choices are immutable configuration; timers, projectiles, traps,
+    /// Bell progress, and buffered inputs belong to the arena being retired.
+    pub fn fresh_arena_with_projectile_allocator(
+        &self,
+        projectile_ids: EntityIdAllocator,
+    ) -> Result<Self, CombatError> {
+        let mut state = Self::with_projectile_allocator(
+            self.weapon.clone(),
+            self.grave_mark.clone(),
+            self.slipstep.clone(),
+            self.stillness.clone(),
+            projectile_ids,
+        )?;
+        state.outgoing_direct_damage_basis_points = self.outgoing_direct_damage_basis_points;
+        state.bell_debt = self.bell_debt;
+        state.oath = self.oath;
+        Ok(state)
+    }
+
     #[must_use]
     pub const fn tick(&self) -> Tick {
         self.tick
@@ -2057,6 +2077,48 @@ mod tests {
                 .unwrap_err(),
             CombatError::InvalidBellCheckpoint
         );
+    }
+
+    #[test]
+    fn fresh_arena_preserves_core_configuration_and_resets_transient_state() {
+        let mut original = PlayerCombatState::with_core_choices(
+            scatterbow(),
+            grave_mark(),
+            slipstep(),
+            stillness(),
+            Some(GraveArbalistOath::Nailkeeper),
+            11_800,
+            Some(bell_debt()),
+        )
+        .unwrap();
+        original
+            .step(
+                CombatAction {
+                    primary_held: true,
+                    primary_press_sequence: 7,
+                    ..CombatAction::default()
+                },
+                SimulationVector::new(4.0, 7.0),
+                &empty_world(),
+            )
+            .unwrap();
+        assert_eq!(original.bell_primary_release_count(), 1);
+        assert!(!original.projectiles().is_empty());
+
+        let fresh = original
+            .fresh_arena_with_projectile_allocator(EntityIdAllocator::starting_at(
+                NonZeroU64::new(90_000).unwrap(),
+            ))
+            .unwrap();
+
+        assert_eq!(fresh.oath(), Some(GraveArbalistOath::Nailkeeper));
+        assert_eq!(fresh.outgoing_direct_damage_basis_points(), 11_800);
+        assert_eq!(fresh.tick(), Tick(0));
+        assert_eq!(fresh.interval_remaining_ticks(), 0);
+        assert_eq!(fresh.bell_primary_release_count(), 0);
+        assert!(!fresh.has_pending_bell_repeat());
+        assert!(fresh.projectiles().is_empty());
+        assert!(fresh.nail_traps().traps().is_empty());
     }
 
     #[test]
