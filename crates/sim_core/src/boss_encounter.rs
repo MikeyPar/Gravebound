@@ -402,7 +402,7 @@ impl BellProctorEncounterSimulation {
                 target_is_immune: false,
                 raw_damage: resolved_raw_damage,
                 damage_type: DamageType::Physical,
-                attacker_multiplier_basis_points: 10_000,
+                attacker_multiplier_basis_points: combat.attacker_multiplier_basis_points,
                 target_resistance_basis_points: 0,
                 direct_damage_reductions_basis_points: Vec::new(),
                 armor: self.definition.parameters().armor,
@@ -886,6 +886,30 @@ mod tests {
                 status: BellProctorImmuneStatus::Frostbind,
             }]
         );
+    }
+
+    #[test]
+    fn cinder_attacker_stage_applies_to_boss_direct_hits() {
+        let mut simulation = BellProctorEncounterSimulation::new(
+            BellProctorDefinition::first_playable(),
+            arena(),
+            handoff(),
+            1,
+            Tick(100),
+        )
+        .unwrap();
+        let boss = simulation.entity_id();
+        let mut combat = damage_step(100, boss, 61, 100);
+        combat.attacker_multiplier_basis_points = 11_800;
+        let step = simulation.step(&combat).unwrap();
+        assert_eq!(step.friendly_damage.len(), 1);
+        assert_eq!(
+            step.friendly_damage[0]
+                .damage
+                .attacker_multiplier_basis_points,
+            11_800
+        );
+        assert_eq!(step.friendly_damage[0].damage.health_damage_applied, 114);
     }
 
     #[test]

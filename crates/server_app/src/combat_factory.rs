@@ -16,6 +16,7 @@ pub struct CoreCharacterCombat {
     pub inventory_version: u64,
     pub oath_bargain_version: u64,
     pub level: u16,
+    pub maximum_health: u32,
     pub bargains: CoreBargainLoadout,
     pub bargain_modifiers: ResolvedCoreBargainModifiers,
     pub maximum_health_multiplier_basis_points: u32,
@@ -33,6 +34,7 @@ pub struct CoreCharacterCombatCompiler {
     class_package: sim_content::ContentPackage,
     items: sim_content::CompiledProductionItemCatalog,
     oaths: sim_content::CompiledOathBargainCatalog,
+    progression: sim_content::CoreDevelopmentProgression,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
@@ -93,10 +95,13 @@ impl CoreCharacterCombatCompiler {
             .map_err(|_| CoreCombatFactoryError::InvalidContent)?;
         let oaths = sim_content::load_core_development_oaths_bargains(content_root)
             .map_err(|_| CoreCombatFactoryError::InvalidContent)?;
+        let progression = sim_content::load_core_development_progression(content_root)
+            .map_err(|_| CoreCombatFactoryError::InvalidContent)?;
         Ok(Self {
             class_package,
             items,
             oaths,
+            progression,
         })
     }
 
@@ -156,21 +161,31 @@ impl CoreCharacterCombatCompiler {
             0,
         )
         .map_err(|_| CoreCombatFactoryError::InvalidContent)?;
-        let state = match definitions.oath {
-            Some(oath) => PlayerCombatState::with_oath(
-                definitions.weapon,
-                definitions.grave_mark,
-                definitions.slipstep,
-                definitions.stillness,
-                oath,
-            ),
-            None => PlayerCombatState::new(
-                definitions.weapon,
-                definitions.grave_mark,
-                definitions.slipstep,
-                definitions.stillness,
-            ),
-        }
+        let level =
+            u16::try_from(snapshot.level).map_err(|_| CoreCombatFactoryError::InvalidContent)?;
+        let level_stats = sim_core::grave_arbalist_level_stats(self.progression.arbalist(), level)
+            .map_err(|_| CoreCombatFactoryError::InvalidContent)?;
+        let outgoing_direct_damage_basis_points =
+            sim_core::compose_outgoing_direct_damage_multiplier(
+                level_stats.damage_multiplier_basis_points,
+                definitions
+                    .bargain_modifiers
+                    .outgoing_direct_damage_basis_points,
+            )
+            .map_err(|_| CoreCombatFactoryError::InvalidContent)?;
+        let maximum_health = sim_core::resolve_oath_maximum_health(
+            level_stats.maximum_health,
+            definitions.maximum_health_multiplier_basis_points,
+        )
+        .map_err(|_| CoreCombatFactoryError::InvalidContent)?;
+        let state = PlayerCombatState::with_core_choices(
+            definitions.weapon,
+            definitions.grave_mark,
+            definitions.slipstep,
+            definitions.stillness,
+            definitions.oath,
+            outgoing_direct_damage_basis_points,
+        )
         .map_err(|_| CoreCombatFactoryError::InvalidContent)?;
         Ok(CoreCharacterCombat {
             character_id: snapshot.character_id,
@@ -179,8 +194,8 @@ impl CoreCharacterCombatCompiler {
             inventory_version,
             oath_bargain_version: u64::try_from(snapshot.oath_bargain_version)
                 .map_err(|_| CoreCombatFactoryError::InvalidContent)?,
-            level: u16::try_from(snapshot.level)
-                .map_err(|_| CoreCombatFactoryError::InvalidContent)?,
+            level,
+            maximum_health,
             bargains: definitions.bargains,
             bargain_modifiers: definitions.bargain_modifiers,
             maximum_health_multiplier_basis_points: definitions
@@ -287,10 +302,8 @@ mod tests {
         assert_eq!(combat.oath_bargain_version, 2);
         assert_eq!(combat.bargains.definitions().len(), 1);
         assert_eq!(combat.maximum_health_multiplier_basis_points, 8_800);
-        assert_eq!(
-            combat.bargain_modifiers.outgoing_direct_damage_basis_points,
-            11_800
-        );
+        assert_eq!(combat.maximum_health, 120);
+        assert_eq!(combat.state.outgoing_direct_damage_basis_points(), 12_508);
         value.active_bargains[0]
             .acquiring_offer_content_version
             .push_str(".drift");

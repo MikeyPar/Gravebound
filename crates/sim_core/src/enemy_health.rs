@@ -396,7 +396,7 @@ impl EnemyHealthSimulation {
                 target_is_immune: false,
                 raw_damage: intent.resolved_raw_damage,
                 damage_type: DamageType::Physical,
-                attacker_multiplier_basis_points: 10_000,
+                attacker_multiplier_basis_points: step.attacker_multiplier_basis_points,
                 target_resistance_basis_points: 0,
                 direct_damage_reductions_basis_points: Vec::new(),
                 armor: actor.armor,
@@ -753,6 +753,55 @@ mod tests {
             vec![65, 112, 285]
         );
         assert_eq!(simulation.alive_hurtboxes().expect("hurtboxes").len(), 3);
+    }
+
+    #[test]
+    fn cinder_attacker_stage_covers_primary_grave_mark_and_nail_trap_intents() {
+        let cases = [
+            (RawDamageIntentSource::Primary, 20, 24),
+            (RawDamageIntentSource::GraveMark, 10, 12),
+            (RawDamageIntentSource::NailTrap, 18, 21),
+        ];
+        for (source, resolved_raw_damage, expected_damage) in cases {
+            let mut simulation = simulation();
+            let damage_intent = intent(
+                1,
+                40,
+                source,
+                100,
+                resolved_raw_damage,
+                10_000,
+                resolved_raw_damage,
+                0,
+            );
+            let mut combat = if source == RawDamageIntentSource::NailTrap {
+                CombatStep {
+                    tick: Tick(1),
+                    raw_damage_intents: vec![damage_intent],
+                    nail_traps: crate::NailTrapStep {
+                        triggers: vec![crate::NailTrapTrigger {
+                            trap_id: id(40),
+                            target_id: id(100),
+                            tick: Tick(1),
+                            position: SimulationVector::new(8.0, 3.0),
+                            raw_damage: resolved_raw_damage,
+                            snapshot_weapon_raw_damage: resolved_raw_damage,
+                            frostbind_ticks: 45,
+                        }],
+                        ..crate::NailTrapStep::default()
+                    },
+                    ..CombatStep::default()
+                }
+            } else {
+                step(1, vec![damage_intent])
+            };
+            combat.attacker_multiplier_basis_points = 11_800;
+            let output = simulation.apply_combat_step(&combat).unwrap();
+            let event = &output.damage_events[0];
+            assert_eq!(event.resolved_raw_damage, resolved_raw_damage);
+            assert_eq!(event.damage.attacker_multiplier_basis_points, 11_800);
+            assert_eq!(event.damage.health_damage_applied, expected_damage);
+        }
     }
 
     #[test]

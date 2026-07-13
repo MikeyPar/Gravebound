@@ -58,8 +58,8 @@ pub use bargain::{
     CinderHungerDefinition, CoreBargainDefinition, CoreBargainError, CoreBargainKind,
     CoreBargainLoadout, LanternAshDefinition, MAXIMUM_OUTGOING_DAMAGE_BASIS_POINTS,
     MINIMUM_MAXIMUM_HEALTH_BASIS_POINTS, ResolvedCoreBargainModifiers,
-    compose_maximum_health_multiplier, resolve_core_bargain_modifiers,
-    resolve_primary_interval_micros,
+    compose_maximum_health_multiplier, compose_outgoing_direct_damage_multiplier,
+    resolve_core_bargain_modifiers, resolve_primary_interval_micros,
 };
 pub use bargain_offer::{
     BARGAIN_CONTENT_ID_MAX_BYTES, BargainOfferError, MAX_ACTIVE_BARGAINS,

@@ -330,13 +330,14 @@ pub struct GraveMarkInputEvent {
 }
 
 /// Events and state summary produced by one fixed combat tick.
-#[derive(Debug, Default, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CombatStep {
     pub tick: Tick,
     pub shots: Vec<ShotEvent>,
     pub collisions: Vec<ProjectileCollision>,
     pub expirations: Vec<ProjectileExpired>,
     pub raw_damage_intents: Vec<RawDamageIntent>,
+    pub attacker_multiplier_basis_points: u32,
     pub mark_transitions: Vec<GraveMarkTransition>,
     pub grave_mark_inputs: Vec<GraveMarkInputEvent>,
     pub slipstep_inputs: Vec<SlipstepInputEvent>,
@@ -344,6 +345,26 @@ pub struct CombatStep {
     pub direct_damage_reduction_basis_points: u32,
     pub focused_transitions: Vec<FocusedTransition>,
     pub nail_traps: NailTrapStep,
+}
+
+impl Default for CombatStep {
+    fn default() -> Self {
+        Self {
+            tick: Tick::default(),
+            shots: Vec::new(),
+            collisions: Vec::new(),
+            expirations: Vec::new(),
+            raw_damage_intents: Vec::new(),
+            attacker_multiplier_basis_points: BASIS_POINTS_PER_ONE,
+            mark_transitions: Vec::new(),
+            grave_mark_inputs: Vec::new(),
+            slipstep_inputs: Vec::new(),
+            slipstep_transitions: Vec::new(),
+            direct_damage_reduction_basis_points: 0,
+            focused_transitions: Vec::new(),
+            nail_traps: NailTrapStep::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -392,6 +413,7 @@ pub struct PlayerCombatState {
     focused: bool,
     projectile_ids: EntityIdAllocator,
     projectiles: Vec<FriendlyProjectile>,
+    outgoing_direct_damage_basis_points: u32,
     oath: Option<GraveArbalistOath>,
     nail_traps: NailTrapField,
 }
@@ -443,6 +465,7 @@ impl PlayerCombatState {
             focused: false,
             projectile_ids,
             projectiles: Vec::new(),
+            outgoing_direct_damage_basis_points: BASIS_POINTS_PER_ONE,
             oath: None,
             nail_traps: NailTrapField::default(),
         })
@@ -457,6 +480,25 @@ impl PlayerCombatState {
     ) -> Result<Self, CombatError> {
         let mut state = Self::new(weapon, grave_mark, slipstep, stillness)?;
         state.oath = Some(oath);
+        Ok(state)
+    }
+
+    pub fn with_core_choices(
+        weapon: WeaponDefinition,
+        grave_mark: GraveMarkDefinition,
+        slipstep: SlipstepDefinition,
+        stillness: StillnessDefinition,
+        oath: Option<GraveArbalistOath>,
+        outgoing_direct_damage_basis_points: u32,
+    ) -> Result<Self, CombatError> {
+        if !(1..=crate::MAXIMUM_OUTGOING_DAMAGE_BASIS_POINTS)
+            .contains(&outgoing_direct_damage_basis_points)
+        {
+            return Err(CombatError::InvalidOutgoingDirectDamageMultiplier);
+        }
+        let mut state = Self::new(weapon, grave_mark, slipstep, stillness)?;
+        state.oath = oath;
+        state.outgoing_direct_damage_basis_points = outgoing_direct_damage_basis_points;
         Ok(state)
     }
 
@@ -538,6 +580,11 @@ impl PlayerCombatState {
         } else {
             0
         }
+    }
+
+    #[must_use]
+    pub const fn outgoing_direct_damage_basis_points(&self) -> u32 {
+        self.outgoing_direct_damage_basis_points
     }
 
     #[must_use]
@@ -663,6 +710,7 @@ impl PlayerCombatState {
         self.tick = self.tick.checked_next().ok_or(CombatError::TickExhausted)?;
         let mut step = CombatStep {
             tick: self.tick,
+            attacker_multiplier_basis_points: self.outgoing_direct_damage_basis_points,
             ..CombatStep::default()
         };
         self.advance_active_mark(&mut step.mark_transitions);
@@ -1534,6 +1582,8 @@ pub enum CombatError {
     NonFiniteCollisionResult,
     #[error("raw-damage intent failed: {0}")]
     IntentMath(#[from] IntentMathError),
+    #[error("outgoing direct-damage multiplier is outside the global cap")]
+    InvalidOutgoingDirectDamageMultiplier,
 }
 
 #[allow(clippy::cast_precision_loss)]

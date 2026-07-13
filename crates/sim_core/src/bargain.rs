@@ -219,6 +219,25 @@ pub fn compose_maximum_health_multiplier(
         .max(MINIMUM_MAXIMUM_HEALTH_BASIS_POINTS))
 }
 
+pub fn compose_outgoing_direct_damage_multiplier(
+    class_multiplier_basis_points: u32,
+    bargain_multiplier_basis_points: u32,
+) -> Result<u32, CoreBargainError> {
+    if class_multiplier_basis_points == 0 || bargain_multiplier_basis_points == 0 {
+        return Err(CoreBargainError::InvalidOutgoingDirectDamageMultiplier);
+    }
+    let product = u64::from(class_multiplier_basis_points)
+        .checked_mul(u64::from(bargain_multiplier_basis_points))
+        .ok_or(CoreBargainError::ArithmeticOverflow)?;
+    let rounded = product
+        .checked_add(u64::from(BASIS_POINTS_PER_ONE / 2))
+        .ok_or(CoreBargainError::ArithmeticOverflow)?
+        / u64::from(BASIS_POINTS_PER_ONE);
+    Ok(u32::try_from(rounded)
+        .map_err(|_| CoreBargainError::ArithmeticOverflow)?
+        .min(MAXIMUM_OUTGOING_DAMAGE_BASIS_POINTS))
+}
+
 pub fn resolve_primary_interval_micros(
     base_interval_micros: u32,
     attack_rate_basis_points: u32,
@@ -252,6 +271,8 @@ pub enum CoreBargainError {
     InvalidMaximumHealthMultiplier,
     #[error("base primary interval and attack rate must be positive")]
     InvalidPrimaryInterval,
+    #[error("outgoing direct-damage multipliers must be positive")]
+    InvalidOutgoingDirectDamageMultiplier,
     #[error("Core Bargain fixed-point arithmetic overflowed")]
     ArithmeticOverflow,
 }
@@ -342,5 +363,13 @@ mod tests {
         assert_eq!(compose_maximum_health_multiplier(9_000, 8_800), Ok(7_920));
         assert_eq!(compose_maximum_health_multiplier(7_000, 7_000), Ok(7_000));
         assert_eq!(resolve_primary_interval_micros(454_545, 8_500), Ok(534_759));
+        assert_eq!(
+            compose_outgoing_direct_damage_multiplier(10_600, 11_800),
+            Ok(12_508)
+        );
+        assert_eq!(
+            compose_outgoing_direct_damage_multiplier(14_000, 12_000),
+            Ok(15_000)
+        );
     }
 }
