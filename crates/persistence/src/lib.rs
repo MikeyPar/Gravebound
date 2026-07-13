@@ -13,6 +13,7 @@ use thiserror::Error;
 
 mod ash_wallet;
 mod bargain;
+mod bargain_cleanup;
 mod bargain_milestone;
 mod combat_loadout;
 mod danger_checkpoint;
@@ -33,6 +34,10 @@ pub use bargain::{
     BargainDecisionTransaction, BargainDecisionTransactionState, StoredActiveBargain,
     StoredBargainCandidate, StoredBargainDecisionResult, StoredBargainLife, StoredBargainOffer,
     StoredBargainSnapshot,
+};
+pub use bargain_cleanup::{
+    BargainLifeCleanupCommand, BargainLifeCleanupResult, BargainLifeEndReason,
+    cleanup_bargains_for_life_end,
 };
 pub use bargain_milestone::{
     CORE_BARGAIN_LAYOUT_ID, CORE_BARGAIN_MILESTONE_ID, CORE_BARGAIN_SOURCE_ID,
@@ -78,7 +83,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 21;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 22;
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -254,6 +259,10 @@ pub enum PersistenceError {
     DangerCheckpointReplayConflict,
     #[error("danger checkpoint cleanup requires a committed safe location")]
     DangerCheckpointFinalizationNotCommitted,
+    #[error("Bargain life-end cleanup input or stored state is corrupt")]
+    CorruptBargainCleanup,
+    #[error("Bargain life-end cleanup expected a different aggregate version")]
+    BargainCleanupVersionMismatch,
 }
 
 /// Returns whether `PostgreSQL` explicitly permits the complete transaction to be retried.
@@ -804,6 +813,31 @@ mod tests {
             assert!(
                 !migration.contains(prohibited),
                 "checkpoint migration leaked {prohibited}"
+            );
+        }
+    }
+
+    #[test]
+    fn bargain_life_cleanup_outbox_is_typed_and_history_preserving() {
+        let migration = include_str!("../../../migrations/0022_bargain_life_cleanup_outbox.sql");
+        for required in [
+            "bargains_cleared_death",
+            "bargains_cleared_retirement",
+            "one_bargain_cleanup_event_per_life_reason",
+        ] {
+            assert!(migration.contains(required), "migration omitted {required}");
+        }
+        for prohibited in [
+            "DELETE FROM bargain_offers",
+            "DELETE FROM bargain_decision_results",
+            "DROP TABLE",
+            "TRUNCATE",
+            "JSON",
+            "JSONB",
+        ] {
+            assert!(
+                !migration.contains(prohibited),
+                "cleanup migration leaked {prohibited}"
             );
         }
     }
