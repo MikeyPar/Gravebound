@@ -7,7 +7,10 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use persistence::{PersistenceConfig, PostgresPersistence, WIPEABLE_CORE_NAMESPACE};
+use persistence::{
+    DangerCheckpointWrite, PersistenceConfig, PostgresPersistence, StoredWorldFlowRevisionV1,
+    WIPEABLE_CORE_NAMESPACE,
+};
 use protocol::{
     AccountBootstrapFrame, AccountBootstrapRequest, AccountBootstrapResult, AccountErrorCode,
     AuthTicket, BargainContentRevisionV1, BargainDecision, BargainDecisionFrame,
@@ -21,15 +24,20 @@ use protocol::{
 };
 use server_app::{
     AccountId, AuthenticatedAccount, AuthenticatedNamespace, BoundCoreIdentityServer,
-    CharacterIdGenerator, CoreCharacterCombatFactory, CoreIdentityServerConfig,
-    CoreIdentityServerReport, EntryCaptureContext, EntryRestoreProvider, IdentityClock,
-    IdentityService, LOCAL_SERVER_NAME, LocalServerRuntimeError, NoopIdentityEventSink,
-    PostgresAccountRepository, PostgresGroundExpiryService, PostgresProgressionAwardService,
+    CharacterIdGenerator, CoreCharacterCombatFactory, CoreCheckpointBinding,
+    CoreDangerCheckpointService, CoreIdentityServerConfig, CoreIdentityServerReport, CoreLifeKey,
+    CoreLiveBindingId, CoreLiveDirectory, CoreResumeOutcome, EntryCaptureContext,
+    EntryRestoreProvider, IdentityClock, IdentityService, LOCAL_SERVER_NAME,
+    LocalServerRuntimeError, NoopIdentityEventSink, PostgresAccountRepository,
+    PostgresGroundExpiryService, PostgresProgressionAwardService,
     PostgresProgressionRestoreProvider, PostgresRewardService, ProgressionAwardCode,
     ProgressionAwardCommand, ProgressionAwardEvidence, ProgressionAwardPayload, RewardGrantContext,
     RewardGrantTransaction, RewardPlacement, SecretRewardEpoch,
 };
-use sim_core::{EncounterXpEvidence, RewardLifeState, RewardRecallState, RewardTrustState};
+use sim_core::{
+    ArenaGeometry, BellDebtCheckpoint, CombatAction, EncounterXpEvidence, ProjectileCollisionWorld,
+    RewardLifeState, RewardRecallState, RewardTrustState, SimulationVector, TilePoint,
+};
 use tokio::sync::oneshot;
 
 #[derive(Debug, Clone, Copy)]
@@ -1005,6 +1013,145 @@ async fn assert_persisted_combat_factory(
     }
 }
 
+fn core_checkpoint_binding(content_root: &Path) -> CoreCheckpointBinding {
+    let world = sim_content::load_core_development_world_flow(content_root).unwrap();
+    let hashes = world.hashes();
+    CoreCheckpointBinding::new(StoredWorldFlowRevisionV1 {
+        records_blake3: hashes.records_blake3.clone(),
+        assets_blake3: hashes.assets_blake3.clone(),
+        localization_blake3: hashes.localization_blake3.clone(),
+    })
+    .unwrap()
+}
+
+fn checkpoint_world() -> ProjectileCollisionWorld {
+    let arena = ArenaGeometry {
+        id: "arena.postgres_checkpoint".to_owned(),
+        width_milli_tiles: 100_000,
+        height_milli_tiles: 100_000,
+        shell_thickness_milli_tiles: 1_000,
+        player_spawn: TilePoint::new(4_000, 12_000),
+        boss_spawn: TilePoint::new(80_000, 80_000),
+        pillars: vec![],
+        anchors: vec![],
+    }
+    .validated()
+    .unwrap();
+    ProjectileCollisionWorld::new(&arena, vec![]).unwrap()
+}
+
+async fn persist_pending_bell_checkpoint(
+    persistence: &PostgresPersistence,
+    content_root: &Path,
+    ticket: &[u8],
+    character_id: [u8; 16],
+) -> BellDebtCheckpoint {
+    const LINEAGE_ID: [u8; 16] = [75; 16];
+    let account_hash = blake3::hash(ticket);
+    let account_id = <[u8; 16]>::try_from(&account_hash.as_bytes()[..16]).unwrap();
+    let factory = CoreCharacterCombatFactory::load(persistence.clone(), content_root).unwrap();
+    let combat = factory.build(account_id, character_id).await.unwrap();
+    let key = CoreLifeKey::new(account_id, character_id, LINEAGE_ID).unwrap();
+    let mut directory = CoreLiveDirectory::default();
+    directory
+        .insert(
+            key,
+            CoreLiveBindingId::new(1).unwrap(),
+            "room.sepulcher",
+            core_checkpoint_binding(content_root),
+            combat,
+        )
+        .unwrap();
+    let world = checkpoint_world();
+    for _ in 0..200 {
+        directory
+            .get_mut(key)
+            .unwrap()
+            .with_combat_mutation(|combat| {
+                combat.state.step(
+                    CombatAction {
+                        primary_held: true,
+                        primary_press_sequence: 1,
+                        ..CombatAction::default()
+                    },
+                    SimulationVector::new(4.0, 7.0),
+                    &world,
+                )
+            })
+            .unwrap()
+            .unwrap();
+        if directory
+            .get(key)
+            .unwrap()
+            .combat()
+            .state
+            .has_pending_bell_repeat()
+        {
+            break;
+        }
+    }
+    let expected = directory
+        .get(key)
+        .unwrap()
+        .combat()
+        .state
+        .export_bell_debt_checkpoint()
+        .unwrap();
+    assert!(expected.has_pending_repeat());
+    let service = CoreDangerCheckpointService::new(persistence.clone());
+    assert_eq!(
+        service
+            .flush_lifecycle_boundary(directory.get_mut(key).unwrap())
+            .await
+            .unwrap(),
+        Some(DangerCheckpointWrite::Created)
+    );
+    expected
+}
+
+async fn assert_pending_bell_checkpoint_resumes(
+    persistence: &PostgresPersistence,
+    content_root: &Path,
+    ticket: &[u8],
+    character_id: [u8; 16],
+    expected: &BellDebtCheckpoint,
+) {
+    const LINEAGE_ID: [u8; 16] = [75; 16];
+    let account_hash = blake3::hash(ticket);
+    let account_id = <[u8; 16]>::try_from(&account_hash.as_bytes()[..16]).unwrap();
+    let factory = CoreCharacterCombatFactory::load(persistence.clone(), content_root).unwrap();
+    let combat = factory.build(account_id, character_id).await.unwrap();
+    let key = CoreLifeKey::new(account_id, character_id, LINEAGE_ID).unwrap();
+    let mut directory = CoreLiveDirectory::default();
+    directory
+        .insert(
+            key,
+            CoreLiveBindingId::new(2).unwrap(),
+            "room.sepulcher",
+            core_checkpoint_binding(content_root),
+            combat,
+        )
+        .unwrap();
+    let service = CoreDangerCheckpointService::new(persistence.clone());
+    assert!(matches!(
+        service
+            .resume_latest(directory.get_mut(key).unwrap())
+            .await
+            .unwrap(),
+        CoreResumeOutcome::Restored { checkpoint_tick } if checkpoint_tick > 0
+    ));
+    assert_eq!(
+        directory
+            .get(key)
+            .unwrap()
+            .combat()
+            .state
+            .export_bell_debt_checkpoint()
+            .unwrap(),
+        *expected
+    );
+}
+
 async fn assert_persisted_oath_view(
     connection: &quinn::Connection,
     content_root: &Path,
@@ -1308,6 +1455,8 @@ async fn postgres_real_quic_server_restart_preserves_authoritative_roster() {
     stage_complete_core_combat_package(&persistence, &content_root, ticket, character_id).await;
     let combat_before_restart =
         assert_persisted_combat_factory(&persistence, &content_root, ticket, character_id).await;
+    let bell_before_restart =
+        persist_pending_bell_checkpoint(&persistence, &content_root, ticket, character_id).await;
     connection.close(0_u32.into(), b"combat package restart");
     shutdown.send(()).unwrap();
     assert!(task.await.unwrap().unwrap().persistence_enabled);
@@ -1326,6 +1475,14 @@ async fn postgres_real_quic_server_restart_preserves_authoritative_roster() {
     let combat_after_restart =
         assert_persisted_combat_factory(&persistence, &content_root, ticket, character_id).await;
     assert_eq!(combat_after_restart, combat_before_restart);
+    assert_pending_bell_checkpoint_resumes(
+        &persistence,
+        &content_root,
+        ticket,
+        character_id,
+        &bell_before_restart,
+    )
+    .await;
     connection.close(0_u32.into(), b"complete");
     shutdown.send(()).unwrap();
     assert!(task.await.unwrap().unwrap().persistence_enabled);
