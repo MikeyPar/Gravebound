@@ -18,6 +18,7 @@ mod core_microrealm;
 mod damage;
 mod death;
 mod debug_state;
+mod dungeon_room;
 mod encounter;
 mod enemy;
 mod enemy_health;
@@ -123,6 +124,12 @@ pub use death::{
 };
 pub use debug_state::{
     DebugBossState, DebugEnemyState, DebugStateError, LocalDebugStateInput, LocalDebugStateSnapshot,
+};
+pub use dungeon_room::{
+    DungeonAnchorKind, DungeonCorridor, DungeonDoorDefinition, DungeonDoorSide, DungeonRoomAnchor,
+    DungeonRoomDefinition, DungeonRoomError, DungeonRoomNavigationEvidence, DungeonRoomVolume,
+    DungeonRoomVolumeGeometry, DungeonRoomVolumeKind, FixedDungeonLayoutDefinition,
+    PlacedDungeonRoom, RotatedDungeonDoor, RotatedDungeonRoom, WorldDungeonDoor,
 };
 pub use encounter::{
     BOSS_INTRODUCTION_TICKS, BOSS_REWARD_ID, BellLaboratoryEncounter, EncounterAction,

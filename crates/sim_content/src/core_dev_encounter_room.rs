@@ -6,8 +6,15 @@ use anyhow::{Context, Result, bail};
 use content_schema::{
     ContentId, CoreEncounterRank, CoreEncounterRoomAssetManifest, CoreEncounterRoomCopyFile,
     CoreEncounterRoomDevelopmentTarget, CoreEncounterRoomRecords, CoreEncounterRoomTargetKind,
-    CoreEncounterSourceKind, CoreFixedLayoutRecord, CoreRoomDoorSide, CoreRoomTemplateRecord,
-    CoreRoomVolumeGeometry, CoreRoomVolumeKind, ReleaseStage, SCHEMA_VERSION,
+    CoreEncounterSourceKind, CoreFixedLayoutRecord, CoreRoomAnchorKind, CoreRoomDoorSide,
+    CoreRoomTemplateRecord, CoreRoomVolumeGeometry, CoreRoomVolumeKind, ReleaseStage,
+    SCHEMA_VERSION,
+};
+use sim_core::{
+    DungeonAnchorKind, DungeonCorridor, DungeonDoorDefinition, DungeonDoorSide, DungeonRoomAnchor,
+    DungeonRoomDefinition, DungeonRoomVolume, DungeonRoomVolumeGeometry, DungeonRoomVolumeKind,
+    FixedDungeonLayoutDefinition, MILLI_TILES_PER_TILE, PLAYER_COLLISION_RADIUS_MILLI_TILES,
+    PlacedDungeonRoom,
 };
 
 use crate::{
@@ -121,6 +128,45 @@ impl CoreDevelopmentEncounterRooms {
     pub fn localized(&self, key: &str) -> Option<&str> {
         self.localization.get(key).map(String::as_str)
     }
+
+    /// Compiles every authored Bell template into renderer-independent local geometry.
+    pub fn compile_room_definitions(&self) -> Result<Vec<DungeonRoomDefinition>> {
+        let definitions = self
+            .records
+            .rooms
+            .iter()
+            .map(compile_room)
+            .collect::<Result<Vec<_>>>()?;
+        let utility_kinds = [
+            DungeonAnchorKind::SafeEntry,
+            DungeonAnchorKind::Exit,
+            DungeonAnchorKind::Stage,
+            DungeonAnchorKind::Shrine,
+            DungeonAnchorKind::Stabilization,
+            DungeonAnchorKind::Chest,
+            DungeonAnchorKind::Group,
+        ];
+        for definition in &definitions {
+            definition
+                .prove_navigation(
+                    &utility_kinds,
+                    u32::try_from(PLAYER_COLLISION_RADIUS_MILLI_TILES)
+                        .expect("player collision radius is positive"),
+                    500,
+                )
+                .with_context(|| {
+                    format!("Bell room {} has no safe utility route", definition.id)
+                })?;
+        }
+        Ok(definitions)
+    }
+
+    /// Places only the active B0→B6 main chain. Authored branch templates remain available above
+    /// but cannot enter the runtime definition while their layout nodes are disabled.
+    pub fn compile_fixed_layout_definition(&self) -> Result<FixedDungeonLayoutDefinition> {
+        let definitions = self.compile_room_definitions()?;
+        compile_fixed_layout(&self.records.layouts[0], &definitions)
+    }
 }
 
 pub fn load_core_development_encounter_rooms(root: &Path) -> Result<CoreDevelopmentEncounterRooms> {
@@ -170,7 +216,7 @@ pub fn compile_core_development_encounter_rooms(
     validate_records(source, items, progression, target, records)?;
     validate_assets(target, records, assets)?;
     validate_copy(target, records, copy)?;
-    Ok(CoreDevelopmentEncounterRooms {
+    let compiled = CoreDevelopmentEncounterRooms {
         target_name: target.target_name.clone(),
         records: records.clone(),
         hashes: hashes.clone(),
@@ -179,7 +225,271 @@ pub fn compile_core_development_encounter_rooms(
             .iter()
             .map(|entry| (entry.key.to_string(), entry.value.clone()))
             .collect(),
-    })
+    };
+    compiled.compile_fixed_layout_definition()?;
+    Ok(compiled)
+}
+
+fn compile_room(record: &CoreRoomTemplateRecord) -> Result<DungeonRoomDefinition> {
+    DungeonRoomDefinition {
+        id: record.header.id.to_string(),
+        width_milli_tiles: record.width_milli_tiles,
+        height_milli_tiles: record.height_milli_tiles,
+        doors: record
+            .doors
+            .iter()
+            .map(|door| DungeonDoorDefinition {
+                id: door.id.clone(),
+                side: compile_door_side(door.side),
+                offset_milli_tiles: door.offset_milli_tiles,
+                width_milli_tiles: door.width_milli_tiles,
+            })
+            .collect(),
+        volumes: record
+            .volumes
+            .iter()
+            .map(|volume| DungeonRoomVolume {
+                id: volume.id.clone(),
+                kind: compile_volume_kind(volume.kind),
+                geometry: compile_volume_geometry(&volume.geometry),
+            })
+            .collect(),
+        anchors: record
+            .anchors
+            .iter()
+            .map(|anchor| DungeonRoomAnchor {
+                id: anchor.id.clone(),
+                kind: compile_anchor_kind(anchor.kind),
+                x_milli_tiles: anchor.point.x,
+                y_milli_tiles: anchor.point.y,
+                bound_content_id: anchor.bound_content_id.as_ref().map(ToString::to_string),
+            })
+            .collect(),
+        safe_noncombat: record.safe_noncombat,
+    }
+    .validated()
+    .with_context(|| format!("compiled Bell room {} is invalid", record.header.id))
+}
+
+fn compile_fixed_layout(
+    layout: &CoreFixedLayoutRecord,
+    definitions: &[DungeonRoomDefinition],
+) -> Result<FixedDungeonLayoutDefinition> {
+    let definition_by_id = definitions
+        .iter()
+        .map(|definition| (definition.id.as_str(), definition))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let node_by_id = layout
+        .nodes
+        .iter()
+        .map(|node| (node.node_id.as_str(), node))
+        .collect::<std::collections::BTreeMap<_, _>>();
+
+    let first_node_id = layout
+        .main_chain_node_ids
+        .first()
+        .context("fixed Core layout has no main-chain entry")?;
+    let first_node = node_by_id
+        .get(first_node_id.as_str())
+        .context("fixed Core layout entry node is missing")?;
+    let first_definition = definition_by_id
+        .get(first_node.room_template_id.as_str())
+        .context("fixed Core layout entry room is missing")?;
+    let mut rooms = vec![PlacedDungeonRoom {
+        node_id: first_node.node_id.clone(),
+        room: first_definition.rotated(first_node.rotation_degrees)?,
+        origin_x_milli_tiles: 0,
+        origin_y_milli_tiles: 0,
+        counts_toward_room_total: first_node.counts_toward_six_room_total,
+    }];
+    let mut corridors = Vec::with_capacity(layout.edges.len());
+
+    for edge in &layout.edges {
+        let from = rooms
+            .last()
+            .context("fixed Core layout placement lost its prior room")?;
+        let (room, corridor) = place_layout_edge(from, edge, &node_by_id, &definition_by_id)?;
+        corridors.push(corridor);
+        rooms.push(room);
+    }
+
+    reject_room_overlap(&rooms)?;
+    FixedDungeonLayoutDefinition {
+        id: layout.header.id.to_string(),
+        rooms,
+        corridors,
+        disabled_branch_node_ids: layout.disabled_branch_node_ids.clone(),
+    }
+    .validated()
+    .context("compiled Core fixed layout is invalid")
+}
+
+fn place_layout_edge(
+    from: &PlacedDungeonRoom,
+    edge: &content_schema::CoreFixedLayoutEdge,
+    node_by_id: &std::collections::BTreeMap<&str, &content_schema::CoreFixedLayoutNode>,
+    definition_by_id: &std::collections::BTreeMap<&str, &DungeonRoomDefinition>,
+) -> Result<(PlacedDungeonRoom, DungeonCorridor)> {
+    if from.node_id != edge.from_node_id {
+        bail!("fixed Core layout edges are not ordered with the main chain");
+    }
+    let start = from.world_door(&edge.from_door_id)?;
+    let to_node = node_by_id
+        .get(edge.to_node_id.as_str())
+        .with_context(|| format!("fixed Core layout is missing node {}", edge.to_node_id))?;
+    let to_definition = definition_by_id
+        .get(to_node.room_template_id.as_str())
+        .with_context(|| {
+            format!(
+                "fixed Core layout is missing room {}",
+                to_node.room_template_id
+            )
+        })?;
+    let rotated = to_definition.rotated(to_node.rotation_degrees)?;
+    let to_door = rotated.door(&edge.to_door_id).with_context(|| {
+        format!(
+            "node {} is missing door {}",
+            to_node.node_id, edge.to_door_id
+        )
+    })?;
+    if start.side.opposite() != to_door.side
+        || start.width_milli_tiles != edge.corridor_width_milli_tiles
+        || to_door.width_milli_tiles != edge.corridor_width_milli_tiles
+    {
+        bail!(
+            "fixed Core layout edge {} to {} has incompatible doors",
+            edge.from_node_id,
+            edge.to_node_id
+        );
+    }
+    let length_milli_tiles = u32::from(edge.corridor_length_tiles)
+        .checked_mul(u32::try_from(MILLI_TILES_PER_TILE).expect("milli-tiles fit u32"))
+        .context("fixed Core corridor length overflow")?;
+    let length_i32 =
+        i32::try_from(length_milli_tiles).context("fixed Core corridor length exceeds i32")?;
+    let (direction_x, direction_y) = start.side.outward_unit();
+    let end_x = start
+        .x_milli_tiles
+        .checked_add(direction_x.saturating_mul(length_i32))
+        .context("fixed Core corridor x overflow")?;
+    let end_y = start
+        .y_milli_tiles
+        .checked_add(direction_y.saturating_mul(length_i32))
+        .context("fixed Core corridor y overflow")?;
+    let origin_x = end_x
+        .checked_sub(to_door.x_milli_tiles)
+        .context("fixed Core room x placement overflow")?;
+    let origin_y = end_y
+        .checked_sub(to_door.y_milli_tiles)
+        .context("fixed Core room y placement overflow")?;
+    Ok((
+        PlacedDungeonRoom {
+            node_id: to_node.node_id.clone(),
+            room: rotated,
+            origin_x_milli_tiles: origin_x,
+            origin_y_milli_tiles: origin_y,
+            counts_toward_room_total: to_node.counts_toward_six_room_total,
+        },
+        DungeonCorridor {
+            from_node_id: edge.from_node_id.clone(),
+            to_node_id: edge.to_node_id.clone(),
+            start_x_milli_tiles: start.x_milli_tiles,
+            start_y_milli_tiles: start.y_milli_tiles,
+            end_x_milli_tiles: end_x,
+            end_y_milli_tiles: end_y,
+            width_milli_tiles: edge.corridor_width_milli_tiles,
+            length_milli_tiles,
+        },
+    ))
+}
+
+fn reject_room_overlap(rooms: &[PlacedDungeonRoom]) -> Result<()> {
+    for (index, left) in rooms.iter().enumerate() {
+        for right in rooms.iter().skip(index + 1) {
+            let left_right =
+                i64::from(left.origin_x_milli_tiles) + i64::from(left.room.width_milli_tiles);
+            let left_bottom =
+                i64::from(left.origin_y_milli_tiles) + i64::from(left.room.height_milli_tiles);
+            let right_right =
+                i64::from(right.origin_x_milli_tiles) + i64::from(right.room.width_milli_tiles);
+            let right_bottom =
+                i64::from(right.origin_y_milli_tiles) + i64::from(right.room.height_milli_tiles);
+            let overlaps = i64::from(left.origin_x_milli_tiles) < right_right
+                && i64::from(right.origin_x_milli_tiles) < left_right
+                && i64::from(left.origin_y_milli_tiles) < right_bottom
+                && i64::from(right.origin_y_milli_tiles) < left_bottom;
+            if overlaps {
+                bail!(
+                    "fixed Core rooms {} and {} overlap",
+                    left.node_id,
+                    right.node_id
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+const fn compile_door_side(side: CoreRoomDoorSide) -> DungeonDoorSide {
+    match side {
+        CoreRoomDoorSide::North => DungeonDoorSide::North,
+        CoreRoomDoorSide::East => DungeonDoorSide::East,
+        CoreRoomDoorSide::South => DungeonDoorSide::South,
+        CoreRoomDoorSide::West => DungeonDoorSide::West,
+    }
+}
+
+const fn compile_volume_kind(kind: CoreRoomVolumeKind) -> DungeonRoomVolumeKind {
+    match kind {
+        CoreRoomVolumeKind::Solid => DungeonRoomVolumeKind::Solid,
+        CoreRoomVolumeKind::DeepWater => DungeonRoomVolumeKind::DeepWater,
+        CoreRoomVolumeKind::WalkableBoundary => DungeonRoomVolumeKind::WalkableBoundary,
+        CoreRoomVolumeKind::PatternLane => DungeonRoomVolumeKind::PatternLane,
+        CoreRoomVolumeKind::ObjectiveArea => DungeonRoomVolumeKind::ObjectiveArea,
+    }
+}
+
+fn compile_volume_geometry(geometry: &CoreRoomVolumeGeometry) -> DungeonRoomVolumeGeometry {
+    match geometry {
+        CoreRoomVolumeGeometry::Rectangle { rectangle } => DungeonRoomVolumeGeometry::Rectangle {
+            x: rectangle.x,
+            y: rectangle.y,
+            width: rectangle.width,
+            height: rectangle.height,
+        },
+        CoreRoomVolumeGeometry::Circle { circle } => DungeonRoomVolumeGeometry::Circle {
+            x: circle.center.x,
+            y: circle.center.y,
+            radius: circle.radius,
+        },
+        CoreRoomVolumeGeometry::Polyline {
+            width_milli_tiles,
+            points,
+        } => DungeonRoomVolumeGeometry::Polyline {
+            width_milli_tiles: *width_milli_tiles,
+            points: points.iter().map(|point| (point.x, point.y)).collect(),
+        },
+    }
+}
+
+const fn compile_anchor_kind(kind: CoreRoomAnchorKind) -> DungeonAnchorKind {
+    match kind {
+        CoreRoomAnchorKind::SafeEntry => DungeonAnchorKind::SafeEntry,
+        CoreRoomAnchorKind::Exit => DungeonAnchorKind::Exit,
+        CoreRoomAnchorKind::Fodder => DungeonAnchorKind::Fodder,
+        CoreRoomAnchorKind::Pressure => DungeonAnchorKind::Pressure,
+        CoreRoomAnchorKind::Disruptor => DungeonAnchorKind::Disruptor,
+        CoreRoomAnchorKind::AnchorEnemy => DungeonAnchorKind::AnchorEnemy,
+        CoreRoomAnchorKind::Miniboss => DungeonAnchorKind::Miniboss,
+        CoreRoomAnchorKind::Stage => DungeonAnchorKind::Stage,
+        CoreRoomAnchorKind::Add => DungeonAnchorKind::Add,
+        CoreRoomAnchorKind::Shrine => DungeonAnchorKind::Shrine,
+        CoreRoomAnchorKind::Stabilization => DungeonAnchorKind::Stabilization,
+        CoreRoomAnchorKind::Chest => DungeonAnchorKind::Chest,
+        CoreRoomAnchorKind::Boss => DungeonAnchorKind::Boss,
+        CoreRoomAnchorKind::ChargeEndpoint => DungeonAnchorKind::ChargeEndpoint,
+        CoreRoomAnchorKind::Group => DungeonAnchorKind::Group,
+    }
 }
 
 fn validate_target(
@@ -318,6 +628,68 @@ fn validate_records(
     validate_rooms(target, &records.rooms)?;
     validate_pack(&records.packs)?;
     validate_layout(&records.layouts, &records.rooms)?;
+    validate_encounter_anchor_capacity(records)?;
+    Ok(())
+}
+
+fn validate_encounter_anchor_capacity(records: &CoreEncounterRoomRecords) -> Result<()> {
+    let room_by_id = records
+        .rooms
+        .iter()
+        .map(|room| (room.header.id.as_str(), room))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let roster_by_id = records
+        .roster
+        .iter()
+        .map(|member| (member.header.id.as_str(), member))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    for node in &records.layouts[0].nodes {
+        let Some(encounter) = &node.encounter else {
+            continue;
+        };
+        let room = room_by_id
+            .get(node.room_template_id.as_str())
+            .with_context(|| format!("node {} references a missing room", node.node_id))?;
+        for member in &encounter.members {
+            let roster = roster_by_id
+                .get(member.enemy_id.as_str())
+                .with_context(|| {
+                    format!("node {} references a missing roster member", node.node_id)
+                })?;
+            let available = if roster.rank == CoreEncounterRank::Miniboss {
+                room.anchors
+                    .iter()
+                    .filter(|anchor| {
+                        anchor.kind == CoreRoomAnchorKind::Miniboss
+                            || anchor.bound_content_id.as_ref() == Some(&member.enemy_id)
+                    })
+                    .count()
+            } else {
+                let required_kind = if roster.header.tags.iter().any(|tag| tag == "fodder") {
+                    CoreRoomAnchorKind::Fodder
+                } else if roster.header.tags.iter().any(|tag| tag == "pressure") {
+                    CoreRoomAnchorKind::Pressure
+                } else if roster.header.tags.iter().any(|tag| tag == "disruptor") {
+                    CoreRoomAnchorKind::Disruptor
+                } else if roster.header.tags.iter().any(|tag| tag == "anchor") {
+                    CoreRoomAnchorKind::AnchorEnemy
+                } else {
+                    bail!("{} has no supported room role tag", roster.header.id);
+                };
+                room.anchors
+                    .iter()
+                    .filter(|anchor| anchor.kind == required_kind)
+                    .count()
+            };
+            if available < usize::from(member.count) {
+                bail!(
+                    "node {} lacks role-compatible anchors for {}",
+                    node.node_id,
+                    member.enemy_id
+                );
+            }
+        }
+    }
     Ok(())
 }
 
@@ -874,6 +1246,39 @@ mod tests {
         assert_eq!(compiled.rooms().len(), 9);
         assert_eq!(compiled.pack_bell_01().base_budget, 12);
         assert_eq!(compiled.fixed_layout().main_chain_node_ids, MAIN_CHAIN);
+        let room_definitions = compiled
+            .compile_room_definitions()
+            .expect("room definitions");
+        assert_eq!(room_definitions.len(), 9);
+        let layout = compiled
+            .compile_fixed_layout_definition()
+            .expect("fixed layout definition");
+        assert_eq!(layout.rooms.len(), 7);
+        assert_eq!(layout.corridors.len(), 6);
+        assert_eq!(layout.disabled_branch_node_ids, ["BB1", "BS1"]);
+        assert_eq!(
+            (
+                layout.rooms[2].room.width_milli_tiles,
+                layout.rooms[2].room.height_milli_tiles,
+                layout.rooms[2].room.rotation_degrees,
+            ),
+            (21_000, 15_000, 90)
+        );
+        assert!(layout.corridors.iter().all(|corridor| {
+            corridor.width_milli_tiles == 3_000 && corridor.length_milli_tiles == 4_000
+        }));
+        assert_eq!(
+            layout
+                .rooms
+                .iter()
+                .filter(|room| room.counts_toward_room_total)
+                .count(),
+            6
+        );
+        assert_eq!(
+            layout.deterministic_digest(),
+            "0de16de0531d5a1eee7bdc139c4a34e5b7ce83be68bea8676abab2bc32a8a88c"
+        );
     }
 
     #[test]
@@ -907,6 +1312,29 @@ mod tests {
     fn compiler_rejects_room_geometry_and_layout_drift() {
         let mut case = fixture();
         case.records.rooms[1].width_milli_tiles += 1;
+        assert!(compile_fixture(&case).is_err());
+
+        let mut case = fixture();
+        case.records.rooms[1]
+            .anchors
+            .retain(|anchor| anchor.id != "p2");
+        assert!(compile_fixture(&case).is_err());
+
+        let mut case = fixture();
+        case.records.rooms[1]
+            .volumes
+            .push(content_schema::CoreRoomVolume {
+                id: "solid.partition".to_owned(),
+                kind: CoreRoomVolumeKind::Solid,
+                geometry: CoreRoomVolumeGeometry::Rectangle {
+                    rectangle: content_schema::MilliTileRectangle {
+                        x: 8_000,
+                        y: 0,
+                        width: 1_000,
+                        height: 17_000,
+                    },
+                },
+            });
         assert!(compile_fixture(&case).is_err());
 
         let mut case = fixture();

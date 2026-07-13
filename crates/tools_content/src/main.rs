@@ -116,13 +116,15 @@ fn main() -> Result<()> {
 
 fn validate_core_encounter_rooms_command(root: &std::path::Path) -> Result<()> {
     let compiled = sim_content::load_core_development_encounter_rooms(root)?;
+    let layout = compiled.compile_fixed_layout_definition()?;
     info!(
         target = compiled.target_name(),
         normal_enemies = 6,
         minibosses = 2,
         rooms = compiled.rooms().len(),
         pack = compiled.pack_bell_01().header.id.as_str(),
-        layout = compiled.fixed_layout().header.id.as_str(),
+        layout = layout.id.as_str(),
+        layout_blake3 = layout.deterministic_digest(),
         records_blake3 = compiled.hashes().records_blake3,
         assets_blake3 = compiled.hashes().assets_blake3,
         localization_blake3 = compiled.hashes().localization_blake3,
