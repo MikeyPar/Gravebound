@@ -167,8 +167,8 @@ impl BargainStatComparison {
         if values
             .into_iter()
             .any(|value| value == 0 || value > MAX_STAT_BASIS_POINTS)
-            || !(1..=4).contains(&self.active_belt_slots_before)
-            || !(1..=4).contains(&self.active_belt_slots_after)
+            || !(1..=2).contains(&self.active_belt_slots_before)
+            || !(1..=2).contains(&self.active_belt_slots_after)
         {
             return Err(BargainValidationError::InvalidComparison);
         }
@@ -428,8 +428,8 @@ mod tests {
             healing_after_basis_points: 10_000,
             attack_rate_before_basis_points: 10_000,
             attack_rate_after_basis_points: 10_000,
-            active_belt_slots_before: 4,
-            active_belt_slots_after: 4,
+            active_belt_slots_before: 2,
+            active_belt_slots_after: 2,
         }
     }
 

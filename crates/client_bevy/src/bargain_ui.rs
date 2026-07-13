@@ -375,8 +375,8 @@ mod tests {
             healing_after_basis_points: 10_000,
             attack_rate_before_basis_points: 10_000,
             attack_rate_after_basis_points: 8_500,
-            active_belt_slots_before: 4,
-            active_belt_slots_after: 4,
+            active_belt_slots_before: 2,
+            active_belt_slots_after: 2,
         }
     }
 

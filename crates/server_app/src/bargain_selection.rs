@@ -397,7 +397,7 @@ const fn base_stats() -> Stats {
         movement: 10_000,
         healing: 10_000,
         attack_rate: 10_000,
-        belt_slots: 4,
+        belt_slots: 2,
     }
 }
 
@@ -549,6 +549,7 @@ mod tests {
         assert_eq!(bell.attack_rate_after_basis_points, 8_500);
         let lantern = comparison(&[], LANTERN_ASH_ID);
         assert_eq!(lantern.healing_after_basis_points, 14_000);
+        assert_eq!(lantern.active_belt_slots_before, 2);
         assert_eq!(lantern.active_belt_slots_after, 1);
     }
 
