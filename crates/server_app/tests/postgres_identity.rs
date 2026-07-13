@@ -1259,9 +1259,6 @@ async fn postgres_real_quic_server_restart_preserves_authoritative_roster() {
         character_id,
     )
     .await;
-    stage_complete_core_combat_package(&persistence, &content_root, ticket, character_id).await;
-    let combat_before_restart =
-        assert_persisted_combat_factory(&persistence, &content_root, ticket, character_id).await;
     connection.close(0_u32.into(), b"durable restart");
     shutdown.send(()).unwrap();
     let report = task.await.unwrap().unwrap();
@@ -1305,9 +1302,27 @@ async fn postgres_real_quic_server_restart_preserves_authoritative_roster() {
     .unwrap();
     assert_eq!(bargain_view.code, BargainResultCode::NoOffer);
     let bargain_projection = bargain_view.projection.unwrap();
-    assert_eq!(bargain_projection.active_bargain_ids.len(), 3);
-    assert_eq!(bargain_projection.earned_bargain_slots, 3);
-    assert_eq!(bargain_projection.oath_bargain_version, 7);
+    assert_eq!(bargain_projection.active_bargain_ids.len(), 1);
+    assert_eq!(bargain_projection.earned_bargain_slots, 1);
+    assert_eq!(bargain_projection.oath_bargain_version, 4);
+    stage_complete_core_combat_package(&persistence, &content_root, ticket, character_id).await;
+    let combat_before_restart =
+        assert_persisted_combat_factory(&persistence, &content_root, ticket, character_id).await;
+    connection.close(0_u32.into(), b"combat package restart");
+    shutdown.send(()).unwrap();
+    assert!(task.await.unwrap().unwrap().persistence_enabled);
+    endpoint.wait_idle().await;
+
+    let (address, certificate, shutdown, task) = start_server(&content_root, persistence.clone());
+    let endpoint = client_endpoint(certificate);
+    let connection = endpoint
+        .connect(address, LOCAL_SERVER_NAME)
+        .unwrap()
+        .await
+        .unwrap();
+    bot_client::perform_handshake(&connection, wire_hello(&content_root, ticket))
+        .await
+        .unwrap();
     let combat_after_restart =
         assert_persisted_combat_factory(&persistence, &content_root, ticket, character_id).await;
     assert_eq!(combat_after_restart, combat_before_restart);
