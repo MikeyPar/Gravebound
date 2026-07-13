@@ -1,8 +1,9 @@
 use std::path::{Path, PathBuf};
 
 use persistence::{
-    BargainLifeCleanupCommand, BargainLifeCleanupEventV1, BargainLifeEndReason, PersistenceConfig,
-    PersistenceError, PostgresPersistence, WIPEABLE_CORE_NAMESPACE, cleanup_bargains_for_life_end,
+    BargainDeclinedEventV1, BargainLifeCleanupCommand, BargainLifeCleanupEventV1,
+    BargainLifeEndReason, BargainOfferedEventV1, PersistenceConfig, PersistenceError,
+    PostgresPersistence, WIPEABLE_CORE_NAMESPACE, cleanup_bargains_for_life_end,
 };
 use protocol::{
     BargainContentRevisionV1, BargainDecision, BargainDecisionFrame, BargainDecisionPayload,
@@ -454,6 +455,17 @@ async fn assert_open_offer_rows(
     .fetch_one(transaction.connection())
     .await
     .unwrap();
+    let offered_event: (i64, Vec<u8>) = sqlx::query_as(
+        "SELECT aggregate_version, event_payload FROM character_life_outbox \
+         WHERE namespace_id = $1 AND account_id = $2 AND character_id = $3 \
+         AND event_type = 'bargain_offered'",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ids.account.as_slice())
+    .bind(ids.character.as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
     transaction.rollback().await.unwrap();
 
     assert_eq!(progression, (820, 5, 2));
@@ -533,6 +545,22 @@ async fn assert_open_offer_rows(
     );
     assert_eq!(xp_receipts, 1);
     assert_eq!(ash_results, 0);
+    assert_eq!(offered_event.0, 2);
+    let offered_event = BargainOfferedEventV1::decode(&offered_event.1).unwrap();
+    assert_eq!(offered_event.offer_id, ids.reward);
+    assert_eq!(offered_event.source_reward_event_id, ids.reward);
+    assert_eq!(offered_event.source_content_id, CORE_SOURCE_ID);
+    assert_eq!(offered_event.source_layout_id, CORE_LAYOUT_ID);
+    assert_eq!(offered_event.instance_lineage_id, ids.lineage);
+    assert_eq!(offered_event.entry_restore_point_id, ids.restore);
+    assert_eq!(offered_event.content_version, content_version);
+    assert_eq!(offered_event.records_blake3, hashes.records_blake3);
+    assert_eq!(offered_event.assets_blake3, hashes.assets_blake3);
+    assert_eq!(
+        offered_event.localization_blake3,
+        hashes.localization_blake3
+    );
+    assert_eq!(offered_event.oath_bargain_version, 2);
 
     let enabled = content
         .bargains()
@@ -544,14 +572,53 @@ async fn assert_open_offer_rows(
         sim_core::plan_bargain_offer(ids.reward, ids.character, &content_version, &enabled)
             .unwrap();
     assert_eq!(candidates.len(), 3);
+    assert_eq!(offered_event.candidates.len(), candidates.len());
     for (index, ((ordinal, bargain_id, score), expected)) in
         candidates.iter().zip(&expected).enumerate()
     {
         assert_eq!(*ordinal, i16::try_from(index).unwrap());
         assert_eq!(bargain_id, &expected.bargain_id);
         assert_eq!(score.as_slice(), expected.score);
+        assert_eq!(offered_event.candidates[index].candidate_ordinal, *ordinal);
+        assert_eq!(offered_event.candidates[index].bargain_id, *bargain_id);
+        assert_eq!(offered_event.candidates[index].score.as_slice(), score);
     }
     candidates
+}
+
+async fn assert_declined_event(
+    persistence: &PostgresPersistence,
+    ids: FixtureIds,
+    content: &sim_content::CompiledOathBargainCatalog,
+) {
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let rows: Vec<(i64, Vec<u8>)> = sqlx::query_as(
+        "SELECT aggregate_version, event_payload FROM character_life_outbox \
+         WHERE namespace_id = $1 AND account_id = $2 AND character_id = $3 \
+         AND event_type = 'bargain_declined'",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ids.account.as_slice())
+    .bind(ids.character.as_slice())
+    .fetch_all(transaction.connection())
+    .await
+    .unwrap();
+    transaction.rollback().await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, 2);
+    let event = BargainDeclinedEventV1::decode(&rows[0].1).unwrap();
+    assert_eq!(event.mutation_id, ids.mutation);
+    assert_eq!(event.offer_id, ids.reward);
+    assert_eq!(event.oath_bargain_version, 2);
+    assert_eq!(event.source_content_id, CORE_SOURCE_ID);
+    assert_eq!(event.source_layout_id, CORE_LAYOUT_ID);
+    assert_eq!(event.instance_lineage_id, ids.lineage);
+    assert_eq!(event.entry_restore_point_id, ids.restore);
+    let hashes = content.hashes();
+    assert_eq!(event.records_blake3, hashes.records_blake3);
+    assert_eq!(event.assets_blake3, hashes.assets_blake3);
+    assert_eq!(event.localization_blake3, hashes.localization_blake3);
+    assert_eq!(event.candidates.len(), 3);
 }
 
 async fn assert_terminal_rows(
@@ -861,6 +928,7 @@ async fn postgres_bargain_refusal_is_concurrent_replay_safe_and_restart_durable(
         },
     )
     .await;
+    assert_declined_event(&persistence, REFUSE_FIXTURE, &content).await;
     let conflict = decision_frame(
         REFUSE_FIXTURE,
         2,
@@ -915,5 +983,6 @@ async fn postgres_bargain_refusal_is_concurrent_replay_safe_and_restart_durable(
         },
     )
     .await;
+    assert_declined_event(&restarted_persistence, REFUSE_FIXTURE, &content).await;
     restarted_persistence.close().await;
 }
