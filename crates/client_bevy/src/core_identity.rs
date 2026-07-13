@@ -28,6 +28,7 @@ use sim_content::{
 
 use crate::{
     accessibility::AccessibilitySettings,
+    bargain_ui::{BargainUiAction, BargainUiCopy, BargainUiModel},
     network_transport::{
         NetworkStartup, NetworkTransportConfig, NetworkWorkerHandle, TransportEvent,
     },
@@ -236,6 +237,9 @@ struct CoreProgressionHudText;
 #[derive(Component)]
 struct CoreOathText;
 
+#[derive(Component)]
+struct CoreBargainText;
+
 #[derive(Debug, Clone, Resource)]
 struct CoreOathUiCopy(OathUiCopy);
 
@@ -244,6 +248,15 @@ struct CoreOathUiState(OathUiModel);
 
 #[derive(Debug, Clone, Copy, Component)]
 struct CoreOathActionLabel(OathUiAction);
+
+#[derive(Debug, Clone, Resource)]
+struct CoreBargainUiCopy(BargainUiCopy);
+
+#[derive(Debug, Default, Resource)]
+struct CoreBargainUiState(BargainUiModel);
+
+#[derive(Debug, Clone, Copy, Component)]
+struct CoreBargainActionLabel(BargainUiAction);
 
 #[derive(Debug, Resource)]
 struct CoreProgressionQueryState {
@@ -265,6 +278,7 @@ struct CoreCaptureProgress {
 }
 
 /// Validates the unpromoted Core boundary and opens the authoritative character-select client.
+#[allow(clippy::too_many_lines)] // Bevy app composition is clearest in one ordered registration site.
 pub fn run_core_identity(config: CoreIdentityConfig) -> Result<()> {
     if config.test_token.trim().is_empty() {
         bail!("--identity must contain a nonempty wipeable test token");
@@ -279,7 +293,7 @@ pub fn run_core_identity(config: CoreIdentityConfig) -> Result<()> {
         .context("unpromoted Core identity content failed validation")?;
     let identity_copy = load_core_development_identity_copy(&config.content_root)
         .context("Core identity UI copy failed validation")?;
-    let (progression_content_revision, oath_copy) =
+    let (progression_content_revision, oath_copy, bargain_copy) =
         load_core_supporting_content(&config.content_root)?;
     let (_, source_report) = load_and_validate(&config.content_root)
         .context("Core identity source package failed validation")?;
@@ -324,6 +338,8 @@ pub fn run_core_identity(config: CoreIdentityConfig) -> Result<()> {
         .insert_resource(ProgressionHudModel::default())
         .insert_resource(CoreOathUiCopy(oath_copy))
         .insert_resource(CoreOathUiState::default())
+        .insert_resource(CoreBargainUiCopy(bargain_copy))
+        .insert_resource(CoreBargainUiState::default())
         .insert_resource(CoreProgressionQueryState {
             content_revision: progression_content_revision,
             requested_character_id: None,
@@ -349,10 +365,13 @@ pub fn run_core_identity(config: CoreIdentityConfig) -> Result<()> {
                 poll_core_transport,
                 request_selected_progression,
                 request_selected_oath,
+                request_selected_bargain,
                 handle_core_keyboard,
                 handle_oath_keyboard,
+                handle_bargain_keyboard,
                 handle_core_buttons,
                 handle_oath_buttons,
+                handle_bargain_buttons,
                 automate_core_evidence,
                 update_core_identity_ui,
             )
@@ -372,7 +391,7 @@ pub fn run_core_identity(config: CoreIdentityConfig) -> Result<()> {
 
 fn load_core_supporting_content(
     content_root: &std::path::Path,
-) -> Result<(ManifestHash, OathUiCopy)> {
+) -> Result<(ManifestHash, OathUiCopy, BargainUiCopy)> {
     let progression = load_core_development_progression(content_root)
         .context("Core progression content failed validation")?;
     let progression_revision = ManifestHash::new(progression.hashes().records_blake3.clone())?;
@@ -380,7 +399,9 @@ fn load_core_supporting_content(
         .context("Core Oath content failed validation")?;
     let oath_copy =
         OathUiCopy::from_catalog(&oaths).context("Core Oath UI copy failed validation")?;
-    Ok((progression_revision, oath_copy))
+    let bargain_copy =
+        BargainUiCopy::from_catalog(&oaths).context("Core Bargain UI copy failed validation")?;
+    Ok((progression_revision, oath_copy, bargain_copy))
 }
 
 fn core_window_configuration() -> Result<(Option<PathBuf>, u32, u32)> {
@@ -398,6 +419,7 @@ fn poll_core_transport(
     mut model: ResMut<CoreIdentityModel>,
     mut progression: ResMut<ProgressionHudModel>,
     mut oath: ResMut<CoreOathUiState>,
+    mut bargain: ResMut<CoreBargainUiState>,
 ) {
     for event in bridge.0.drain_events() {
         match event {
@@ -409,6 +431,8 @@ fn poll_core_transport(
                 ReliableEvent::ProgressionResult(result) => progression.apply(result),
                 ReliableEvent::OathViewResult(result) => oath.0.apply_view(result),
                 ReliableEvent::InitialOathSelectionResult(result) => oath.0.apply_selection(result),
+                ReliableEvent::BargainViewResult(result) => bargain.0.apply_view(result),
+                ReliableEvent::BargainDecisionResult(result) => bargain.0.apply_decision(result),
                 _ => model.transport_failed(),
             },
             TransportEvent::LinkLost
@@ -416,6 +440,32 @@ fn poll_core_transport(
             | TransportEvent::TransportClosed => model.disconnected(),
             TransportEvent::Fatal(_) => model.transport_failed(),
         }
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)] // Bevy system parameters are wrapper values.
+fn request_selected_bargain(
+    bridge: Res<CoreNetworkBridge>,
+    model: Res<CoreIdentityModel>,
+    copy: Res<CoreBargainUiCopy>,
+    mut bargain: ResMut<CoreBargainUiState>,
+) {
+    let selected = model
+        .snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.selected_character_id);
+    let Some(frame) = bargain
+        .0
+        .request_for_selected(selected, copy.0.revision.clone())
+    else {
+        return;
+    };
+    if bridge
+        .0
+        .queue_reliable(WireMessage::BargainViewFrame(frame))
+        .is_err()
+    {
+        bargain.0.request_failed();
     }
 }
 
@@ -492,9 +542,11 @@ fn handle_core_keyboard(
     mut model: ResMut<CoreIdentityModel>,
     mut sequencer: ResMut<CoreMutationSequencer>,
     oath: Res<CoreOathUiState>,
+    bargain: Res<CoreBargainUiState>,
 ) {
     let action = if keyboard.just_pressed(KeyCode::Enter)
         && !oath.0.action_available(OathUiAction::Confirm)
+        && !bargain.0.action_available(BargainUiAction::Confirm)
     {
         Some(CoreAction::Create)
     } else if keyboard.just_pressed(KeyCode::Escape)
@@ -504,9 +556,9 @@ fn handle_core_keyboard(
             model.set_snapshot(snapshot);
         }
         None
-    } else if keyboard.just_pressed(KeyCode::Digit1) {
+    } else if keyboard.just_pressed(KeyCode::Digit1) && !bargain.0.captures_input() {
         Some(CoreAction::Slot(1))
-    } else if keyboard.just_pressed(KeyCode::Digit2) {
+    } else if keyboard.just_pressed(KeyCode::Digit2) && !bargain.0.captures_input() {
         Some(CoreAction::Slot(2))
     } else if keyboard.just_pressed(KeyCode::KeyR) {
         Some(CoreAction::Retry)
@@ -524,21 +576,54 @@ fn handle_oath_keyboard(
     bridge: Res<CoreNetworkBridge>,
     copy: Res<CoreOathUiCopy>,
     mut oath: ResMut<CoreOathUiState>,
+    bargain: Res<CoreBargainUiState>,
     mut sequencer: ResMut<CoreMutationSequencer>,
 ) {
     let action = if keyboard.just_pressed(KeyCode::KeyL) {
         Some(OathUiAction::LongVigil)
     } else if keyboard.just_pressed(KeyCode::KeyN) {
         Some(OathUiAction::Nailkeeper)
-    } else if keyboard.just_pressed(KeyCode::Enter) {
+    } else if keyboard.just_pressed(KeyCode::Enter) && !bargain.0.captures_input() {
         Some(OathUiAction::Confirm)
-    } else if keyboard.just_pressed(KeyCode::Escape) {
+    } else if keyboard.just_pressed(KeyCode::Escape) && !bargain.0.captures_input() {
         Some(OathUiAction::Cancel)
     } else {
         None
     };
     if let Some(action) = action {
         submit_oath_action(action, &bridge, &copy, &mut oath, &mut sequencer);
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)] // Bevy system parameters are wrapper values.
+fn handle_bargain_keyboard(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    gamepads: Query<&Gamepad>,
+    bridge: Res<CoreNetworkBridge>,
+    copy: Res<CoreBargainUiCopy>,
+    mut bargain: ResMut<CoreBargainUiState>,
+    mut sequencer: ResMut<CoreMutationSequencer>,
+) {
+    let gamepad_pressed = |button| gamepads.iter().any(|gamepad| gamepad.just_pressed(button));
+    let action = if keyboard.just_pressed(KeyCode::Digit1)
+        || gamepad_pressed(GamepadButton::DPadLeft)
+    {
+        Some(BargainUiAction::Cell(0))
+    } else if keyboard.just_pressed(KeyCode::Digit2) || gamepad_pressed(GamepadButton::DPadUp) {
+        Some(BargainUiAction::Cell(1))
+    } else if keyboard.just_pressed(KeyCode::Digit3) || gamepad_pressed(GamepadButton::DPadRight) {
+        Some(BargainUiAction::Cell(2))
+    } else if keyboard.just_pressed(KeyCode::KeyF) || gamepad_pressed(GamepadButton::West) {
+        Some(BargainUiAction::Refuse)
+    } else if keyboard.just_pressed(KeyCode::Enter) || gamepad_pressed(GamepadButton::South) {
+        Some(BargainUiAction::Confirm)
+    } else if keyboard.just_pressed(KeyCode::Escape) || gamepad_pressed(GamepadButton::East) {
+        Some(BargainUiAction::Cancel)
+    } else {
+        None
+    };
+    if let Some(action) = action {
+        submit_bargain_action(action, &bridge, &copy, &mut bargain, &mut sequencer);
     }
 }
 
@@ -567,6 +652,61 @@ fn handle_oath_buttons(
     for (interaction, action) in &interactions {
         if *interaction == Interaction::Pressed {
             submit_oath_action(action.0, &bridge, &copy, &mut oath, &mut sequencer);
+        }
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)] // Bevy system parameters are wrapper values.
+fn handle_bargain_buttons(
+    interactions: Query<(&Interaction, &CoreBargainActionLabel), Changed<Interaction>>,
+    bridge: Res<CoreNetworkBridge>,
+    copy: Res<CoreBargainUiCopy>,
+    mut bargain: ResMut<CoreBargainUiState>,
+    mut sequencer: ResMut<CoreMutationSequencer>,
+) {
+    for (interaction, action) in &interactions {
+        if *interaction == Interaction::Pressed {
+            submit_bargain_action(action.0, &bridge, &copy, &mut bargain, &mut sequencer);
+        }
+    }
+}
+
+fn submit_bargain_action(
+    action: BargainUiAction,
+    bridge: &CoreNetworkBridge,
+    copy: &CoreBargainUiCopy,
+    bargain: &mut CoreBargainUiState,
+    sequencer: &mut CoreMutationSequencer,
+) {
+    match action {
+        BargainUiAction::Cell(_) | BargainUiAction::Refuse => bargain.0.choose(action),
+        BargainUiAction::Cancel => bargain.0.cancel(),
+        BargainUiAction::Confirm => {
+            let Some(mutation_id) = sequencer.next_id() else {
+                bargain.0.mutation_failed();
+                return;
+            };
+            let issued_at = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .ok()
+                .and_then(|duration| u64::try_from(duration.as_millis()).ok());
+            let Some(issued_at) = issued_at else {
+                bargain.0.mutation_failed();
+                return;
+            };
+            let Some(frame) = bargain
+                .0
+                .confirm(mutation_id, issued_at, copy.0.revision.clone())
+            else {
+                return;
+            };
+            if bridge
+                .0
+                .queue_reliable(WireMessage::BargainDecisionFrame(frame))
+                .is_err()
+            {
+                bargain.0.mutation_failed();
+            }
         }
     }
 }
@@ -787,6 +927,7 @@ fn spawn_core_identity_ui(mut commands: Commands, copy: Res<CoreUiCopy>) {
             ));
             spawn_progression_hud(root);
             spawn_oath_panel(root);
+            spawn_bargain_panel(root);
             root.spawn((
                 Text::new(&authored.loading_roster),
                 TextFont::from_font_size(18.0),
@@ -911,6 +1052,81 @@ fn spawn_oath_button(parent: &mut ChildSpawnerCommands, action: OathUiAction, la
         ));
 }
 
+fn spawn_bargain_panel(parent: &mut ChildSpawnerCommands) {
+    parent
+        .spawn((
+            Node {
+                width: percent(100),
+                min_height: px(230),
+                padding: UiRect::all(px(14)),
+                border: UiRect::all(px(2)),
+                flex_direction: FlexDirection::Column,
+                row_gap: px(10),
+                ..default()
+            },
+            BackgroundColor(Color::srgba_u8(16, 14, 24, 247)),
+            BorderColor::all(Color::srgb_u8(130, 102, 168)),
+        ))
+        .with_children(|panel| {
+            panel.spawn((
+                Text::new("VEIL BARGAIN\nSelect a living character to inspect Bargains."),
+                TextFont::from_font_size(14.0),
+                TextColor(Color::srgb_u8(229, 216, 244)),
+                CoreBargainText,
+            ));
+            panel
+                .spawn((Node {
+                    flex_direction: FlexDirection::Row,
+                    flex_wrap: FlexWrap::Wrap,
+                    column_gap: px(10),
+                    row_gap: px(8),
+                    ..default()
+                },))
+                .with_children(|actions| {
+                    spawn_bargain_button(
+                        actions,
+                        BargainUiAction::Cell(0),
+                        "CHOICE 1 [1 / DPAD LEFT]",
+                    );
+                    spawn_bargain_button(
+                        actions,
+                        BargainUiAction::Cell(1),
+                        "CHOICE 2 [2 / DPAD UP]",
+                    );
+                    spawn_bargain_button(
+                        actions,
+                        BargainUiAction::Cell(2),
+                        "CHOICE 3 [3 / DPAD RIGHT]",
+                    );
+                    spawn_bargain_button(actions, BargainUiAction::Refuse, "REFUSE ALL [F / X]");
+                    spawn_bargain_button(actions, BargainUiAction::Confirm, "CONFIRM [ENTER / A]");
+                    spawn_bargain_button(actions, BargainUiAction::Cancel, "CANCEL [ESC / B]");
+                });
+        });
+}
+
+fn spawn_bargain_button(parent: &mut ChildSpawnerCommands, action: BargainUiAction, label: &str) {
+    parent
+        .spawn((
+            Button,
+            Node {
+                min_width: px(144),
+                min_height: px(44),
+                padding: UiRect::axes(px(12), px(8)),
+                border: UiRect::all(px(2)),
+                ..default()
+            },
+            BackgroundColor(Color::srgb_u8(28, 24, 38)),
+            BorderColor::all(Color::srgb_u8(73, 61, 91)),
+            CoreBargainActionLabel(action),
+        ))
+        .with_child((
+            Text::new(label),
+            TextFont::from_font_size(13.0),
+            TextColor(Color::srgb_u8(229, 216, 244)),
+        ));
+}
+
 fn spawn_progression_hud(parent: &mut ChildSpawnerCommands) {
     parent.spawn((
         Text::new("VITALS\nSelect a living character to load progression."),
@@ -1027,6 +1243,8 @@ fn update_core_identity_ui(
     progression: Res<ProgressionHudModel>,
     oath: Res<CoreOathUiState>,
     oath_copy: Res<CoreOathUiCopy>,
+    bargain: Res<CoreBargainUiState>,
+    bargain_copy: Res<CoreBargainUiCopy>,
     mut status: Single<&mut Text, With<CoreStatusText>>,
     mut roster: Single<&mut Text, (With<CoreRosterText>, Without<CoreStatusText>)>,
     mut details: Single<
@@ -1045,6 +1263,7 @@ fn update_core_identity_ui(
             Without<CoreRosterText>,
             Without<CoreDetailText>,
             Without<CoreOathText>,
+            Without<CoreBargainText>,
         ),
     >,
     mut oath_text: Single<
@@ -1057,13 +1276,35 @@ fn update_core_identity_ui(
             Without<CoreProgressionHudText>,
         ),
     >,
+    mut bargain_text: Single<
+        &mut Text,
+        (
+            With<CoreBargainText>,
+            Without<CoreStatusText>,
+            Without<CoreRosterText>,
+            Without<CoreDetailText>,
+            Without<CoreProgressionHudText>,
+            Without<CoreOathText>,
+        ),
+    >,
     mut actions: Query<
         (&CoreActionLabel, &mut BackgroundColor, &mut BorderColor),
-        Without<CoreOathActionLabel>,
+        (
+            Without<CoreOathActionLabel>,
+            Without<CoreBargainActionLabel>,
+        ),
     >,
     mut oath_actions: Query<
         (&CoreOathActionLabel, &mut BackgroundColor, &mut BorderColor),
-        Without<CoreActionLabel>,
+        (Without<CoreActionLabel>, Without<CoreBargainActionLabel>),
+    >,
+    mut bargain_actions: Query<
+        (
+            &CoreBargainActionLabel,
+            &mut BackgroundColor,
+            &mut BorderColor,
+        ),
+        (Without<CoreActionLabel>, Without<CoreOathActionLabel>),
     >,
 ) {
     let authored = copy.0.copy();
@@ -1089,6 +1330,7 @@ fn update_core_identity_ui(
     ));
     **progression_text = Text::new(progression.render());
     **oath_text = Text::new(oath.0.render(&oath_copy.0));
+    **bargain_text = Text::new(bargain.0.render(&bargain_copy.0));
 
     let mut rows = Vec::with_capacity(2);
     for ordinal in 1..=2 {
@@ -1144,6 +1386,15 @@ fn update_core_identity_ui(
         } else {
             *background = BackgroundColor(Color::srgb_u8(31, 27, 25));
             *border = BorderColor::all(Color::srgb_u8(88, 75, 58));
+        }
+    }
+    for (action, mut background, mut border) in &mut bargain_actions {
+        if bargain.0.action_available(action.0) {
+            *background = BackgroundColor(Color::srgb_u8(52, 38, 69));
+            *border = BorderColor::all(Color::srgb_u8(172, 132, 219));
+        } else {
+            *background = BackgroundColor(Color::srgb_u8(28, 24, 38));
+            *border = BorderColor::all(Color::srgb_u8(73, 61, 91));
         }
     }
 }

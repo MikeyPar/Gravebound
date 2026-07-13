@@ -2,6 +2,7 @@
 
 mod accessibility;
 mod arena_view;
+mod bargain_ui;
 mod combat;
 mod consumable;
 mod core_identity;
