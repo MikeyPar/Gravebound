@@ -6,6 +6,7 @@
 mod ability;
 mod arena;
 mod authority;
+mod bargain;
 mod bargain_offer;
 mod boss;
 mod boss_encounter;
@@ -51,6 +52,13 @@ pub use authority::{
     AuthorityError, AuthorityInput, AuthorityPhase, AuthorityRecallCommit, AuthorityStep,
     EMERGENCY_RECALL_CHANNEL_TICKS, EMERGENCY_RECALL_MOVEMENT_BASIS_POINTS, EmergencyRecallState,
     PickupEligibility,
+};
+pub use bargain::{
+    BASIS_POINTS_PER_ONE as BARGAIN_BASIS_POINTS_PER_ONE, BellDebtDefinition,
+    CinderHungerDefinition, CoreBargainDefinition, CoreBargainError, CoreBargainKind,
+    CoreBargainLoadout, LanternAshDefinition, MAXIMUM_OUTGOING_DAMAGE_BASIS_POINTS,
+    MINIMUM_MAXIMUM_HEALTH_BASIS_POINTS, ResolvedCoreBargainModifiers,
+    compose_maximum_health_multiplier, resolve_core_bargain_modifiers,
 };
 pub use bargain_offer::{
     BARGAIN_CONTENT_ID_MAX_BYTES, BargainOfferError, MAX_ACTIVE_BARGAINS,
@@ -169,17 +177,15 @@ pub use normal_wave::{
     normal_wave_projectile_allocator,
 };
 pub use oath::{
-    CoreBargainModifier, CoreChoiceModifiers, GraveArbalistOath,
-    LONG_VIGIL_FOCUSED_ACTIVATION_TICKS, LONG_VIGIL_GRAVE_MARK_RANGE_BONUS_MILLI_TILES,
-    LONG_VIGIL_ID, LONG_VIGIL_MARKED_PRIMARY_BONUS_BASIS_POINTS,
-    LONG_VIGIL_MAX_HEALTH_MULTIPLIER_BASIS_POINTS, NAILKEEPER_ARM_TICKS,
-    NAILKEEPER_DAMAGE_BASIS_POINTS, NAILKEEPER_FROSTBIND_TICKS, NAILKEEPER_ID,
-    NAILKEEPER_LIFETIME_TICKS, NAILKEEPER_MAXIMUM_ACTIVE_TRAPS,
+    GraveArbalistOath, LONG_VIGIL_FOCUSED_ACTIVATION_TICKS,
+    LONG_VIGIL_GRAVE_MARK_RANGE_BONUS_MILLI_TILES, LONG_VIGIL_ID,
+    LONG_VIGIL_MARKED_PRIMARY_BONUS_BASIS_POINTS, LONG_VIGIL_MAX_HEALTH_MULTIPLIER_BASIS_POINTS,
+    NAILKEEPER_ARM_TICKS, NAILKEEPER_DAMAGE_BASIS_POINTS, NAILKEEPER_FROSTBIND_TICKS,
+    NAILKEEPER_ID, NAILKEEPER_LIFETIME_TICKS, NAILKEEPER_MAXIMUM_ACTIVE_TRAPS,
     NAILKEEPER_PRIMARY_INTERVAL_MULTIPLIER_BASIS_POINTS, NAILKEEPER_TRAP_RADIUS_MILLI_TILES,
     NAILKEEPER_TRAP_RADIUS_TILES, NailTrap, NailTrapEnemy, NailTrapField, NailTrapRemoval,
     NailTrapRemovalReason, NailTrapStep, NailTrapTrigger, OathMechanicError,
-    ResolvedArbalistOathStats, resolve_arbalist_oath_stats, resolve_core_choice_modifiers,
-    resolve_oath_maximum_health,
+    ResolvedArbalistOathStats, resolve_arbalist_oath_stats, resolve_oath_maximum_health,
 };
 pub use pattern::{
     CombatColorFamily, FirstPlayableMinSpeedPaths, FixedTimelineEvent, MinimumSpeedRouteEvidence,

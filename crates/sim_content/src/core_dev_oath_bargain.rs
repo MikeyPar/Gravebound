@@ -10,9 +10,10 @@ use content_schema::{
 };
 use serde::{Deserialize, Serialize};
 use sim_core::{
-    EquipmentRarity, GraveArbalistOath, GraveMarkDefinition, ResolvedArbalistOathStats,
-    SlipstepDefinition, StillnessDefinition, WeaponDefinition, duration_ms_to_ticks_nearest,
-    resolve_arbalist_oath_stats,
+    BellDebtDefinition, CinderHungerDefinition, CoreBargainDefinition, CoreBargainLoadout,
+    EquipmentRarity, GraveArbalistOath, GraveMarkDefinition, LanternAshDefinition,
+    ResolvedArbalistOathStats, SlipstepDefinition, StillnessDefinition, WeaponDefinition,
+    duration_ms_to_ticks_nearest, resolve_arbalist_oath_stats,
 };
 
 use crate::{
@@ -100,6 +101,92 @@ impl CompiledOathBargainCatalog {
     pub fn localized(&self, key: &str) -> Option<&str> {
         self.localization.get(key).map(String::as_str)
     }
+}
+
+/// Compiles active Bargains in durable acquisition order from the immutable Core catalog.
+pub fn compile_core_bargain_loadout(
+    catalog: &CompiledOathBargainCatalog,
+    bargain_ids: &[&str],
+) -> Result<CoreBargainLoadout> {
+    let definitions = bargain_ids
+        .iter()
+        .map(|bargain_id| {
+            let record = catalog
+                .bargains
+                .get(*bargain_id)
+                .with_context(|| format!("Core Bargain `{bargain_id}` is unavailable"))?;
+            if !record.header.enabled {
+                bail!("Core Bargain `{bargain_id}` is disabled");
+            }
+            Ok(match &record.behavior {
+                BargainBehavior::CinderHunger {
+                    outgoing_direct_damage_multiplier_basis_points,
+                    maximum_health_multiplier_basis_points,
+                } => CoreBargainDefinition::CinderHunger(CinderHungerDefinition {
+                    outgoing_direct_damage_multiplier_basis_points: u32::from(
+                        *outgoing_direct_damage_multiplier_basis_points,
+                    ),
+                    maximum_health_multiplier_basis_points: u32::from(
+                        *maximum_health_multiplier_basis_points,
+                    ),
+                }),
+                BargainBehavior::BellDebt {
+                    accepted_primary_emissions_per_repeat,
+                    repeat_delay_millis,
+                    repeat_damage_multiplier_basis_points,
+                    primary_attack_rate_multiplier_basis_points,
+                    counts_legal_misses,
+                    generated_repeats_advance_counter,
+                    snapshots_aim_and_resolved_behavior,
+                    uses_live_origin_at_repeat,
+                    repeat_is_recursive,
+                    repeat_spends_cooldown_or_resource,
+                    counter_persists_reconnect_and_room_change,
+                    counter_resets_on_acquisition_purge_death_retirement_or_safe_transfer,
+                    cancel_pending_repeat_when_dead_transferred_or_primary_illegal,
+                } => CoreBargainDefinition::BellDebt(BellDebtDefinition {
+                    accepted_primary_emissions_per_repeat: *accepted_primary_emissions_per_repeat,
+                    repeat_delay_ticks: u32::try_from(duration_ms_to_ticks_nearest(u64::from(
+                        *repeat_delay_millis,
+                    )))
+                    .context("Bell Debt repeat delay exceeds u32 ticks")?,
+                    repeat_damage_multiplier_basis_points: u32::from(
+                        *repeat_damage_multiplier_basis_points,
+                    ),
+                    primary_attack_rate_multiplier_basis_points: u32::from(
+                        *primary_attack_rate_multiplier_basis_points,
+                    ),
+                    counts_legal_misses: *counts_legal_misses,
+                    generated_repeats_advance_counter: *generated_repeats_advance_counter,
+                    snapshots_aim_and_resolved_behavior: *snapshots_aim_and_resolved_behavior,
+                    uses_live_origin_at_repeat: *uses_live_origin_at_repeat,
+                    repeat_is_recursive: *repeat_is_recursive,
+                    repeat_spends_cooldown_or_resource: *repeat_spends_cooldown_or_resource,
+                    counter_persists_reconnect_and_room_change:
+                        *counter_persists_reconnect_and_room_change,
+                    counter_resets_on_acquisition_purge_death_retirement_or_safe_transfer:
+                        *counter_resets_on_acquisition_purge_death_retirement_or_safe_transfer,
+                    cancel_pending_repeat_when_dead_transferred_or_primary_illegal:
+                        *cancel_pending_repeat_when_dead_transferred_or_primary_illegal,
+                }),
+                BargainBehavior::LanternAsh {
+                    potion_healing_multiplier_basis_points,
+                    active_belt_slot_count,
+                    active_belt_index,
+                    inactive_slot_remains_stored_visible_locked,
+                } => CoreBargainDefinition::LanternAsh(LanternAshDefinition {
+                    potion_healing_multiplier_basis_points: u32::from(
+                        *potion_healing_multiplier_basis_points,
+                    ),
+                    active_belt_slot_count: *active_belt_slot_count,
+                    active_belt_index: *active_belt_index,
+                    inactive_slot_remains_stored_visible_locked:
+                        *inactive_slot_remains_stored_visible_locked,
+                }),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    CoreBargainLoadout::new(definitions).map_err(Into::into)
 }
 
 /// Resolves one compiled Core Oath against authored base class/item values.
@@ -838,6 +925,50 @@ mod tests {
     }
 
     #[test]
+    fn typed_bargain_loadout_preserves_authored_values_and_acquisition_order() {
+        let choices = load_core_development_oaths_bargains(&content_root()).unwrap();
+        let loadout = compile_core_bargain_loadout(
+            &choices,
+            &[
+                "bargain.lantern_ash",
+                "bargain.cinder_hunger",
+                "bargain.bell_debt",
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            loadout
+                .definitions()
+                .iter()
+                .map(|definition| definition.kind())
+                .collect::<Vec<_>>(),
+            vec![
+                sim_core::CoreBargainKind::LanternAsh,
+                sim_core::CoreBargainKind::CinderHunger,
+                sim_core::CoreBargainKind::BellDebt,
+            ]
+        );
+        let resolved = sim_core::resolve_core_bargain_modifiers(&loadout);
+        assert_eq!(resolved.ordinary_attack_rate_basis_points, 8_500);
+        assert_eq!(resolved.outgoing_direct_damage_basis_points, 11_800);
+        assert_eq!(resolved.maximum_health_multiplier_basis_points, 8_800);
+        assert_eq!(resolved.potion_healing_multiplier_basis_points, 14_000);
+        assert_eq!(resolved.active_belt_slots, 1);
+        let bell = loadout.bell_debt().unwrap();
+        assert_eq!(bell.accepted_primary_emissions_per_repeat, 5);
+        assert_eq!(bell.repeat_delay_ticks, 9);
+        assert_eq!(bell.repeat_damage_multiplier_basis_points, 5_000);
+        assert!(
+            compile_core_bargain_loadout(
+                &choices,
+                &["bargain.cinder_hunger", "bargain.cinder_hunger"],
+            )
+            .is_err()
+        );
+        assert!(compile_core_bargain_loadout(&choices, &["bargain.unknown"]).is_err());
+    }
+
+    #[test]
     fn every_core_oath_bargain_crossbow_combination_respects_caps_and_cadence() {
         let (class_package, _) = crate::load_and_validate(&content_root()).unwrap();
         let items = crate::load_core_development_items(&content_root()).unwrap();
@@ -849,19 +980,14 @@ mod tests {
             ("item.weapon.crossbow.pine_crossbow", 1),
         ];
         let bargains = [
-            sim_core::CoreBargainModifier::CinderHunger,
-            sim_core::CoreBargainModifier::BellDebt,
-            sim_core::CoreBargainModifier::LanternAsh,
+            "bargain.cinder_hunger",
+            "bargain.bell_debt",
+            "bargain.lantern_ash",
         ];
-        for (oath_id, oath) in [
-            (
-                "oath.arbalist.long_vigil",
-                sim_core::GraveArbalistOath::LongVigil,
-            ),
-            (
-                "oath.arbalist.nailkeeper",
-                sim_core::GraveArbalistOath::Nailkeeper,
-            ),
+        for oath_id in [
+            None,
+            Some("oath.arbalist.long_vigil"),
+            Some("oath.arbalist.nailkeeper"),
         ] {
             for mask in 0_u8..8 {
                 let active = bargains
@@ -869,28 +995,37 @@ mod tests {
                     .enumerate()
                     .filter_map(|(index, bargain)| (mask & (1 << index) != 0).then_some(*bargain))
                     .collect::<Vec<_>>();
-                let modifiers = sim_core::resolve_core_choice_modifiers(oath, &active).unwrap();
-                assert!(modifiers.maximum_health_multiplier_basis_points >= 7_000);
+                let loadout = compile_core_bargain_loadout(&choices, &active).unwrap();
+                let modifiers = sim_core::resolve_core_bargain_modifiers(&loadout);
+                let oath_health = if oath_id == Some("oath.arbalist.long_vigil") {
+                    9_000
+                } else {
+                    10_000
+                };
+                let maximum_health_multiplier = sim_core::compose_maximum_health_multiplier(
+                    oath_health,
+                    modifiers.maximum_health_multiplier_basis_points,
+                )
+                .unwrap();
+                assert!(maximum_health_multiplier >= 7_000);
                 assert!(
-                    sim_core::resolve_oath_maximum_health(
-                        120,
-                        modifiers.maximum_health_multiplier_basis_points,
-                    )
-                    .unwrap()
+                    sim_core::resolve_oath_maximum_health(120, maximum_health_multiplier,).unwrap()
                         >= 84
                 );
-                for (weapon_id, minimum_level) in weapons {
-                    let definitions = compile_core_oathed_combat_definitions(
-                        &class_package,
-                        &items,
-                        &choices,
-                        oath_id,
-                        weapon_id,
-                        minimum_level,
-                        modifiers.ordinary_attack_rate_basis_points,
-                    )
-                    .unwrap();
-                    assert!(definitions.weapon.attack_interval_ticks() > 0);
+                if let Some(oath_id) = oath_id {
+                    for (weapon_id, minimum_level) in weapons {
+                        let definitions = compile_core_oathed_combat_definitions(
+                            &class_package,
+                            &items,
+                            &choices,
+                            oath_id,
+                            weapon_id,
+                            minimum_level,
+                            modifiers.ordinary_attack_rate_basis_points,
+                        )
+                        .unwrap();
+                        assert!(definitions.weapon.attack_interval_ticks() > 0);
+                    }
                 }
             }
         }

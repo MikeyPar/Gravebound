@@ -27,65 +27,6 @@ pub enum GraveArbalistOath {
     Nailkeeper,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CoreBargainModifier {
-    CinderHunger,
-    BellDebt,
-    LanternAsh,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CoreChoiceModifiers {
-    pub ordinary_attack_rate_basis_points: u32,
-    pub outgoing_direct_damage_basis_points: u32,
-    pub maximum_health_multiplier_basis_points: u32,
-    pub potion_healing_multiplier_basis_points: u32,
-    pub active_belt_slots: u8,
-}
-
-pub fn resolve_core_choice_modifiers(
-    oath: GraveArbalistOath,
-    bargains: &[CoreBargainModifier],
-) -> Result<CoreChoiceModifiers, OathMechanicError> {
-    let mut seen = BTreeSet::new();
-    if bargains.iter().any(|bargain| !seen.insert(*bargain as u8)) {
-        return Err(OathMechanicError::DuplicateBargain);
-    }
-    let mut result = CoreChoiceModifiers {
-        ordinary_attack_rate_basis_points: 10_000,
-        outgoing_direct_damage_basis_points: 10_000,
-        maximum_health_multiplier_basis_points: match oath {
-            GraveArbalistOath::LongVigil => LONG_VIGIL_MAX_HEALTH_MULTIPLIER_BASIS_POINTS,
-            GraveArbalistOath::Nailkeeper => 10_000,
-        },
-        potion_healing_multiplier_basis_points: 10_000,
-        active_belt_slots: 2,
-    };
-    for bargain in bargains {
-        match bargain {
-            CoreBargainModifier::CinderHunger => {
-                result.outgoing_direct_damage_basis_points = 11_800;
-                result.maximum_health_multiplier_basis_points = u32::try_from(round_half_up_ratio(
-                    u64::from(result.maximum_health_multiplier_basis_points) * 8_800,
-                    10_000,
-                )?)
-                .map_err(|_| OathMechanicError::ArithmeticOverflow)?;
-            }
-            CoreBargainModifier::BellDebt => {
-                result.ordinary_attack_rate_basis_points = 8_500;
-            }
-            CoreBargainModifier::LanternAsh => {
-                result.potion_healing_multiplier_basis_points = 14_000;
-                result.active_belt_slots = 1;
-            }
-        }
-    }
-    if result.maximum_health_multiplier_basis_points < 7_000 {
-        return Err(OathMechanicError::MaximumHealthFloorViolation);
-    }
-    Ok(result)
-}
-
 impl GraveArbalistOath {
     pub fn from_content_id(value: &str) -> Result<Self, OathMechanicError> {
         match value {
@@ -432,10 +373,6 @@ pub enum OathMechanicError {
     InvalidEnemyPosition,
     #[error("nail trap enemy IDs must be unique")]
     DuplicateEnemyId,
-    #[error("Core Bargain appears more than once")]
-    DuplicateBargain,
-    #[error("resolved maximum health violates the global 0.70 floor")]
-    MaximumHealthFloorViolation,
 }
 
 #[cfg(test)]
@@ -482,21 +419,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(nailkeeper.primary_interval_micros, 577_540);
-
-        let all = resolve_core_choice_modifiers(
-            GraveArbalistOath::LongVigil,
-            &[
-                CoreBargainModifier::CinderHunger,
-                CoreBargainModifier::BellDebt,
-                CoreBargainModifier::LanternAsh,
-            ],
-        )
-        .unwrap();
-        assert_eq!(all.ordinary_attack_rate_basis_points, 8_500);
-        assert_eq!(all.outgoing_direct_damage_basis_points, 11_800);
-        assert_eq!(all.maximum_health_multiplier_basis_points, 7_920);
-        assert_eq!(all.potion_healing_multiplier_basis_points, 14_000);
-        assert_eq!(all.active_belt_slots, 1);
     }
 
     #[test]
