@@ -472,6 +472,7 @@ fn validate_boss_intents(
         }
         let source = match intent.source {
             RawDamageIntentSource::Primary => FriendlyProjectileSource::Primary,
+            RawDamageIntentSource::BellDebtRepeat => FriendlyProjectileSource::BellDebtRepeat,
             RawDamageIntentSource::GraveMark => FriendlyProjectileSource::GraveMark,
             RawDamageIntentSource::NailTrap => unreachable!("handled above"),
         };

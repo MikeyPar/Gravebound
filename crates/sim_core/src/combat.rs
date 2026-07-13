@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use thiserror::Error;
 
+use crate::BellDebtDefinition;
 use crate::{
     ArenaGeometry, BASIS_POINTS_PER_ONE, CollisionError, CollisionTarget, EntityId,
     EntityIdAllocator, GraveArbalistOath, GraveMarkDefinition, IntentMathError, MovementAction,
@@ -71,6 +72,7 @@ pub struct CombatAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum FriendlyProjectileSource {
     Primary,
+    BellDebtRepeat,
     GraveMark,
 }
 
@@ -94,6 +96,7 @@ pub struct FriendlyProjectile {
     focused_by_stillness: bool,
     release_tick: Tick,
     max_projectiles_per_target: u32,
+    damage_multiplier_basis_points: u32,
 }
 
 impl FriendlyProjectile {
@@ -166,6 +169,11 @@ impl FriendlyProjectile {
     pub const fn focused_by_stillness(&self) -> bool {
         self.focused_by_stillness
     }
+
+    #[must_use]
+    pub const fn damage_multiplier_basis_points(&self) -> u32 {
+        self.damage_multiplier_basis_points
+    }
 }
 
 /// Shot event used for prediction/presentation without inspecting Bevy entities.
@@ -204,6 +212,7 @@ pub struct ProjectileCollision {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RawDamageIntentSource {
     Primary,
+    BellDebtRepeat,
     GraveMark,
     NailTrap,
 }
@@ -387,6 +396,47 @@ struct ActiveSlipstep {
     target_position: SimulationVector,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct PendingBellRepeat {
+    due_tick: Tick,
+    press_sequence: u32,
+    projectiles: Vec<FriendlyProjectile>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BellDebtCheckpoint {
+    primary_release_count: u8,
+    pending_repeat: Option<BellDebtPendingRepeatCheckpoint>,
+}
+
+impl BellDebtCheckpoint {
+    #[must_use]
+    pub const fn primary_release_count(&self) -> u8 {
+        self.primary_release_count
+    }
+
+    #[must_use]
+    pub const fn has_pending_repeat(&self) -> bool {
+        self.pending_repeat.is_some()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct BellDebtPendingRepeatCheckpoint {
+    ticks_remaining: u32,
+    press_sequence: u32,
+    projectiles: Vec<FriendlyProjectile>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BellDebtResetReason {
+    Acquisition,
+    Purge,
+    Death,
+    Retirement,
+    SafeTransfer,
+}
+
 /// Simulation-owned primary weapon timer and projectile collection.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlayerCombatState {
@@ -414,6 +464,9 @@ pub struct PlayerCombatState {
     projectile_ids: EntityIdAllocator,
     projectiles: Vec<FriendlyProjectile>,
     outgoing_direct_damage_basis_points: u32,
+    bell_debt: Option<BellDebtDefinition>,
+    bell_primary_release_count: u8,
+    pending_bell_repeat: Option<PendingBellRepeat>,
     oath: Option<GraveArbalistOath>,
     nail_traps: NailTrapField,
 }
@@ -466,6 +519,9 @@ impl PlayerCombatState {
             projectile_ids,
             projectiles: Vec::new(),
             outgoing_direct_damage_basis_points: BASIS_POINTS_PER_ONE,
+            bell_debt: None,
+            bell_primary_release_count: 0,
+            pending_bell_repeat: None,
             oath: None,
             nail_traps: NailTrapField::default(),
         })
@@ -490,6 +546,7 @@ impl PlayerCombatState {
         stillness: StillnessDefinition,
         oath: Option<GraveArbalistOath>,
         outgoing_direct_damage_basis_points: u32,
+        bell_debt: Option<BellDebtDefinition>,
     ) -> Result<Self, CombatError> {
         if !(1..=crate::MAXIMUM_OUTGOING_DAMAGE_BASIS_POINTS)
             .contains(&outgoing_direct_damage_basis_points)
@@ -499,6 +556,7 @@ impl PlayerCombatState {
         let mut state = Self::new(weapon, grave_mark, slipstep, stillness)?;
         state.oath = oath;
         state.outgoing_direct_damage_basis_points = outgoing_direct_damage_basis_points;
+        state.bell_debt = bell_debt;
         Ok(state)
     }
 
@@ -588,6 +646,103 @@ impl PlayerCombatState {
     }
 
     #[must_use]
+    pub const fn bell_primary_release_count(&self) -> u8 {
+        self.bell_primary_release_count
+    }
+
+    #[must_use]
+    pub const fn has_pending_bell_repeat(&self) -> bool {
+        self.pending_bell_repeat.is_some()
+    }
+
+    pub fn export_bell_debt_checkpoint(&self) -> Result<BellDebtCheckpoint, CombatError> {
+        let pending_repeat = self
+            .pending_bell_repeat
+            .as_ref()
+            .map(|pending| {
+                let remaining = pending
+                    .due_tick
+                    .0
+                    .checked_sub(self.tick.0)
+                    .ok_or(CombatError::InvalidBellCheckpoint)?;
+                Ok::<BellDebtPendingRepeatCheckpoint, CombatError>(
+                    BellDebtPendingRepeatCheckpoint {
+                        ticks_remaining: u32::try_from(remaining)
+                            .map_err(|_| CombatError::InvalidBellCheckpoint)?,
+                        press_sequence: pending.press_sequence,
+                        projectiles: pending.projectiles.clone(),
+                    },
+                )
+            })
+            .transpose()?;
+        let checkpoint = BellDebtCheckpoint {
+            primary_release_count: self.bell_primary_release_count,
+            pending_repeat,
+        };
+        self.validate_bell_checkpoint(&checkpoint)?;
+        Ok(checkpoint)
+    }
+
+    pub fn import_bell_debt_checkpoint(
+        &mut self,
+        checkpoint: &BellDebtCheckpoint,
+    ) -> Result<(), CombatError> {
+        self.validate_bell_checkpoint(checkpoint)?;
+        self.bell_primary_release_count = checkpoint.primary_release_count;
+        self.pending_bell_repeat = checkpoint
+            .pending_repeat
+            .as_ref()
+            .map(|pending| {
+                Ok::<PendingBellRepeat, CombatError>(PendingBellRepeat {
+                    due_tick: Tick(
+                        self.tick
+                            .0
+                            .checked_add(u64::from(pending.ticks_remaining))
+                            .ok_or(CombatError::TickExhausted)?,
+                    ),
+                    press_sequence: pending.press_sequence,
+                    projectiles: pending.projectiles.clone(),
+                })
+            })
+            .transpose()?;
+        Ok(())
+    }
+
+    pub fn reset_bell_debt(&mut self, _reason: BellDebtResetReason) {
+        self.bell_primary_release_count = 0;
+        self.pending_bell_repeat = None;
+    }
+
+    pub fn cancel_pending_bell_repeat_for_primary_illegal(&mut self) {
+        self.pending_bell_repeat = None;
+    }
+
+    fn validate_bell_checkpoint(&self, checkpoint: &BellDebtCheckpoint) -> Result<(), CombatError> {
+        let Some(definition) = self.bell_debt else {
+            return if checkpoint.primary_release_count == 0 && checkpoint.pending_repeat.is_none() {
+                Ok(())
+            } else {
+                Err(CombatError::InvalidBellCheckpoint)
+            };
+        };
+        if checkpoint.primary_release_count >= definition.accepted_primary_emissions_per_repeat {
+            return Err(CombatError::InvalidBellCheckpoint);
+        }
+        if let Some(pending) = &checkpoint.pending_repeat
+            && (pending.ticks_remaining == 0
+                || pending.ticks_remaining > definition.repeat_delay_ticks
+                || pending.projectiles.is_empty()
+                || pending.projectiles.iter().any(|projectile| {
+                    projectile.source != FriendlyProjectileSource::Primary
+                        || projectile.damage_multiplier_basis_points != BASIS_POINTS_PER_ONE
+                }))
+        {
+            return Err(CombatError::InvalidBellCheckpoint);
+        }
+        Ok(())
+    }
+
+    #[must_use]
     pub const fn pending_slipstep_sequence(&self) -> Option<u32> {
         match self.pending_slipstep {
             Some(pending) => Some(pending.press_sequence),
@@ -645,6 +800,7 @@ impl PlayerCombatState {
 
     /// Drains all run-owned friendly projectiles in stable identity order after local death.
     pub fn clear_projectiles_for_local_death(&mut self) -> Vec<FriendlyProjectile> {
+        self.reset_bell_debt(BellDebtResetReason::Death);
         self.projectiles.sort_by_key(FriendlyProjectile::id);
         std::mem::take(&mut self.projectiles)
     }
@@ -790,6 +946,7 @@ impl PlayerCombatState {
             return Err(CombatError::MovementStateRequired);
         }
 
+        self.emit_due_bell_repeat(player_position, &mut step.shots)?;
         self.resolve_primary(action, player_position, &mut step)?;
         Ok((step, movement_step))
     }
@@ -866,6 +1023,7 @@ impl PlayerCombatState {
                 self.weapon.pierce()
             };
             let directions = self.weapon.projectile_directions_millionths().to_vec();
+            let mut released_projectiles = Vec::with_capacity(directions.len());
             for local_direction in directions {
                 let projectile_id = self
                     .projectile_ids
@@ -894,14 +1052,17 @@ impl PlayerCombatState {
                     focused_by_stillness: focused,
                     release_tick: self.tick,
                     max_projectiles_per_target: self.weapon.max_projectiles_per_target(),
+                    damage_multiplier_basis_points: BASIS_POINTS_PER_ONE,
                 };
                 self.projectiles.push(projectile.clone());
+                released_projectiles.push(projectile.clone());
                 step.shots.push(ShotEvent {
                     tick: self.tick,
                     press_sequence: action.primary_press_sequence,
                     projectile,
                 });
             }
+            self.record_bell_primary_release(action.primary_press_sequence, released_projectiles)?;
             self.interval_remaining_ticks = self.weapon.attack_interval_ticks();
             if empowered {
                 self.empowered_primary_remaining_ticks = 0;
@@ -915,6 +1076,82 @@ impl PlayerCombatState {
                     solid: None,
                 });
             }
+        }
+        Ok(())
+    }
+
+    fn record_bell_primary_release(
+        &mut self,
+        press_sequence: u32,
+        projectiles: Vec<FriendlyProjectile>,
+    ) -> Result<(), CombatError> {
+        let Some(definition) = self.bell_debt else {
+            return Ok(());
+        };
+        self.bell_primary_release_count = self
+            .bell_primary_release_count
+            .checked_add(1)
+            .ok_or(CombatError::BellCounterOverflow)?;
+        if self.bell_primary_release_count < definition.accepted_primary_emissions_per_repeat {
+            return Ok(());
+        }
+        if self.bell_primary_release_count != definition.accepted_primary_emissions_per_repeat
+            || self.pending_bell_repeat.is_some()
+        {
+            return Err(CombatError::BellPendingRepeatConflict);
+        }
+        self.bell_primary_release_count = 0;
+        let due_tick = Tick(
+            self.tick
+                .0
+                .checked_add(u64::from(definition.repeat_delay_ticks))
+                .ok_or(CombatError::TickExhausted)?,
+        );
+        self.pending_bell_repeat = Some(PendingBellRepeat {
+            due_tick,
+            press_sequence,
+            projectiles,
+        });
+        Ok(())
+    }
+
+    fn emit_due_bell_repeat(
+        &mut self,
+        player_position: SimulationVector,
+        shots: &mut Vec<ShotEvent>,
+    ) -> Result<(), CombatError> {
+        let Some(pending) = self.pending_bell_repeat.as_ref() else {
+            return Ok(());
+        };
+        if pending.due_tick != self.tick {
+            return Ok(());
+        }
+        let definition = self
+            .bell_debt
+            .ok_or(CombatError::BellPendingRepeatConflict)?;
+        let pending = self
+            .pending_bell_repeat
+            .take()
+            .ok_or(CombatError::BellPendingRepeatConflict)?;
+        for mut projectile in pending.projectiles {
+            projectile.id = self
+                .projectile_ids
+                .allocate()
+                .ok_or(CombatError::ProjectileIdExhausted)?;
+            projectile.source = FriendlyProjectileSource::BellDebtRepeat;
+            projectile.position = player_position;
+            projectile.origin = player_position;
+            projectile.distance_travelled_tiles = 0.0;
+            projectile.hit_targets.clear();
+            projectile.release_tick = self.tick;
+            projectile.damage_multiplier_basis_points =
+                definition.repeat_damage_multiplier_basis_points;
+            self.projectiles.push(projectile.clone());
+            shots.push(ShotEvent {
+                tick: self.tick,
+                press_sequence: pending.press_sequence,
+                projectile,
+            });
         }
         Ok(())
     }
@@ -1241,6 +1478,7 @@ impl PlayerCombatState {
             focused_by_stillness: false,
             release_tick: self.tick,
             max_projectiles_per_target: 1,
+            damage_multiplier_basis_points: BASIS_POINTS_PER_ONE,
         };
         self.projectiles.push(projectile.clone());
         shots.push(ShotEvent {
@@ -1322,6 +1560,8 @@ impl PlayerCombatState {
                                 target,
                                 raw_damage: projectile.raw_damage,
                                 contact_ordinal,
+                                damage_multiplier_basis_points: projectile
+                                    .damage_multiplier_basis_points,
                             },
                             raw_damage_intents,
                             mark_transitions,
@@ -1460,6 +1700,7 @@ struct EnemyContactFact {
     target: EntityId,
     raw_damage: u32,
     contact_ordinal: u32,
+    damage_multiplier_basis_points: u32,
 }
 
 #[allow(clippy::cast_precision_loss)] // Basis-point values are small validated gameplay inputs.
@@ -1484,7 +1725,7 @@ fn record_enemy_contact(
     mark_transitions: &mut Vec<GraveMarkTransition>,
 ) -> Result<(), CombatError> {
     match contact.source {
-        FriendlyProjectileSource::Primary => {
+        FriendlyProjectileSource::Primary | FriendlyProjectileSource::BellDebtRepeat => {
             let marked = active_mark.is_some_and(|mark| mark.target == contact.target);
             let multiplier_basis_points = if marked {
                 BASIS_POINTS_PER_ONE
@@ -1493,15 +1734,27 @@ fn record_enemy_contact(
             } else {
                 BASIS_POINTS_PER_ONE
             };
-            let resolved_raw_damage = if marked {
+            let ordinary_raw_damage = if marked {
                 grave_mark.marked_primary_raw_intent(contact.raw_damage)?
             } else {
                 contact.raw_damage
             };
+            let resolved_raw_damage = scale_u32_basis_points_half_up(
+                ordinary_raw_damage,
+                contact.damage_multiplier_basis_points,
+            )?;
+            let multiplier_basis_points = scale_u32_basis_points_half_up(
+                multiplier_basis_points,
+                contact.damage_multiplier_basis_points,
+            )?;
             raw_damage_intents.push(RawDamageIntent {
                 tick: contact.tick,
                 projectile_id: contact.projectile_id,
-                source: RawDamageIntentSource::Primary,
+                source: if contact.source == FriendlyProjectileSource::BellDebtRepeat {
+                    RawDamageIntentSource::BellDebtRepeat
+                } else {
+                    RawDamageIntentSource::Primary
+                },
                 target: contact.target,
                 base_raw_damage: contact.raw_damage,
                 multiplier_basis_points,
@@ -1584,6 +1837,21 @@ pub enum CombatError {
     IntentMath(#[from] IntentMathError),
     #[error("outgoing direct-damage multiplier is outside the global cap")]
     InvalidOutgoingDirectDamageMultiplier,
+    #[error("Bell Debt accepted-release counter overflowed")]
+    BellCounterOverflow,
+    #[error("Bell Debt pending-repeat state conflicts with its deterministic cadence")]
+    BellPendingRepeatConflict,
+    #[error("Bell Debt checkpoint state is invalid for the immutable loadout")]
+    InvalidBellCheckpoint,
+}
+
+fn scale_u32_basis_points_half_up(value: u32, basis_points: u32) -> Result<u32, CombatError> {
+    let scaled = u64::from(value)
+        .checked_mul(u64::from(basis_points))
+        .and_then(|product| product.checked_add(u64::from(BASIS_POINTS_PER_ONE / 2)))
+        .ok_or(CombatError::ProjectileModifierOverflow)?
+        / u64::from(BASIS_POINTS_PER_ONE);
+    u32::try_from(scaled).map_err(|_| CombatError::ProjectileModifierOverflow)
 }
 
 #[allow(clippy::cast_precision_loss)]
@@ -1646,6 +1914,181 @@ mod tests {
             stops_on_first_enemy: true,
         })
         .expect("Scatterbow")
+    }
+
+    fn bell_debt() -> BellDebtDefinition {
+        BellDebtDefinition {
+            accepted_primary_emissions_per_repeat: 5,
+            repeat_delay_ticks: 9,
+            repeat_damage_multiplier_basis_points: 5_000,
+            primary_attack_rate_multiplier_basis_points: 8_500,
+            counts_legal_misses: true,
+            generated_repeats_advance_counter: false,
+            snapshots_aim_and_resolved_behavior: true,
+            uses_live_origin_at_repeat: true,
+            repeat_is_recursive: false,
+            repeat_spends_cooldown_or_resource: false,
+            counter_persists_reconnect_and_room_change: true,
+            counter_resets_on_acquisition_purge_death_retirement_or_safe_transfer: true,
+            cancel_pending_repeat_when_dead_transferred_or_primary_illegal: true,
+        }
+    }
+
+    fn bell_combat() -> PlayerCombatState {
+        PlayerCombatState::with_core_choices(
+            scatterbow(),
+            grave_mark(),
+            slipstep(),
+            stillness(),
+            None,
+            10_000,
+            Some(bell_debt()),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn bell_counts_multibolt_misses_once_and_repeats_from_live_origin_at_nine_ticks() {
+        let mut combat = bell_combat();
+        let world = empty_world();
+        let mut repeat = None;
+        for tick in 1..=74 {
+            let position = if tick == 74 {
+                SimulationVector::new(9.0, 7.0)
+            } else {
+                SimulationVector::new(4.0, 7.0)
+            };
+            let step = combat
+                .step(
+                    CombatAction {
+                        primary_held: true,
+                        primary_press_sequence: 1,
+                        ..CombatAction::default()
+                    },
+                    position,
+                    &world,
+                )
+                .unwrap();
+            if tick == 1 {
+                assert_eq!(step.shots.len(), 3);
+                assert_eq!(combat.bell_primary_release_count(), 1);
+            }
+            if !step.shots.is_empty()
+                && step.shots[0].projectile.source() == FriendlyProjectileSource::BellDebtRepeat
+            {
+                repeat = Some(step);
+            }
+        }
+        let repeat = repeat.expect("fifth accepted release must repeat");
+        assert_eq!(repeat.tick, Tick(74));
+        assert_eq!(repeat.shots.len(), 3);
+        assert!(repeat.shots.iter().all(|shot| {
+            shot.projectile.source() == FriendlyProjectileSource::BellDebtRepeat
+                && shot.projectile.origin() == SimulationVector::new(9.0, 7.0)
+                && shot.projectile.damage_multiplier_basis_points() == 5_000
+        }));
+        assert_eq!(combat.bell_primary_release_count(), 0);
+        assert!(!combat.has_pending_bell_repeat());
+    }
+
+    #[test]
+    fn bell_checkpoint_and_reset_seams_preserve_or_cancel_exact_state() {
+        let world = empty_world();
+        let mut original = bell_combat();
+        for _ in 1..=65 {
+            original
+                .step(
+                    CombatAction {
+                        primary_held: true,
+                        primary_press_sequence: 1,
+                        ..CombatAction::default()
+                    },
+                    SimulationVector::new(4.0, 7.0),
+                    &world,
+                )
+                .unwrap();
+        }
+        let checkpoint = original.export_bell_debt_checkpoint().unwrap();
+        assert_eq!(checkpoint.primary_release_count(), 0);
+        assert!(checkpoint.has_pending_repeat());
+
+        let mut restored = bell_combat();
+        restored.import_bell_debt_checkpoint(&checkpoint).unwrap();
+        let mut repeated = None;
+        for _ in 1..=9 {
+            let step = restored
+                .step(
+                    CombatAction::default(),
+                    SimulationVector::new(8.0, 6.0),
+                    &world,
+                )
+                .unwrap();
+            if !step.shots.is_empty() {
+                repeated = Some(step);
+            }
+        }
+        assert!(repeated.unwrap().shots.iter().all(|shot| {
+            shot.projectile.source() == FriendlyProjectileSource::BellDebtRepeat
+                && shot.projectile.origin() == SimulationVector::new(8.0, 6.0)
+        }));
+
+        original.cancel_pending_bell_repeat_for_primary_illegal();
+        assert!(!original.has_pending_bell_repeat());
+        original
+            .step(
+                CombatAction {
+                    primary_held: true,
+                    primary_press_sequence: 1,
+                    ..CombatAction::default()
+                },
+                SimulationVector::new(4.0, 7.0),
+                &world,
+            )
+            .unwrap();
+        original.reset_bell_debt(BellDebtResetReason::SafeTransfer);
+        assert_eq!(original.bell_primary_release_count(), 0);
+        assert!(!original.has_pending_bell_repeat());
+
+        let mut invalid = checkpoint;
+        invalid.primary_release_count = 5;
+        assert_eq!(
+            bell_combat()
+                .import_bell_debt_checkpoint(&invalid)
+                .unwrap_err(),
+            CombatError::InvalidBellCheckpoint
+        );
+    }
+
+    #[test]
+    fn bell_repeat_multiplier_applies_after_ordinary_mark_resolution() {
+        let target = EntityId::new(50).unwrap();
+        let mut active_mark = Some(ActiveGraveMark {
+            target,
+            remaining_ticks: 30,
+            source_projectile_id: EntityId::new(49).unwrap(),
+        });
+        let mut intents = Vec::new();
+        record_enemy_contact(
+            &grave_mark(),
+            12,
+            &mut active_mark,
+            EnemyContactFact {
+                tick: Tick(1),
+                projectile_id: EntityId::new(51).unwrap(),
+                source: FriendlyProjectileSource::BellDebtRepeat,
+                target,
+                raw_damage: 12,
+                contact_ordinal: 0,
+                damage_multiplier_basis_points: 5_000,
+            },
+            &mut intents,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(intents.len(), 1);
+        assert_eq!(intents[0].source, RawDamageIntentSource::BellDebtRepeat);
+        assert_eq!(intents[0].resolved_raw_damage, 7);
+        assert_eq!(intents[0].multiplier_basis_points, 5_750);
     }
 
     fn grave_mark() -> GraveMarkDefinition {

@@ -1029,6 +1029,7 @@ fn present_expirations(
             position,
             match expiration.source {
                 FriendlyProjectileSource::Primary => Color::srgba_u8(211, 241, 224, 150),
+                FriendlyProjectileSource::BellDebtRepeat => Color::srgba_u8(245, 183, 79, 190),
                 FriendlyProjectileSource::GraveMark => Color::srgba_u8(191, 139, 241, 180),
             },
             0.32,
@@ -1048,6 +1049,7 @@ fn present_shots(
         let origin = simulation_point_to_render(shot.projectile.origin(), arena);
         let muzzle_color = match shot.projectile.source() {
             FriendlyProjectileSource::Primary => Color::srgba_u8(240, 213, 139, 220),
+            FriendlyProjectileSource::BellDebtRepeat => Color::srgba_u8(245, 183, 79, 250),
             FriendlyProjectileSource::GraveMark => Color::srgba_u8(191, 139, 241, 240),
         };
         spawn_transient(
@@ -1300,6 +1302,12 @@ fn spawn_projectile(
             } else {
                 0.34
             },
+        ),
+        FriendlyProjectileSource::BellDebtRepeat => (
+            "Bell echo bolt",
+            Color::srgb_u8(245, 183, 79),
+            Color::srgb_u8(255, 239, 178),
+            0.28,
         ),
         FriendlyProjectileSource::GraveMark => (
             "Grave Mark bolt",
@@ -1611,6 +1619,7 @@ fn draw_collision_debug(
     for projectile in runtime.combat().projectiles() {
         let color = match projectile.source() {
             FriendlyProjectileSource::Primary => Color::srgb_u8(231, 224, 199),
+            FriendlyProjectileSource::BellDebtRepeat => Color::srgb_u8(245, 183, 79),
             FriendlyProjectileSource::GraveMark => Color::srgb_u8(211, 176, 245),
         };
         gizmos

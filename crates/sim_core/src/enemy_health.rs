@@ -559,6 +559,7 @@ fn validate_intent_order_and_provenance(step: &CombatStep) -> Result<(), EnemyHe
         }
         let expected_source = match intent.source {
             RawDamageIntentSource::Primary => FriendlyProjectileSource::Primary,
+            RawDamageIntentSource::BellDebtRepeat => FriendlyProjectileSource::BellDebtRepeat,
             RawDamageIntentSource::GraveMark => FriendlyProjectileSource::GraveMark,
             RawDamageIntentSource::NailTrap => unreachable!("handled above"),
         };
@@ -701,6 +702,7 @@ mod tests {
             projectile_id: intent.projectile_id,
             source: match intent.source {
                 RawDamageIntentSource::Primary => FriendlyProjectileSource::Primary,
+                RawDamageIntentSource::BellDebtRepeat => FriendlyProjectileSource::BellDebtRepeat,
                 RawDamageIntentSource::GraveMark => FriendlyProjectileSource::GraveMark,
                 RawDamageIntentSource::NailTrap => {
                     panic!("test projectile collision cannot represent a nail trap")

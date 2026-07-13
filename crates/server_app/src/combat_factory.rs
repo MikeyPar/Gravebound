@@ -185,6 +185,7 @@ impl CoreCharacterCombatCompiler {
             definitions.stillness,
             definitions.oath,
             outgoing_direct_damage_basis_points,
+            definitions.bargains.bell_debt(),
         )
         .map_err(|_| CoreCombatFactoryError::InvalidContent)?;
         Ok(CoreCharacterCombat {
