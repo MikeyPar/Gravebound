@@ -44,6 +44,28 @@ pub struct ProductionItemRecords {
     pub stage_policies: Vec<ProductionItemStagePolicyRecord>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ProductionItemAssetKind {
+    ItemIcon,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProductionItemAssetRecord {
+    pub asset_id: ContentId,
+    pub source_record_id: ContentId,
+    pub kind: ProductionItemAssetKind,
+}
+
+/// Exact derived icon-reference closure for a production item subset.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProductionItemAssetManifest {
+    pub schema_version: u32,
+    pub assets: Vec<ProductionItemAssetRecord>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProductionItemTemplateRecord {
@@ -116,6 +138,18 @@ pub enum ProductionEquipmentBehavior {
     },
     Armor {
         family: ProductionArmorFamily,
+        raw_health_base_hundredths: u16,
+        raw_health_per_level_hundredths: u16,
+        raw_armor_base_hundredths: u16,
+        raw_armor_per_level_hundredths: u16,
+        raw_resistance_base_basis_points: u16,
+        raw_resistance_per_level_basis_points: u16,
+        fixed_movement_basis_points: i16,
+        fixed_healing_received_basis_points: i16,
+        negative_status_duration_reduction_basis_points: u16,
+        affected_negative_statuses: Vec<ProductionNegativeStatus>,
+        excluded_negative_statuses: Vec<ProductionNegativeStatus>,
+        direct_hit_barrier: Option<ProductionDirectHitBarrier>,
     },
     Charm {
         effect: ProductionCharmEffect,
@@ -160,19 +194,46 @@ pub enum ProductionArmorFamily {
     Bellguard,
 }
 
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ProductionNegativeStatus {
+    Bleed,
+    Frostbind,
+    Silence,
+    Hex,
+    Guardbreak,
+    Exhaustion,
+    EncounterMarked,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProductionDirectHitBarrier {
+    pub triggering_damage_bands: Vec<String>,
+    pub raw_base_health_hundredths: u16,
+    pub raw_health_per_level_hundredths: u16,
+    pub duration_millis: u32,
+    pub internal_cooldown_millis: u32,
+    pub cannot_retrigger_while_active: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "effect_kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProductionCharmEffect {
     RestedPrimaryDamage {
         idle_millis: u32,
         bonus_basis_points: u16,
-        consumed_on_release: bool,
+        consumed_on_release_regardless_of_hit: bool,
     },
     PotionHealing {
         bonus_basis_points: u16,
     },
     NamedNegativeStatusDuration {
         reduction_basis_points: u16,
+        affected_statuses: Vec<ProductionNegativeStatus>,
+        excluded_statuses: Vec<ProductionNegativeStatus>,
     },
 }
 
@@ -220,8 +281,6 @@ pub struct ProductionRarityWeight {
 pub struct ProductionRarityProfileRecord {
     #[serde(flatten)]
     pub header: CoreDevelopmentHeader,
-    pub minimum_item_level: u8,
-    pub maximum_item_level: u8,
     pub ordered_weights: Vec<ProductionRarityWeight>,
 }
 
@@ -239,11 +298,15 @@ pub enum ProductionRewardRoll {
     Equipment {
         presence_basis_points: u16,
         count: u8,
+        minimum_item_level: u8,
+        maximum_item_level: u8,
         rarity_profile_id: ContentId,
     },
     UniversalItem {
         presence_basis_points: u16,
         count: u8,
+        minimum_item_level: u8,
+        maximum_item_level: u8,
         rarity_profile_id: ContentId,
     },
     Material {

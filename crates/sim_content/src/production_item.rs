@@ -142,13 +142,18 @@ impl CompiledProductionItemCatalog {
                 }
                 match roll {
                     ProductionRewardRoll::Equipment {
-                        rarity_profile_id, ..
+                        minimum_item_level,
+                        maximum_item_level,
+                        rarity_profile_id,
+                        ..
                     } => {
                         let pool = choose_equipment_pool(policy, draws)?;
                         entries.push(self.plan_equipment(
                             index,
                             pool,
                             rarity_profile_id.as_str(),
+                            *minimum_item_level,
+                            *maximum_item_level,
                             fixed_rarity,
                             policy.maximum_item_level,
                             request.current_class_id,
@@ -156,7 +161,10 @@ impl CompiledProductionItemCatalog {
                         )?);
                     }
                     ProductionRewardRoll::UniversalItem {
-                        rarity_profile_id, ..
+                        minimum_item_level,
+                        maximum_item_level,
+                        rarity_profile_id,
+                        ..
                     } => {
                         let slot = if draws.draw_below(10_000)?
                             < u32::from(policy.armor_within_universal_basis_points)
@@ -169,6 +177,8 @@ impl CompiledProductionItemCatalog {
                             index,
                             PlannedEquipmentPool::Universal(slot),
                             rarity_profile_id.as_str(),
+                            *minimum_item_level,
+                            *maximum_item_level,
                             fixed_rarity,
                             policy.maximum_item_level,
                             request.current_class_id,
@@ -200,23 +210,23 @@ impl CompiledProductionItemCatalog {
         roll_index: u16,
         pool: PlannedEquipmentPool,
         source_rarity_profile_id: &str,
+        source_minimum_item_level: u8,
+        source_maximum_item_level: u8,
         fixed_rarity: &ProductionRarityProfileRecord,
         stage_maximum_item_level: u8,
         current_class_id: &str,
         draws: &mut impl ProductionRewardDrawSource,
     ) -> Result<ProductionRewardPlanEntry, ProductionRewardPlanningError> {
-        let source_profile = self
+        let _source_profile = self
             .rarity_profiles
             .get(source_rarity_profile_id)
             .ok_or(ProductionRewardPlanningError::InvalidCompiledCatalog)?;
-        let maximum = source_profile
-            .maximum_item_level
-            .min(stage_maximum_item_level);
-        if source_profile.minimum_item_level > maximum {
+        let maximum = source_maximum_item_level.min(stage_maximum_item_level);
+        if source_minimum_item_level > maximum {
             return Err(ProductionRewardPlanningError::NoLegalItemLevel);
         }
-        let level_width = u32::from(maximum - source_profile.minimum_item_level) + 1;
-        let item_level = source_profile.minimum_item_level
+        let level_width = u32::from(maximum - source_minimum_item_level) + 1;
+        let item_level = source_minimum_item_level
             + u8::try_from(draws.draw_below(level_width)?)
                 .map_err(|_| ProductionRewardPlanningError::DrawOutOfRange)?;
         let rarity = draw_rarity(fixed_rarity, draws)?;
@@ -629,6 +639,10 @@ fn validate_behavior(
     family: ProductionEquipmentFamily,
     behavior: &ProductionEquipmentBehavior,
 ) -> Result<()> {
+    validate_armor_behavior(behavior)?;
+    if let ProductionEquipmentBehavior::Charm { effect } = behavior {
+        validate_charm_behavior(effect)?;
+    }
     match (family, behavior) {
         (
             ProductionEquipmentFamily::Crossbow,
@@ -663,36 +677,42 @@ fn validate_behavior(
             ProductionEquipmentFamily::Ashplate,
             ProductionEquipmentBehavior::Armor {
                 family: ProductionArmorFamily::Ashplate,
+                ..
             },
         )
         | (
             ProductionEquipmentFamily::Gravehide,
             ProductionEquipmentBehavior::Armor {
                 family: ProductionArmorFamily::Gravehide,
+                ..
             },
         )
         | (
             ProductionEquipmentFamily::Saltglass,
             ProductionEquipmentBehavior::Armor {
                 family: ProductionArmorFamily::Saltglass,
+                ..
             },
         )
         | (
             ProductionEquipmentFamily::Pilgrim,
             ProductionEquipmentBehavior::Armor {
                 family: ProductionArmorFamily::Pilgrim,
+                ..
             },
         )
         | (
             ProductionEquipmentFamily::Rootweave,
             ProductionEquipmentBehavior::Armor {
                 family: ProductionArmorFamily::Rootweave,
+                ..
             },
         )
         | (
             ProductionEquipmentFamily::Bellguard,
             ProductionEquipmentBehavior::Armor {
                 family: ProductionArmorFamily::Bellguard,
+                ..
             },
         )
         | (ProductionEquipmentFamily::Charm, ProductionEquipmentBehavior::Charm { .. }) => Ok(()),
@@ -700,14 +720,82 @@ fn validate_behavior(
     }
 }
 
+fn validate_armor_behavior(behavior: &ProductionEquipmentBehavior) -> Result<()> {
+    let ProductionEquipmentBehavior::Armor {
+        affected_negative_statuses,
+        excluded_negative_statuses,
+        negative_status_duration_reduction_basis_points,
+        direct_hit_barrier,
+        ..
+    } = behavior
+    else {
+        return Ok(());
+    };
+    if !strictly_sorted_unique(affected_negative_statuses.iter().copied())
+        || !strictly_sorted_unique(excluded_negative_statuses.iter().copied())
+        || affected_negative_statuses
+            .iter()
+            .any(|status| excluded_negative_statuses.contains(status))
+        || (*negative_status_duration_reduction_basis_points == 0
+            && !affected_negative_statuses.is_empty())
+        || (*negative_status_duration_reduction_basis_points > 0
+            && affected_negative_statuses.is_empty())
+    {
+        bail!("armor status behavior is invalid");
+    }
+    if let Some(barrier) = direct_hit_barrier
+        && (barrier.triggering_damage_bands.is_empty()
+            || !strictly_sorted_unique(barrier.triggering_damage_bands.iter().map(String::as_str))
+            || barrier.raw_base_health_hundredths == 0
+            || barrier.raw_health_per_level_hundredths == 0
+            || barrier.duration_millis == 0
+            || barrier.internal_cooldown_millis == 0
+            || !barrier.cannot_retrigger_while_active)
+    {
+        bail!("armor direct-hit barrier is invalid");
+    }
+    Ok(())
+}
+
+fn validate_charm_behavior(effect: &content_schema::ProductionCharmEffect) -> Result<()> {
+    match effect {
+        content_schema::ProductionCharmEffect::RestedPrimaryDamage {
+            idle_millis,
+            bonus_basis_points,
+            consumed_on_release_regardless_of_hit,
+        } if *idle_millis > 0
+            && *bonus_basis_points > 0
+            && *consumed_on_release_regardless_of_hit =>
+        {
+            Ok(())
+        }
+        content_schema::ProductionCharmEffect::PotionHealing { bonus_basis_points }
+            if *bonus_basis_points > 0 =>
+        {
+            Ok(())
+        }
+        content_schema::ProductionCharmEffect::NamedNegativeStatusDuration {
+            reduction_basis_points,
+            affected_statuses,
+            excluded_statuses,
+        } if *reduction_basis_points > 0
+            && !affected_statuses.is_empty()
+            && strictly_sorted_unique(affected_statuses.iter().copied())
+            && strictly_sorted_unique(excluded_statuses.iter().copied())
+            && affected_statuses
+                .iter()
+                .all(|status| !excluded_statuses.contains(status)) =>
+        {
+            Ok(())
+        }
+        _ => bail!("charm behavior is invalid"),
+    }
+}
+
 fn validate_rarity_profile(record: &ProductionRarityProfileRecord) -> Result<()> {
     validate_header(&record.header)?;
-    if record.minimum_item_level == 0
-        || record.minimum_item_level > record.maximum_item_level
-        || record.maximum_item_level > 20
-        || record.ordered_weights.is_empty()
-    {
-        bail!("rarity profile `{}` has invalid levels", record.header.id);
+    if record.ordered_weights.is_empty() {
+        bail!("rarity profile `{}` has no weights", record.header.id);
     }
     let mut rarities = BTreeSet::new();
     let mut total = 0_u32;
@@ -775,16 +863,24 @@ fn validate_reward(
             ProductionRewardRoll::Equipment {
                 presence_basis_points,
                 count,
+                minimum_item_level,
+                maximum_item_level,
                 rarity_profile_id,
             }
             | ProductionRewardRoll::UniversalItem {
                 presence_basis_points,
                 count,
+                minimum_item_level,
+                maximum_item_level,
                 rarity_profile_id,
             } => {
-                if !rarity_profiles.contains_key(rarity_profile_id.as_str()) {
+                if *minimum_item_level == 0
+                    || minimum_item_level > maximum_item_level
+                    || *maximum_item_level > 20
+                    || !rarity_profiles.contains_key(rarity_profile_id.as_str())
+                {
                     bail!(
-                        "reward table `{}` has a missing rarity profile",
+                        "reward table `{}` has invalid item levels or rarity profile",
                         record.header.id
                     );
                 }
@@ -915,6 +1011,24 @@ mod tests {
         }
     }
 
+    fn ashplate_behavior() -> ProductionEquipmentBehavior {
+        ProductionEquipmentBehavior::Armor {
+            family: ProductionArmorFamily::Ashplate,
+            raw_health_base_hundredths: 600,
+            raw_health_per_level_hundredths: 100,
+            raw_armor_base_hundredths: 200,
+            raw_armor_per_level_hundredths: 30,
+            raw_resistance_base_basis_points: 0,
+            raw_resistance_per_level_basis_points: 0,
+            fixed_movement_basis_points: -300,
+            fixed_healing_received_basis_points: 0,
+            negative_status_duration_reduction_basis_points: 0,
+            affected_negative_statuses: vec![],
+            excluded_negative_statuses: vec![],
+            direct_hit_barrier: None,
+        }
+    }
+
     #[allow(clippy::too_many_lines)] // The complete cross-record fixture is intentionally visible.
     fn fixture() -> (ProductionItemDevelopmentTarget, ProductionItemRecords) {
         let items = vec![
@@ -942,9 +1056,7 @@ mod tests {
                     core_maximum_item_level_override: Some(10),
                     capability_tags: vec!["slot.armor".to_owned()],
                     affix_exclusion_ids: vec![],
-                    behavior: ProductionEquipmentBehavior::Armor {
-                        family: ProductionArmorFamily::Ashplate,
-                    },
+                    behavior: ashplate_behavior(),
                 },
             },
             ProductionItemTemplateRecord {
@@ -962,7 +1074,7 @@ mod tests {
                         effect: content_schema::ProductionCharmEffect::RestedPrimaryDamage {
                             idle_millis: 2_000,
                             bonus_basis_points: 1_500,
-                            consumed_on_release: true,
+                            consumed_on_release_regardless_of_hit: true,
                         },
                     },
                 },
@@ -995,8 +1107,6 @@ mod tests {
         let rarity_profiles = vec![
             ProductionRarityProfileRecord {
                 header: header("rarity.core_fixed"),
-                minimum_item_level: 1,
-                maximum_item_level: 10,
                 ordered_weights: vec![ProductionRarityWeight {
                     rarity: ProductionItemRarity::Forged,
                     weight_basis_points: 10_000,
@@ -1004,8 +1114,6 @@ mod tests {
             },
             ProductionRarityProfileRecord {
                 header: header("rarity.normal_outer"),
-                minimum_item_level: 1,
-                maximum_item_level: 6,
                 ordered_weights: vec![
                     ProductionRarityWeight {
                         rarity: ProductionItemRarity::Forged,
@@ -1036,6 +1144,8 @@ mod tests {
                 ordered_rolls: vec![ProductionRewardRoll::Equipment {
                     presence_basis_points: 10_000,
                     count: 1,
+                    minimum_item_level: 1,
+                    maximum_item_level: 6,
                     rarity_profile_id: id("rarity.normal_outer"),
                 }],
             },
@@ -1045,6 +1155,8 @@ mod tests {
                     ProductionRewardRoll::UniversalItem {
                         presence_basis_points: 800,
                         count: 1,
+                        minimum_item_level: 1,
+                        maximum_item_level: 6,
                         rarity_profile_id: id("rarity.normal_outer"),
                     },
                     ProductionRewardRoll::Material {
@@ -1140,9 +1252,7 @@ mod tests {
             core_maximum_item_level_override: Some(10),
             capability_tags: vec!["slot.armor".to_owned()],
             affix_exclusion_ids: vec![],
-            behavior: ProductionEquipmentBehavior::Armor {
-                family: ProductionArmorFamily::Ashplate,
-            },
+            behavior: ashplate_behavior(),
         };
         assert!(compile_production_item_catalog(&target, &records).is_err());
     }
@@ -1254,12 +1364,13 @@ mod tests {
     #[test]
     fn core_equipment_reallocates_at_85_percent_and_caps_source_level_at_ten() {
         let (target, mut records) = fixture();
-        let normal = records
-            .rarity_profiles
-            .iter_mut()
-            .find(|profile| profile.header.id.as_str() == "rarity.normal_outer")
-            .unwrap();
-        normal.maximum_item_level = 20;
+        let ProductionRewardRoll::Equipment {
+            maximum_item_level, ..
+        } = &mut records.reward_tables[0].ordered_rolls[0]
+        else {
+            panic!("fixture equipment roll");
+        };
+        *maximum_item_level = 20;
         let compiled = compile_production_item_catalog(&target, &records).unwrap();
         let request = ProductionRewardPlanRequest {
             reward_table_id: "reward.elite_outer",

@@ -1159,6 +1159,11 @@ mod tests {
                 serde_json::to_value(schemars::schema_for!(ProductionItemRecords))
                     .expect("serializable item records schema"),
             ),
+            (
+                "production_item_assets.schema.json",
+                serde_json::to_value(schemars::schema_for!(ProductionItemAssetManifest))
+                    .expect("serializable item asset schema"),
+            ),
         ];
         for (name, generated) in cases {
             let text = fs::read_to_string(schema_root.join(name)).expect("checked-in schema");

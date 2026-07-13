@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ProductionItemAssetManifest",
+  "description": "Exact derived icon-reference closure for a production item subset.",
+  "type": "object",
+  "properties": {
+    "assets": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ProductionItemAssetRecord"
+      }
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "assets"
+  ],
+  "$defs": {
+    "ContentId": {
+      "description": "Stable dot-separated content identifier.",
+      "type": "string"
+    },
+    "ProductionItemAssetKind": {
+      "type": "string",
+      "enum": [
+        "item_icon"
+      ]
+    },
+    "ProductionItemAssetRecord": {
+      "type": "object",
+      "properties": {
+        "asset_id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "kind": {
+          "$ref": "#/$defs/ProductionItemAssetKind"
+        },
+        "source_record_id": {
+          "$ref": "#/$defs/ContentId"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "asset_id",
+        "source_record_id",
+        "kind"
+      ]
+    }
+  }
+}

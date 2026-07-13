@@ -197,7 +197,7 @@
               "maximum": 65535,
               "minimum": 0
             },
-            "consumed_on_release": {
+            "consumed_on_release_regardless_of_hit": {
               "type": "boolean"
             },
             "effect_kind": {
@@ -215,7 +215,7 @@
             "effect_kind",
             "idle_millis",
             "bonus_basis_points",
-            "consumed_on_release"
+            "consumed_on_release_regardless_of_hit"
           ]
         },
         {
@@ -241,9 +241,21 @@
         {
           "type": "object",
           "properties": {
+            "affected_statuses": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ProductionNegativeStatus"
+              }
+            },
             "effect_kind": {
               "type": "string",
               "const": "named_negative_status_duration"
+            },
+            "excluded_statuses": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ProductionNegativeStatus"
+              }
             },
             "reduction_basis_points": {
               "type": "integer",
@@ -255,7 +267,9 @@
           "additionalProperties": false,
           "required": [
             "effect_kind",
-            "reduction_basis_points"
+            "reduction_basis_points",
+            "affected_statuses",
+            "excluded_statuses"
           ]
         }
       ]
@@ -340,6 +354,51 @@
             "consumed_on_use"
           ]
         }
+      ]
+    },
+    "ProductionDirectHitBarrier": {
+      "type": "object",
+      "properties": {
+        "cannot_retrigger_while_active": {
+          "type": "boolean"
+        },
+        "duration_millis": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "internal_cooldown_millis": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "raw_base_health_hundredths": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "raw_health_per_level_hundredths": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "triggering_damage_bands": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "triggering_damage_bands",
+        "raw_base_health_hundredths",
+        "raw_health_per_level_hundredths",
+        "duration_millis",
+        "internal_cooldown_millis",
+        "cannot_retrigger_while_active"
       ]
     },
     "ProductionEquipmentBehavior": {
@@ -466,18 +525,105 @@
         {
           "type": "object",
           "properties": {
+            "affected_negative_statuses": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ProductionNegativeStatus"
+              }
+            },
             "behavior_kind": {
               "type": "string",
               "const": "armor"
             },
+            "direct_hit_barrier": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ProductionDirectHitBarrier"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "excluded_negative_statuses": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ProductionNegativeStatus"
+              }
+            },
             "family": {
               "$ref": "#/$defs/ProductionArmorFamily"
+            },
+            "fixed_healing_received_basis_points": {
+              "type": "integer",
+              "format": "int16",
+              "maximum": 32767,
+              "minimum": -32768
+            },
+            "fixed_movement_basis_points": {
+              "type": "integer",
+              "format": "int16",
+              "maximum": 32767,
+              "minimum": -32768
+            },
+            "negative_status_duration_reduction_basis_points": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            },
+            "raw_armor_base_hundredths": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            },
+            "raw_armor_per_level_hundredths": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            },
+            "raw_health_base_hundredths": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            },
+            "raw_health_per_level_hundredths": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            },
+            "raw_resistance_base_basis_points": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            },
+            "raw_resistance_per_level_basis_points": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
             }
           },
           "additionalProperties": false,
           "required": [
             "behavior_kind",
-            "family"
+            "family",
+            "raw_health_base_hundredths",
+            "raw_health_per_level_hundredths",
+            "raw_armor_base_hundredths",
+            "raw_armor_per_level_hundredths",
+            "raw_resistance_base_basis_points",
+            "raw_resistance_per_level_basis_points",
+            "fixed_movement_basis_points",
+            "fixed_healing_received_basis_points",
+            "negative_status_duration_reduction_basis_points",
+            "affected_negative_statuses",
+            "excluded_negative_statuses"
           ]
         },
         {
@@ -922,6 +1068,18 @@
         "ordered_outcomes"
       ]
     },
+    "ProductionNegativeStatus": {
+      "type": "string",
+      "enum": [
+        "bleed",
+        "frostbind",
+        "silence",
+        "hex",
+        "guardbreak",
+        "exhaustion",
+        "encounter_marked"
+      ]
+    },
     "ProductionRarityProfileRecord": {
       "description": "Metadata shared by unpromoted Core world-flow records.",
       "type": "object",
@@ -946,18 +1104,6 @@
         },
         "localization_name_key": {
           "$ref": "#/$defs/ContentId"
-        },
-        "maximum_item_level": {
-          "type": "integer",
-          "format": "uint8",
-          "maximum": 255,
-          "minimum": 0
-        },
-        "minimum_item_level": {
-          "type": "integer",
-          "format": "uint8",
-          "maximum": 255,
-          "minimum": 0
         },
         "ordered_weights": {
           "type": "array",
@@ -991,8 +1137,6 @@
         "asset_ids",
         "tags",
         "source_document_feature_id",
-        "minimum_item_level",
-        "maximum_item_level",
         "ordered_weights"
       ]
     },
@@ -1026,6 +1170,18 @@
               "maximum": 255,
               "minimum": 0
             },
+            "maximum_item_level": {
+              "type": "integer",
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0
+            },
+            "minimum_item_level": {
+              "type": "integer",
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0
+            },
             "presence_basis_points": {
               "type": "integer",
               "format": "uint16",
@@ -1045,6 +1201,8 @@
             "roll_kind",
             "presence_basis_points",
             "count",
+            "minimum_item_level",
+            "maximum_item_level",
             "rarity_profile_id"
           ]
         },
@@ -1052,6 +1210,18 @@
           "type": "object",
           "properties": {
             "count": {
+              "type": "integer",
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0
+            },
+            "maximum_item_level": {
+              "type": "integer",
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0
+            },
+            "minimum_item_level": {
               "type": "integer",
               "format": "uint8",
               "maximum": 255,
@@ -1076,6 +1246,8 @@
             "roll_kind",
             "presence_basis_points",
             "count",
+            "minimum_item_level",
+            "maximum_item_level",
             "rarity_profile_id"
           ]
         },
