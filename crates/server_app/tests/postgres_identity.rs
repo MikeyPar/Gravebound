@@ -644,7 +644,7 @@ async fn stage_real_quic_bargain_offer(
             EntryCaptureContext {
                 account_id,
                 character_id,
-                transfer_id: RESTORE_ID,
+                restore_point_id: RESTORE_ID,
             },
         )
         .await

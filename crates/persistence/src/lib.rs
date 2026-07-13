@@ -81,8 +81,9 @@ pub use reward::{
     StoredRewardEntry, StoredRewardItem, StoredRewardOutcome, StoredRewardRequest,
 };
 pub use world_flow::{
-    StoredSafeArrival, StoredWorldFlowCharacter, StoredWorldFlowRevisionV1, StoredWorldLocation,
-    StoredWorldTransferReceipt, WorldFlowTransaction, WorldFlowTransactionState,
+    StoredDangerEntryRootV1, StoredSafeArrival, StoredWorldFlowCharacter,
+    StoredWorldFlowRevisionV1, StoredWorldLocation, StoredWorldTransferReceipt, WorldFlowBegin,
+    WorldFlowTransaction, WorldFlowTransactionState, WorldFlowWrite, stage_world_flow_danger_entry,
 };
 
 pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
@@ -557,6 +558,19 @@ mod tests {
                 !migration.contains(prohibited),
                 "progression crash-restore migration leaked {prohibited}"
             );
+        }
+    }
+
+    #[test]
+    fn entry_restore_component_root_is_deferred_for_atomic_composite_capture() {
+        let migration = include_str!("../../../migrations/0024_defer_entry_restore_components.sql");
+        for required in [
+            "entry_restore_progression_root_owned",
+            "DEFERRABLE INITIALLY DEFERRED",
+            "character_entry_restore_points",
+            "entry restore progression root constraint is missing",
+        ] {
+            assert!(migration.contains(required), "migration omitted {required}");
         }
     }
 

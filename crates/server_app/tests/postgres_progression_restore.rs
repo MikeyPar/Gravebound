@@ -240,7 +240,7 @@ async fn begin_danger_entry(
             EntryCaptureContext {
                 account_id: ACCOUNT_ID,
                 character_id: CHARACTER_ID,
-                transfer_id: restore_id,
+                restore_point_id: restore_id,
             },
         )
         .await

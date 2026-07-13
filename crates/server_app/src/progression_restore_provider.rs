@@ -47,7 +47,7 @@ impl EntryRestoreProvider for PostgresProgressionRestoreProvider {
             transaction,
             context.account_id,
             context.character_id,
-            context.transfer_id,
+            context.restore_point_id,
             &self.contract,
         )
         .await

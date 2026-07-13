@@ -1,6 +1,8 @@
 use sqlx::Row;
 
-use crate::{PersistenceError, PostgresPersistence, WIPEABLE_CORE_NAMESPACE};
+use crate::{
+    PersistenceError, PersistenceTransaction, PostgresPersistence, WIPEABLE_CORE_NAMESPACE,
+};
 
 const ID_BYTES: usize = 16;
 const HASH_BYTES: usize = 32;
@@ -78,9 +80,28 @@ pub struct StoredWorldFlowCharacter {
     pub character_version: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredDangerEntryRootV1 {
+    pub account_id: [u8; ID_BYTES],
+    pub character_id: [u8; ID_BYTES],
+    pub lineage_id: [u8; ID_BYTES],
+    pub restore_point_id: [u8; ID_BYTES],
+    pub source_location_id: String,
+    pub danger_location_id: String,
+    pub layout_id: String,
+    pub content_revision: StoredWorldFlowRevisionV1,
+    pub account_version: i64,
+    pub character_version: i64,
+    pub progression_version: i64,
+    pub inventory_version: i64,
+    pub oath_bargain_version: i64,
+    pub composite_digest: [u8; HASH_BYTES],
+}
+
 /// Mutable state exposed only inside one serializable account/character transaction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorldFlowTransactionState {
+    pub account_version: i64,
     pub selected_character_id: Option<[u8; ID_BYTES]>,
     pub character: StoredWorldFlowCharacter,
     pub location: StoredWorldLocation,
@@ -93,6 +114,83 @@ pub struct WorldFlowTransactionState {
 pub enum WorldFlowTransaction<T> {
     Replayed(Box<StoredWorldTransferReceipt>),
     Committed(T),
+}
+
+pub enum WorldFlowBegin<'pool> {
+    Replayed(Box<StoredWorldTransferReceipt>),
+    Fresh(Box<WorldFlowWrite<'pool>>),
+}
+
+/// Owned serializable world-flow write. Only `commit` can publish staged state.
+pub struct WorldFlowWrite<'pool> {
+    transaction: PersistenceTransaction<'pool>,
+    account_id: [u8; ID_BYTES],
+    character_id: [u8; ID_BYTES],
+    mutation_id: [u8; ID_BYTES],
+    initial_location: StoredWorldLocation,
+    state: WorldFlowTransactionState,
+}
+
+impl<'pool> WorldFlowWrite<'pool> {
+    #[must_use]
+    pub const fn state(&self) -> &WorldFlowTransactionState {
+        &self.state
+    }
+
+    pub const fn state_mut(&mut self) -> &mut WorldFlowTransactionState {
+        &mut self.state
+    }
+
+    pub const fn transaction_mut(&mut self) -> &mut PersistenceTransaction<'pool> {
+        &mut self.transaction
+    }
+
+    pub async fn commit<T>(
+        mut self,
+        result: T,
+    ) -> Result<WorldFlowTransaction<T>, PersistenceError> {
+        if self.state.location_changed {
+            if self.state.location == self.initial_location
+                || self.state.location.character_version()
+                    != self
+                        .initial_location
+                        .character_version()
+                        .checked_add(1)
+                        .ok_or(PersistenceError::CorruptStoredWorldFlow)?
+            {
+                return Err(PersistenceError::CorruptStoredWorldFlow);
+            }
+            persist_location(
+                self.transaction.connection(),
+                &self.account_id,
+                &self.character_id,
+                &self.state.location,
+            )
+            .await?;
+        } else if self.state.location != self.initial_location {
+            return Err(PersistenceError::CorruptStoredWorldFlow);
+        }
+        let receipt = self
+            .state
+            .new_receipt
+            .as_ref()
+            .ok_or(PersistenceError::WorldFlowResultRequired)?;
+        if receipt.pre_character_version != self.initial_location.character_version()
+            || receipt.post_character_version != self.state.location.character_version()
+            || self.state.location_changed != (receipt.result_code == 0)
+        {
+            return Err(PersistenceError::CorruptStoredWorldFlow);
+        }
+        validate_receipt_binding(
+            receipt,
+            &self.account_id,
+            &self.character_id,
+            &self.mutation_id,
+        )?;
+        insert_receipt(self.transaction.connection(), receipt).await?;
+        self.transaction.commit().await?;
+        Ok(WorldFlowTransaction::Committed(result))
+    }
 }
 
 impl PostgresPersistence {
@@ -127,27 +225,19 @@ impl PostgresPersistence {
         row.map(|row| decode_location(&row)).transpose()
     }
 
-    pub async fn transact_world_flow<T, F>(
+    pub async fn begin_world_flow(
         &self,
         account_id: [u8; ID_BYTES],
         character_id: [u8; ID_BYTES],
         mutation_id: [u8; ID_BYTES],
-        operation: F,
-    ) -> Result<WorldFlowTransaction<T>, PersistenceError>
-    where
-        T: Send,
-        F: FnOnce(&mut WorldFlowTransactionState) -> Result<T, PersistenceError> + Send,
-    {
+    ) -> Result<WorldFlowBegin<'_>, PersistenceError> {
         let mut transaction = self.begin_transaction().await?;
-        let selected_character_id = lock_account(transaction.connection(), &account_id)
-            .await?
-            .map(fixed_bytes)
-            .transpose()?;
+        let account = lock_account(transaction.connection(), &account_id).await?;
         if let Some(receipt) =
             load_receipt(transaction.connection(), &account_id, &mutation_id).await?
         {
             transaction.rollback().await?;
-            return Ok(WorldFlowTransaction::Replayed(Box::new(receipt)));
+            return Ok(WorldFlowBegin::Replayed(Box::new(receipt)));
         }
         let character = lock_character(transaction.connection(), &account_id, &character_id)
             .await?
@@ -161,65 +251,148 @@ impl PostgresPersistence {
             return Err(PersistenceError::CorruptStoredWorldFlow);
         }
         let initial_location = location.clone();
-        let mut state = WorldFlowTransactionState {
-            selected_character_id,
+        let state = WorldFlowTransactionState {
+            account_version: account.state_version,
+            selected_character_id: account.selected_character_id,
             character,
             location,
             new_receipt: None,
             location_changed: false,
         };
-        let result = operation(&mut state)?;
-        if state.location_changed {
-            if state.location == initial_location
-                || state.location.character_version()
-                    != initial_location
-                        .character_version()
-                        .checked_add(1)
-                        .ok_or(PersistenceError::CorruptStoredWorldFlow)?
-            {
-                return Err(PersistenceError::CorruptStoredWorldFlow);
-            }
-            persist_location(
-                transaction.connection(),
-                &account_id,
-                &character_id,
-                &state.location,
-            )
-            .await?;
-        } else if state.location != initial_location {
-            return Err(PersistenceError::CorruptStoredWorldFlow);
-        }
-        let receipt = state
-            .new_receipt
-            .as_ref()
-            .ok_or(PersistenceError::WorldFlowResultRequired)?;
-        if receipt.pre_character_version != initial_location.character_version()
-            || receipt.post_character_version != state.location.character_version()
-            || state.location_changed != (receipt.result_code == 0)
-        {
-            return Err(PersistenceError::CorruptStoredWorldFlow);
-        }
-        validate_receipt_binding(receipt, &account_id, &character_id, &mutation_id)?;
-        insert_receipt(transaction.connection(), receipt).await?;
-        transaction.commit().await?;
-        Ok(WorldFlowTransaction::Committed(result))
+        Ok(WorldFlowBegin::Fresh(Box::new(WorldFlowWrite {
+            transaction,
+            account_id,
+            character_id,
+            mutation_id,
+            initial_location,
+            state,
+        })))
     }
+}
+
+/// Stages the immutable lineage and complete v1 restore root inside a caller-owned transaction.
+/// Provider-owned component rows may be inserted before this call because their root foreign keys
+/// are deferred until commit.
+pub async fn stage_world_flow_danger_entry(
+    transaction: &mut PersistenceTransaction<'_>,
+    root: &StoredDangerEntryRootV1,
+) -> Result<(), PersistenceError> {
+    validate_danger_entry_root(root)?;
+    sqlx::query(
+        "INSERT INTO character_instance_lineages \
+         (namespace_id, account_id, character_id, lineage_id, content_id, layout_id, \
+          lineage_state, records_blake3, assets_blake3, localization_blake3) \
+         VALUES ($1, $2, $3, $4, $5, $6, 0, $7, $8, $9)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(root.account_id.as_slice())
+    .bind(root.character_id.as_slice())
+    .bind(root.lineage_id.as_slice())
+    .bind(&root.danger_location_id)
+    .bind(&root.layout_id)
+    .bind(&root.content_revision.records_blake3)
+    .bind(&root.content_revision.assets_blake3)
+    .bind(&root.content_revision.localization_blake3)
+    .execute(transaction.connection())
+    .await
+    .map_err(PersistenceError::Database)?;
+    sqlx::query(
+        "INSERT INTO character_entry_restore_points \
+         (namespace_id, account_id, character_id, restore_point_id, lineage_id, \
+          source_location_id, restore_location_id, snapshot_contract_version, account_version, \
+          character_version, progression_version, inventory_version, oath_bargain_version, \
+          component_mask, composite_digest, restore_state, records_blake3, assets_blake3, \
+          localization_blake3) \
+         VALUES ($1, $2, $3, $4, $5, $6, 'hub.lantern_halls_01', 1, $7, $8, $9, $10, \
+                 $11, 7, $12, 0, $13, $14, $15)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(root.account_id.as_slice())
+    .bind(root.character_id.as_slice())
+    .bind(root.restore_point_id.as_slice())
+    .bind(root.lineage_id.as_slice())
+    .bind(&root.source_location_id)
+    .bind(root.account_version)
+    .bind(root.character_version)
+    .bind(root.progression_version)
+    .bind(root.inventory_version)
+    .bind(root.oath_bargain_version)
+    .bind(root.composite_digest.as_slice())
+    .bind(&root.content_revision.records_blake3)
+    .bind(&root.content_revision.assets_blake3)
+    .bind(&root.content_revision.localization_blake3)
+    .execute(transaction.connection())
+    .await
+    .map_err(PersistenceError::Database)?;
+    Ok(())
+}
+
+fn validate_danger_entry_root(root: &StoredDangerEntryRootV1) -> Result<(), PersistenceError> {
+    let bounded_content_id = |value: &str| (3..=96).contains(&value.len());
+    if [
+        &root.account_id,
+        &root.character_id,
+        &root.lineage_id,
+        &root.restore_point_id,
+    ]
+    .into_iter()
+    .any(|value| value.iter().all(|byte| *byte == 0))
+        || root.lineage_id == root.restore_point_id
+        || !bounded_content_id(&root.source_location_id)
+        || !bounded_content_id(&root.danger_location_id)
+        || !bounded_content_id(&root.layout_id)
+        || !valid_revision(&root.content_revision)
+        || [
+            root.account_version,
+            root.character_version,
+            root.progression_version,
+            root.inventory_version,
+            root.oath_bargain_version,
+        ]
+        .into_iter()
+        .any(|version| version <= 0)
+        || root.composite_digest.iter().all(|byte| *byte == 0)
+    {
+        return Err(PersistenceError::CorruptStoredWorldFlow);
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LockedWorldFlowAccount {
+    state_version: i64,
+    selected_character_id: Option<[u8; ID_BYTES]>,
 }
 
 async fn lock_account(
     connection: &mut sqlx::PgConnection,
     account_id: &[u8; ID_BYTES],
-) -> Result<Option<Vec<u8>>, PersistenceError> {
-    let selected: Option<Option<Vec<u8>>> = sqlx::query_scalar(
-        "SELECT selected_character_id FROM accounts \
+) -> Result<LockedWorldFlowAccount, PersistenceError> {
+    let row = sqlx::query(
+        "SELECT state_version, selected_character_id FROM accounts \
          WHERE namespace_id = $1 AND account_id = $2 FOR UPDATE",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(account_id.as_slice())
     .fetch_optional(connection)
     .await
-    .map_err(PersistenceError::Database)?;
-    selected.ok_or(PersistenceError::WorldFlowCharacterNotFound)
+    .map_err(PersistenceError::Database)?
+    .ok_or(PersistenceError::WorldFlowCharacterNotFound)?;
+    let state_version = row
+        .try_get("state_version")
+        .map_err(PersistenceError::Database)?;
+    let selected_character_id = row
+        .try_get::<Option<Vec<u8>>, _>("selected_character_id")
+        .map_err(PersistenceError::Database)?
+        .map(fixed_bytes)
+        .transpose()?;
+    if state_version <= 0 {
+        return Err(PersistenceError::CorruptStoredWorldFlow);
+    }
+    Ok(LockedWorldFlowAccount {
+        state_version,
+        selected_character_id,
+    })
 }
 
 async fn lock_character(

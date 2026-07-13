@@ -4,9 +4,9 @@
 //! transaction semantics while the player route remains fail-closed in [`crate::WorldFlowGateService`].
 
 use persistence::{
-    PersistenceError, PostgresPersistence, StoredSafeArrival, StoredWorldFlowRevisionV1,
-    StoredWorldLocation, StoredWorldTransferReceipt, WorldFlowTransaction,
-    WorldFlowTransactionState,
+    PersistenceError, PostgresPersistence, StoredDangerEntryRootV1, StoredSafeArrival,
+    StoredWorldFlowRevisionV1, StoredWorldLocation, StoredWorldTransferReceipt, WorldFlowBegin,
+    WorldFlowTransaction, WorldFlowTransactionState, stage_world_flow_danger_entry,
 };
 use protocol::{
     CharacterLocationSnapshot, WorldFlowContentRevisionV1, WorldFlowFrame, WorldFlowRequest,
@@ -15,15 +15,22 @@ use protocol::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AuthenticatedAccount, AuthenticatedNamespace, IdentityClock, WorldFlowRepositoryError,
-    world_flow_gate::stored_location_snapshot,
+    AuthenticatedAccount, AuthenticatedNamespace, EntryCaptureContext, EntryRestoreProvider,
+    IdentityClock, InventorySecurityRestoreV1, OathBargainRestoreV1,
+    PostgresProgressionRestoreProvider, RestorePointError, RestorePointProviders,
+    WorldFlowRepositoryError, world_flow_gate::stored_location_snapshot,
 };
 
 const HALL_ID: &str = "hub.lantern_halls_01";
 const CHARACTER_SELECT_RETURN_SPAWN_ID: &str = "spawn.hub.character_select_return";
+const REALM_GATE_ID: &str = "station.realm_gate";
+const CORE_MICROREALM_ID: &str = "world.core_microrealm_01";
+const CORE_PRIVATE_LIFE_LAYOUT_ID: &str = "layout.core_private_life_01";
 
 pub trait WorldFlowIdGenerator: Send + Sync {
     fn next_transfer_id(&self) -> [u8; 16];
+    fn next_lineage_id(&self) -> [u8; 16];
+    fn next_restore_point_id(&self) -> [u8; 16];
 }
 
 #[derive(Debug, Clone)]
@@ -123,6 +130,42 @@ where
                     CHARACTER_SELECT_RETURN_SPAWN_ID.to_owned(),
                 ),
             },
+            (
+                WorldTransferCommand::UsePortal { portal_id },
+                StoredWorldLocation::Safe {
+                    location_content_id,
+                    ..
+                },
+            ) if portal_id.as_str() == REALM_GATE_ID && location_content_id == HALL_ID => {
+                let transfer_id = self.generator.next_transfer_id();
+                let lineage_id = self.generator.next_lineage_id();
+                let restore_point_id = self.generator.next_restore_point_id();
+                if [transfer_id, lineage_id, restore_point_id]
+                    .into_iter()
+                    .any(|identity| identity.iter().all(|byte| *byte == 0))
+                    || transfer_id == lineage_id
+                    || transfer_id == restore_point_id
+                    || lineage_id == restore_point_id
+                {
+                    return Err(PersistenceError::CorruptStoredWorldFlow);
+                }
+                let next_location = StoredWorldLocation::Danger {
+                    character_version: next_version,
+                    location_content_id: CORE_MICROREALM_ID.to_owned(),
+                    instance_lineage_id: lineage_id,
+                    entry_restore_point_id: restore_point_id,
+                };
+                let snapshot = protocol_snapshot(mutation.character_id, &next_location)?;
+                state.location = next_location;
+                state.location_changed = true;
+                return Ok(staged_result(
+                    request_sequence,
+                    mutation,
+                    WorldTransferResultCode::Accepted,
+                    Some(snapshot),
+                    Some(transfer_id),
+                ));
+            }
             (WorldTransferCommand::UsePortal { .. }, _) => {
                 return Ok(staged_result(
                     request_sequence,
@@ -196,25 +239,35 @@ where
 }
 
 #[derive(Debug, Clone)]
-pub struct PostgresDormantWorldFlowCoordinator<Generator, Clock> {
+pub struct PostgresDormantWorldFlowCoordinator<Generator, Clock, Inventory, OathBargains> {
     persistence: PostgresPersistence,
     planner: DormantWorldFlowPlanner<Generator, Clock>,
+    restore_providers:
+        RestorePointProviders<PostgresProgressionRestoreProvider, Inventory, OathBargains>,
 }
 
-impl<Generator, Clock> PostgresDormantWorldFlowCoordinator<Generator, Clock>
+impl<Generator, Clock, Inventory, OathBargains>
+    PostgresDormantWorldFlowCoordinator<Generator, Clock, Inventory, OathBargains>
 where
     Generator: WorldFlowIdGenerator,
     Clock: IdentityClock,
+    Inventory: EntryRestoreProvider<Snapshot = InventorySecurityRestoreV1>,
+    OathBargains: EntryRestoreProvider<Snapshot = OathBargainRestoreV1>,
 {
-    pub const fn new(
+    pub fn new(
         persistence: PostgresPersistence,
         generator: Generator,
         clock: Clock,
         required_content_revision: WorldFlowContentRevisionV1,
+        progression: PostgresProgressionRestoreProvider,
+        inventory: Inventory,
+        oath_bargains: OathBargains,
     ) -> Self {
+        let restore_providers = RestorePointProviders::new(progression, inventory, oath_bargains);
         Self {
             persistence,
             planner: DormantWorldFlowPlanner::new(generator, clock, required_content_revision),
+            restore_providers,
         }
     }
 
@@ -240,26 +293,23 @@ where
                 None,
             );
         }
-        match self
+        let begin = self
             .persistence
-            .transact_world_flow(
+            .begin_world_flow(
                 authenticated.account_id.as_bytes(),
                 mutation.character_id,
                 mutation.mutation_id,
-                |state| {
-                    self.planner
-                        .plan_fresh(authenticated, frame.sequence, mutation, state)
-                },
             )
-            .await
-        {
-            Ok(WorldFlowTransaction::Committed(result)) => result,
-            Ok(WorldFlowTransaction::Replayed(receipt)) => DormantWorldFlowPlanner::<
-                Generator,
-                Clock,
-            >::replay(
-                frame.sequence, mutation, &receipt
-            ),
+            .await;
+        let mut write = match begin {
+            Ok(WorldFlowBegin::Replayed(receipt)) => {
+                return DormantWorldFlowPlanner::<Generator, Clock>::replay(
+                    frame.sequence,
+                    mutation,
+                    &receipt,
+                );
+            }
+            Ok(WorldFlowBegin::Fresh(write)) => *write,
             Err(PersistenceError::WorldFlowCharacterNotFound) => {
                 let code = match self
                     .persistence
@@ -272,8 +322,36 @@ where
                     Ok(_) => WorldTransferResultCode::CharacterNotFound,
                     Err(_) => WorldTransferResultCode::ServiceUnavailable,
                 };
-                staged_result(frame.sequence, mutation, code, None, None)
+                return staged_result(frame.sequence, mutation, code, None, None);
             }
+            Err(_) => {
+                return staged_result(
+                    frame.sequence,
+                    mutation,
+                    WorldTransferResultCode::ServiceUnavailable,
+                    None,
+                    None,
+                );
+            }
+        };
+        let Ok(result) =
+            self.planner
+                .plan_fresh(authenticated, frame.sequence, mutation, write.state_mut())
+        else {
+            return staged_result(
+                frame.sequence,
+                mutation,
+                WorldTransferResultCode::ServiceUnavailable,
+                None,
+                None,
+            );
+        };
+        if let Err(code) = self.capture_danger_entry(&mut write, mutation).await {
+            return staged_result(frame.sequence, mutation, code, None, None);
+        }
+        match write.commit(result).await {
+            Ok(WorldFlowTransaction::Committed(result)) => result,
+            Ok(WorldFlowTransaction::Replayed(_)) => unreachable!("fresh write cannot replay"),
             Err(_) => staged_result(
                 frame.sequence,
                 mutation,
@@ -282,6 +360,108 @@ where
                 None,
             ),
         }
+    }
+
+    async fn capture_danger_entry(
+        &self,
+        write: &mut persistence::WorldFlowWrite<'_>,
+        mutation: &WorldTransferMutation,
+    ) -> Result<(), WorldTransferResultCode> {
+        if !write.state().location_changed {
+            return Ok(());
+        }
+        let (
+            account_id,
+            account_version,
+            character_version,
+            lineage_id,
+            restore_point_id,
+            danger_location_id,
+        ) = match &write.state().location {
+            StoredWorldLocation::Danger {
+                character_version: post_version,
+                location_content_id,
+                instance_lineage_id,
+                entry_restore_point_id,
+            } => (
+                write
+                    .state()
+                    .new_receipt
+                    .as_ref()
+                    .ok_or(WorldTransferResultCode::ServiceUnavailable)?
+                    .account_id,
+                write.state().account_version,
+                post_version
+                    .checked_sub(1)
+                    .ok_or(WorldTransferResultCode::ServiceUnavailable)?,
+                *instance_lineage_id,
+                *entry_restore_point_id,
+                location_content_id.clone(),
+            ),
+            _ => return Ok(()),
+        };
+        let account_version = u64::try_from(account_version)
+            .map_err(|_| WorldTransferResultCode::ServiceUnavailable)?;
+        let character_version = u64::try_from(character_version)
+            .map_err(|_| WorldTransferResultCode::ServiceUnavailable)?;
+        let snapshot = self
+            .restore_providers
+            .capture_v1(
+                write.transaction_mut(),
+                EntryCaptureContext {
+                    account_id,
+                    character_id: mutation.character_id,
+                    restore_point_id,
+                },
+                mutation.payload.content_revision.clone(),
+                account_version,
+                character_version,
+            )
+            .await
+            .map_err(restore_capture_code)?;
+        let root = StoredDangerEntryRootV1 {
+            account_id,
+            character_id: mutation.character_id,
+            lineage_id,
+            restore_point_id,
+            source_location_id: HALL_ID.to_owned(),
+            danger_location_id,
+            layout_id: CORE_PRIVATE_LIFE_LAYOUT_ID.to_owned(),
+            content_revision: stored_revision(&snapshot.content_revision),
+            account_version: i64::try_from(snapshot.versions.account_version)
+                .map_err(|_| WorldTransferResultCode::ServiceUnavailable)?,
+            character_version: i64::try_from(snapshot.versions.character_version)
+                .map_err(|_| WorldTransferResultCode::ServiceUnavailable)?,
+            progression_version: i64::try_from(snapshot.versions.progression_version)
+                .map_err(|_| WorldTransferResultCode::ServiceUnavailable)?,
+            inventory_version: i64::try_from(snapshot.versions.inventory_version)
+                .map_err(|_| WorldTransferResultCode::ServiceUnavailable)?,
+            oath_bargain_version: i64::try_from(snapshot.versions.oath_bargain_version)
+                .map_err(|_| WorldTransferResultCode::ServiceUnavailable)?,
+            composite_digest: snapshot.composite_digest().map_err(restore_capture_code)?,
+        };
+        stage_world_flow_danger_entry(write.transaction_mut(), &root)
+            .await
+            .map_err(|_| WorldTransferResultCode::ServiceUnavailable)
+    }
+}
+
+const fn restore_capture_code(error: RestorePointError) -> WorldTransferResultCode {
+    match error {
+        RestorePointError::Persistence => WorldTransferResultCode::ServiceUnavailable,
+        RestorePointError::ZeroItemUid
+        | RestorePointError::ZeroCharacterId
+        | RestorePointError::ZeroContextIdentity
+        | RestorePointError::InvalidProgression
+        | RestorePointError::InvalidInventory
+        | RestorePointError::InvalidBeltStack
+        | RestorePointError::DuplicateItemUid
+        | RestorePointError::InvalidOathBargains
+        | RestorePointError::ZeroAggregateVersion
+        | RestorePointError::AggregateVersionMismatch
+        | RestorePointError::Encoding
+        | RestorePointError::IncompleteRestorePoint
+        | RestorePointError::RestoreSuperseded => WorldTransferResultCode::IncompleteRestorePoint,
     }
 }
 
@@ -438,6 +618,14 @@ mod tests {
         fn next_transfer_id(&self) -> [u8; 16] {
             [8; 16]
         }
+
+        fn next_lineage_id(&self) -> [u8; 16] {
+            [9; 16]
+        }
+
+        fn next_restore_point_id(&self) -> [u8; 16] {
+            [10; 16]
+        }
     }
 
     #[derive(Debug, Clone, Copy)]
@@ -481,6 +669,7 @@ mod tests {
 
     fn state(location: StoredWorldLocation) -> WorldFlowTransactionState {
         WorldFlowTransactionState {
+            account_version: 1,
             selected_character_id: Some([2; 16]),
             character: persistence::StoredWorldFlowCharacter {
                 life_state: 0,
@@ -637,6 +826,46 @@ mod tests {
             }
         ));
         assert!(!portal.location_changed);
+    }
+
+    #[test]
+    fn exact_realm_gate_stages_distinct_danger_identities_after_safe_preflight() {
+        let planner = DormantWorldFlowPlanner::new(FixedIds, FixedClock, revision());
+        let mut state = state(StoredWorldLocation::Safe {
+            character_version: 4,
+            location_content_id: HALL_ID.to_owned(),
+            arrival: StoredSafeArrival::HallDefault,
+        });
+        state.character.character_version = 4;
+        let mutation = mutation(
+            WorldTransferCommand::UsePortal {
+                portal_id: WireText::new(REALM_GATE_ID).unwrap(),
+            },
+            4,
+        );
+        let result = planner
+            .plan_fresh(authenticated(), 7, &mutation, &mut state)
+            .unwrap();
+        assert!(matches!(
+            result,
+            WorldFlowResult::Transfer {
+                code: WorldTransferResultCode::Accepted,
+                transfer_id: Some(transfer_id),
+                snapshot: Some(CharacterLocationSnapshot {
+                    location: CharacterLocation::Danger {
+                        ref location_id,
+                        instance_lineage_id,
+                        entry_restore_point_id,
+                    },
+                    ..
+                }),
+                ..
+            } if transfer_id == [8; 16]
+                && instance_lineage_id == [9; 16]
+                && entry_restore_point_id == [10; 16]
+                && location_id.as_str() == CORE_MICROREALM_ID
+        ));
+        assert!(state.location_changed);
     }
 
     #[test]

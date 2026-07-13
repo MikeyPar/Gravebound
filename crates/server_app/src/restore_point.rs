@@ -204,7 +204,7 @@ impl DangerEntrySnapshotV1 {
 pub struct EntryCaptureContext {
     pub account_id: [u8; ID_BYTES],
     pub character_id: [u8; ID_BYTES],
-    pub transfer_id: [u8; ID_BYTES],
+    pub restore_point_id: [u8; ID_BYTES],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -271,7 +271,7 @@ where
         validate_context(
             &context.account_id,
             &context.character_id,
-            &context.transfer_id,
+            &context.restore_point_id,
         )?;
         let progression = self.progression.capture(transaction, context).await?;
         let inventory = self.inventory.capture(transaction, context).await?;

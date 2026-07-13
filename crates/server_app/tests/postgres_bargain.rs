@@ -248,7 +248,7 @@ async fn begin_core_danger_entry(
             EntryCaptureContext {
                 account_id: ids.account,
                 character_id: ids.character,
-                transfer_id: ids.restore,
+                restore_point_id: ids.restore,
             },
         )
         .await
