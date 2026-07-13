@@ -803,12 +803,15 @@ async fn stage_complete_core_combat_package(
         let created_version = i64::from(ordinal) + 3;
         let offer_id = [u8::try_from(81 + index).unwrap(); 16];
         let reward_id = [u8::try_from(84 + index).unwrap(); 16];
+        let lineage_id = [75_u8; 16];
+        let restore_id = [76_u8; 16];
         sqlx::query(
             "INSERT INTO bargain_offers (namespace_id, account_id, character_id, offer_id, \
-             source_reward_event_id, content_version, records_blake3, assets_blake3, \
+             source_reward_event_id, source_content_id, source_layout_id, instance_lineage_id, \
+             entry_restore_point_id, content_version, records_blake3, assets_blake3, \
              localization_blake3, offer_state, selected_bargain_id, \
              created_oath_bargain_version, resolved_oath_bargain_version, resolved_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 1, $10, $11, $12, \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 1, $14, $15, $16, \
              transaction_timestamp())",
         )
         .bind(WIPEABLE_CORE_NAMESPACE)
@@ -816,6 +819,10 @@ async fn stage_complete_core_combat_package(
         .bind(character_id.as_slice())
         .bind(offer_id.as_slice())
         .bind(reward_id.as_slice())
+        .bind(persistence::CORE_BARGAIN_SOURCE_ID)
+        .bind(persistence::CORE_BARGAIN_LAYOUT_ID)
+        .bind(lineage_id.as_slice())
+        .bind(restore_id.as_slice())
         .bind(catalog.revision_label())
         .bind(&hashes.records_blake3)
         .bind(&hashes.assets_blake3)
