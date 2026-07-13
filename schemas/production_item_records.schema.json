@@ -584,6 +584,12 @@
         "localization_name_key": {
           "$ref": "#/$defs/ContentId"
         },
+        "maximum_item_level": {
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        },
         "other_class_weapon_relic_basis_points": {
           "type": "integer",
           "format": "uint16",
@@ -633,6 +639,7 @@
         "universal_armor_charm_basis_points",
         "weapon_within_class_basis_points",
         "armor_within_universal_basis_points",
+        "maximum_item_level",
         "affix_manifest_id",
         "enabled_family_fragment_checks",
         "enabled_cosmetic_checks"

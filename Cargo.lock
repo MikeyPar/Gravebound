@@ -5410,6 +5410,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sim_core",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

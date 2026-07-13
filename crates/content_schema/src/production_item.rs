@@ -279,6 +279,7 @@ pub struct ProductionItemStagePolicyRecord {
     pub universal_armor_charm_basis_points: u16,
     pub weapon_within_class_basis_points: u16,
     pub armor_within_universal_basis_points: u16,
+    pub maximum_item_level: u8,
     pub fixed_rarity_profile_id: Option<ContentId>,
     pub affix_manifest_id: ContentId,
     pub enabled_family_fragment_checks: bool,

@@ -10,6 +10,8 @@ use content_schema::{
     ProductionMaterialPoolRecord, ProductionRarityProfileRecord, ProductionRewardRoll,
     ProductionRewardTableRecord, SCHEMA_VERSION,
 };
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 const BASIS_POINTS: u32 = 10_000;
 const CORE_AFFIX_MANIFEST_ID: &str = "manifest.affixes.core";
@@ -54,6 +56,347 @@ impl CompiledProductionItemCatalog {
     pub const fn stage_policies(&self) -> &BTreeMap<String, ProductionItemStagePolicyRecord> {
         &self.stage_policies
     }
+}
+
+pub trait ProductionRewardDrawSource {
+    fn draw_below(&mut self, upper_exclusive: u32) -> Result<u32, ProductionRewardPlanningError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProductionRewardPlanRequest<'a> {
+    pub reward_table_id: &'a str,
+    pub stage_policy_id: &'a str,
+    pub current_class_id: &'a str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProductionRewardPlan {
+    pub content_revision: String,
+    pub reward_table_id: String,
+    pub entries: Vec<ProductionRewardPlanEntry>,
+}
+
+impl ProductionRewardPlan {
+    pub fn canonical_hash(&self) -> Result<[u8; 32], ProductionRewardPlanningError> {
+        let encoded =
+            serde_json::to_vec(self).map_err(|_| ProductionRewardPlanningError::EncodingFailed)?;
+        Ok(*blake3::hash(&encoded).as_bytes())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "entry_kind", rename_all = "snake_case")]
+pub enum ProductionRewardPlanEntry {
+    Equipment {
+        roll_index: u16,
+        template_id: String,
+        item_level: u8,
+        rarity: ProductionItemRarity,
+    },
+    Material {
+        roll_index: u16,
+        item_id: String,
+        quantity: u16,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlannedEquipmentPool {
+    CurrentClass(EquipmentSlot),
+    Universal(EquipmentSlot),
+}
+
+impl CompiledProductionItemCatalog {
+    /// Resolves only immutable reward facts. UID allocation, affixes, placement, and ledgers are
+    /// later transactional concerns and cannot be reached through this function.
+    pub fn plan_reward(
+        &self,
+        request: &ProductionRewardPlanRequest<'_>,
+        draws: &mut impl ProductionRewardDrawSource,
+    ) -> Result<ProductionRewardPlan, ProductionRewardPlanningError> {
+        let table = self
+            .reward_tables
+            .get(request.reward_table_id)
+            .ok_or(ProductionRewardPlanningError::UnknownRewardTable)?;
+        let policy = self
+            .stage_policies
+            .get(request.stage_policy_id)
+            .ok_or(ProductionRewardPlanningError::UnknownStagePolicy)?;
+        let fixed_rarity = policy
+            .fixed_rarity_profile_id
+            .as_ref()
+            .and_then(|id| self.rarity_profiles.get(id.as_str()))
+            .ok_or(ProductionRewardPlanningError::InvalidCompiledCatalog)?;
+        let mut entries = Vec::new();
+        let mut roll_index = 0_u16;
+        for roll in &table.ordered_rolls {
+            let (presence, count) = roll_presence_count(roll);
+            let present = draws.draw_below(10_000)? < u32::from(presence);
+            for _ in 0..count {
+                let index = roll_index;
+                roll_index = roll_index
+                    .checked_add(1)
+                    .ok_or(ProductionRewardPlanningError::RollIndexExhausted)?;
+                if !present {
+                    continue;
+                }
+                match roll {
+                    ProductionRewardRoll::Equipment {
+                        rarity_profile_id, ..
+                    } => {
+                        let pool = choose_equipment_pool(policy, draws)?;
+                        entries.push(self.plan_equipment(
+                            index,
+                            pool,
+                            rarity_profile_id.as_str(),
+                            fixed_rarity,
+                            policy.maximum_item_level,
+                            request.current_class_id,
+                            draws,
+                        )?);
+                    }
+                    ProductionRewardRoll::UniversalItem {
+                        rarity_profile_id, ..
+                    } => {
+                        let slot = if draws.draw_below(10_000)?
+                            < u32::from(policy.armor_within_universal_basis_points)
+                        {
+                            EquipmentSlot::Armor
+                        } else {
+                            EquipmentSlot::Charm
+                        };
+                        entries.push(self.plan_equipment(
+                            index,
+                            PlannedEquipmentPool::Universal(slot),
+                            rarity_profile_id.as_str(),
+                            fixed_rarity,
+                            policy.maximum_item_level,
+                            request.current_class_id,
+                            draws,
+                        )?);
+                    }
+                    ProductionRewardRoll::Material {
+                        material_pool_id, ..
+                    } => {
+                        entries.push(self.plan_material(
+                            index,
+                            material_pool_id.as_str(),
+                            draws,
+                        )?);
+                    }
+                }
+            }
+        }
+        Ok(ProductionRewardPlan {
+            content_revision: self.revision_label.clone(),
+            reward_table_id: request.reward_table_id.to_owned(),
+            entries,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)] // Every argument is one authored reward dimension.
+    fn plan_equipment(
+        &self,
+        roll_index: u16,
+        pool: PlannedEquipmentPool,
+        source_rarity_profile_id: &str,
+        fixed_rarity: &ProductionRarityProfileRecord,
+        stage_maximum_item_level: u8,
+        current_class_id: &str,
+        draws: &mut impl ProductionRewardDrawSource,
+    ) -> Result<ProductionRewardPlanEntry, ProductionRewardPlanningError> {
+        let source_profile = self
+            .rarity_profiles
+            .get(source_rarity_profile_id)
+            .ok_or(ProductionRewardPlanningError::InvalidCompiledCatalog)?;
+        let maximum = source_profile
+            .maximum_item_level
+            .min(stage_maximum_item_level);
+        if source_profile.minimum_item_level > maximum {
+            return Err(ProductionRewardPlanningError::NoLegalItemLevel);
+        }
+        let level_width = u32::from(maximum - source_profile.minimum_item_level) + 1;
+        let item_level = source_profile.minimum_item_level
+            + u8::try_from(draws.draw_below(level_width)?)
+                .map_err(|_| ProductionRewardPlanningError::DrawOutOfRange)?;
+        let rarity = draw_rarity(fixed_rarity, draws)?;
+        let candidates = self
+            .items
+            .iter()
+            .filter_map(|(id, item)| {
+                legal_equipment_candidate(item, pool, item_level, current_class_id)
+                    .then_some(id.as_str())
+            })
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            return Err(ProductionRewardPlanningError::NoLegalTemplate);
+        }
+        let selected = usize::try_from(
+            draws.draw_below(
+                u32::try_from(candidates.len())
+                    .map_err(|_| ProductionRewardPlanningError::DrawOutOfRange)?,
+            )?,
+        )
+        .map_err(|_| ProductionRewardPlanningError::DrawOutOfRange)?;
+        Ok(ProductionRewardPlanEntry::Equipment {
+            roll_index,
+            template_id: candidates[selected].to_owned(),
+            item_level,
+            rarity,
+        })
+    }
+
+    fn plan_material(
+        &self,
+        roll_index: u16,
+        material_pool_id: &str,
+        draws: &mut impl ProductionRewardDrawSource,
+    ) -> Result<ProductionRewardPlanEntry, ProductionRewardPlanningError> {
+        let pool = self
+            .material_pools
+            .get(material_pool_id)
+            .ok_or(ProductionRewardPlanningError::InvalidCompiledCatalog)?;
+        let draw = draws.draw_below(100)?;
+        let mut cumulative = 0_u32;
+        let selected = pool
+            .ordered_outcomes
+            .iter()
+            .find(|outcome| {
+                cumulative += u32::from(outcome.weight);
+                draw < cumulative
+            })
+            .ok_or(ProductionRewardPlanningError::InvalidCompiledCatalog)?;
+        Ok(ProductionRewardPlanEntry::Material {
+            roll_index,
+            item_id: selected.item_id.as_str().to_owned(),
+            quantity: selected.quantity,
+        })
+    }
+}
+
+fn roll_presence_count(roll: &ProductionRewardRoll) -> (u16, u8) {
+    match roll {
+        ProductionRewardRoll::Equipment {
+            presence_basis_points,
+            count,
+            ..
+        }
+        | ProductionRewardRoll::UniversalItem {
+            presence_basis_points,
+            count,
+            ..
+        }
+        | ProductionRewardRoll::Material {
+            presence_basis_points,
+            count,
+            ..
+        } => (*presence_basis_points, *count),
+    }
+}
+
+fn choose_equipment_pool(
+    policy: &ProductionItemStagePolicyRecord,
+    draws: &mut impl ProductionRewardDrawSource,
+) -> Result<PlannedEquipmentPool, ProductionRewardPlanningError> {
+    let usability = draws.draw_below(10_000)?;
+    let current_end = u32::from(policy.current_class_weapon_relic_basis_points);
+    let other_end = current_end + u32::from(policy.other_class_weapon_relic_basis_points);
+    if usability < current_end {
+        let slot = if draws.draw_below(10_000)? < u32::from(policy.weapon_within_class_basis_points)
+        {
+            EquipmentSlot::Weapon
+        } else {
+            EquipmentSlot::Relic
+        };
+        Ok(PlannedEquipmentPool::CurrentClass(slot))
+    } else if usability < other_end {
+        Err(ProductionRewardPlanningError::OtherClassUnavailable)
+    } else {
+        let slot =
+            if draws.draw_below(10_000)? < u32::from(policy.armor_within_universal_basis_points) {
+                EquipmentSlot::Armor
+            } else {
+                EquipmentSlot::Charm
+            };
+        Ok(PlannedEquipmentPool::Universal(slot))
+    }
+}
+
+fn draw_rarity(
+    profile: &ProductionRarityProfileRecord,
+    draws: &mut impl ProductionRewardDrawSource,
+) -> Result<ProductionItemRarity, ProductionRewardPlanningError> {
+    let draw = draws.draw_below(10_000)?;
+    let mut cumulative = 0_u32;
+    profile
+        .ordered_weights
+        .iter()
+        .find_map(|weight| {
+            cumulative += u32::from(weight.weight_basis_points);
+            (draw < cumulative).then_some(weight.rarity)
+        })
+        .ok_or(ProductionRewardPlanningError::InvalidCompiledCatalog)
+}
+
+fn legal_equipment_candidate(
+    record: &ProductionItemTemplateRecord,
+    pool: PlannedEquipmentPool,
+    item_level: u8,
+    current_class_id: &str,
+) -> bool {
+    let ProductionItemTemplatePayload::Equipment {
+        slot,
+        class_id,
+        minimum_item_level,
+        maximum_item_level,
+        core_maximum_item_level_override,
+        ..
+    } = &record.payload
+    else {
+        return false;
+    };
+    let maximum = core_maximum_item_level_override.unwrap_or(*maximum_item_level);
+    if !record.header.enabled
+        || item_level < *minimum_item_level
+        || item_level > maximum
+        || *slot
+            != match pool {
+                PlannedEquipmentPool::CurrentClass(slot)
+                | PlannedEquipmentPool::Universal(slot) => slot,
+            }
+    {
+        return false;
+    }
+    match pool {
+        PlannedEquipmentPool::CurrentClass(_) => class_id
+            .as_ref()
+            .is_some_and(|class| class.as_str() == current_class_id),
+        PlannedEquipmentPool::Universal(_) => class_id.is_none(),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum ProductionRewardPlanningError {
+    #[error("reward table is not compiled")]
+    UnknownRewardTable,
+    #[error("item stage policy is not compiled")]
+    UnknownStagePolicy,
+    #[error("compiled item/reward catalog is internally inconsistent")]
+    InvalidCompiledCatalog,
+    #[error("bounded reward draw source returned an invalid value")]
+    DrawOutOfRange,
+    #[error("bounded reward draw source is exhausted")]
+    DrawSourceExhausted,
+    #[error("Core has no other-class equipment pool")]
+    OtherClassUnavailable,
+    #[error("reward profile has no legal Core item level")]
+    NoLegalItemLevel,
+    #[error("reward roll has no legal template")]
+    NoLegalTemplate,
+    #[error("reward roll index exhausted")]
+    RollIndexExhausted,
+    #[error("reward plan encoding failed")]
+    EncodingFailed,
 }
 
 pub fn compile_production_item_catalog(
@@ -478,6 +821,7 @@ fn validate_core_policy(
         || record.universal_armor_charm_basis_points != 1_500
         || record.weapon_within_class_basis_points != 5_000
         || record.armor_within_universal_basis_points != 5_000
+        || record.maximum_item_level != 10
         || record.affix_manifest_id.as_str() != CORE_AFFIX_MANIFEST_ID
         || record.enabled_family_fragment_checks
         || record.enabled_cosmetic_checks
@@ -588,6 +932,42 @@ mod tests {
                 },
             },
             ProductionItemTemplateRecord {
+                header: header("item.armor.ashplate.t1"),
+                payload: ProductionItemTemplatePayload::Equipment {
+                    slot: EquipmentSlot::Armor,
+                    class_id: None,
+                    family: ProductionEquipmentFamily::Ashplate,
+                    minimum_item_level: 1,
+                    maximum_item_level: 6,
+                    core_maximum_item_level_override: Some(10),
+                    capability_tags: vec!["slot.armor".to_owned()],
+                    affix_exclusion_ids: vec![],
+                    behavior: ProductionEquipmentBehavior::Armor {
+                        family: ProductionArmorFamily::Ashplate,
+                    },
+                },
+            },
+            ProductionItemTemplateRecord {
+                header: header("item.charm.ember_tooth.t1"),
+                payload: ProductionItemTemplatePayload::Equipment {
+                    slot: EquipmentSlot::Charm,
+                    class_id: None,
+                    family: ProductionEquipmentFamily::Charm,
+                    minimum_item_level: 1,
+                    maximum_item_level: 6,
+                    core_maximum_item_level_override: Some(10),
+                    capability_tags: vec!["slot.charm".to_owned()],
+                    affix_exclusion_ids: vec![],
+                    behavior: ProductionEquipmentBehavior::Charm {
+                        effect: content_schema::ProductionCharmEffect::RestedPrimaryDamage {
+                            idle_millis: 2_000,
+                            bonus_basis_points: 1_500,
+                            consumed_on_release: true,
+                        },
+                    },
+                },
+            },
+            ProductionItemTemplateRecord {
                 header: header("item.weapon.crossbow.pine_crossbow"),
                 payload: ProductionItemTemplatePayload::Equipment {
                     slot: EquipmentSlot::Weapon,
@@ -612,15 +992,36 @@ mod tests {
                 },
             },
         ];
-        let rarity_profiles = vec![ProductionRarityProfileRecord {
-            header: header("rarity.core_fixed"),
-            minimum_item_level: 1,
-            maximum_item_level: 10,
-            ordered_weights: vec![ProductionRarityWeight {
-                rarity: ProductionItemRarity::Forged,
-                weight_basis_points: 10_000,
-            }],
-        }];
+        let rarity_profiles = vec![
+            ProductionRarityProfileRecord {
+                header: header("rarity.core_fixed"),
+                minimum_item_level: 1,
+                maximum_item_level: 10,
+                ordered_weights: vec![ProductionRarityWeight {
+                    rarity: ProductionItemRarity::Forged,
+                    weight_basis_points: 10_000,
+                }],
+            },
+            ProductionRarityProfileRecord {
+                header: header("rarity.normal_outer"),
+                minimum_item_level: 1,
+                maximum_item_level: 6,
+                ordered_weights: vec![
+                    ProductionRarityWeight {
+                        rarity: ProductionItemRarity::Forged,
+                        weight_basis_points: 7_000,
+                    },
+                    ProductionRarityWeight {
+                        rarity: ProductionItemRarity::Oathed,
+                        weight_basis_points: 2_600,
+                    },
+                    ProductionRarityWeight {
+                        rarity: ProductionItemRarity::Relic,
+                        weight_basis_points: 400,
+                    },
+                ],
+            },
+        ];
         let material_pools = vec![ProductionMaterialPoolRecord {
             header: header("material.core_tonic"),
             ordered_outcomes: vec![ProductionMaterialPoolOutcome {
@@ -629,21 +1030,31 @@ mod tests {
                 weight: 100,
             }],
         }];
-        let reward_tables = vec![ProductionRewardTableRecord {
-            header: header("reward.normal_outer"),
-            ordered_rolls: vec![
-                ProductionRewardRoll::UniversalItem {
-                    presence_basis_points: 800,
+        let reward_tables = vec![
+            ProductionRewardTableRecord {
+                header: header("reward.elite_outer"),
+                ordered_rolls: vec![ProductionRewardRoll::Equipment {
+                    presence_basis_points: 10_000,
                     count: 1,
-                    rarity_profile_id: id("rarity.core_fixed"),
-                },
-                ProductionRewardRoll::Material {
-                    presence_basis_points: 1_200,
-                    count: 1,
-                    material_pool_id: id("material.core_tonic"),
-                },
-            ],
-        }];
+                    rarity_profile_id: id("rarity.normal_outer"),
+                }],
+            },
+            ProductionRewardTableRecord {
+                header: header("reward.normal_outer"),
+                ordered_rolls: vec![
+                    ProductionRewardRoll::UniversalItem {
+                        presence_basis_points: 800,
+                        count: 1,
+                        rarity_profile_id: id("rarity.normal_outer"),
+                    },
+                    ProductionRewardRoll::Material {
+                        presence_basis_points: 1_200,
+                        count: 1,
+                        material_pool_id: id("material.core_tonic"),
+                    },
+                ],
+            },
+        ];
         let stage_policies = vec![ProductionItemStagePolicyRecord {
             header: header("policy.items.core"),
             current_class_weapon_relic_basis_points: 8_500,
@@ -651,6 +1062,7 @@ mod tests {
             universal_armor_charm_basis_points: 1_500,
             weapon_within_class_basis_points: 5_000,
             armor_within_universal_basis_points: 5_000,
+            maximum_item_level: 10,
             fixed_rarity_profile_id: Some(id("rarity.core_fixed")),
             affix_manifest_id: id("manifest.affixes.core"),
             enabled_family_fragment_checks: false,
@@ -669,10 +1081,12 @@ mod tests {
             target_name: "core-items-dev".to_owned(),
             required_item_ids: vec![
                 id("consumable.red_tonic"),
+                id("item.armor.ashplate.t1"),
+                id("item.charm.ember_tooth.t1"),
                 id("item.weapon.crossbow.pine_crossbow"),
             ],
-            required_rarity_profile_ids: vec![id("rarity.core_fixed")],
-            required_reward_table_ids: vec![id("reward.normal_outer")],
+            required_rarity_profile_ids: vec![id("rarity.core_fixed"), id("rarity.normal_outer")],
+            required_reward_table_ids: vec![id("reward.elite_outer"), id("reward.normal_outer")],
             required_material_pool_ids: vec![id("material.core_tonic")],
             required_stage_policy_ids: vec![id("policy.items.core")],
             expected_manifest_blake3: "a".repeat(64),
@@ -691,7 +1105,7 @@ mod tests {
             compiled.revision_label(),
             format!("core-dev.blake3.{}", "a".repeat(64))
         );
-        assert_eq!(compiled.items().len(), 2);
+        assert_eq!(compiled.items().len(), 4);
     }
 
     #[test]
@@ -731,5 +1145,158 @@ mod tests {
             },
         };
         assert!(compile_production_item_catalog(&target, &records).is_err());
+    }
+
+    #[derive(Debug)]
+    struct DrawTape(std::collections::VecDeque<u32>);
+
+    impl DrawTape {
+        fn new(values: impl IntoIterator<Item = u32>) -> Self {
+            Self(values.into_iter().collect())
+        }
+
+        fn exhausted(&self) -> bool {
+            self.0.is_empty()
+        }
+    }
+
+    impl ProductionRewardDrawSource for DrawTape {
+        fn draw_below(
+            &mut self,
+            upper_exclusive: u32,
+        ) -> Result<u32, ProductionRewardPlanningError> {
+            let value = self
+                .0
+                .pop_front()
+                .ok_or(ProductionRewardPlanningError::DrawSourceExhausted)?;
+            if upper_exclusive == 0 || value >= upper_exclusive {
+                return Err(ProductionRewardPlanningError::DrawOutOfRange);
+            }
+            Ok(value)
+        }
+    }
+
+    #[test]
+    fn injected_draw_order_resolves_current_class_and_universal_pools_exactly() {
+        let (target, records) = fixture();
+        let compiled = compile_production_item_catalog(&target, &records).unwrap();
+        let request = ProductionRewardPlanRequest {
+            reward_table_id: "reward.elite_outer",
+            stage_policy_id: "policy.items.core",
+            current_class_id: "class.grave_arbalist",
+        };
+        // presence, usability=current, slot=weapon, level=6, rarity=Forged, template.
+        let mut tape = DrawTape::new([0, 0, 0, 5, 0, 0]);
+        let plan = compiled.plan_reward(&request, &mut tape).unwrap();
+        assert!(tape.exhausted());
+        assert_eq!(
+            plan.entries,
+            vec![ProductionRewardPlanEntry::Equipment {
+                roll_index: 0,
+                template_id: "item.weapon.crossbow.pine_crossbow".to_owned(),
+                item_level: 6,
+                rarity: ProductionItemRarity::Forged,
+            }]
+        );
+
+        let request = ProductionRewardPlanRequest {
+            reward_table_id: "reward.normal_outer",
+            ..request
+        };
+        // universal present, armor slot, level=6, rarity=Forged, template, material absent.
+        let mut tape = DrawTape::new([0, 0, 5, 0, 0, 9_999]);
+        let plan = compiled.plan_reward(&request, &mut tape).unwrap();
+        assert!(tape.exhausted());
+        assert_eq!(
+            plan.entries,
+            vec![ProductionRewardPlanEntry::Equipment {
+                roll_index: 0,
+                template_id: "item.armor.ashplate.t1".to_owned(),
+                item_level: 6,
+                rarity: ProductionItemRarity::Forged,
+            }]
+        );
+    }
+
+    #[test]
+    fn material_category_plan_and_revision_bound_hash_are_deterministic() {
+        let (target, records) = fixture();
+        let compiled = compile_production_item_catalog(&target, &records).unwrap();
+        let request = ProductionRewardPlanRequest {
+            reward_table_id: "reward.normal_outer",
+            stage_policy_id: "policy.items.core",
+            current_class_id: "class.grave_arbalist",
+        };
+        // universal absent, material present, singleton material outcome.
+        let mut first_tape = DrawTape::new([9_999, 0, 0]);
+        let first = compiled.plan_reward(&request, &mut first_tape).unwrap();
+        let mut second_tape = DrawTape::new([9_999, 0, 0]);
+        let second = compiled.plan_reward(&request, &mut second_tape).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first.canonical_hash(), second.canonical_hash());
+        assert_eq!(
+            first.entries,
+            vec![ProductionRewardPlanEntry::Material {
+                roll_index: 1,
+                item_id: "consumable.red_tonic".to_owned(),
+                quantity: 1,
+            }]
+        );
+
+        let (mut changed_target, records) = fixture();
+        changed_target.expected_manifest_blake3 = "e".repeat(64);
+        let changed = compile_production_item_catalog(&changed_target, &records).unwrap();
+        let mut changed_tape = DrawTape::new([9_999, 0, 0]);
+        let changed = changed.plan_reward(&request, &mut changed_tape).unwrap();
+        assert_ne!(first.canonical_hash(), changed.canonical_hash());
+    }
+
+    #[test]
+    fn core_equipment_reallocates_at_85_percent_and_caps_source_level_at_ten() {
+        let (target, mut records) = fixture();
+        let normal = records
+            .rarity_profiles
+            .iter_mut()
+            .find(|profile| profile.header.id.as_str() == "rarity.normal_outer")
+            .unwrap();
+        normal.maximum_item_level = 20;
+        let compiled = compile_production_item_catalog(&target, &records).unwrap();
+        let request = ProductionRewardPlanRequest {
+            reward_table_id: "reward.elite_outer",
+            stage_policy_id: "policy.items.core",
+            current_class_id: "class.grave_arbalist",
+        };
+        // Boundary 8500 is universal, then Armor; the stage-capped width is exactly 10.
+        let mut tape = DrawTape::new([0, 8_500, 0, 9, 0, 0]);
+        let plan = compiled.plan_reward(&request, &mut tape).unwrap();
+        assert!(tape.exhausted());
+        assert_eq!(
+            plan.entries,
+            vec![ProductionRewardPlanEntry::Equipment {
+                roll_index: 0,
+                template_id: "item.armor.ashplate.t1".to_owned(),
+                item_level: 10,
+                rarity: ProductionItemRarity::Forged,
+            }]
+        );
+    }
+
+    #[test]
+    fn exhausted_or_out_of_range_draw_tapes_fail_closed() {
+        let (target, records) = fixture();
+        let compiled = compile_production_item_catalog(&target, &records).unwrap();
+        let request = ProductionRewardPlanRequest {
+            reward_table_id: "reward.elite_outer",
+            stage_policy_id: "policy.items.core",
+            current_class_id: "class.grave_arbalist",
+        };
+        assert_eq!(
+            compiled.plan_reward(&request, &mut DrawTape::new([])),
+            Err(ProductionRewardPlanningError::DrawSourceExhausted)
+        );
+        assert_eq!(
+            compiled.plan_reward(&request, &mut DrawTape::new([10_000])),
+            Err(ProductionRewardPlanningError::DrawOutOfRange)
+        );
     }
 }
