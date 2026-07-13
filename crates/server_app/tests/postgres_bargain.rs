@@ -1,6 +1,9 @@
 use std::path::{Path, PathBuf};
 
-use persistence::{PersistenceConfig, PostgresPersistence, WIPEABLE_CORE_NAMESPACE};
+use persistence::{
+    BargainLifeCleanupCommand, BargainLifeEndReason, PersistenceConfig, PersistenceError,
+    PostgresPersistence, WIPEABLE_CORE_NAMESPACE, cleanup_bargains_for_life_end,
+};
 use protocol::{
     BargainContentRevisionV1, BargainDecision, BargainDecisionFrame, BargainDecisionPayload,
     BargainOfferCell, BargainOfferState, BargainResultCode, BargainViewFrame, ManifestHash,
@@ -623,6 +626,81 @@ async fn assert_terminal_rows(
     );
 }
 
+async fn assert_life_cleanup_participant(
+    persistence: &PostgresPersistence,
+    ids: FixtureIds,
+    selected_id: &str,
+) {
+    let command = BargainLifeCleanupCommand {
+        account_id: ids.account,
+        character_id: ids.character,
+        event_id: [91; 16],
+        reason: BargainLifeEndReason::Death,
+        expected_oath_bargain_version: 3,
+        event_payload: b"ordered-bargain-snapshot-v1".to_vec(),
+    };
+    let mut stale = command.clone();
+    stale.expected_oath_bargain_version = 2;
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    assert!(matches!(
+        cleanup_bargains_for_life_end(&mut transaction, &stale).await,
+        Err(PersistenceError::BargainCleanupVersionMismatch)
+    ));
+    transaction.rollback().await.unwrap();
+
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let result = cleanup_bargains_for_life_end(&mut transaction, &command)
+        .await
+        .unwrap();
+    assert_eq!(result.pre_oath_bargain_version, 3);
+    assert_eq!(result.post_oath_bargain_version, 4);
+    assert!(!result.removed_danger_checkpoint);
+    assert_eq!(result.active_bargains.len(), 1);
+    assert_eq!(result.active_bargains[0].bargain_id, selected_id);
+    assert_eq!(result.active_bargains[0].acquisition_ordinal, 1);
+    transaction.commit().await.unwrap();
+
+    let mut verification = persistence.begin_transaction().await.unwrap();
+    let life: (i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT ob.oath_bargain_version, \
+         (SELECT count(*) FROM character_active_bargains ab WHERE ab.namespace_id = ob.namespace_id \
+          AND ab.account_id = ob.account_id AND ab.character_id = ob.character_id), \
+         (SELECT count(*) FROM bargain_offers bo WHERE bo.namespace_id = ob.namespace_id \
+          AND bo.account_id = ob.account_id AND bo.character_id = ob.character_id), \
+         (SELECT count(*) FROM bargain_decision_results br WHERE br.namespace_id = ob.namespace_id \
+          AND br.account_id = ob.account_id AND br.character_id = ob.character_id) \
+         FROM character_oath_bargain_state ob WHERE ob.namespace_id = $1 AND ob.account_id = $2 \
+         AND ob.character_id = $3",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ids.account.as_slice())
+    .bind(ids.character.as_slice())
+    .fetch_one(verification.connection())
+    .await
+    .unwrap();
+    let cleanup_event: (String, i64, Vec<u8>) = sqlx::query_as(
+        "SELECT event_type, aggregate_version, event_payload FROM character_life_outbox \
+         WHERE namespace_id = $1 AND account_id = $2 AND character_id = $3 \
+         AND event_type = 'bargains_cleared_death'",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ids.account.as_slice())
+    .bind(ids.character.as_slice())
+    .fetch_one(verification.connection())
+    .await
+    .unwrap();
+    verification.rollback().await.unwrap();
+    assert_eq!(life, (4, 0, 1, 1));
+    assert_eq!(
+        cleanup_event,
+        (
+            "bargains_cleared_death".to_owned(),
+            4,
+            command.event_payload
+        )
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires explicitly authorized disposable PostgreSQL"]
 #[allow(clippy::too_many_lines)] // The restart boundary and its before/after invariants stay visible.
@@ -739,6 +817,7 @@ async fn postgres_bargain_selection_is_atomic_concurrent_replay_safe_and_restart
         },
     )
     .await;
+    assert_life_cleanup_participant(&restarted_persistence, SELECT_FIXTURE, &selected_id).await;
     restarted_persistence.close().await;
 }
 
