@@ -40,4 +40,4 @@ The slice was delivered in granular commits for the checkpoint contract/reposito
 
 ## Deferred scope
 
-The 50-Ash purge transaction and confirmations; later paid Oath changes; full death, memorial, Echo, successor, or retirement features; normal-route admission; Core promotion; and telemetry export/redaction remain under their owning roadmap packages. `GB-M03-05C` still owns the remaining inspected Nailkeeper/Frostbind audiovisual evidence before parent `GB-M03-05` can close.
+The 50-Ash purge transaction and confirmations; later paid Oath changes; full death, memorial, Echo, successor, or retirement features; normal-route admission; Core promotion; and telemetry export/redaction remain under their owning roadmap packages. `GB-M03-05C` and the parent `GB-M03-05` audit subsequently closed without broadening those exclusions.
