@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::BellDebtDefinition;
@@ -403,8 +404,16 @@ struct PendingBellRepeat {
     projectiles: Vec<FriendlyProjectile>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+/// Durable Bell Debt checkpoint schema understood by this simulation build.
+pub const BELL_DEBT_CHECKPOINT_SCHEMA_VERSION: u16 = 1;
+/// Hard allocation and persistence bound for one encoded Bell Debt checkpoint.
+pub const MAX_BELL_DEBT_CHECKPOINT_BYTES: usize = 4_096;
+const MAX_BELL_CHECKPOINT_PROJECTILES: usize = 32;
+const MAX_CHECKPOINT_PROJECTILE_SCALAR: f32 = 1_024.0;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BellDebtCheckpoint {
+    schema_version: u16,
     primary_release_count: u8,
     pending_repeat: Option<BellDebtPendingRepeatCheckpoint>,
 }
@@ -416,16 +425,127 @@ impl BellDebtCheckpoint {
     }
 
     #[must_use]
+    pub const fn schema_version(&self) -> u16 {
+        self.schema_version
+    }
+
+    #[must_use]
     pub const fn has_pending_repeat(&self) -> bool {
         self.pending_repeat.is_some()
     }
+
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, CombatError> {
+        let bytes = postcard::to_stdvec(self).map_err(|_| CombatError::InvalidBellCheckpoint)?;
+        if bytes.is_empty() || bytes.len() > MAX_BELL_DEBT_CHECKPOINT_BYTES {
+            return Err(CombatError::InvalidBellCheckpoint);
+        }
+        Ok(bytes)
+    }
+
+    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, CombatError> {
+        if bytes.is_empty() || bytes.len() > MAX_BELL_DEBT_CHECKPOINT_BYTES {
+            return Err(CombatError::InvalidBellCheckpoint);
+        }
+        let checkpoint: Self =
+            postcard::from_bytes(bytes).map_err(|_| CombatError::InvalidBellCheckpoint)?;
+        if checkpoint.canonical_bytes()?.as_slice() != bytes {
+            return Err(CombatError::InvalidBellCheckpoint);
+        }
+        Ok(checkpoint)
+    }
+
+    pub fn canonical_digest(&self) -> Result<[u8; 32], CombatError> {
+        Ok(*blake3::hash(&self.canonical_bytes()?).as_bytes())
+    }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-struct BellDebtPendingRepeatCheckpoint {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BellDebtPendingRepeatCheckpoint {
     ticks_remaining: u32,
     press_sequence: u32,
-    projectiles: Vec<FriendlyProjectile>,
+    projectiles: Vec<BellDebtProjectileCheckpoint>,
+}
+
+impl BellDebtPendingRepeatCheckpoint {
+    #[must_use]
+    pub const fn ticks_remaining(&self) -> u32 {
+        self.ticks_remaining
+    }
+
+    #[must_use]
+    pub const fn press_sequence(&self) -> u32 {
+        self.press_sequence
+    }
+
+    #[must_use]
+    pub fn projectiles(&self) -> &[BellDebtProjectileCheckpoint] {
+        &self.projectiles
+    }
+}
+
+/// Immutable projectile behavior required to reproduce a scheduled Bell repeat.
+///
+/// Transient identity, location, hit history, distance, and release tick are deliberately
+/// excluded because the authoritative simulation regenerates them when the repeat emits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BellDebtProjectileCheckpoint {
+    direction_x_bits: u32,
+    direction_y_bits: u32,
+    range_tiles_bits: u32,
+    speed_tiles_per_second_bits: u32,
+    radius_tiles_bits: u32,
+    raw_damage: u32,
+    pierce_remaining: u32,
+    stops_on_first_enemy: bool,
+    empowered_by_slipstep: bool,
+    focused_by_stillness: bool,
+    max_projectiles_per_target: u32,
+}
+
+impl BellDebtProjectileCheckpoint {
+    fn from_projectile(projectile: &FriendlyProjectile) -> Self {
+        let direction = projectile.direction.vector();
+        Self {
+            direction_x_bits: direction.x.to_bits(),
+            direction_y_bits: direction.y.to_bits(),
+            range_tiles_bits: projectile.range_tiles.to_bits(),
+            speed_tiles_per_second_bits: projectile.speed_tiles_per_second.to_bits(),
+            radius_tiles_bits: projectile.radius_tiles.to_bits(),
+            raw_damage: projectile.raw_damage,
+            pierce_remaining: projectile.pierce_remaining,
+            stops_on_first_enemy: projectile.stops_on_first_enemy,
+            empowered_by_slipstep: projectile.empowered_by_slipstep,
+            focused_by_stillness: projectile.focused_by_stillness,
+            max_projectiles_per_target: projectile.max_projectiles_per_target,
+        }
+    }
+
+    fn into_projectile(self) -> FriendlyProjectile {
+        let origin = SimulationVector::default();
+        FriendlyProjectile {
+            id: EntityId::new(1).expect("one is a valid placeholder entity ID"),
+            source: FriendlyProjectileSource::Primary,
+            position: origin,
+            origin,
+            direction: AimDirection(SimulationVector::new(
+                f32::from_bits(self.direction_x_bits),
+                f32::from_bits(self.direction_y_bits),
+            )),
+            distance_travelled_tiles: 0.0,
+            range_tiles: f32::from_bits(self.range_tiles_bits),
+            speed_tiles_per_second: f32::from_bits(self.speed_tiles_per_second_bits),
+            radius_tiles: f32::from_bits(self.radius_tiles_bits),
+            raw_damage: self.raw_damage,
+            pierce_remaining: self.pierce_remaining,
+            stops_on_first_enemy: self.stops_on_first_enemy,
+            empowered_by_slipstep: self.empowered_by_slipstep,
+            hit_targets: Vec::new(),
+            focused_by_stillness: self.focused_by_stillness,
+            release_tick: Tick(0),
+            max_projectiles_per_target: self.max_projectiles_per_target,
+            damage_multiplier_basis_points: BASIS_POINTS_PER_ONE,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -690,12 +810,17 @@ impl PlayerCombatState {
                         ticks_remaining: u32::try_from(remaining)
                             .map_err(|_| CombatError::InvalidBellCheckpoint)?,
                         press_sequence: pending.press_sequence,
-                        projectiles: pending.projectiles.clone(),
+                        projectiles: pending
+                            .projectiles
+                            .iter()
+                            .map(BellDebtProjectileCheckpoint::from_projectile)
+                            .collect(),
                     },
                 )
             })
             .transpose()?;
         let checkpoint = BellDebtCheckpoint {
+            schema_version: BELL_DEBT_CHECKPOINT_SCHEMA_VERSION,
             primary_release_count: self.bell_primary_release_count,
             pending_repeat,
         };
@@ -721,7 +846,12 @@ impl PlayerCombatState {
                             .ok_or(CombatError::TickExhausted)?,
                     ),
                     press_sequence: pending.press_sequence,
-                    projectiles: pending.projectiles.clone(),
+                    projectiles: pending
+                        .projectiles
+                        .iter()
+                        .copied()
+                        .map(BellDebtProjectileCheckpoint::into_projectile)
+                        .collect(),
                 })
             })
             .transpose()?;
@@ -738,6 +868,9 @@ impl PlayerCombatState {
     }
 
     fn validate_bell_checkpoint(&self, checkpoint: &BellDebtCheckpoint) -> Result<(), CombatError> {
+        if checkpoint.schema_version != BELL_DEBT_CHECKPOINT_SCHEMA_VERSION {
+            return Err(CombatError::InvalidBellCheckpoint);
+        }
         let Some(definition) = self.bell_debt else {
             return if checkpoint.primary_release_count == 0 && checkpoint.pending_repeat.is_none() {
                 Ok(())
@@ -752,9 +885,31 @@ impl PlayerCombatState {
             && (pending.ticks_remaining == 0
                 || pending.ticks_remaining > definition.repeat_delay_ticks
                 || pending.projectiles.is_empty()
+                || pending.projectiles.len() > MAX_BELL_CHECKPOINT_PROJECTILES
+                || pending.projectiles.len()
+                    != usize::try_from(self.weapon.projectile_count())
+                        .map_err(|_| CombatError::InvalidBellCheckpoint)?
                 || pending.projectiles.iter().any(|projectile| {
-                    projectile.source != FriendlyProjectileSource::Primary
-                        || projectile.damage_multiplier_basis_points != BASIS_POINTS_PER_ONE
+                    let direction = SimulationVector::new(
+                        f32::from_bits(projectile.direction_x_bits),
+                        f32::from_bits(projectile.direction_y_bits),
+                    );
+                    let range = f32::from_bits(projectile.range_tiles_bits);
+                    let speed = f32::from_bits(projectile.speed_tiles_per_second_bits);
+                    let radius = f32::from_bits(projectile.radius_tiles_bits);
+                    !direction.is_finite()
+                        || (direction.length_squared() - 1.0).abs() > RANGE_EPSILON
+                        || !range.is_finite()
+                        || !(0.0..=MAX_CHECKPOINT_PROJECTILE_SCALAR).contains(&range)
+                        || range <= 0.0
+                        || !speed.is_finite()
+                        || !(0.0..=MAX_CHECKPOINT_PROJECTILE_SCALAR).contains(&speed)
+                        || speed <= 0.0
+                        || !radius.is_finite()
+                        || !(0.0..=MAX_CHECKPOINT_PROJECTILE_SCALAR).contains(&radius)
+                        || radius <= 0.0
+                        || projectile.raw_damage == 0
+                        || projectile.max_projectiles_per_target == 0
                 }))
         {
             return Err(CombatError::InvalidBellCheckpoint);
@@ -2030,7 +2185,20 @@ mod tests {
         }
         let checkpoint = original.export_bell_debt_checkpoint().unwrap();
         assert_eq!(checkpoint.primary_release_count(), 0);
+        assert_eq!(
+            checkpoint.schema_version(),
+            BELL_DEBT_CHECKPOINT_SCHEMA_VERSION
+        );
         assert!(checkpoint.has_pending_repeat());
+        let encoded = checkpoint.canonical_bytes().unwrap();
+        assert_eq!(
+            BellDebtCheckpoint::decode_canonical(&encoded).unwrap(),
+            checkpoint
+        );
+        assert_eq!(
+            checkpoint.canonical_digest().unwrap(),
+            *blake3::hash(&encoded).as_bytes()
+        );
 
         let mut restored = bell_combat();
         restored.import_bell_debt_checkpoint(&checkpoint).unwrap();
@@ -2074,6 +2242,30 @@ mod tests {
         assert_eq!(
             bell_combat()
                 .import_bell_debt_checkpoint(&invalid)
+                .unwrap_err(),
+            CombatError::InvalidBellCheckpoint
+        );
+
+        invalid.primary_release_count = 0;
+        invalid.schema_version = BELL_DEBT_CHECKPOINT_SCHEMA_VERSION + 1;
+        assert_eq!(
+            bell_combat()
+                .import_bell_debt_checkpoint(&invalid)
+                .unwrap_err(),
+            CombatError::InvalidBellCheckpoint
+        );
+
+        invalid.schema_version = BELL_DEBT_CHECKPOINT_SCHEMA_VERSION;
+        invalid.pending_repeat.as_mut().unwrap().projectiles[0].direction_x_bits =
+            f32::NAN.to_bits();
+        assert_eq!(
+            bell_combat()
+                .import_bell_debt_checkpoint(&invalid)
+                .unwrap_err(),
+            CombatError::InvalidBellCheckpoint
+        );
+        assert_eq!(
+            BellDebtCheckpoint::decode_canonical(&vec![0; MAX_BELL_DEBT_CHECKPOINT_BYTES + 1])
                 .unwrap_err(),
             CombatError::InvalidBellCheckpoint
         );

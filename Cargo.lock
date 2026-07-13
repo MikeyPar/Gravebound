@@ -5420,6 +5420,7 @@ name = "sim_core"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "postcard",
  "rand_chacha",
  "rand_core",
  "serde",

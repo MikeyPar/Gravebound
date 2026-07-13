@@ -86,12 +86,14 @@ pub use collision::{
     ShellSide, SolidColliderId, SweepHit,
 };
 pub use combat::{
-    ActiveGraveMark, AimDirection, AimDirectionError, BellDebtCheckpoint, BellDebtResetReason,
-    CombatAction, CombatError, CombatStep, FocusedTransition, FocusedTransitionKind,
-    FriendlyProjectile, FriendlyProjectileSource, GraveMarkInputEvent, GraveMarkInputResult,
-    GraveMarkTransition, GraveMarkTransitionKind, PlayerCombatState, ProjectileCollision,
-    ProjectileExpired, RawDamageIntent, RawDamageIntentSource, ShotEvent, SlipstepInputEvent,
-    SlipstepInputResult, SlipstepTransition, SlipstepTransitionKind,
+    ActiveGraveMark, AimDirection, AimDirectionError, BELL_DEBT_CHECKPOINT_SCHEMA_VERSION,
+    BellDebtCheckpoint, BellDebtPendingRepeatCheckpoint, BellDebtProjectileCheckpoint,
+    BellDebtResetReason, CombatAction, CombatError, CombatStep, FocusedTransition,
+    FocusedTransitionKind, FriendlyProjectile, FriendlyProjectileSource, GraveMarkInputEvent,
+    GraveMarkInputResult, GraveMarkTransition, GraveMarkTransitionKind,
+    MAX_BELL_DEBT_CHECKPOINT_BYTES, PlayerCombatState, ProjectileCollision, ProjectileExpired,
+    RawDamageIntent, RawDamageIntentSource, ShotEvent, SlipstepInputEvent, SlipstepInputResult,
+    SlipstepTransition, SlipstepTransitionKind,
 };
 pub use consumable::{
     BeltError, BeltSlot, ConsumableAction, ConsumableError, ConsumableEvent, ConsumableStep,
