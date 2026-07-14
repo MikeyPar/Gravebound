@@ -486,8 +486,21 @@ impl NormalWaveSimulation {
     /// Fixed order: activation -> friendly damage/death -> living AI/movement -> hostile lanes and
     /// projectiles -> due drops -> wave-end hostile cleanup. The whole tick commits atomically.
     pub fn step(&mut self, combat_step: &CombatStep) -> Result<NormalWaveStep, NormalWaveError> {
+        self.step_with_external_hostiles(combat_step, 0)
+    }
+
+    /// Advances an immutable cohort while a mixed encounter owns additional required hostiles.
+    /// External health cannot mutate this wave; the count only delays terminal cleanup/clear.
+    pub fn step_with_external_hostiles(
+        &mut self,
+        combat_step: &CombatStep,
+        external_hostiles_remaining: u16,
+    ) -> Result<NormalWaveStep, NormalWaveError> {
         let player_id = self.player().target.entity_id;
-        self.step_players(&BTreeMap::from([(player_id, combat_step.clone())]))
+        self.step_players_with_external_hostiles(
+            &BTreeMap::from([(player_id, combat_step.clone())]),
+            external_hostiles_remaining,
+        )
     }
 
     /// Advances a shared wave from the frozen per-player combat results. Network arrival order is
@@ -496,15 +509,45 @@ impl NormalWaveSimulation {
         &mut self,
         combat_steps: &BTreeMap<EntityId, CombatStep>,
     ) -> Result<NormalWaveStep, NormalWaveError> {
+        self.step_players_with_external_hostiles(combat_steps, 0)
+    }
+
+    pub fn step_players_with_external_hostiles(
+        &mut self,
+        combat_steps: &BTreeMap<EntityId, CombatStep>,
+        external_hostiles_remaining: u16,
+    ) -> Result<NormalWaveStep, NormalWaveError> {
         let mut next = self.clone();
-        let result = next.step_players_inner(combat_steps)?;
+        let result = next.step_players_inner(combat_steps, external_hostiles_remaining)?;
         *self = next;
         Ok(result)
+    }
+
+    /// Inserts one Core-authored immutable release into this wave's shared hostile allocator.
+    /// Returned events are shifted into the wave's global tick domain.
+    pub fn spawn_from_core_normal_event(
+        &mut self,
+        source_entity_id: EntityId,
+        definition: &crate::CoreEnemyDefinition,
+        event: &crate::CoreNormalAttackEvent,
+    ) -> Result<Vec<HostileEvent>, NormalWaveError> {
+        let mut next = self.clone();
+        let mut events = next.hostile_projectiles.spawn_from_core_normal_event(
+            source_entity_id,
+            definition,
+            event,
+        )?;
+        for event in &mut events {
+            shift_hostile_event(event, next.starts_at)?;
+        }
+        *self = next;
+        Ok(events)
     }
 
     fn step_players_inner(
         &mut self,
         combat_steps: &BTreeMap<EntityId, CombatStep>,
+        external_hostiles_remaining: u16,
     ) -> Result<NormalWaveStep, NormalWaveError> {
         if combat_steps.keys().any(|id| !self.players.contains_key(id)) {
             return Err(NormalWaveError::UnknownCombatPlayer);
@@ -538,8 +581,9 @@ impl NormalWaveSimulation {
         let enemy_health_step = self.health.apply_combat_step(&combat_step)?;
         let defeats = self.map_defeats(&enemy_health_step)?;
         let alive = self.alive_entity_ids();
-        let just_cleared =
-            alive.is_empty() && !matches!(self.phase, NormalWavePhase::Cleared { .. });
+        let just_cleared = alive.is_empty()
+            && external_hostiles_remaining == 0
+            && !matches!(self.phase, NormalWavePhase::Cleared { .. });
 
         let mut timeline_events = Vec::new();
         let mut actor_movements = Vec::new();
@@ -1382,6 +1426,38 @@ mod tests {
             raw_damage_intents: vec![intent],
             ..CombatStep::default()
         }
+    }
+
+    #[test]
+    fn mixed_completion_hold_defers_terminal_cleanup_until_external_hostiles_clear() {
+        let target = wave_id(1);
+        let mut wave = simulation(vec![spawn(
+            1,
+            0,
+            NormalWaveEnemyKind::DrownedPilgrim,
+            (8_000, 3_000),
+        )]);
+        for tick in 0..27 {
+            wave.step_with_external_hostiles(&empty_step(tick), 1)
+                .expect("warning tick");
+        }
+        let held = wave
+            .step_with_external_hostiles(&lethal_step(27, target), 1)
+            .expect("held clear");
+        assert_eq!(held.phase_after, NormalWavePhase::Active);
+        assert!(held.cleared_hostiles.is_none());
+        assert!(!wave.snapshots()[0].health.alive);
+
+        let cleared = wave
+            .step_with_external_hostiles(&empty_step(28), 0)
+            .expect("external clear");
+        assert_eq!(
+            cleared.phase_after,
+            NormalWavePhase::Cleared {
+                cleared_at: Tick(28)
+            }
+        );
+        assert!(cleared.cleared_hostiles.is_some());
     }
 
     #[test]
