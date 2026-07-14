@@ -13,8 +13,9 @@ use server_app::{
     AccountId, AuthenticatedAccount, AuthenticatedNamespace, BeltStackV1, CrashRestoreContext,
     DangerEntrySnapshotV1, EntryCaptureContext, EntryRestoreProvider, IdentityClock,
     InventorySecurityRestoreV1, OathBargainRestoreV1, PostgresDormantWorldFlowCoordinator,
-    PostgresProgressionRestoreProvider, ProgressionRestoreV1, RestorePointError,
-    SafeAggregateVersionsV1, WorldFlowIdGenerator,
+    PostgresProgressionRestoreProvider, PostgresSafeInventoryService, ProgressionRestoreV1,
+    RestorePointError, SafeAggregateVersionsV1, SafeInventoryServiceError,
+    SafeInventoryTransferCommand, SafeInventoryTransferKind, WorldFlowIdGenerator,
 };
 
 const ACCOUNT_ID: [u8; 16] = [81; 16];
@@ -138,6 +139,7 @@ async fn insert_safe_equipment(
     transaction: &mut PersistenceTransaction<'_>,
     item_uid: [u8; 16],
     character_id: Option<[u8; 16]>,
+    security_state: i16,
     location_kind: i16,
     slot_index: i16,
 ) {
@@ -146,13 +148,14 @@ async fn insert_safe_equipment(
          content_revision,item_kind,item_level,rarity,creation_kind,creation_request_id,roll_index, \
          unit_ordinal,item_version,security_state,location_kind,slot_index,provenance_kind, \
          salvage_band,salvage_value) VALUES ($1,$2,$3,$4,'item.weapon.crossbow.pine_crossbow', \
-         $5,0,1,0,0,$2,0,0,1,0,$6,$7,0,0,0)",
+         $5,0,1,0,0,$2,0,0,1,$6,$7,$8,0,0,0)",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(item_uid.as_slice())
     .bind(ACCOUNT_ID.as_slice())
     .bind(character_id.map(|id| id.to_vec()))
     .bind(CORE_ITEM_CONTENT_REVISION)
+    .bind(security_state)
     .bind(location_kind)
     .bind(slot_index)
     .execute(transaction.connection())
@@ -162,7 +165,13 @@ async fn insert_safe_equipment(
 
 async fn seed_character_safe_item(persistence: &PostgresPersistence, item_uid: [u8; 16]) {
     let mut transaction = persistence.begin_transaction().await.unwrap();
-    insert_safe_equipment(&mut transaction, item_uid, Some(CHARACTER_ID), 5, 0).await;
+    insert_safe_equipment(&mut transaction, item_uid, Some(CHARACTER_ID), 0, 5, 0).await;
+    transaction.commit().await.unwrap();
+}
+
+async fn seed_deliberate_risk_item(persistence: &PostgresPersistence, item_uid: [u8; 16]) {
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    insert_safe_equipment(&mut transaction, item_uid, Some(CHARACTER_ID), 2, 2, 0).await;
     transaction.commit().await.unwrap();
 }
 
@@ -170,7 +179,7 @@ async fn fill_vault(persistence: &PostgresPersistence) {
     let mut transaction = persistence.begin_transaction().await.unwrap();
     for slot in 0_i16..160 {
         let item_uid = (10_000_u128 + u128::try_from(slot).unwrap()).to_be_bytes();
-        insert_safe_equipment(&mut transaction, item_uid, None, 6, slot).await;
+        insert_safe_equipment(&mut transaction, item_uid, None, 0, 6, slot).await;
     }
     transaction.commit().await.unwrap();
 }
@@ -666,6 +675,104 @@ async fn full_vault_rejects_before_item_version_identity_restore_or_location_cha
     transaction.rollback().await.unwrap();
     assert_eq!(state, (Some(CHARACTER_ID.to_vec()), 5, 0, 1, 1, 1, 1));
     assert_eq!(ledger_count, 0);
+}
+
+#[tokio::test]
+#[ignore = "requires explicitly authorized disposable PostgreSQL"]
+async fn deliberate_risk_item_remains_pending_and_permits_danger_entry() {
+    const PENDING_ITEM: [u8; 16] = [123; 16];
+    let persistence = disposable_database().await;
+    reset_fixture(&persistence).await;
+    seed_deliberate_risk_item(&persistence, PENDING_ITEM).await;
+
+    let accepted = coordinator(persistence.clone(), PostgresFixtureInventory)
+        .handle(authenticated(ACCOUNT_ID), &frame(1, 100, CHARACTER_ID, 1))
+        .await;
+    assert_eq!(code(&accepted), WorldTransferResultCode::Accepted);
+
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let item: (Option<Vec<u8>>, i16, i16, i64) = sqlx::query_as(
+        "SELECT character_id,security_state,location_kind,item_version FROM item_instances \
+         WHERE namespace_id=$1 AND account_id=$2 AND item_uid=$3",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(PENDING_ITEM.as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    let versions: (i64, i64) = sqlx::query_as(
+        "SELECT state_version,inventory_version FROM accounts JOIN character_inventories \
+         USING (namespace_id,account_id) WHERE namespace_id=$1 AND account_id=$2 \
+         AND character_id=$3",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(CHARACTER_ID.as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    transaction.rollback().await.unwrap();
+    assert_eq!(item, (Some(CHARACTER_ID.to_vec()), 2, 2, 1));
+    assert_eq!(versions, (1, 1));
+}
+
+#[tokio::test]
+#[ignore = "requires explicitly authorized disposable PostgreSQL"]
+async fn concurrent_manual_transfer_and_entry_have_one_serial_storage_move() {
+    const SAFE_ITEM: [u8; 16] = [124; 16];
+    let persistence = disposable_database().await;
+    reset_fixture(&persistence).await;
+    seed_character_safe_item(&persistence, SAFE_ITEM).await;
+    let entry = coordinator(persistence.clone(), PostgresFixtureInventory);
+    let manual = PostgresSafeInventoryService::new(persistence.clone());
+    let entry_frame = frame(1, 101, CHARACTER_ID, 1);
+    let manual_command = SafeInventoryTransferCommand {
+        mutation_id: [102; 16],
+        kind: SafeInventoryTransferKind::CharacterSafeToVault,
+        source_slot_index: 0,
+        expected_account_version: 1,
+        expected_inventory_version: 1,
+    };
+
+    let (entry_result, manual_result) = tokio::join!(
+        entry.handle(authenticated(ACCOUNT_ID), &entry_frame),
+        manual.transfer(ACCOUNT_ID, CHARACTER_ID, manual_command),
+    );
+    assert_eq!(code(&entry_result), WorldTransferResultCode::Accepted);
+    assert!(matches!(
+        manual_result,
+        Ok(_)
+            | Err(SafeInventoryServiceError::StaleVersion
+                | SafeInventoryServiceError::BindingMismatch)
+    ));
+
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let item: (Option<Vec<u8>>, i16, i64) = sqlx::query_as(
+        "SELECT character_id,location_kind,item_version FROM item_instances \
+         WHERE namespace_id=$1 AND account_id=$2 AND item_uid=$3",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(SAFE_ITEM.as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    let ledgers: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM item_ledger_events WHERE namespace_id=$1 AND account_id=$2 \
+         AND item_uid=$3 AND mutation_id IN ($4,$5)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(SAFE_ITEM.as_slice())
+    .bind([101_u8; 16].as_slice())
+    .bind([102_u8; 16].as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    transaction.rollback().await.unwrap();
+    assert_eq!(item, (None, 6, 2));
+    assert_eq!(ledgers, 1);
 }
 
 #[tokio::test]
