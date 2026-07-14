@@ -669,6 +669,37 @@ async fn dropped_quic_response_retries_the_stored_lifecycle_result() {
 
 #[tokio::test]
 #[ignore = "requires explicitly authorized disposable PostgreSQL"]
+async fn duplicate_quic_sessions_converge_on_one_inventory_commit() {
+    let persistence = disposable_database().await;
+    seed_fixture(&persistence).await;
+    stage_progression_reward_and_equipment(&persistence).await;
+    let frame = transfer_frame_at(4);
+    let left_frames = [frame];
+    let right_frames = [frame];
+    let (left, right) = tokio::join!(
+        run_quic_transfers(&persistence, &left_frames, false),
+        run_quic_transfers(&persistence, &right_frames, false),
+    );
+    assert_eq!(left.len(), 1);
+    assert_eq!(right.len(), 1);
+    assert_eq!(left[0].code, SafeInventoryResultCodeV1::Accepted);
+    assert_eq!(right[0].code, SafeInventoryResultCodeV1::Accepted);
+    assert_eq!(
+        usize::from(left[0].replayed) + usize::from(right[0].replayed),
+        1
+    );
+    assert_eq!(left[0].result_hash, right[0].result_hash);
+    let signature = persistence
+        .core_item_lifecycle_signature_v1(ACCOUNT_ID, CHARACTER_ID)
+        .await
+        .unwrap();
+    assert_eq!(signature.safe_inventory_receipts.len(), 1);
+    assert_committed_state(&persistence).await;
+    persistence.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires explicitly authorized disposable PostgreSQL"]
 async fn safe_inventory_service_derives_placement_and_replays_after_restart() {
     let persistence = disposable_database().await;
     seed_fixture(&persistence).await;
