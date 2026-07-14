@@ -120,7 +120,7 @@ Concept images establish mood, hierarchy, and visual language. They are not fina
 
 ## Current Next Step
 
-[`GB-M03-03F`](docs/milestones/GB-M03-03F-audit.md) is complete under its three-authority audit. [`GB-M03-04E`](docs/tasks/GB-M03-04E.md) is now active with its contract reconciled against the canonical GDD, Content Production Specification, Development Roadmap, and approved `SPEC-CONFLICT-007`: implement the pure authoritative equipment snapshot, comparison, preview hash, and exact RunBackpack/PersonalGround swap planner, then persist that boundary before connecting the native inventory overlay. `04F` retains CharacterSafe/Vault and `04G` retains real-QUIC parent closure. Keep death/extraction/Recall, Overflow/ResolutionHold, Core promotion, Character Select `Play`, Realm Gate admission, seeded selection, the normal player route, and affected Hall stations fail closed until their owning gates pass.
+[`GB-M03-03F`](docs/milestones/GB-M03-03F-audit.md) is complete under its three-authority audit. [`GB-M03-04E`](docs/tasks/GB-M03-04E.md) is active: the content-bound pure preview, exact RunBackpack/PersonalGround swap planner, and resolved behavior-first comparison now pass. Implement the schema-27 serializable command/result repository with ledger, replay, stale-version, ownership, rollback, and restart evidence, then expose its bounded server projection before connecting the native inventory overlay. `04F` retains CharacterSafe/Vault and `04G` retains real-QUIC parent closure. Keep death/extraction/Recall, Overflow/ResolutionHold, Core promotion, Character Select `Play`, Realm Gate admission, seeded selection, the normal player route, and affected Hall stations fail closed until their owning gates pass.
 
 ## Resolved prior handoff
 

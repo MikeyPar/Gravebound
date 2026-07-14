@@ -101,7 +101,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 26;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 27;
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -1043,6 +1043,37 @@ mod tests {
             assert!(
                 !migration.contains(prohibited),
                 "reward item-count migration leaked {prohibited}"
+            );
+        }
+    }
+
+    #[test]
+    fn field_equipment_schema_binds_preview_replay_and_exact_source_shape() {
+        let migration = include_str!("../../../migrations/0027_field_equipment_mutations.sql");
+        for required in [
+            "CREATE TABLE field_equipment_mutations",
+            "canonical_request_hash BYTEA NOT NULL",
+            "preview_hash BYTEA NOT NULL",
+            "pre_inventory_version BIGINT NOT NULL",
+            "post_inventory_version BIGINT NOT NULL",
+            "source_kind SMALLINT NOT NULL",
+            "replacement_slot_index SMALLINT",
+            "post_inventory_version = pre_inventory_version + 1",
+        ] {
+            assert!(migration.contains(required), "schema 27 omitted {required}");
+        }
+        let lowercase = migration.to_ascii_lowercase();
+        for forbidden in [
+            "vault",
+            "character_safe",
+            "overflow",
+            "resolution_hold",
+            "extraction",
+            "json",
+        ] {
+            assert!(
+                !lowercase.contains(forbidden),
+                "schema 27 leaked {forbidden}"
             );
         }
     }
