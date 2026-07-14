@@ -37,6 +37,30 @@ pub struct CoreCaldusInput {
     pub living_targets: Vec<CoreCaldusTargetInput>,
 }
 
+/// Fully locked projectile release consumed by the shared hostile allocator.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CoreCaldusProjectileRelease {
+    ShieldArc {
+        tick: Tick,
+        cast_id: u64,
+        origin: crate::SimulationVector,
+        target_x_milli_tiles: i32,
+        target_y_milli_tiles: i32,
+    },
+    BellRing {
+        tick: Tick,
+        cast_id: u64,
+        origin: crate::SimulationVector,
+        gap_start_index: u8,
+    },
+    ChargeStopRing {
+        tick: Tick,
+        cast_id: u64,
+        origin: crate::SimulationVector,
+        omitted_start_index: u8,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CoreCaldusState {
     Active {
@@ -86,12 +110,16 @@ pub enum CoreCaldusEvent {
         tick: Tick,
         cast_id: u64,
         target: CoreBossParticipant,
+        target_x_milli_tiles: i32,
+        target_y_milli_tiles: i32,
         fires_at: Tick,
     },
     ShieldFired {
         tick: Tick,
         cast_id: u64,
         target: CoreBossParticipant,
+        target_x_milli_tiles: i32,
+        target_y_milli_tiles: i32,
     },
     BellRingTelegraph {
         tick: Tick,
@@ -147,6 +175,8 @@ pub enum CoreCaldusEvent {
 struct ScheduledShield {
     cast_id: u64,
     target: CoreBossParticipant,
+    target_x_milli_tiles: i32,
+    target_y_milli_tiles: i32,
     telegraph_at: Tick,
     fires_at: Tick,
 }
@@ -430,7 +460,9 @@ impl CoreCaldusSimulation {
             let cast_id = self.allocate_cast_id()?;
             self.scheduled_shields.push(ScheduledShield {
                 cast_id,
-                target,
+                target: target.participant,
+                target_x_milli_tiles: target.position_x_milli_tiles,
+                target_y_milli_tiles: target.position_y_milli_tiles,
                 telegraph_at,
                 fires_at,
             });
@@ -441,7 +473,7 @@ impl CoreCaldusSimulation {
     fn select_shield_targets(
         &mut self,
         targets: &BTreeMap<u8, CoreCaldusTargetInput>,
-    ) -> Vec<CoreBossParticipant> {
+    ) -> Vec<CoreCaldusTargetInput> {
         let locked_count = self.lock.participants.len();
         let target_count = if locked_count >= 7 {
             3
@@ -452,15 +484,16 @@ impl CoreCaldusSimulation {
         };
         if target_count == 1 {
             return nearest_target(targets)
-                .map(|target| vec![target.participant])
+                .copied()
+                .map(|target| vec![target])
                 .unwrap_or_default();
         }
         let mut selected = Vec::new();
         for offset in 0..self.lock.participants.len() {
             let index = (self.shield_cursor + offset) % self.lock.participants.len();
             let participant = self.lock.participants[index];
-            if targets.contains_key(&participant.party_slot) {
-                selected.push(participant);
+            if let Some(target) = targets.get(&participant.party_slot) {
+                selected.push(*target);
                 if selected.len() == target_count {
                     break;
                 }
@@ -471,7 +504,7 @@ impl CoreCaldusSimulation {
                 .lock
                 .participants
                 .iter()
-                .position(|participant| participant == final_target)
+                .position(|participant| participant == &final_target.participant)
         {
             self.shield_cursor = (index + 1) % self.lock.participants.len();
         }
@@ -560,6 +593,8 @@ impl CoreCaldusSimulation {
                     tick: self.tick,
                     cast_id: shield.cast_id,
                     target: shield.target,
+                    target_x_milli_tiles: shield.target_x_milli_tiles,
+                    target_y_milli_tiles: shield.target_y_milli_tiles,
                     fires_at: shield.fires_at,
                 });
             }
@@ -568,6 +603,8 @@ impl CoreCaldusSimulation {
                     tick: self.tick,
                     cast_id: shield.cast_id,
                     target: shield.target,
+                    target_x_milli_tiles: shield.target_x_milli_tiles,
+                    target_y_milli_tiles: shield.target_y_milli_tiles,
                 });
             }
         }

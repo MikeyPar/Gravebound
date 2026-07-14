@@ -136,8 +136,8 @@ pub use core_caldus::{
     CALDUS_PHASE_BREAK_TICKS, CALDUS_PHASE_ONE_LOOP_TICKS, CALDUS_PHASE_THREE_LOOP_TICKS,
     CALDUS_PHASE_THREE_LOW_HEALTH_LOOP_TICKS, CALDUS_PHASE_TWO_LOOP_TICKS,
     CALDUS_RING_WARNING_TICKS, CALDUS_SHIELD_WARNING_TICKS, CALDUS_SOFT_ENRAGE_TICKS,
-    CoreCaldusError, CoreCaldusEvent, CoreCaldusInput, CoreCaldusPhase, CoreCaldusSimulation,
-    CoreCaldusState, CoreCaldusTargetInput,
+    CoreCaldusError, CoreCaldusEvent, CoreCaldusInput, CoreCaldusPhase,
+    CoreCaldusProjectileRelease, CoreCaldusSimulation, CoreCaldusState, CoreCaldusTargetInput,
 };
 pub use core_counterplay::{
     CORE_COM006_CLOSE_SPAWN_DISTANCE_MILLI_TILES,

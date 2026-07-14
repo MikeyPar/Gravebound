@@ -11,12 +11,13 @@ use thiserror::Error;
 
 use crate::{
     AimDirection, AimDirectionError, AimVector, ArenaGeometry, AttackCastId, BossEvent,
-    CollisionError, CollisionTarget, CoreAbbotEvent, CoreAcolyteFanPhase, CoreEnemyDefinition,
-    CoreKnightEvent, CoreNormalAttackEvent, CoreNormalAttackKind, CorePatternDefinition,
-    CorePatternGeometryDefinition, CoreWorldPosition, Counterplay, DamageAppliedEvent, DamageBand,
-    DamageError, DamageEvent, DamageType, DirectHitParameters, DirectHitRequest, EchoMemoryFamily,
-    EnemyEvent, EnemyHurtbox, EnemyLabPlayer, EntityId, EntityIdAllocator, FocusedTransition,
-    HostileDisposition, HurtboxError, LaneAttackDefinition, PilgrimTargetInput, PlayerCombatState,
+    CollisionError, CollisionTarget, CoreAbbotEvent, CoreAcolyteFanPhase,
+    CoreCaldusProjectileRelease, CoreEnemyDefinition, CoreKnightEvent, CoreNormalAttackEvent,
+    CoreNormalAttackKind, CorePatternDefinition, CorePatternGeometryDefinition, CoreWorldPosition,
+    Counterplay, DamageAppliedEvent, DamageBand, DamageError, DamageEvent, DamageType,
+    DirectHitParameters, DirectHitRequest, EchoMemoryFamily, EnemyEvent, EnemyHurtbox,
+    EnemyLabPlayer, EntityId, EntityIdAllocator, FocusedTransition, HostileDisposition,
+    HurtboxError, LaneAttackDefinition, PilgrimTargetInput, PlayerCombatState,
     ProjectileAttackDefinition, ProjectileCollisionWorld, RedTonicSimulation, SimulationVector,
     SolidColliderId, Tick, resolve_direct_hit,
 };
@@ -31,6 +32,9 @@ const KNIGHT_STOP_RING_ID: &str = "miniboss.sepulcher_knight.stop_ring";
 const KNIGHT_SHIELD_FAN_ID: &str = "miniboss.sepulcher_knight.shield_fan";
 const ABBOT_ROTOR_ID: &str = "miniboss.choir_abbot.rotor";
 const ABBOT_RECOVERY_RING_ID: &str = "miniboss.choir_abbot.recovery_ring";
+const CALDUS_SHIELD_ARC_ID: &str = "boss.caldus.shield_arc";
+const CALDUS_BELL_RING_ID: &str = "boss.caldus.bell_ring";
+const CALDUS_CHARGE_STOP_RING_ID: &str = "boss.caldus.charge_stop_ring";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HostileProjectileSourceKind {
@@ -383,6 +387,50 @@ impl HostileProjectileSimulation {
             .collect();
         *self = next;
         Ok(spawned)
+    }
+
+    /// Materializes only fully locked Sir Caldus projectile releases. Scheduler cues, charge body
+    /// movement, and renderer state cannot authorize projectiles through this seam.
+    pub fn spawn_from_core_caldus_release(
+        &mut self,
+        source_entity_id: EntityId,
+        release: &CoreCaldusProjectileRelease,
+    ) -> Result<Vec<HostileEvent>, HostileError> {
+        let mut next = self.clone();
+        let (tick, cast_ordinal, origin, source_kind, directions, attack) =
+            caldus_projectile_spec(release)?;
+        if tick != next.tick {
+            return Err(HostileError::CoreReleaseTickMismatch);
+        }
+        if !origin.is_finite() {
+            return Err(HostileError::NonFiniteOrigin);
+        }
+        validate_projectile_attack(&attack, source_kind)?;
+        let cast_id =
+            AttackCastId::from_ordinal(cast_ordinal).ok_or(HostileError::InvalidBossCastId)?;
+        let mut projectiles = Vec::with_capacity(directions.len());
+        for direction in directions {
+            projectiles.push(next.allocate_projectile(
+                source_entity_id,
+                cast_id,
+                source_kind,
+                origin,
+                direction,
+                &attack,
+            )?);
+        }
+        next.projectiles
+            .extend(projectiles.iter().map(|(_, projectile)| projectile.clone()));
+        next.projectiles.sort_by_key(HostileProjectile::id);
+        let events = projectiles
+            .into_iter()
+            .map(|(_, projectile)| HostileEvent::Spawned {
+                tick: next.tick,
+                projectile,
+            })
+            .collect();
+        *self = next;
+        Ok(events)
     }
 
     fn spawn_core_normal_inner(
@@ -1832,6 +1880,17 @@ fn validate_projectile_attack(
                         && attack.threat_cost == 5
                         && attack.maximum_active_instances == 5
                 }
+                CALDUS_SHIELD_ARC_ID => {
+                    attack.projectile_count == 5
+                        && attack.speed_milli_tiles_per_second == 7_000
+                        && attack.radius_milli_tiles == 120
+                        && attack.lifetime_ticks == 75
+                        && attack.raw_damage == 24
+                        && attack.damage_type == DamageType::Physical
+                        && attack.damage_band == DamageBand::Major
+                        && attack.threat_cost == 5
+                        && attack.maximum_active_instances == 25
+                }
                 _ => false,
             }) && attack.memory_family == EchoMemoryFamily::FanProjectile
                 && attack.counterplay == Counterplay::Strafe
@@ -1876,10 +1935,35 @@ fn validate_projectile_attack(
                         && attack.threat_cost == 12
                         && attack.maximum_active_instances == 12
                 }
+                CALDUS_BELL_RING_ID => {
+                    attack.projectile_count == 15
+                        && attack.speed_milli_tiles_per_second == 5_000
+                        && attack.radius_milli_tiles == 130
+                        && attack.lifetime_ticks == 120
+                        && attack.raw_damage == 32
+                        && attack.damage_type == DamageType::Veil
+                        && attack.damage_band == DamageBand::Major
+                        && attack.threat_cost == 15
+                        && attack.maximum_active_instances == 45
+                }
+                CALDUS_CHARGE_STOP_RING_ID => {
+                    attack.projectile_count == 12
+                        && attack.speed_milli_tiles_per_second == 5_000
+                        && attack.radius_milli_tiles == 130
+                        && attack.lifetime_ticks == 108
+                        && attack.raw_damage == 28
+                        && attack.damage_type == DamageType::Physical
+                        && attack.damage_band == DamageBand::Major
+                        && attack.threat_cost == 12
+                        && attack.maximum_active_instances == 12
+                }
                 _ => false,
             }) && (matches!(
                 attack.pattern_id,
-                KNIGHT_STOP_RING_ID | ABBOT_RECOVERY_RING_ID
+                KNIGHT_STOP_RING_ID
+                    | ABBOT_RECOVERY_RING_ID
+                    | CALDUS_BELL_RING_ID
+                    | CALDUS_CHARGE_STOP_RING_ID
             ) || (attack.speed_milli_tiles_per_second == 4_500
                 && attack.radius_milli_tiles == 130
                 && attack.damage_type == DamageType::Veil))
@@ -2002,6 +2086,143 @@ fn core_projectile_attack(
     })
 }
 
+type CaldusProjectileSpec = (
+    Tick,
+    u64,
+    SimulationVector,
+    HostileProjectileSourceKind,
+    Vec<AimDirection>,
+    ProjectileAttackDefinition,
+);
+
+#[allow(clippy::too_many_lines)] // Three closed authored variants remain visibly field-complete.
+fn caldus_projectile_spec(
+    release: &CoreCaldusProjectileRelease,
+) -> Result<CaldusProjectileSpec, HostileError> {
+    match release {
+        CoreCaldusProjectileRelease::ShieldArc {
+            tick,
+            cast_id,
+            origin,
+            target_x_milli_tiles,
+            target_y_milli_tiles,
+        } => {
+            let target = SimulationVector::new(
+                signed_milli_to_tiles(*target_x_milli_tiles),
+                signed_milli_to_tiles(*target_y_milli_tiles),
+            );
+            let base = AimDirection::new(target - *origin).map_err(HostileError::Aim)?;
+            let directions = [-30_000, -15_000, 0, 15_000, 30_000]
+                .into_iter()
+                .map(|offset| rotate_core_direction(base, offset))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((
+                *tick,
+                *cast_id,
+                *origin,
+                HostileProjectileSourceKind::AimedFan,
+                directions,
+                ProjectileAttackDefinition {
+                    pattern_id: CALDUS_SHIELD_ARC_ID,
+                    projectile_count: 5,
+                    speed_milli_tiles_per_second: 7_000,
+                    radius_milli_tiles: 120,
+                    lifetime_ticks: 75,
+                    raw_damage: 24,
+                    damage_type: DamageType::Physical,
+                    damage_band: DamageBand::Major,
+                    threat_cost: 5,
+                    memory_family: EchoMemoryFamily::FanProjectile,
+                    counterplay: Counterplay::Strafe,
+                    disposition: HostileDisposition::ConsumeOnPlayerOrSolid,
+                    pierces_players: false,
+                    maximum_active_instances: 25,
+                },
+            ))
+        }
+        CoreCaldusProjectileRelease::BellRing {
+            tick,
+            cast_id,
+            origin,
+            gap_start_index,
+        } => {
+            if *gap_start_index >= 18 {
+                return Err(HostileError::InvalidBossRingIndices);
+            }
+            let omitted = [
+                *gap_start_index,
+                (*gap_start_index + 1) % 18,
+                (*gap_start_index + 2) % 18,
+            ];
+            let directions = (0..18)
+                .filter(|index| !omitted.contains(index))
+                .map(|index| caldus_ring_direction(index, 18))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((
+                *tick,
+                *cast_id,
+                *origin,
+                HostileProjectileSourceKind::GapRing,
+                directions,
+                ProjectileAttackDefinition {
+                    pattern_id: CALDUS_BELL_RING_ID,
+                    projectile_count: 15,
+                    speed_milli_tiles_per_second: 5_000,
+                    radius_milli_tiles: 130,
+                    lifetime_ticks: 120,
+                    raw_damage: 32,
+                    damage_type: DamageType::Veil,
+                    damage_band: DamageBand::Major,
+                    threat_cost: 15,
+                    memory_family: EchoMemoryFamily::RadialProjectile,
+                    counterplay: Counterplay::FollowGap,
+                    disposition: HostileDisposition::ConsumeOnPlayerOrSolid,
+                    pierces_players: false,
+                    maximum_active_instances: 45,
+                },
+            ))
+        }
+        CoreCaldusProjectileRelease::ChargeStopRing {
+            tick,
+            cast_id,
+            origin,
+            omitted_start_index,
+        } => {
+            if *omitted_start_index >= 14 {
+                return Err(HostileError::InvalidBossRingIndices);
+            }
+            let omitted = [*omitted_start_index, (*omitted_start_index + 1) % 14];
+            let directions = (0..14)
+                .filter(|index| !omitted.contains(index))
+                .map(|index| caldus_ring_direction(index, 14))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((
+                *tick,
+                *cast_id,
+                *origin,
+                HostileProjectileSourceKind::GapRing,
+                directions,
+                ProjectileAttackDefinition {
+                    pattern_id: CALDUS_CHARGE_STOP_RING_ID,
+                    projectile_count: 12,
+                    speed_milli_tiles_per_second: 5_000,
+                    radius_milli_tiles: 130,
+                    lifetime_ticks: 108,
+                    raw_damage: 28,
+                    damage_type: DamageType::Physical,
+                    damage_band: DamageBand::Major,
+                    threat_cost: 12,
+                    memory_family: EchoMemoryFamily::RadialProjectile,
+                    counterplay: Counterplay::FollowGap,
+                    disposition: HostileDisposition::ConsumeOnPlayerOrSolid,
+                    pierces_players: false,
+                    maximum_active_instances: 12,
+                },
+            ))
+        }
+    }
+}
+
 /// Exact lookup for the only authored Core normal-projectile angles. Positive angles are
 /// clockwise in the northwest-origin simulation plane. No platform trigonometry enters replay.
 fn rotate_core_direction(
@@ -2010,7 +2231,9 @@ fn rotate_core_direction(
 ) -> Result<AimDirection, HostileError> {
     let (cosine, sine) = match milli_degrees {
         -25_000 => (0.906_307_8, -0.422_618_27),
+        -30_000 => (0.866_025_4, -0.5),
         -12_500 => (0.976_296, -0.216_439_62),
+        -15_000 => (0.965_925_8, -0.258_819_04),
         -50_000 => (0.642_787_64, -0.766_044_44),
         -35_000 => (0.819_152_06, -0.573_576_45),
         -20_000 => (0.939_692_6, -0.342_020_15),
@@ -2021,9 +2244,11 @@ fn rotate_core_direction(
         10_000 => (0.984_807_7, 0.173_648_18),
         12_500 => (0.976_296, 0.216_439_62),
         14_000 => (0.970_295_7, 0.241_921_9),
+        15_000 => (0.965_925_8, 0.258_819_04),
         20_000 => (0.939_692_6, 0.342_020_15),
         25_000 => (0.906_307_8, 0.422_618_27),
         28_000 => (0.882_947_56, 0.469_471_57),
+        30_000 => (0.866_025_4, 0.5),
         35_000 => (0.819_152_06, 0.573_576_45),
         36_000 => (0.809_017, 0.587_785_24),
         42_000 => (0.743_144_8, 0.669_130_6),
@@ -2103,6 +2328,44 @@ fn boss_ring_direction(index: u8) -> AimDirection {
         _ => unreachable!("validated Bell ring index"),
     };
     AimDirection::new(vector).expect("Bell ring table contains finite unit vectors")
+}
+
+/// Exact clockwise unit-vector tables for Caldus's 18-index and 14-index rings.
+fn caldus_ring_direction(index: u8, count: u8) -> Result<AimDirection, HostileError> {
+    let (x, y) = match (count, index) {
+        (18 | 14, 0) => (1.0, 0.0),
+        (18, 1) => (0.939_692_6, 0.342_020_15),
+        (18, 2) => (0.766_044_44, 0.642_787_64),
+        (18, 3) => (0.5, 0.866_025_4),
+        (18, 4) => (0.173_648_18, 0.984_807_7),
+        (18, 5) => (-0.173_648_18, 0.984_807_7),
+        (18, 6) => (-0.5, 0.866_025_4),
+        (18, 7) => (-0.766_044_44, 0.642_787_64),
+        (18, 8) => (-0.939_692_6, 0.342_020_15),
+        (18, 9) | (14, 7) => (-1.0, 0.0),
+        (18, 10) => (-0.939_692_6, -0.342_020_15),
+        (18, 11) => (-0.766_044_44, -0.642_787_64),
+        (18, 12) => (-0.5, -0.866_025_4),
+        (18, 13) => (-0.173_648_18, -0.984_807_7),
+        (18, 14) => (0.173_648_18, -0.984_807_7),
+        (18, 15) => (0.5, -0.866_025_4),
+        (18, 16) => (0.766_044_44, -0.642_787_64),
+        (18, 17) => (0.939_692_6, -0.342_020_15),
+        (14, 1) => (0.900_968_85, 0.433_883_73),
+        (14, 2) => (0.623_489_8, 0.781_831_5),
+        (14, 3) => (0.222_520_93, 0.974_927_9),
+        (14, 4) => (-0.222_520_93, 0.974_927_9),
+        (14, 5) => (-0.623_489_8, 0.781_831_5),
+        (14, 6) => (-0.900_968_85, 0.433_883_73),
+        (14, 8) => (-0.900_968_85, -0.433_883_73),
+        (14, 9) => (-0.623_489_8, -0.781_831_5),
+        (14, 10) => (-0.222_520_93, -0.974_927_9),
+        (14, 11) => (0.222_520_93, -0.974_927_9),
+        (14, 12) => (0.623_489_8, -0.781_831_5),
+        (14, 13) => (0.900_968_85, -0.433_883_73),
+        _ => return Err(HostileError::InvalidBossRingIndices),
+    };
+    AimDirection::new(SimulationVector::new(x, y)).map_err(HostileError::Aim)
 }
 
 fn abbot_rotor_direction(index: u8) -> AimDirection {
@@ -3057,5 +3320,85 @@ mod tests {
             "cb9c95a99c1ce1b6b31fefcb0104641b6e7496c907349bd3a8903b032fd7b177"
         );
         assert_eq!(first, replay());
+    }
+
+    #[test]
+    fn caldus_releases_materialize_exact_shared_hostiles_and_fail_transactionally() {
+        let mut hostile = HostileProjectileSimulation::with_allocator(
+            EntityIdAllocator::starting_at(NonZeroU64::new(90_000).expect("allocator")),
+        );
+        let origin = SimulationVector::new(9.0, 9.0);
+        let shield = hostile
+            .spawn_from_core_caldus_release(
+                id(80_001),
+                &CoreCaldusProjectileRelease::ShieldArc {
+                    tick: Tick(0),
+                    cast_id: 1,
+                    origin,
+                    target_x_milli_tiles: 2_500,
+                    target_y_milli_tiles: 9_000,
+                },
+            )
+            .expect("shield");
+        assert_eq!(shield.len(), 5);
+        assert_eq!(hostile.projectiles().len(), 5);
+        assert!(hostile.projectiles().iter().all(|projectile| {
+            projectile.pattern_id() == "boss.caldus.shield_arc"
+                && projectile.raw_damage() == 24
+                && projectile.remaining_lifetime_ticks() == 75
+        }));
+
+        let before = hostile.clone();
+        let error = hostile
+            .spawn_from_core_caldus_release(
+                id(80_001),
+                &CoreCaldusProjectileRelease::BellRing {
+                    tick: Tick(1),
+                    cast_id: 2,
+                    origin,
+                    gap_start_index: 0,
+                },
+            )
+            .expect_err("future release");
+        assert!(matches!(error, HostileError::CoreReleaseTickMismatch));
+        assert_eq!(hostile, before);
+
+        let bell = hostile
+            .spawn_from_core_caldus_release(
+                id(80_001),
+                &CoreCaldusProjectileRelease::BellRing {
+                    tick: Tick(0),
+                    cast_id: 2,
+                    origin,
+                    gap_start_index: 17,
+                },
+            )
+            .expect("bell");
+        assert_eq!(bell.len(), 15);
+        assert_eq!(hostile.projectiles().len(), 20);
+        assert!(hostile.projectiles()[5..].iter().all(|projectile| {
+            projectile.pattern_id() == "boss.caldus.bell_ring"
+                && projectile.raw_damage() == 32
+                && projectile.remaining_lifetime_ticks() == 120
+        }));
+
+        let stop = hostile
+            .spawn_from_core_caldus_release(
+                id(80_001),
+                &CoreCaldusProjectileRelease::ChargeStopRing {
+                    tick: Tick(0),
+                    cast_id: 3,
+                    origin,
+                    omitted_start_index: 13,
+                },
+            )
+            .expect("stop ring");
+        assert_eq!(stop.len(), 12);
+        assert_eq!(hostile.projectiles().len(), 32);
+        assert!(hostile.projectiles()[20..].iter().all(|projectile| {
+            projectile.pattern_id() == "boss.caldus.charge_stop_ring"
+                && projectile.raw_damage() == 28
+                && projectile.remaining_lifetime_ticks() == 108
+        }));
     }
 }
