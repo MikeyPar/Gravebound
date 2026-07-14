@@ -1,6 +1,9 @@
 use sqlx::Row;
 
-use crate::{PersistenceError, PostgresPersistence, WIPEABLE_CORE_NAMESPACE};
+use crate::{
+    PersistenceError, PostgresPersistence, WIPEABLE_CORE_NAMESPACE,
+    items::CORE_ITEM_CONTENT_REVISION,
+};
 
 pub const CORE_ITEM_LIFECYCLE_SIGNATURE_CONTEXT: &str = "gravebound.m03-04g.lifecycle-signature.v1";
 
@@ -8,6 +11,7 @@ pub const CORE_ITEM_LIFECYCLE_SIGNATURE_CONTEXT: &str = "gravebound.m03-04g.life
 pub struct StoredCoreItemLifecycleSignatureV1 {
     pub contract_version: u16,
     pub namespace_id: String,
+    pub item_content_revision: String,
     pub account_id: [u8; 16],
     pub character_id: [u8; 16],
     pub account_version: u64,
@@ -124,6 +128,7 @@ pub struct StoredLifecycleSafeInventoryPlacementV1 {
 pub struct StoredLifecycleSafeInventoryReceiptV1 {
     pub mutation_id: [u8; 16],
     pub command_kind: u16,
+    pub result_code: u16,
     pub source_slot_index: u16,
     pub canonical_request_hash: [u8; 32],
     pub pre_account_version: u64,
@@ -258,7 +263,7 @@ impl PostgresPersistence {
         }
 
         let receipt_rows = sqlx::query(
-            "SELECT mutation_id,command_kind,source_slot_index,canonical_request_hash, \
+            "SELECT mutation_id,command_kind,result_code,source_slot_index,canonical_request_hash, \
              pre_account_version,post_account_version,pre_inventory_version,post_inventory_version, \
              result_hash FROM safe_inventory_mutations WHERE namespace_id=$1 AND account_id=$2 \
              AND character_id=$3 ORDER BY mutation_id",
@@ -298,6 +303,7 @@ impl PostgresPersistence {
             safe_inventory_receipts.push(StoredLifecycleSafeInventoryReceiptV1 {
                 mutation_id,
                 command_kind: unsigned(row.try_get::<i16, _>("command_kind")?)?,
+                result_code: unsigned(row.try_get::<i16, _>("result_code")?)?,
                 source_slot_index: unsigned(row.try_get::<i16, _>("source_slot_index")?)?,
                 canonical_request_hash: required_hash(row.try_get("canonical_request_hash")?)?,
                 pre_account_version: unsigned(row.try_get::<i64, _>("pre_account_version")?)?,
@@ -346,6 +352,7 @@ impl PostgresPersistence {
         let signature = StoredCoreItemLifecycleSignatureV1 {
             contract_version: 1,
             namespace_id: WIPEABLE_CORE_NAMESPACE.to_owned(),
+            item_content_revision: CORE_ITEM_CONTENT_REVISION.to_owned(),
             account_id,
             character_id,
             account_version: unsigned(account.try_get::<i64, _>("state_version")?)?,
@@ -390,6 +397,7 @@ fn validate_signature(
 ) -> Result<(), PersistenceError> {
     if signature.contract_version != 1
         || signature.namespace_id != WIPEABLE_CORE_NAMESPACE
+        || signature.item_content_revision != CORE_ITEM_CONTENT_REVISION
         || signature.account_id == [0; 16]
         || signature.character_id == [0; 16]
         || signature.selected_character_id != signature.character_id
@@ -403,6 +411,10 @@ fn validate_signature(
             .items
             .windows(2)
             .all(|pair| pair[0].item_uid < pair[1].item_uid)
+        || signature
+            .items
+            .iter()
+            .any(|item| item.content_revision != signature.item_content_revision)
         || !signature
             .safe_inventory_receipts
             .windows(2)
@@ -418,21 +430,46 @@ fn validate_signature(
                 pair[1].ledger_event_id,
             )
         })
-        || signature.safe_inventory_receipts.iter().any(|receipt| {
-            receipt.mutation_id == [0; 16]
-                || receipt.canonical_request_hash == [0; 32]
-                || receipt.result_hash == [0; 32]
-                || receipt.placements.is_empty()
-                || !receipt
-                    .placements
-                    .iter()
-                    .enumerate()
-                    .all(|(index, placement)| usize::from(placement.ordinal) == index)
-        })
+        || signature
+            .safe_inventory_receipts
+            .iter()
+            .any(invalid_safe_inventory_receipt)
     {
         return Err(PersistenceError::CorruptStoredLifecycleSignature);
     }
     Ok(())
+}
+
+fn invalid_safe_inventory_receipt(receipt: &StoredLifecycleSafeInventoryReceiptV1) -> bool {
+    let account_version_valid = match receipt.command_kind {
+        0 | 1 => receipt.post_account_version == receipt.pre_account_version.saturating_add(1),
+        2 => receipt.post_account_version == receipt.pre_account_version,
+        _ => false,
+    };
+    receipt.mutation_id == [0; 16]
+        || receipt.result_code != 1
+        || receipt.canonical_request_hash == [0; 32]
+        || receipt.result_hash == [0; 32]
+        || receipt.pre_account_version == 0
+        || !account_version_valid
+        || receipt.pre_inventory_version == 0
+        || receipt.post_inventory_version != receipt.pre_inventory_version.saturating_add(1)
+        || receipt.placements.is_empty()
+        || receipt.placements.len() > 6
+        || !receipt
+            .placements
+            .iter()
+            .enumerate()
+            .all(|(index, placement)| {
+                usize::from(placement.ordinal) == index
+                    && placement.item_uid != [0; 16]
+                    && placement.pre_item_version > 0
+                    && placement.post_item_version == placement.pre_item_version.saturating_add(1)
+                    && matches!(
+                        (placement.destination_kind, placement.destination_slot_index),
+                        (2 | 5, 0..=7) | (6, 0..=159)
+                    )
+            })
 }
 
 fn required_id(bytes: Vec<u8>) -> Result<[u8; 16], PersistenceError> {
@@ -481,6 +518,7 @@ mod tests {
         StoredCoreItemLifecycleSignatureV1 {
             contract_version: 1,
             namespace_id: WIPEABLE_CORE_NAMESPACE.to_owned(),
+            item_content_revision: CORE_ITEM_CONTENT_REVISION.to_owned(),
             account_id: [1; 16],
             character_id: [2; 16],
             account_version: 2,
@@ -530,6 +568,41 @@ mod tests {
     fn invalid_binding_fails_closed() {
         let mut value = signature();
         value.selected_character_id = [3; 16];
+        assert!(matches!(
+            value.canonical_bytes(),
+            Err(PersistenceError::CorruptStoredLifecycleSignature)
+        ));
+    }
+
+    #[test]
+    fn safe_receipt_result_code_and_version_shape_are_canonical() {
+        let mut value = signature();
+        value
+            .safe_inventory_receipts
+            .push(StoredLifecycleSafeInventoryReceiptV1 {
+                mutation_id: [3; 16],
+                command_kind: 0,
+                result_code: 1,
+                source_slot_index: 0,
+                canonical_request_hash: [4; 32],
+                pre_account_version: 1,
+                post_account_version: 2,
+                pre_inventory_version: 1,
+                post_inventory_version: 2,
+                result_hash: [5; 32],
+                placements: vec![StoredLifecycleSafeInventoryPlacementV1 {
+                    ordinal: 0,
+                    item_uid: [6; 16],
+                    destination_kind: 6,
+                    destination_slot_index: 0,
+                    pre_item_version: 1,
+                    post_item_version: 2,
+                }],
+            });
+        let canonical = value.canonical_bytes().unwrap();
+        value.safe_inventory_receipts[0].result_hash[0] ^= 1;
+        assert_ne!(canonical, value.canonical_bytes().unwrap());
+        value.safe_inventory_receipts[0].result_code = 0;
         assert!(matches!(
             value.canonical_bytes(),
             Err(PersistenceError::CorruptStoredLifecycleSignature)
