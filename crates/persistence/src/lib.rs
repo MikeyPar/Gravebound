@@ -67,7 +67,10 @@ pub use extraction::{
     CaldusExtractionTransfer, StoredExtractionAuthority, StoredExtractionResult,
     StoredExtractionState, stage_caldus_extraction_transfer,
 };
-pub use field_equipment::{StoredFieldEquipmentItem, StoredFieldEquipmentSnapshot};
+pub use field_equipment::{
+    StoredFieldEquipmentCommand, StoredFieldEquipmentItem, StoredFieldEquipmentResult,
+    StoredFieldEquipmentSnapshot, StoredFieldEquipmentSource,
+};
 pub use ground_expiry::{MAX_GROUND_EXPIRY_BATCH, StoredGroundExpiry, StoredGroundExpiryCandidate};
 pub use identity::{StoredCharacter, StoredIdentityAggregate, StoredMutation};
 pub use items::{
@@ -251,6 +254,10 @@ pub enum PersistenceError {
     CorruptStoredItems,
     #[error("item request ID was reused with different canonical material")]
     ItemIdempotencyConflict,
+    #[error("field equipment command expected a different inventory or item version")]
+    FieldEquipmentVersionMismatch,
+    #[error("field equipment source or replacement destination no longer matches")]
+    FieldEquipmentBindingMismatch,
     #[error("stored Ash wallet or currency ledger violates the approved contract")]
     CorruptStoredAsh,
     #[error("Ash wallet account does not exist")]
@@ -421,6 +428,7 @@ impl PostgresPersistence {
         // These rows bind both the character and its danger lineage. Delete the cross-linked
         // children explicitly before the account cascade reaches either side of that binding.
         for statement in [
+            "DELETE FROM field_equipment_mutations WHERE namespace_id = $1",
             "DELETE FROM character_extraction_results WHERE namespace_id = $1",
             "DELETE FROM caldus_victory_exit_owners WHERE namespace_id = $1",
             "DELETE FROM caldus_victory_exits WHERE namespace_id = $1",
