@@ -15,6 +15,18 @@ enum CoreWorldEvidenceStateArg {
     MicrorealmCleared,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CoreCaldusEvidenceStateArg {
+    Staging,
+    Introduction,
+    PhaseOne,
+    ChargePressure,
+    FinalRings,
+    VictoryExit,
+    ExtractionCommitted,
+    HallArrival,
+}
+
 #[derive(Debug, Parser)]
 #[command(name = "client_bevy", about = "Gravebound native client")]
 struct Cli {
@@ -68,6 +80,15 @@ enum Command {
         content_root: PathBuf,
         #[arg(long)]
         reduced_effects: bool,
+    },
+    /// Open the disposable GB-M03-03E Sir Caldus encounter and Hall-return evidence surface.
+    CoreCaldusShowcase {
+        #[arg(long, default_value = "content")]
+        content_root: PathBuf,
+        #[arg(long)]
+        reduced_effects: bool,
+        #[arg(long, value_enum, default_value_t = CoreCaldusEvidenceStateArg::PhaseOne)]
+        state: CoreCaldusEvidenceStateArg,
     },
 }
 
@@ -126,6 +147,40 @@ fn main() {
         } => client_bevy::run_core_encounter_showcase(client_bevy::CoreEncounterShowcaseConfig {
             content_root,
             reduced_effects,
+        }),
+        Command::CoreCaldusShowcase {
+            content_root,
+            reduced_effects,
+            state,
+        } => client_bevy::run_core_caldus_showcase(client_bevy::CoreCaldusShowcaseConfig {
+            content_root,
+            reduced_effects,
+            state: match state {
+                CoreCaldusEvidenceStateArg::Staging => {
+                    client_bevy::CoreCaldusShowcaseState::Staging
+                }
+                CoreCaldusEvidenceStateArg::Introduction => {
+                    client_bevy::CoreCaldusShowcaseState::Introduction
+                }
+                CoreCaldusEvidenceStateArg::PhaseOne => {
+                    client_bevy::CoreCaldusShowcaseState::PhaseOne
+                }
+                CoreCaldusEvidenceStateArg::ChargePressure => {
+                    client_bevy::CoreCaldusShowcaseState::ChargePressure
+                }
+                CoreCaldusEvidenceStateArg::FinalRings => {
+                    client_bevy::CoreCaldusShowcaseState::FinalRings
+                }
+                CoreCaldusEvidenceStateArg::VictoryExit => {
+                    client_bevy::CoreCaldusShowcaseState::VictoryExit
+                }
+                CoreCaldusEvidenceStateArg::ExtractionCommitted => {
+                    client_bevy::CoreCaldusShowcaseState::ExtractionCommitted
+                }
+                CoreCaldusEvidenceStateArg::HallArrival => {
+                    client_bevy::CoreCaldusShowcaseState::HallArrival
+                }
+            },
         }),
     };
     if let Err(error) = result {
