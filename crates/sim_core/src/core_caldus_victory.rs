@@ -469,10 +469,14 @@ mod tests {
         ];
         assert_eq!(first_ids.iter().copied().collect::<BTreeSet<_>>().len(), 8);
         assert!(first_ids.iter().all(|id| {
-            !retry.personal_rewards.iter().any(|reward| reward.request_id == *id)
-                && !retry.personal_extractions.iter().any(|extraction| {
-                    extraction.request_id == *id || extraction.receipt_id == *id
-                })
+            !retry
+                .personal_rewards
+                .iter()
+                .any(|reward| reward.request_id == *id)
+                && !retry
+                    .personal_extractions
+                    .iter()
+                    .any(|extraction| extraction.request_id == *id || extraction.receipt_id == *id)
         }));
         assert_ne!(first.encounter_id, retry.encounter_id);
         assert_ne!(first.exit_instance_id, retry.exit_instance_id);

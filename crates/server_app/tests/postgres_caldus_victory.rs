@@ -7,10 +7,9 @@ use persistence::{
 use protocol::ManifestHash;
 use server_app::{
     AccountId, AuthenticatedAccount, AuthenticatedNamespace, CaldusVictoryCoordinatorError,
-    CaldusVictoryOwnerCommand, PostgresCaldusVictoryCoordinator,
-    PostgresProgressionAwardService, PostgresRewardService, ProgressionAwardCode,
-    ProgressionAwardEvidence, ProgressionAwardPayload, RewardGrantContext,
-    RewardGrantTransaction, SecretRewardEpoch,
+    CaldusVictoryOwnerCommand, PostgresCaldusVictoryCoordinator, PostgresProgressionAwardService,
+    PostgresRewardService, ProgressionAwardCode, ProgressionAwardEvidence, ProgressionAwardPayload,
+    RewardGrantContext, RewardGrantTransaction, SecretRewardEpoch,
 };
 use sim_core::{
     CoreBossParticipant, CoreBossParticipantLock, CoreCaldusAntiCheatState,
@@ -119,8 +118,7 @@ fn services(
     .unwrap();
     let progression_content =
         sim_content::load_core_development_progression(&content_root()).unwrap();
-    let oath_bargain =
-        sim_content::load_core_development_oaths_bargains(&content_root()).unwrap();
+    let oath_bargain = sim_content::load_core_development_oaths_bargains(&content_root()).unwrap();
     let progression = PostgresProgressionAwardService::new(
         persistence.clone(),
         &progression_content,
@@ -294,7 +292,11 @@ async fn caldus_victory_fresh_replay_and_payload_conflict_are_durable() {
         .filter(|item| item.template_id != "consumable.red_tonic")
         .collect::<Vec<_>>();
     assert_eq!(equipment.len(), 2);
-    assert!(equipment.iter().all(|item| matches!(item.item_level, Some(8..=10))));
+    assert!(
+        equipment
+            .iter()
+            .all(|item| matches!(item.item_level, Some(8..=10)))
+    );
     assert_eq!(fresh.owners[0].progression.base_xp, 450);
     assert_eq!(fresh.owners[0].progression.first_clear_bonus_xp, 225);
 
@@ -314,16 +316,13 @@ async fn caldus_victory_fresh_replay_and_payload_conflict_are_durable() {
         RewardGrantTransaction::Replay { .. }
     ));
     assert_eq!(fresh.exit.exit_instance_id, replay.exit.exit_instance_id);
-    assert_eq!(fresh.exit.canonical_request_hash, replay.exit.canonical_request_hash);
+    assert_eq!(
+        fresh.exit.canonical_request_hash,
+        replay.exit.canonical_request_hash
+    );
 
     let conflict = coordinator
-        .commit(
-            lineage_id,
-            &lock,
-            ACTIVE_TICKS - 1,
-            CURRENT_TICK,
-            &[owner],
-        )
+        .commit(lineage_id, &lock, ACTIVE_TICKS - 1, CURRENT_TICK, &[owner])
         .await
         .unwrap_err();
     assert!(matches!(
@@ -332,7 +331,10 @@ async fn caldus_victory_fresh_replay_and_payload_conflict_are_durable() {
             ProgressionAwardCode::IdempotencyConflict
         )
     ));
-    assert_eq!(exit_count(&persistence, fresh.identities.encounter_id.bytes()).await, 1);
+    assert_eq!(
+        exit_count(&persistence, fresh.identities.encounter_id.bytes()).await,
+        1
+    );
 }
 
 #[tokio::test]
@@ -381,7 +383,10 @@ async fn caldus_victory_partial_item_terminal_blocks_exit_then_converges() {
         persistence.commit_caldus_victory_exit(&partial_exit).await,
         Err(PersistenceError::CaldusRewardNotTerminal)
     ));
-    assert_eq!(exit_count(&persistence, identities.encounter_id.bytes()).await, 0);
+    assert_eq!(
+        exit_count(&persistence, identities.encounter_id.bytes()).await,
+        0
+    );
 
     let recovered = coordinator
         .commit(lineage_id, &lock, ACTIVE_TICKS, CURRENT_TICK, &[owner])
@@ -393,5 +398,8 @@ async fn caldus_victory_partial_item_terminal_blocks_exit_then_converges() {
         RewardGrantTransaction::Replay { .. }
     ));
     assert_eq!(recovered.owners[0].progression.base_xp, 450);
-    assert_eq!(exit_count(&persistence, identities.encounter_id.bytes()).await, 1);
+    assert_eq!(
+        exit_count(&persistence, identities.encounter_id.bytes()).await,
+        1
+    );
 }

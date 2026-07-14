@@ -131,9 +131,7 @@ impl CaldusInstancePresentation {
                 self.exit = Some(presentation);
                 Ok(CaldusExitPresentationCommit::Fresh)
             }
-            Some(existing) if existing == &presentation => {
-                Ok(CaldusExitPresentationCommit::Replay)
-            }
+            Some(existing) if existing == &presentation => Ok(CaldusExitPresentationCommit::Replay),
             Some(_) => Err(CaldusInstancePresentationError::PresentationConflict),
         }
     }
@@ -192,8 +190,8 @@ mod tests {
     }
 
     fn committed_exit(lineage_id: [u8; 16], attempt_ordinal: u32) -> StoredCaldusVictoryExit {
-        let identities = CoreCaldusVictoryIdentities::derive(lineage_id, &lock(attempt_ordinal))
-            .unwrap();
+        let identities =
+            CoreCaldusVictoryIdentities::derive(lineage_id, &lock(attempt_ordinal)).unwrap();
         StoredCaldusVictoryExit {
             replayed: false,
             encounter_id: identities.encounter_id.bytes(),

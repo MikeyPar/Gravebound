@@ -160,10 +160,10 @@ pub use core_caldus_victory::{
     CALDUS_BOSS_XP, CALDUS_EXIT_ID, CALDUS_FIRST_CLEAR_XP, CALDUS_MAX_INACTIVITY_TICKS,
     CALDUS_MAX_OBJECTIVE_CREDITS, CALDUS_REWARD_ID, CALDUS_SHORT_FIGHT_TICKS,
     CoreCaldusAntiCheatState, CoreCaldusDefeatPresence, CoreCaldusEligibilityDecision,
-    CoreCaldusEligibilityEvidence, CoreCaldusIneligibilityReason, CoreCaldusPersonalRewardIdentity,
-    CoreCaldusRecallState, CoreCaldusSessionState, CoreCaldusStableId, CoreCaldusVictoryError,
-    CoreCaldusPersonalExtractionIdentity, CoreCaldusVictoryIdentities,
-    evaluate_caldus_eligibility,
+    CoreCaldusEligibilityEvidence, CoreCaldusIneligibilityReason,
+    CoreCaldusPersonalExtractionIdentity, CoreCaldusPersonalRewardIdentity, CoreCaldusRecallState,
+    CoreCaldusSessionState, CoreCaldusStableId, CoreCaldusVictoryError,
+    CoreCaldusVictoryIdentities, evaluate_caldus_eligibility,
 };
 pub use core_counterplay::{
     CORE_COM006_CLOSE_SPAWN_DISTANCE_MILLI_TILES,
