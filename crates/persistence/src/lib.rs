@@ -99,8 +99,9 @@ pub use reward::{
 };
 pub use safe_inventory::{
     StoredSafeInventoryCommand, StoredSafeInventoryCommandKind, StoredSafeInventoryItem,
-    StoredSafeInventoryLocation, StoredSafeInventoryPlacement, StoredSafeInventoryResult,
-    StoredSafeInventorySnapshot,
+    StoredSafeInventoryLocation, StoredSafeInventoryPlacement, StoredSafeInventoryPreflightResult,
+    StoredSafeInventoryResult, StoredSafeInventorySnapshot, load_world_flow_safe_inventory,
+    stage_world_flow_safe_inventory_preflight,
 };
 pub use world_flow::{
     StoredDangerEntryRootV1, StoredSafeArrival, StoredWorldFlowCharacter,

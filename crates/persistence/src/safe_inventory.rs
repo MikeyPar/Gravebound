@@ -130,6 +130,87 @@ pub struct StoredSafeInventoryResult {
     pub placements: Vec<StoredSafeInventoryPlacement>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StoredSafeInventoryPreflightResult {
+    pub moved_item_count: usize,
+    pub account_version: u64,
+    pub inventory_version: u64,
+}
+
+/// Locks and projects the safe-storage state inside an already account/character-locked
+/// world-flow transaction. This deliberately does not relock the account or Hall location.
+pub async fn load_world_flow_safe_inventory(
+    transaction: &mut crate::PersistenceTransaction<'_>,
+    account_id: [u8; 16],
+    character_id: [u8; 16],
+    locked_account_version: u64,
+) -> Result<StoredSafeInventorySnapshot, PersistenceError> {
+    ensure_no_unresolved_inventory_mutation(transaction.connection(), account_id, character_id)
+        .await?;
+    let inventory_version =
+        lock_inventory(transaction.connection(), account_id, character_id).await?;
+    let items = lock_storage_items(transaction.connection(), account_id, character_id).await?;
+    decode_snapshot(locked_account_version, inventory_version, items)
+}
+
+/// Applies a complete server-planned CharacterSafe-to-Vault preflight inside the caller's
+/// world-flow transaction. The durable planner independently derives and verifies every
+/// destination before the first write, keeping manual transfers and entry preflight aligned.
+pub async fn stage_world_flow_safe_inventory_preflight(
+    transaction: &mut crate::PersistenceTransaction<'_>,
+    account_id: [u8; 16],
+    character_id: [u8; 16],
+    mutation_id: [u8; 16],
+    snapshot: &StoredSafeInventorySnapshot,
+    placements: &[StoredSafeInventoryPlacement],
+) -> Result<StoredSafeInventoryPreflightResult, PersistenceError> {
+    if mutation_id == [0; 16] {
+        return Err(PersistenceError::CorruptStoredSafeInventory);
+    }
+    let expected = derive_preflight_placements(snapshot)?;
+    if placements != expected {
+        return Err(PersistenceError::SafeInventoryBindingMismatch);
+    }
+    if placements.is_empty() {
+        return Ok(StoredSafeInventoryPreflightResult {
+            moved_item_count: 0,
+            account_version: snapshot.account_version,
+            inventory_version: snapshot.inventory_version,
+        });
+    }
+    for placement in placements {
+        transition_item(
+            transaction.connection(),
+            account_id,
+            character_id,
+            mutation_id,
+            placement,
+        )
+        .await?;
+    }
+    let account_version = snapshot
+        .account_version
+        .checked_add(1)
+        .ok_or(PersistenceError::CorruptStoredSafeInventory)?;
+    let inventory_version = snapshot
+        .inventory_version
+        .checked_add(1)
+        .ok_or(PersistenceError::CorruptStoredSafeInventory)?;
+    update_account_version(transaction.connection(), account_id, account_version).await?;
+    update_inventory_version(
+        transaction.connection(),
+        account_id,
+        character_id,
+        inventory_version,
+    )
+    .await?;
+    Ok(StoredSafeInventoryPreflightResult {
+        moved_item_count: placements.len(),
+        account_version,
+        inventory_version,
+    })
+}
+
 impl PostgresPersistence {
     pub async fn load_safe_inventory_replay(
         &self,
@@ -643,6 +724,45 @@ fn derive_placements<'a>(
         return Err(PersistenceError::SafeInventoryBindingMismatch);
     }
     Ok(result)
+}
+
+fn derive_preflight_placements(
+    snapshot: &StoredSafeInventorySnapshot,
+) -> Result<Vec<StoredSafeInventoryPlacement>, PersistenceError> {
+    let mut virtual_snapshot = snapshot.clone();
+    let mut placements = Vec::new();
+    for source_slot in 0..CHARACTER_SAFE_CAPACITY {
+        let source = StoredSafeInventoryLocation::CharacterSafe(
+            u8::try_from(source_slot).map_err(|_| PersistenceError::CorruptStoredSafeInventory)?,
+        );
+        let (derived, moved_items) = {
+            let mut source_items = items_at(&virtual_snapshot, source);
+            if source_items.is_empty() {
+                continue;
+            }
+            source_items.sort_by_key(|item| item.item_uid);
+            let derived = derive_placements(&virtual_snapshot, &source_items, source, 6)?
+                .into_iter()
+                .map(|(item, destination)| StoredSafeInventoryPlacement {
+                    item_uid: item.item_uid,
+                    source,
+                    destination,
+                    expected_item_version: item.item_version,
+                })
+                .collect::<Vec<_>>();
+            let moved_items = source_items.into_iter().cloned().collect::<Vec<_>>();
+            (derived, moved_items)
+        };
+        virtual_snapshot
+            .character_safe
+            .retain(|item| item.location != source);
+        for (mut item, placement) in moved_items.into_iter().zip(&derived) {
+            item.location = placement.destination;
+            virtual_snapshot.vault.push(item);
+        }
+        placements.extend(derived);
+    }
+    Ok(placements)
 }
 
 fn items_at(
@@ -1290,6 +1410,52 @@ mod tests {
             ),
             Err(PersistenceError::SafeInventoryStorageFull)
         ));
+    }
+
+    #[test]
+    fn entry_preflight_derives_all_sources_against_one_virtual_vault() {
+        let storage = snapshot(vec![
+            item(
+                1,
+                "equipment.one",
+                0,
+                StoredSafeInventoryLocation::CharacterSafe(1),
+            ),
+            item(
+                2,
+                "equipment.two",
+                0,
+                StoredSafeInventoryLocation::CharacterSafe(7),
+            ),
+            item(
+                3,
+                "equipment.vault",
+                0,
+                StoredSafeInventoryLocation::Vault(0),
+            ),
+        ]);
+        assert_eq!(
+            derive_preflight_placements(&storage).unwrap(),
+            vec![
+                StoredSafeInventoryPlacement {
+                    item_uid: [1; 16],
+                    source: StoredSafeInventoryLocation::CharacterSafe(1),
+                    destination: StoredSafeInventoryLocation::Vault(1),
+                    expected_item_version: 1,
+                },
+                StoredSafeInventoryPlacement {
+                    item_uid: [2; 16],
+                    source: StoredSafeInventoryLocation::CharacterSafe(7),
+                    destination: StoredSafeInventoryLocation::Vault(2),
+                    expected_item_version: 2,
+                },
+            ]
+        );
+        assert!(
+            derive_preflight_placements(&snapshot(Vec::new()))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

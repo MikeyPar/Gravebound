@@ -6,7 +6,8 @@
 use persistence::{
     PersistenceError, PostgresPersistence, StoredDangerEntryRootV1, StoredSafeArrival,
     StoredWorldFlowRevisionV1, StoredWorldLocation, StoredWorldTransferReceipt, WorldFlowBegin,
-    WorldFlowTransaction, WorldFlowTransactionState, stage_world_flow_danger_entry,
+    WorldFlowTransaction, WorldFlowTransactionState, load_world_flow_safe_inventory,
+    stage_world_flow_danger_entry, stage_world_flow_safe_inventory_preflight,
 };
 use protocol::{
     CharacterLocationSnapshot, WorldFlowContentRevisionV1, WorldFlowFrame, WorldFlowRequest,
@@ -18,7 +19,8 @@ use crate::{
     AuthenticatedAccount, AuthenticatedNamespace, EntryCaptureContext, EntryRestoreProvider,
     IdentityClock, InventorySecurityRestoreV1, OathBargainRestoreV1,
     PostgresProgressionRestoreProvider, RestorePointError, RestorePointProviders,
-    WorldFlowRepositoryError,
+    SafeInventoryServiceError, WorldFlowRepositoryError,
+    safe_inventory::plan_danger_entry_safe_deposit,
     world_flow_gate::{CoreWorldFlowAuthority, stored_location_snapshot},
 };
 
@@ -58,6 +60,7 @@ where
         }
     }
 
+    #[cfg(test)]
     fn plan_fresh(
         &self,
         authenticated: AuthenticatedAccount,
@@ -65,34 +68,58 @@ where
         mutation: &WorldTransferMutation,
         state: &mut WorldFlowTransactionState,
     ) -> Result<WorldFlowResult, PersistenceError> {
+        let planned = self
+            .validate_fresh(request_sequence, mutation, state)?
+            .map_or_else(|| self.plan_route(request_sequence, mutation, state), Ok)?;
+        stage_receipt(authenticated, mutation, state, &planned)?;
+        Ok(planned)
+    }
+
+    fn validate_fresh(
+        &self,
+        request_sequence: u32,
+        mutation: &WorldTransferMutation,
+        state: &WorldFlowTransactionState,
+    ) -> Result<Option<WorldFlowResult>, PersistenceError> {
         let reject = |code| staged_result(request_sequence, mutation, code, None, None);
         let planned = if mutation.payload.content_revision != self.required_content_revision {
-            reject(WorldTransferResultCode::ContentMismatch)
+            Some(reject(WorldTransferResultCode::ContentMismatch))
         } else if mutation.issued_at_unix_millis > self.clock.unix_millis() {
-            reject(WorldTransferResultCode::IssuedAtInvalid)
+            Some(reject(WorldTransferResultCode::IssuedAtInvalid))
         } else if state.selected_character_id.is_none() {
-            reject(WorldTransferResultCode::NoSelectedCharacter)
+            Some(reject(WorldTransferResultCode::NoSelectedCharacter))
         } else if state.selected_character_id != Some(mutation.character_id) {
-            reject(WorldTransferResultCode::InvalidSource)
+            Some(reject(WorldTransferResultCode::InvalidSource))
         } else if state.character.life_state != 0 {
-            reject(WorldTransferResultCode::CharacterDead)
+            Some(reject(WorldTransferResultCode::CharacterDead))
         } else if state.character.security_state != 0 {
-            reject(WorldTransferResultCode::StorageResolutionRequired)
+            Some(reject(WorldTransferResultCode::StorageResolutionRequired))
         } else if state.location.character_version()
             != i64::try_from(mutation.expected_character_version)
                 .map_err(|_| PersistenceError::CorruptStoredWorldFlow)?
         {
             let snapshot = protocol_snapshot(mutation.character_id, &state.location)?;
-            staged_result(
+            Some(staged_result(
                 request_sequence,
                 mutation,
                 WorldTransferResultCode::StateVersionMismatch,
                 Some(snapshot),
                 None,
-            )
+            ))
         } else {
-            self.plan_route(request_sequence, mutation, state)?
+            None
         };
+        Ok(planned)
+    }
+
+    fn plan_validated(
+        &self,
+        authenticated: AuthenticatedAccount,
+        request_sequence: u32,
+        mutation: &WorldTransferMutation,
+        state: &mut WorldFlowTransactionState,
+    ) -> Result<WorldFlowResult, PersistenceError> {
+        let planned = self.plan_route(request_sequence, mutation, state)?;
         stage_receipt(authenticated, mutation, state, &planned)?;
         Ok(planned)
     }
@@ -280,6 +307,10 @@ where
         }
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the serializable validation, preflight, route, restore, receipt, and commit order stays contiguous for auditability"
+    )]
     pub async fn handle(
         &self,
         authenticated: AuthenticatedAccount,
@@ -343,9 +374,9 @@ where
                 );
             }
         };
-        let Ok(result) =
-            self.planner
-                .plan_fresh(authenticated, frame.sequence, mutation, write.state_mut())
+        let Ok(validation) = self
+            .planner
+            .validate_fresh(frame.sequence, mutation, write.state())
         else {
             return staged_result(
                 frame.sequence,
@@ -354,6 +385,57 @@ where
                 None,
                 None,
             );
+        };
+        let result = if let Some(rejection) = validation {
+            if stage_receipt(authenticated, mutation, write.state_mut(), &rejection).is_err() {
+                return staged_result(
+                    frame.sequence,
+                    mutation,
+                    WorldTransferResultCode::ServiceUnavailable,
+                    None,
+                    None,
+                );
+            }
+            rejection
+        } else {
+            if requires_safe_preflight(mutation, write.state())
+                && let Err(code) = self
+                    .preflight_safe_inventory(&mut write, authenticated, mutation)
+                    .await
+            {
+                if code != WorldTransferResultCode::StorageResolutionRequired {
+                    return staged_result(frame.sequence, mutation, code, None, None);
+                }
+                let rejection = staged_result(frame.sequence, mutation, code, None, None);
+                if stage_receipt(authenticated, mutation, write.state_mut(), &rejection).is_err() {
+                    return staged_result(
+                        frame.sequence,
+                        mutation,
+                        WorldTransferResultCode::ServiceUnavailable,
+                        None,
+                        None,
+                    );
+                }
+                return commit_world_flow_rejection(write, rejection, frame.sequence, mutation)
+                    .await;
+            }
+            match self.planner.plan_validated(
+                authenticated,
+                frame.sequence,
+                mutation,
+                write.state_mut(),
+            ) {
+                Ok(result) => result,
+                Err(_) => {
+                    return staged_result(
+                        frame.sequence,
+                        mutation,
+                        WorldTransferResultCode::ServiceUnavailable,
+                        None,
+                        None,
+                    );
+                }
+            }
         };
         if let Err(code) = self.capture_danger_entry(&mut write, mutation).await {
             return staged_result(frame.sequence, mutation, code, None, None);
@@ -369,6 +451,40 @@ where
                 None,
             ),
         }
+    }
+
+    async fn preflight_safe_inventory(
+        &self,
+        write: &mut persistence::WorldFlowWrite<'_>,
+        authenticated: AuthenticatedAccount,
+        mutation: &WorldTransferMutation,
+    ) -> Result<(), WorldTransferResultCode> {
+        let account_id = authenticated.account_id.as_bytes();
+        let account_version = u64::try_from(write.state().account_version)
+            .map_err(|_| WorldTransferResultCode::ServiceUnavailable)?;
+        let snapshot = load_world_flow_safe_inventory(
+            write.transaction_mut(),
+            account_id,
+            mutation.character_id,
+            account_version,
+        )
+        .await
+        .map_err(|error| preflight_persistence_code(&error))?;
+        let placements = plan_danger_entry_safe_deposit(&snapshot)
+            .map_err(|error| preflight_plan_code(&error))?;
+        let staged = stage_world_flow_safe_inventory_preflight(
+            write.transaction_mut(),
+            account_id,
+            mutation.character_id,
+            mutation.mutation_id,
+            &snapshot,
+            &placements,
+        )
+        .await
+        .map_err(|error| preflight_persistence_code(&error))?;
+        write.state_mut().account_version = i64::try_from(staged.account_version)
+            .map_err(|_| WorldTransferResultCode::ServiceUnavailable)?;
+        Ok(())
     }
 
     async fn capture_danger_entry(
@@ -452,6 +568,60 @@ where
         stage_world_flow_danger_entry(write.transaction_mut(), &root)
             .await
             .map_err(|_| WorldTransferResultCode::ServiceUnavailable)
+    }
+}
+
+async fn commit_world_flow_rejection(
+    write: persistence::WorldFlowWrite<'_>,
+    rejection: WorldFlowResult,
+    request_sequence: u32,
+    mutation: &WorldTransferMutation,
+) -> WorldFlowResult {
+    match write.commit(rejection).await {
+        Ok(WorldFlowTransaction::Committed(result)) => result,
+        Ok(WorldFlowTransaction::Replayed(_)) => unreachable!("fresh write cannot replay"),
+        Err(_) => staged_result(
+            request_sequence,
+            mutation,
+            WorldTransferResultCode::ServiceUnavailable,
+            None,
+            None,
+        ),
+    }
+}
+
+fn requires_safe_preflight(
+    mutation: &WorldTransferMutation,
+    state: &WorldFlowTransactionState,
+) -> bool {
+    matches!(
+        (&mutation.payload.command, &state.location),
+        (
+            WorldTransferCommand::UsePortal { portal_id },
+            StoredWorldLocation::Safe {
+                location_content_id,
+                ..
+            }
+        ) if portal_id.as_str() == REALM_GATE_ID && location_content_id == HALL_ID
+    )
+}
+
+const fn preflight_plan_code(error: &SafeInventoryServiceError) -> WorldTransferResultCode {
+    match error {
+        SafeInventoryServiceError::StorageFull => {
+            WorldTransferResultCode::StorageResolutionRequired
+        }
+        _ => WorldTransferResultCode::ServiceUnavailable,
+    }
+}
+
+fn preflight_persistence_code(error: &PersistenceError) -> WorldTransferResultCode {
+    match error {
+        PersistenceError::SafeInventoryStorageFull
+        | PersistenceError::SafeInventoryUnresolvedMutation => {
+            WorldTransferResultCode::StorageResolutionRequired
+        }
+        _ => WorldTransferResultCode::ServiceUnavailable,
     }
 }
 

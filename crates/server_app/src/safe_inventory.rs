@@ -12,7 +12,7 @@ use protocol::{
 use sim_core::{
     CHARACTER_SAFE_CAPACITY, DurableStorageSlot, ItemUid, RUN_BACKPACK_CAPACITY,
     SafeStorageCommand, SafeStorageError, SafeStorageLocation, SafeStorageSnapshot, VAULT_CAPACITY,
-    plan_safe_storage_transfer,
+    plan_character_safe_preflight, plan_safe_storage_transfer,
 };
 use thiserror::Error;
 
@@ -349,6 +349,28 @@ fn project_snapshot(
         },
         versions,
     ))
+}
+
+pub(crate) fn plan_danger_entry_safe_deposit(
+    stored: &StoredSafeInventorySnapshot,
+) -> Result<Vec<StoredSafeInventoryPlacement>, SafeInventoryServiceError> {
+    let (snapshot, versions) = project_snapshot(stored)?;
+    plan_character_safe_preflight(&snapshot)
+        .map_err(|error| map_plan(&error))?
+        .placements
+        .into_iter()
+        .map(|placement| {
+            Ok(StoredSafeInventoryPlacement {
+                item_uid: placement.item_uid.bytes(),
+                source: stored_location(placement.source),
+                destination: stored_location(placement.destination),
+                expected_item_version: versions
+                    .get(&placement.item_uid.bytes())
+                    .copied()
+                    .ok_or(SafeInventoryServiceError::CorruptSnapshot)?,
+            })
+        })
+        .collect()
 }
 
 fn project_item(

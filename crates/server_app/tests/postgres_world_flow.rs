@@ -1,7 +1,8 @@
 use std::{path::PathBuf, sync::Arc};
 
 use persistence::{
-    PersistenceConfig, PersistenceTransaction, PostgresPersistence, WIPEABLE_CORE_NAMESPACE,
+    CORE_ITEM_CONTENT_REVISION, PersistenceConfig, PersistenceTransaction, PostgresPersistence,
+    WIPEABLE_CORE_NAMESPACE,
 };
 use protocol::{
     ManifestHash, WireText, WorldFlowContentRevisionV1, WorldFlowFrame, WorldFlowRequest,
@@ -130,6 +131,47 @@ async fn reset_fixture(persistence: &PostgresPersistence) {
         .unwrap();
     insert_character(&mut transaction, ACCOUNT_ID, CHARACTER_ID).await;
     insert_character(&mut transaction, FOREIGN_ACCOUNT_ID, FOREIGN_CHARACTER_ID).await;
+    transaction.commit().await.unwrap();
+}
+
+async fn insert_safe_equipment(
+    transaction: &mut PersistenceTransaction<'_>,
+    item_uid: [u8; 16],
+    character_id: Option<[u8; 16]>,
+    location_kind: i16,
+    slot_index: i16,
+) {
+    sqlx::query(
+        "INSERT INTO item_instances (namespace_id,item_uid,account_id,character_id,template_id, \
+         content_revision,item_kind,item_level,rarity,creation_kind,creation_request_id,roll_index, \
+         unit_ordinal,item_version,security_state,location_kind,slot_index,provenance_kind, \
+         salvage_band,salvage_value) VALUES ($1,$2,$3,$4,'item.weapon.crossbow.pine_crossbow', \
+         $5,0,1,0,0,$2,0,0,1,0,$6,$7,0,0,0)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(item_uid.as_slice())
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(character_id.map(|id| id.to_vec()))
+    .bind(CORE_ITEM_CONTENT_REVISION)
+    .bind(location_kind)
+    .bind(slot_index)
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+}
+
+async fn seed_character_safe_item(persistence: &PostgresPersistence, item_uid: [u8; 16]) {
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    insert_safe_equipment(&mut transaction, item_uid, Some(CHARACTER_ID), 5, 0).await;
+    transaction.commit().await.unwrap();
+}
+
+async fn fill_vault(persistence: &PostgresPersistence) {
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    for slot in 0_i16..160 {
+        let item_uid = (10_000_u128 + u128::try_from(slot).unwrap()).to_be_bytes();
+        insert_safe_equipment(&mut transaction, item_uid, None, 6, slot).await;
+    }
     transaction.commit().await.unwrap();
 }
 
@@ -523,6 +565,107 @@ async fn danger_entry_commits_complete_root_and_replays_after_pool_restart() {
         WorldTransferResultCode::IdempotencyConflict
     );
     assert_eq!(aggregate_counts(&restarted).await, (1, 1, 1, 1));
+}
+
+#[tokio::test]
+#[ignore = "requires explicitly authorized disposable PostgreSQL"]
+async fn danger_entry_deposits_character_safe_before_ids_and_captures_post_versions() {
+    const SAFE_ITEM: [u8; 16] = [121; 16];
+    let persistence = disposable_database().await;
+    reset_fixture(&persistence).await;
+    seed_character_safe_item(&persistence, SAFE_ITEM).await;
+
+    let accepted = coordinator(persistence.clone(), PostgresFixtureInventory)
+        .handle(authenticated(ACCOUNT_ID), &frame(1, 98, CHARACTER_ID, 1))
+        .await;
+    assert_eq!(code(&accepted), WorldTransferResultCode::Accepted);
+
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let item: (Option<Vec<u8>>, i16, i16, i64) = sqlx::query_as(
+        "SELECT character_id,location_kind,slot_index,item_version FROM item_instances \
+         WHERE namespace_id=$1 AND account_id=$2 AND item_uid=$3",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(SAFE_ITEM.as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    let versions: (i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT a.state_version,i.inventory_version,r.account_version,r.inventory_version \
+         FROM accounts a JOIN character_inventories i USING (namespace_id,account_id) \
+         JOIN character_entry_restore_points r USING (namespace_id,account_id,character_id) \
+         WHERE a.namespace_id=$1 AND a.account_id=$2 AND i.character_id=$3",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(CHARACTER_ID.as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    let ledger_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM item_ledger_events WHERE namespace_id=$1 AND account_id=$2 \
+         AND item_uid=$3 AND mutation_id=$4",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(SAFE_ITEM.as_slice())
+    .bind([98_u8; 16].as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    transaction.rollback().await.unwrap();
+    assert_eq!(item, (None, 6, 0, 2));
+    assert_eq!(versions, (2, 2, 2, 2));
+    assert_eq!(ledger_count, 1);
+}
+
+#[tokio::test]
+#[ignore = "requires explicitly authorized disposable PostgreSQL"]
+async fn full_vault_rejects_before_item_version_identity_restore_or_location_change() {
+    const SAFE_ITEM: [u8; 16] = [122; 16];
+    let persistence = disposable_database().await;
+    reset_fixture(&persistence).await;
+    seed_character_safe_item(&persistence, SAFE_ITEM).await;
+    fill_vault(&persistence).await;
+
+    let rejected = coordinator(persistence.clone(), PostgresFixtureInventory)
+        .handle(authenticated(ACCOUNT_ID), &frame(1, 99, CHARACTER_ID, 1))
+        .await;
+    assert_eq!(
+        code(&rejected),
+        WorldTransferResultCode::StorageResolutionRequired
+    );
+    assert_eq!(aggregate_counts(&persistence).await, (0, 0, 0, 1));
+
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let state: (Option<Vec<u8>>, i16, i16, i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT x.character_id,x.location_kind,x.slot_index,x.item_version,a.state_version, \
+         i.inventory_version,w.location_kind FROM item_instances x JOIN accounts a \
+         USING (namespace_id,account_id) JOIN character_inventories i \
+         USING (namespace_id,account_id,character_id) JOIN character_world_locations w \
+         USING (namespace_id,account_id,character_id) WHERE x.namespace_id=$1 \
+         AND x.account_id=$2 AND x.item_uid=$3",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(SAFE_ITEM.as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    let ledger_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM item_ledger_events WHERE namespace_id=$1 AND account_id=$2 \
+         AND mutation_id=$3",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind([99_u8; 16].as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    transaction.rollback().await.unwrap();
+    assert_eq!(state, (Some(CHARACTER_ID.to_vec()), 5, 0, 1, 1, 1, 1));
+    assert_eq!(ledger_count, 0);
 }
 
 #[tokio::test]
