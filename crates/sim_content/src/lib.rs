@@ -10,6 +10,7 @@ mod core_dev_progression;
 mod core_dev_world_flow;
 mod core_fixed_room_encounter;
 mod core_microrealm_pack;
+mod core_mire_fixture;
 mod production_item;
 mod prototype;
 
@@ -23,6 +24,7 @@ pub use core_dev_progression::*;
 pub use core_dev_world_flow::*;
 pub use core_fixed_room_encounter::*;
 pub use core_microrealm_pack::*;
+pub use core_mire_fixture::*;
 pub use production_item::*;
 pub use prototype::*;
 
