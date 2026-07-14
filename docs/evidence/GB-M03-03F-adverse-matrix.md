@@ -1,6 +1,6 @@
 # GB-M03-03F adverse transition and recovery matrix
 
-**Status:** Evidence map active; hosted real-QUIC/PostgreSQL execution remains the final transport gate.
+**Status:** PASS; hosted real-QUIC/PostgreSQL execution is green in CI `29330704486`.
 
 ## Authority
 
@@ -38,7 +38,7 @@ The matrix is intentionally layered. Reliable QUIC proves framing and disposable
 5. committed extraction to `HallDefault` and exact extraction replay;
 6. durable final-version assertion with no production inventory admission.
 
-Each connection-through-authoritative-Hall sample must remain below 30 seconds; the sorted median, p95, and maximum are printed by the hosted guarded run. A failure in any iteration fails the mandatory PostgreSQL job.
+Each connection-through-authoritative-Hall sample must remain below 30 seconds. Hosted CI recorded median `25.620 ms`, p95 `29.874 ms`, and maximum `37.903 ms`; both QUIC tests completed in `9.63 s`. A failure in any iteration fails the mandatory PostgreSQL job.
 
 ## Scope boundary
 
