@@ -19,6 +19,7 @@ mod bargain_milestone;
 mod caldus_victory;
 mod combat_loadout;
 mod danger_checkpoint;
+mod extraction;
 mod ground_expiry;
 mod identity;
 mod items;
@@ -59,6 +60,10 @@ pub use combat_loadout::{
 pub use danger_checkpoint::{
     DangerCheckpointDelete, DangerCheckpointWrite, StoredDangerCheckpoint,
 };
+pub use extraction::{
+    CaldusExtractionCommit, CaldusExtractionRequest, CaldusExtractionTransaction,
+    StoredExtractionAuthority, StoredExtractionResult, StoredExtractionState,
+};
 pub use ground_expiry::{MAX_GROUND_EXPIRY_BATCH, StoredGroundExpiry, StoredGroundExpiryCandidate};
 pub use identity::{StoredCharacter, StoredIdentityAggregate, StoredMutation};
 pub use items::{
@@ -94,7 +99,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 25;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 26;
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -282,6 +287,14 @@ pub enum PersistenceError {
     CaldusRewardNotTerminal,
     #[error("a durable Caldus reward terminal does not match the eligible owner binding")]
     CaldusRewardTerminalMismatch,
+    #[error("stored extraction request or receipt violates the approved bounded contract")]
+    CorruptStoredExtraction,
+    #[error("extraction identity was replayed with different canonical material")]
+    ExtractionIdempotencyConflict,
+    #[error("extraction does not match the active Caldus exit and danger binding")]
+    ExtractionBindingMismatch,
+    #[error("extraction lost the race to crash restore or another final resolution")]
+    ExtractionSuperseded,
 }
 
 /// Returns whether `PostgreSQL` explicitly permits the complete transaction to be retried.
