@@ -66,6 +66,29 @@ pub struct StoredFieldEquipmentResult {
 }
 
 impl PostgresPersistence {
+    pub async fn load_field_equipment_replay(
+        &self,
+        account_id: [u8; 16],
+        character_id: [u8; 16],
+        command_id: [u8; 16],
+        canonical_request_hash: [u8; 32],
+    ) -> Result<Option<StoredFieldEquipmentResult>, PersistenceError> {
+        if command_id == [0; 16] || canonical_request_hash == [0; 32] {
+            return Err(PersistenceError::CorruptStoredItems);
+        }
+        let mut transaction = self.begin_transaction().await?;
+        let row = load_result_row(
+            transaction.connection(),
+            account_id,
+            character_id,
+            command_id,
+        )
+        .await?;
+        transaction.rollback().await?;
+        row.map(|row| decode_result_row(&row, command_id, canonical_request_hash, true))
+            .transpose()
+    }
+
     pub async fn load_field_equipment_snapshot(
         &self,
         account_id: [u8; 16],
@@ -488,7 +511,24 @@ async fn load_result(
     character_id: [u8; 16],
     command: &StoredFieldEquipmentCommand,
 ) -> Result<Option<StoredFieldEquipmentResult>, PersistenceError> {
-    let row = sqlx::query(
+    let row = load_result_row(connection, account_id, character_id, command.command_id).await?;
+    let Some(row) = row else { return Ok(None) };
+    decode_result_row(
+        &row,
+        command.command_id,
+        command.canonical_request_hash,
+        true,
+    )
+    .map(Some)
+}
+
+async fn load_result_row(
+    connection: &mut sqlx::PgConnection,
+    account_id: [u8; 16],
+    character_id: [u8; 16],
+    command_id: [u8; 16],
+) -> Result<Option<sqlx::postgres::PgRow>, PersistenceError> {
+    sqlx::query(
         "SELECT canonical_request_hash, result_hash, pre_inventory_version, \
          post_inventory_version, incoming_item_uid, replaced_item_uid, replacement_slot_index \
          FROM field_equipment_mutations WHERE namespace_id = $1 AND account_id = $2 \
@@ -497,25 +537,32 @@ async fn load_result(
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(account_id.as_slice())
     .bind(character_id.as_slice())
-    .bind(command.command_id.as_slice())
+    .bind(command_id.as_slice())
     .fetch_optional(connection)
     .await
-    .map_err(PersistenceError::Database)?;
-    let Some(row) = row else { return Ok(None) };
+    .map_err(PersistenceError::Database)
+}
+
+fn decode_result_row(
+    row: &sqlx::postgres::PgRow,
+    command_id: [u8; 16],
+    canonical_request_hash: [u8; 32],
+    replayed: bool,
+) -> Result<StoredFieldEquipmentResult, PersistenceError> {
     let request_hash: [u8; 32] = fixed_bytes(row.try_get("canonical_request_hash")?)?;
-    if request_hash != command.canonical_request_hash {
+    if request_hash != canonical_request_hash {
         return Err(PersistenceError::ItemIdempotencyConflict);
     }
-    Ok(Some(StoredFieldEquipmentResult {
-        replayed: true,
-        command_id: command.command_id,
+    Ok(StoredFieldEquipmentResult {
+        replayed,
+        command_id,
         result_hash: fixed_bytes(row.try_get("result_hash")?)?,
         pre_inventory_version: positive_u64(row.try_get("pre_inventory_version")?)?,
         post_inventory_version: positive_u64(row.try_get("post_inventory_version")?)?,
         incoming_item_uid: fixed_bytes(row.try_get("incoming_item_uid")?)?,
         replaced_item_uid: optional_bytes(row.try_get("replaced_item_uid")?)?,
         replacement_slot_index: optional_index(row.try_get("replacement_slot_index")?)?,
-    }))
+    })
 }
 
 async fn insert_result(

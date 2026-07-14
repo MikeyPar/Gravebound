@@ -80,6 +80,7 @@ pub enum FieldEquipmentSource {
     },
     PersonalGround {
         item: DurableEquipmentItem,
+        instance_id: [u8; 16],
         pickup_id: [u8; 16],
         expires_at_tick: u64,
     },
@@ -167,11 +168,12 @@ pub fn plan_field_equipment_swap(
         }
         FieldEquipmentSource::PersonalGround {
             item,
+            instance_id,
             pickup_id,
             expires_at_tick,
         } => {
             validate_equipment_item(item)?;
-            if *pickup_id == [0; 16] {
+            if *instance_id == [0; 16] || *pickup_id == [0; 16] {
                 return Err(ItemLifecycleError::ZeroPersonalGroundPickupId);
             }
             if now_tick >= *expires_at_tick {
@@ -333,11 +335,13 @@ fn field_equipment_preview_hash(
             push_hash_field(&mut material, &[0, *slot_index])?;
         }
         FieldEquipmentSource::PersonalGround {
+            instance_id,
             pickup_id,
             expires_at_tick,
             ..
         } => {
             push_hash_field(&mut material, &[1])?;
+            push_hash_field(&mut material, instance_id)?;
             push_hash_field(&mut material, pickup_id)?;
             push_hash_field(&mut material, &expires_at_tick.to_le_bytes())?;
         }
@@ -710,6 +714,7 @@ mod tests {
         snapshot.backpack[1] = DurableRunBackpackSlot::Consumable;
         let source = FieldEquipmentSource::PersonalGround {
             item: equipment(4, "item.relic.arbalist.long_lens", EquipmentSlot::Relic),
+            instance_id: [7; 16],
             pickup_id: [9; 16],
             expires_at_tick: 200,
         };
@@ -795,6 +800,7 @@ mod tests {
                 &snapshot,
                 FieldEquipmentSource::PersonalGround {
                     item: equipment(8, "item.armor.pilgrim.t1", EquipmentSlot::Armor),
+                    instance_id: [7; 16],
                     pickup_id: [8; 16],
                     expires_at_tick: 90,
                 },

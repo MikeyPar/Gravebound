@@ -63,7 +63,8 @@ pub use core_lifecycle::{
     CoreLiveDirectory, CoreLiveError, CoreResumeOutcome, DANGER_CHECKPOINT_INTERVAL_TICKS,
 };
 pub use field_equipment::{
-    AuthoritativeFieldEquipmentPreview, FieldEquipmentPreviewSource, FieldEquipmentServiceError,
+    AuthoritativeFieldEquipmentCommit, AuthoritativeFieldEquipmentPreview,
+    FieldEquipmentConfirmCommand, FieldEquipmentPreviewSource, FieldEquipmentServiceError,
     PostgresFieldEquipmentService,
 };
 pub use ground_expiry::{GROUND_EXPIRY_CONTEXT, GroundExpiryError, PostgresGroundExpiryService};
