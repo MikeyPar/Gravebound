@@ -222,6 +222,32 @@ impl PostgresPersistence {
         if mutation_id == [0; 16] || canonical_request_hash == [0; 32] {
             return Err(PersistenceError::CorruptStoredSafeInventory);
         }
+        for attempt in 1..=MAX_TRANSACTION_ATTEMPTS {
+            match self
+                .load_safe_inventory_replay_once(
+                    account_id,
+                    character_id,
+                    mutation_id,
+                    canonical_request_hash,
+                )
+                .await
+            {
+                Err(error)
+                    if attempt < MAX_TRANSACTION_ATTEMPTS
+                        && crate::is_retryable_transaction_failure(&error) => {}
+                result => return result,
+            }
+        }
+        unreachable!("bounded safe-inventory replay read always returns")
+    }
+
+    async fn load_safe_inventory_replay_once(
+        &self,
+        account_id: [u8; 16],
+        character_id: [u8; 16],
+        mutation_id: [u8; 16],
+        canonical_request_hash: [u8; 32],
+    ) -> Result<Option<StoredSafeInventoryResult>, PersistenceError> {
         let mut transaction = self.begin_transaction().await?;
         lock_account(transaction.connection(), account_id).await?;
         let replay = load_replay(
@@ -237,6 +263,25 @@ impl PostgresPersistence {
     }
 
     pub async fn load_safe_inventory_snapshot(
+        &self,
+        account_id: [u8; 16],
+        character_id: [u8; 16],
+    ) -> Result<StoredSafeInventorySnapshot, PersistenceError> {
+        for attempt in 1..=MAX_TRANSACTION_ATTEMPTS {
+            match self
+                .load_safe_inventory_snapshot_once(account_id, character_id)
+                .await
+            {
+                Err(error)
+                    if attempt < MAX_TRANSACTION_ATTEMPTS
+                        && crate::is_retryable_transaction_failure(&error) => {}
+                result => return result,
+            }
+        }
+        unreachable!("bounded safe-inventory snapshot read always returns")
+    }
+
+    async fn load_safe_inventory_snapshot_once(
         &self,
         account_id: [u8; 16],
         character_id: [u8; 16],
