@@ -220,9 +220,9 @@ pub use normal_wave::{
     NORMAL_WAVE_ENEMY_ID_OFFSET, NORMAL_WAVE_MAX_SPAWN_ORDINAL, NormalWaveClearedHostiles,
     NormalWaveDefeat, NormalWaveDefinitions, NormalWaveDrop, NormalWaveEnemyKind,
     NormalWaveEntityIdError, NormalWaveError, NormalWaveHandoff, NormalWaveInstanceSnapshot,
-    NormalWaveLaneEvent, NormalWavePhase, NormalWaveSimulation, NormalWaveSpawn, NormalWaveStep,
-    NormalWaveTimelineEvent, RUN_ENTITY_ID_STRIDE, normal_wave_entity_id,
-    normal_wave_projectile_allocator,
+    NormalWaveLaneEvent, NormalWavePhase, NormalWaveResetHandoff, NormalWaveSimulation,
+    NormalWaveSpawn, NormalWaveStep, NormalWaveTimelineEvent, RUN_ENTITY_ID_STRIDE,
+    normal_wave_entity_id, normal_wave_projectile_allocator,
 };
 pub use oath::{
     GraveArbalistOath, LONG_VIGIL_FOCUSED_ACTIVATION_TICKS,

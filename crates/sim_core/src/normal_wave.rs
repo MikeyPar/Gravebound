@@ -174,6 +174,12 @@ pub struct NormalWaveHandoff {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct NormalWaveResetHandoff {
+    pub participant: NormalWaveHandoff,
+    pub cleared_hostiles: NormalWaveClearedHostiles,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct NormalWaveStep {
     pub tick: Tick,
     pub phase_after: NormalWavePhase,
@@ -395,6 +401,26 @@ impl NormalWaveSimulation {
                 .next()
                 .ok_or(NormalWaveError::MissingPlayer)?,
             hostile_projectile_ids: self.hostile_projectiles.into_allocator(),
+        })
+    }
+
+    /// Cancels an uncleared wave for an owning encounter reset while preserving participant and
+    /// monotonic projectile authority. No reward or defeat event is synthesized.
+    pub fn into_reset_handoff(mut self) -> Result<NormalWaveResetHandoff, NormalWaveError> {
+        if self.players.len() != 1 {
+            return Err(NormalWaveError::SharedHandoffUnsupported);
+        }
+        let cleared_hostiles = self.clear_hostiles();
+        Ok(NormalWaveResetHandoff {
+            participant: NormalWaveHandoff {
+                player: self
+                    .players
+                    .into_values()
+                    .next()
+                    .ok_or(NormalWaveError::MissingPlayer)?,
+                hostile_projectile_ids: self.hostile_projectiles.into_allocator(),
+            },
+            cleared_hostiles,
         })
     }
 

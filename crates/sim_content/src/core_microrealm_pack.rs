@@ -6,10 +6,12 @@
 
 use content_schema::ContentId;
 use sim_core::{
-    ArenaAnchor, ArenaGeometry, ArenaGeometryError, CORE_MICROREALM_PACK_WARNING_TICKS,
-    CoreMicrorealmEvent, EnemyLabPlayer, EntityId, EntityIdAllocator, NormalWaveDefinitions,
-    NormalWaveEnemyKind, NormalWaveEntityIdError, NormalWaveError, NormalWaveSimulation,
-    NormalWaveSpawn, SpawnInstanceId, Tick, TilePoint, normal_wave_entity_id,
+    ArenaAnchor, ArenaGeometry, ArenaGeometryError, CORE_MICROREALM_PACK_WARNING_TICKS, CombatStep,
+    CoreMicrorealmError, CoreMicrorealmEvent, CoreMicrorealmInput, CoreMicrorealmPhase,
+    CoreMicrorealmSimulation, EnemyLabPlayer, EntityId, EntityIdAllocator,
+    NormalWaveClearedHostiles, NormalWaveDefinitions, NormalWaveEnemyKind, NormalWaveEntityIdError,
+    NormalWaveError, NormalWaveHandoff, NormalWavePhase, NormalWaveSimulation, NormalWaveSpawn,
+    NormalWaveStep, SpawnInstanceId, Tick, TilePoint, normal_wave_entity_id,
 };
 use thiserror::Error;
 
@@ -62,6 +64,24 @@ pub fn construct_core_microrealm_pack(
     warning_started_at: Tick,
     event: CoreMicrorealmEvent,
     run_ordinal: u32,
+) -> Result<CoreMicrorealmPackPlan, CoreMicrorealmPackError> {
+    construct_core_microrealm_pack_at_ordinal(
+        encounters,
+        world_flow,
+        warning_started_at,
+        event,
+        run_ordinal,
+        1,
+    )
+}
+
+fn construct_core_microrealm_pack_at_ordinal(
+    encounters: &CoreDevelopmentEncounterRooms,
+    world_flow: &CoreDevelopmentWorldFlow,
+    warning_started_at: Tick,
+    event: CoreMicrorealmEvent,
+    run_ordinal: u32,
+    first_spawn_ordinal: u16,
 ) -> Result<CoreMicrorealmPackPlan, CoreMicrorealmPackError> {
     let CoreMicrorealmEvent::BeginPackWarning { warning_ticks } = event else {
         return Err(CoreMicrorealmPackError::UnexpectedLifecycleEvent);
@@ -126,8 +146,11 @@ pub fn construct_core_microrealm_pack(
         .zip(anchors)
         .enumerate()
         .map(|(index, ((enemy_id, kind, _), anchor))| {
-            let spawn_ordinal =
-                u16::try_from(index + 1).map_err(|_| CoreMicrorealmPackError::DefinitionDrift)?;
+            let offset =
+                u16::try_from(index).map_err(|_| CoreMicrorealmPackError::DefinitionDrift)?;
+            let spawn_ordinal = first_spawn_ordinal
+                .checked_add(offset)
+                .ok_or(CoreMicrorealmPackError::DefinitionDrift)?;
             let instance_id = SpawnInstanceId {
                 run_ordinal,
                 spawn_ordinal,
@@ -197,6 +220,181 @@ pub fn instantiate_core_microrealm_pack(
     Ok(wave)
 }
 
+#[derive(Debug, Clone)]
+pub struct CoreMicrorealmEncounterInput {
+    pub entrant_position: TilePoint,
+    pub primary_released: bool,
+    pub living_participants: u16,
+    pub combat_step: Option<CombatStep>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CoreMicrorealmEncounterStep {
+    pub tick: Tick,
+    pub phase_after: CoreMicrorealmPhase,
+    pub lifecycle_events: Vec<CoreMicrorealmEvent>,
+    pub wave_step: Option<NormalWaveStep>,
+    pub reset_cleared_hostiles: Option<NormalWaveClearedHostiles>,
+}
+
+/// Capacity-one owner joining the `03C` lifecycle to the exact `03D` pack runtime.
+#[derive(Debug, Clone)]
+pub struct CoreMicrorealmEncounterSimulation {
+    encounters: CoreDevelopmentEncounterRooms,
+    world_flow: CoreDevelopmentWorldFlow,
+    lifecycle: CoreMicrorealmSimulation,
+    run_ordinal: u32,
+    next_spawn_ordinal: u16,
+    participant: Option<NormalWaveHandoff>,
+    wave: Option<NormalWaveSimulation>,
+}
+
+impl CoreMicrorealmEncounterSimulation {
+    pub fn new(
+        encounters: CoreDevelopmentEncounterRooms,
+        world_flow: CoreDevelopmentWorldFlow,
+        run_ordinal: u32,
+        player: EnemyLabPlayer,
+        hostile_projectile_ids: EntityIdAllocator,
+    ) -> Result<Self, CoreMicrorealmPackError> {
+        if run_ordinal == 0 {
+            return Err(CoreMicrorealmPackError::EntityId(
+                NormalWaveEntityIdError::ZeroRunOrdinal,
+            ));
+        }
+        let spawn = world_flow.world().player_spawn;
+        Ok(Self {
+            encounters,
+            world_flow,
+            lifecycle: CoreMicrorealmSimulation::new(TilePoint::new(spawn.x, spawn.y)),
+            run_ordinal,
+            next_spawn_ordinal: 1,
+            participant: Some(NormalWaveHandoff {
+                player,
+                hostile_projectile_ids,
+            }),
+            wave: None,
+        })
+    }
+
+    #[must_use]
+    pub const fn phase(&self) -> CoreMicrorealmPhase {
+        self.lifecycle.phase()
+    }
+
+    #[must_use]
+    pub const fn wave(&self) -> Option<&NormalWaveSimulation> {
+        self.wave.as_ref()
+    }
+
+    #[must_use]
+    pub const fn bell_portal_available(&self) -> bool {
+        self.lifecycle.bell_portal_available()
+    }
+
+    pub fn step(
+        &mut self,
+        tick: Tick,
+        input: &CoreMicrorealmEncounterInput,
+    ) -> Result<CoreMicrorealmEncounterStep, CoreMicrorealmPackError> {
+        let mut staged = self.clone();
+        let step = staged.step_inner(tick, input)?;
+        *self = staged;
+        Ok(step)
+    }
+
+    fn step_inner(
+        &mut self,
+        tick: Tick,
+        input: &CoreMicrorealmEncounterInput,
+    ) -> Result<CoreMicrorealmEncounterStep, CoreMicrorealmPackError> {
+        let mut wave_step = None;
+        let mut wave_cleared = false;
+        if let Some(wave) = &mut self.wave {
+            let combat_step = match input.combat_step.as_ref() {
+                Some(step) => step.clone(),
+                None if input.living_participants == 0 => CombatStep {
+                    tick,
+                    ..CombatStep::default()
+                },
+                None => return Err(CoreMicrorealmPackError::MissingCombatStep),
+            };
+            let step = wave.step(&combat_step)?;
+            wave_cleared = matches!(step.phase_after, NormalWavePhase::Cleared { .. });
+            wave_step = Some(step);
+        }
+
+        let lifecycle_events = self.lifecycle.step(
+            tick,
+            CoreMicrorealmInput {
+                entrant_position: input.entrant_position,
+                primary_released: input.primary_released,
+                living_participants: input.living_participants,
+                pack_cleared: wave_cleared,
+            },
+        )?;
+        let mut reset_cleared_hostiles = None;
+        for event in lifecycle_events.iter().copied() {
+            match event {
+                CoreMicrorealmEvent::BeginPackWarning { .. } => {
+                    let participant = self
+                        .participant
+                        .take()
+                        .ok_or(CoreMicrorealmPackError::MissingParticipantHandoff)?;
+                    let plan = construct_core_microrealm_pack_at_ordinal(
+                        &self.encounters,
+                        &self.world_flow,
+                        tick,
+                        event,
+                        self.run_ordinal,
+                        self.next_spawn_ordinal,
+                    )?;
+                    let mut wave = instantiate_core_microrealm_pack(
+                        &plan,
+                        &self.world_flow,
+                        participant.player,
+                        participant.hostile_projectile_ids,
+                    )?;
+                    let initial_combat = input.combat_step.clone().unwrap_or(CombatStep {
+                        tick,
+                        ..CombatStep::default()
+                    });
+                    wave_step = Some(wave.step(&initial_combat)?);
+                    self.next_spawn_ordinal = self
+                        .next_spawn_ordinal
+                        .checked_add(8)
+                        .ok_or(CoreMicrorealmPackError::DefinitionDrift)?;
+                    self.wave = Some(wave);
+                }
+                CoreMicrorealmEvent::ResetPack => {
+                    let reset = self
+                        .wave
+                        .take()
+                        .ok_or(CoreMicrorealmPackError::MissingWave)?
+                        .into_reset_handoff()?;
+                    self.participant = Some(reset.participant);
+                    reset_cleared_hostiles = Some(reset.cleared_hostiles);
+                }
+                CoreMicrorealmEvent::Cleared => {
+                    self.participant = Some(
+                        self.wave
+                            .take()
+                            .ok_or(CoreMicrorealmPackError::MissingWave)?
+                            .into_handoff()?,
+                    );
+                }
+            }
+        }
+        Ok(CoreMicrorealmEncounterStep {
+            tick,
+            phase_after: self.lifecycle.phase(),
+            lifecycle_events,
+            wave_step,
+            reset_cleared_hostiles,
+        })
+    }
+}
+
 fn microrealm_combat_arena(
     world_flow: &CoreDevelopmentWorldFlow,
 ) -> Result<ArenaGeometry, CoreMicrorealmPackError> {
@@ -256,12 +454,20 @@ pub enum CoreMicrorealmPackError {
     DefinitionDrift,
     #[error("Core microrealm pack activation tick overflowed")]
     TickOverflow,
+    #[error("an active Core microrealm participant requires an authoritative combat step")]
+    MissingCombatStep,
+    #[error("Core microrealm pack warning has no participant handoff")]
+    MissingParticipantHandoff,
+    #[error("Core microrealm lifecycle requested cleanup without an owned wave")]
+    MissingWave,
     #[error(transparent)]
     EntityId(#[from] NormalWaveEntityIdError),
     #[error(transparent)]
     Arena(#[from] ArenaGeometryError),
     #[error(transparent)]
     Wave(#[from] NormalWaveError),
+    #[error(transparent)]
+    Lifecycle(#[from] CoreMicrorealmError),
 }
 
 #[cfg(test)]
@@ -271,12 +477,50 @@ mod tests {
     use super::*;
     use crate::{load_core_development_encounter_rooms, load_core_development_world_flow};
     use sim_core::{
-        CombatStep, HostileTargetState, NormalWavePhase, PlayerVitals, RedTonicSimulation,
-        SimulationVector, TonicBelt,
+        CollisionTarget, CombatStep, FriendlyProjectileSource, HostileTargetState, NormalWavePhase,
+        PlayerVitals, ProjectileCollision, RawDamageIntent, RawDamageIntentSource,
+        RedTonicSimulation, SimulationVector, TonicBelt,
     };
 
     fn content_root() -> std::path::PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content")
+    }
+
+    fn runtime_fixture() -> CoreMicrorealmEncounterSimulation {
+        let root = content_root();
+        let encounters = load_core_development_encounter_rooms(&root).expect("encounters");
+        let world = load_core_development_world_flow(&root).expect("world");
+        let (source, _) = crate::load_and_validate(&root).expect("FP source");
+        let fixture = crate::first_playable_authority_combat_test(&source).expect("FP fixture");
+        let definitions = fixture.definitions;
+        let player = EnemyLabPlayer {
+            target: HostileTargetState {
+                entity_id: EntityId::new(900).expect("player ID"),
+                position: SimulationVector::new(8.5, 40.5),
+                target_is_immune: false,
+                resistance_basis_points: definitions.resistance_basis_points,
+                additional_direct_damage_reductions_basis_points: Vec::new(),
+                armor: definitions.starting_armor,
+                current_barrier: 0,
+                health_damage_cap_basis_points: None,
+            },
+            consumables: RedTonicSimulation::new(
+                definitions.red_tonic,
+                PlayerVitals::new(definitions.maximum_health, definitions.maximum_health)
+                    .expect("vitals"),
+                TonicBelt::first_playable(),
+            )
+            .expect("tonic"),
+            combat: definitions.combat,
+        };
+        CoreMicrorealmEncounterSimulation::new(
+            encounters,
+            world,
+            1,
+            player,
+            EntityIdAllocator::starting_at(NonZeroU64::new(20_000).expect("projectile ID")),
+        )
+        .expect("runtime")
     }
 
     #[test]
@@ -457,5 +701,238 @@ mod tests {
         assert!(step.activated);
         assert_eq!(wave.phase(), NormalWavePhase::Active);
         assert_eq!(wave.snapshots().len(), 8);
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the reset, rollback, and retrigger boundaries remain one readable lifecycle trace"
+    )]
+    fn encounter_owner_resets_atomically_and_never_reuses_spawn_ordinals() {
+        let mut runtime = runtime_fixture();
+        let spawn = TilePoint::new(8_500, 40_500);
+        runtime
+            .step(
+                Tick(1),
+                &CoreMicrorealmEncounterInput {
+                    entrant_position: spawn,
+                    primary_released: true,
+                    living_participants: 1,
+                    combat_step: None,
+                },
+            )
+            .expect("trigger");
+        let warning = runtime
+            .step(
+                Tick(31),
+                &CoreMicrorealmEncounterInput {
+                    entrant_position: spawn,
+                    primary_released: false,
+                    living_participants: 1,
+                    combat_step: Some(CombatStep {
+                        tick: Tick(31),
+                        ..CombatStep::default()
+                    }),
+                },
+            )
+            .expect("warning");
+        assert_eq!(
+            warning.lifecycle_events,
+            [CoreMicrorealmEvent::BeginPackWarning { warning_ticks: 27 }]
+        );
+        assert_eq!(
+            runtime
+                .wave()
+                .expect("wave")
+                .snapshots()
+                .iter()
+                .map(|snapshot| snapshot.instance_id.spawn_ordinal)
+                .collect::<Vec<_>>(),
+            (1..=8).collect::<Vec<_>>()
+        );
+
+        let before_failed_tick = runtime.wave().expect("wave").tick();
+        assert!(matches!(
+            runtime.step(
+                Tick(32),
+                &CoreMicrorealmEncounterInput {
+                    entrant_position: spawn,
+                    primary_released: false,
+                    living_participants: 1,
+                    combat_step: None,
+                },
+            ),
+            Err(CoreMicrorealmPackError::MissingCombatStep)
+        ));
+        assert_eq!(
+            runtime.wave().expect("rollback wave").tick(),
+            before_failed_tick
+        );
+
+        for tick in 32..182 {
+            let step = runtime
+                .step(
+                    Tick(tick),
+                    &CoreMicrorealmEncounterInput {
+                        entrant_position: spawn,
+                        primary_released: false,
+                        living_participants: 0,
+                        combat_step: None,
+                    },
+                )
+                .expect("empty tick");
+            assert!(step.reset_cleared_hostiles.is_none());
+        }
+        let reset = runtime
+            .step(
+                Tick(182),
+                &CoreMicrorealmEncounterInput {
+                    entrant_position: spawn,
+                    primary_released: false,
+                    living_participants: 0,
+                    combat_step: None,
+                },
+            )
+            .expect("reset");
+        assert_eq!(reset.lifecycle_events, [CoreMicrorealmEvent::ResetPack]);
+        assert!(reset.reset_cleared_hostiles.is_some());
+        assert_eq!(runtime.phase(), CoreMicrorealmPhase::Dormant);
+        assert!(runtime.wave().is_none());
+
+        runtime
+            .step(
+                Tick(183),
+                &CoreMicrorealmEncounterInput {
+                    entrant_position: spawn,
+                    primary_released: true,
+                    living_participants: 1,
+                    combat_step: None,
+                },
+            )
+            .expect("retrigger");
+        runtime
+            .step(
+                Tick(213),
+                &CoreMicrorealmEncounterInput {
+                    entrant_position: spawn,
+                    primary_released: false,
+                    living_participants: 1,
+                    combat_step: Some(CombatStep {
+                        tick: Tick(213),
+                        ..CombatStep::default()
+                    }),
+                },
+            )
+            .expect("second warning");
+        assert_eq!(
+            runtime
+                .wave()
+                .expect("second wave")
+                .snapshots()
+                .iter()
+                .map(|snapshot| snapshot.instance_id.spawn_ordinal)
+                .collect::<Vec<_>>(),
+            (9..=16).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn only_authoritative_wave_defeat_opens_the_terminal_bell_portal() {
+        let mut runtime = runtime_fixture();
+        let spawn = TilePoint::new(8_500, 40_500);
+        runtime
+            .step(
+                Tick(1),
+                &CoreMicrorealmEncounterInput {
+                    entrant_position: spawn,
+                    primary_released: true,
+                    living_participants: 1,
+                    combat_step: None,
+                },
+            )
+            .expect("trigger");
+        runtime
+            .step(
+                Tick(31),
+                &CoreMicrorealmEncounterInput {
+                    entrant_position: spawn,
+                    primary_released: false,
+                    living_participants: 1,
+                    combat_step: Some(CombatStep {
+                        tick: Tick(31),
+                        ..CombatStep::default()
+                    }),
+                },
+            )
+            .expect("warning");
+        for tick in 32..58 {
+            runtime
+                .step(
+                    Tick(tick),
+                    &CoreMicrorealmEncounterInput {
+                        entrant_position: spawn,
+                        primary_released: false,
+                        living_participants: 1,
+                        combat_step: Some(CombatStep {
+                            tick: Tick(tick),
+                            ..CombatStep::default()
+                        }),
+                    },
+                )
+                .expect("warning progression");
+        }
+        assert!(!runtime.bell_portal_available());
+        let targets = runtime
+            .wave()
+            .expect("wave")
+            .snapshots()
+            .into_iter()
+            .map(|snapshot| snapshot.entity_id)
+            .collect::<Vec<_>>();
+        let mut lethal = CombatStep {
+            tick: Tick(58),
+            ..CombatStep::default()
+        };
+        for (index, target) in targets.into_iter().enumerate() {
+            let projectile_id = EntityId::new(50_000 + u64::try_from(index).expect("index"))
+                .expect("projectile ID");
+            lethal.collisions.push(ProjectileCollision {
+                tick: Tick(58),
+                projectile_id,
+                source: FriendlyProjectileSource::Primary,
+                target: CollisionTarget::Enemy(target),
+                final_position: SimulationVector::new(8.5, 8.5),
+                distance_travelled_tiles: 1.0,
+                contact_ordinal: 0,
+                empowered_by_slipstep: false,
+                focused_by_stillness: false,
+                projectile_continues: false,
+            });
+            lethal.raw_damage_intents.push(RawDamageIntent {
+                tick: Tick(58),
+                projectile_id,
+                source: RawDamageIntentSource::Primary,
+                target,
+                base_raw_damage: 10_000,
+                multiplier_basis_points: 10_000,
+                resolved_raw_damage: 10_000,
+                contact_ordinal: 0,
+            });
+        }
+        let cleared = runtime
+            .step(
+                Tick(58),
+                &CoreMicrorealmEncounterInput {
+                    entrant_position: spawn,
+                    primary_released: false,
+                    living_participants: 1,
+                    combat_step: Some(lethal),
+                },
+            )
+            .expect("authoritative clear");
+        assert_eq!(cleared.lifecycle_events, [CoreMicrorealmEvent::Cleared]);
+        assert_eq!(cleared.phase_after, CoreMicrorealmPhase::Cleared);
+        assert!(runtime.bell_portal_available());
+        assert!(runtime.wave().is_none());
     }
 }
