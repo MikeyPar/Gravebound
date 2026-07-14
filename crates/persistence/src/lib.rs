@@ -24,6 +24,7 @@ mod field_equipment;
 mod ground_expiry;
 mod identity;
 mod items;
+mod lifecycle_signature;
 mod oath;
 mod progression;
 mod progression_restore;
@@ -77,6 +78,13 @@ pub use identity::{StoredCharacter, StoredIdentityAggregate, StoredMutation};
 pub use items::{
     CORE_ITEM_CONTENT_REVISION, STARTER_INITIALIZER_REVISION, STARTER_ITEM_COUNT,
     StoredStarterInitialization, StoredStarterItem,
+};
+pub use lifecycle_signature::{
+    CORE_ITEM_LIFECYCLE_SIGNATURE_CONTEXT, StoredCoreItemLifecycleSignatureV1,
+    StoredLifecycleCapacitiesV1, StoredLifecycleCharacterV1, StoredLifecycleItemV1,
+    StoredLifecycleLedgerEntryV1, StoredLifecycleProgressionV1,
+    StoredLifecycleSafeInventoryPlacementV1, StoredLifecycleSafeInventoryReceiptV1,
+    StoredLifecycleWorldV1,
 };
 pub use oath::{
     OathSelectionTransaction, OathSelectionTransactionState, StoredCharacterLifeEvent,
@@ -267,6 +275,8 @@ pub enum PersistenceError {
     FieldEquipmentBindingMismatch,
     #[error("stored safe-inventory state violates the approved durable contract")]
     CorruptStoredSafeInventory,
+    #[error("stored lifecycle signature violates the approved canonical contract")]
+    CorruptStoredLifecycleSignature,
     #[error("safe-inventory account does not exist")]
     SafeInventoryAccountNotFound,
     #[error("safe-inventory transfer requires the selected living character in Lantern Halls")]

@@ -104,6 +104,16 @@ async fn seed_fixture(persistence: &PostgresPersistence) {
     .await
     .unwrap();
     sqlx::query(
+        "INSERT INTO character_progression (namespace_id,account_id,character_id,total_xp,level, \
+         current_health,progression_version) VALUES ($1,$2,$3,0,1,120,1)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(CHARACTER_ID.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query(
         "INSERT INTO character_world_locations (namespace_id,account_id,character_id, \
          character_version,location_kind,location_content_id,safe_arrival_kind) \
          VALUES ($1,$2,$3,1,1,'hub.lantern_halls_01',0)",
@@ -350,6 +360,34 @@ async fn real_quic_safe_inventory_replays_across_a_new_endpoint() {
     assert!(!initial[2].replayed);
     assert_eq!(initial[2].result_hash, [0; 32]);
     assert!(initial[2].placements.is_empty());
+    let before_reconnect = persistence
+        .core_item_lifecycle_signature_v1(ACCOUNT_ID, CHARACTER_ID)
+        .await
+        .unwrap();
+    let before_reconnect_bytes = before_reconnect.canonical_bytes().unwrap();
+    let before_reconnect_digest = before_reconnect.digest().unwrap();
+
+    let reconnected = run_quic_transfers(
+        &persistence,
+        &[transfer_frame(), conflicting_transfer_frame()],
+    )
+    .await;
+    assert_eq!(reconnected[0].code, SafeInventoryResultCodeV1::Accepted);
+    assert!(reconnected[0].replayed);
+    assert_eq!(
+        reconnected[1].code,
+        SafeInventoryResultCodeV1::IdempotencyConflict
+    );
+    let after_reconnect = persistence
+        .core_item_lifecycle_signature_v1(ACCOUNT_ID, CHARACTER_ID)
+        .await
+        .unwrap();
+    assert_eq!(after_reconnect, before_reconnect);
+    assert_eq!(
+        after_reconnect.canonical_bytes().unwrap(),
+        before_reconnect_bytes
+    );
+    assert_eq!(after_reconnect.digest().unwrap(), before_reconnect_digest);
     persistence.close().await;
 
     let restarted = disposable_database().await;
@@ -365,6 +403,16 @@ async fn real_quic_safe_inventory_replays_across_a_new_endpoint() {
         replay[1].code,
         SafeInventoryResultCodeV1::IdempotencyConflict
     );
+    let after_restart = restarted
+        .core_item_lifecycle_signature_v1(ACCOUNT_ID, CHARACTER_ID)
+        .await
+        .unwrap();
+    assert_eq!(after_restart, before_reconnect);
+    assert_eq!(
+        after_restart.canonical_bytes().unwrap(),
+        before_reconnect_bytes
+    );
+    assert_eq!(after_restart.digest().unwrap(), before_reconnect_digest);
     assert_committed_state(&restarted).await;
     restarted.close().await;
 }
