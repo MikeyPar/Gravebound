@@ -1,4 +1,4 @@
-use crate::{EQUIPMENT_SLOT_COUNT, EquipmentSlot};
+use crate::{EQUIPMENT_SLOT_COUNT, EquipmentRarity, EquipmentSlot};
 use thiserror::Error;
 
 pub const ITEM_UID_BYTES: usize = 16;
@@ -54,6 +54,8 @@ pub struct DurableEquipmentItem {
     pub item_uid: ItemUid,
     pub template_id: String,
     pub legal_slot: EquipmentSlot,
+    pub item_level: u8,
+    pub rarity: EquipmentRarity,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,6 +121,8 @@ pub enum ItemLifecycleError {
     EmptyContentRevision,
     #[error("field equipment template ID cannot be empty")]
     EmptyEquipmentTemplateId,
+    #[error("field equipment item level is outside 1..=20")]
+    InvalidEquipmentItemLevel,
     #[error("RunBackpack source index is outside 0..=7")]
     RunBackpackSourceOutOfRange,
     #[error("RunBackpack source does not contain equipment")]
@@ -290,6 +294,9 @@ fn validate_equipment_item(item: &DurableEquipmentItem) -> Result<(), ItemLifecy
     if item.template_id.is_empty() {
         return Err(ItemLifecycleError::EmptyEquipmentTemplateId);
     }
+    if !(1..=20).contains(&item.item_level) {
+        return Err(ItemLifecycleError::InvalidEquipmentItemLevel);
+    }
     Ok(())
 }
 
@@ -354,7 +361,15 @@ fn push_equipment_hash_fields(
 ) -> Result<(), ItemLifecycleError> {
     push_hash_field(material, &item.item_uid.bytes())?;
     push_hash_field(material, item.template_id.as_bytes())?;
-    push_hash_field(material, &[item.legal_slot as u8])
+    let rarity = match item.rarity {
+        EquipmentRarity::Worn => 0,
+        EquipmentRarity::Forged => 1,
+        EquipmentRarity::Oathed => 2,
+        EquipmentRarity::Relic => 3,
+        EquipmentRarity::Sainted => 4,
+        EquipmentRarity::BlackUnique => 5,
+    };
+    push_hash_field(material, &[item.legal_slot as u8, item.item_level, rarity])
 }
 
 fn push_hash_field(material: &mut Vec<u8>, field: &[u8]) -> Result<(), ItemLifecycleError> {
@@ -523,6 +538,8 @@ mod tests {
             item_uid: ItemUid::new([byte; 16]).unwrap(),
             template_id: template.to_owned(),
             legal_slot,
+            item_level: 1,
+            rarity: EquipmentRarity::Forged,
         }
     }
 
