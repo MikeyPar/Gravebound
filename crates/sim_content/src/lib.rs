@@ -6,6 +6,7 @@ mod core_dev_encounter_room;
 mod core_dev_oath_bargain;
 mod core_dev_progression;
 mod core_dev_world_flow;
+mod core_microrealm_pack;
 mod production_item;
 mod prototype;
 
@@ -15,6 +16,7 @@ pub use core_dev_encounter_room::*;
 pub use core_dev_oath_bargain::*;
 pub use core_dev_progression::*;
 pub use core_dev_world_flow::*;
+pub use core_microrealm_pack::*;
 pub use production_item::*;
 pub use prototype::*;
 
