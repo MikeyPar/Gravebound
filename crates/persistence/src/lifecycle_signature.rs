@@ -226,6 +226,7 @@ pub struct StoredLifecycleSafeInventoryReceiptV1 {
     pub post_account_version: u64,
     pub pre_inventory_version: u64,
     pub post_inventory_version: u64,
+    pub placement_count: u16,
     pub result_hash: [u8; 32],
     pub placements: Vec<StoredLifecycleSafeInventoryPlacementV1>,
 }
@@ -568,8 +569,8 @@ impl PostgresPersistence {
         let receipt_rows = sqlx::query(
             "SELECT mutation_id,command_kind,result_code,source_slot_index,canonical_request_hash, \
              pre_account_version,post_account_version,pre_inventory_version,post_inventory_version, \
-             result_hash FROM safe_inventory_mutations WHERE namespace_id=$1 AND account_id=$2 \
-             AND character_id=$3 ORDER BY mutation_id",
+             placement_count,result_hash FROM safe_inventory_mutations WHERE namespace_id=$1 \
+             AND account_id=$2 AND character_id=$3 ORDER BY mutation_id",
         )
         .bind(WIPEABLE_CORE_NAMESPACE)
         .bind(account_id.as_slice())
@@ -613,6 +614,7 @@ impl PostgresPersistence {
                 post_account_version: unsigned(row.try_get::<i64, _>("post_account_version")?)?,
                 pre_inventory_version: unsigned(row.try_get::<i64, _>("pre_inventory_version")?)?,
                 post_inventory_version: unsigned(row.try_get::<i64, _>("post_inventory_version")?)?,
+                placement_count: unsigned(row.try_get::<i16, _>("placement_count")?)?,
                 result_hash: required_hash(row.try_get("result_hash")?)?,
                 placements,
             });
@@ -906,6 +908,7 @@ fn invalid_safe_inventory_receipt(receipt: &StoredLifecycleSafeInventoryReceiptV
         || !account_version_valid
         || receipt.pre_inventory_version == 0
         || receipt.post_inventory_version != receipt.pre_inventory_version.saturating_add(1)
+        || usize::from(receipt.placement_count) != receipt.placements.len()
         || receipt.placements.is_empty()
         || receipt.placements.len() > 6
         || !receipt
@@ -1050,6 +1053,7 @@ mod tests {
                 post_account_version: 2,
                 pre_inventory_version: 1,
                 post_inventory_version: 2,
+                placement_count: 1,
                 result_hash: [5; 32],
                 placements: vec![StoredLifecycleSafeInventoryPlacementV1 {
                     ordinal: 0,
