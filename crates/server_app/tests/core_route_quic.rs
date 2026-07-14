@@ -20,14 +20,15 @@ use rustls::pki_types::PrivatePkcs8KeyDer;
 use server_app::{
     AccountId, AdmissionState, AuthenticatedAccount, AuthenticatedNamespace,
     AuthenticationDecision, BeltStackV1, CaldusVictoryOwnerCommand, CharacterIdGenerator,
-    CoreBargainAuthority, CoreOathSelectionAuthority, DisabledProgressionQueryRepository,
-    DisposableCoreJourneyWorldFlow, EntryCaptureContext, EntryRestoreProvider, HandshakePolicy,
-    IdentityClock, IdentityService, InMemoryAccountRepository, InventorySecurityRestoreV1,
-    NoopIdentityEventSink, OathBargainRestoreV1, PostgresCaldusHallTransferCoordinator,
-    PostgresCaldusVictoryCoordinator, PostgresDormantWorldFlowCoordinator,
-    PostgresProgressionAwardService, PostgresProgressionRestoreProvider, PostgresRewardService,
-    ProgressionQueryService, RestorePointError, SecretRewardEpoch, WorldFlowIdGenerator,
-    serve_core_reliable, serve_handshake,
+    CoreBargainAuthority, CoreOathSelectionAuthority, CoreSafeInventoryAuthority,
+    DisabledProgressionQueryRepository, DisposableCoreJourneyWorldFlow, EntryCaptureContext,
+    EntryRestoreProvider, HandshakePolicy, IdentityClock, IdentityService,
+    InMemoryAccountRepository, InventorySecurityRestoreV1, NoopIdentityEventSink,
+    OathBargainRestoreV1, PostgresCaldusHallTransferCoordinator, PostgresCaldusVictoryCoordinator,
+    PostgresDormantWorldFlowCoordinator, PostgresProgressionAwardService,
+    PostgresProgressionRestoreProvider, PostgresRewardService, ProgressionQueryService,
+    RestorePointError, SecretRewardEpoch, WorldFlowIdGenerator, serve_core_reliable,
+    serve_handshake,
 };
 use sim_core::{
     CoreBossParticipant, CoreBossParticipantLock, CoreCaldusAntiCheatState,
@@ -446,6 +447,7 @@ async fn run_reliable_core_journey(persistence: &PostgresPersistence) -> Duratio
             .unwrap();
     let oath = CoreOathSelectionAuthority::<FixedAuthority>::disabled();
     let bargain = CoreBargainAuthority::<FixedAuthority>::disabled();
+    let safe_inventory = CoreSafeInventoryAuthority::disabled();
     let authenticated = AuthenticatedAccount {
         account_id: AccountId::new(ACCOUNT_ID).unwrap(),
         namespace: AuthenticatedNamespace::WipeableTest,
@@ -475,6 +477,7 @@ async fn run_reliable_core_journey(persistence: &PostgresPersistence) -> Duratio
                 &progression,
                 &oath,
                 &bargain,
+                &safe_inventory,
                 authenticated,
                 response_sequence,
                 0,

@@ -119,8 +119,8 @@ pub use runtime::{
     LocalServerRuntimeError,
 };
 pub use safe_inventory::{
-    AuthoritativeSafeInventoryTransfer, PostgresSafeInventoryService, SafeInventoryServiceError,
-    SafeInventoryTransferCommand, SafeInventoryTransferKind,
+    AuthoritativeSafeInventoryTransfer, CoreSafeInventoryAuthority, PostgresSafeInventoryService,
+    SafeInventoryServiceError, SafeInventoryTransferCommand, SafeInventoryTransferKind,
 };
 pub use session::{
     AuthoritativeSession, IngressAnomaly, IngressAnomalyKind, IngressDiagnostics, InputDisposition,
@@ -504,6 +504,7 @@ pub async fn serve_core_reliable<R, C, G, E, W, P, OC, BC>(
     progression: &ProgressionQueryService<P>,
     oath: &CoreOathSelectionAuthority<OC>,
     bargain: &CoreBargainAuthority<BC>,
+    safe_inventory: &CoreSafeInventoryAuthority,
     authenticated: AuthenticatedAccount,
     response_sequence: u32,
     server_tick: u64,
@@ -560,6 +561,11 @@ where
         WireMessage::BargainDecisionFrame(frame) => protocol::ReliableEvent::BargainDecisionResult(
             bargain.decide(authenticated, &frame).await,
         ),
+        WireMessage::SafeInventoryTransferFrame(frame) => {
+            protocol::ReliableEvent::SafeInventoryTransferResult(
+                safe_inventory.transfer(authenticated, &frame).await,
+            )
+        }
         _ => return Err(ServerTransportError::UnexpectedMessage),
     };
     let response = protocol::ReliableEventFrame {

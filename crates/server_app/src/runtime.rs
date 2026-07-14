@@ -32,13 +32,13 @@ use tracing::{debug, info, warn};
 use crate::{
     AccountId, AccountRepository, AdmissionState, AuthenticatedAccount, AuthenticatedNamespace,
     AuthenticationDecision, CharacterIdGenerator, CoreBargainAuthority, CoreOathSelectionAuthority,
-    DisabledProgressionQueryRepository, HandshakePolicy, IdentityClock, IdentityService,
-    InMemoryAccountRepository, InstanceError, InstanceScheduler, NoopIdentityEventSink,
-    PostgresAccountRepository, PostgresBargainService, PostgresOathSelectionService,
-    PostgresProgressionQueryRepository, PostgresWorldFlowLocationRepository,
-    ProgressionQueryRepository, ProgressionQueryService, SERVER_SHUTDOWN_CLOSE_CODE,
-    SessionOwnerId, TransportId, WorldFlowGateService, WorldFlowLocationRepository,
-    close_transport, serve_core_reliable,
+    CoreSafeInventoryAuthority, DisabledProgressionQueryRepository, HandshakePolicy, IdentityClock,
+    IdentityService, InMemoryAccountRepository, InstanceError, InstanceScheduler,
+    NoopIdentityEventSink, PostgresAccountRepository, PostgresBargainService,
+    PostgresOathSelectionService, PostgresProgressionQueryRepository,
+    PostgresWorldFlowLocationRepository, ProgressionQueryRepository, ProgressionQueryService,
+    SERVER_SHUTDOWN_CLOSE_CODE, SessionOwnerId, TransportId, WorldFlowGateService,
+    WorldFlowLocationRepository, close_transport, serve_core_reliable,
 };
 
 pub const LOCAL_BUILD_ID: &str = M02_LOCAL_BUILD_ID;
@@ -516,6 +516,7 @@ pub struct BoundCoreIdentityServer<
     progression: Arc<ProgressionQueryService<P>>,
     oath: Arc<CoreOathSelectionAuthority<SystemIdentityClock>>,
     bargain: Arc<CoreBargainAuthority<SystemIdentityClock>>,
+    safe_inventory: Arc<CoreSafeInventoryAuthority>,
     persistence_enabled: bool,
 }
 
@@ -658,6 +659,7 @@ where
         );
         let oath = Arc::new(shrines.oath);
         let bargain = Arc::new(shrines.bargain);
+        let safe_inventory = Arc::new(CoreSafeInventoryAuthority::disabled());
         Ok(Self {
             endpoint,
             certificate,
@@ -668,6 +670,7 @@ where
             progression,
             oath,
             bargain,
+            safe_inventory,
             persistence_enabled,
         })
     }
@@ -711,10 +714,11 @@ where
                     let progression = Arc::clone(&self.progression);
                     let oath = Arc::clone(&self.oath);
                     let bargain = Arc::clone(&self.bargain);
+                    let safe_inventory = Arc::clone(&self.safe_inventory);
                     let accepted = Arc::clone(&accepted);
                     let rejected = Arc::clone(&rejected);
                     workers.spawn(async move {
-                        match serve_core_identity_connection(incoming, policy, authority, world_flow, progression, oath, bargain).await {
+                        match serve_core_identity_connection(incoming, policy, authority, world_flow, progression, oath, bargain, safe_inventory).await {
                             Ok(true) => { accepted.fetch_add(1, Ordering::Relaxed); }
                             Ok(false) => { rejected.fetch_add(1, Ordering::Relaxed); }
                             Err(error) => warn!(%error, "Core identity connection ended"),
@@ -743,6 +747,10 @@ where
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "each injected authority retains an independently auditable fail-closed boundary"
+)]
 async fn serve_core_identity_connection<R, W, P>(
     incoming: quinn::Incoming,
     policy: HandshakePolicy,
@@ -751,6 +759,7 @@ async fn serve_core_identity_connection<R, W, P>(
     progression: Arc<ProgressionQueryService<P>>,
     oath: Arc<CoreOathSelectionAuthority<SystemIdentityClock>>,
     bargain: Arc<CoreBargainAuthority<SystemIdentityClock>>,
+    safe_inventory: Arc<CoreSafeInventoryAuthority>,
 ) -> Result<bool, LocalServerRuntimeError>
 where
     R: AccountRepository,
@@ -797,6 +806,7 @@ where
             progression.as_ref(),
             oath.as_ref(),
             bargain.as_ref(),
+            safe_inventory.as_ref(),
             authenticated,
             response_sequence,
             0,
@@ -1140,6 +1150,12 @@ mod tests {
                 .feature_flags
                 .iter()
                 .all(|flag| flag.as_str() != protocol::CORE_WORLD_FLOW_FEATURE_FLAG)
+        );
+        assert!(
+            server_hello
+                .feature_flags
+                .iter()
+                .all(|flag| flag.as_str() != protocol::CORE_SAFE_INVENTORY_FEATURE_FLAG)
         );
         let (_, initial) =
             bot_client::perform_account_bootstrap(&connection, bootstrap(&content_root, 1))

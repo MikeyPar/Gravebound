@@ -16,6 +16,8 @@ use sim_core::{
 };
 use thiserror::Error;
 
+use crate::{AuthenticatedAccount, AuthenticatedNamespace};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SafeInventoryTransferKind {
     CharacterSafeToVault,
@@ -77,6 +79,42 @@ impl AuthoritativeSafeInventoryTransfer {
 #[derive(Debug, Clone)]
 pub struct PostgresSafeInventoryService {
     persistence: PostgresPersistence,
+}
+
+#[derive(Debug, Clone)]
+pub enum CoreSafeInventoryAuthority {
+    Disabled,
+    Persistent(PostgresSafeInventoryService),
+}
+
+impl CoreSafeInventoryAuthority {
+    #[must_use]
+    pub const fn disabled() -> Self {
+        Self::Disabled
+    }
+
+    #[must_use]
+    pub const fn persistent(service: PostgresSafeInventoryService) -> Self {
+        Self::Persistent(service)
+    }
+
+    pub async fn transfer(
+        &self,
+        authenticated: AuthenticatedAccount,
+        frame: &SafeInventoryTransferFrameV1,
+    ) -> SafeInventoryTransferResultV1 {
+        let result = match self {
+            Self::Persistent(service)
+                if authenticated.namespace == AuthenticatedNamespace::WipeableTest =>
+            {
+                service
+                    .transfer_frame(authenticated.account_id.as_bytes(), frame)
+                    .await
+            }
+            Self::Disabled | Self::Persistent(_) => Err(SafeInventoryServiceError::Persistence),
+        };
+        result.unwrap_or_else(|error| rejected_wire_result(frame, error.result_code()))
+    }
 }
 
 impl PostgresSafeInventoryService {
@@ -209,6 +247,24 @@ impl SafeInventoryServiceError {
             }
         }
     }
+}
+
+fn rejected_wire_result(
+    frame: &SafeInventoryTransferFrameV1,
+    code: SafeInventoryResultCodeV1,
+) -> SafeInventoryTransferResultV1 {
+    let result = SafeInventoryTransferResultV1 {
+        mutation_id: frame.mutation_id,
+        character_id: frame.character_id,
+        code,
+        replayed: false,
+        result_hash: [0; 32],
+        account_version: 0,
+        inventory_version: 0,
+        placements: Vec::new(),
+    };
+    debug_assert!(result.validate().is_ok());
+    result
 }
 
 const fn command_from_frame(frame: &SafeInventoryTransferFrameV1) -> SafeInventoryTransferCommand {
@@ -640,6 +696,37 @@ mod tests {
             frame.validate(),
             Err(SafeInventoryValidationError::SourceIndex)
         );
+    }
+
+    #[tokio::test]
+    async fn disabled_authority_returns_a_typed_state_free_rejection() {
+        let payload = SafeInventoryTransferPayloadV1 {
+            kind: SafeInventoryTransferKindV1::CharacterSafeToVault,
+            source_slot_index: 0,
+            expected_account_version: 4,
+            expected_inventory_version: 7,
+        };
+        let frame = SafeInventoryTransferFrameV1 {
+            mutation_id: [1; 16],
+            character_id: [2; 16],
+            issued_at_unix_millis: 99,
+            payload_hash: payload.canonical_hash(),
+            payload,
+        };
+        let result = CoreSafeInventoryAuthority::disabled()
+            .transfer(
+                AuthenticatedAccount {
+                    account_id: crate::AccountId::new([3; 16]).unwrap(),
+                    namespace: AuthenticatedNamespace::WipeableTest,
+                },
+                &frame,
+            )
+            .await;
+        result.validate().unwrap();
+        assert_eq!(result.code, SafeInventoryResultCodeV1::ServiceUnavailable);
+        assert!(!result.replayed);
+        assert_eq!(result.result_hash, [0; 32]);
+        assert!(result.placements.is_empty());
     }
 
     #[test]
