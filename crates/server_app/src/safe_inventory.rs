@@ -5,6 +5,10 @@ use persistence::{
     StoredSafeInventoryCommandKind, StoredSafeInventoryItem, StoredSafeInventoryLocation,
     StoredSafeInventoryPlacement, StoredSafeInventoryResult, StoredSafeInventorySnapshot,
 };
+use protocol::{
+    SafeInventoryDestinationV1, SafeInventoryPlacementV1, SafeInventoryResultCodeV1,
+    SafeInventoryTransferFrameV1, SafeInventoryTransferKindV1, SafeInventoryTransferResultV1,
+};
 use sim_core::{
     CHARACTER_SAFE_CAPACITY, DurableStorageSlot, ItemUid, RUN_BACKPACK_CAPACITY,
     SafeStorageCommand, SafeStorageError, SafeStorageLocation, SafeStorageSnapshot, VAULT_CAPACITY,
@@ -33,6 +37,42 @@ pub struct AuthoritativeSafeInventoryTransfer {
     pub result: StoredSafeInventoryResult,
 }
 
+impl AuthoritativeSafeInventoryTransfer {
+    pub fn wire_result(
+        &self,
+        character_id: [u8; 16],
+    ) -> Result<SafeInventoryTransferResultV1, SafeInventoryServiceError> {
+        let placements = self
+            .result
+            .placements
+            .iter()
+            .map(|placement| {
+                Ok(SafeInventoryPlacementV1 {
+                    item_uid: placement.item_uid,
+                    destination: wire_destination(placement.destination),
+                    item_version: placement
+                        .expected_item_version
+                        .checked_add(1)
+                        .ok_or(SafeInventoryServiceError::CorruptSnapshot)?,
+                })
+            })
+            .collect::<Result<Vec<_>, SafeInventoryServiceError>>()?;
+        let projection = SafeInventoryTransferResultV1 {
+            mutation_id: self.result.mutation_id,
+            character_id,
+            replayed: self.result.replayed,
+            result_hash: self.result.result_hash,
+            account_version: self.result.post_account_version,
+            inventory_version: self.result.post_inventory_version,
+            placements,
+        };
+        projection
+            .validate()
+            .map_err(|_| SafeInventoryServiceError::CorruptSnapshot)?;
+        Ok(projection)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PostgresSafeInventoryService {
     persistence: PostgresPersistence,
@@ -42,6 +82,20 @@ impl PostgresSafeInventoryService {
     #[must_use]
     pub const fn new(persistence: PostgresPersistence) -> Self {
         Self { persistence }
+    }
+
+    pub async fn transfer_frame(
+        &self,
+        account_id: [u8; 16],
+        frame: &SafeInventoryTransferFrameV1,
+    ) -> Result<SafeInventoryTransferResultV1, SafeInventoryServiceError> {
+        frame
+            .validate()
+            .map_err(|_| SafeInventoryServiceError::InvalidCommand)?;
+        let command = command_from_frame(frame);
+        self.transfer(account_id, frame.character_id, command)
+            .await?
+            .wire_result(frame.character_id)
     }
 
     pub async fn transfer(
@@ -56,7 +110,7 @@ impl PostgresSafeInventoryService {
             .persistence
             .load_safe_inventory_replay(account_id, character_id, command.mutation_id, request_hash)
             .await
-            .map_err(|error| map_persistence(&error))?
+            .map_err(|error| map_persistence(&error, Some(command.kind)))?
         {
             return Ok(AuthoritativeSafeInventoryTransfer { result });
         }
@@ -64,7 +118,7 @@ impl PostgresSafeInventoryService {
             .persistence
             .load_safe_inventory_snapshot(account_id, character_id)
             .await
-            .map_err(|error| map_persistence(&error))?;
+            .map_err(|error| map_persistence(&error, Some(command.kind)))?;
         if stored.account_version != command.expected_account_version
             || stored.inventory_version != command.expected_inventory_version
         {
@@ -105,7 +159,7 @@ impl PostgresSafeInventoryService {
             .persistence
             .commit_safe_inventory_transfer(account_id, character_id, &stored_command)
             .await
-            .map_err(|error| map_persistence(&error))?;
+            .map_err(|error| map_persistence(&error, Some(command.kind)))?;
         Ok(AuthoritativeSafeInventoryTransfer { result })
     }
 }
@@ -126,10 +180,54 @@ pub enum SafeInventoryServiceError {
     BindingMismatch,
     #[error("safe-inventory destination lacks capacity")]
     StorageFull,
+    #[error("CharacterSafe lacks capacity")]
+    CharacterSafeFull,
+    #[error("RunBackpack lacks capacity")]
+    RunBackpackFull,
     #[error("safe-inventory snapshot is corrupt")]
     CorruptSnapshot,
     #[error("safe-inventory persistence failed")]
     Persistence,
+}
+
+impl SafeInventoryServiceError {
+    #[must_use]
+    pub const fn result_code(&self) -> SafeInventoryResultCodeV1 {
+        match self {
+            Self::InvalidCommand => SafeInventoryResultCodeV1::InvalidCommand,
+            Self::StaleVersion => SafeInventoryResultCodeV1::VersionMismatch,
+            Self::HallBinding => SafeInventoryResultCodeV1::HallBindingRequired,
+            Self::UnresolvedMutation => SafeInventoryResultCodeV1::UnresolvedMutation,
+            Self::IdempotencyConflict => SafeInventoryResultCodeV1::IdempotencyConflict,
+            Self::BindingMismatch => SafeInventoryResultCodeV1::SourceUnavailable,
+            Self::StorageFull => SafeInventoryResultCodeV1::StorageFull,
+            Self::CharacterSafeFull => SafeInventoryResultCodeV1::CharacterSafeFull,
+            Self::RunBackpackFull => SafeInventoryResultCodeV1::RunBackpackFull,
+            Self::CorruptSnapshot | Self::Persistence => {
+                SafeInventoryResultCodeV1::ServiceUnavailable
+            }
+        }
+    }
+}
+
+const fn command_from_frame(frame: &SafeInventoryTransferFrameV1) -> SafeInventoryTransferCommand {
+    SafeInventoryTransferCommand {
+        mutation_id: frame.mutation_id,
+        kind: match frame.payload.kind {
+            SafeInventoryTransferKindV1::CharacterSafeToVault => {
+                SafeInventoryTransferKind::CharacterSafeToVault
+            }
+            SafeInventoryTransferKindV1::VaultToCharacterSafe => {
+                SafeInventoryTransferKind::VaultToCharacterSafe
+            }
+            SafeInventoryTransferKindV1::CharacterSafeToRunBackpack => {
+                SafeInventoryTransferKind::CharacterSafeToRunBackpack
+            }
+        },
+        source_slot_index: frame.payload.source_slot_index,
+        expected_account_version: frame.payload.expected_account_version,
+        expected_inventory_version: frame.payload.expected_inventory_version,
+    }
 }
 
 fn validate_command(
@@ -197,6 +295,20 @@ fn stored_location(location: SafeStorageLocation) -> StoredSafeInventoryLocation
             StoredSafeInventoryLocation::CharacterSafe(slot)
         }
         SafeStorageLocation::Vault(slot) => StoredSafeInventoryLocation::Vault(slot),
+    }
+}
+
+const fn wire_destination(location: StoredSafeInventoryLocation) -> SafeInventoryDestinationV1 {
+    match location {
+        StoredSafeInventoryLocation::RunBackpack(slot_index) => {
+            SafeInventoryDestinationV1::RunBackpack { slot_index }
+        }
+        StoredSafeInventoryLocation::CharacterSafe(slot_index) => {
+            SafeInventoryDestinationV1::CharacterSafe { slot_index }
+        }
+        StoredSafeInventoryLocation::Vault(slot_index) => {
+            SafeInventoryDestinationV1::Vault { slot_index }
+        }
     }
 }
 
@@ -308,7 +420,10 @@ fn result_hash(request_hash: [u8; 32], placements: &[StoredSafeInventoryPlacemen
     blake3::derive_key("gravebound.safe-inventory-result.v1", &material)
 }
 
-fn map_persistence(error: &PersistenceError) -> SafeInventoryServiceError {
+fn map_persistence(
+    error: &PersistenceError,
+    kind: Option<SafeInventoryTransferKind>,
+) -> SafeInventoryServiceError {
     match error {
         PersistenceError::SafeInventoryVersionMismatch => SafeInventoryServiceError::StaleVersion,
         PersistenceError::SafeInventoryHallBindingMismatch
@@ -322,7 +437,17 @@ fn map_persistence(error: &PersistenceError) -> SafeInventoryServiceError {
         PersistenceError::SafeInventoryBindingMismatch => {
             SafeInventoryServiceError::BindingMismatch
         }
-        PersistenceError::SafeInventoryStorageFull => SafeInventoryServiceError::StorageFull,
+        PersistenceError::SafeInventoryStorageFull => match kind {
+            Some(SafeInventoryTransferKind::VaultToCharacterSafe) => {
+                SafeInventoryServiceError::CharacterSafeFull
+            }
+            Some(SafeInventoryTransferKind::CharacterSafeToRunBackpack) => {
+                SafeInventoryServiceError::RunBackpackFull
+            }
+            Some(SafeInventoryTransferKind::CharacterSafeToVault) | None => {
+                SafeInventoryServiceError::StorageFull
+            }
+        },
         PersistenceError::CorruptStoredSafeInventory => SafeInventoryServiceError::CorruptSnapshot,
         _ => SafeInventoryServiceError::Persistence,
     }
@@ -330,9 +455,9 @@ fn map_persistence(error: &PersistenceError) -> SafeInventoryServiceError {
 
 const fn map_plan(error: &SafeStorageError) -> SafeInventoryServiceError {
     match error {
-        SafeStorageError::StorageFull
-        | SafeStorageError::CharacterSafeFull
-        | SafeStorageError::RunBackpackFull => SafeInventoryServiceError::StorageFull,
+        SafeStorageError::StorageFull => SafeInventoryServiceError::StorageFull,
+        SafeStorageError::CharacterSafeFull => SafeInventoryServiceError::CharacterSafeFull,
+        SafeStorageError::RunBackpackFull => SafeInventoryServiceError::RunBackpackFull,
         SafeStorageError::SourceOutOfRange | SafeStorageError::EmptySource => {
             SafeInventoryServiceError::BindingMismatch
         }
@@ -350,6 +475,7 @@ const fn map_plan(error: &SafeStorageError) -> SafeInventoryServiceError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use protocol::{SafeInventoryTransferPayloadV1, SafeInventoryValidationError};
 
     fn item(
         byte: u8,
@@ -458,5 +584,70 @@ mod tests {
             }),
             Err(SafeInventoryServiceError::InvalidCommand)
         ));
+    }
+
+    #[test]
+    fn wire_frame_maps_only_validated_caller_fields() {
+        let payload = SafeInventoryTransferPayloadV1 {
+            kind: SafeInventoryTransferKindV1::CharacterSafeToRunBackpack,
+            source_slot_index: 7,
+            expected_account_version: 4,
+            expected_inventory_version: 7,
+        };
+        let mut frame = SafeInventoryTransferFrameV1 {
+            mutation_id: [1; 16],
+            character_id: [2; 16],
+            issued_at_unix_millis: 99,
+            payload_hash: payload.canonical_hash(),
+            payload,
+        };
+        frame.validate().unwrap();
+        assert_eq!(
+            command_from_frame(&frame),
+            SafeInventoryTransferCommand {
+                mutation_id: [1; 16],
+                kind: SafeInventoryTransferKind::CharacterSafeToRunBackpack,
+                source_slot_index: 7,
+                expected_account_version: 4,
+                expected_inventory_version: 7,
+            }
+        );
+        frame.payload.source_slot_index = 8;
+        assert_eq!(
+            frame.validate(),
+            Err(SafeInventoryValidationError::SourceIndex)
+        );
+    }
+
+    #[test]
+    fn accepted_result_projects_only_server_derived_destinations() {
+        let transfer = AuthoritativeSafeInventoryTransfer {
+            result: StoredSafeInventoryResult {
+                replayed: false,
+                mutation_id: [1; 16],
+                result_hash: [3; 32],
+                pre_account_version: 4,
+                post_account_version: 5,
+                pre_inventory_version: 7,
+                post_inventory_version: 8,
+                placements: vec![StoredSafeInventoryPlacement {
+                    item_uid: [4; 16],
+                    source: StoredSafeInventoryLocation::CharacterSafe(2),
+                    destination: StoredSafeInventoryLocation::Vault(0),
+                    expected_item_version: 9,
+                }],
+            },
+        };
+        let projection = transfer.wire_result([2; 16]).unwrap();
+        projection.validate().unwrap();
+        assert_eq!(
+            (projection.account_version, projection.inventory_version),
+            (5, 8)
+        );
+        assert_eq!(projection.placements[0].item_version, 10);
+        assert_eq!(
+            projection.placements[0].destination,
+            SafeInventoryDestinationV1::Vault { slot_index: 0 }
+        );
     }
 }

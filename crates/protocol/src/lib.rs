@@ -13,6 +13,7 @@ mod handshake;
 mod messages;
 mod oath;
 mod progression;
+mod safe_inventory;
 mod world_flow;
 
 pub use account::{
@@ -67,6 +68,12 @@ pub use oath::{
 pub use progression::{
     PROGRESSION_REWARD_EVENT_ID_BYTES, ProgressionCapState, ProgressionProjection,
     ProgressionQueryFrame, ProgressionResult, ProgressionResultCode, ProgressionValidationError,
+};
+pub use safe_inventory::{
+    SAFE_INVENTORY_ITEM_UID_BYTES, SAFE_INVENTORY_PLACEMENT_CAPACITY,
+    SAFE_INVENTORY_RESULT_HASH_BYTES, SafeInventoryDestinationV1, SafeInventoryPlacementV1,
+    SafeInventoryResultCodeV1, SafeInventoryTransferFrameV1, SafeInventoryTransferKindV1,
+    SafeInventoryTransferPayloadV1, SafeInventoryTransferResultV1, SafeInventoryValidationError,
 };
 pub use world_flow::{
     CharacterLocation, CharacterLocationSnapshot, INSTANCE_LINEAGE_ID_BYTES, SafeArrival,
