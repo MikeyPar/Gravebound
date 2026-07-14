@@ -490,14 +490,14 @@ mod tests {
         )])
     }
 
-    fn threshold_damage() -> CoreCaldusFriendlyInput {
-        let projectile_id = id(500);
+    fn friendly_damage(tick: u64, projectile: u64, raw_damage: u32) -> CoreCaldusFriendlyInput {
+        let projectile_id = id(projectile);
         CoreCaldusFriendlyInput {
             participant: participant(),
             combat: crate::CombatStep {
-                tick: Tick(0),
+                tick: Tick(tick),
                 collisions: vec![ProjectileCollision {
-                    tick: Tick(0),
+                    tick: Tick(tick),
                     projectile_id,
                     source: FriendlyProjectileSource::Primary,
                     target: CollisionTarget::Enemy(id(99)),
@@ -509,13 +509,13 @@ mod tests {
                     projectile_continues: false,
                 }],
                 raw_damage_intents: vec![RawDamageIntent {
-                    tick: Tick(0),
+                    tick: Tick(tick),
                     projectile_id,
                     source: RawDamageIntentSource::Primary,
                     target: id(99),
-                    base_raw_damage: 2_500,
+                    base_raw_damage: raw_damage,
                     multiplier_basis_points: 10_000,
-                    resolved_raw_damage: 2_500,
+                    resolved_raw_damage: raw_damage,
                     contact_ordinal: 0,
                 }],
                 ..crate::CombatStep::default()
@@ -538,7 +538,7 @@ mod tests {
         let mut encounter = encounter();
         let mut players = players();
         let transition = encounter
-            .step(&[threshold_damage()], &mut players)
+            .step(&[friendly_damage(0, 500, 2_500)], &mut players)
             .expect("threshold");
         assert!(transition.scheduler_events.iter().any(|event| matches!(
             event,
@@ -583,5 +583,52 @@ mod tests {
         ));
         assert_eq!(encounter, before_encounter);
         assert_eq!(players, before_players);
+    }
+
+    fn complete_solo_run() -> (Tick, Vec<(Tick, crate::CoreCaldusPhase)>, blake3::Hash) {
+        let mut encounter = encounter();
+        encounter.set_damage_policy(HostileDamagePolicy::DebugInvulnerable);
+        let mut players = players();
+        let mut phase_starts = Vec::new();
+        let mut trace = blake3::Hasher::new();
+        for tick in 0_u64..=5_400 {
+            let input = [1_800_u64, 3_600, 5_400]
+                .contains(&tick)
+                .then(|| friendly_damage(tick, 600 + tick / 1_800, 2_700));
+            let step = encounter
+                .step(input.as_slice(), &mut players)
+                .unwrap_or_else(|error| panic!("complete run tick {tick}: {error}"));
+            trace.update(format!("{step:?}\n").as_bytes());
+            phase_starts.extend(
+                step.scheduler_events
+                    .iter()
+                    .filter_map(|event| match event {
+                        CoreCaldusEvent::PhaseStarted { tick, phase } => Some((*tick, *phase)),
+                        _ => None,
+                    }),
+            );
+            if let Some(defeat) = step.defeat {
+                assert_eq!(encounter.current_health(), 0);
+                assert!(encounter.hostile_projectiles().is_empty());
+                return (defeat.tick, phase_starts, trace.finalize());
+            }
+        }
+        panic!("script did not defeat Caldus")
+    }
+
+    #[test]
+    fn complete_solo_combat_is_180_seconds_and_byte_identical_on_replay() {
+        let first = complete_solo_run();
+        let second = complete_solo_run();
+        assert_eq!(first, second);
+        assert_eq!(first.0, Tick(5_400));
+        assert_eq!(first.0.0 / 30, 180);
+        assert_eq!(
+            first.1,
+            [
+                (Tick(1_920), crate::CoreCaldusPhase::Phase2),
+                (Tick(3_720), crate::CoreCaldusPhase::Phase3),
+            ]
+        );
     }
 }

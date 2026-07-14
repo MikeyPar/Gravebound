@@ -178,7 +178,8 @@ impl CoreCaldusBodySimulation {
         validate_targets(&self.lock, targets)?;
         if scheduler_events
             .iter()
-            .any(|event| event_tick(event) != self.tick)
+            .filter_map(body_authority_tick)
+            .any(|tick| tick != self.tick)
         {
             return Err(CoreCaldusBodyError::SchedulerTickMismatch);
         }
@@ -586,25 +587,14 @@ fn normalized_tick_step(
     Ok((dx, dy))
 }
 
-fn event_tick(event: &CoreCaldusEvent) -> Tick {
+fn body_authority_tick(event: &CoreCaldusEvent) -> Option<Tick> {
     match event {
         CoreCaldusEvent::PhaseTimelineCancelled { tick, .. }
-        | CoreCaldusEvent::HostilesCleared { tick }
-        | CoreCaldusEvent::BreakStarted { tick, .. }
-        | CoreCaldusEvent::PhaseStarted { tick, .. }
-        | CoreCaldusEvent::SoftEnrageStarted { tick, .. }
-        | CoreCaldusEvent::LoopRestarted { tick, .. }
-        | CoreCaldusEvent::ShieldTelegraph { tick, .. }
-        | CoreCaldusEvent::ShieldFired { tick, .. }
-        | CoreCaldusEvent::BellRingTelegraph { tick, .. }
-        | CoreCaldusEvent::BellRingPreview { tick, .. }
-        | CoreCaldusEvent::BellRingFired { tick, .. }
-        | CoreCaldusEvent::ChargeTelegraph { tick, .. }
         | CoreCaldusEvent::ChargeDirectionLocked { tick, .. }
         | CoreCaldusEvent::ChargeMovementStarted { tick, .. }
         | CoreCaldusEvent::ChargeEnded { tick, .. }
-        | CoreCaldusEvent::ChargeStopRingFired { tick, .. }
-        | CoreCaldusEvent::BossDefeated { tick } => *tick,
+        | CoreCaldusEvent::BossDefeated { tick } => Some(*tick),
+        _ => None,
     }
 }
 
