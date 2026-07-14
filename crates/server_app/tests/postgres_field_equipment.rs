@@ -6,10 +6,13 @@ use server_app::{
     PostgresFieldEquipmentService, initialize_postgres_starter,
 };
 
-const ACCOUNT_ID: [u8; 16] = [111; 16];
-const CHARACTER_ID: [u8; 16] = [112; 16];
-const REWARD_UID: [u8; 16] = [113; 16];
-const REWARD_REQUEST_ID: [u8; 16] = [114; 16];
+// Keep this fixture's identity range isolated from the other PostgreSQL gates. The CI job
+// intentionally runs those gates against one database, so reusing an account would make this
+// test's cleanup depend on another test's foreign-key graph.
+const ACCOUNT_ID: [u8; 16] = [201; 16];
+const CHARACTER_ID: [u8; 16] = [202; 16];
+const REWARD_UID: [u8; 16] = [203; 16];
+const REWARD_REQUEST_ID: [u8; 16] = [204; 16];
 
 fn content_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content")
