@@ -185,6 +185,13 @@ fn transfer_frame() -> SafeInventoryTransferFrameV1 {
     }
 }
 
+fn conflicting_transfer_frame() -> SafeInventoryTransferFrameV1 {
+    let mut frame = transfer_frame();
+    frame.payload.source_slot_index = 1;
+    frame.payload_hash = frame.payload.canonical_hash();
+    frame
+}
+
 fn endpoints() -> (quinn::Endpoint, quinn::Endpoint, std::net::SocketAddr) {
     let CertifiedKey { cert, signing_key } =
         generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
@@ -230,7 +237,7 @@ fn hello() -> ClientHello {
 
 async fn run_quic_transfers(
     persistence: &PostgresPersistence,
-    expected_replayed: &[bool],
+    frames: &[SafeInventoryTransferFrameV1],
 ) -> Vec<protocol::SafeInventoryTransferResultV1> {
     let identity = IdentityService::new(
         InMemoryAccountRepository::default(),
@@ -277,7 +284,7 @@ async fn run_quic_transfers(
         )
         .await
         .unwrap();
-        for response_sequence in 1..=expected_replayed.len() {
+        for response_sequence in 1..=frames.len() {
             serve_core_reliable(
                 &server,
                 &identity,
@@ -301,13 +308,11 @@ async fn run_quic_transfers(
                 |flag| flag.as_str() == CORE_SAFE_INVENTORY_FEATURE_FLAG
             )
         ));
-        let mut results = Vec::with_capacity(expected_replayed.len());
-        for replayed in expected_replayed {
-            let (_, result) =
-                bot_client::perform_safe_inventory_transfer(&client, transfer_frame())
-                    .await
-                    .unwrap();
-            assert_eq!(result.replayed, *replayed);
+        let mut results = Vec::with_capacity(frames.len());
+        for frame in frames {
+            let (_, result) = bot_client::perform_safe_inventory_transfer(&client, *frame)
+                .await
+                .unwrap();
             results.push(result);
         }
         results
@@ -325,15 +330,41 @@ async fn run_quic_transfers(
 async fn real_quic_safe_inventory_replays_across_a_new_endpoint() {
     let persistence = disposable_database().await;
     seed_fixture(&persistence).await;
-    let initial = run_quic_transfers(&persistence, &[false, true]).await;
+    let initial = run_quic_transfers(
+        &persistence,
+        &[
+            transfer_frame(),
+            transfer_frame(),
+            conflicting_transfer_frame(),
+        ],
+    )
+    .await;
     assert_eq!(initial[0].code, SafeInventoryResultCodeV1::Accepted);
+    assert!(!initial[0].replayed);
+    assert!(initial[1].replayed);
     assert_eq!(initial[0].result_hash, initial[1].result_hash);
+    assert_eq!(
+        initial[2].code,
+        SafeInventoryResultCodeV1::IdempotencyConflict
+    );
+    assert!(!initial[2].replayed);
+    assert_eq!(initial[2].result_hash, [0; 32]);
+    assert!(initial[2].placements.is_empty());
     persistence.close().await;
 
     let restarted = disposable_database().await;
-    let replay = run_quic_transfers(&restarted, &[true]).await;
+    let replay = run_quic_transfers(
+        &restarted,
+        &[transfer_frame(), conflicting_transfer_frame()],
+    )
+    .await;
     assert_eq!(replay[0].code, SafeInventoryResultCodeV1::Accepted);
+    assert!(replay[0].replayed);
     assert_eq!(replay[0].result_hash, initial[0].result_hash);
+    assert_eq!(
+        replay[1].code,
+        SafeInventoryResultCodeV1::IdempotencyConflict
+    );
     assert_committed_state(&restarted).await;
     restarted.close().await;
 }
