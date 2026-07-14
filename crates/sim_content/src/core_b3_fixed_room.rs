@@ -631,9 +631,27 @@ mod tests {
         assert!(first.iter().any(|(tick, kind, _)| {
             *tick == 134 && *kind == "miniboss.sepulcher_knight.stop_ring"
         }));
+        assert_eq!(
+            first
+                .iter()
+                .filter(|(tick, kind, _)| {
+                    *tick == 134 && *kind == "miniboss.sepulcher_knight.stop_ring"
+                })
+                .count(),
+            8
+        );
         assert!(first.iter().any(|(tick, kind, _)| {
             *tick == 168 && *kind == "miniboss.sepulcher_knight.shield_fan"
         }));
+        assert_eq!(
+            first
+                .iter()
+                .filter(|(tick, kind, _)| {
+                    *tick == 168 && *kind == "miniboss.sepulcher_knight.shield_fan"
+                })
+                .count(),
+            5
+        );
     }
 
     #[test]
