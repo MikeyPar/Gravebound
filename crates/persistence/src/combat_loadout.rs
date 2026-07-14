@@ -149,12 +149,12 @@ impl PostgresPersistence {
                   AND armor_item.account_id = c.account_id \
                   AND armor_item.character_id = c.character_id \
                   AND armor_item.item_kind = 0 AND armor_item.security_state = 0 \
-                  AND armor_item.location_kind = 0 AND armor_item.slot_index = 1 \
+                  AND armor_item.location_kind = 0 AND armor_item.slot_index = 2 \
              LEFT JOIN item_instances relic_item ON relic_item.namespace_id = c.namespace_id \
                   AND relic_item.account_id = c.account_id \
                   AND relic_item.character_id = c.character_id \
                   AND relic_item.item_kind = 0 AND relic_item.security_state = 0 \
-                  AND relic_item.location_kind = 0 AND relic_item.slot_index = 2 \
+                  AND relic_item.location_kind = 0 AND relic_item.slot_index = 1 \
              LEFT JOIN item_instances charm_item ON charm_item.namespace_id = c.namespace_id \
                   AND charm_item.account_id = c.account_id \
                   AND charm_item.character_id = c.character_id \
