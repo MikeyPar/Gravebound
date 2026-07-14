@@ -508,8 +508,16 @@ async fn caldus_victory_fresh_replay_and_payload_conflict_are_durable() {
         replay.exit.canonical_request_hash
     );
 
+    let mut conflicting_owner = owner;
+    conflicting_owner.eligibility.direct_damage += 1;
     let conflict = coordinator
-        .commit(lineage_id, &lock, ACTIVE_TICKS - 1, CURRENT_TICK, &[owner])
+        .commit(
+            lineage_id,
+            &lock,
+            ACTIVE_TICKS,
+            CURRENT_TICK,
+            &[conflicting_owner],
+        )
         .await
         .unwrap_err();
     assert!(matches!(
@@ -687,7 +695,7 @@ async fn caldus_committed_receipt_supersedes_restore_and_transfers_once_to_hall_
             ..
         }
     ));
-    let mismatched_lineage_id = [199; 16];
+    let mismatched_lineage_id = [199_u8; 16];
     let hashes = sim_content::load_core_development_world_flow(&content_root())
         .unwrap()
         .hashes()
