@@ -69,14 +69,26 @@ async fn disposable_database() -> PostgresPersistence {
     persistence
 }
 
-async fn seed_fixture(persistence: &PostgresPersistence) {
-    let mut transaction = persistence.begin_transaction().await.unwrap();
+async fn clear_fixture(transaction: &mut persistence::PersistenceTransaction<'_>) {
+    sqlx::query(
+        "DELETE FROM field_equipment_mutations WHERE namespace_id = $1 AND account_id = $2",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
     sqlx::query("DELETE FROM accounts WHERE namespace_id = $1 AND account_id = $2")
         .bind(WIPEABLE_CORE_NAMESPACE)
         .bind(ACCOUNT_ID.as_slice())
         .execute(transaction.connection())
         .await
         .unwrap();
+}
+
+async fn seed_fixture(persistence: &PostgresPersistence) {
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    clear_fixture(&mut transaction).await;
     sqlx::query(
         "INSERT INTO accounts (namespace_id,account_id,state_version,slot_capacity) \
          VALUES ($1,$2,1,2)",

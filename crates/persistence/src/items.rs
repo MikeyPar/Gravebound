@@ -96,8 +96,13 @@ impl PostgresPersistence {
             let pre_inventory_version = row.try_get("pre_inventory_version")?;
             let post_inventory_version = row.try_get("post_inventory_version")?;
             let stored_items =
-                load_starter_items(transaction.connection(), account_id, character_id).await?;
+                load_starter_items(transaction.connection(), account_id, character_id, items)
+                    .await?;
             validate_initializer_input(stored_request, stored_result, &stored_items)?;
+            if stored_items != items {
+                transaction.rollback().await?;
+                return Err(PersistenceError::CorruptStoredItems);
+            }
             transaction.rollback().await?;
             return Ok(StoredStarterInitialization {
                 replayed: true,
@@ -248,14 +253,16 @@ async fn load_starter_items(
     connection: &mut sqlx::PgConnection,
     account_id: [u8; 16],
     character_id: [u8; 16],
+    expected_items: &[StoredStarterItem],
 ) -> Result<Vec<StoredStarterItem>, PersistenceError> {
     let rows = sqlx::query(
         "SELECT i.item_uid, l.ledger_event_id, i.template_id, i.item_kind, i.item_level, \
-         i.rarity, i.roll_index, i.unit_ordinal, i.location_kind, i.slot_index \
+         i.rarity, i.roll_index, i.unit_ordinal, l.post_location_kind \
          FROM item_instances i JOIN item_ledger_events l ON l.namespace_id = i.namespace_id \
          AND l.item_uid = i.item_uid AND l.post_item_version = 1 \
-         WHERE i.namespace_id = $1 AND i.account_id = $2 AND i.character_id = $3 \
+         WHERE i.namespace_id = $1 AND i.account_id = $2 \
          AND i.creation_kind = 0 AND i.creation_request_id = $3 \
+         AND l.character_id = $3 AND l.event_kind = 0 AND l.source_kind = 0 \
          ORDER BY i.roll_index, i.unit_ordinal, i.item_uid",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
@@ -266,8 +273,14 @@ async fn load_starter_items(
     .map_err(PersistenceError::Database)?;
     rows.into_iter()
         .map(|row| {
+            let item_uid = fixed_bytes(row.try_get("item_uid")?)?;
+            let slot_index = expected_items
+                .iter()
+                .find(|item| item.item_uid == item_uid)
+                .map(|item| item.slot_index)
+                .ok_or(PersistenceError::CorruptStoredItems)?;
             Ok(StoredStarterItem {
-                item_uid: fixed_bytes(row.try_get("item_uid")?)?,
+                item_uid,
                 ledger_event_id: fixed_bytes(row.try_get("ledger_event_id")?)?,
                 template_id: row.try_get("template_id")?,
                 item_kind: row.try_get("item_kind")?,
@@ -275,8 +288,8 @@ async fn load_starter_items(
                 rarity: row.try_get("rarity")?,
                 roll_index: row.try_get("roll_index")?,
                 unit_ordinal: row.try_get("unit_ordinal")?,
-                location_kind: row.try_get("location_kind")?,
-                slot_index: row.try_get("slot_index")?,
+                location_kind: row.try_get("post_location_kind")?,
+                slot_index,
             })
         })
         .collect()
