@@ -4,8 +4,11 @@ use std::collections::BTreeSet;
 
 use content_schema::{ContentId, CoreFixedLayoutNode};
 use sim_core::{
-    DungeonAnchorKind, DungeonRoomDefinition, EntityId, FixedRoomError, FixedRoomSimulation,
-    NormalWaveEntityIdError, SpawnInstanceId, normal_wave_entity_id,
+    ArenaAnchor, ArenaGeometry, DungeonAnchorKind, DungeonRoomDefinition,
+    DungeonRoomVolumeGeometry, DungeonRoomVolumeKind, EnemyLabPlayer, EntityId, EntityIdAllocator,
+    FixedRoomError, FixedRoomSimulation, NormalWaveDefinitions, NormalWaveEnemyKind,
+    NormalWaveEntityIdError, NormalWaveError, NormalWaveSimulation, NormalWaveSpawn,
+    RotatedDungeonRoom, SpawnInstanceId, Tick, TilePoint, TileRectangle, normal_wave_entity_id,
 };
 use thiserror::Error;
 
@@ -44,6 +47,7 @@ pub struct CoreFixedRoomEncounterPlan {
     pub base_budget: u16,
     pub warning_ticks: u64,
     pub first_spawn_ordinal: u16,
+    arena: ArenaGeometry,
     assignments: Vec<CoreFixedRoomAssignment>,
 }
 
@@ -59,6 +63,55 @@ impl CoreFixedRoomEncounterPlan {
             0,
         )
     }
+
+    #[must_use]
+    pub const fn arena(&self) -> &ArenaGeometry {
+        &self.arena
+    }
+}
+
+/// Instantiates B1/B5 through the immutable First Playable combat owner. Mixed/authored rooms fail
+/// closed until their dedicated owner is supplied.
+pub fn instantiate_immutable_fixed_room_wave(
+    plan: &CoreFixedRoomEncounterPlan,
+    player: EnemyLabPlayer,
+    hostile_projectile_ids: EntityIdAllocator,
+    warning_started_at: Tick,
+) -> Result<NormalWaveSimulation, CoreFixedRoomEncounterError> {
+    let spawns = plan
+        .assignments
+        .iter()
+        .map(|assignment| {
+            let kind = match assignment.runtime_kind {
+                CoreFixedRoomActorRuntimeKind::DrownedPilgrim => {
+                    NormalWaveEnemyKind::DrownedPilgrim
+                }
+                CoreFixedRoomActorRuntimeKind::BellReed => NormalWaveEnemyKind::BellReed,
+                CoreFixedRoomActorRuntimeKind::ChainSentry => NormalWaveEnemyKind::ChainSentry,
+                CoreFixedRoomActorRuntimeKind::BellAcolyte
+                | CoreFixedRoomActorRuntimeKind::ChoirSkull
+                | CoreFixedRoomActorRuntimeKind::SepulcherKnight => {
+                    return Err(CoreFixedRoomEncounterError::AuthoredRuntimeRequired {
+                        node_id: plan.node_id.clone(),
+                    });
+                }
+            };
+            Ok(NormalWaveSpawn {
+                instance_id: assignment.instance_id,
+                kind,
+                position_milli_tiles: (assignment.x_milli_tiles, assignment.y_milli_tiles),
+            })
+        })
+        .collect::<Result<Vec<_>, CoreFixedRoomEncounterError>>()?;
+    NormalWaveSimulation::new(
+        NormalWaveDefinitions::first_playable(),
+        plan.arena.clone(),
+        spawns,
+        player,
+        hostile_projectile_ids,
+        warning_started_at,
+    )
+    .map_err(Into::into)
 }
 
 /// Compiles the four exact initial room attempts with one monotonic run-local identity sequence.
@@ -112,6 +165,7 @@ fn compile_node_plan(
         .find(|room| room.id == node.room_template_id.as_str())
         .ok_or(CoreFixedRoomEncounterError::DefinitionDrift)?;
     let rotated = definition.rotated(node.rotation_degrees)?;
+    let arena = combat_arena(&rotated)?;
 
     let mut units = Vec::new();
     let mut budget = 0_u16;
@@ -186,8 +240,62 @@ fn compile_node_plan(
         base_budget: encounter.base_budget,
         warning_ticks: 27,
         first_spawn_ordinal,
+        arena,
         assignments,
     })
+}
+
+fn combat_arena(room: &RotatedDungeonRoom) -> Result<ArenaGeometry, CoreFixedRoomEncounterError> {
+    let center = TilePoint::new(
+        i32::try_from(room.width_milli_tiles / 2)
+            .map_err(|_| CoreFixedRoomEncounterError::DefinitionDrift)?,
+        i32::try_from(room.height_milli_tiles / 2)
+            .map_err(|_| CoreFixedRoomEncounterError::DefinitionDrift)?,
+    );
+    let player_spawn = room.doors.first().map_or(center, |door| {
+        TilePoint::new(door.x_milli_tiles, door.y_milli_tiles)
+    });
+    ArenaGeometry {
+        id: format!("{}.combat", room.room_id),
+        width_milli_tiles: i32::try_from(room.width_milli_tiles)
+            .map_err(|_| CoreFixedRoomEncounterError::DefinitionDrift)?,
+        height_milli_tiles: i32::try_from(room.height_milli_tiles)
+            .map_err(|_| CoreFixedRoomEncounterError::DefinitionDrift)?,
+        shell_thickness_milli_tiles: 1_000,
+        player_spawn,
+        boss_spawn: center,
+        pillars: room
+            .volumes
+            .iter()
+            .filter_map(|volume| match (&volume.kind, &volume.geometry) {
+                (
+                    DungeonRoomVolumeKind::Solid | DungeonRoomVolumeKind::DeepWater,
+                    DungeonRoomVolumeGeometry::Rectangle {
+                        x,
+                        y,
+                        width,
+                        height,
+                    },
+                ) => Some(TileRectangle::new(
+                    *x,
+                    *y,
+                    i32::try_from(*width).ok()?,
+                    i32::try_from(*height).ok()?,
+                )),
+                _ => None,
+            })
+            .collect(),
+        anchors: room
+            .anchors
+            .iter()
+            .map(|anchor| ArenaAnchor {
+                id: anchor.id.clone(),
+                point: TilePoint::new(anchor.x_milli_tiles, anchor.y_milli_tiles),
+            })
+            .collect(),
+    }
+    .validated()
+    .map_err(Into::into)
 }
 
 fn runtime_and_anchor_kind(
@@ -228,23 +336,63 @@ pub enum CoreFixedRoomEncounterError {
     DefinitionDrift,
     #[error("room {node_id} has no compatible unused anchor for {enemy_id}")]
     MissingCompatibleAnchor { node_id: String, enemy_id: String },
+    #[error("fixed room {node_id} requires its Core-authored combat owner")]
+    AuthoredRuntimeRequired { node_id: String },
     #[error(transparent)]
     EntityId(#[from] NormalWaveEntityIdError),
     #[error(transparent)]
     Room(#[from] sim_core::DungeonRoomError),
+    #[error(transparent)]
+    Arena(#[from] sim_core::ArenaGeometryError),
+    #[error(transparent)]
+    Wave(#[from] NormalWaveError),
     #[error(transparent)]
     Content(#[from] anyhow::Error),
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::{num::NonZeroU64, path::Path};
 
     use super::*;
     use crate::load_core_development_encounter_rooms;
+    use sim_core::{
+        HostileTargetState, NormalWavePhase, PlayerVitals, RedTonicSimulation, SimulationVector,
+        TonicBelt,
+    };
 
     fn content_root() -> std::path::PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content")
+    }
+
+    fn player_fixture() -> (EnemyLabPlayer, EntityIdAllocator) {
+        let root = content_root();
+        let (source, _) = crate::load_and_validate(&root).expect("FP source");
+        let fixture = crate::first_playable_authority_combat_test(&source).expect("FP fixture");
+        let definitions = fixture.definitions;
+        (
+            EnemyLabPlayer {
+                target: HostileTargetState {
+                    entity_id: EntityId::new(900).expect("player ID"),
+                    position: SimulationVector::new(3.0, 8.5),
+                    target_is_immune: false,
+                    resistance_basis_points: definitions.resistance_basis_points,
+                    additional_direct_damage_reductions_basis_points: Vec::new(),
+                    armor: definitions.starting_armor,
+                    current_barrier: 0,
+                    health_damage_cap_basis_points: None,
+                },
+                consumables: RedTonicSimulation::new(
+                    definitions.red_tonic,
+                    PlayerVitals::new(definitions.maximum_health, definitions.maximum_health)
+                        .expect("vitals"),
+                    TonicBelt::first_playable(),
+                )
+                .expect("tonic"),
+                combat: definitions.combat,
+            },
+            EntityIdAllocator::starting_at(NonZeroU64::new(20_000).expect("projectile allocator")),
+        )
     }
 
     #[test]
@@ -328,5 +476,32 @@ mod tests {
                 .activation_ordinal(),
             0
         );
+    }
+
+    #[test]
+    fn only_b1_and_b5_instantiate_through_the_immutable_fp_runtime() {
+        let content = load_core_development_encounter_rooms(&content_root()).expect("content");
+        let plans = compile_core_fixed_room_encounters(&content, 1).expect("plans");
+        for index in [0, 3] {
+            let (player, allocator) = player_fixture();
+            let wave =
+                instantiate_immutable_fixed_room_wave(&plans[index], player, allocator, Tick(100))
+                    .expect("immutable room wave");
+            assert_eq!(wave.starts_at(), Tick(100));
+            assert_eq!(
+                wave.phase(),
+                NormalWavePhase::DormantTelegraph {
+                    activates_at: Tick(127)
+                }
+            );
+            assert_eq!(wave.snapshots().len(), plans[index].assignments.len());
+        }
+        for index in [1, 2] {
+            let (player, allocator) = player_fixture();
+            assert!(matches!(
+                instantiate_immutable_fixed_room_wave(&plans[index], player, allocator, Tick(100),),
+                Err(CoreFixedRoomEncounterError::AuthoredRuntimeRequired { .. })
+            ));
+        }
     }
 }
