@@ -837,7 +837,7 @@ impl CoreB2FixedRoomSimulation {
     }
 }
 
-fn combat_input(
+pub(crate) fn combat_input(
     tick: Tick,
     input: &CoreImmutableFixedRoomInput,
 ) -> Result<CombatStep, CoreFixedRoomEncounterError> {
@@ -851,7 +851,7 @@ fn combat_input(
     }
 }
 
-fn authored_definition(
+pub(crate) fn authored_definition(
     content: &CoreDevelopmentEncounterRooms,
     content_id: &str,
 ) -> Result<CoreEnemyDefinition, CoreFixedRoomEncounterError> {
@@ -911,7 +911,7 @@ fn split_mixed_combat_step(
     (immutable, authored)
 }
 
-fn player_target_candidates(
+pub(crate) fn player_target_candidates(
     player: &EnemyLabPlayer,
 ) -> Result<Vec<CoreTargetCandidate>, CoreFixedRoomEncounterError> {
     let position = CoreWorldPosition::new(
@@ -927,7 +927,7 @@ fn player_target_candidates(
 }
 
 #[allow(clippy::cast_precision_loss)]
-fn core_position_vector(position: CoreWorldPosition) -> sim_core::SimulationVector {
+pub(crate) fn core_position_vector(position: CoreWorldPosition) -> sim_core::SimulationVector {
     sim_core::SimulationVector::new(
         position.x_milli_tiles as f32 / 1_000.0,
         position.y_milli_tiles as f32 / 1_000.0,
@@ -1180,6 +1180,8 @@ pub enum CoreFixedRoomEncounterError {
     MissingWave,
     #[error("fixed-room lifecycle requested B2 completion without its mixed combat owner")]
     MissingB2Combat,
+    #[error("fixed-room lifecycle requested B3 completion without its Knight owner")]
+    MissingB3Combat,
     #[error("friendly damage is forbidden during the B2 group warning")]
     DamageDuringSpawnWarning,
     #[error("B2 player position is non-finite or outside fixed-point range")]
@@ -1202,6 +1204,10 @@ pub enum CoreFixedRoomEncounterError {
     Attack(#[from] CoreNormalAttackError),
     #[error(transparent)]
     Locomotion(#[from] CoreNormalLocomotionError),
+    #[error(transparent)]
+    Knight(#[from] sim_core::CoreKnightError),
+    #[error(transparent)]
+    Hostile(#[from] sim_core::HostileError),
     #[error(transparent)]
     Target(#[from] sim_core::CoreTargetSelectionError),
     #[error(transparent)]

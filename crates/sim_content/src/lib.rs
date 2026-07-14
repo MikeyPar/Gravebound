@@ -1,5 +1,6 @@
 //! Immutable, strict content loading and semantic validation for simulation consumers.
 
+mod core_b3_fixed_room;
 mod core_dev;
 mod core_dev_copy;
 mod core_dev_encounter_room;
@@ -11,6 +12,7 @@ mod core_microrealm_pack;
 mod production_item;
 mod prototype;
 
+pub use core_b3_fixed_room::*;
 pub use core_dev::*;
 pub use core_dev_copy::*;
 pub use core_dev_encounter_room::*;
