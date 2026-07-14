@@ -472,4 +472,37 @@ mod tests {
         let frame = encode_frame(&rejection).unwrap();
         assert_eq!(decode_frame(&frame), Ok(rejection));
     }
+
+    #[test]
+    fn safe_inventory_framing_rejects_malformed_and_oversized_bytes() {
+        let payload = crate::SafeInventoryTransferPayloadV1 {
+            kind: crate::SafeInventoryTransferKindV1::CharacterSafeToVault,
+            source_slot_index: 0,
+            expected_account_version: 1,
+            expected_inventory_version: 2,
+        };
+        let transfer = crate::SafeInventoryTransferFrameV1 {
+            mutation_id: [12; 16],
+            character_id: [13; 16],
+            issued_at_unix_millis: 1,
+            payload_hash: payload.canonical_hash(),
+            payload,
+        };
+        let encoded = encode_frame(&WireMessage::SafeInventoryTransferFrame(transfer)).unwrap();
+        assert_eq!(
+            decode_frame(&encoded[..encoded.len() - 1]),
+            Err(WireCodecError::InvalidFrameLength)
+        );
+
+        let mut bad_hash = transfer;
+        bad_hash.payload_hash[0] ^= 1;
+        assert_eq!(
+            encode_frame(&WireMessage::SafeInventoryTransferFrame(bad_hash)),
+            Err(WireCodecError::InvalidMessage)
+        );
+        assert_eq!(
+            decode_frame(&vec![0; RELIABLE_FRAME_LIMIT + 1]),
+            Err(WireCodecError::InvalidFrameLength)
+        );
+    }
 }
