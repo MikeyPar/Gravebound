@@ -28,6 +28,7 @@ mod oath;
 mod progression;
 mod progression_restore;
 mod reward;
+mod safe_inventory;
 mod world_flow;
 
 pub use ash_wallet::{
@@ -96,6 +97,11 @@ pub use reward::{
     RewardPlanningState, RewardTransaction, StoredPendingItem, StoredRewardCommit,
     StoredRewardEntry, StoredRewardItem, StoredRewardOutcome, StoredRewardRequest,
 };
+pub use safe_inventory::{
+    StoredSafeInventoryCommand, StoredSafeInventoryCommandKind, StoredSafeInventoryItem,
+    StoredSafeInventoryLocation, StoredSafeInventoryPlacement, StoredSafeInventoryResult,
+    StoredSafeInventorySnapshot,
+};
 pub use world_flow::{
     StoredDangerEntryRootV1, StoredSafeArrival, StoredWorldFlowCharacter,
     StoredWorldFlowRevisionV1, StoredWorldLocation, StoredWorldTransferReceipt, WorldFlowBegin,
@@ -106,7 +112,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 29;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 30;
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -258,6 +264,22 @@ pub enum PersistenceError {
     FieldEquipmentVersionMismatch,
     #[error("field equipment source or replacement destination no longer matches")]
     FieldEquipmentBindingMismatch,
+    #[error("stored safe-inventory state violates the approved durable contract")]
+    CorruptStoredSafeInventory,
+    #[error("safe-inventory account does not exist")]
+    SafeInventoryAccountNotFound,
+    #[error("safe-inventory transfer requires the selected living character in Lantern Halls")]
+    SafeInventoryHallBindingMismatch,
+    #[error("safe-inventory transfer is blocked by an unresolved inventory mutation")]
+    SafeInventoryUnresolvedMutation,
+    #[error("safe-inventory mutation ID was reused with different canonical material")]
+    SafeInventoryIdempotencyConflict,
+    #[error("safe-inventory command expected different aggregate or item versions")]
+    SafeInventoryVersionMismatch,
+    #[error("safe-inventory source or normalized placements no longer match")]
+    SafeInventoryBindingMismatch,
+    #[error("safe-inventory destination lacks capacity for the complete transfer")]
+    SafeInventoryStorageFull,
     #[error("stored Ash wallet or currency ledger violates the approved contract")]
     CorruptStoredAsh,
     #[error("Ash wallet account does not exist")]
@@ -1156,6 +1178,25 @@ mod tests {
             assert!(
                 !lowercase.contains(forbidden),
                 "schema 29 leaked {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn safe_inventory_result_code_is_forward_only_and_acceptance_exact() {
+        let migration = include_str!("../../../migrations/0030_safe_inventory_result_code.sql");
+        for required in [
+            "ADD COLUMN result_code SMALLINT NOT NULL DEFAULT 1",
+            "result_code = 1",
+            "ALTER COLUMN result_code DROP DEFAULT",
+        ] {
+            assert!(migration.contains(required), "schema 30 omitted {required}");
+        }
+        let lowercase = migration.to_ascii_lowercase();
+        for forbidden in ["drop table", "truncate", "delete from", "update ", "json"] {
+            assert!(
+                !lowercase.contains(forbidden),
+                "schema 30 leaked {forbidden}"
             );
         }
     }
