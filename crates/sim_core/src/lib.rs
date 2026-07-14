@@ -18,6 +18,7 @@ mod core_abbot;
 mod core_boss_lock;
 mod core_caldus;
 mod core_caldus_body;
+mod core_caldus_health;
 mod core_counterplay;
 mod core_enemy;
 mod core_enemy_attack;
@@ -37,6 +38,7 @@ mod enemy_health;
 mod enemy_lab;
 mod entity;
 mod fixed_room;
+mod friendly_intent;
 mod hostile;
 mod inventory;
 mod item_lifecycle;
@@ -142,6 +144,11 @@ pub use core_caldus::{
 };
 pub use core_caldus_body::{
     CoreCaldusBodyError, CoreCaldusBodyEvent, CoreCaldusBodySimulation, CoreCaldusBodyTarget,
+};
+pub use core_caldus_health::{
+    CALDUS_ARMOR, CALDUS_BREAK_DAMAGE_BASIS_POINTS, CALDUS_HURTBOX_RADIUS_TILES,
+    CoreCaldusDamageEvent, CoreCaldusDefeat, CoreCaldusFriendlyInput, CoreCaldusHealthError,
+    CoreCaldusHealthSimulation, CoreCaldusHealthStep,
 };
 pub use core_counterplay::{
     CORE_COM006_CLOSE_SPAWN_DISTANCE_MILLI_TILES,

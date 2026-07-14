@@ -3,18 +3,16 @@
 //! The exact scheduler owns phase timing. This composite owns player handoff, real health,
 //! hostile projectiles and lanes, same-tick cleanup, defeat, and globally comparable ticks.
 
-use std::collections::BTreeSet;
-
 use thiserror::Error;
 
 use crate::{
     AimVector, ArenaGeometry, AttackCastId, BellProctorDefinition, BellProctorSimulation,
-    BellProctorStateKind, BossEvent, BossInput, CollisionTarget, CombatStep, DamageError,
-    DamageEvent, DamageType, DirectHitParameters, DirectHitRequest, EnemyHurtbox, EnemyLabPlayer,
-    EntityId, FriendlyProjectileSource, HostileDamagePolicy, HostileError, HostileEvent,
-    HostileProjectile, HostileProjectileSimulation, HostileStep, HurtboxError,
-    LaneAttackDefinition, LaneGeometry, RawDamageIntentSource, SimulationVector, Tick,
-    resolve_direct_hit, resolve_lane_contact_with_policy,
+    BellProctorStateKind, BossEvent, BossInput, CombatStep, DamageError, DamageEvent, DamageType,
+    DirectHitParameters, DirectHitRequest, EnemyHurtbox, EnemyLabPlayer, EntityId,
+    HostileDamagePolicy, HostileError, HostileEvent, HostileProjectile,
+    HostileProjectileSimulation, HostileStep, HurtboxError, LaneAttackDefinition, LaneGeometry,
+    RawDamageIntentSource, SimulationVector, Tick, resolve_direct_hit,
+    resolve_lane_contact_with_policy,
 };
 
 pub const BELL_PROCTOR_ENTITY_ID_OFFSET: u64 = 40_001;
@@ -441,57 +439,14 @@ fn validate_boss_intents(
     combat: &CombatStep,
     boss: EntityId,
 ) -> Result<(), BellProctorEncounterError> {
-    let mut previous = None;
-    let mut seen = BTreeSet::new();
-    for intent in &combat.raw_damage_intents {
-        if intent.tick != combat.tick || intent.target != boss {
-            return Err(BellProctorEncounterError::InvalidFriendlyIntent);
+    crate::friendly_intent::validate_friendly_intents(combat, boss).map_err(|error| match error {
+        crate::friendly_intent::FriendlyIntentError::InvalidProvenance => {
+            BellProctorEncounterError::InvalidFriendlyIntent
         }
-        let key = (intent.projectile_id, intent.contact_ordinal);
-        if previous.is_some_and(|prior| key < prior) || !seen.insert(key) {
-            return Err(BellProctorEncounterError::InvalidFriendlyIntentOrder);
+        crate::friendly_intent::FriendlyIntentError::UnstableOrder => {
+            BellProctorEncounterError::InvalidFriendlyIntentOrder
         }
-        previous = Some(key);
-        if intent.source == RawDamageIntentSource::NailTrap {
-            let count = combat
-                .nail_traps
-                .triggers
-                .iter()
-                .filter(|trigger| {
-                    trigger.tick == intent.tick
-                        && trigger.trap_id == intent.projectile_id
-                        && trigger.target_id == boss
-                        && trigger.snapshot_weapon_raw_damage == intent.base_raw_damage
-                        && trigger.raw_damage == intent.resolved_raw_damage
-                })
-                .count();
-            if count != 1 {
-                return Err(BellProctorEncounterError::InvalidFriendlyIntent);
-            }
-            continue;
-        }
-        let source = match intent.source {
-            RawDamageIntentSource::Primary => FriendlyProjectileSource::Primary,
-            RawDamageIntentSource::BellDebtRepeat => FriendlyProjectileSource::BellDebtRepeat,
-            RawDamageIntentSource::GraveMark => FriendlyProjectileSource::GraveMark,
-            RawDamageIntentSource::NailTrap => unreachable!("handled above"),
-        };
-        let count = combat
-            .collisions
-            .iter()
-            .filter(|collision| {
-                collision.tick == intent.tick
-                    && collision.projectile_id == intent.projectile_id
-                    && collision.source == source
-                    && collision.contact_ordinal == intent.contact_ordinal
-                    && collision.target == CollisionTarget::Enemy(boss)
-            })
-            .count();
-        if count != 1 {
-            return Err(BellProctorEncounterError::InvalidFriendlyIntent);
-        }
-    }
-    Ok(())
+    })
 }
 
 fn run_qualified_boss_entity_id(run_ordinal: u32) -> Result<EntityId, BellProctorEncounterError> {
@@ -677,11 +632,12 @@ mod tests {
 
     use super::*;
     use crate::{
-        ArenaAnchor, EntityIdAllocator, GraveMarkDefinition, GraveMarkDefinitionParameters,
-        HostileTargetState, NormalWaveHandoff, PlayerCombatState, PlayerVitals,
-        ProjectileCollision, RedTonicDefinition, RedTonicSimulation, SlipstepDefinition,
-        SlipstepDefinitionParameters, StillnessDefinition, StillnessDefinitionParameters,
-        TilePoint, TileRectangle, TonicBelt, WeaponDefinition, WeaponDefinitionParameters,
+        ArenaAnchor, CollisionTarget, EntityIdAllocator, FriendlyProjectileSource,
+        GraveMarkDefinition, GraveMarkDefinitionParameters, HostileTargetState, NormalWaveHandoff,
+        PlayerCombatState, PlayerVitals, ProjectileCollision, RedTonicDefinition,
+        RedTonicSimulation, SlipstepDefinition, SlipstepDefinitionParameters, StillnessDefinition,
+        StillnessDefinitionParameters, TilePoint, TileRectangle, TonicBelt, WeaponDefinition,
+        WeaponDefinitionParameters,
     };
 
     fn id(value: u64) -> EntityId {
