@@ -20,6 +20,7 @@ mod caldus_victory;
 mod combat_loadout;
 mod danger_checkpoint;
 mod extraction;
+mod field_equipment;
 mod ground_expiry;
 mod identity;
 mod items;
@@ -66,6 +67,7 @@ pub use extraction::{
     CaldusExtractionTransfer, StoredExtractionAuthority, StoredExtractionResult,
     StoredExtractionState, stage_caldus_extraction_transfer,
 };
+pub use field_equipment::{StoredFieldEquipmentItem, StoredFieldEquipmentSnapshot};
 pub use ground_expiry::{MAX_GROUND_EXPIRY_BATCH, StoredGroundExpiry, StoredGroundExpiryCandidate};
 pub use identity::{StoredCharacter, StoredIdentityAggregate, StoredMutation};
 pub use items::{
