@@ -27,6 +27,7 @@ mod restore_point;
 mod reward_rng;
 mod reward_service;
 mod runtime;
+mod safe_inventory;
 mod session;
 mod starter_items;
 mod world_flow_coordinator;
@@ -116,6 +117,10 @@ pub use runtime::{
     CORE_IDENTITY_CONTENT_TARGET, CoreIdentityServerConfig, CoreIdentityServerReport,
     LOCAL_BUILD_ID, LOCAL_REGION_ID, LOCAL_SERVER_NAME, LocalServerConfig, LocalServerReport,
     LocalServerRuntimeError,
+};
+pub use safe_inventory::{
+    AuthoritativeSafeInventoryTransfer, PostgresSafeInventoryService, SafeInventoryServiceError,
+    SafeInventoryTransferCommand, SafeInventoryTransferKind,
 };
 pub use session::{
     AuthoritativeSession, IngressAnomaly, IngressAnomalyKind, IngressDiagnostics, InputDisposition,

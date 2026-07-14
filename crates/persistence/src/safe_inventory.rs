@@ -131,6 +131,30 @@ pub struct StoredSafeInventoryResult {
 }
 
 impl PostgresPersistence {
+    pub async fn load_safe_inventory_replay(
+        &self,
+        account_id: [u8; 16],
+        character_id: [u8; 16],
+        mutation_id: [u8; 16],
+        canonical_request_hash: [u8; 32],
+    ) -> Result<Option<StoredSafeInventoryResult>, PersistenceError> {
+        if mutation_id == [0; 16] || canonical_request_hash == [0; 32] {
+            return Err(PersistenceError::CorruptStoredSafeInventory);
+        }
+        let mut transaction = self.begin_transaction().await?;
+        lock_account(transaction.connection(), account_id).await?;
+        let replay = load_replay(
+            transaction.connection(),
+            account_id,
+            character_id,
+            mutation_id,
+            canonical_request_hash,
+        )
+        .await?;
+        transaction.rollback().await?;
+        Ok(replay)
+    }
+
     pub async fn load_safe_inventory_snapshot(
         &self,
         account_id: [u8; 16],
