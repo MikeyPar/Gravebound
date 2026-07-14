@@ -122,7 +122,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 31;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 32;
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -653,6 +653,42 @@ mod tests {
             assert!(
                 !migration.contains(prohibited),
                 "death foundation migration leaked {prohibited}"
+            );
+        }
+    }
+
+    #[test]
+    fn strict_death_integrity_closes_relational_and_null_authority_gaps() {
+        let migration = include_str!("../../../migrations/0032_strict_death_integrity.sql");
+        for required in [
+            "0032 requires dormant pre-route death and Echo tables",
+            "character_run_material_stacks",
+            "death_destruction_item_owned",
+            "death_destruction_ledger_owned",
+            "death_destruction_material_owned",
+            "pre_location_kind IS NOT NULL",
+            "pre_item_version IS NOT NULL",
+            "death_request_identity",
+            "death_result_request_owned",
+            "death_summary_damage_parent",
+            "echo_transition_creation_death_owned",
+            "death_outbox_echo_owned",
+            "restore_inventory_item_security_transition",
+        ] {
+            assert!(migration.contains(required), "migration omitted {required}");
+        }
+        for prohibited in [
+            "final_damage <= raw_damage",
+            "DROP TABLE",
+            "TRUNCATE",
+            "JSON",
+            "JSONB",
+            "FLOAT",
+            "DOUBLE PRECISION",
+        ] {
+            assert!(
+                !migration.contains(prohibited),
+                "strict death integrity migration leaked {prohibited}"
             );
         }
     }

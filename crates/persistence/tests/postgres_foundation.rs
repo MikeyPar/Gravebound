@@ -116,6 +116,7 @@ async fn migrations_are_idempotent_exact_and_ready() {
             "character_oath_bargain_state",
             "character_oath_mutation_results",
             "character_progression",
+            "character_run_material_stacks",
             "character_world_locations",
             "character_world_transfer_results",
             "character_xp_award_results",

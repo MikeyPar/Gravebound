@@ -126,7 +126,7 @@ Concept images establish mood, hierarchy, and visual language. They are not fina
 
 ## Current Next Step
 
-[`GB-M03-04G`](docs/milestones/GB-M03-04G-audit.md), parent [`GB-M03-04`](docs/milestones/GB-M03-04-audit.md), and persistence slice [`GB-M03-02C`](docs/milestones/GB-M03-02C-audit.md) are complete. The active [`GB-M03-06A`](docs/tasks/GB-M03-06A.md)/[`GB-M03-02D`](docs/tasks/GB-M03-02D.md) slice now has additive schema `0031`: terminal character/item constraints, normalized death/summary/memorial/trace/Echo records, exact replay/audit/outbox roots, and the danger-entry Equipped/Belt restore component. Require hosted PostgreSQL proof next, then add strict DTOs and the transactional repository. Keep player-visible death, successor, extraction/Recall, normal Character Select `Play`, Realm Gate/Vault/Memorial station admission, Overflow/ResolutionHold, Core promotion, and the normal route fail closed.
+[`GB-M03-04G`](docs/milestones/GB-M03-04G-audit.md), parent [`GB-M03-04`](docs/milestones/GB-M03-04-audit.md), and persistence slice [`GB-M03-02C`](docs/milestones/GB-M03-02C-audit.md) are complete. The active [`GB-M03-06A`](docs/tasks/GB-M03-06A.md)/[`GB-M03-02D`](docs/tasks/GB-M03-02D.md) slice now has schemas `0031`/`0032`: normalized death/summary/memorial/trace/Echo/material records, strict replay/ledger/ownership/history bindings, and the danger-entry Equipped/Belt restore component. Require hosted PostgreSQL proof next, then make inventory/life restore children mandatory and add strict DTOs plus the transactional repository. Keep all player-visible death, successor, extraction/Recall, station admission, Core promotion, and normal-route behavior fail closed.
 
 ## Resolved prior handoff
 
