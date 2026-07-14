@@ -9,7 +9,11 @@ use std::collections::BTreeSet;
 
 use thiserror::Error;
 
-use crate::{CoreBossParticipant, CoreBossParticipantLock};
+use crate::{
+    CoreBossParticipant, CoreBossParticipantLock, EncounterXpEvidence, RewardLifeState,
+    RewardRecallState, RewardTrustState, SOC_INACTIVITY_LIMIT_TICKS, SOC_SHORT_ENCOUNTER_TICKS,
+    evaluate_encounter_xp_eligibility,
+};
 
 pub const CALDUS_BOSS_XP: u32 = 450;
 pub const CALDUS_FIRST_CLEAR_XP: u32 = 225;
@@ -173,27 +177,39 @@ pub fn evaluate_caldus_eligibility(
     evidence
         .iter()
         .map(|entry| {
-            let contribution_centi_units = u128::from(entry.direct_damage)
-                .checked_mul(100)
-                .and_then(|value| {
-                    u128::from(entry.effective_healing_to_others)
-                        .checked_mul(80)
-                        .and_then(|support| value.checked_add(support))
-                })
-                .and_then(|value| {
-                    u128::from(entry.damage_prevented_on_others)
-                        .checked_mul(60)
-                        .and_then(|support| value.checked_add(support))
-                })
-                .and_then(|value| {
-                    u128::from(lock.maximum_health)
-                        .checked_mul(2)
-                        .and_then(|credit| credit.checked_mul(u128::from(entry.objective_credits)))
-                        .and_then(|objective| value.checked_add(objective))
-                })
-                .ok_or(CoreCaldusVictoryError::ArithmeticOverflow)?;
+            let shared = evaluate_encounter_xp_eligibility(EncounterXpEvidence {
+                active_ticks: u64::from(active_duration_ticks),
+                present_ticks: u64::from(entry.presence_ticks),
+                longest_inactivity_ticks: u64::from(entry.longest_inactivity_ticks),
+                encounter_contribution_reference_health: u64::from(lock.maximum_health),
+                direct_damage: entry.direct_damage,
+                effective_healing_to_others: entry.effective_healing_to_others,
+                damage_prevented_on_others: entry.damage_prevented_on_others,
+                qualifying_objective_credits: entry.objective_credits,
+                life_state: match entry.defeat_presence {
+                    CoreCaldusDefeatPresence::AliveAndPresent => RewardLifeState::Living,
+                    CoreCaldusDefeatPresence::NotAliveOrAbsent => RewardLifeState::Dead,
+                },
+                recall_state: match entry.recall_state {
+                    CoreCaldusRecallState::Stayed => RewardRecallState::Eligible,
+                    CoreCaldusRecallState::RecalledBeforeDefeat => {
+                        RewardRecallState::EmergencyRecallCompleted
+                    }
+                },
+                trust_state: if entry.session_state == CoreCaldusSessionState::Valid
+                    && entry.anti_cheat_state == CoreCaldusAntiCheatState::Valid
+                {
+                    RewardTrustState::Valid
+                } else if entry.session_state == CoreCaldusSessionState::Invalid {
+                    RewardTrustState::InvalidSession
+                } else {
+                    RewardTrustState::AntiCheatRejected
+                },
+            })
+            .map_err(|_| CoreCaldusVictoryError::InvalidEligibilityEvidence)?;
+            let contribution_centi_units = shared.contribution_centi_units;
             let mut reasons = Vec::new();
-            if active_duration_ticks >= CALDUS_SHORT_FIGHT_TICKS
+            if u64::from(active_duration_ticks) >= SOC_SHORT_ENCOUNTER_TICKS
                 && u64::from(entry.presence_ticks) * 2 < u64::from(active_duration_ticks)
             {
                 reasons.push(CoreCaldusIneligibilityReason::Presence);
@@ -205,7 +221,7 @@ pub fn evaluate_caldus_eligibility(
             {
                 reasons.push(CoreCaldusIneligibilityReason::Contribution);
             }
-            if entry.longest_inactivity_ticks > CALDUS_MAX_INACTIVITY_TICKS {
+            if u64::from(entry.longest_inactivity_ticks) > SOC_INACTIVITY_LIMIT_TICKS {
                 reasons.push(CoreCaldusIneligibilityReason::Inactivity);
             }
             if entry.defeat_presence != CoreCaldusDefeatPresence::AliveAndPresent {
@@ -219,6 +235,9 @@ pub fn evaluate_caldus_eligibility(
             }
             if entry.anti_cheat_state != CoreCaldusAntiCheatState::Valid {
                 reasons.push(CoreCaldusIneligibilityReason::InvalidAntiCheat);
+            }
+            if shared.eligible != reasons.is_empty() {
+                return Err(CoreCaldusVictoryError::EligibilityContractDrift);
             }
             Ok(CoreCaldusEligibilityDecision {
                 participant: entry.participant,
@@ -326,6 +345,10 @@ pub enum CoreCaldusVictoryError {
     PresenceExceedsDuration,
     #[error("Caldus objective contribution is capped at two credits")]
     TooManyObjectiveCredits,
+    #[error("Caldus eligibility evidence was rejected by the shared SOC-010 authority")]
+    InvalidEligibilityEvidence,
+    #[error("Caldus eligibility diagnostics drifted from the shared SOC-010 result")]
+    EligibilityContractDrift,
     #[error("Caldus victory identity field exceeds canonical encoding capacity")]
     FieldTooLong,
     #[error("Caldus victory identity derivation produced the reserved zero value")]
