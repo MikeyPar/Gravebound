@@ -13,8 +13,9 @@ use protocol::{
     ClientHello, ControlEvent, HandshakeResponse, InitialOathSelectionFrame,
     InitialOathSelectionResult, InputFrame, OathViewFrame, OathViewResult, ProgressionQueryFrame,
     ProgressionResult, ProtocolVersion, RELIABLE_FRAME_LIMIT, ReliableEvent, ReliableEventFrame,
-    SIMULATION_HZ, SessionControlFrame, SessionControlResult, SnapshotChunk, WireMessage,
-    WorldFlowFrame, WorldFlowResult, decode_frame, encode_frame,
+    SIMULATION_HZ, SafeInventoryTransferFrameV1, SafeInventoryTransferResultV1,
+    SessionControlFrame, SessionControlResult, SnapshotChunk, WireMessage, WorldFlowFrame,
+    WorldFlowResult, decode_frame, encode_frame,
 };
 use thiserror::Error;
 
@@ -260,6 +261,19 @@ pub async fn perform_bargain_decision(
     let event =
         perform_reliable_gameplay(connection, WireMessage::BargainDecisionFrame(frame)).await?;
     let ReliableEvent::BargainDecisionResult(result) = &event.event else {
+        return Err(BotTransportError::UnexpectedMessage);
+    };
+    Ok((event.clone(), result.clone()))
+}
+
+pub async fn perform_safe_inventory_transfer(
+    connection: &quinn::Connection,
+    frame: SafeInventoryTransferFrameV1,
+) -> Result<(ReliableEventFrame, SafeInventoryTransferResultV1), BotTransportError> {
+    let event =
+        perform_reliable_gameplay(connection, WireMessage::SafeInventoryTransferFrame(frame))
+            .await?;
+    let ReliableEvent::SafeInventoryTransferResult(result) = &event.event else {
         return Err(BotTransportError::UnexpectedMessage);
     };
     Ok((event.clone(), result.clone()))
