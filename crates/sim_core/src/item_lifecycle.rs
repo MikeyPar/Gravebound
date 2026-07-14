@@ -56,6 +56,7 @@ pub struct DurableEquipmentItem {
     pub legal_slot: EquipmentSlot,
     pub item_level: u8,
     pub rarity: EquipmentRarity,
+    pub item_version: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -123,6 +124,8 @@ pub enum ItemLifecycleError {
     EmptyEquipmentTemplateId,
     #[error("field equipment item level is outside 1..=20")]
     InvalidEquipmentItemLevel,
+    #[error("field equipment item version must be positive")]
+    InvalidEquipmentItemVersion,
     #[error("RunBackpack source index is outside 0..=7")]
     RunBackpackSourceOutOfRange,
     #[error("RunBackpack source does not contain equipment")]
@@ -297,6 +300,9 @@ fn validate_equipment_item(item: &DurableEquipmentItem) -> Result<(), ItemLifecy
     if !(1..=20).contains(&item.item_level) {
         return Err(ItemLifecycleError::InvalidEquipmentItemLevel);
     }
+    if item.item_version == 0 {
+        return Err(ItemLifecycleError::InvalidEquipmentItemVersion);
+    }
     Ok(())
 }
 
@@ -369,7 +375,8 @@ fn push_equipment_hash_fields(
         EquipmentRarity::Sainted => 4,
         EquipmentRarity::BlackUnique => 5,
     };
-    push_hash_field(material, &[item.legal_slot as u8, item.item_level, rarity])
+    push_hash_field(material, &[item.legal_slot as u8, item.item_level, rarity])?;
+    push_hash_field(material, &item.item_version.to_le_bytes())
 }
 
 fn push_hash_field(material: &mut Vec<u8>, field: &[u8]) -> Result<(), ItemLifecycleError> {
@@ -540,6 +547,7 @@ mod tests {
             legal_slot,
             item_level: 1,
             rarity: EquipmentRarity::Forged,
+            item_version: 1,
         }
     }
 
