@@ -11,9 +11,11 @@ use thiserror::Error;
 
 use crate::{
     AimDirection, AimDirectionError, AimVector, ArenaGeometry, AttackCastId, BossEvent,
-    CollisionError, CollisionTarget, Counterplay, DamageAppliedEvent, DamageBand, DamageError,
-    DamageEvent, DamageType, DirectHitParameters, DirectHitRequest, EchoMemoryFamily, EnemyEvent,
-    EnemyHurtbox, EnemyLabPlayer, EntityId, EntityIdAllocator, FocusedTransition,
+    CollisionError, CollisionTarget, CoreAcolyteFanPhase, CoreEnemyDefinition,
+    CoreNormalAttackEvent, CoreNormalAttackKind, CorePatternDefinition,
+    CorePatternGeometryDefinition, CoreWorldPosition, Counterplay, DamageAppliedEvent, DamageBand,
+    DamageError, DamageEvent, DamageType, DirectHitParameters, DirectHitRequest, EchoMemoryFamily,
+    EnemyEvent, EnemyHurtbox, EnemyLabPlayer, EntityId, EntityIdAllocator, FocusedTransition,
     HostileDisposition, HurtboxError, LaneAttackDefinition, PilgrimTargetInput, PlayerCombatState,
     ProjectileAttackDefinition, ProjectileCollisionWorld, RedTonicSimulation, SimulationVector,
     SolidColliderId, Tick, resolve_direct_hit,
@@ -23,11 +25,28 @@ pub const PLAYER_HURTBOX_RADIUS_TILES: f32 = 0.25;
 pub const HOSTILE_PROJECTILE_GRACE_TICKS: u64 = 3;
 const TICKS_PER_SECOND_F32: f32 = 30.0;
 const MICRO_UNITS: i64 = 1_000_000;
+const ACOLYTE_FAN_ID: &str = "pattern.enemy.bell_acolyte.alternating_fan";
+const CHOIR_SKULL_ROTOR_ID: &str = "pattern.enemy.choir_skull.rotor";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HostileProjectileSourceKind {
     AimedFan,
     GapRing,
+    RotatingArms,
+}
+
+struct CoreProjectileSpawnSpec {
+    cast_id: AttackCastId,
+    origin: SimulationVector,
+    source_kind: HostileProjectileSourceKind,
+    directions: Vec<AimDirection>,
+    attack: ProjectileAttackDefinition,
+}
+
+struct CorePatternProjectileSpec {
+    source_kind: HostileProjectileSourceKind,
+    directions: Vec<AimDirection>,
+    attack: ProjectileAttackDefinition,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -275,6 +294,51 @@ impl HostileProjectileSimulation {
         let spawned = next.spawn_boss_inner(source_entity_id, origin, event)?;
         *self = next;
         Ok(spawned)
+    }
+
+    /// Materializes only immutable Core normal-enemy release locks. Telegraphs and rotor-start
+    /// markers cannot spawn projectiles, and authored payload drift fails before allocation.
+    pub fn spawn_from_core_normal_event(
+        &mut self,
+        source_entity_id: EntityId,
+        definition: &CoreEnemyDefinition,
+        event: &CoreNormalAttackEvent,
+    ) -> Result<Vec<HostileEvent>, HostileError> {
+        let mut next = self.clone();
+        let spawned = next.spawn_core_normal_inner(source_entity_id, definition, event)?;
+        *self = next;
+        Ok(spawned)
+    }
+
+    fn spawn_core_normal_inner(
+        &mut self,
+        source_entity_id: EntityId,
+        definition: &CoreEnemyDefinition,
+        event: &CoreNormalAttackEvent,
+    ) -> Result<Vec<HostileEvent>, HostileError> {
+        let spec = core_normal_spawn_spec(definition, event, self.tick)?;
+        validate_projectile_attack(&spec.attack, spec.source_kind)?;
+        let mut projectiles = Vec::with_capacity(spec.directions.len());
+        for direction in spec.directions {
+            projectiles.push(self.allocate_projectile(
+                source_entity_id,
+                spec.cast_id,
+                spec.source_kind,
+                spec.origin,
+                direction,
+                &spec.attack,
+            )?);
+        }
+        self.projectiles
+            .extend(projectiles.iter().map(|(_, projectile)| projectile.clone()));
+        self.projectiles.sort_by_key(HostileProjectile::id);
+        Ok(projectiles
+            .into_iter()
+            .map(|(_, projectile)| HostileEvent::Spawned {
+                tick: self.tick,
+                projectile,
+            })
+            .collect())
     }
 
     fn spawn_boss_inner(
@@ -1277,6 +1341,126 @@ pub struct EnemyActorMovement {
     pub blocked_by: Option<SolidColliderId>,
 }
 
+fn core_normal_spawn_spec(
+    definition: &CoreEnemyDefinition,
+    event: &CoreNormalAttackEvent,
+    hostile_tick: Tick,
+) -> Result<CoreProjectileSpawnSpec, HostileError> {
+    let CoreNormalAttackEvent::Released { tick, kind, lock } = event else {
+        return Err(HostileError::EventDoesNotAuthorizeProjectileSpawn);
+    };
+    if *tick != hostile_tick || lock.resolves_at() > *tick {
+        return Err(HostileError::CoreReleaseTickMismatch);
+    }
+    let pattern = definition
+        .parameters()
+        .patterns
+        .get(lock.pattern_index())
+        .ok_or(HostileError::InvalidProjectileAttack)?;
+    if pattern.parameters().id != lock.pattern_id()
+        || pattern.parameters().owner_id != definition.parameters().content_id
+    {
+        return Err(HostileError::InvalidProjectileAttack);
+    }
+    let pattern_spec = match kind {
+        CoreNormalAttackKind::AcolyteFan { phase } => {
+            build_acolyte_projectile_spec(pattern, lock.origin(), lock.target(), *phase)?
+        }
+        CoreNormalAttackKind::SkullRotorVolley { volley_index, .. } => {
+            build_skull_projectile_spec(pattern, *volley_index)?
+        }
+        CoreNormalAttackKind::MireCharge | CoreNormalAttackKind::SkullRotorStart => {
+            return Err(HostileError::EventDoesNotAuthorizeProjectileSpawn);
+        }
+    };
+    Ok(CoreProjectileSpawnSpec {
+        cast_id: lock.cast_id(),
+        origin: core_world_to_vector(lock.origin()),
+        source_kind: pattern_spec.source_kind,
+        directions: pattern_spec.directions,
+        attack: pattern_spec.attack,
+    })
+}
+
+fn build_acolyte_projectile_spec(
+    pattern: &CorePatternDefinition,
+    origin: CoreWorldPosition,
+    target: Option<crate::CoreSelectedTarget>,
+    phase: CoreAcolyteFanPhase,
+) -> Result<CorePatternProjectileSpec, HostileError> {
+    let CorePatternGeometryDefinition::AlternatingFan {
+        first_offsets_milli_degrees,
+        second_offsets_milli_degrees,
+        projectile_speed_milli_tiles_per_second,
+        projectile_radius_milli_tiles,
+        projectile_lifetime_ticks,
+        ..
+    } = pattern.geometry()
+    else {
+        return Err(HostileError::InvalidProjectileAttack);
+    };
+    let target = target.ok_or(HostileError::CoreReleaseMissingTarget)?;
+    let base = aim_from_core_positions(origin, target.position)?;
+    let offsets = match phase {
+        CoreAcolyteFanPhase::First => first_offsets_milli_degrees,
+        CoreAcolyteFanPhase::Second => second_offsets_milli_degrees,
+    };
+    let directions = offsets
+        .iter()
+        .map(|offset| rotate_core_direction(base, *offset))
+        .collect::<Result<Vec<_>, _>>()?;
+    let attack = core_projectile_attack(
+        ACOLYTE_FAN_ID,
+        directions.len(),
+        *projectile_speed_milli_tiles_per_second,
+        *projectile_radius_milli_tiles,
+        *projectile_lifetime_ticks,
+        pattern,
+    )?;
+    Ok(CorePatternProjectileSpec {
+        source_kind: HostileProjectileSourceKind::AimedFan,
+        directions,
+        attack,
+    })
+}
+
+fn build_skull_projectile_spec(
+    pattern: &CorePatternDefinition,
+    volley_index: u8,
+) -> Result<CorePatternProjectileSpec, HostileError> {
+    let CorePatternGeometryDefinition::RotatingArms {
+        arm_count: 2,
+        clockwise_milli_degrees_per_second: 35_000,
+        emission_interval_ticks: 12,
+        active_ticks: 120,
+        projectile_speed_milli_tiles_per_second,
+        projectile_radius_milli_tiles,
+        projectile_lifetime_ticks,
+        ..
+    } = pattern.geometry()
+    else {
+        return Err(HostileError::InvalidProjectileAttack);
+    };
+    if volley_index >= 10 {
+        return Err(HostileError::InvalidProjectileAttack);
+    }
+    let first = rotate_core_direction(AimDirection::east(), i32::from(volley_index) * 14_000)?;
+    let directions = vec![first, AimDirection::new(first.vector() * -1.0)?];
+    let attack = core_projectile_attack(
+        CHOIR_SKULL_ROTOR_ID,
+        directions.len(),
+        *projectile_speed_milli_tiles_per_second,
+        *projectile_radius_milli_tiles,
+        *projectile_lifetime_ticks,
+        pattern,
+    )?;
+    Ok(CorePatternProjectileSpec {
+        source_kind: HostileProjectileSourceKind::RotatingArms,
+        directions,
+        attack,
+    })
+}
+
 fn validate_projectile_attack(
     attack: &ProjectileAttackDefinition,
     source_kind: HostileProjectileSourceKind,
@@ -1305,6 +1489,17 @@ fn validate_projectile_attack(
                         && attack.damage_band == DamageBand::Chip
                         && attack.threat_cost == 5
                         && attack.maximum_active_instances == 10
+                }
+                ACOLYTE_FAN_ID => {
+                    attack.projectile_count == 5
+                        && attack.speed_milli_tiles_per_second == 6_000
+                        && attack.radius_milli_tiles == 110
+                        && attack.lifetime_ticks == 45
+                        && attack.raw_damage == 16
+                        && attack.damage_type == DamageType::Veil
+                        && attack.damage_band == DamageBand::Pressure
+                        && attack.threat_cost == 7
+                        && attack.maximum_active_instances == 5
                 }
                 _ => false,
             }) && attack.memory_family == EchoMemoryFamily::FanProjectile
@@ -1335,6 +1530,21 @@ fn validate_projectile_attack(
                 && attack.damage_type == DamageType::Veil
                 && attack.memory_family == EchoMemoryFamily::RadialProjectile
                 && attack.counterplay == Counterplay::FollowGap
+                && !attack.pierces_players
+        }
+        HostileProjectileSourceKind::RotatingArms => {
+            attack.pattern_id == CHOIR_SKULL_ROTOR_ID
+                && attack.projectile_count == 2
+                && attack.speed_milli_tiles_per_second == 4_500
+                && attack.radius_milli_tiles == 120
+                && attack.lifetime_ticks == 47
+                && attack.raw_damage == 14
+                && attack.damage_type == DamageType::Veil
+                && attack.damage_band == DamageBand::Pressure
+                && attack.threat_cost == 10
+                && attack.maximum_active_instances == 8
+                && attack.memory_family == EchoMemoryFamily::RotatingProjectile
+                && attack.counterplay == Counterplay::MoveWithRotation
                 && !attack.pierces_players
         }
     };
@@ -1378,6 +1588,88 @@ fn aim_from_vector(vector: AimVector) -> Result<AimDirection, HostileError> {
     AimDirection::new(SimulationVector::new(
         signed_component_to_f32(vector.x),
         signed_component_to_f32(vector.y),
+    ))
+    .map_err(HostileError::Aim)
+}
+
+fn aim_from_core_positions(
+    origin: CoreWorldPosition,
+    target: CoreWorldPosition,
+) -> Result<AimDirection, HostileError> {
+    let x = i32::try_from(i64::from(target.x_milli_tiles) - i64::from(origin.x_milli_tiles))
+        .map_err(|_| HostileError::ActorArithmeticOverflow)?;
+    let y = i32::try_from(i64::from(target.y_milli_tiles) - i64::from(origin.y_milli_tiles))
+        .map_err(|_| HostileError::ActorArithmeticOverflow)?;
+    aim_from_vector(AimVector { x, y })
+}
+
+fn core_world_to_vector(position: CoreWorldPosition) -> SimulationVector {
+    SimulationVector::new(
+        signed_milli_to_tiles(position.x_milli_tiles),
+        signed_milli_to_tiles(position.y_milli_tiles),
+    )
+}
+
+fn core_projectile_attack(
+    pattern_id: &'static str,
+    projectile_count: usize,
+    speed_milli_tiles_per_second: u32,
+    radius_milli_tiles: u32,
+    lifetime_ticks: u32,
+    pattern: &CorePatternDefinition,
+) -> Result<ProjectileAttackDefinition, HostileError> {
+    Ok(ProjectileAttackDefinition {
+        pattern_id,
+        projectile_count: u8::try_from(projectile_count)
+            .map_err(|_| HostileError::InvalidProjectileAttack)?,
+        speed_milli_tiles_per_second,
+        radius_milli_tiles,
+        lifetime_ticks,
+        raw_damage: pattern.parameters().raw_damage,
+        damage_type: pattern.parameters().damage_type,
+        damage_band: pattern.parameters().damage_band,
+        threat_cost: u32::from(pattern.parameters().threat_cost),
+        memory_family: pattern.parameters().memory_family,
+        counterplay: pattern.parameters().counterplay,
+        disposition: pattern.parameters().disposition,
+        pierces_players: pattern.parameters().pierces_players,
+        maximum_active_instances: u32::from(pattern.traced_maximum_active_instances()),
+    })
+}
+
+/// Exact lookup for the only authored Core normal-projectile angles. Positive angles are
+/// clockwise in the northwest-origin simulation plane. No platform trigonometry enters replay.
+fn rotate_core_direction(
+    base: AimDirection,
+    milli_degrees: i32,
+) -> Result<AimDirection, HostileError> {
+    let (cosine, sine) = match milli_degrees {
+        -50_000 => (0.642_787_64, -0.766_044_44),
+        -35_000 => (0.819_152_06, -0.573_576_45),
+        -20_000 => (0.939_692_6, -0.342_020_15),
+        -10_000 => (0.984_807_7, -0.173_648_18),
+        -5_000 => (0.996_194_7, -0.087_155_744),
+        0 => (1.0, 0.0),
+        5_000 => (0.996_194_7, 0.087_155_744),
+        10_000 => (0.984_807_7, 0.173_648_18),
+        14_000 => (0.970_295_7, 0.241_921_9),
+        20_000 => (0.939_692_6, 0.342_020_15),
+        28_000 => (0.882_947_56, 0.469_471_57),
+        35_000 => (0.819_152_06, 0.573_576_45),
+        42_000 => (0.743_144_8, 0.669_130_6),
+        50_000 => (0.642_787_64, 0.766_044_44),
+        56_000 => (0.559_192_9, 0.829_037_55),
+        70_000 => (0.342_020_15, 0.939_692_6),
+        84_000 => (0.104_528_464, 0.994_521_9),
+        98_000 => (-0.139_173_1, 0.990_268_05),
+        112_000 => (-0.374_606_58, 0.927_183_87),
+        126_000 => (-0.587_785_24, 0.809_017),
+        _ => return Err(HostileError::UnsupportedCoreProjectileAngle(milli_degrees)),
+    };
+    let vector = base.vector();
+    AimDirection::new(SimulationVector::new(
+        vector.x * cosine - vector.y * sine,
+        vector.x * sine + vector.y * cosine,
     ))
     .map_err(HostileError::Aim)
 }
@@ -1530,6 +1822,10 @@ pub enum HostileError {
     ProjectileIdOverflow,
     #[error("hostile tick overflow")]
     TickOverflow,
+    #[error("Core hostile release tick does not match the projectile owner")]
+    CoreReleaseTickMismatch,
+    #[error("Core hostile release requires an immutable target lock")]
+    CoreReleaseMissingTarget,
     #[error("hostile attack definition is invalid")]
     InvalidProjectileAttack,
     #[error("hostile lane definition differs from CONT-FP-004")]
@@ -1540,6 +1836,8 @@ pub enum HostileError {
     UnsupportedFanOffsets([i16; 3]),
     #[error("unsupported fan offset {0}")]
     UnsupportedFanOffset(i16),
+    #[error("unsupported Core projectile angle {0} milli-degrees")]
+    UnsupportedCoreProjectileAngle(i32),
     #[error("unsupported Bell Proctor fan offsets {0:?}")]
     UnsupportedBossFanOffsets([i16; 5]),
     #[error("Bell Proctor ring indices must be twelve sorted unique values below sixteen")]

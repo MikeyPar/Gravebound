@@ -13,9 +13,15 @@ use crate::{
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoreAcolyteFanPhase {
+    First,
+    Second,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoreNormalAttackKind {
     MireCharge,
-    AcolyteFan,
+    AcolyteFan { phase: CoreAcolyteFanPhase },
     SkullRotorStart,
     SkullRotorVolley { cycle_index: u32, volley_index: u8 },
 }
@@ -259,12 +265,27 @@ impl CoreNormalAttackSimulation {
             CoreEnemyKitEvent::AcolyteFanDue {
                 tick,
                 pattern_index,
-                ..
+                offsets_milli_degrees,
             } => {
                 let lock = self.take_resolved_lock(*tick, *pattern_index)?;
+                let CorePatternGeometryDefinition::AlternatingFan {
+                    first_offsets_milli_degrees,
+                    second_offsets_milli_degrees,
+                    ..
+                } = self.definition.parameters().patterns[*pattern_index].geometry()
+                else {
+                    return Err(CoreNormalAttackError::DefinitionDrift);
+                };
+                let phase = if offsets_milli_degrees == first_offsets_milli_degrees {
+                    CoreAcolyteFanPhase::First
+                } else if offsets_milli_degrees == second_offsets_milli_degrees {
+                    CoreAcolyteFanPhase::Second
+                } else {
+                    return Err(CoreNormalAttackError::DefinitionDrift);
+                };
                 output.push(CoreNormalAttackEvent::Released {
                     tick: *tick,
-                    kind: CoreNormalAttackKind::AcolyteFan,
+                    kind: CoreNormalAttackKind::AcolyteFan { phase },
                     lock,
                 });
             }

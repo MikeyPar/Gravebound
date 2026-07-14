@@ -2050,11 +2050,14 @@ fn hash_file(path: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{collections::BTreeMap, num::NonZeroU64};
+
     use sim_core::{
         CoreEnemyKitEvent, CoreEnemyKitScheduler, CoreNormalAttackEvent, CoreNormalAttackKind,
         CoreNormalAttackSimulation, CorePatternGeometryDefinition, CorePatternWarningDefinition,
         CoreTargetCandidate, CoreWorldPosition, EnemyHealthActor, EnemyHealthKind, EntityId,
-        SimulationVector, Tick,
+        EntityIdAllocator, HostileEvent, HostileProjectile, HostileProjectileSimulation,
+        HostileProjectileSourceKind, SimulationVector, Tick,
     };
 
     struct Fixture {
@@ -2269,8 +2272,20 @@ mod tests {
                 })
                 .collect::<Vec<_>>(),
             [
-                (Tick(12), CoreNormalAttackKind::AcolyteFan, 1),
-                (Tick(63), CoreNormalAttackKind::AcolyteFan, 2),
+                (
+                    Tick(12),
+                    CoreNormalAttackKind::AcolyteFan {
+                        phase: sim_core::CoreAcolyteFanPhase::First,
+                    },
+                    1,
+                ),
+                (
+                    Tick(63),
+                    CoreNormalAttackKind::AcolyteFan {
+                        phase: sim_core::CoreAcolyteFanPhase::Second,
+                    },
+                    2,
+                ),
             ]
         );
 
@@ -2335,6 +2350,152 @@ mod tests {
                 }
             )
         }));
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "both B2 authored projectile grammars share one synchronized hostile-owner trace"
+    )]
+    fn b2_locked_releases_materialize_exact_fans_and_clockwise_rotor_projectiles() {
+        let compiled =
+            load_core_development_encounter_rooms(&content_root()).expect("encounter rooms");
+        let arena = crate::compile_core_fixed_room_encounters(&compiled, 1)
+            .expect("fixed rooms")
+            .remove(1)
+            .arena()
+            .clone();
+        let origin = CoreWorldPosition::new(7_500, 7_500);
+        let target = CoreTargetCandidate {
+            entity_id: EntityId::new(9_000).expect("target ID"),
+            position: CoreWorldPosition::new(13_500, 7_500),
+            living: true,
+            damageable: true,
+        };
+        let source_id = EntityId::new(8_000).expect("source ID");
+
+        let acolyte_definition = authored_definition(&compiled, "enemy.bell_acolyte");
+        let mut acolyte =
+            CoreNormalAttackSimulation::new(acolyte_definition.clone()).expect("Acolyte attacks");
+        let mut acolyte_hostiles = HostileProjectileSimulation::with_allocator(
+            EntityIdAllocator::starting_at(NonZeroU64::new(20_000).expect("allocator")),
+        );
+        let mut acolyte_volleys = Vec::<(Tick, Vec<HostileProjectile>)>::new();
+        for _ in 0..=63 {
+            let step = acolyte
+                .advance(origin, &[target], true)
+                .expect("Acolyte tick");
+            for event in &step.attack_events {
+                if matches!(event, CoreNormalAttackEvent::TelegraphStarted { .. }) {
+                    assert!(
+                        acolyte_hostiles
+                            .spawn_from_core_normal_event(source_id, &acolyte_definition, event)
+                            .is_err()
+                    );
+                }
+                if matches!(
+                    event,
+                    CoreNormalAttackEvent::Released {
+                        kind: CoreNormalAttackKind::AcolyteFan { .. },
+                        ..
+                    }
+                ) {
+                    let projectiles = acolyte_hostiles
+                        .spawn_from_core_normal_event(source_id, &acolyte_definition, event)
+                        .expect("Acolyte release")
+                        .into_iter()
+                        .map(|event| match event {
+                            HostileEvent::Spawned { projectile, .. } => projectile,
+                            _ => unreachable!("spawn returns only spawned projectiles"),
+                        })
+                        .collect();
+                    acolyte_volleys.push((step.tick, projectiles));
+                }
+            }
+            acolyte_hostiles
+                .step_players(&arena, &mut BTreeMap::new())
+                .expect("hostile tick");
+        }
+        assert_eq!(
+            acolyte_volleys
+                .iter()
+                .map(|(tick, volley)| (*tick, volley.len()))
+                .collect::<Vec<_>>(),
+            [(Tick(12), 5), (Tick(63), 5)]
+        );
+        assert_eq!(acolyte_volleys[0].1[0].id().get(), 20_000);
+        for (_, volley) in &acolyte_volleys {
+            assert!(volley.iter().all(|projectile| {
+                projectile.source_kind() == HostileProjectileSourceKind::AimedFan
+                    && projectile.pattern_id() == "pattern.enemy.bell_acolyte.alternating_fan"
+                    && projectile.raw_damage() == 16
+                    && projectile.declared_damage_band() == sim_core::DamageBand::Pressure
+            }));
+        }
+        assert!(acolyte_volleys[0].1[0].direction().vector().y < 0.0);
+        assert!(acolyte_volleys[0].1[4].direction().vector().y > 0.0);
+        assert!(acolyte_volleys[1].1[0].direction().vector().y < 0.0);
+        assert!(acolyte_volleys[1].1[4].direction().vector().y > 0.0);
+
+        let skull_definition = authored_definition(&compiled, "enemy.choir_skull");
+        let mut skull =
+            CoreNormalAttackSimulation::new(skull_definition.clone()).expect("Skull attacks");
+        let mut skull_hostiles = HostileProjectileSimulation::with_allocator(
+            EntityIdAllocator::starting_at(NonZeroU64::new(30_000).expect("allocator")),
+        );
+        let mut rotor_volleys = Vec::<Vec<HostileProjectile>>::new();
+        for _ in 0..=140 {
+            let step = skull.advance(origin, &[target], true).expect("Skull tick");
+            for event in &step.attack_events {
+                if matches!(
+                    event,
+                    CoreNormalAttackEvent::Released {
+                        kind: CoreNormalAttackKind::SkullRotorVolley { .. },
+                        ..
+                    }
+                ) {
+                    rotor_volleys.push(
+                        skull_hostiles
+                            .spawn_from_core_normal_event(source_id, &skull_definition, event)
+                            .expect("rotor release")
+                            .into_iter()
+                            .map(|event| match event {
+                                HostileEvent::Spawned { projectile, .. } => projectile,
+                                _ => unreachable!("spawn returns only spawned projectiles"),
+                            })
+                            .collect(),
+                    );
+                }
+            }
+            skull_hostiles
+                .step_players(&arena, &mut BTreeMap::new())
+                .expect("hostile tick");
+        }
+        assert_eq!(rotor_volleys.len(), 10);
+        assert!(rotor_volleys.iter().all(|volley| volley.len() == 2));
+        assert_eq!(rotor_volleys[0][0].id().get(), 30_000);
+        assert_eq!(
+            rotor_volleys[0][0].direction().vector(),
+            SimulationVector::new(1.0, 0.0)
+        );
+        assert_eq!(
+            rotor_volleys[0][1].direction().vector(),
+            SimulationVector::new(-1.0, 0.0)
+        );
+        for volley in &rotor_volleys {
+            let first = volley[0].direction().vector();
+            let second = volley[1].direction().vector();
+            assert!((first.x + second.x).abs() < 0.000_001);
+            assert!((first.y + second.y).abs() < 0.000_001);
+            assert!(volley.iter().all(|projectile| {
+                projectile.source_kind() == HostileProjectileSourceKind::RotatingArms
+                    && projectile.pattern_id() == "pattern.enemy.choir_skull.rotor"
+                    && projectile.raw_damage() == 14
+                    && projectile.remaining_lifetime_ticks() == 47
+            }));
+        }
+        let final_first_arm = rotor_volleys[9][0].direction().vector();
+        assert!(final_first_arm.x < 0.0 && final_first_arm.y > 0.0);
     }
 
     #[test]

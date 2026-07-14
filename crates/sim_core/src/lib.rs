@@ -132,8 +132,8 @@ pub use core_enemy::{
     CorePatternWarningParameters, CoreRadialGapRelation, CoreTargetSelection, CoreTelegraphLock,
 };
 pub use core_enemy_attack::{
-    CoreNormalAttackError, CoreNormalAttackEvent, CoreNormalAttackKind, CoreNormalAttackLock,
-    CoreNormalAttackSimulation, CoreNormalAttackStep,
+    CoreAcolyteFanPhase, CoreNormalAttackError, CoreNormalAttackEvent, CoreNormalAttackKind,
+    CoreNormalAttackLock, CoreNormalAttackSimulation, CoreNormalAttackStep,
 };
 pub use core_enemy_kit::{
     CoreEnemyKitError, CoreEnemyKitEvent, CoreEnemyKitKind, CoreEnemyKitScheduler,
