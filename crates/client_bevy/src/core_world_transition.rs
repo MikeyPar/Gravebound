@@ -48,6 +48,15 @@ pub enum CoreWorldTransitionFailure {
     InvalidAuthoritativeState,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoreWorldTransitionResolution {
+    None,
+    TransferReady,
+    Reattached,
+    HallCommitted,
+    DeathCommitted,
+}
+
 impl CoreWorldTransitionFailure {
     #[must_use]
     pub const fn localization_key(self) -> &'static str {
@@ -108,6 +117,7 @@ pub struct CoreWorldTransitionModel {
     failure: Option<CoreWorldTransitionFailure>,
     retry: CoreRetryDirective,
     reconnect_attempt: Option<u8>,
+    resolution: CoreWorldTransitionResolution,
 }
 
 impl CoreWorldTransitionModel {
@@ -133,6 +143,7 @@ impl CoreWorldTransitionModel {
             failure: None,
             retry: CoreRetryDirective::Unavailable,
             reconnect_attempt: None,
+            resolution: CoreWorldTransitionResolution::None,
         })
     }
 
@@ -159,6 +170,11 @@ impl CoreWorldTransitionModel {
     #[must_use]
     pub const fn reconnect_attempt(&self) -> Option<u8> {
         self.reconnect_attempt
+    }
+
+    #[must_use]
+    pub const fn resolution(&self) -> CoreWorldTransitionResolution {
+        self.resolution
     }
 
     #[must_use]
@@ -230,6 +246,7 @@ impl CoreWorldTransitionModel {
         self.failure = None;
         self.retry = CoreRetryDirective::Unavailable;
         self.reconnect_attempt = None;
+        self.resolution = CoreWorldTransitionResolution::None;
         self.phase = CoreWorldTransitionPhase::RequestingTransfer;
         Ok(())
     }
@@ -334,15 +351,20 @@ impl CoreWorldTransitionModel {
         if is_hall(&snapshot) {
             self.safe_origin = CoreSafeOrigin::LanternHalls;
         }
-        self.phase = match self
+        let completion = self
             .loading_completion
             .take()
-            .ok_or(CoreWorldTransitionError::InvalidAuthoritativeState)?
-        {
+            .ok_or(CoreWorldTransitionError::InvalidAuthoritativeState)?;
+        self.phase = match completion {
             LoadingCompletion::Ordinary | LoadingCompletion::Reattached => {
                 CoreWorldTransitionPhase::Ready
             }
             LoadingCompletion::ResolvedToHall => CoreWorldTransitionPhase::ResolvedToHall,
+        };
+        self.resolution = match completion {
+            LoadingCompletion::Ordinary => CoreWorldTransitionResolution::TransferReady,
+            LoadingCompletion::Reattached => CoreWorldTransitionResolution::Reattached,
+            LoadingCompletion::ResolvedToHall => CoreWorldTransitionResolution::HallCommitted,
         };
         self.pending_mutation = None;
         self.pending_request_sequence = None;
@@ -364,6 +386,7 @@ impl CoreWorldTransitionModel {
         self.failure = None;
         self.retry = CoreRetryDirective::ReconnectTransport;
         self.reconnect_attempt = None;
+        self.resolution = CoreWorldTransitionResolution::None;
         Ok(())
     }
 
@@ -436,6 +459,7 @@ impl CoreWorldTransitionModel {
                 self.loading_completion = None;
                 self.failure = None;
                 self.retry = CoreRetryDirective::Unavailable;
+                self.resolution = CoreWorldTransitionResolution::DeathCommitted;
                 self.phase = CoreWorldTransitionPhase::ResolvedToCharacterSelect;
                 Ok(())
             }
@@ -500,6 +524,7 @@ impl CoreWorldTransitionModel {
             self.retry = CoreRetryDirective::Unavailable;
             self.safe_origin = CoreSafeOrigin::CharacterSelect;
             self.phase = CoreWorldTransitionPhase::ResolvedToCharacterSelect;
+            self.resolution = CoreWorldTransitionResolution::None;
             return Ok(());
         }
         self.loading_snapshot = Some(snapshot);
@@ -541,6 +566,11 @@ impl CoreWorldTransitionModel {
                 self.pending_mutation = None;
                 self.pending_request_sequence = None;
                 self.retry = CoreRetryDirective::Unavailable;
+                self.resolution = if code == WorldTransferResultCode::CharacterDead {
+                    CoreWorldTransitionResolution::DeathCommitted
+                } else {
+                    CoreWorldTransitionResolution::None
+                };
                 self.phase = CoreWorldTransitionPhase::ResolvedToCharacterSelect;
             }
             _ if transfer_is_fatal(code) => {

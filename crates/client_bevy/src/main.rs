@@ -27,6 +27,33 @@ enum CoreCaldusEvidenceStateArg {
     HallArrival,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CoreTransitionEvidenceStateArg {
+    HallLoading,
+    DungeonLoading,
+    RecoverableError,
+    FatalError,
+    LinkLost,
+    Reconnecting,
+    SameStateRecovery,
+    HallResolution,
+}
+
+impl From<CoreTransitionEvidenceStateArg> for client_bevy::CoreTransitionShowcaseState {
+    fn from(value: CoreTransitionEvidenceStateArg) -> Self {
+        match value {
+            CoreTransitionEvidenceStateArg::HallLoading => Self::HallLoading,
+            CoreTransitionEvidenceStateArg::DungeonLoading => Self::DungeonLoading,
+            CoreTransitionEvidenceStateArg::RecoverableError => Self::RecoverableError,
+            CoreTransitionEvidenceStateArg::FatalError => Self::FatalError,
+            CoreTransitionEvidenceStateArg::LinkLost => Self::LinkLost,
+            CoreTransitionEvidenceStateArg::Reconnecting => Self::Reconnecting,
+            CoreTransitionEvidenceStateArg::SameStateRecovery => Self::SameStateRecovery,
+            CoreTransitionEvidenceStateArg::HallResolution => Self::HallResolution,
+        }
+    }
+}
+
 #[derive(Debug, Parser)]
 #[command(name = "client_bevy", about = "Gravebound native client")]
 struct Cli {
@@ -90,10 +117,26 @@ enum Command {
         #[arg(long, value_enum, default_value_t = CoreCaldusEvidenceStateArg::PhaseOne)]
         state: CoreCaldusEvidenceStateArg,
     },
+    /// Open the disposable GB-M03-03F loading, error, and reconnect evidence surface.
+    CoreTransitionShowcase {
+        #[arg(long, default_value = "content")]
+        content_root: PathBuf,
+        #[arg(long)]
+        reduced_effects: bool,
+        #[arg(long, value_enum, default_value_t = CoreTransitionEvidenceStateArg::HallLoading)]
+        state: CoreTransitionEvidenceStateArg,
+    },
 }
 
 fn main() {
-    let result = match Cli::parse().command.unwrap_or_else(default_command) {
+    if let Err(error) = run() {
+        eprintln!("Gravebound client failed to start: {error:#}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> anyhow::Result<()> {
+    match Cli::parse().command.unwrap_or_else(default_command) {
         Command::LocalLab => client_bevy::run_local_lab(),
         Command::Network {
             server,
@@ -182,11 +225,24 @@ fn main() {
                 }
             },
         }),
-    };
-    if let Err(error) = result {
-        eprintln!("Gravebound client failed to start: {error:#}");
-        std::process::exit(1);
+        Command::CoreTransitionShowcase {
+            content_root,
+            reduced_effects,
+            state,
+        } => run_transition_showcase(content_root, reduced_effects, state),
     }
+}
+
+fn run_transition_showcase(
+    content_root: PathBuf,
+    reduced_effects: bool,
+    state: CoreTransitionEvidenceStateArg,
+) -> anyhow::Result<()> {
+    client_bevy::run_core_transition_showcase(&client_bevy::CoreTransitionShowcaseConfig {
+        content_root,
+        reduced_effects,
+        state: state.into(),
+    })
 }
 
 fn default_command() -> Command {

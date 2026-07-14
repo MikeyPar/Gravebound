@@ -9,6 +9,7 @@ mod consumable;
 mod core_caldus_showcase;
 mod core_encounter_showcase;
 mod core_identity;
+mod core_transition_showcase;
 mod core_world_showcase;
 mod core_world_transition;
 mod death;
@@ -64,6 +65,9 @@ pub use core_encounter_showcase::{CoreEncounterShowcaseConfig, run_core_encounte
 pub use core_identity::{
     CoreIdentityConfig, CoreIdentityModel, CoreIdentityPhase, run_core_identity,
 };
+pub use core_transition_showcase::{
+    CoreTransitionShowcaseConfig, CoreTransitionShowcaseState, run_core_transition_showcase,
+};
 pub use core_world_showcase::{
     CoreWorldShowcaseConfig, CoreWorldShowcaseEvidenceState, CoreWorldShowcaseScene,
     run_core_world_showcase,
@@ -71,6 +75,7 @@ pub use core_world_showcase::{
 pub use core_world_transition::{
     CoreRetryDirective, CoreSafeOrigin, CoreSceneReadiness, CoreWorldTransitionError,
     CoreWorldTransitionFailure, CoreWorldTransitionModel, CoreWorldTransitionPhase,
+    CoreWorldTransitionResolution,
 };
 pub use network_play::{NetworkPlayConfig, run_network_playtest};
 pub use network_prediction::{
