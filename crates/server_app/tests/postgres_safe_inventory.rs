@@ -16,12 +16,16 @@ use rustls::pki_types::PrivatePkcs8KeyDer;
 use server_app::{
     AccountId, AdmissionState, AuthenticatedAccount, AuthenticatedNamespace,
     AuthenticationDecision, CharacterIdGenerator, CoreBargainAuthority, CoreOathSelectionAuthority,
-    CoreSafeInventoryAuthority, HandshakePolicy, IdentityClock, IdentityService,
-    NoopIdentityEventSink, PostgresAccountRepository, PostgresProgressionQueryRepository,
-    PostgresSafeInventoryService, PostgresWorldFlowLocationRepository, ProgressionQueryService,
-    SafeInventoryServiceError, WorldFlowGateService, initialize_postgres_starter,
-    serve_core_reliable, serve_handshake,
+    CoreSafeInventoryAuthority, FieldEquipmentConfirmCommand, FieldEquipmentPreviewSource,
+    HandshakePolicy, IdentityClock, IdentityService, NoopIdentityEventSink,
+    PostgresAccountRepository, PostgresFieldEquipmentService, PostgresProgressionAwardService,
+    PostgresProgressionQueryRepository, PostgresRewardService, PostgresSafeInventoryService,
+    PostgresWorldFlowLocationRepository, ProgressionAwardCode, ProgressionAwardCommand,
+    ProgressionAwardEvidence, ProgressionAwardPayload, ProgressionQueryService, RewardGrantContext,
+    RewardGrantTransaction, RewardPlacement, SafeInventoryServiceError, SecretRewardEpoch,
+    WorldFlowGateService, initialize_postgres_starter, serve_core_reliable, serve_handshake,
 };
+use sim_core::{EncounterXpEvidence, RewardLifeState, RewardRecallState, RewardTrustState};
 
 // The mandatory PostgreSQL job shares one database across integration binaries. Keep this
 // fixture's identities disjoint so cleanup never depends on another test's foreign-key graph.
@@ -117,6 +121,16 @@ async fn seed_fixture(persistence: &PostgresPersistence) {
     .await
     .unwrap();
     sqlx::query(
+        "INSERT INTO character_oath_bargain_state (namespace_id,account_id,character_id, \
+         earned_bargain_slots,oath_bargain_version) VALUES ($1,$2,$3,0,1)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(CHARACTER_ID.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query(
         "INSERT INTO character_world_locations (namespace_id,account_id,character_id, \
          character_version,location_kind,location_content_id,safe_arrival_kind) \
          VALUES ($1,$2,$3,1,1,'hub.lantern_halls_01',0)",
@@ -186,11 +200,15 @@ async fn seed_final_vault_slot_race(persistence: &PostgresPersistence) {
 }
 
 fn transfer_frame() -> SafeInventoryTransferFrameV1 {
+    transfer_frame_at(2)
+}
+
+fn transfer_frame_at(expected_inventory_version: u64) -> SafeInventoryTransferFrameV1 {
     let payload = SafeInventoryTransferPayloadV1 {
         kind: SafeInventoryTransferKindV1::CharacterSafeToVault,
         source_slot_index: 0,
         expected_account_version: 1,
-        expected_inventory_version: 2,
+        expected_inventory_version,
     };
     SafeInventoryTransferFrameV1 {
         mutation_id: MUTATION_ID,
@@ -201,11 +219,122 @@ fn transfer_frame() -> SafeInventoryTransferFrameV1 {
     }
 }
 
-fn conflicting_transfer_frame() -> SafeInventoryTransferFrameV1 {
-    let mut frame = transfer_frame();
+fn conflicting_transfer_frame_at(expected_inventory_version: u64) -> SafeInventoryTransferFrameV1 {
+    let mut frame = transfer_frame_at(expected_inventory_version);
     frame.payload.source_slot_index = 1;
     frame.payload_hash = frame.payload.canonical_hash();
     frame
+}
+
+fn caldus_progression_command(
+    progression_content: &sim_content::CoreDevelopmentProgression,
+) -> ProgressionAwardCommand {
+    let payload = ProgressionAwardPayload {
+        character_id: CHARACTER_ID,
+        expected_progression_version: 1,
+        source_content_id: "boss.sir_caldus".to_owned(),
+        progression_content_revision: ManifestHash::new(
+            progression_content.hashes().records_blake3.clone(),
+        )
+        .unwrap(),
+        evidence: ProgressionAwardEvidence::Encounter(EncounterXpEvidence {
+            active_ticks: 5_400,
+            present_ticks: 5_400,
+            longest_inactivity_ticks: 0,
+            encounter_contribution_reference_health: 7_200,
+            direct_damage: 100,
+            effective_healing_to_others: 0,
+            damage_prevented_on_others: 0,
+            qualifying_objective_credits: 0,
+            life_state: RewardLifeState::Living,
+            recall_state: RewardRecallState::Eligible,
+            trust_state: RewardTrustState::Valid,
+        }),
+    };
+    ProgressionAwardCommand {
+        reward_event_id: [225; 16],
+        payload_hash: payload.canonical_hash(),
+        payload,
+    }
+}
+
+async fn stage_progression_reward_and_equipment(persistence: &PostgresPersistence) {
+    let progression_content =
+        sim_content::load_core_development_progression(&content_root()).unwrap();
+    let oath_bargain_content =
+        sim_content::load_core_development_oaths_bargains(&content_root()).unwrap();
+    let command = caldus_progression_command(&progression_content);
+    let authenticated = AuthenticatedAccount {
+        account_id: AccountId::new(ACCOUNT_ID).unwrap(),
+        namespace: AuthenticatedNamespace::WipeableTest,
+    };
+    let progression = PostgresProgressionAwardService::new(
+        persistence.clone(),
+        &progression_content,
+        &oath_bargain_content,
+    )
+    .unwrap();
+    let awarded = progression.award(authenticated, &command).await;
+    assert_eq!(awarded.code, ProgressionAwardCode::Accepted);
+    assert_eq!(progression.award(authenticated, &command).await, awarded);
+
+    let rewards = PostgresRewardService::load(
+        persistence.clone(),
+        &content_root(),
+        SecretRewardEpoch::new("m03-04g-lifecycle", [0x5a; 32]).unwrap(),
+    )
+    .unwrap();
+    let context = RewardGrantContext {
+        reward_request_id: [226; 16],
+        account_id: ACCOUNT_ID,
+        character_id: CHARACTER_ID,
+        source_instance_id: [227; 16],
+        reward_table_id: "reward.boss_caldus",
+        current_tick: 9_000,
+    };
+    let RewardGrantTransaction::Fresh { result, .. } = rewards.grant(context).await.unwrap() else {
+        panic!("first lifecycle reward must be fresh")
+    };
+    assert!(matches!(
+        rewards.grant(context).await.unwrap(),
+        RewardGrantTransaction::Replay { result: ref replay, .. } if replay == &result
+    ));
+    let source_slot_index = result
+        .items
+        .iter()
+        .find_map(|item| match (&item.placement, item.item_level) {
+            (RewardPlacement::RunBackpack { slot_index }, Some(_)) => Some(*slot_index),
+            _ => None,
+        })
+        .expect("Caldus lifecycle reward must contain RunBackpack equipment");
+    let equipment =
+        PostgresFieldEquipmentService::load(persistence.clone(), &content_root()).unwrap();
+    let source = FieldEquipmentPreviewSource::RunBackpack {
+        slot_index: source_slot_index,
+    };
+    let preview = equipment
+        .preview(ACCOUNT_ID, CHARACTER_ID, source, 9_001)
+        .await
+        .unwrap();
+    let confirmation = FieldEquipmentConfirmCommand {
+        command_id: [228; 16],
+        source,
+        preview_hash: preview.mutation.preview_hash,
+        now_tick: 9_001,
+    };
+    let committed = equipment
+        .confirm(ACCOUNT_ID, CHARACTER_ID, confirmation)
+        .await
+        .unwrap();
+    assert!(!committed.result.replayed);
+    assert!(
+        equipment
+            .confirm(ACCOUNT_ID, CHARACTER_ID, confirmation)
+            .await
+            .unwrap()
+            .result
+            .replayed
+    );
 }
 
 fn endpoints() -> (quinn::Endpoint, quinn::Endpoint, std::net::SocketAddr) {
@@ -362,10 +491,10 @@ async fn run_quic_transfers(
             progression,
             ProgressionResult::Snapshot {
                 projection: ProgressionProjection {
-                    level: 1,
-                    total_xp: 0,
+                    level: 4,
+                    total_xp: 675,
                     current_health: 120,
-                    progression_version: 1,
+                    progression_version: 2,
                     ..
                 },
                 ..
@@ -393,13 +522,12 @@ async fn run_quic_transfers(
 async fn real_quic_safe_inventory_replays_across_a_new_endpoint() {
     let persistence = disposable_database().await;
     seed_fixture(&persistence).await;
+    stage_progression_reward_and_equipment(&persistence).await;
+    let lifecycle_frame = transfer_frame_at(4);
+    let lifecycle_conflict = conflicting_transfer_frame_at(4);
     let initial = run_quic_transfers(
         &persistence,
-        &[
-            transfer_frame(),
-            transfer_frame(),
-            conflicting_transfer_frame(),
-        ],
+        &[lifecycle_frame, lifecycle_frame, lifecycle_conflict],
     )
     .await;
     assert_eq!(initial[0].code, SafeInventoryResultCodeV1::Accepted);
@@ -420,11 +548,8 @@ async fn real_quic_safe_inventory_replays_across_a_new_endpoint() {
     let before_reconnect_bytes = before_reconnect.canonical_bytes().unwrap();
     let before_reconnect_digest = before_reconnect.digest().unwrap();
 
-    let reconnected = run_quic_transfers(
-        &persistence,
-        &[transfer_frame(), conflicting_transfer_frame()],
-    )
-    .await;
+    let reconnected =
+        run_quic_transfers(&persistence, &[lifecycle_frame, lifecycle_conflict]).await;
     assert_eq!(reconnected[0].code, SafeInventoryResultCodeV1::Accepted);
     assert!(reconnected[0].replayed);
     assert_eq!(
@@ -444,11 +569,7 @@ async fn real_quic_safe_inventory_replays_across_a_new_endpoint() {
     persistence.close().await;
 
     let restarted = disposable_database().await;
-    let replay = run_quic_transfers(
-        &restarted,
-        &[transfer_frame(), conflicting_transfer_frame()],
-    )
-    .await;
+    let replay = run_quic_transfers(&restarted, &[lifecycle_frame, lifecycle_conflict]).await;
     assert_eq!(replay[0].code, SafeInventoryResultCodeV1::Accepted);
     assert!(replay[0].replayed);
     assert_eq!(replay[0].result_hash, initial[0].result_hash);
