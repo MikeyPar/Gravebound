@@ -138,6 +138,7 @@ pub enum SafeInventoryResultCodeV1 {
 pub struct SafeInventoryTransferResultV1 {
     pub mutation_id: [u8; MUTATION_ID_BYTES],
     pub character_id: [u8; CHARACTER_ID_BYTES],
+    pub code: SafeInventoryResultCodeV1,
     pub replayed: bool,
     pub result_hash: [u8; SAFE_INVENTORY_RESULT_HASH_BYTES],
     pub account_version: u64,
@@ -147,20 +148,31 @@ pub struct SafeInventoryTransferResultV1 {
 
 impl SafeInventoryTransferResultV1 {
     pub fn validate(&self) -> Result<(), SafeInventoryValidationError> {
-        if all_zero(&self.mutation_id)
-            || all_zero(&self.character_id)
-            || all_zero(&self.result_hash)
-        {
+        if all_zero(&self.mutation_id) || all_zero(&self.character_id) {
             return Err(SafeInventoryValidationError::ZeroIdentity);
         }
-        if self.account_version == 0 || self.inventory_version == 0 {
-            return Err(SafeInventoryValidationError::ZeroVersion);
-        }
-        if self.placements.is_empty() || self.placements.len() > SAFE_INVENTORY_PLACEMENT_CAPACITY {
-            return Err(SafeInventoryValidationError::PlacementCount);
-        }
-        for placement in &self.placements {
-            placement.validate()?;
+        if self.code == SafeInventoryResultCodeV1::Accepted {
+            if all_zero(&self.result_hash) {
+                return Err(SafeInventoryValidationError::ZeroIdentity);
+            }
+            if self.account_version == 0 || self.inventory_version == 0 {
+                return Err(SafeInventoryValidationError::ZeroVersion);
+            }
+            if self.placements.is_empty()
+                || self.placements.len() > SAFE_INVENTORY_PLACEMENT_CAPACITY
+            {
+                return Err(SafeInventoryValidationError::PlacementCount);
+            }
+            for placement in &self.placements {
+                placement.validate()?;
+            }
+        } else if self.replayed
+            || !all_zero(&self.result_hash)
+            || self.account_version != 0
+            || self.inventory_version != 0
+            || !self.placements.is_empty()
+        {
+            return Err(SafeInventoryValidationError::RejectedResultShape);
         }
         Ok(())
     }
@@ -180,6 +192,8 @@ pub enum SafeInventoryValidationError {
     PayloadHashMismatch,
     #[error("safe-inventory placement count must be in 1..=6")]
     PlacementCount,
+    #[error("rejected safe-inventory results cannot carry authoritative mutation state")]
+    RejectedResultShape,
 }
 
 const fn all_zero<const N: usize>(bytes: &[u8; N]) -> bool {
@@ -253,6 +267,7 @@ mod tests {
         let mut result = SafeInventoryTransferResultV1 {
             mutation_id: [1; 16],
             character_id: [2; 16],
+            code: SafeInventoryResultCodeV1::Accepted,
             replayed: false,
             result_hash: [4; 32],
             account_version: 5,
@@ -271,6 +286,24 @@ mod tests {
         assert_eq!(
             result.validate(),
             Err(SafeInventoryValidationError::DestinationIndex)
+        );
+
+        let rejected = SafeInventoryTransferResultV1 {
+            mutation_id: [1; 16],
+            character_id: [2; 16],
+            code: SafeInventoryResultCodeV1::StorageFull,
+            replayed: false,
+            result_hash: [0; 32],
+            account_version: 0,
+            inventory_version: 0,
+            placements: Vec::new(),
+        };
+        rejected.validate().unwrap();
+        let mut invalid = rejected;
+        invalid.replayed = true;
+        assert_eq!(
+            invalid.validate(),
+            Err(SafeInventoryValidationError::RejectedResultShape)
         );
     }
 }

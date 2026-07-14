@@ -25,6 +25,7 @@ pub fn encode_m02_compatibility_frame(message: &WireMessage) -> Result<Vec<u8>, 
             | MessageKind::InitialOathSelectionFrame
             | MessageKind::BargainViewFrame
             | MessageKind::BargainDecisionFrame
+            | MessageKind::SafeInventoryTransferFrame
     ) {
         return Err(WireCodecError::MessageUnavailableAtVersion);
     }
@@ -126,6 +127,7 @@ const fn message_kind_byte(kind: MessageKind) -> u8 {
         MessageKind::InitialOathSelectionFrame => 14,
         MessageKind::BargainViewFrame => 15,
         MessageKind::BargainDecisionFrame => 16,
+        MessageKind::SafeInventoryTransferFrame => 17,
     }
 }
 
@@ -147,6 +149,7 @@ const fn message_kind_from_byte(value: u8) -> Result<MessageKind, WireCodecError
         14 => Ok(MessageKind::InitialOathSelectionFrame),
         15 => Ok(MessageKind::BargainViewFrame),
         16 => Ok(MessageKind::BargainDecisionFrame),
+        17 => Ok(MessageKind::SafeInventoryTransferFrame),
         other => Err(WireCodecError::UnknownMessageKind(other)),
     }
 }
@@ -208,7 +211,7 @@ mod tests {
         assert_eq!(decode_frame(&frame).unwrap(), input_message());
         assert_eq!(
             blake3::hash(&frame).to_hex().to_string(),
-            "8c72f34ff8d064a9f451b7ba6e261cf6b730845378863a1f63b5e37a65d24b0a"
+            "04b734acd84cf09bf65e76c5773ffea1892682b91600996902099aec8a7d7266"
         );
         let m02 = encode_m02_compatibility_frame(&input_message()).unwrap();
         assert_eq!(
@@ -395,7 +398,7 @@ mod tests {
     }
 
     #[test]
-    fn protocol_1_11_binds_committed_caldus_extraction_identities() {
+    fn protocol_1_12_preserves_committed_caldus_extraction_identities() {
         let payload = crate::WorldTransferPayload {
             content_revision: crate::WorldFlowContentRevisionV1 {
                 records_blake3: ManifestHash::new("4".repeat(64)).unwrap(),
@@ -421,7 +424,52 @@ mod tests {
         });
 
         let frame = encode_frame(&transfer).unwrap();
-        assert_eq!(u16::from_le_bytes([frame[6], frame[7]]), 11);
+        assert_eq!(u16::from_le_bytes([frame[6], frame[7]]), 12);
         assert_eq!(decode_frame(&frame), Ok(transfer));
+    }
+
+    #[test]
+    fn protocol_1_12_appends_bounded_safe_inventory_mutation() {
+        let payload = crate::SafeInventoryTransferPayloadV1 {
+            kind: crate::SafeInventoryTransferKindV1::CharacterSafeToVault,
+            source_slot_index: 7,
+            expected_account_version: 4,
+            expected_inventory_version: 9,
+        };
+        let transfer =
+            WireMessage::SafeInventoryTransferFrame(crate::SafeInventoryTransferFrameV1 {
+                mutation_id: [12; 16],
+                character_id: [13; 16],
+                issued_at_unix_millis: 1,
+                payload_hash: payload.canonical_hash(),
+                payload,
+            });
+        let frame = encode_frame(&transfer).unwrap();
+        assert_eq!(u16::from_le_bytes([frame[6], frame[7]]), 12);
+        assert_eq!(frame[8], 17);
+        assert_eq!(decode_frame(&frame), Ok(transfer.clone()));
+        assert_eq!(
+            encode_m02_compatibility_frame(&transfer),
+            Err(WireCodecError::MessageUnavailableAtVersion)
+        );
+
+        let rejection = WireMessage::ReliableEvent(crate::ReliableEventFrame {
+            sequence: 1,
+            server_tick: 1,
+            event: crate::ReliableEvent::SafeInventoryTransferResult(
+                crate::SafeInventoryTransferResultV1 {
+                    mutation_id: [12; 16],
+                    character_id: [13; 16],
+                    code: crate::SafeInventoryResultCodeV1::StorageFull,
+                    replayed: false,
+                    result_hash: [0; 32],
+                    account_version: 0,
+                    inventory_version: 0,
+                    placements: Vec::new(),
+                },
+            ),
+        });
+        let frame = encode_frame(&rejection).unwrap();
+        assert_eq!(decode_frame(&frame), Ok(rejection));
     }
 }

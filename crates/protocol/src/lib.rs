@@ -88,7 +88,9 @@ use thiserror::Error;
 /// First incompatible protocol generation.
 pub const PROTOCOL_MAJOR: u16 = 1;
 /// Backward-compatible feature generation within [`PROTOCOL_MAJOR`].
-pub const PROTOCOL_MINOR: u16 = CALDUS_EXTRACTION_PROTOCOL_MINOR;
+pub const PROTOCOL_MINOR: u16 = SAFE_INVENTORY_PROTOCOL_MINOR;
+/// Exact safe-inventory reliable mutation generation.
+pub const SAFE_INVENTORY_PROTOCOL_MINOR: u16 = 12;
 /// Exact committed-Caldus-extraction command generation.
 pub const CALDUS_EXTRACTION_PROTOCOL_MINOR: u16 = 11;
 /// Exact Oath generation retained while Bargain messages are appended.
@@ -125,6 +127,8 @@ pub const M02_LOCAL_REGION_ID: &str = "local-playtest";
 pub const CORE_TEST_IDENTITY_FEATURE_FLAG: &str = "core_test_identity_character_select";
 /// Advertised only after every owning package makes the normal Core route honest.
 pub const CORE_WORLD_FLOW_FEATURE_FLAG: &str = "core_world_flow_integration";
+/// Advertised only by the disposable integrated item/Vault lifecycle harness.
+pub const CORE_SAFE_INVENTORY_FEATURE_FLAG: &str = "core_safe_inventory_integration";
 /// Build admitted by the explicit wipeable Core identity development endpoint.
 pub const M03_CORE_DEV_BUILD_ID: &str = "m03-core-dev-identity-1";
 /// Non-promotable content target label advertised by the Core identity endpoint.

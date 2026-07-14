@@ -60,6 +60,7 @@ impl AuthoritativeSafeInventoryTransfer {
         let projection = SafeInventoryTransferResultV1 {
             mutation_id: self.result.mutation_id,
             character_id,
+            code: SafeInventoryResultCodeV1::Accepted,
             replayed: self.result.replayed,
             result_hash: self.result.result_hash,
             account_version: self.result.post_account_version,

@@ -8,7 +8,8 @@ use crate::{
     BargainViewFrame, BargainViewResult, CharacterMutationFrame, CharacterMutationResult,
     ClientHello, HandshakeResponse, InitialOathSelectionFrame, InitialOathSelectionResult,
     NetworkChannel, OathViewFrame, OathViewResult, ProgressionQueryFrame, ProgressionResult,
-    WireText, WorldFlowFrame, WorldFlowResult,
+    SafeInventoryTransferFrameV1, SafeInventoryTransferResultV1, WireText, WorldFlowFrame,
+    WorldFlowResult,
 };
 
 pub const FIXED_VECTOR_SCALE: i16 = 1_000;
@@ -38,6 +39,7 @@ pub enum MessageKind {
     InitialOathSelectionFrame,
     BargainViewFrame,
     BargainDecisionFrame,
+    SafeInventoryTransferFrame,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -439,6 +441,7 @@ pub enum ReliableEvent {
     InitialOathSelectionResult(InitialOathSelectionResult),
     BargainViewResult(BargainViewResult),
     BargainDecisionResult(BargainDecisionResult),
+    SafeInventoryTransferResult(SafeInventoryTransferResultV1),
 }
 
 impl ReliableEvent {
@@ -450,7 +453,8 @@ impl ReliableEvent {
             Self::MutationResult(_)
             | Self::CharacterMutationResult(_)
             | Self::InitialOathSelectionResult(_)
-            | Self::BargainDecisionResult(_) => NetworkChannel::Mutation,
+            | Self::BargainDecisionResult(_)
+            | Self::SafeInventoryTransferResult(_) => NetworkChannel::Mutation,
             Self::Control(_)
             | Self::AccountBootstrapResult(_)
             | Self::WorldFlowResult(_)
@@ -495,6 +499,9 @@ impl ReliableEvent {
             Self::BargainDecisionResult(result) => result
                 .validate()
                 .map_err(|_| MessageValidationError::Bargain),
+            Self::SafeInventoryTransferResult(result) => result
+                .validate()
+                .map_err(|_| MessageValidationError::SafeInventory),
             _ => Ok(()),
         }
     }
@@ -535,6 +542,7 @@ pub enum WireMessage {
     InitialOathSelectionFrame(InitialOathSelectionFrame),
     BargainViewFrame(BargainViewFrame),
     BargainDecisionFrame(BargainDecisionFrame),
+    SafeInventoryTransferFrame(SafeInventoryTransferFrameV1),
 }
 
 impl WireMessage {
@@ -557,6 +565,7 @@ impl WireMessage {
             Self::InitialOathSelectionFrame(_) => MessageKind::InitialOathSelectionFrame,
             Self::BargainViewFrame(_) => MessageKind::BargainViewFrame,
             Self::BargainDecisionFrame(_) => MessageKind::BargainDecisionFrame,
+            Self::SafeInventoryTransferFrame(_) => MessageKind::SafeInventoryTransferFrame,
         }
     }
 
@@ -578,7 +587,8 @@ impl WireMessage {
             Self::MutationRequest(_)
             | Self::CharacterMutationFrame(_)
             | Self::InitialOathSelectionFrame(_)
-            | Self::BargainDecisionFrame(_) => NetworkChannel::Mutation,
+            | Self::BargainDecisionFrame(_)
+            | Self::SafeInventoryTransferFrame(_) => NetworkChannel::Mutation,
         }
     }
 
@@ -625,6 +635,9 @@ impl WireMessage {
             Self::BargainDecisionFrame(value) => value
                 .validate()
                 .map_err(|_| MessageValidationError::Bargain),
+            Self::SafeInventoryTransferFrame(value) => value
+                .validate()
+                .map_err(|_| MessageValidationError::SafeInventory),
         }
     }
 }
@@ -641,6 +654,8 @@ pub enum MessageValidationError {
     Oath,
     #[error("Bargain message failed semantic validation")]
     Bargain,
+    #[error("safe-inventory message failed semantic validation")]
+    SafeInventory,
     #[error("message sequence must be nonzero")]
     ZeroSequence,
     #[error("fixed-point vector component must remain within -1000..=1000")]
