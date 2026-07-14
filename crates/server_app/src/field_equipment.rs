@@ -4,14 +4,21 @@ use persistence::{
     PostgresPersistence, StoredFieldEquipmentCommand, StoredFieldEquipmentItem,
     StoredFieldEquipmentResult, StoredFieldEquipmentSnapshot, StoredFieldEquipmentSource,
 };
+use protocol::{
+    FieldEquipmentComparisonAxisV1, FieldEquipmentComparisonChangeV1,
+    FieldEquipmentComparisonPreferenceV1, FieldEquipmentItemV1, FieldEquipmentPreviewProjectionV1,
+    FieldEquipmentRarityV1, FieldEquipmentReplacementDestinationV1, FieldEquipmentSlotV1,
+    FieldEquipmentSourceV1, WireText,
+};
 use sim_content::{
-    CompiledProductionItemCatalog, CoreEquipmentComparison, CoreEquipmentPresentation,
-    compare_core_equipment, resolve_core_equipment_presentation,
+    CompiledProductionItemCatalog, CoreEquipmentAxis, CoreEquipmentAxisPreference,
+    CoreEquipmentComparison, CoreEquipmentPresentation, compare_core_equipment,
+    resolve_core_equipment_presentation,
 };
 use sim_core::{
-    DurableEquipmentItem, DurableRunBackpackSlot, EquipmentRarity, FieldEquipmentPreview,
-    FieldEquipmentSnapshot, FieldEquipmentSource, ItemUid, RUN_BACKPACK_CAPACITY,
-    ReplacementDestination, plan_field_equipment_swap,
+    DurableEquipmentItem, DurableRunBackpackSlot, EquipmentRarity, EquipmentSlot,
+    FieldEquipmentPreview, FieldEquipmentSnapshot, FieldEquipmentSource, ItemUid,
+    RUN_BACKPACK_CAPACITY, ReplacementDestination, plan_field_equipment_swap,
 };
 use thiserror::Error;
 
@@ -32,6 +39,169 @@ pub struct AuthoritativeFieldEquipmentPreview {
     pub incoming: CoreEquipmentPresentation,
     pub current: Option<CoreEquipmentPresentation>,
     pub comparison: CoreEquipmentComparison,
+}
+
+impl AuthoritativeFieldEquipmentPreview {
+    pub fn wire_projection(
+        &self,
+        character_id: [u8; 16],
+    ) -> Result<FieldEquipmentPreviewProjectionV1, FieldEquipmentServiceError> {
+        let current = self
+            .mutation
+            .replaced
+            .as_ref()
+            .zip(self.current.as_ref())
+            .map(|(item, presentation)| wire_item(item, presentation))
+            .transpose()?;
+        let projection = FieldEquipmentPreviewProjectionV1 {
+            character_id,
+            inventory_version: self.mutation.inventory_version,
+            content_revision: WireText::new(self.mutation.content_revision.clone())
+                .map_err(|_| FieldEquipmentServiceError::ProtocolProjection)?,
+            source: match self.mutation.source {
+                FieldEquipmentSource::RunBackpack { slot_index } => {
+                    FieldEquipmentSourceV1::RunBackpack { slot_index }
+                }
+                FieldEquipmentSource::PersonalGround {
+                    ref item,
+                    pickup_id,
+                    ..
+                } => FieldEquipmentSourceV1::PersonalGround {
+                    item_uid: item.item_uid.bytes(),
+                    pickup_id,
+                },
+            },
+            incoming: wire_item(&self.mutation.incoming, &self.incoming)?,
+            current,
+            replacement_destination: match self.mutation.replacement_destination {
+                ReplacementDestination::None => FieldEquipmentReplacementDestinationV1::None,
+                ReplacementDestination::RunBackpack { slot_index } => {
+                    FieldEquipmentReplacementDestinationV1::RunBackpack { slot_index }
+                }
+            },
+            preview_hash: self.mutation.preview_hash,
+            behavior_changed: self.comparison.behavior_changed,
+            changes: self
+                .comparison
+                .changes
+                .iter()
+                .map(|change| FieldEquipmentComparisonChangeV1 {
+                    axis: wire_axis(change.axis),
+                    before: change.before,
+                    after: change.after,
+                    delta: change.delta,
+                    preference: match change.preference {
+                        CoreEquipmentAxisPreference::Higher => {
+                            FieldEquipmentComparisonPreferenceV1::Higher
+                        }
+                        CoreEquipmentAxisPreference::Lower => {
+                            FieldEquipmentComparisonPreferenceV1::Lower
+                        }
+                        CoreEquipmentAxisPreference::Contextual => {
+                            FieldEquipmentComparisonPreferenceV1::Contextual
+                        }
+                    },
+                    advanced: change.advanced,
+                })
+                .collect(),
+        };
+        projection
+            .validate()
+            .map_err(|_| FieldEquipmentServiceError::ProtocolProjection)?;
+        Ok(projection)
+    }
+}
+
+fn wire_item(
+    item: &DurableEquipmentItem,
+    presentation: &CoreEquipmentPresentation,
+) -> Result<FieldEquipmentItemV1, FieldEquipmentServiceError> {
+    Ok(FieldEquipmentItemV1 {
+        item_uid: item.item_uid.bytes(),
+        template_id: WireText::new(item.template_id.clone())
+            .map_err(|_| FieldEquipmentServiceError::ProtocolProjection)?,
+        slot: match item.legal_slot {
+            EquipmentSlot::Weapon => FieldEquipmentSlotV1::Weapon,
+            EquipmentSlot::Armor => FieldEquipmentSlotV1::Armor,
+            EquipmentSlot::Relic => FieldEquipmentSlotV1::Relic,
+            EquipmentSlot::Charm => FieldEquipmentSlotV1::Charm,
+        },
+        item_level: item.item_level,
+        rarity: match item.rarity {
+            EquipmentRarity::Worn => FieldEquipmentRarityV1::Worn,
+            EquipmentRarity::Forged => FieldEquipmentRarityV1::Forged,
+            EquipmentRarity::Oathed => FieldEquipmentRarityV1::Oathed,
+            EquipmentRarity::Relic => FieldEquipmentRarityV1::Relic,
+            EquipmentRarity::Sainted => FieldEquipmentRarityV1::Sainted,
+            EquipmentRarity::BlackUnique => FieldEquipmentRarityV1::BlackUnique,
+        },
+        item_version: item.item_version,
+        behavior_key: WireText::new(presentation.behavior_key.clone())
+            .map_err(|_| FieldEquipmentServiceError::ProtocolProjection)?,
+    })
+}
+
+const fn wire_axis(axis: CoreEquipmentAxis) -> FieldEquipmentComparisonAxisV1 {
+    match axis {
+        CoreEquipmentAxis::WeaponDamage => FieldEquipmentComparisonAxisV1::WeaponDamage,
+        CoreEquipmentAxis::AttackIntervalMicros => {
+            FieldEquipmentComparisonAxisV1::AttackIntervalMicros
+        }
+        CoreEquipmentAxis::RangeMilliTiles => FieldEquipmentComparisonAxisV1::RangeMilliTiles,
+        CoreEquipmentAxis::ProjectileSpeedMilliTilesPerSecond => {
+            FieldEquipmentComparisonAxisV1::ProjectileSpeedMilliTilesPerSecond
+        }
+        CoreEquipmentAxis::ProjectileRadiusMilliTiles => {
+            FieldEquipmentComparisonAxisV1::ProjectileRadiusMilliTiles
+        }
+        CoreEquipmentAxis::BoltCount => FieldEquipmentComparisonAxisV1::BoltCount,
+        CoreEquipmentAxis::PierceCount => FieldEquipmentComparisonAxisV1::PierceCount,
+        CoreEquipmentAxis::MaximumHealth => FieldEquipmentComparisonAxisV1::MaximumHealth,
+        CoreEquipmentAxis::Armor => FieldEquipmentComparisonAxisV1::Armor,
+        CoreEquipmentAxis::ResistanceBasisPoints => {
+            FieldEquipmentComparisonAxisV1::ResistanceBasisPoints
+        }
+        CoreEquipmentAxis::MovementBasisPoints => {
+            FieldEquipmentComparisonAxisV1::MovementBasisPoints
+        }
+        CoreEquipmentAxis::HealingReceivedBasisPoints => {
+            FieldEquipmentComparisonAxisV1::HealingReceivedBasisPoints
+        }
+        CoreEquipmentAxis::NegativeStatusReductionBasisPoints => {
+            FieldEquipmentComparisonAxisV1::NegativeStatusReductionBasisPoints
+        }
+        CoreEquipmentAxis::DirectHitBarrierHealth => {
+            FieldEquipmentComparisonAxisV1::DirectHitBarrierHealth
+        }
+        CoreEquipmentAxis::MarkDamageCoefficientBasisPoints => {
+            FieldEquipmentComparisonAxisV1::MarkDamageCoefficientBasisPoints
+        }
+        CoreEquipmentAxis::MarkDurationMillis => FieldEquipmentComparisonAxisV1::MarkDurationMillis,
+        CoreEquipmentAxis::MarkPrimaryBonusBasisPoints => {
+            FieldEquipmentComparisonAxisV1::MarkPrimaryBonusBasisPoints
+        }
+        CoreEquipmentAxis::SlipstepDistanceMilliTiles => {
+            FieldEquipmentComparisonAxisV1::SlipstepDistanceMilliTiles
+        }
+        CoreEquipmentAxis::SlipstepDurationMillis => {
+            FieldEquipmentComparisonAxisV1::SlipstepDurationMillis
+        }
+        CoreEquipmentAxis::SlipstepDamageReductionBasisPoints => {
+            FieldEquipmentComparisonAxisV1::SlipstepDamageReductionBasisPoints
+        }
+        CoreEquipmentAxis::SlipstepCooldownMillis => {
+            FieldEquipmentComparisonAxisV1::SlipstepCooldownMillis
+        }
+        CoreEquipmentAxis::RestedPrimaryBonusBasisPoints => {
+            FieldEquipmentComparisonAxisV1::RestedPrimaryBonusBasisPoints
+        }
+        CoreEquipmentAxis::RestedPrimaryIdleMillis => {
+            FieldEquipmentComparisonAxisV1::RestedPrimaryIdleMillis
+        }
+        CoreEquipmentAxis::PotionHealingBasisPoints => {
+            FieldEquipmentComparisonAxisV1::PotionHealingBasisPoints
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -278,6 +448,8 @@ pub enum FieldEquipmentServiceError {
     Persistence,
     #[error("stored field equipment aggregate is corrupt")]
     CorruptSnapshot,
+    #[error("authoritative field equipment state could not be projected to the bounded protocol")]
+    ProtocolProjection,
     #[error("requested field equipment source is unavailable")]
     SourceUnavailable,
     #[error("field equipment confirmation identity is invalid")]

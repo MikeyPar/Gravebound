@@ -133,6 +133,14 @@ async fn field_equipment_swap_is_atomic_replay_safe_and_restart_durable() {
         preview.mutation.replacement_destination,
         sim_core::ReplacementDestination::RunBackpack { slot_index: 0 }
     );
+    let wire = preview.wire_projection(CHARACTER_ID).unwrap();
+    wire.validate().unwrap();
+    assert_eq!(wire.inventory_version, preview.mutation.inventory_version);
+    assert_eq!(wire.preview_hash, preview.mutation.preview_hash);
+    assert!(matches!(
+        wire.replacement_destination,
+        protocol::FieldEquipmentReplacementDestinationV1::RunBackpack { slot_index: 0 }
+    ));
 
     let command = FieldEquipmentConfirmCommand {
         command_id: [120; 16],

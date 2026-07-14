@@ -8,6 +8,7 @@ mod account;
 mod bargain;
 mod bounded;
 mod codec;
+mod field_equipment;
 mod handshake;
 mod messages;
 mod oath;
@@ -34,6 +35,16 @@ pub use bounded::{AuthTicket, BoundedValueError, ManifestHash, WireText};
 pub use codec::{
     DATAGRAM_FRAME_LIMIT, FRAME_HEADER_BYTES, RELIABLE_FRAME_LIMIT, WireCodecError, decode_frame,
     encode_frame, encode_m02_compatibility_frame,
+};
+pub use field_equipment::{
+    FIELD_EQUIPMENT_CHANGE_CAPACITY, FIELD_EQUIPMENT_ID_MAX_BYTES, FIELD_EQUIPMENT_ITEM_UID_BYTES,
+    FIELD_EQUIPMENT_PICKUP_ID_BYTES, FIELD_EQUIPMENT_PREVIEW_HASH_BYTES,
+    FieldEquipmentComparisonAxisV1, FieldEquipmentComparisonChangeV1,
+    FieldEquipmentComparisonPreferenceV1, FieldEquipmentConfirmFrameV1,
+    FieldEquipmentConfirmPayloadV1, FieldEquipmentItemV1, FieldEquipmentPreviewFrameV1,
+    FieldEquipmentPreviewProjectionV1, FieldEquipmentRarityV1,
+    FieldEquipmentReplacementDestinationV1, FieldEquipmentResultCodeV1, FieldEquipmentSlotV1,
+    FieldEquipmentSourceV1, FieldEquipmentValidationError,
 };
 pub use handshake::{
     ClientHello, Compression, HandshakeRejection, HandshakeResponse, Platform, ServerHello,
