@@ -13,6 +13,7 @@ mod caldus_victory;
 mod combat_factory;
 mod core_journey_world_flow;
 mod core_lifecycle;
+mod field_equipment;
 mod ground_expiry;
 mod identity;
 mod instance;
@@ -60,6 +61,10 @@ pub use core_lifecycle::{
     CoreCheckpointBinding, CoreCheckpointServiceError, CoreDangerCheckpointRepository,
     CoreDangerCheckpointService, CoreLifeKey, CoreLiveBindingId, CoreLiveCharacter,
     CoreLiveDirectory, CoreLiveError, CoreResumeOutcome, DANGER_CHECKPOINT_INTERVAL_TICKS,
+};
+pub use field_equipment::{
+    AuthoritativeFieldEquipmentPreview, FieldEquipmentPreviewSource, FieldEquipmentServiceError,
+    PostgresFieldEquipmentService,
 };
 pub use ground_expiry::{GROUND_EXPIRY_CONTEXT, GroundExpiryError, PostgresGroundExpiryService};
 pub use identity::{
