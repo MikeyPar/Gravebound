@@ -14,6 +14,7 @@ mod clock;
 mod collision;
 mod combat;
 mod consumable;
+mod core_abbot;
 mod core_counterplay;
 mod core_enemy;
 mod core_enemy_attack;
@@ -114,6 +115,10 @@ pub use consumable::{
     RedTonicDefinition, RedTonicDefinitionError, RedTonicDefinitionParameters, RedTonicSimulation,
     TonicBelt, TonicBeltPolicy, TonicMergeResult, TonicUseRejection,
     UNDERTAKER_KNOT_RESTORE_BASIS_POINTS, UNDERTAKER_KNOT_SHARED_COOLDOWN_TICKS, VitalsError,
+};
+pub use core_abbot::{
+    CoreAbbotError, CoreAbbotEvent, CoreAbbotRingLock, CoreAbbotRotorLock, CoreAbbotSimulation,
+    CoreAbbotStep,
 };
 pub use core_counterplay::{
     CORE_COM006_CLOSE_SPAWN_DISTANCE_MILLI_TILES,

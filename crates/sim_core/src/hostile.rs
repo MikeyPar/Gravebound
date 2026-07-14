@@ -11,8 +11,8 @@ use thiserror::Error;
 
 use crate::{
     AimDirection, AimDirectionError, AimVector, ArenaGeometry, AttackCastId, BossEvent,
-    CollisionError, CollisionTarget, CoreAcolyteFanPhase, CoreEnemyDefinition, CoreKnightEvent,
-    CoreNormalAttackEvent, CoreNormalAttackKind, CorePatternDefinition,
+    CollisionError, CollisionTarget, CoreAbbotEvent, CoreAcolyteFanPhase, CoreEnemyDefinition,
+    CoreKnightEvent, CoreNormalAttackEvent, CoreNormalAttackKind, CorePatternDefinition,
     CorePatternGeometryDefinition, CoreWorldPosition, Counterplay, DamageAppliedEvent, DamageBand,
     DamageError, DamageEvent, DamageType, DirectHitParameters, DirectHitRequest, EchoMemoryFamily,
     EnemyEvent, EnemyHurtbox, EnemyLabPlayer, EntityId, EntityIdAllocator, FocusedTransition,
@@ -29,6 +29,8 @@ const ACOLYTE_FAN_ID: &str = "pattern.enemy.bell_acolyte.alternating_fan";
 const CHOIR_SKULL_ROTOR_ID: &str = "pattern.enemy.choir_skull.rotor";
 const KNIGHT_STOP_RING_ID: &str = "miniboss.sepulcher_knight.stop_ring";
 const KNIGHT_SHIELD_FAN_ID: &str = "miniboss.sepulcher_knight.shield_fan";
+const ABBOT_ROTOR_ID: &str = "miniboss.choir_abbot.rotor";
+const ABBOT_RECOVERY_RING_ID: &str = "miniboss.choir_abbot.recovery_ring";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HostileProjectileSourceKind {
@@ -322,6 +324,41 @@ impl HostileProjectileSimulation {
     ) -> Result<Vec<HostileEvent>, HostileError> {
         let mut next = self.clone();
         let spec = core_knight_spawn_spec(definition, event, next.tick)?;
+        validate_projectile_attack(&spec.attack, spec.source_kind)?;
+        let mut projectiles = Vec::with_capacity(spec.directions.len());
+        for direction in spec.directions {
+            projectiles.push(next.allocate_projectile(
+                source_entity_id,
+                spec.cast_id,
+                spec.source_kind,
+                spec.origin,
+                direction,
+                &spec.attack,
+            )?);
+        }
+        next.projectiles
+            .extend(projectiles.iter().map(|(_, projectile)| projectile.clone()));
+        next.projectiles.sort_by_key(HostileProjectile::id);
+        let spawned = projectiles
+            .into_iter()
+            .map(|(_, projectile)| HostileEvent::Spawned {
+                tick: next.tick,
+                projectile,
+            })
+            .collect();
+        *self = next;
+        Ok(spawned)
+    }
+
+    /// Materializes only Choir Abbot rotor volleys and recovery rings.
+    pub fn spawn_from_core_abbot_event(
+        &mut self,
+        source_entity_id: EntityId,
+        definition: &CoreEnemyDefinition,
+        event: &CoreAbbotEvent,
+    ) -> Result<Vec<HostileEvent>, HostileError> {
+        let mut next = self.clone();
+        let spec = core_abbot_spawn_spec(definition, event, next.tick)?;
         validate_projectile_attack(&spec.attack, spec.source_kind)?;
         let mut projectiles = Vec::with_capacity(spec.directions.len());
         for direction in spec.directions {
@@ -1537,6 +1574,130 @@ fn core_knight_spawn_spec(
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the complete two-release Abbot grammar remains auditable in one exhaustive match"
+)]
+fn core_abbot_spawn_spec(
+    definition: &CoreEnemyDefinition,
+    event: &CoreAbbotEvent,
+    hostile_tick: Tick,
+) -> Result<CoreProjectileSpawnSpec, HostileError> {
+    match event {
+        CoreAbbotEvent::RotorVolleyReleased {
+            tick,
+            volley_index,
+            phase_milli_degrees,
+            lock,
+            ..
+        } => {
+            if *tick != hostile_tick
+                || *volley_index >= 10
+                || *phase_milli_degrees != i32::from(*volley_index) * 12_250
+                || lock.pattern_id() != ABBOT_ROTOR_ID
+            {
+                return Err(HostileError::InvalidProjectileAttack);
+            }
+            let pattern = definition
+                .parameters()
+                .patterns
+                .first()
+                .ok_or(HostileError::InvalidProjectileAttack)?;
+            let CorePatternGeometryDefinition::RotatingArms {
+                arm_count: 2,
+                clockwise_milli_degrees_per_second: 35_000,
+                emission_interval_ticks: 11,
+                active_ticks: 105,
+                projectile_speed_milli_tiles_per_second,
+                projectile_radius_milli_tiles,
+                projectile_lifetime_ticks,
+                ..
+            } = pattern.geometry()
+            else {
+                return Err(HostileError::InvalidProjectileAttack);
+            };
+            let first = abbot_rotor_direction(*volley_index);
+            let directions = vec![first, AimDirection::new(first.vector() * -1.0)?];
+            Ok(CoreProjectileSpawnSpec {
+                cast_id: lock.cast_id(),
+                origin: core_world_to_vector(lock.origin()),
+                source_kind: HostileProjectileSourceKind::RotatingArms,
+                directions,
+                attack: core_projectile_attack(
+                    ABBOT_ROTOR_ID,
+                    2,
+                    *projectile_speed_milli_tiles_per_second,
+                    *projectile_radius_milli_tiles,
+                    *projectile_lifetime_ticks,
+                    pattern,
+                )?,
+            })
+        }
+        CoreAbbotEvent::RecoveryRingReleased {
+            tick,
+            lock,
+            emitted_indices,
+            omitted_indices,
+        } => {
+            if *tick != hostile_tick
+                || lock.pattern_id() != ABBOT_RECOVERY_RING_ID
+                || !emitted_indices.windows(2).all(|pair| pair[0] < pair[1])
+                || emitted_indices.iter().any(|index| *index >= 16)
+                || omitted_indices.iter().any(|index| *index >= 16)
+                || omitted_indices
+                    .windows(2)
+                    .any(|pair| pair[1] != (pair[0] + 1) % 16)
+                || emitted_indices
+                    .iter()
+                    .any(|index| omitted_indices.contains(index))
+            {
+                return Err(HostileError::InvalidProjectileAttack);
+            }
+            let pattern = definition
+                .parameters()
+                .patterns
+                .get(1)
+                .ok_or(HostileError::InvalidProjectileAttack)?;
+            let CorePatternGeometryDefinition::RadialGap {
+                index_count: 16,
+                omitted_adjacent_count: 4,
+                projectile_speed_milli_tiles_per_second,
+                projectile_radius_milli_tiles,
+                projectile_lifetime_ticks,
+                ..
+            } = pattern.geometry()
+            else {
+                return Err(HostileError::InvalidProjectileAttack);
+            };
+            Ok(CoreProjectileSpawnSpec {
+                cast_id: lock.cast_id(),
+                origin: core_world_to_vector(lock.origin()),
+                source_kind: HostileProjectileSourceKind::GapRing,
+                directions: emitted_indices
+                    .iter()
+                    .map(|index| boss_ring_direction(*index))
+                    .collect(),
+                attack: core_projectile_attack(
+                    ABBOT_RECOVERY_RING_ID,
+                    12,
+                    *projectile_speed_milli_tiles_per_second,
+                    *projectile_radius_milli_tiles,
+                    *projectile_lifetime_ticks,
+                    pattern,
+                )?,
+            })
+        }
+        CoreAbbotEvent::RotorTelegraphStarted { .. }
+        | CoreAbbotEvent::RotorStarted { .. }
+        | CoreAbbotEvent::RecoveryStarted { .. }
+        | CoreAbbotEvent::RecoveryOriginWarningStarted { .. }
+        | CoreAbbotEvent::DirectionalGapPreviewStarted { .. }
+        | CoreAbbotEvent::TargetlessReset { .. } => {
+            Err(HostileError::EventDoesNotAuthorizeProjectileSpawn)
+        }
+    }
+}
+
 fn build_acolyte_projectile_spec(
     pattern: &CorePatternDefinition,
     origin: CoreWorldPosition,
@@ -1704,17 +1865,30 @@ fn validate_projectile_attack(
                         && attack.threat_cost == 8
                         && attack.maximum_active_instances == 8
                 }
+                ABBOT_RECOVERY_RING_ID => {
+                    attack.projectile_count == 12
+                        && attack.speed_milli_tiles_per_second == 4_500
+                        && attack.radius_milli_tiles == 120
+                        && attack.lifetime_ticks == 54
+                        && attack.raw_damage == 26
+                        && attack.damage_type == DamageType::Veil
+                        && attack.damage_band == DamageBand::Major
+                        && attack.threat_cost == 12
+                        && attack.maximum_active_instances == 12
+                }
                 _ => false,
-            }) && (attack.pattern_id == KNIGHT_STOP_RING_ID
-                || (attack.speed_milli_tiles_per_second == 4_500
-                    && attack.radius_milli_tiles == 130
-                    && attack.damage_type == DamageType::Veil))
+            }) && (matches!(
+                attack.pattern_id,
+                KNIGHT_STOP_RING_ID | ABBOT_RECOVERY_RING_ID
+            ) || (attack.speed_milli_tiles_per_second == 4_500
+                && attack.radius_milli_tiles == 130
+                && attack.damage_type == DamageType::Veil))
                 && attack.memory_family == EchoMemoryFamily::RadialProjectile
                 && attack.counterplay == Counterplay::FollowGap
                 && !attack.pierces_players
         }
         HostileProjectileSourceKind::RotatingArms => {
-            attack.pattern_id == CHOIR_SKULL_ROTOR_ID
+            (attack.pattern_id == CHOIR_SKULL_ROTOR_ID
                 && attack.projectile_count == 2
                 && attack.speed_milli_tiles_per_second == 4_500
                 && attack.radius_milli_tiles == 120
@@ -1724,6 +1898,16 @@ fn validate_projectile_attack(
                 && attack.damage_band == DamageBand::Pressure
                 && attack.threat_cost == 10
                 && attack.maximum_active_instances == 8
+                || attack.pattern_id == ABBOT_ROTOR_ID
+                    && attack.projectile_count == 2
+                    && attack.speed_milli_tiles_per_second == 4_500
+                    && attack.radius_milli_tiles == 120
+                    && attack.lifetime_ticks == 47
+                    && attack.raw_damage == 18
+                    && attack.damage_type == DamageType::Veil
+                    && attack.damage_band == DamageBand::Pressure
+                    && attack.threat_cost == 12
+                    && attack.maximum_active_instances == 10)
                 && attack.memory_family == EchoMemoryFamily::RotatingProjectile
                 && attack.counterplay == Counterplay::MoveWithRotation
                 && !attack.pierces_players
@@ -1919,6 +2103,24 @@ fn boss_ring_direction(index: u8) -> AimDirection {
         _ => unreachable!("validated Bell ring index"),
     };
     AimDirection::new(vector).expect("Bell ring table contains finite unit vectors")
+}
+
+fn abbot_rotor_direction(index: u8) -> AimDirection {
+    let (x, y) = match index {
+        0 => (1.0, 0.0),
+        1 => (0.977_231_1, 0.212_177_68),
+        2 => (0.909_961_3, 0.414_693_24),
+        3 => (0.801_253_8, 0.598_324_6),
+        4 => (0.656_059, 0.754_709_6),
+        5 => (0.480_988_77, 0.876_726_75),
+        6 => (0.284_015_36, 0.958_819_75),
+        7 => (0.074_108_49, 0.997_250_2),
+        8 => (-0.139_173_1, 0.990_268_05),
+        9 => (-0.346_117_05, 0.938_191_35),
+        _ => unreachable!("validated Abbot volley index"),
+    };
+    AimDirection::new(SimulationVector::new(x, y))
+        .expect("Abbot rotor table contains finite unit vectors")
 }
 
 fn ring_direction(index: u8) -> AimDirection {
