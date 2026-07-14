@@ -696,6 +696,9 @@ mod tests {
                     item_level: 1,
                     rarity: 0,
                 }),
+                equipped_armor: None,
+                equipped_relic: None,
+                equipped_charm: None,
                 belt_slots: [None, None],
             })
             .unwrap()

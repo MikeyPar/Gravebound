@@ -45,12 +45,17 @@ pub struct StoredCoreCombatLoadout {
     pub progression_version: i64,
     pub inventory_version: Option<i64>,
     pub equipped_weapon: Option<StoredEquippedWeapon>,
+    pub equipped_armor: Option<StoredEquippedWeapon>,
+    pub equipped_relic: Option<StoredEquippedWeapon>,
+    pub equipped_charm: Option<StoredEquippedWeapon>,
     pub belt_slots: [Option<StoredCombatBeltStack>; 2],
 }
 
 impl PostgresPersistence {
-    /// Reads identity, progression, Oath, inventory, and equipped weapon in one `PostgreSQL`
-    /// statement snapshot. Callers never assemble combat authority from independently timed reads.
+    /// Reads identity, progression, Oath, inventory, and all four equipped slots in one
+    /// `PostgreSQL` statement snapshot. Callers never assemble combat authority from independently
+    /// timed reads.
+    #[allow(clippy::too_many_lines)] // One linear SQL snapshot keeps every combat input atomic.
     pub async fn core_combat_loadout_snapshot(
         &self,
         account_id: [u8; 16],
@@ -87,6 +92,21 @@ impl PostgresPersistence {
                     w.item_uid AS weapon_uid, w.template_id AS weapon_template_id, \
                     w.content_revision AS weapon_content_revision, \
                     w.item_level AS weapon_item_level, w.rarity AS weapon_rarity, \
+                    armor_item.item_uid AS armor_uid, \
+                    armor_item.template_id AS armor_template_id, \
+                    armor_item.content_revision AS armor_content_revision, \
+                    armor_item.item_level AS armor_item_level, \
+                    armor_item.rarity AS armor_rarity, \
+                    relic_item.item_uid AS relic_uid, \
+                    relic_item.template_id AS relic_template_id, \
+                    relic_item.content_revision AS relic_content_revision, \
+                    relic_item.item_level AS relic_item_level, \
+                    relic_item.rarity AS relic_rarity, \
+                    charm_item.item_uid AS charm_uid, \
+                    charm_item.template_id AS charm_template_id, \
+                    charm_item.content_revision AS charm_content_revision, \
+                    charm_item.item_level AS charm_item_level, \
+                    charm_item.rarity AS charm_rarity, \
                     ARRAY(SELECT belt.slot_index FROM item_instances belt \
                           WHERE belt.namespace_id = c.namespace_id \
                           AND belt.account_id = c.account_id AND belt.character_id = c.character_id \
@@ -125,6 +145,21 @@ impl PostgresPersistence {
                   AND w.account_id = c.account_id AND w.character_id = c.character_id \
                   AND w.item_kind = 0 AND w.security_state = 0 \
                   AND w.location_kind = 0 AND w.slot_index = 0 \
+             LEFT JOIN item_instances armor_item ON armor_item.namespace_id = c.namespace_id \
+                  AND armor_item.account_id = c.account_id \
+                  AND armor_item.character_id = c.character_id \
+                  AND armor_item.item_kind = 0 AND armor_item.security_state = 0 \
+                  AND armor_item.location_kind = 0 AND armor_item.slot_index = 1 \
+             LEFT JOIN item_instances relic_item ON relic_item.namespace_id = c.namespace_id \
+                  AND relic_item.account_id = c.account_id \
+                  AND relic_item.character_id = c.character_id \
+                  AND relic_item.item_kind = 0 AND relic_item.security_state = 0 \
+                  AND relic_item.location_kind = 0 AND relic_item.slot_index = 2 \
+             LEFT JOIN item_instances charm_item ON charm_item.namespace_id = c.namespace_id \
+                  AND charm_item.account_id = c.account_id \
+                  AND charm_item.character_id = c.character_id \
+                  AND charm_item.item_kind = 0 AND charm_item.security_state = 0 \
+                  AND charm_item.location_kind = 0 AND charm_item.slot_index = 3 \
              WHERE c.namespace_id = $1 AND c.account_id = $2 AND c.character_id = $3",
         )
         .bind(WIPEABLE_CORE_NAMESPACE)
@@ -146,7 +181,10 @@ fn decode_loadout(
         .try_get::<Option<Vec<u8>>, _>("selected_character_id")?
         .map(fixed_id)
         .transpose()?;
-    let equipped_weapon = decode_weapon(row)?;
+    let equipped_weapon = decode_equipped_item(row, "weapon")?;
+    let equipped_armor = decode_equipped_item(row, "armor")?;
+    let equipped_relic = decode_equipped_item(row, "relic")?;
+    let equipped_charm = decode_equipped_item(row, "charm")?;
     let active_bargains = decode_active_bargains(row)?;
     let belt_slots = decode_belt_slots(row)?;
     let loadout = StoredCoreCombatLoadout {
@@ -164,23 +202,29 @@ fn decode_loadout(
         progression_version: row.try_get("progression_version")?,
         inventory_version: row.try_get("inventory_version")?,
         equipped_weapon,
+        equipped_armor,
+        equipped_relic,
+        equipped_charm,
         belt_slots,
     };
     validate_loadout_shape(&loadout)?;
     Ok(loadout)
 }
 
-fn decode_weapon(
+fn decode_equipped_item(
     row: &sqlx::postgres::PgRow,
+    prefix: &str,
 ) -> Result<Option<StoredEquippedWeapon>, PersistenceError> {
+    let column = |suffix: &str| format!("{prefix}_{suffix}");
     let weapon_uid = row
-        .try_get::<Option<Vec<u8>>, _>("weapon_uid")?
+        .try_get::<Option<Vec<u8>>, _>(column("uid").as_str())?
         .map(fixed_id)
         .transpose()?;
-    let weapon_template_id = row.try_get::<Option<String>, _>("weapon_template_id")?;
-    let weapon_content_revision = row.try_get::<Option<String>, _>("weapon_content_revision")?;
-    let weapon_item_level = row.try_get::<Option<i16>, _>("weapon_item_level")?;
-    let weapon_rarity = row.try_get::<Option<i16>, _>("weapon_rarity")?;
+    let weapon_template_id = row.try_get::<Option<String>, _>(column("template_id").as_str())?;
+    let weapon_content_revision =
+        row.try_get::<Option<String>, _>(column("content_revision").as_str())?;
+    let weapon_item_level = row.try_get::<Option<i16>, _>(column("item_level").as_str())?;
+    let weapon_rarity = row.try_get::<Option<i16>, _>(column("rarity").as_str())?;
     let weapon_shape = [
         weapon_uid.is_some(),
         weapon_template_id.is_some(),
@@ -295,11 +339,20 @@ fn validate_loadout_shape(loadout: &StoredCoreCombatLoadout) -> Result<(), Persi
         || loadout.progression_version <= 0
         || loadout.oath_bargain_version <= 0
         || loadout.inventory_version.is_some_and(|value| value <= 0)
-        || loadout.equipped_weapon.as_ref().is_some_and(|weapon| {
-            weapon.template_id.is_empty()
-                || weapon.content_revision.is_empty()
-                || !(1..=10).contains(&weapon.item_level)
-                || !(0..=4).contains(&weapon.rarity)
+        || [
+            loadout.equipped_weapon.as_ref(),
+            loadout.equipped_armor.as_ref(),
+            loadout.equipped_relic.as_ref(),
+            loadout.equipped_charm.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|item| {
+            item.item_uid == [0; 16]
+                || item.template_id.is_empty()
+                || item.content_revision.is_empty()
+                || !(1..=10).contains(&item.item_level)
+                || !(0..=4).contains(&item.rarity)
         })
     {
         return Err(PersistenceError::CorruptStoredItems);
@@ -359,6 +412,9 @@ mod tests {
                 item_level: 10,
                 rarity: 0,
             }),
+            equipped_armor: None,
+            equipped_relic: None,
+            equipped_charm: None,
             belt_slots: [
                 Some(StoredCombatBeltStack {
                     template_id: "consumable.red_tonic".into(),
@@ -387,6 +443,13 @@ mod tests {
     fn malformed_weapon_or_versions_fail_closed() {
         let mut value = loadout();
         value.equipped_weapon.as_mut().unwrap().rarity = 5;
+        assert!(matches!(
+            validate_loadout_shape(&value),
+            Err(PersistenceError::CorruptStoredItems)
+        ));
+        value = loadout();
+        value.equipped_armor = value.equipped_weapon.clone();
+        value.equipped_armor.as_mut().unwrap().item_uid = [0; 16];
         assert!(matches!(
             validate_loadout_shape(&value),
             Err(PersistenceError::CorruptStoredItems)
