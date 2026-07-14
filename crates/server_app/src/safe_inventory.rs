@@ -703,7 +703,7 @@ mod tests {
         let mut replay = StoredSafeInventoryResult {
             replayed: true,
             mutation_id: command.mutation_id,
-            result_hash: result_hash(request, &[placement.clone()]),
+            result_hash: result_hash(request, std::slice::from_ref(&placement)),
             pre_account_version: 4,
             post_account_version: 5,
             pre_inventory_version: 7,
