@@ -11,6 +11,7 @@ mod caldus_extraction;
 mod caldus_instance_presentation;
 mod caldus_victory;
 mod combat_factory;
+mod core_journey_world_flow;
 mod core_lifecycle;
 mod ground_expiry;
 mod identity;
@@ -51,6 +52,9 @@ pub use caldus_victory::{
 pub use combat_factory::{
     CoreCharacterCombat, CoreCharacterCombatCompiler, CoreCharacterCombatFactory,
     CoreCombatFactoryError,
+};
+pub use core_journey_world_flow::{
+    CommittedExtractionTransferAuthority, DisposableCoreJourneyWorldFlow,
 };
 pub use core_lifecycle::{
     CoreCheckpointBinding, CoreCheckpointServiceError, CoreDangerCheckpointRepository,
