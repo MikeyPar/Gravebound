@@ -1,8 +1,9 @@
 use std::path::{Path, PathBuf};
 
 use persistence::{
-    CaldusVictoryExitCommit, PersistenceConfig, PersistenceError, PostgresPersistence,
-    StoredCaldusVictoryOwner, WIPEABLE_CORE_NAMESPACE,
+    CaldusExtractionCommit, CaldusExtractionRequest, CaldusVictoryExitCommit, PersistenceConfig,
+    PersistenceError, PostgresPersistence, StoredCaldusVictoryOwner, StoredExtractionAuthority,
+    StoredExtractionState, StoredWorldFlowRevisionV1, WIPEABLE_CORE_NAMESPACE,
 };
 use protocol::ManifestHash;
 use server_app::{
@@ -42,6 +43,14 @@ async fn disposable_database() -> PostgresPersistence {
     let persistence = PostgresPersistence::connect(&config).await.unwrap();
     persistence.verify_disposable_test_database().await.unwrap();
     persistence.migrate().await.unwrap();
+    persistence
+}
+
+async fn reconnect_database() -> PostgresPersistence {
+    let config = PersistenceConfig::from_test_environment()
+        .expect("TEST_DATABASE_URL must identify dedicated disposable PostgreSQL");
+    let persistence = PostgresPersistence::connect(&config).await.unwrap();
+    persistence.verify_disposable_test_database().await.unwrap();
     persistence
 }
 
@@ -398,6 +407,36 @@ fn extraction_transfer(
     }
 }
 
+fn extraction_request(
+    account_id: [u8; 16],
+    character_id: [u8; 16],
+    lineage_id: [u8; 16],
+    restore_id: [u8; 16],
+    lock: &CoreBossParticipantLock,
+) -> CaldusExtractionRequest {
+    let identities = CoreCaldusVictoryIdentities::derive(lineage_id, lock).unwrap();
+    let extraction = identities.extraction_for(lock.participants[0]).unwrap();
+    let revision = world_flow_revision();
+    CaldusExtractionRequest {
+        account_id,
+        character_id,
+        extraction_request_id: extraction.request_id.bytes(),
+        encounter_id: identities.encounter_id.bytes(),
+        instance_lineage_id: lineage_id,
+        entry_restore_point_id: restore_id,
+        exit_instance_id: identities.exit_instance_id.bytes(),
+        attempt_ordinal: lock.attempt_ordinal,
+        party_slot: lock.participants[0].party_slot,
+        participant_entity_id: lock.participants[0].entity_id.get(),
+        expected_character_version: 2,
+        content_revision: StoredWorldFlowRevisionV1 {
+            records_blake3: revision.records_blake3.as_str().to_owned(),
+            assets_blake3: revision.assets_blake3.as_str().to_owned(),
+            localization_blake3: revision.localization_blake3.as_str().to_owned(),
+        },
+    }
+}
+
 #[tokio::test]
 #[ignore = "requires explicitly authorized disposable PostgreSQL"]
 async fn caldus_victory_fresh_replay_and_payload_conflict_are_durable() {
@@ -625,8 +664,10 @@ async fn caldus_committed_receipt_supersedes_restore_and_transfers_once_to_hall_
         transaction.rollback().await.unwrap();
         version
     };
+    drop(extraction);
+    let restarted_persistence = reconnect_database().await;
     let hall = PostgresCaldusHallTransferCoordinator::new(
-        persistence.clone(),
+        restarted_persistence,
         ExtractionClock,
         world_flow_revision(),
     );
@@ -713,4 +754,95 @@ async fn caldus_committed_receipt_supersedes_restore_and_transfers_once_to_hall_
     .unwrap();
     assert_eq!(checkpoint_count, 0);
     verification.rollback().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires explicitly authorized disposable PostgreSQL"]
+async fn crash_restore_between_request_and_receipt_supersedes_caldus_extraction() {
+    let persistence = disposable_database().await;
+    let account_id = [171; 16];
+    let character_id = [172; 16];
+    let lineage_id = [173; 16];
+    let restore_id = [174; 16];
+    let lock = lock(175, 1);
+    reset_fixture(&persistence, account_id, character_id, lineage_id, &lock).await;
+    stage_danger_binding(
+        &persistence,
+        account_id,
+        character_id,
+        lineage_id,
+        restore_id,
+    )
+    .await;
+    let (_, _, coordinator) = services(&persistence);
+    coordinator
+        .commit(
+            lineage_id,
+            &lock,
+            ACTIVE_TICKS,
+            CURRENT_TICK,
+            std::slice::from_ref(&owner(account_id, character_id, 175)),
+        )
+        .await
+        .unwrap();
+
+    let request = extraction_request(account_id, character_id, lineage_id, restore_id, &lock);
+    let requested = persistence
+        .request_caldus_extraction(&request)
+        .await
+        .unwrap();
+    assert!(matches!(
+        requested,
+        persistence::CaldusExtractionTransaction::Fresh(ref result)
+            if result.state == StoredExtractionState::Requested
+    ));
+
+    let mut restore = persistence.begin_transaction().await.unwrap();
+    sqlx::query(
+        "UPDATE character_entry_restore_points SET restore_state=2,
+         consumed_at=transaction_timestamp() WHERE namespace_id=$1 AND account_id=$2
+         AND character_id=$3 AND restore_point_id=$4 AND restore_state=0",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
+    .bind(restore_id.as_slice())
+    .execute(restore.connection())
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE character_instance_lineages SET lineage_state=2,closed_at=transaction_timestamp()
+         WHERE namespace_id=$1 AND account_id=$2 AND character_id=$3 AND lineage_id=$4",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
+    .bind(lineage_id.as_slice())
+    .execute(restore.connection())
+    .await
+    .unwrap();
+    restore.commit().await.unwrap();
+
+    let identities = CoreCaldusVictoryIdentities::derive(lineage_id, &lock).unwrap();
+    let extraction = identities.extraction_for(lock.participants[0]).unwrap();
+    assert!(matches!(
+        persistence
+            .commit_caldus_extraction(CaldusExtractionCommit {
+                extraction_request_id: extraction.request_id.bytes(),
+                extraction_receipt_id: extraction.receipt_id.bytes(),
+                authority: StoredExtractionAuthority::WipeableTestEvidence,
+            })
+            .await,
+        Err(PersistenceError::ExtractionSuperseded)
+    ));
+    let replay = persistence
+        .request_caldus_extraction(&request)
+        .await
+        .unwrap();
+    assert!(matches!(
+        replay,
+        persistence::CaldusExtractionTransaction::Replay(ref result)
+            if result.state == StoredExtractionState::Requested
+                && result.extraction_receipt_id.is_none()
+    ));
 }
