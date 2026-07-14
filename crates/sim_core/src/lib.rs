@@ -53,6 +53,7 @@ mod production_item;
 mod progression;
 mod readability;
 mod rng;
+mod safe_storage;
 mod scene_interaction;
 mod shared_authority;
 mod telemetry;
@@ -345,6 +346,11 @@ pub use readability::{
     canonical_priority_stack_is_valid, compile_hostile_readability_manifest,
 };
 pub use rng::{DeterministicRng, RngError, derive_stream_seed};
+pub use safe_storage::{
+    CHARACTER_SAFE_CAPACITY, DurableStorageSlot, SafeStorageCommand, SafeStorageError,
+    SafeStorageLocation, SafeStoragePlacement, SafeStoragePlan, SafeStorageSnapshot,
+    VAULT_CAPACITY, plan_character_safe_preflight, plan_safe_storage_transfer,
+};
 pub use scene_interaction::{
     SceneInteractionEvent, SceneInteractionRejection, SceneInteractionSession,
     SceneInteractionSessionError,
