@@ -102,6 +102,36 @@ async fn seed_character(persistence: &PostgresPersistence) {
     .execute(transaction.connection())
     .await
     .unwrap();
+    sqlx::query(
+        "INSERT INTO character_inventories
+         (namespace_id,account_id,character_id,inventory_version) VALUES ($1,$2,$3,1)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(CHARACTER_ID.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO character_oath_bargain_state
+         (namespace_id,account_id,character_id,earned_bargain_slots,oath_bargain_version)
+         VALUES ($1,$2,$3,0,1)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(CHARACTER_ID.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO ash_wallets (namespace_id,account_id,balance,wallet_version)
+         VALUES ($1,$2,0,1)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
     transaction.commit().await.unwrap();
 }
 
