@@ -419,6 +419,9 @@ impl PostgresPersistence {
         // These rows bind both the character and its danger lineage. Delete the cross-linked
         // children explicitly before the account cascade reaches either side of that binding.
         for statement in [
+            "DELETE FROM character_extraction_results WHERE namespace_id = $1",
+            "DELETE FROM caldus_victory_exit_owners WHERE namespace_id = $1",
+            "DELETE FROM caldus_victory_exits WHERE namespace_id = $1",
             "DELETE FROM bargain_decision_results WHERE namespace_id = $1",
             "DELETE FROM character_active_bargains WHERE namespace_id = $1",
             "DELETE FROM bargain_milestone_results WHERE namespace_id = $1",
