@@ -55,7 +55,7 @@ const ASSET_IDS: [&str; 11] = [
     "tilemap.hub.lantern_halls_01",
     "tilemap.world.core_microrealm_01",
 ];
-const LOCALIZATION_KEYS: [&str; 24] = [
+const RECORD_LOCALIZATION_KEYS: [&str; 24] = [
     "hub.lantern_halls_01.description",
     "hub.lantern_halls_01.name",
     "landmark.lantern_fork.description",
@@ -81,12 +81,184 @@ const LOCALIZATION_KEYS: [&str; 24] = [
     "world.core_microrealm_01.description",
     "world.core_microrealm_01.name",
 ];
+const LOCALIZATION_KEYS: [&str; 71] = [
+    "hub.lantern_halls_01.description",
+    "hub.lantern_halls_01.name",
+    "landmark.lantern_fork.description",
+    "landmark.lantern_fork.name",
+    "landmark.realm_gate.description",
+    "landmark.realm_gate.name",
+    "portal.dungeon.bell_sepulcher.description",
+    "portal.dungeon.bell_sepulcher.name",
+    "portal.return.lantern_halls.description",
+    "portal.return.lantern_halls.name",
+    "spawn.hub.character_select_return.description",
+    "spawn.hub.character_select_return.name",
+    "station.memorial_wall.description",
+    "station.memorial_wall.name",
+    "station.oath_shrine.description",
+    "station.oath_shrine.name",
+    "station.overflow.description",
+    "station.overflow.name",
+    "station.realm_gate.description",
+    "station.realm_gate.name",
+    "station.vault.description",
+    "station.vault.name",
+    "world.core_microrealm_01.description",
+    "world.core_microrealm_01.name",
+    "transition.action.exit",
+    "transition.action.retry",
+    "transition.action.return_character_select",
+    "transition.handshake.account_suspended",
+    "transition.handshake.authentication_failed",
+    "transition.handshake.content_mismatch",
+    "transition.handshake.internal_retryable",
+    "transition.handshake.maintenance",
+    "transition.handshake.protocol_unsupported",
+    "transition.handshake.rate_limited",
+    "transition.handshake.region_full",
+    "transition.handshake.update_required",
+    "transition.transfer.character_dead",
+    "transition.transfer.character_not_found",
+    "transition.transfer.character_not_owned",
+    "transition.transfer.content_disabled",
+    "transition.transfer.content_mismatch",
+    "transition.transfer.destination_disabled",
+    "transition.transfer.idempotency_conflict",
+    "transition.transfer.incomplete_restore_point",
+    "transition.transfer.instance_unavailable",
+    "transition.transfer.invalid_source",
+    "transition.transfer.issued_at_invalid",
+    "transition.transfer.no_selected_character",
+    "transition.transfer.out_of_range",
+    "transition.transfer.payload_hash_mismatch",
+    "transition.transfer.rate_limited",
+    "transition.transfer.service_unavailable",
+    "transition.transfer.stage_disabled",
+    "transition.transfer.state_version_mismatch",
+    "transition.transfer.storage_resolution_required",
+    "transition.transfer.transfer_in_progress",
+    "transition.phase.awaiting_authoritative_state",
+    "transition.phase.fatal_error",
+    "transition.phase.link_lost",
+    "transition.phase.loading_content",
+    "transition.phase.ready",
+    "transition.phase.reconnecting",
+    "transition.phase.recoverable_error",
+    "transition.phase.requesting_transfer",
+    "transition.phase.resolved_to_character_select",
+    "transition.phase.resolved_to_hall",
+    "transition.phase.safe_origin",
+    "transition.status.no_progress",
+    "transition.status.prior_safe_state",
+    "transition.status.reconnect_attempt",
+    "transition.status.vulnerability_warning",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreWorldFlowHashes {
     pub records_blake3: String,
     pub assets_blake3: String,
     pub localization_blake3: String,
+}
+
+/// Closed keys for native Core transfer, failure, and reconnect presentation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CoreWorldTransitionCopyKey {
+    ActionExit,
+    ActionRetry,
+    ActionReturnCharacterSelect,
+    HandshakeAccountSuspended,
+    HandshakeAuthenticationFailed,
+    HandshakeContentMismatch,
+    HandshakeInternalRetryable,
+    HandshakeMaintenance,
+    HandshakeProtocolUnsupported,
+    HandshakeRateLimited,
+    HandshakeRegionFull,
+    HandshakeUpdateRequired,
+    PhaseAwaitingAuthoritativeState,
+    PhaseFatalError,
+    PhaseLinkLost,
+    PhaseLoadingContent,
+    PhaseReady,
+    PhaseReconnecting,
+    PhaseRecoverableError,
+    PhaseRequestingTransfer,
+    PhaseResolvedToCharacterSelect,
+    PhaseResolvedToHall,
+    PhaseSafeOrigin,
+    StatusNoProgress,
+    StatusPriorSafeState,
+    StatusReconnectAttempt,
+    StatusVulnerabilityWarning,
+}
+
+impl CoreWorldTransitionCopyKey {
+    pub const ALL: [Self; 27] = [
+        Self::ActionExit,
+        Self::ActionRetry,
+        Self::ActionReturnCharacterSelect,
+        Self::HandshakeAccountSuspended,
+        Self::HandshakeAuthenticationFailed,
+        Self::HandshakeContentMismatch,
+        Self::HandshakeInternalRetryable,
+        Self::HandshakeMaintenance,
+        Self::HandshakeProtocolUnsupported,
+        Self::HandshakeRateLimited,
+        Self::HandshakeRegionFull,
+        Self::HandshakeUpdateRequired,
+        Self::PhaseAwaitingAuthoritativeState,
+        Self::PhaseFatalError,
+        Self::PhaseLinkLost,
+        Self::PhaseLoadingContent,
+        Self::PhaseReady,
+        Self::PhaseReconnecting,
+        Self::PhaseRecoverableError,
+        Self::PhaseRequestingTransfer,
+        Self::PhaseResolvedToCharacterSelect,
+        Self::PhaseResolvedToHall,
+        Self::PhaseSafeOrigin,
+        Self::StatusNoProgress,
+        Self::StatusPriorSafeState,
+        Self::StatusReconnectAttempt,
+        Self::StatusVulnerabilityWarning,
+    ];
+
+    #[must_use]
+    pub const fn localization_key(self) -> &'static str {
+        match self {
+            Self::ActionExit => "transition.action.exit",
+            Self::ActionRetry => "transition.action.retry",
+            Self::ActionReturnCharacterSelect => "transition.action.return_character_select",
+            Self::HandshakeAccountSuspended => "transition.handshake.account_suspended",
+            Self::HandshakeAuthenticationFailed => "transition.handshake.authentication_failed",
+            Self::HandshakeContentMismatch => "transition.handshake.content_mismatch",
+            Self::HandshakeInternalRetryable => "transition.handshake.internal_retryable",
+            Self::HandshakeMaintenance => "transition.handshake.maintenance",
+            Self::HandshakeProtocolUnsupported => "transition.handshake.protocol_unsupported",
+            Self::HandshakeRateLimited => "transition.handshake.rate_limited",
+            Self::HandshakeRegionFull => "transition.handshake.region_full",
+            Self::HandshakeUpdateRequired => "transition.handshake.update_required",
+            Self::PhaseAwaitingAuthoritativeState => {
+                "transition.phase.awaiting_authoritative_state"
+            }
+            Self::PhaseFatalError => "transition.phase.fatal_error",
+            Self::PhaseLinkLost => "transition.phase.link_lost",
+            Self::PhaseLoadingContent => "transition.phase.loading_content",
+            Self::PhaseReady => "transition.phase.ready",
+            Self::PhaseReconnecting => "transition.phase.reconnecting",
+            Self::PhaseRecoverableError => "transition.phase.recoverable_error",
+            Self::PhaseRequestingTransfer => "transition.phase.requesting_transfer",
+            Self::PhaseResolvedToCharacterSelect => "transition.phase.resolved_to_character_select",
+            Self::PhaseResolvedToHall => "transition.phase.resolved_to_hall",
+            Self::PhaseSafeOrigin => "transition.phase.safe_origin",
+            Self::StatusNoProgress => "transition.status.no_progress",
+            Self::StatusPriorSafeState => "transition.status.prior_safe_state",
+            Self::StatusReconnectAttempt => "transition.status.reconnect_attempt",
+            Self::StatusVulnerabilityWarning => "transition.status.vulnerability_warning",
+        }
+    }
 }
 
 /// Immutable compiled development view. It deliberately has no serialization or release API.
@@ -129,6 +301,15 @@ impl CoreDevelopmentWorldFlow {
     #[must_use]
     pub fn localized(&self, key: &str) -> Option<&str> {
         self.localization.get(key).map(String::as_str)
+    }
+
+    /// Returns copy only from the compile-time closed transition-key set.
+    #[must_use]
+    pub fn transition_copy(&self, key: CoreWorldTransitionCopyKey) -> &str {
+        self.localization
+            .get(key.localization_key())
+            .map(String::as_str)
+            .expect("validated Core transition copy key must remain present")
     }
 
     /// Compiles the validated Lantern Halls record into renderer-independent simulation data.
@@ -432,7 +613,7 @@ fn validate_copy(
     referenced.sort();
     require_same_ids(
         &referenced,
-        &target.required_localization_keys,
+        &target.required_localization_keys[..RECORD_LOCALIZATION_KEYS.len()],
         "referenced localization",
     )?;
     Ok(())
@@ -1045,6 +1226,24 @@ mod tests {
             "packages/core.1.0.0.json",
         ] {
             assert!(!content_root().join(forbidden).exists());
+        }
+    }
+
+    #[test]
+    fn transition_copy_is_closed_typed_and_complete() {
+        let compiled =
+            load_core_development_world_flow(&content_root()).expect("valid Core world flow");
+        assert_eq!(
+            CoreWorldTransitionCopyKey::ALL
+                .iter()
+                .map(|key| key.localization_key())
+                .collect::<BTreeSet<_>>()
+                .len(),
+            CoreWorldTransitionCopyKey::ALL.len()
+        );
+        for key in CoreWorldTransitionCopyKey::ALL {
+            assert!(key.localization_key().starts_with("transition."));
+            assert!(!compiled.transition_copy(key).trim().is_empty());
         }
     }
 
