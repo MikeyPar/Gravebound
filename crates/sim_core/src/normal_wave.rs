@@ -338,6 +338,11 @@ impl NormalWaveSimulation {
     }
 
     #[must_use]
+    pub const fn arena(&self) -> &ArenaGeometry {
+        &self.arena
+    }
+
+    #[must_use]
     pub fn player(&self) -> &EnemyLabPlayer {
         match self.players.first_key_value() {
             Some((_, player)) => player,
