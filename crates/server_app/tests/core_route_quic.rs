@@ -368,7 +368,7 @@ async fn reliable_quic_traverses_disposable_core_route_and_committed_extraction(
         )
         .await
         .unwrap();
-        for response_sequence in 1..=3 {
+        for response_sequence in 1..=6 {
             serve_core_reliable(
                 &server,
                 &identity,
@@ -391,23 +391,56 @@ async fn reliable_quic_traverses_disposable_core_route_and_committed_extraction(
                 |flag| flag.as_str() == "core_world_flow_integration"
             )
         ));
+        let hall_request = route_frame(
+            1,
+            [224; 16],
+            1,
+            WorldTransferCommand::EnterHallFromCharacterSelect,
+        );
+        let _discarded_committed_response =
+            bot_client::perform_world_flow(&client, hall_request.clone())
+                .await
+                .unwrap();
         let (_, hall) = bot_client::perform_world_flow(
             &client,
-            route_frame(
-                1,
-                [224; 16],
-                1,
-                WorldTransferCommand::EnterHallFromCharacterSelect,
-            ),
+            WorldFlowFrame {
+                sequence: 2,
+                ..hall_request
+            },
         )
         .await
         .unwrap();
         assert_accepted(&hall, 2, HALL_ID);
+        let mut mismatched_danger = route_frame(
+            3,
+            [225; 16],
+            2,
+            WorldTransferCommand::UsePortal {
+                portal_id: WireText::new("station.realm_gate").unwrap(),
+            },
+        );
+        let WorldFlowRequest::Transfer(mutation) = &mut mismatched_danger.request else {
+            unreachable!();
+        };
+        mutation.payload.content_revision.assets_blake3 =
+            ManifestHash::new("f".repeat(64)).unwrap();
+        mutation.payload_hash = mutation.payload.canonical_hash();
+        let (_, mismatch) = bot_client::perform_world_flow(&client, mismatched_danger)
+            .await
+            .unwrap();
+        assert!(matches!(
+            mismatch,
+            WorldFlowResult::Transfer {
+                accepted: false,
+                code: WorldTransferResultCode::ContentMismatch,
+                ..
+            }
+        ));
         let (_, danger) = bot_client::perform_world_flow(
             &client,
             route_frame(
-                2,
-                [225; 16],
+                4,
+                [226; 16],
                 2,
                 WorldTransferCommand::UsePortal {
                     portal_id: WireText::new("station.realm_gate").unwrap(),
@@ -418,22 +451,30 @@ async fn reliable_quic_traverses_disposable_core_route_and_committed_extraction(
         .unwrap();
         assert_accepted(&danger, 3, WORLD_ID);
         commit_caldus_fixture(&persistence).await;
-        let (_, hall_return) = bot_client::perform_world_flow(
+        let extraction_request = route_frame(
+            5,
+            [227; 16],
+            3,
+            WorldTransferCommand::UseCommittedExtraction {
+                portal_id: WireText::new("portal.exit.dungeon.bell_sepulcher").unwrap(),
+                extraction_request_id: EXTRACTION_REQUEST_ID,
+                extraction_receipt_id: EXTRACTION_RECEIPT_ID,
+            },
+        );
+        let (_, hall_return) = bot_client::perform_world_flow(&client, extraction_request.clone())
+            .await
+            .unwrap();
+        assert_accepted(&hall_return, 4, HALL_ID);
+        let (_, extraction_replay) = bot_client::perform_world_flow(
             &client,
-            route_frame(
-                3,
-                [226; 16],
-                3,
-                WorldTransferCommand::UseCommittedExtraction {
-                    portal_id: WireText::new("portal.exit.dungeon.bell_sepulcher").unwrap(),
-                    extraction_request_id: EXTRACTION_REQUEST_ID,
-                    extraction_receipt_id: EXTRACTION_RECEIPT_ID,
-                },
-            ),
+            WorldFlowFrame {
+                sequence: 6,
+                ..extraction_request
+            },
         )
         .await
         .unwrap();
-        assert_accepted(&hall_return, 4, HALL_ID);
+        assert_accepted(&extraction_replay, 4, HALL_ID);
     };
     tokio::join!(server_journey, client_journey);
 
