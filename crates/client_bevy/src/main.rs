@@ -62,6 +62,13 @@ enum Command {
         #[arg(long, value_enum)]
         evidence_state: Option<CoreWorldEvidenceStateArg>,
     },
+    /// Open the disposable GB-M03-03D fixed-room and Core 6/2 evidence surface.
+    CoreEncounterShowcase {
+        #[arg(long, default_value = "content")]
+        content_root: PathBuf,
+        #[arg(long)]
+        reduced_effects: bool,
+    },
 }
 
 fn main() {
@@ -112,6 +119,13 @@ fn main() {
                     client_bevy::CoreWorldShowcaseEvidenceState::MicrorealmCleared
                 }
             }),
+        }),
+        Command::CoreEncounterShowcase {
+            content_root,
+            reduced_effects,
+        } => client_bevy::run_core_encounter_showcase(client_bevy::CoreEncounterShowcaseConfig {
+            content_root,
+            reduced_effects,
         }),
     };
     if let Err(error) = result {

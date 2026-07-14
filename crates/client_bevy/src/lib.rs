@@ -6,6 +6,7 @@ mod bargain_feedback;
 mod bargain_ui;
 mod combat;
 mod consumable;
+mod core_encounter_showcase;
 mod core_identity;
 mod core_world_showcase;
 mod death;
@@ -54,6 +55,7 @@ pub use arena_view::{
 };
 pub use combat::AbilityTwoBindings;
 pub use combat::{AbilityOneBindings, CombatInputGate, PrimaryFireBindings};
+pub use core_encounter_showcase::{CoreEncounterShowcaseConfig, run_core_encounter_showcase};
 pub use core_identity::{
     CoreIdentityConfig, CoreIdentityModel, CoreIdentityPhase, run_core_identity,
 };
