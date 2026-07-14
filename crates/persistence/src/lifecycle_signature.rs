@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use sqlx::{PgConnection, Row};
 
 use crate::{
@@ -114,6 +116,10 @@ pub struct StoredLifecycleItemV1 {
     pub security_state: u16,
     pub location_kind: u16,
     pub slot_index: Option<u16>,
+    pub instance_id: Option<[u8; 16]>,
+    pub pickup_id: Option<[u8; 16]>,
+    pub expires_at_tick: Option<u64>,
+    pub destruction_reason: Option<String>,
     pub provenance_kind: u16,
     pub salvage_band: u16,
     pub salvage_value: u32,
@@ -535,7 +541,8 @@ impl PostgresPersistence {
         let item_rows = sqlx::query(
             "SELECT item_uid,character_id,template_id,content_revision,item_kind,item_level,rarity, \
              creation_kind,creation_request_id,roll_index,unit_ordinal,item_version,security_state, \
-             location_kind,slot_index,provenance_kind,salvage_band,salvage_value FROM item_instances \
+             location_kind,slot_index,instance_id,pickup_id,expires_at_tick,destruction_reason, \
+             provenance_kind,salvage_band,salvage_value FROM item_instances \
              WHERE namespace_id=$1 AND account_id=$2 ORDER BY item_uid",
         )
         .bind(WIPEABLE_CORE_NAMESPACE)
@@ -560,6 +567,12 @@ impl PostgresPersistence {
                 security_state: unsigned(row.try_get::<i16, _>("security_state")?)?,
                 location_kind: unsigned(row.try_get::<i16, _>("location_kind")?)?,
                 slot_index: optional_unsigned(row.try_get::<Option<i16>, _>("slot_index")?)?,
+                instance_id: optional_id(row.try_get("instance_id")?)?,
+                pickup_id: optional_id(row.try_get("pickup_id")?)?,
+                expires_at_tick: optional_unsigned(
+                    row.try_get::<Option<i64>, _>("expires_at_tick")?,
+                )?,
+                destruction_reason: row.try_get("destruction_reason")?,
                 provenance_kind: unsigned(row.try_get::<i16, _>("provenance_kind")?)?,
                 salvage_band: unsigned(row.try_get::<i16, _>("salvage_band")?)?,
                 salvage_value: unsigned(row.try_get::<i32, _>("salvage_value")?)?,
@@ -735,6 +748,7 @@ fn validate_signature(
             .items
             .iter()
             .any(|item| item.content_revision != signature.item_content_revision)
+        || invalid_items(&signature.items)
         || !signature
             .starter_receipts
             .windows(2)
@@ -787,6 +801,7 @@ fn validate_signature(
                 pair[1].ledger_event_id,
             )
         })
+        || invalid_ledger(&signature.items, &signature.ledger)
         || signature
             .safe_inventory_receipts
             .iter()
@@ -795,6 +810,183 @@ fn validate_signature(
         return Err(PersistenceError::CorruptStoredLifecycleSignature);
     }
     Ok(())
+}
+
+fn invalid_items(items: &[StoredLifecycleItemV1]) -> bool {
+    type ProjectedSlotKey = (u16, Option<[u8; 16]>, u16);
+    let mut projected_slots: BTreeMap<ProjectedSlotKey, Vec<&StoredLifecycleItemV1>> =
+        BTreeMap::new();
+
+    for item in items {
+        if invalid_item(item) {
+            return true;
+        }
+        if let Some(slot_index) = item.slot_index {
+            projected_slots
+                .entry((item.location_kind, item.character_id, slot_index))
+                .or_default()
+                .push(item);
+        }
+    }
+
+    projected_slots.values().any(|slot| {
+        let first = slot[0];
+        match first.item_kind {
+            0 => slot.len() != 1,
+            1 => {
+                slot.len() > 6
+                    || slot
+                        .iter()
+                        .any(|item| item.item_kind != 1 || item.template_id != first.template_id)
+            }
+            _ => true,
+        }
+    })
+}
+
+fn invalid_item(item: &StoredLifecycleItemV1) -> bool {
+    let no_ground_identity = item.instance_id.is_none()
+        && item.pickup_id.is_none()
+        && item.expires_at_tick.is_none()
+        && item.destruction_reason.is_none();
+    let location_valid = match item.location_kind {
+        0 => {
+            item.character_id.is_some()
+                && matches!(item.slot_index, Some(0..=3))
+                && no_ground_identity
+                && matches!(item.security_state, 0 | 1)
+                && item.item_kind == 0
+        }
+        1 => {
+            item.character_id.is_some()
+                && matches!(item.slot_index, Some(0..=1))
+                && no_ground_identity
+                && matches!(item.security_state, 0 | 1)
+                && item.item_kind == 1
+        }
+        2 => {
+            item.character_id.is_some()
+                && matches!(item.slot_index, Some(0..=7))
+                && no_ground_identity
+                && item.security_state == 2
+        }
+        3 => {
+            item.character_id.is_some()
+                && item.slot_index.is_none()
+                && item.instance_id.is_some_and(|id| id != [0; 16])
+                && item.pickup_id.is_some_and(|id| id != [0; 16])
+                && item.expires_at_tick.is_some_and(|tick| tick > 0)
+                && item.destruction_reason.is_none()
+                && item.security_state == 2
+        }
+        4 => {
+            item.character_id.is_some()
+                && item.slot_index.is_none()
+                && item.instance_id.is_none()
+                && item.pickup_id.is_none()
+                && item.expires_at_tick.is_none()
+                && item.destruction_reason.as_deref() == Some("ground_expired")
+                && item.security_state == 3
+        }
+        5 => {
+            item.character_id.is_some()
+                && matches!(item.slot_index, Some(0..=7))
+                && no_ground_identity
+                && item.security_state == 0
+        }
+        6 => {
+            item.character_id.is_none()
+                && matches!(item.slot_index, Some(0..=159))
+                && no_ground_identity
+                && item.security_state == 0
+        }
+        _ => false,
+    };
+    let kind_valid = matches!(
+        (item.item_kind, item.item_level, item.rarity),
+        (0, Some(1..=10), Some(0..=4)) | (1, None, None)
+    );
+    let provenance_valid = matches!(
+        (item.creation_kind, item.provenance_kind),
+        (0, 0 | 4) | (1, 1 | 4)
+    );
+    let salvage_valid = ((item.provenance_kind == 0 || item.item_kind == 1)
+        && item.salvage_band == 0
+        && item.salvage_value == 0)
+        || (item.provenance_kind != 0 && item.item_kind == 0 && item.salvage_band <= 5);
+
+    item.item_uid == [0; 16]
+        || item.creation_request_id == [0; 16]
+        || !(3..=96).contains(&item.template_id.chars().count())
+        || item.item_version == 0
+        || !kind_valid
+        || !provenance_valid
+        || !salvage_valid
+        || !location_valid
+}
+
+fn invalid_ledger(
+    items: &[StoredLifecycleItemV1],
+    ledger: &[StoredLifecycleLedgerEntryV1],
+) -> bool {
+    let item_versions: BTreeMap<[u8; 16], u64> = items
+        .iter()
+        .map(|item| (item.item_uid, item.item_version))
+        .collect();
+    let mut last_versions = BTreeMap::new();
+
+    for entry in ledger {
+        let Some(current_item_version) = item_versions.get(&entry.item_uid) else {
+            return true;
+        };
+        let event_shape_valid = match entry.event_kind {
+            0 => {
+                entry.pre_item_version == 0
+                    && entry.pre_security_state.is_none()
+                    && entry.pre_location_kind.is_none()
+                    && entry.reason.is_none()
+            }
+            1 => {
+                entry.pre_item_version > 0
+                    && entry.pre_security_state.is_some()
+                    && entry.pre_location_kind.is_some()
+                    && entry.reason.is_none()
+            }
+            2 => {
+                entry.pre_item_version > 0
+                    && entry.pre_security_state.is_some()
+                    && entry.pre_location_kind.is_some()
+                    && entry.post_security_state == 3
+                    && entry.post_location_kind == 4
+                    && entry.reason.as_deref() == Some("ground_expired")
+            }
+            _ => false,
+        };
+        if entry.ledger_event_id == [0; 16]
+            || entry.acting_character_id == [0; 16]
+            || entry.mutation_id == [0; 16]
+            || entry.source_kind > 2
+            || entry.post_item_version != entry.pre_item_version.checked_add(1).unwrap_or(0)
+            || entry.pre_security_state.is_some_and(|state| state > 3)
+            || entry.post_security_state > 3
+            || entry.pre_location_kind.is_some_and(|kind| kind > 6)
+            || entry.post_location_kind > 6
+            || entry.post_item_version > *current_item_version
+            || !event_shape_valid
+        {
+            return true;
+        }
+        if let Some(previous_version) =
+            last_versions.insert(entry.item_uid, entry.post_item_version)
+            && entry.pre_item_version != previous_version
+        {
+            return true;
+        }
+    }
+
+    last_versions
+        .iter()
+        .any(|(item_uid, version)| item_versions.get(item_uid) != Some(version))
 }
 
 fn invalid_xp_receipt(receipt: &StoredLifecycleXpReceiptV1) -> bool {
@@ -973,6 +1165,78 @@ where
 mod tests {
     use super::*;
 
+    fn equipment_item(item_uid: [u8; 16], item_version: u64) -> StoredLifecycleItemV1 {
+        StoredLifecycleItemV1 {
+            item_uid,
+            character_id: Some([2; 16]),
+            template_id: "equipment.test".to_owned(),
+            content_revision: CORE_ITEM_CONTENT_REVISION.to_owned(),
+            item_kind: 0,
+            item_level: Some(1),
+            rarity: Some(0),
+            creation_kind: 0,
+            creation_request_id: item_uid,
+            roll_index: 0,
+            unit_ordinal: 0,
+            item_version,
+            security_state: 0,
+            location_kind: 0,
+            slot_index: Some(0),
+            instance_id: None,
+            pickup_id: None,
+            expires_at_tick: None,
+            destruction_reason: None,
+            provenance_kind: 0,
+            salvage_band: 0,
+            salvage_value: 0,
+        }
+    }
+
+    fn consumable_safe_item(item_uid: [u8; 16]) -> StoredLifecycleItemV1 {
+        StoredLifecycleItemV1 {
+            item_uid,
+            character_id: Some([2; 16]),
+            template_id: "consumable.test".to_owned(),
+            content_revision: CORE_ITEM_CONTENT_REVISION.to_owned(),
+            item_kind: 1,
+            item_level: None,
+            rarity: None,
+            creation_kind: 0,
+            creation_request_id: item_uid,
+            roll_index: 0,
+            unit_ordinal: 0,
+            item_version: 1,
+            security_state: 0,
+            location_kind: 5,
+            slot_index: Some(0),
+            instance_id: None,
+            pickup_id: None,
+            expires_at_tick: None,
+            destruction_reason: None,
+            provenance_kind: 0,
+            salvage_band: 0,
+            salvage_value: 0,
+        }
+    }
+
+    fn transition_ledger(item_uid: [u8; 16]) -> StoredLifecycleLedgerEntryV1 {
+        StoredLifecycleLedgerEntryV1 {
+            ledger_event_id: [7; 16],
+            item_uid,
+            acting_character_id: [2; 16],
+            mutation_id: [8; 16],
+            event_kind: 1,
+            source_kind: 2,
+            pre_item_version: 1,
+            post_item_version: 2,
+            pre_security_state: Some(2),
+            post_security_state: 0,
+            pre_location_kind: Some(2),
+            post_location_kind: 0,
+            reason: None,
+        }
+    }
+
     fn signature() -> StoredCoreItemLifecycleSignatureV1 {
         StoredCoreItemLifecycleSignatureV1 {
             contract_version: 1,
@@ -1068,6 +1332,74 @@ mod tests {
         value.safe_inventory_receipts[0].result_hash[0] ^= 1;
         assert_ne!(canonical, value.canonical_bytes().unwrap());
         value.safe_inventory_receipts[0].result_code = 0;
+        assert!(matches!(
+            value.canonical_bytes(),
+            Err(PersistenceError::CorruptStoredLifecycleSignature)
+        ));
+    }
+
+    #[test]
+    fn item_location_identity_shape_fails_closed() {
+        let mut value = signature();
+        let mut item = equipment_item([3; 16], 1);
+        item.location_kind = 3;
+        item.security_state = 2;
+        item.slot_index = None;
+        item.instance_id = Some([4; 16]);
+        item.pickup_id = Some([5; 16]);
+        item.expires_at_tick = Some(100);
+        value.items.push(item);
+        assert!(value.canonical_bytes().is_ok());
+
+        value.items[0].pickup_id = None;
+        assert!(matches!(
+            value.canonical_bytes(),
+            Err(PersistenceError::CorruptStoredLifecycleSignature)
+        ));
+    }
+
+    #[test]
+    fn projected_stack_is_limited_to_six_homogeneous_units() {
+        let mut value = signature();
+        value.items = (1..=6)
+            .map(|byte| consumable_safe_item([byte; 16]))
+            .collect();
+        assert!(value.canonical_bytes().is_ok());
+
+        value.items.push(consumable_safe_item([7; 16]));
+        assert!(matches!(
+            value.canonical_bytes(),
+            Err(PersistenceError::CorruptStoredLifecycleSignature)
+        ));
+
+        value.items.pop();
+        value.items[5].template_id = "consumable.other".to_owned();
+        assert!(matches!(
+            value.canonical_bytes(),
+            Err(PersistenceError::CorruptStoredLifecycleSignature)
+        ));
+    }
+
+    #[test]
+    fn ledger_identity_event_and_version_shapes_fail_closed() {
+        let mut value = signature();
+        value.items.push(equipment_item([3; 16], 2));
+        value.ledger.push(transition_ledger([3; 16]));
+        assert!(value.canonical_bytes().is_ok());
+
+        value.ledger[0].mutation_id = [0; 16];
+        assert!(matches!(
+            value.canonical_bytes(),
+            Err(PersistenceError::CorruptStoredLifecycleSignature)
+        ));
+        value.ledger[0].mutation_id = [8; 16];
+        value.ledger[0].post_item_version = 3;
+        assert!(matches!(
+            value.canonical_bytes(),
+            Err(PersistenceError::CorruptStoredLifecycleSignature)
+        ));
+        value.ledger[0].post_item_version = 2;
+        value.ledger[0].reason = Some("unexpected".to_owned());
         assert!(matches!(
             value.canonical_bytes(),
             Err(PersistenceError::CorruptStoredLifecycleSignature)
