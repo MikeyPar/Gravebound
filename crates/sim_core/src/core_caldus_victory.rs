@@ -27,6 +27,8 @@ const ID_BYTES: usize = 16;
 const ENCOUNTER_DOMAIN: &[u8] = b"gravebound.caldus.encounter.v1";
 const REWARD_DOMAIN: &[u8] = b"gravebound.caldus.personal-reward.v1";
 const EXIT_DOMAIN: &[u8] = b"gravebound.caldus.exit-instance.v1";
+const EXTRACTION_REQUEST_DOMAIN: &[u8] = b"gravebound.caldus.extraction-request.v1";
+const EXTRACTION_RECEIPT_DOMAIN: &[u8] = b"gravebound.caldus.extraction-receipt.v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CoreCaldusStableId([u8; ID_BYTES]);
@@ -45,10 +47,18 @@ pub struct CoreCaldusPersonalRewardIdentity {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreCaldusPersonalExtractionIdentity {
+    pub participant: CoreBossParticipant,
+    pub request_id: CoreCaldusStableId,
+    pub receipt_id: CoreCaldusStableId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreCaldusVictoryIdentities {
     pub encounter_id: CoreCaldusStableId,
     pub exit_instance_id: CoreCaldusStableId,
     pub personal_rewards: Vec<CoreCaldusPersonalRewardIdentity>,
+    pub personal_extractions: Vec<CoreCaldusPersonalExtractionIdentity>,
 }
 
 impl CoreCaldusVictoryIdentities {
@@ -94,10 +104,48 @@ impl CoreCaldusVictoryIdentities {
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let personal_extractions = lock
+            .participants
+            .iter()
+            .map(|participant| {
+                let entity = participant.entity_id.get().to_le_bytes();
+                let slot = [participant.party_slot];
+                let request_id = derive_id(
+                    EXTRACTION_REQUEST_DOMAIN,
+                    &[
+                        &instance_lineage_id,
+                        &attempt,
+                        &encounter_id.0,
+                        &exit_instance_id.0,
+                        &slot,
+                        &entity,
+                        CALDUS_EXIT_ID.as_bytes(),
+                    ],
+                )?;
+                let receipt_id = derive_id(
+                    EXTRACTION_RECEIPT_DOMAIN,
+                    &[
+                        &instance_lineage_id,
+                        &attempt,
+                        &encounter_id.0,
+                        &exit_instance_id.0,
+                        &request_id.0,
+                        &slot,
+                        &entity,
+                    ],
+                )?;
+                Ok(CoreCaldusPersonalExtractionIdentity {
+                    participant: *participant,
+                    request_id,
+                    receipt_id,
+                })
+            })
+            .collect::<Result<Vec<_>, CoreCaldusVictoryError>>()?;
         Ok(Self {
             encounter_id,
             exit_instance_id,
             personal_rewards,
+            personal_extractions,
         })
     }
 
@@ -107,6 +155,16 @@ impl CoreCaldusVictoryIdentities {
             .iter()
             .find(|reward| reward.participant == participant)
             .map(|reward| reward.request_id)
+    }
+
+    #[must_use]
+    pub fn extraction_for(
+        &self,
+        participant: CoreBossParticipant,
+    ) -> Option<&CoreCaldusPersonalExtractionIdentity> {
+        self.personal_extractions
+            .iter()
+            .find(|identity| identity.participant == participant)
     }
 }
 
@@ -404,13 +462,17 @@ mod tests {
             first.exit_instance_id,
             first.personal_rewards[0].request_id,
             first.personal_rewards[1].request_id,
+            first.personal_extractions[0].request_id,
+            first.personal_extractions[0].receipt_id,
+            first.personal_extractions[1].request_id,
+            first.personal_extractions[1].receipt_id,
         ];
-        assert_eq!(first_ids.iter().copied().collect::<BTreeSet<_>>().len(), 4);
+        assert_eq!(first_ids.iter().copied().collect::<BTreeSet<_>>().len(), 8);
         assert!(first_ids.iter().all(|id| {
-            !retry
-                .personal_rewards
-                .iter()
-                .any(|reward| reward.request_id == *id)
+            !retry.personal_rewards.iter().any(|reward| reward.request_id == *id)
+                && !retry.personal_extractions.iter().any(|extraction| {
+                    extraction.request_id == *id || extraction.receipt_id == *id
+                })
         }));
         assert_ne!(first.encounter_id, retry.encounter_id);
         assert_ne!(first.exit_instance_id, retry.exit_instance_id);

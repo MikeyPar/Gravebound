@@ -162,7 +162,8 @@ pub use core_caldus_victory::{
     CoreCaldusAntiCheatState, CoreCaldusDefeatPresence, CoreCaldusEligibilityDecision,
     CoreCaldusEligibilityEvidence, CoreCaldusIneligibilityReason, CoreCaldusPersonalRewardIdentity,
     CoreCaldusRecallState, CoreCaldusSessionState, CoreCaldusStableId, CoreCaldusVictoryError,
-    CoreCaldusVictoryIdentities, evaluate_caldus_eligibility,
+    CoreCaldusPersonalExtractionIdentity, CoreCaldusVictoryIdentities,
+    evaluate_caldus_eligibility,
 };
 pub use core_counterplay::{
     CORE_COM006_CLOSE_SPAWN_DISTANCE_MILLI_TILES,
