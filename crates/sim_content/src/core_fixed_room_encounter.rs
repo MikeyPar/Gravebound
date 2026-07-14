@@ -424,6 +424,7 @@ fn compile_node_plan(
     }
 
     let mut used_anchor_ids = BTreeSet::new();
+    let mut used_anchor_positions = BTreeSet::new();
     let mut assignments = Vec::with_capacity(units.len());
     for (index, (enemy_id, _)) in units.into_iter().enumerate() {
         let (runtime_kind, anchor_kind) = runtime_and_anchor_kind(enemy_id.as_str())?;
@@ -442,6 +443,8 @@ fn compile_node_plan(
                         .as_deref()
                         .is_none_or(|bound| bound == enemy_id.as_str())
                     && !used_anchor_ids.contains(anchor.id.as_str())
+                    && !used_anchor_positions
+                        .contains(&(anchor.x_milli_tiles, anchor.y_milli_tiles))
             })
             .min_by_key(|anchor| (anchor.y_milli_tiles, anchor.x_milli_tiles, &anchor.id))
             .ok_or_else(|| CoreFixedRoomEncounterError::MissingCompatibleAnchor {
@@ -449,6 +452,7 @@ fn compile_node_plan(
                 enemy_id: enemy_id.to_string(),
             })?;
         used_anchor_ids.insert(anchor.id.clone());
+        used_anchor_positions.insert((anchor.x_milli_tiles, anchor.y_milli_tiles));
         let offset =
             u16::try_from(index).map_err(|_| CoreFixedRoomEncounterError::DefinitionDrift)?;
         let instance_id = SpawnInstanceId {
@@ -728,6 +732,14 @@ mod tests {
                 .len()
                 == plan.assignments.len()
         }));
+        assert!(plans.iter().all(|plan| {
+            plan.assignments
+                .iter()
+                .map(|assignment| (assignment.x_milli_tiles, assignment.y_milli_tiles))
+                .collect::<BTreeSet<_>>()
+                .len()
+                == plan.assignments.len()
+        }));
     }
 
     #[test]
@@ -759,6 +771,13 @@ mod tests {
                 && !assignment.xp_profile_id.as_str().is_empty()
                 && assignment.instance_id.run_ordinal == 7
         }));
+        let skull = b2
+            .assignments
+            .iter()
+            .find(|assignment| assignment.runtime_kind == CoreFixedRoomActorRuntimeKind::ChoirSkull)
+            .expect("Skull");
+        assert_eq!(skull.anchor_id, "d3");
+        assert_eq!((skull.x_milli_tiles, skull.y_milli_tiles), (10_500, 7_500));
         let knight = &plans[2].assignments[0];
         assert_eq!(knight.enemy_id.as_str(), "miniboss.sepulcher_knight");
         assert_eq!(knight.anchor_id, "miniboss");
