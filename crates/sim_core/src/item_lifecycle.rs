@@ -1,3 +1,4 @@
+use crate::{EQUIPMENT_SLOT_COUNT, EquipmentSlot};
 use thiserror::Error;
 
 pub const ITEM_UID_BYTES: usize = 16;
@@ -48,6 +49,56 @@ pub enum EquipmentPlacementPlan {
     PersonalGround,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DurableEquipmentItem {
+    pub item_uid: ItemUid,
+    pub template_id: String,
+    pub legal_slot: EquipmentSlot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DurableRunBackpackSlot {
+    Empty,
+    Equipment(DurableEquipmentItem),
+    Consumable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldEquipmentSnapshot {
+    pub inventory_version: u64,
+    pub equipped: [Option<DurableEquipmentItem>; EQUIPMENT_SLOT_COUNT],
+    pub backpack: [DurableRunBackpackSlot; RUN_BACKPACK_CAPACITY],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FieldEquipmentSource {
+    RunBackpack {
+        slot_index: u8,
+    },
+    PersonalGround {
+        item: DurableEquipmentItem,
+        pickup_id: [u8; 16],
+        expires_at_tick: u64,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplacementDestination {
+    None,
+    RunBackpack { slot_index: u8 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldEquipmentPreview {
+    pub inventory_version: u64,
+    pub content_revision: String,
+    pub source: FieldEquipmentSource,
+    pub incoming: DurableEquipmentItem,
+    pub replaced: Option<DurableEquipmentItem>,
+    pub replacement_destination: ReplacementDestination,
+    pub preview_hash: [u8; 32],
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ItemLifecycleError {
     #[error("item UID cannot be all zero")]
@@ -62,6 +113,256 @@ pub enum ItemLifecycleError {
     InvalidRunBackpackCapacity,
     #[error("stored consumable stack quantity is outside 1..=6")]
     InvalidConsumableStack,
+    #[error("field equipment inventory version must be positive")]
+    InvalidInventoryVersion,
+    #[error("field equipment content revision cannot be empty")]
+    EmptyContentRevision,
+    #[error("field equipment template ID cannot be empty")]
+    EmptyEquipmentTemplateId,
+    #[error("RunBackpack source index is outside 0..=7")]
+    RunBackpackSourceOutOfRange,
+    #[error("RunBackpack source does not contain equipment")]
+    RunBackpackSourceNotEquipment,
+    #[error("personal-ground pickup identity cannot be all zero")]
+    ZeroPersonalGroundPickupId,
+    #[error("personal-ground item has already expired")]
+    PersonalGroundExpired,
+    #[error("PersonalGround equipment swap requires an empty RunBackpack index")]
+    BackpackFullForPersonalGroundSwap,
+    #[error("equipment item is stored in an illegal equipped slot")]
+    IllegalEquippedSlot,
+    #[error("equipment item identity occurs more than once in the snapshot")]
+    DuplicateEquipmentItem,
+    #[error("field equipment preview no longer matches authoritative state")]
+    StaleEquipmentPreview,
+}
+
+pub fn plan_field_equipment_swap(
+    snapshot: &FieldEquipmentSnapshot,
+    source: FieldEquipmentSource,
+    content_revision: &str,
+    now_tick: u64,
+) -> Result<FieldEquipmentPreview, ItemLifecycleError> {
+    validate_field_snapshot(snapshot)?;
+    if content_revision.is_empty() {
+        return Err(ItemLifecycleError::EmptyContentRevision);
+    }
+    let incoming = match &source {
+        FieldEquipmentSource::RunBackpack { slot_index } => {
+            let slot = snapshot
+                .backpack
+                .get(usize::from(*slot_index))
+                .ok_or(ItemLifecycleError::RunBackpackSourceOutOfRange)?;
+            let DurableRunBackpackSlot::Equipment(item) = slot else {
+                return Err(ItemLifecycleError::RunBackpackSourceNotEquipment);
+            };
+            item.clone()
+        }
+        FieldEquipmentSource::PersonalGround {
+            item,
+            pickup_id,
+            expires_at_tick,
+        } => {
+            validate_equipment_item(item)?;
+            if *pickup_id == [0; 16] {
+                return Err(ItemLifecycleError::ZeroPersonalGroundPickupId);
+            }
+            if now_tick >= *expires_at_tick {
+                return Err(ItemLifecycleError::PersonalGroundExpired);
+            }
+            if snapshot_contains(snapshot, item.item_uid) {
+                return Err(ItemLifecycleError::DuplicateEquipmentItem);
+            }
+            item.clone()
+        }
+    };
+    let replaced = snapshot.equipped[incoming.legal_slot.index()].clone();
+    let replacement_destination = match (&source, &replaced) {
+        (_, None) => ReplacementDestination::None,
+        (FieldEquipmentSource::RunBackpack { slot_index }, Some(_)) => {
+            ReplacementDestination::RunBackpack {
+                slot_index: *slot_index,
+            }
+        }
+        (FieldEquipmentSource::PersonalGround { .. }, Some(_)) => {
+            let index = snapshot
+                .backpack
+                .iter()
+                .position(|slot| matches!(slot, DurableRunBackpackSlot::Empty))
+                .ok_or(ItemLifecycleError::BackpackFullForPersonalGroundSwap)?;
+            ReplacementDestination::RunBackpack {
+                slot_index: u8::try_from(index)
+                    .map_err(|_| ItemLifecycleError::InvalidRunBackpackCapacity)?,
+            }
+        }
+    };
+    let preview_hash = field_equipment_preview_hash(
+        snapshot.inventory_version,
+        content_revision,
+        &source,
+        &incoming,
+        replaced.as_ref(),
+        replacement_destination,
+    )?;
+    Ok(FieldEquipmentPreview {
+        inventory_version: snapshot.inventory_version,
+        content_revision: content_revision.to_owned(),
+        source,
+        incoming,
+        replaced,
+        replacement_destination,
+        preview_hash,
+    })
+}
+
+pub fn apply_field_equipment_preview(
+    snapshot: &FieldEquipmentSnapshot,
+    preview: &FieldEquipmentPreview,
+    now_tick: u64,
+) -> Result<FieldEquipmentSnapshot, ItemLifecycleError> {
+    let expected = plan_field_equipment_swap(
+        snapshot,
+        preview.source.clone(),
+        &preview.content_revision,
+        now_tick,
+    )?;
+    if &expected != preview {
+        return Err(ItemLifecycleError::StaleEquipmentPreview);
+    }
+    let mut next = snapshot.clone();
+    match preview.source {
+        FieldEquipmentSource::RunBackpack { slot_index } => {
+            next.backpack[usize::from(slot_index)] = preview.replaced.clone().map_or(
+                DurableRunBackpackSlot::Empty,
+                DurableRunBackpackSlot::Equipment,
+            );
+        }
+        FieldEquipmentSource::PersonalGround { .. } => {
+            if let ReplacementDestination::RunBackpack { slot_index } =
+                preview.replacement_destination
+            {
+                next.backpack[usize::from(slot_index)] = DurableRunBackpackSlot::Equipment(
+                    preview
+                        .replaced
+                        .clone()
+                        .ok_or(ItemLifecycleError::StaleEquipmentPreview)?,
+                );
+            }
+        }
+    }
+    next.equipped[preview.incoming.legal_slot.index()] = Some(preview.incoming.clone());
+    next.inventory_version = next
+        .inventory_version
+        .checked_add(1)
+        .ok_or(ItemLifecycleError::InvalidInventoryVersion)?;
+    validate_field_snapshot(&next)?;
+    Ok(next)
+}
+
+fn validate_field_snapshot(snapshot: &FieldEquipmentSnapshot) -> Result<(), ItemLifecycleError> {
+    if snapshot.inventory_version == 0 {
+        return Err(ItemLifecycleError::InvalidInventoryVersion);
+    }
+    let mut identities = Vec::new();
+    for (index, item) in snapshot.equipped.iter().enumerate() {
+        if let Some(item) = item {
+            validate_equipment_item(item)?;
+            if item.legal_slot.index() != index {
+                return Err(ItemLifecycleError::IllegalEquippedSlot);
+            }
+            identities.push(item.item_uid);
+        }
+    }
+    for slot in &snapshot.backpack {
+        if let DurableRunBackpackSlot::Equipment(item) = slot {
+            validate_equipment_item(item)?;
+            identities.push(item.item_uid);
+        }
+    }
+    identities.sort_unstable();
+    if identities.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(ItemLifecycleError::DuplicateEquipmentItem);
+    }
+    Ok(())
+}
+
+fn validate_equipment_item(item: &DurableEquipmentItem) -> Result<(), ItemLifecycleError> {
+    if item.template_id.is_empty() {
+        return Err(ItemLifecycleError::EmptyEquipmentTemplateId);
+    }
+    Ok(())
+}
+
+fn snapshot_contains(snapshot: &FieldEquipmentSnapshot, uid: ItemUid) -> bool {
+    snapshot
+        .equipped
+        .iter()
+        .flatten()
+        .any(|item| item.item_uid == uid)
+        || snapshot.backpack.iter().any(
+            |slot| matches!(slot, DurableRunBackpackSlot::Equipment(item) if item.item_uid == uid),
+        )
+}
+
+fn field_equipment_preview_hash(
+    inventory_version: u64,
+    content_revision: &str,
+    source: &FieldEquipmentSource,
+    incoming: &DurableEquipmentItem,
+    replaced: Option<&DurableEquipmentItem>,
+    destination: ReplacementDestination,
+) -> Result<[u8; 32], ItemLifecycleError> {
+    let mut material = Vec::new();
+    push_hash_field(&mut material, &inventory_version.to_le_bytes())?;
+    push_hash_field(&mut material, content_revision.as_bytes())?;
+    match source {
+        FieldEquipmentSource::RunBackpack { slot_index } => {
+            push_hash_field(&mut material, &[0, *slot_index])?;
+        }
+        FieldEquipmentSource::PersonalGround {
+            pickup_id,
+            expires_at_tick,
+            ..
+        } => {
+            push_hash_field(&mut material, &[1])?;
+            push_hash_field(&mut material, pickup_id)?;
+            push_hash_field(&mut material, &expires_at_tick.to_le_bytes())?;
+        }
+    }
+    push_equipment_hash_fields(&mut material, incoming)?;
+    if let Some(item) = replaced {
+        push_hash_field(&mut material, &[1])?;
+        push_equipment_hash_fields(&mut material, item)?;
+    } else {
+        push_hash_field(&mut material, &[0])?;
+    }
+    match destination {
+        ReplacementDestination::None => push_hash_field(&mut material, &[0])?,
+        ReplacementDestination::RunBackpack { slot_index } => {
+            push_hash_field(&mut material, &[1, slot_index])?;
+        }
+    }
+    Ok(blake3::derive_key(
+        "gravebound.field-equipment-preview.v1",
+        &material,
+    ))
+}
+
+fn push_equipment_hash_fields(
+    material: &mut Vec<u8>,
+    item: &DurableEquipmentItem,
+) -> Result<(), ItemLifecycleError> {
+    push_hash_field(material, &item.item_uid.bytes())?;
+    push_hash_field(material, item.template_id.as_bytes())?;
+    push_hash_field(material, &[item.legal_slot as u8])
+}
+
+fn push_hash_field(material: &mut Vec<u8>, field: &[u8]) -> Result<(), ItemLifecycleError> {
+    let length =
+        u32::try_from(field.len()).map_err(|_| ItemLifecycleError::DerivationFieldTooLong)?;
+    material.extend_from_slice(&length.to_le_bytes());
+    material.extend_from_slice(field);
+    Ok(())
 }
 
 pub fn derive_reward_item_uid(
@@ -217,6 +518,35 @@ mod tests {
         vec![RunBackpackSlot::Empty; RUN_BACKPACK_CAPACITY]
     }
 
+    fn equipment(byte: u8, template: &str, legal_slot: EquipmentSlot) -> DurableEquipmentItem {
+        DurableEquipmentItem {
+            item_uid: ItemUid::new([byte; 16]).unwrap(),
+            template_id: template.to_owned(),
+            legal_slot,
+        }
+    }
+
+    fn field_snapshot() -> FieldEquipmentSnapshot {
+        FieldEquipmentSnapshot {
+            inventory_version: 7,
+            equipped: [
+                Some(equipment(
+                    1,
+                    "item.weapon.crossbow.pine_crossbow",
+                    EquipmentSlot::Weapon,
+                )),
+                Some(equipment(
+                    2,
+                    "item.relic.arbalist.cracked_mark_lens",
+                    EquipmentSlot::Relic,
+                )),
+                None,
+                None,
+            ],
+            backpack: std::array::from_fn(|_| DurableRunBackpackSlot::Empty),
+        }
+    }
+
     #[test]
     fn uid_derivation_is_domain_separated_framed_and_stable() {
         let request = [0x11; 16];
@@ -312,6 +642,141 @@ mod tests {
         assert_eq!(
             plan_equipment_reward_placement(&slots[..7]),
             Err(ItemLifecycleError::InvalidRunBackpackCapacity)
+        );
+    }
+
+    #[test]
+    fn backpack_swap_uses_the_exact_vacated_source_even_when_every_slot_is_full() {
+        let mut snapshot = field_snapshot();
+        for index in 0..RUN_BACKPACK_CAPACITY {
+            snapshot.backpack[index] = DurableRunBackpackSlot::Consumable;
+        }
+        let incoming = equipment(
+            3,
+            "item.weapon.crossbow.grave_repeater",
+            EquipmentSlot::Weapon,
+        );
+        snapshot.backpack[5] = DurableRunBackpackSlot::Equipment(incoming.clone());
+        let preview = plan_field_equipment_swap(
+            &snapshot,
+            FieldEquipmentSource::RunBackpack { slot_index: 5 },
+            "core-dev.blake3.test",
+            100,
+        )
+        .unwrap();
+        assert_eq!(preview.incoming, incoming);
+        assert_eq!(
+            preview.replacement_destination,
+            ReplacementDestination::RunBackpack { slot_index: 5 }
+        );
+        let next = apply_field_equipment_preview(&snapshot, &preview, 100).unwrap();
+        assert_eq!(next.inventory_version, 8);
+        assert_eq!(next.equipped[0], Some(incoming));
+        assert!(matches!(
+            &next.backpack[5],
+            DurableRunBackpackSlot::Equipment(item) if item.item_uid == ItemUid::new([1; 16]).unwrap()
+        ));
+    }
+
+    #[test]
+    fn personal_ground_swap_uses_lowest_empty_slot_and_rejects_a_full_backpack_atomically() {
+        let mut snapshot = field_snapshot();
+        snapshot.backpack[0] = DurableRunBackpackSlot::Consumable;
+        snapshot.backpack[1] = DurableRunBackpackSlot::Consumable;
+        let source = FieldEquipmentSource::PersonalGround {
+            item: equipment(4, "item.relic.arbalist.long_lens", EquipmentSlot::Relic),
+            pickup_id: [9; 16],
+            expires_at_tick: 200,
+        };
+        let preview =
+            plan_field_equipment_swap(&snapshot, source.clone(), "core-dev.blake3.test", 100)
+                .unwrap();
+        assert_eq!(
+            preview.replacement_destination,
+            ReplacementDestination::RunBackpack { slot_index: 2 }
+        );
+        let next = apply_field_equipment_preview(&snapshot, &preview, 100).unwrap();
+        assert!(
+            matches!(&next.backpack[2], DurableRunBackpackSlot::Equipment(item) if item.item_uid == ItemUid::new([2; 16]).unwrap())
+        );
+
+        let mut full = snapshot.clone();
+        full.backpack.fill(DurableRunBackpackSlot::Consumable);
+        assert_eq!(
+            plan_field_equipment_swap(&full, source, "core-dev.blake3.test", 100),
+            Err(ItemLifecycleError::BackpackFullForPersonalGroundSwap)
+        );
+        assert_eq!(full, {
+            let mut unchanged = snapshot;
+            unchanged.backpack.fill(DurableRunBackpackSlot::Consumable);
+            unchanged
+        });
+    }
+
+    #[test]
+    fn preview_hash_binds_version_source_item_destination_and_content() {
+        let mut snapshot = field_snapshot();
+        snapshot.backpack[3] = DurableRunBackpackSlot::Equipment(equipment(
+            5,
+            "item.charm.ember_tooth.t1",
+            EquipmentSlot::Charm,
+        ));
+        let preview = plan_field_equipment_swap(
+            &snapshot,
+            FieldEquipmentSource::RunBackpack { slot_index: 3 },
+            "core-dev.blake3.test",
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            preview.preview_hash,
+            plan_field_equipment_swap(
+                &snapshot,
+                FieldEquipmentSource::RunBackpack { slot_index: 3 },
+                "core-dev.blake3.test",
+                999,
+            )
+            .unwrap()
+            .preview_hash
+        );
+        let mut tampered = preview.clone();
+        tampered.preview_hash[0] ^= 1;
+        assert_eq!(
+            apply_field_equipment_preview(&snapshot, &tampered, 0),
+            Err(ItemLifecycleError::StaleEquipmentPreview)
+        );
+        let mut stale = snapshot;
+        stale.inventory_version += 1;
+        assert_eq!(
+            apply_field_equipment_preview(&stale, &preview, 0),
+            Err(ItemLifecycleError::StaleEquipmentPreview)
+        );
+    }
+
+    #[test]
+    fn corrupt_and_expired_sources_fail_closed() {
+        let snapshot = field_snapshot();
+        assert_eq!(
+            plan_field_equipment_swap(
+                &snapshot,
+                FieldEquipmentSource::RunBackpack { slot_index: 8 },
+                "core-dev.blake3.test",
+                0,
+            ),
+            Err(ItemLifecycleError::RunBackpackSourceOutOfRange)
+        );
+        assert_eq!(
+            plan_field_equipment_swap(
+                &snapshot,
+                FieldEquipmentSource::PersonalGround {
+                    item: equipment(8, "item.armor.pilgrim.t1", EquipmentSlot::Armor),
+                    pickup_id: [8; 16],
+                    expires_at_tick: 90,
+                },
+                "core-dev.blake3.test",
+                90,
+            ),
+            Err(ItemLifecycleError::PersonalGroundExpired)
         );
     }
 }
