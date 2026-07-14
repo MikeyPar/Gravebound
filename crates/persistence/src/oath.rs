@@ -299,12 +299,16 @@ async fn lock_inventory_safety(
         let location_kind = row
             .try_get::<i16, _>("location_kind")
             .map_err(PersistenceError::Database)?;
-        is_safe &= matches!((security_state, location_kind), (0, 0 | 1) | (3, 4));
+        is_safe &= item_location_is_safe(security_state, location_kind);
     }
     Ok(StoredOathInventory {
         inventory_version: Some(inventory_version),
         is_safe,
     })
+}
+
+const fn item_location_is_safe(security_state: i16, location_kind: i16) -> bool {
+    matches!((security_state, location_kind), (0, 0 | 1 | 5 | 6) | (3, 4))
 }
 
 async fn lock_account(
@@ -728,5 +732,16 @@ mod tests {
             })
             .is_err()
         );
+    }
+
+    #[test]
+    fn safe_storage_locations_do_not_block_hall_oath_mutations() {
+        for location_kind in [0, 1, 5, 6] {
+            assert!(item_location_is_safe(0, location_kind));
+        }
+        assert!(item_location_is_safe(3, 4));
+        for unsafe_pair in [(1, 0), (2, 2), (2, 3), (0, 4), (0, 2)] {
+            assert!(!item_location_is_safe(unsafe_pair.0, unsafe_pair.1));
+        }
     }
 }
