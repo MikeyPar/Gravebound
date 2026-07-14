@@ -128,8 +128,9 @@ pub use core_enemy::{
     CorePatternWarningParameters, CoreRadialGapRelation, CoreTargetSelection, CoreTelegraphLock,
 };
 pub use core_enemy_runtime::{
-    CoreAttackLock, CoreAttackLockError, CoreSelectedTarget, CoreTargetCandidate,
-    CoreTargetSelectionError, CoreWorldPosition, select_core_target,
+    CoreAttackLock, CoreAttackLockError, CoreEnemyRuntimeError, CoreEnemyRuntimeEvent,
+    CoreEnemySimulation, CoreSelectedTarget, CoreTargetCandidate, CoreTargetSelectionError,
+    CoreWorldPosition, select_core_target,
 };
 pub use core_microrealm::{
     CORE_MICROREALM_EMPTY_RESET_TICKS, CORE_MICROREALM_PACK_WARNING_TICKS,
