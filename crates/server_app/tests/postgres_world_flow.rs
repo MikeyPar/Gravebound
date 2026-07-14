@@ -744,7 +744,8 @@ async fn concurrent_manual_transfer_and_entry_have_one_serial_storage_move() {
         manual_result,
         Ok(_)
             | Err(SafeInventoryServiceError::StaleVersion
-                | SafeInventoryServiceError::BindingMismatch)
+                | SafeInventoryServiceError::BindingMismatch
+                | SafeInventoryServiceError::HallBinding)
     ));
 
     let mut transaction = persistence.begin_transaction().await.unwrap();
