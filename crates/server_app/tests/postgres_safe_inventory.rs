@@ -101,6 +101,42 @@ async fn seed_fixture(persistence: &PostgresPersistence) {
     transaction.commit().await.unwrap();
 }
 
+async fn insert_equipment(
+    transaction: &mut persistence::PersistenceTransaction<'_>,
+    item_uid: [u8; 16],
+    character_id: Option<[u8; 16]>,
+    location_kind: i16,
+    slot_index: i16,
+) {
+    sqlx::query(
+        "INSERT INTO item_instances (namespace_id,item_uid,account_id,character_id,template_id, \
+         content_revision,item_kind,item_level,rarity,creation_kind,creation_request_id,roll_index, \
+         unit_ordinal,item_version,security_state,location_kind,slot_index,provenance_kind, \
+         salvage_band,salvage_value) VALUES ($1,$2,$3,$4,'item.weapon.crossbow.pine_crossbow', \
+         $5,0,1,0,0,$2,0,0,1,0,$6,$7,0,0,0)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(item_uid.as_slice())
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(character_id.map(|id| id.to_vec()))
+    .bind(CORE_ITEM_CONTENT_REVISION)
+    .bind(location_kind)
+    .bind(slot_index)
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+}
+
+async fn seed_final_vault_slot_race(persistence: &PostgresPersistence) {
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    insert_equipment(&mut transaction, [215; 16], Some(CHARACTER_ID), 5, 1).await;
+    for slot in 0_i16..159 {
+        let item_uid = (30_000_u128 + u128::try_from(slot).unwrap()).to_be_bytes();
+        insert_equipment(&mut transaction, item_uid, None, 6, slot).await;
+    }
+    transaction.commit().await.unwrap();
+}
+
 fn transfer_frame() -> SafeInventoryTransferFrameV1 {
     let payload = SafeInventoryTransferPayloadV1 {
         kind: SafeInventoryTransferKindV1::CharacterSafeToVault,
@@ -156,6 +192,156 @@ async fn safe_inventory_service_derives_placement_and_replays_after_restart() {
     ));
     assert_committed_state(&restarted).await;
     restarted.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires explicitly authorized disposable PostgreSQL"]
+async fn concurrent_claims_for_final_vault_slot_have_one_winner() {
+    let persistence = disposable_database().await;
+    seed_fixture(&persistence).await;
+    seed_final_vault_slot_race(&persistence).await;
+    let service = PostgresSafeInventoryService::new(persistence.clone());
+    let first_payload = SafeInventoryTransferPayloadV1 {
+        kind: SafeInventoryTransferKindV1::CharacterSafeToVault,
+        source_slot_index: 0,
+        expected_account_version: 1,
+        expected_inventory_version: 1,
+    };
+    let second_payload = SafeInventoryTransferPayloadV1 {
+        source_slot_index: 1,
+        ..first_payload
+    };
+    let first = SafeInventoryTransferFrameV1 {
+        mutation_id: [216; 16],
+        character_id: CHARACTER_ID,
+        issued_at_unix_millis: 1,
+        payload_hash: first_payload.canonical_hash(),
+        payload: first_payload,
+    };
+    let second = SafeInventoryTransferFrameV1 {
+        mutation_id: [217; 16],
+        character_id: CHARACTER_ID,
+        issued_at_unix_millis: 2,
+        payload_hash: second_payload.canonical_hash(),
+        payload: second_payload,
+    };
+    let (left, right) = tokio::join!(
+        service.transfer_frame(ACCOUNT_ID, &first),
+        service.transfer_frame(ACCOUNT_ID, &second),
+    );
+    assert!(matches!(
+        (&left, &right),
+        (Ok(_), Err(SafeInventoryServiceError::StaleVersion))
+            | (Err(SafeInventoryServiceError::StaleVersion), Ok(_))
+    ));
+
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let counts: (i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM item_instances WHERE namespace_id=$1 AND account_id=$2 \
+         AND location_kind=6),(SELECT count(*) FROM item_instances WHERE namespace_id=$1 \
+         AND account_id=$2 AND character_id=$3 AND location_kind=5), \
+         (SELECT count(*) FROM item_ledger_events WHERE namespace_id=$1 AND account_id=$2 \
+         AND mutation_id IN ($4,$5)),(SELECT count(*) FROM safe_inventory_mutations \
+         WHERE namespace_id=$1 AND account_id=$2 AND mutation_id IN ($4,$5))",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(CHARACTER_ID.as_slice())
+    .bind([216_u8; 16].as_slice())
+    .bind([217_u8; 16].as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    transaction.rollback().await.unwrap();
+    assert_eq!(counts, (160, 1, 1, 1));
+}
+
+#[tokio::test]
+#[ignore = "requires explicitly authorized disposable PostgreSQL"]
+async fn injected_ledger_failure_rolls_back_item_versions_and_receipt() {
+    let persistence = disposable_database().await;
+    seed_fixture(&persistence).await;
+    let mut setup = persistence.begin_transaction().await.unwrap();
+    sqlx::query("DROP TRIGGER IF EXISTS safe_inventory_test_failure ON item_ledger_events")
+        .execute(setup.connection())
+        .await
+        .unwrap();
+    sqlx::query("DROP FUNCTION IF EXISTS gravebound_test_fail_safe_inventory_ledger()")
+        .execute(setup.connection())
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE FUNCTION gravebound_test_fail_safe_inventory_ledger() RETURNS trigger \
+         LANGUAGE plpgsql AS $$ BEGIN IF NEW.mutation_id = decode(repeat('dc',16),'hex') THEN \
+         RAISE EXCEPTION 'injected safe inventory ledger failure'; END IF; RETURN NEW; END; $$",
+    )
+    .execute(setup.connection())
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER safe_inventory_test_failure BEFORE INSERT ON item_ledger_events \
+         FOR EACH ROW EXECUTE FUNCTION gravebound_test_fail_safe_inventory_ledger()",
+    )
+    .execute(setup.connection())
+    .await
+    .unwrap();
+    setup.commit().await.unwrap();
+
+    let payload = SafeInventoryTransferPayloadV1 {
+        kind: SafeInventoryTransferKindV1::CharacterSafeToVault,
+        source_slot_index: 0,
+        expected_account_version: 1,
+        expected_inventory_version: 1,
+    };
+    let frame = SafeInventoryTransferFrameV1 {
+        mutation_id: [220; 16],
+        character_id: CHARACTER_ID,
+        issued_at_unix_millis: 1,
+        payload_hash: payload.canonical_hash(),
+        payload,
+    };
+    assert!(matches!(
+        PostgresSafeInventoryService::new(persistence.clone())
+            .transfer_frame(ACCOUNT_ID, &frame)
+            .await,
+        Err(SafeInventoryServiceError::Persistence)
+    ));
+
+    let mut verify = persistence.begin_transaction().await.unwrap();
+    sqlx::query("DROP TRIGGER safe_inventory_test_failure ON item_ledger_events")
+        .execute(verify.connection())
+        .await
+        .unwrap();
+    sqlx::query("DROP FUNCTION gravebound_test_fail_safe_inventory_ledger()")
+        .execute(verify.connection())
+        .await
+        .unwrap();
+    let state: (Option<Vec<u8>>, i16, i16, i64, i64, i64) = sqlx::query_as(
+        "SELECT x.character_id,x.location_kind,x.slot_index,x.item_version,a.state_version, \
+         i.inventory_version FROM item_instances x JOIN accounts a USING(namespace_id,account_id) \
+         JOIN character_inventories i USING(namespace_id,account_id,character_id) \
+         WHERE x.namespace_id=$1 AND x.account_id=$2 AND x.item_uid=$3",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(ITEM_UID.as_slice())
+    .fetch_one(verify.connection())
+    .await
+    .unwrap();
+    let durable_rows: i64 = sqlx::query_scalar(
+        "SELECT (SELECT count(*) FROM item_ledger_events WHERE namespace_id=$1 \
+         AND account_id=$2 AND mutation_id=$3) + (SELECT count(*) FROM safe_inventory_mutations \
+         WHERE namespace_id=$1 AND account_id=$2 AND mutation_id=$3)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind([220_u8; 16].as_slice())
+    .fetch_one(verify.connection())
+    .await
+    .unwrap();
+    verify.commit().await.unwrap();
+    assert_eq!(state, (Some(CHARACTER_ID.to_vec()), 5, 0, 1, 1, 1));
+    assert_eq!(durable_rows, 0);
 }
 
 async fn assert_committed_state(persistence: &PostgresPersistence) {
