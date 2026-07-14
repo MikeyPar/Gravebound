@@ -3,6 +3,7 @@
 mod core_abbot_fixture;
 mod core_b3_fixed_room;
 mod core_dev;
+mod core_dev_caldus;
 mod core_dev_copy;
 mod core_dev_encounter_room;
 mod core_dev_oath_bargain;
@@ -17,6 +18,7 @@ mod prototype;
 pub use core_abbot_fixture::*;
 pub use core_b3_fixed_room::*;
 pub use core_dev::*;
+pub use core_dev_caldus::*;
 pub use core_dev_copy::*;
 pub use core_dev_encounter_room::*;
 pub use core_dev_oath_bargain::*;

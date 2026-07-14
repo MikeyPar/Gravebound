@@ -36,6 +36,8 @@ jobs:
         run: cargo test --workspace --locked
       - name: Validate First Playable content
         run: cargo run --locked -p tools_content -- validate
+      - name: Validate unpromoted Core Sir Caldus content
+        run: cargo run --locked -p tools_content -- validate-core-caldus
       - name: Verify deterministic trace
         run: |
           cargo run --locked -p tools_content -- trace tests/deterministic/m00_smoke.json

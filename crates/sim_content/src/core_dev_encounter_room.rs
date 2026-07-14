@@ -1779,7 +1779,9 @@ fn validate_layout(
         || layout.nodes[6].encounter.is_some()
         || layout.nodes[8].encounter.is_some()
     {
-        bail!("rest, 03E boss arena, and disabled secret fixture must not construct 03D hostiles");
+        bail!(
+            "rest, major-boss-owned B6, and disabled secret fixture must not construct ordinary 03D hostiles"
+        );
     }
     validate_node_encounter(
         &layout.nodes[5],

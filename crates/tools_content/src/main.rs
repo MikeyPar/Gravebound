@@ -50,6 +50,12 @@ enum Command {
         #[arg(long, default_value = "content")]
         root: PathBuf,
     },
+    /// Validate the independently hashed, non-promotable Core Sir Caldus target.
+    ValidateCoreCaldus {
+        /// Content root containing the validated Core dependencies and `core_dev` Caldus files.
+        #[arg(long, default_value = "content")]
+        root: PathBuf,
+    },
     /// Validate the independently hashed, non-promotable Core progression target.
     ValidateCoreProgression {
         /// Content root containing the immutable FP source and `core_dev` files.
@@ -103,6 +109,7 @@ fn main() -> Result<()> {
         Command::ValidateCoreEncounterRooms { root } => {
             validate_core_encounter_rooms_command(&root)?;
         }
+        Command::ValidateCoreCaldus { root } => validate_core_caldus_command(&root)?,
         Command::ValidateCoreProgression { root } => validate_core_progression_command(&root)?,
         Command::ValidateCoreItems { root } => validate_core_items_command(&root)?,
         Command::ValidateCoreOathsBargains { root } => {
@@ -111,6 +118,22 @@ fn main() -> Result<()> {
         Command::GenerateSchemas { output } => generate_schemas_command(&output)?,
     }
 
+    Ok(())
+}
+
+fn validate_core_caldus_command(root: &std::path::Path) -> Result<()> {
+    let compiled = sim_content::load_core_development_caldus(root)?;
+    info!(
+        target = compiled.target_name(),
+        boss = compiled.boss().header.id.as_str(),
+        patterns = compiled.patterns().len(),
+        exit = compiled.exit().header.id.as_str(),
+        node = compiled.room_binding().node_id,
+        records_blake3 = compiled.hashes().records_blake3,
+        assets_blake3 = compiled.hashes().assets_blake3,
+        localization_blake3 = compiled.hashes().localization_blake3,
+        "unpromoted Core Sir Caldus target is valid"
+    );
     Ok(())
 }
 
@@ -289,6 +312,16 @@ fn generate_schemas_command(output: &std::path::Path) -> Result<()> {
         output,
         "core_encounter_room_copy.schema.json",
     )?;
+    write_schema::<content_schema::CoreCaldusDevelopmentTarget>(
+        output,
+        "core_caldus_target.schema.json",
+    )?;
+    write_schema::<content_schema::CoreCaldusRecords>(output, "core_caldus_records.schema.json")?;
+    write_schema::<content_schema::CoreCaldusAssetManifest>(
+        output,
+        "core_caldus_assets.schema.json",
+    )?;
+    write_schema::<content_schema::CoreCaldusCopyFile>(output, "core_caldus_copy.schema.json")?;
     write_schema::<content_schema::CoreProgressionDevelopmentTarget>(
         output,
         "core_progression_target.schema.json",
