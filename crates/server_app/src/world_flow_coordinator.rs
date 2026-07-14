@@ -18,7 +18,8 @@ use crate::{
     AuthenticatedAccount, AuthenticatedNamespace, EntryCaptureContext, EntryRestoreProvider,
     IdentityClock, InventorySecurityRestoreV1, OathBargainRestoreV1,
     PostgresProgressionRestoreProvider, RestorePointError, RestorePointProviders,
-    WorldFlowRepositoryError, world_flow_gate::stored_location_snapshot,
+    WorldFlowRepositoryError,
+    world_flow_gate::{CoreWorldFlowAuthority, stored_location_snapshot},
 };
 
 const HALL_ID: &str = "hub.lantern_halls_01";
@@ -451,6 +452,23 @@ where
         stage_world_flow_danger_entry(write.transaction_mut(), &root)
             .await
             .map_err(|_| WorldTransferResultCode::ServiceUnavailable)
+    }
+}
+
+impl<Generator, Clock, Inventory, OathBargains> CoreWorldFlowAuthority
+    for PostgresDormantWorldFlowCoordinator<Generator, Clock, Inventory, OathBargains>
+where
+    Generator: WorldFlowIdGenerator,
+    Clock: IdentityClock,
+    Inventory: EntryRestoreProvider<Snapshot = InventorySecurityRestoreV1>,
+    OathBargains: EntryRestoreProvider<Snapshot = OathBargainRestoreV1>,
+{
+    async fn handle_world_flow(
+        &self,
+        authenticated: AuthenticatedAccount,
+        frame: &WorldFlowFrame,
+    ) -> WorldFlowResult {
+        self.handle(authenticated, frame).await
     }
 }
 

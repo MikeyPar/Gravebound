@@ -120,8 +120,8 @@ pub use world_flow_coordinator::{
     DormantWorldFlowPlanner, PostgresDormantWorldFlowCoordinator, WorldFlowIdGenerator,
 };
 pub use world_flow_gate::{
-    PostgresWorldFlowLocationRepository, WorldFlowGateService, WorldFlowLocationRepository,
-    WorldFlowRepositoryError,
+    CoreWorldFlowAuthority, PostgresWorldFlowLocationRepository, WorldFlowGateService,
+    WorldFlowLocationRepository, WorldFlowRepositoryError,
 };
 
 use protocol::{
@@ -482,10 +482,10 @@ where
 /// World-flow messages share the reliable transport but cannot mutate identity state, and the
 /// normal world-flow authority remains fail-closed until its downstream packages are complete.
 #[allow(clippy::too_many_arguments)]
-pub async fn serve_core_reliable<R, C, G, E, W, WC, P, OC, BC>(
+pub async fn serve_core_reliable<R, C, G, E, W, P, OC, BC>(
     connection: &quinn::Connection,
     identity: &IdentityService<R, C, G, E>,
-    world_flow: &WorldFlowGateService<W, WC>,
+    world_flow: &W,
     progression: &ProgressionQueryService<P>,
     oath: &CoreOathSelectionAuthority<OC>,
     bargain: &CoreBargainAuthority<BC>,
@@ -498,8 +498,7 @@ where
     C: IdentityClock,
     G: CharacterIdGenerator,
     E: IdentityEventSink,
-    W: WorldFlowLocationRepository,
-    WC: IdentityClock,
+    W: CoreWorldFlowAuthority,
     P: ProgressionQueryRepository,
     OC: IdentityClock,
     BC: IdentityClock,
@@ -526,9 +525,9 @@ where
                 identity.mutate(Some(authenticated), &frame).await,
             )
         }
-        WireMessage::WorldFlowFrame(frame) => {
-            protocol::ReliableEvent::WorldFlowResult(world_flow.handle(authenticated, &frame).await)
-        }
+        WireMessage::WorldFlowFrame(frame) => protocol::ReliableEvent::WorldFlowResult(
+            world_flow.handle_world_flow(authenticated, &frame).await,
+        ),
         WireMessage::ProgressionQueryFrame(frame) => protocol::ReliableEvent::ProgressionResult(
             progression.handle(authenticated, &frame).await,
         ),

@@ -30,6 +30,17 @@ pub trait WorldFlowLocationRepository: Send + Sync {
     ) -> impl Future<Output = Result<Option<CharacterLocationSnapshot>, WorldFlowRepositoryError>> + Send;
 }
 
+/// Reliable-transport boundary shared by the fail-closed route gate and explicitly disposable
+/// integration coordinators. Implementations own namespace and admission checks; transport code
+/// cannot silently select a more permissive authority.
+pub trait CoreWorldFlowAuthority: Send + Sync {
+    fn handle_world_flow(
+        &self,
+        authenticated: AuthenticatedAccount,
+        frame: &WorldFlowFrame,
+    ) -> impl Future<Output = WorldFlowResult> + Send;
+}
+
 #[derive(Debug, Clone)]
 pub struct PostgresWorldFlowLocationRepository {
     persistence: PostgresPersistence,
@@ -224,6 +235,20 @@ where
             .await
             .map_err(|_| (WorldTransferResultCode::ServiceUnavailable, None))?
             .ok_or((WorldTransferResultCode::CharacterNotFound, None))
+    }
+}
+
+impl<Repository, Clock> CoreWorldFlowAuthority for WorldFlowGateService<Repository, Clock>
+where
+    Repository: WorldFlowLocationRepository,
+    Clock: IdentityClock,
+{
+    async fn handle_world_flow(
+        &self,
+        authenticated: AuthenticatedAccount,
+        frame: &WorldFlowFrame,
+    ) -> WorldFlowResult {
+        self.handle(authenticated, frame).await
     }
 }
 
