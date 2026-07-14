@@ -1,6 +1,6 @@
 # SPEC-CONFLICT-017 — Core authored locomotion phase
 
-**Status:** Owner decision required
+**Status:** Owner-approved on 2026-07-13
 
 **Blocks:** Final B2 Bell Acolyte/Choir Skull movement traces in `GB-M03-03D`
 
@@ -19,7 +19,7 @@ The authorities fix speed and desired geometry but do not define two state neede
 
 Choosing these values in renderer or movement code would make replays and future content changes depend on an undocumented implementation accident.
 
-## Recommended resolution
+## Approved resolution
 
 1. Bell Acolyte uses no deadband. Each ordinary movement tick corrects radially toward exactly `6000` milli-tiles from its locked current target at `3000` milli-tiles/second, preserves fixed-point remainder, and clamps the final step so it never crosses the six-tile boundary. At exactly six tiles it holds position. Telegraph aim/position remains locked by `CONT-ENEMY-001`; movement resumes only when the authored state permits it.
 2. Choir Skull treats its authored room anchor as orbit center and starts at phase `0°` (east). It first moves radially east at `2800` milli-tiles/second until reaching radius `3000`, clamping without overshoot, then advances clockwise at the same ordinary ground speed with deterministic radial correction. The orbit phase is simulation state, never derived from renderer time, target position, or unordered entity iteration.
@@ -28,6 +28,6 @@ Choosing these values in renderer or movement code would make replays and future
 
 This decision supplies only missing deterministic locomotion state. It does not change authored speed, radius, preferred distance, attack cadence, warning, damage, target selection, or room composition.
 
-## Approval request
+## Approval record
 
-Approve the four-part recommended resolution, or provide amendments.
+The owner approved all four recommendations without amendment on 2026-07-13.

@@ -2051,8 +2051,9 @@ fn hash_file(path: &Path) -> Result<String> {
 mod tests {
     use super::*;
     use sim_core::{
-        CoreEnemyKitEvent, CoreEnemyKitScheduler, CorePatternGeometryDefinition,
-        CorePatternWarningDefinition, EnemyHealthActor, EnemyHealthKind, EntityId,
+        CoreEnemyKitEvent, CoreEnemyKitScheduler, CoreNormalAttackEvent, CoreNormalAttackKind,
+        CoreNormalAttackSimulation, CorePatternGeometryDefinition, CorePatternWarningDefinition,
+        CoreTargetCandidate, CoreWorldPosition, EnemyHealthActor, EnemyHealthKind, EntityId,
         SimulationVector, Tick,
     };
 
@@ -2192,6 +2193,176 @@ mod tests {
             assert_eq!(actor.reward_table_id(), reward);
             assert_eq!(actor.damageable_at(), Tick(130));
         }
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Acolyte aim locking and the complete Skull rotor loop share one B2 integration trace"
+    )]
+    fn b2_authored_attack_locks_pin_acolyte_aim_and_skull_rotor_boundaries() {
+        let compiled =
+            load_core_development_encounter_rooms(&content_root()).expect("encounter rooms");
+        let target_id = EntityId::new(9_000).expect("target ID");
+        let origin = CoreWorldPosition::new(5_000, 5_000);
+        let target = |x| CoreTargetCandidate {
+            entity_id: target_id,
+            position: CoreWorldPosition::new(x, 5_000),
+            living: true,
+            damageable: true,
+        };
+
+        let mut acolyte =
+            CoreNormalAttackSimulation::new(authored_definition(&compiled, "enemy.bell_acolyte"))
+                .expect("Acolyte attacks");
+        let mut acolyte_events = Vec::new();
+        for tick in 0..=63 {
+            let candidate = if tick == 0 {
+                target(11_000)
+            } else {
+                target(8_000)
+            };
+            acolyte_events.extend(
+                acolyte
+                    .advance(origin, &[candidate], true)
+                    .expect("Acolyte tick")
+                    .attack_events,
+            );
+        }
+        let telegraphs = acolyte_events
+            .iter()
+            .filter_map(|event| match event {
+                CoreNormalAttackEvent::TelegraphStarted { lock, first_use } => Some((
+                    lock.telegraph_started_at(),
+                    lock.resolves_at(),
+                    lock.target().expect("target lock").position,
+                    *first_use,
+                )),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            telegraphs,
+            [
+                (
+                    Tick(0),
+                    Tick(12),
+                    CoreWorldPosition::new(11_000, 5_000),
+                    true,
+                ),
+                (
+                    Tick(54),
+                    Tick(63),
+                    CoreWorldPosition::new(8_000, 5_000),
+                    false,
+                ),
+            ]
+        );
+        assert_eq!(
+            acolyte_events
+                .iter()
+                .filter_map(|event| match event {
+                    CoreNormalAttackEvent::Released { tick, kind, lock } => {
+                        Some((*tick, *kind, lock.cast_id().get()))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            [
+                (Tick(12), CoreNormalAttackKind::AcolyteFan, 1),
+                (Tick(63), CoreNormalAttackKind::AcolyteFan, 2),
+            ]
+        );
+
+        let mut skull =
+            CoreNormalAttackSimulation::new(authored_definition(&compiled, "enemy.choir_skull"))
+                .expect("Skull attacks");
+        let mut skull_events = Vec::new();
+        for _ in 0..=200 {
+            skull_events.extend(
+                skull
+                    .advance(origin, &[target(11_000)], true)
+                    .expect("Skull tick")
+                    .attack_events,
+            );
+        }
+        assert_eq!(
+            skull_events
+                .iter()
+                .filter_map(|event| match event {
+                    CoreNormalAttackEvent::TelegraphStarted { lock, first_use } =>
+                        Some((lock.telegraph_started_at(), lock.resolves_at(), *first_use,)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            [(Tick(0), Tick(20), true), (Tick(185), Tick(200), false)]
+        );
+        assert_eq!(
+            skull_events
+                .iter()
+                .filter_map(|event| match event {
+                    CoreNormalAttackEvent::Released {
+                        tick,
+                        kind: CoreNormalAttackKind::SkullRotorStart,
+                        lock,
+                    } => Some((*tick, lock.cast_id().get())),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            [(Tick(20), 1), (Tick(200), 2)]
+        );
+        assert_eq!(
+            skull_events
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event,
+                        CoreNormalAttackEvent::Released {
+                            kind: CoreNormalAttackKind::SkullRotorVolley { cycle_index: 0, .. },
+                            ..
+                        }
+                    )
+                })
+                .count(),
+            10
+        );
+        assert!(skull_events.iter().any(|event| {
+            matches!(
+                event,
+                CoreNormalAttackEvent::RotorRecoveryStarted {
+                    tick: Tick(140),
+                    recovery_ticks: 60,
+                }
+            )
+        }));
+    }
+
+    #[test]
+    fn authored_attack_target_errors_roll_back_scheduler_and_cast_identity() {
+        let compiled =
+            load_core_development_encounter_rooms(&content_root()).expect("encounter rooms");
+        let mut attacks =
+            CoreNormalAttackSimulation::new(authored_definition(&compiled, "enemy.bell_acolyte"))
+                .expect("attacks");
+        let candidate = CoreTargetCandidate {
+            entity_id: EntityId::new(9_000).expect("target ID"),
+            position: CoreWorldPosition::new(6_000, 0),
+            living: true,
+            damageable: true,
+        };
+        assert!(
+            attacks
+                .advance(CoreWorldPosition::new(0, 0), &[candidate, candidate], true)
+                .is_err()
+        );
+        assert_eq!(attacks.tick(), Tick(0));
+        let step = attacks
+            .advance(CoreWorldPosition::new(0, 0), &[candidate], true)
+            .expect("retry");
+        let CoreNormalAttackEvent::TelegraphStarted { lock, .. } = &step.attack_events[0] else {
+            panic!("telegraph");
+        };
+        assert_eq!(lock.cast_id().get(), 1);
     }
 
     #[test]
