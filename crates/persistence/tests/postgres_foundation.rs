@@ -110,6 +110,8 @@ async fn migrations_are_idempotent_exact_and_ready() {
             "character_extraction_results",
             "character_instance_lineages",
             "character_inventories",
+            "character_life_deeds",
+            "character_life_metrics",
             "character_life_outbox",
             "character_oath_bargain_state",
             "character_oath_mutation_results",
@@ -119,11 +121,29 @@ async fn migrations_are_idempotent_exact_and_ready() {
             "character_xp_award_results",
             "characters",
             "currency_ledger_events",
+            "death_audit_events",
+            "death_combat_trace_entries",
+            "death_combat_trace_statuses",
+            "death_destruction_entries",
+            "death_events",
+            "death_mutation_results",
+            "death_outbox_events",
+            "death_summary_bargains",
+            "death_summary_damage_entries",
+            "death_summary_projection_entries",
+            "death_summary_snapshots",
+            "echo_bargain_snapshots",
+            "echo_deed_tags",
+            "echo_records",
+            "echo_state_transitions",
+            "entry_restore_inventory_items_v1",
+            "entry_restore_inventory_v1",
             "entry_restore_progression_v1",
             "field_equipment_mutations",
             "gravebound_namespaces",
             "item_instances",
             "item_ledger_events",
+            "memorial_records",
             "reward_requests",
             "reward_result_entries",
             "safe_inventory_mutations",
@@ -131,7 +151,7 @@ async fn migrations_are_idempotent_exact_and_ready() {
             "starter_initializer_results",
         ]
     );
-    for prohibited in ["vault", "memorials", "currency_ledger"] {
+    for prohibited in ["vault", "currency_ledger", "purchases"] {
         assert!(!tables.iter().any(|table| table == prohibited));
     }
     persistence.close().await;

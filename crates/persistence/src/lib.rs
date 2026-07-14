@@ -122,7 +122,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 30;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 31;
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -607,6 +607,52 @@ mod tests {
             assert!(
                 !migration.contains(prohibited),
                 "progression migration leaked {prohibited}"
+            );
+        }
+    }
+
+    #[test]
+    fn durable_death_foundation_is_normalized_terminal_and_echo_atomicity_ready() {
+        let migration = include_str!("../../../migrations/0031_durable_death_foundation.sql");
+        for required in [
+            "character_life_state_core CHECK (life_state IN (0, 1))",
+            "progression_current_health_terminal",
+            "entry_restore_inventory_v1",
+            "entry_restore_inventory_items_v1",
+            "Safe -> AtRiskEquipped",
+            "character_life_metrics",
+            "character_life_deeds",
+            "death_events",
+            "death_combat_trace_entries",
+            "death_combat_trace_statuses",
+            "death_destruction_entries",
+            "death_summary_snapshots",
+            "memorial_records_newest_first",
+            "echo_records",
+            "one_available_echo_per_account",
+            "dormant_echoes_oldest_first",
+            "echo_state_transitions",
+            "death_mutation_results",
+            "death_audit_events",
+            "death_outbox_events",
+            "permadeath-v1",
+            "permadeath",
+        ] {
+            assert!(migration.contains(required), "migration omitted {required}");
+        }
+        for prohibited in [
+            "JSON",
+            "JSONB",
+            "FLOAT",
+            "DOUBLE PRECISION",
+            "DROP TABLE",
+            "DELETE FROM item_instances",
+            "DELETE FROM item_ledger_events",
+            "localized_text",
+        ] {
+            assert!(
+                !migration.contains(prohibited),
+                "death foundation migration leaked {prohibited}"
             );
         }
     }
