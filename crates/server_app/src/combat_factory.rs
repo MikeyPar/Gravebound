@@ -236,10 +236,17 @@ fn compile_consumables(
     maximum_health: u32,
     lantern_ash: Option<sim_core::LanternAshDefinition>,
 ) -> Result<RedTonicSimulation, CoreCombatFactoryError> {
-    let current_health = u32::try_from(snapshot.current_health)
-        .map_err(|_| CoreCombatFactoryError::InvalidContent)?
-        .min(maximum_health)
-        .max(1);
+    let stored_current_health = u32::try_from(snapshot.current_health)
+        .map_err(|_| CoreCombatFactoryError::InvalidContent)?;
+    // Only absolute current health is durable. Any historical maximum at least this large gives
+    // the same approved rebuild result, so use the smallest valid value instead of inventing a
+    // percentage or healing on load.
+    let current_health = sim_core::rebuild_current_health(
+        stored_current_health,
+        stored_current_health.max(maximum_health),
+        maximum_health,
+    )
+    .map_err(|_| CoreCombatFactoryError::InvalidContent)?;
     let belt = TonicBelt::from_slots([
         compile_belt_slot(snapshot.belt_slots[0].as_ref(), required_item_revision)?,
         compile_belt_slot(snapshot.belt_slots[1].as_ref(), required_item_revision)?,
@@ -387,6 +394,21 @@ mod tests {
             compiler.build_from_snapshot(&value).unwrap_err(),
             CoreCombatFactoryError::ContentMismatch
         );
+    }
+
+    #[test]
+    fn combat_rebuild_preserves_absolute_health_and_clamps_only_on_decrease() {
+        let compiler = compiler();
+        let mut value = snapshot(&compiler, LONG_VIGIL_ID);
+        value.current_health = 120;
+        let unchanged = compiler.build_from_snapshot(&value).unwrap();
+        assert_eq!(unchanged.maximum_health, 140);
+        assert_eq!(unchanged.consumables.vitals().current_health(), 120);
+
+        value.current_health = 150;
+        let clamped = compiler.build_from_snapshot(&value).unwrap();
+        assert_eq!(clamped.maximum_health, 140);
+        assert_eq!(clamped.consumables.vitals().current_health(), 140);
     }
 
     #[test]
