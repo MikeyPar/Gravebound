@@ -648,7 +648,7 @@ async fn full_vault_rejects_before_item_version_identity_restore_or_location_cha
     assert_eq!(aggregate_counts(&persistence).await, (0, 0, 0, 1));
 
     let mut transaction = persistence.begin_transaction().await.unwrap();
-    let state: (Option<Vec<u8>>, i16, i16, i64, i64, i64, i64) = sqlx::query_as(
+    let state: (Option<Vec<u8>>, i16, i16, i64, i64, i64, i16) = sqlx::query_as(
         "SELECT x.character_id,x.location_kind,x.slot_index,x.item_version,a.state_version, \
          i.inventory_version,w.location_kind FROM item_instances x JOIN accounts a \
          USING (namespace_id,account_id) JOIN character_inventories i \
