@@ -15,14 +15,20 @@ use rcgen::{CertifiedKey, generate_simple_self_signed};
 use rustls::pki_types::PrivatePkcs8KeyDer;
 use server_app::{
     AccountId, AdmissionState, AuthenticatedAccount, AuthenticatedNamespace,
-    AuthenticationDecision, BeltStackV1, CharacterIdGenerator, CoreBargainAuthority,
-    CoreOathSelectionAuthority, DisabledProgressionQueryRepository, DisposableCoreJourneyWorldFlow,
-    EntryCaptureContext, EntryRestoreProvider, HandshakePolicy, IdentityClock, IdentityService,
-    InMemoryAccountRepository, InventorySecurityRestoreV1, NoopIdentityEventSink,
-    OathBargainRestoreV1, PostgresCaldusHallTransferCoordinator,
-    PostgresDormantWorldFlowCoordinator, PostgresProgressionRestoreProvider,
-    ProgressionQueryService, RestorePointError, WorldFlowIdGenerator, serve_core_reliable,
-    serve_handshake,
+    AuthenticationDecision, BeltStackV1, CaldusVictoryOwnerCommand, CharacterIdGenerator,
+    CoreBargainAuthority, CoreOathSelectionAuthority, DisabledProgressionQueryRepository,
+    DisposableCoreJourneyWorldFlow, EntryCaptureContext, EntryRestoreProvider, HandshakePolicy,
+    IdentityClock, IdentityService, InMemoryAccountRepository, InventorySecurityRestoreV1,
+    NoopIdentityEventSink, OathBargainRestoreV1, PostgresCaldusHallTransferCoordinator,
+    PostgresCaldusVictoryCoordinator, PostgresDormantWorldFlowCoordinator,
+    PostgresProgressionAwardService, PostgresProgressionRestoreProvider, PostgresRewardService,
+    ProgressionQueryService, RestorePointError, SecretRewardEpoch, WorldFlowIdGenerator,
+    serve_core_reliable, serve_handshake,
+};
+use sim_core::{
+    CoreBossParticipant, CoreBossParticipantLock, CoreCaldusAntiCheatState,
+    CoreCaldusDefeatPresence, CoreCaldusEligibilityEvidence, CoreCaldusRecallState,
+    CoreCaldusSessionState, CoreCaldusVictoryIdentities, EntityId,
 };
 
 const ACCOUNT_ID: [u8; 16] = [211; 16];
@@ -30,7 +36,6 @@ const CHARACTER_ID: [u8; 16] = [212; 16];
 const TRANSFER_ID: [u8; 16] = [213; 16];
 const LINEAGE_ID: [u8; 16] = [214; 16];
 const RESTORE_ID: [u8; 16] = [215; 16];
-const EXTRACTION_REQUEST_ID: [u8; 16] = [216; 16];
 const EXTRACTION_RECEIPT_ID: [u8; 16] = [217; 16];
 const HALL_ID: &str = "hub.lantern_halls_01";
 const WORLD_ID: &str = "world.core_microrealm_01";
@@ -221,17 +226,79 @@ fn route_frame(
     }
 }
 
-async fn commit_caldus_fixture(persistence: &PostgresPersistence) {
+async fn commit_caldus_fixture(persistence: &PostgresPersistence) -> ([u8; 16], [u8; 16]) {
+    let participant = CoreBossParticipant {
+        entity_id: EntityId::new(1).unwrap(),
+        party_slot: 0,
+    };
+    let lock = CoreBossParticipantLock {
+        attempt_ordinal: 1,
+        participants: vec![participant],
+        maximum_health: 7_200,
+    };
+    let progression_content =
+        sim_content::load_core_development_progression(&content_root()).unwrap();
+    let oath_bargain = sim_content::load_core_development_oaths_bargains(&content_root()).unwrap();
+    let rewards = PostgresRewardService::load(
+        persistence.clone(),
+        &content_root(),
+        SecretRewardEpoch::new("core-route-caldus-v1", [0x5a; 32]).unwrap(),
+    )
+    .unwrap();
+    let progression = PostgresProgressionAwardService::new(
+        persistence.clone(),
+        &progression_content,
+        &oath_bargain,
+    )
+    .unwrap();
+    let victory = PostgresCaldusVictoryCoordinator::new(persistence.clone(), rewards, progression);
+    victory
+        .commit(
+            LINEAGE_ID,
+            &lock,
+            5_400,
+            9_000,
+            &[CaldusVictoryOwnerCommand {
+                participant,
+                authenticated: AuthenticatedAccount {
+                    account_id: AccountId::new(ACCOUNT_ID).unwrap(),
+                    namespace: AuthenticatedNamespace::WipeableTest,
+                },
+                character_id: CHARACTER_ID,
+                expected_progression_version: 1,
+                progression_content_revision: ManifestHash::new(
+                    progression_content.hashes().records_blake3.clone(),
+                )
+                .unwrap(),
+                eligibility: CoreCaldusEligibilityEvidence {
+                    participant,
+                    presence_ticks: 5_400,
+                    direct_damage: 100,
+                    effective_healing_to_others: 0,
+                    damage_prevented_on_others: 0,
+                    objective_credits: 0,
+                    longest_inactivity_ticks: 0,
+                    defeat_presence: CoreCaldusDefeatPresence::AliveAndPresent,
+                    recall_state: CoreCaldusRecallState::Stayed,
+                    session_state: CoreCaldusSessionState::Valid,
+                    anti_cheat_state: CoreCaldusAntiCheatState::Valid,
+                },
+            }],
+        )
+        .await
+        .unwrap();
+    let identities = CoreCaldusVictoryIdentities::derive(LINEAGE_ID, &lock).unwrap();
+    let extraction = identities.extraction_for(participant).unwrap();
     let revision = revision();
     persistence
         .request_caldus_extraction(&CaldusExtractionRequest {
             account_id: ACCOUNT_ID,
             character_id: CHARACTER_ID,
-            extraction_request_id: EXTRACTION_REQUEST_ID,
-            encounter_id: [222; 16],
+            extraction_request_id: extraction.request_id.bytes(),
+            encounter_id: identities.encounter_id.bytes(),
             instance_lineage_id: LINEAGE_ID,
             entry_restore_point_id: RESTORE_ID,
-            exit_instance_id: [223; 16],
+            exit_instance_id: identities.exit_instance_id.bytes(),
             attempt_ordinal: 1,
             party_slot: 0,
             participant_entity_id: 1,
@@ -246,12 +313,13 @@ async fn commit_caldus_fixture(persistence: &PostgresPersistence) {
         .unwrap();
     persistence
         .commit_caldus_extraction(CaldusExtractionCommit {
-            extraction_request_id: EXTRACTION_REQUEST_ID,
+            extraction_request_id: extraction.request_id.bytes(),
             extraction_receipt_id: EXTRACTION_RECEIPT_ID,
             authority: StoredExtractionAuthority::WipeableTestEvidence,
         })
         .await
         .unwrap();
+    (extraction.request_id.bytes(), EXTRACTION_RECEIPT_ID)
 }
 
 fn endpoints() -> (quinn::Endpoint, quinn::Endpoint, std::net::SocketAddr) {
@@ -450,15 +518,16 @@ async fn reliable_quic_traverses_disposable_core_route_and_committed_extraction(
         .await
         .unwrap();
         assert_accepted(&danger, 3, WORLD_ID);
-        commit_caldus_fixture(&persistence).await;
+        let (extraction_request_id, extraction_receipt_id) =
+            commit_caldus_fixture(&persistence).await;
         let extraction_request = route_frame(
             5,
             [227; 16],
             3,
             WorldTransferCommand::UseCommittedExtraction {
                 portal_id: WireText::new("portal.exit.dungeon.bell_sepulcher").unwrap(),
-                extraction_request_id: EXTRACTION_REQUEST_ID,
-                extraction_receipt_id: EXTRACTION_RECEIPT_ID,
+                extraction_request_id,
+                extraction_receipt_id,
             },
         );
         let (_, hall_return) = bot_client::perform_world_flow(&client, extraction_request.clone())
