@@ -16,6 +16,7 @@ mod combat;
 mod consumable;
 mod core_counterplay;
 mod core_enemy;
+mod core_enemy_runtime;
 mod core_microrealm;
 mod damage;
 mod death;
@@ -125,6 +126,10 @@ pub use core_enemy::{
     CoreEnemyRole, CoreEnemyStateStage, CorePatternDefinition, CorePatternDefinitionParameters,
     CorePatternGeometryDefinition, CorePatternGeometryParameters, CorePatternWarningDefinition,
     CorePatternWarningParameters, CoreRadialGapRelation, CoreTargetSelection, CoreTelegraphLock,
+};
+pub use core_enemy_runtime::{
+    CoreAttackLock, CoreAttackLockError, CoreSelectedTarget, CoreTargetCandidate,
+    CoreTargetSelectionError, CoreWorldPosition, select_core_target,
 };
 pub use core_microrealm::{
     CORE_MICROREALM_EMPTY_RESET_TICKS, CORE_MICROREALM_PACK_WARNING_TICKS,
