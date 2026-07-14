@@ -16,6 +16,7 @@ mod bargain;
 mod bargain_cleanup;
 mod bargain_events;
 mod bargain_milestone;
+mod caldus_victory;
 mod combat_loadout;
 mod danger_checkpoint;
 mod ground_expiry;
@@ -48,6 +49,9 @@ pub use bargain_events::{
 pub use bargain_milestone::{
     CORE_BARGAIN_LAYOUT_ID, CORE_BARGAIN_MILESTONE_ID, CORE_BARGAIN_SOURCE_ID,
     StagedBargainMilestone, StoredBargainMilestoneLife, StoredBargainMilestoneResult,
+};
+pub use caldus_victory::{
+    CaldusVictoryExitCommit, StoredCaldusVictoryExit, StoredCaldusVictoryOwner,
 };
 pub use combat_loadout::{
     StoredCombatBargain, StoredCombatBeltStack, StoredCoreCombatLoadout, StoredEquippedWeapon,
@@ -90,7 +94,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 24;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 25;
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -270,6 +274,14 @@ pub enum PersistenceError {
     CorruptBargainCleanup,
     #[error("Bargain life-end cleanup expected a different aggregate version")]
     BargainCleanupVersionMismatch,
+    #[error("stored Caldus victory or exit state violates its bounded durable contract")]
+    CorruptCaldusVictory,
+    #[error("Caldus victory identity was replayed with different canonical material")]
+    CaldusVictoryIdempotencyConflict,
+    #[error("Caldus exit creation requires every eligible reward to be durably terminal")]
+    CaldusRewardNotTerminal,
+    #[error("a durable Caldus reward terminal does not match the eligible owner binding")]
+    CaldusRewardTerminalMismatch,
 }
 
 /// Returns whether `PostgreSQL` explicitly permits the complete transaction to be retried.
@@ -571,6 +583,37 @@ mod tests {
             "entry restore progression root constraint is missing",
         ] {
             assert!(migration.contains(required), "migration omitted {required}");
+        }
+    }
+
+    #[test]
+    fn caldus_victory_exit_migration_is_reward_terminal_and_inventory_boundary_safe() {
+        let migration = include_str!("../../../migrations/0025_caldus_victory_exit_gate.sql");
+        for required in [
+            "caldus_victory_exits",
+            "caldus_victory_exit_owners",
+            "reward_requests",
+            "character_xp_award_results",
+            "eligible_owner_count BETWEEN 1 AND 8",
+            "caldus_victory_terminal_hashes_exact",
+        ] {
+            assert!(migration.contains(required), "migration omitted {required}");
+        }
+        for prohibited in [
+            "pending_inventory",
+            "overflow",
+            "resolution_hold",
+            "JSON",
+            "JSONB",
+            "FLOAT",
+            "DOUBLE PRECISION",
+        ] {
+            assert!(
+                !migration
+                    .to_ascii_lowercase()
+                    .contains(&prohibited.to_ascii_lowercase()),
+                "Caldus victory migration leaked {prohibited}"
+            );
         }
     }
 
