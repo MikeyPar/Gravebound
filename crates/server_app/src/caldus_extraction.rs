@@ -165,47 +165,17 @@ where
         request_sequence: u32,
         mutation: &WorldTransferMutation,
     ) -> WorldFlowResult {
-        if request_sequence == 0
-            || mutation.validate().is_err()
-            || authenticated.namespace != AuthenticatedNamespace::WipeableTest
-        {
-            return transfer_result(
-                request_sequence,
-                mutation,
-                WorldTransferResultCode::InvalidSource,
-                None,
-                None,
-            );
-        }
-        if mutation.payload_hash != mutation.payload.canonical_hash() {
-            return transfer_result(
-                request_sequence,
-                mutation,
-                WorldTransferResultCode::PayloadHashMismatch,
-                None,
-                None,
-            );
-        }
-        if mutation.payload.content_revision != self.required_content_revision {
-            return transfer_result(
-                request_sequence,
-                mutation,
-                WorldTransferResultCode::ContentMismatch,
-                None,
-                None,
-            );
-        }
-        if mutation.issued_at_unix_millis > self.clock.unix_millis() {
-            return transfer_result(
-                request_sequence,
-                mutation,
-                WorldTransferResultCode::IssuedAtInvalid,
-                None,
-                None,
-            );
+        if let Some(code) = validate_transfer_preflight(
+            authenticated,
+            request_sequence,
+            mutation,
+            &self.required_content_revision,
+            self.clock.unix_millis(),
+        ) {
+            return transfer_result(request_sequence, mutation, code, None, None);
         }
         let WorldTransferCommand::UseCommittedExtraction {
-            portal_id,
+            portal_id: _,
             extraction_request_id,
             extraction_receipt_id,
         } = &mutation.payload.command
@@ -218,15 +188,6 @@ where
                 None,
             );
         };
-        if portal_id.as_str() != CALDUS_EXIT_ID {
-            return transfer_result(
-                request_sequence,
-                mutation,
-                WorldTransferResultCode::InvalidSource,
-                None,
-                None,
-            );
-        }
         let begin = self
             .persistence
             .begin_world_flow(
@@ -370,6 +331,34 @@ where
                 None,
             ),
         }
+    }
+}
+
+fn validate_transfer_preflight(
+    authenticated: AuthenticatedAccount,
+    request_sequence: u32,
+    mutation: &WorldTransferMutation,
+    required_content_revision: &WorldFlowContentRevisionV1,
+    now_unix_millis: u64,
+) -> Option<WorldTransferResultCode> {
+    if request_sequence == 0
+        || mutation.validate().is_err()
+        || authenticated.namespace != AuthenticatedNamespace::WipeableTest
+        || !matches!(
+            &mutation.payload.command,
+            WorldTransferCommand::UseCommittedExtraction { portal_id, .. }
+                if portal_id.as_str() == CALDUS_EXIT_ID
+        )
+    {
+        Some(WorldTransferResultCode::InvalidSource)
+    } else if mutation.payload_hash != mutation.payload.canonical_hash() {
+        Some(WorldTransferResultCode::PayloadHashMismatch)
+    } else if mutation.payload.content_revision != *required_content_revision {
+        Some(WorldTransferResultCode::ContentMismatch)
+    } else if mutation.issued_at_unix_millis > now_unix_millis {
+        Some(WorldTransferResultCode::IssuedAtInvalid)
+    } else {
+        None
     }
 }
 
@@ -618,6 +607,32 @@ mod tests {
         }
     }
 
+    fn authenticated(namespace: AuthenticatedNamespace) -> AuthenticatedAccount {
+        AuthenticatedAccount {
+            account_id: AccountId::new([1; 16]).unwrap(),
+            namespace,
+        }
+    }
+
+    fn transfer_mutation() -> WorldTransferMutation {
+        let payload = protocol::WorldTransferPayload {
+            content_revision: revision(),
+            command: WorldTransferCommand::UseCommittedExtraction {
+                portal_id: protocol::WireText::new(CALDUS_EXIT_ID).unwrap(),
+                extraction_request_id: [4; 16],
+                extraction_receipt_id: [5; 16],
+            },
+        };
+        WorldTransferMutation {
+            mutation_id: [6; 16],
+            character_id: [7; 16],
+            expected_character_version: 2,
+            issued_at_unix_millis: 10,
+            payload_hash: payload.canonical_hash(),
+            payload,
+        }
+    }
+
     #[test]
     fn extraction_evidence_cannot_bypass_hidden_exit_or_wipeable_namespace() {
         let participant = CoreBossParticipant {
@@ -651,5 +666,46 @@ mod tests {
             build_request(&presentation, &lock, &command),
             Err(CaldusExtractionError::InvalidEvidenceBinding)
         ));
+    }
+
+    #[test]
+    fn hall_transfer_preflight_is_content_payload_time_and_namespace_bound() {
+        let required = revision();
+        let auth = authenticated(AuthenticatedNamespace::WipeableTest);
+        let mutation = transfer_mutation();
+        assert_eq!(
+            validate_transfer_preflight(auth, 1, &mutation, &required, 10),
+            None
+        );
+
+        let mut bad_hash = mutation.clone();
+        bad_hash.payload_hash[0] ^= 1;
+        assert_eq!(
+            validate_transfer_preflight(auth, 1, &bad_hash, &required, 10),
+            Some(WorldTransferResultCode::PayloadHashMismatch)
+        );
+
+        let mut wrong_content = mutation.clone();
+        wrong_content.payload.content_revision.records_blake3 =
+            ManifestHash::new("9".repeat(64)).unwrap();
+        wrong_content.payload_hash = wrong_content.payload.canonical_hash();
+        assert_eq!(
+            validate_transfer_preflight(auth, 1, &wrong_content, &required, 10),
+            Some(WorldTransferResultCode::ContentMismatch)
+        );
+        assert_eq!(
+            validate_transfer_preflight(auth, 1, &mutation, &required, 9),
+            Some(WorldTransferResultCode::IssuedAtInvalid)
+        );
+        assert_eq!(
+            validate_transfer_preflight(
+                authenticated(AuthenticatedNamespace::Production),
+                1,
+                &mutation,
+                &required,
+                10,
+            ),
+            Some(WorldTransferResultCode::InvalidSource)
+        );
     }
 }
