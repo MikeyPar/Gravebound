@@ -9,7 +9,8 @@ use protocol::{
     Platform, ProgressionProjection, ProgressionQueryFrame, ProgressionResult, ProtocolVersion,
     SafeInventoryDestinationV1, SafeInventoryResultCodeV1, SafeInventoryTransferFrameV1,
     SafeInventoryTransferKindV1, SafeInventoryTransferPayloadV1, WireText,
-    WorldFlowContentRevisionV1,
+    WorldFlowContentRevisionV1, WorldFlowFrame, WorldFlowRequest, WorldFlowResult,
+    WorldTransferCommand, WorldTransferMutation, WorldTransferPayload, WorldTransferResultCode,
 };
 use rcgen::{CertifiedKey, generate_simple_self_signed};
 use rustls::pki_types::PrivatePkcs8KeyDer;
@@ -395,14 +396,22 @@ async fn run_quic_transfers(
         NoopIdentityEventSink,
         ManifestHash::new("a".repeat(64)).unwrap(),
     );
+    let world_flow_content =
+        sim_content::load_core_development_world_flow(&content_root()).unwrap();
+    let world_flow_revision = WorldFlowContentRevisionV1 {
+        records_blake3: ManifestHash::new(world_flow_content.hashes().records_blake3.clone())
+            .unwrap(),
+        assets_blake3: ManifestHash::new(world_flow_content.hashes().assets_blake3.clone())
+            .unwrap(),
+        localization_blake3: ManifestHash::new(
+            world_flow_content.hashes().localization_blake3.clone(),
+        )
+        .unwrap(),
+    };
     let world_flow = WorldFlowGateService::new(
         PostgresWorldFlowLocationRepository::new(persistence.clone()),
         FixedAuthority,
-        WorldFlowContentRevisionV1 {
-            records_blake3: ManifestHash::new("b".repeat(64)).unwrap(),
-            assets_blake3: ManifestHash::new("c".repeat(64)).unwrap(),
-            localization_blake3: ManifestHash::new("d".repeat(64)).unwrap(),
-        },
+        world_flow_revision.clone(),
     );
     let progression_content =
         sim_content::load_core_development_progression(&content_root()).unwrap();
@@ -437,7 +446,7 @@ async fn run_quic_transfers(
         )
         .await
         .unwrap();
-        for response_sequence in 1..=frames.len() + 2 {
+        for response_sequence in 1..=frames.len() + 3 {
             serve_core_reliable(
                 &server,
                 &identity,
@@ -497,6 +506,37 @@ async fn run_quic_transfers(
                     progression_version: 2,
                     ..
                 },
+                ..
+            }
+        ));
+        let world_payload = WorldTransferPayload {
+            content_revision: world_flow_revision,
+            command: WorldTransferCommand::UsePortal {
+                portal_id: WireText::new("station.realm_gate").unwrap(),
+            },
+        };
+        let (_, world_result) = bot_client::perform_world_flow(
+            &client,
+            WorldFlowFrame {
+                sequence: 3,
+                request: WorldFlowRequest::Transfer(WorldTransferMutation {
+                    mutation_id: [229; 16],
+                    character_id: CHARACTER_ID,
+                    expected_character_version: 1,
+                    issued_at_unix_millis: 1,
+                    payload_hash: world_payload.canonical_hash(),
+                    payload: world_payload,
+                }),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            world_result,
+            WorldFlowResult::Transfer {
+                accepted: false,
+                code: WorldTransferResultCode::StageDisabled,
+                transfer_id: None,
                 ..
             }
         ));
