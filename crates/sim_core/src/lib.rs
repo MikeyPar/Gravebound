@@ -23,6 +23,7 @@ mod core_enemy_locomotion;
 mod core_enemy_runtime;
 mod core_knight;
 mod core_microrealm;
+mod core_mire;
 mod damage;
 mod death;
 mod debug_state;
@@ -160,6 +161,9 @@ pub use core_microrealm::{
     CORE_MICROREALM_EMPTY_RESET_TICKS, CORE_MICROREALM_PACK_WARNING_TICKS,
     CORE_MICROREALM_TRIGGER_DELAY_TICKS, CoreMicrorealmError, CoreMicrorealmEvent,
     CoreMicrorealmInput, CoreMicrorealmPhase, CoreMicrorealmSimulation,
+};
+pub use core_mire::{
+    CoreMireError, CoreMireEvent, CoreMireMovementPhase, CoreMireSimulation, CoreMireStep,
 };
 pub use damage::{
     DamageBand, DamageBandError, DamageError, DamageEvent, DamageType, DirectHitParameters,
