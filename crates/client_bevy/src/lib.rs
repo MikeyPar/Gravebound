@@ -8,6 +8,7 @@ mod combat;
 mod consumable;
 mod core_caldus_showcase;
 mod core_encounter_showcase;
+mod core_equipment_showcase;
 mod core_identity;
 mod core_transition_showcase;
 mod core_world_showcase;
@@ -62,6 +63,9 @@ pub use core_caldus_showcase::{
     CoreCaldusShowcaseConfig, CoreCaldusShowcaseState, run_core_caldus_showcase,
 };
 pub use core_encounter_showcase::{CoreEncounterShowcaseConfig, run_core_encounter_showcase};
+pub use core_equipment_showcase::{
+    CoreEquipmentShowcaseConfig, CoreEquipmentShowcaseState, run_core_equipment_showcase,
+};
 pub use core_identity::{
     CoreIdentityConfig, CoreIdentityModel, CoreIdentityPhase, run_core_identity,
 };

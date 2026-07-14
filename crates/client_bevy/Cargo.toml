@@ -12,6 +12,7 @@ anyhow.workspace = true
 bevy.workspace = true
 blake3.workspace = true
 clap.workspace = true
+content_schema = { path = "../content_schema" }
 quinn.workspace = true
 rodio.workspace = true
 protocol = { path = "../protocol" }

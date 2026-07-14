@@ -39,6 +39,12 @@ enum CoreTransitionEvidenceStateArg {
     HallResolution,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CoreEquipmentEvidenceStateArg {
+    Comparison,
+    IconMatrix,
+}
+
 impl From<CoreTransitionEvidenceStateArg> for client_bevy::CoreTransitionShowcaseState {
     fn from(value: CoreTransitionEvidenceStateArg) -> Self {
         match value {
@@ -125,6 +131,15 @@ enum Command {
         reduced_effects: bool,
         #[arg(long, value_enum, default_value_t = CoreTransitionEvidenceStateArg::HallLoading)]
         state: CoreTransitionEvidenceStateArg,
+    },
+    /// Open the disposable GB-M03-04E field inventory and icon-review evidence surface.
+    CoreEquipmentShowcase {
+        #[arg(long, default_value = "content")]
+        content_root: PathBuf,
+        #[arg(long)]
+        reduced_effects: bool,
+        #[arg(long, value_enum, default_value_t = CoreEquipmentEvidenceStateArg::Comparison)]
+        state: CoreEquipmentEvidenceStateArg,
     },
 }
 
@@ -230,7 +245,31 @@ fn run() -> anyhow::Result<()> {
             reduced_effects,
             state,
         } => run_transition_showcase(content_root, reduced_effects, state),
+        Command::CoreEquipmentShowcase {
+            content_root,
+            reduced_effects,
+            state,
+        } => run_equipment_showcase(content_root, reduced_effects, state),
     }
+}
+
+fn run_equipment_showcase(
+    content_root: PathBuf,
+    reduced_effects: bool,
+    state: CoreEquipmentEvidenceStateArg,
+) -> anyhow::Result<()> {
+    client_bevy::run_core_equipment_showcase(&client_bevy::CoreEquipmentShowcaseConfig {
+        content_root,
+        reduced_effects,
+        state: match state {
+            CoreEquipmentEvidenceStateArg::Comparison => {
+                client_bevy::CoreEquipmentShowcaseState::Comparison
+            }
+            CoreEquipmentEvidenceStateArg::IconMatrix => {
+                client_bevy::CoreEquipmentShowcaseState::IconMatrix
+            }
+        },
+    })
 }
 
 fn run_transition_showcase(

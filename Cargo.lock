@@ -2155,6 +2155,7 @@ dependencies = [
  "bevy",
  "blake3",
  "clap",
+ "content_schema",
  "protocol",
  "quinn",
  "rodio",
