@@ -106,7 +106,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 28;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 29;
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -1120,6 +1120,42 @@ mod tests {
             assert!(
                 !lowercase.contains(forbidden),
                 "schema 28 leaked {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn safe_inventory_receipt_is_normalized_bounded_and_version_exact() {
+        let migration = include_str!("../../../migrations/0029_safe_inventory_mutations.sql");
+        for required in [
+            "CREATE TABLE safe_inventory_mutations",
+            "CREATE TABLE safe_inventory_placements",
+            "canonical_request_hash BYTEA NOT NULL",
+            "command_kind BETWEEN 0 AND 2",
+            "placement_count BETWEEN 1 AND 6",
+            "post_inventory_version = pre_inventory_version + 1",
+            "post_account_version = pre_account_version + 1",
+            "post_account_version = pre_account_version",
+            "destination_kind = 2",
+            "destination_kind = 5",
+            "destination_kind = 6",
+            "post_item_version = pre_item_version + 1",
+        ] {
+            assert!(migration.contains(required), "schema 29 omitted {required}");
+        }
+        let lowercase = migration.to_ascii_lowercase();
+        for forbidden in [
+            "json",
+            "overflow",
+            "resolutionhold",
+            "resolution_hold",
+            "extraction",
+            "drop table",
+            "truncate",
+        ] {
+            assert!(
+                !lowercase.contains(forbidden),
+                "schema 29 leaked {forbidden}"
             );
         }
     }

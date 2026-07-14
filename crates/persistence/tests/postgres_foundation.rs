@@ -124,6 +124,8 @@ async fn migrations_are_idempotent_exact_and_ready() {
             "item_ledger_events",
             "reward_requests",
             "reward_result_entries",
+            "safe_inventory_mutations",
+            "safe_inventory_placements",
             "starter_initializer_results",
         ]
     );
