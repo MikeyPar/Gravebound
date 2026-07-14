@@ -11,7 +11,7 @@ use thiserror::Error;
 
 use crate::{
     AimDirection, AimDirectionError, AimVector, ArenaGeometry, AttackCastId, BossEvent,
-    CollisionError, CollisionTarget, CoreAcolyteFanPhase, CoreEnemyDefinition,
+    CollisionError, CollisionTarget, CoreAcolyteFanPhase, CoreEnemyDefinition, CoreKnightEvent,
     CoreNormalAttackEvent, CoreNormalAttackKind, CorePatternDefinition,
     CorePatternGeometryDefinition, CoreWorldPosition, Counterplay, DamageAppliedEvent, DamageBand,
     DamageError, DamageEvent, DamageType, DirectHitParameters, DirectHitRequest, EchoMemoryFamily,
@@ -27,6 +27,8 @@ const TICKS_PER_SECOND_F32: f32 = 30.0;
 const MICRO_UNITS: i64 = 1_000_000;
 const ACOLYTE_FAN_ID: &str = "pattern.enemy.bell_acolyte.alternating_fan";
 const CHOIR_SKULL_ROTOR_ID: &str = "pattern.enemy.choir_skull.rotor";
+const KNIGHT_STOP_RING_ID: &str = "miniboss.sepulcher_knight.stop_ring";
+const KNIGHT_SHIELD_FAN_ID: &str = "miniboss.sepulcher_knight.shield_fan";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HostileProjectileSourceKind {
@@ -306,6 +308,42 @@ impl HostileProjectileSimulation {
     ) -> Result<Vec<HostileEvent>, HostileError> {
         let mut next = self.clone();
         let spawned = next.spawn_core_normal_inner(source_entity_id, definition, event)?;
+        *self = next;
+        Ok(spawned)
+    }
+
+    /// Materializes only immutable Sepulcher Knight fan and parent-ring releases. Charge body
+    /// contact remains a direct hostile transaction owned by the B3 aggregate.
+    pub fn spawn_from_core_knight_event(
+        &mut self,
+        source_entity_id: EntityId,
+        definition: &CoreEnemyDefinition,
+        event: &CoreKnightEvent,
+    ) -> Result<Vec<HostileEvent>, HostileError> {
+        let mut next = self.clone();
+        let spec = core_knight_spawn_spec(definition, event, next.tick)?;
+        validate_projectile_attack(&spec.attack, spec.source_kind)?;
+        let mut projectiles = Vec::with_capacity(spec.directions.len());
+        for direction in spec.directions {
+            projectiles.push(next.allocate_projectile(
+                source_entity_id,
+                spec.cast_id,
+                spec.source_kind,
+                spec.origin,
+                direction,
+                &spec.attack,
+            )?);
+        }
+        next.projectiles
+            .extend(projectiles.iter().map(|(_, projectile)| projectile.clone()));
+        next.projectiles.sort_by_key(HostileProjectile::id);
+        let spawned = projectiles
+            .into_iter()
+            .map(|(_, projectile)| HostileEvent::Spawned {
+                tick: next.tick,
+                projectile,
+            })
+            .collect();
         *self = next;
         Ok(spawned)
     }
@@ -1382,6 +1420,123 @@ fn core_normal_spawn_spec(
     })
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the complete two-release Knight grammar remains auditable in one exhaustive match"
+)]
+fn core_knight_spawn_spec(
+    definition: &CoreEnemyDefinition,
+    event: &CoreKnightEvent,
+    hostile_tick: Tick,
+) -> Result<CoreProjectileSpawnSpec, HostileError> {
+    match event {
+        CoreKnightEvent::StopRingReleased {
+            tick,
+            lock,
+            origin,
+            emitted_indices,
+            omitted_indices,
+        } => {
+            if *tick != hostile_tick
+                || lock.pattern_index() != 0
+                || lock.pattern_id() != "miniboss.sepulcher_knight.charge_lane"
+                || !emitted_indices.windows(2).all(|pair| pair[0] < pair[1])
+                || emitted_indices.iter().any(|index| *index >= 10)
+                || omitted_indices[0] >= 10
+                || omitted_indices[1] != (omitted_indices[0] + 1) % 10
+                || emitted_indices
+                    .iter()
+                    .any(|index| omitted_indices.contains(index))
+            {
+                return Err(HostileError::InvalidProjectileAttack);
+            }
+            let pattern = definition
+                .parameters()
+                .patterns
+                .get(1)
+                .ok_or(HostileError::InvalidProjectileAttack)?;
+            let directions = emitted_indices
+                .iter()
+                .map(|index| {
+                    rotate_core_direction(AimDirection::east(), i32::from(*index) * 36_000)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let CorePatternGeometryDefinition::RadialGap {
+                projectile_speed_milli_tiles_per_second,
+                projectile_radius_milli_tiles,
+                projectile_lifetime_ticks,
+                ..
+            } = pattern.geometry()
+            else {
+                return Err(HostileError::InvalidProjectileAttack);
+            };
+            Ok(CoreProjectileSpawnSpec {
+                cast_id: lock.cast_id(),
+                origin: core_world_to_vector(*origin),
+                source_kind: HostileProjectileSourceKind::GapRing,
+                directions,
+                attack: core_projectile_attack(
+                    KNIGHT_STOP_RING_ID,
+                    8,
+                    *projectile_speed_milli_tiles_per_second,
+                    *projectile_radius_milli_tiles,
+                    *projectile_lifetime_ticks,
+                    pattern,
+                )?,
+            })
+        }
+        CoreKnightEvent::ShieldFanReleased { tick, lock } => {
+            if *tick != hostile_tick
+                || lock.pattern_index() != 2
+                || lock.pattern_id() != KNIGHT_SHIELD_FAN_ID
+            {
+                return Err(HostileError::InvalidProjectileAttack);
+            }
+            let pattern = definition
+                .parameters()
+                .patterns
+                .get(2)
+                .ok_or(HostileError::InvalidProjectileAttack)?;
+            let CorePatternGeometryDefinition::ProjectileFan {
+                shot_count: 5,
+                total_arc_milli_degrees: 50_000,
+                projectile_speed_milli_tiles_per_second,
+                projectile_radius_milli_tiles,
+                projectile_lifetime_ticks,
+                ..
+            } = pattern.geometry()
+            else {
+                return Err(HostileError::InvalidProjectileAttack);
+            };
+            let base = aim_from_core_positions(lock.origin(), lock.target().position)?;
+            let directions = [-25_000, -12_500, 0, 12_500, 25_000]
+                .into_iter()
+                .map(|offset| rotate_core_direction(base, offset))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(CoreProjectileSpawnSpec {
+                cast_id: lock.cast_id(),
+                origin: core_world_to_vector(lock.origin()),
+                source_kind: HostileProjectileSourceKind::AimedFan,
+                directions,
+                attack: core_projectile_attack(
+                    KNIGHT_SHIELD_FAN_ID,
+                    5,
+                    *projectile_speed_milli_tiles_per_second,
+                    *projectile_radius_milli_tiles,
+                    *projectile_lifetime_ticks,
+                    pattern,
+                )?,
+            })
+        }
+        CoreKnightEvent::TelegraphStarted { .. }
+        | CoreKnightEvent::ChargeStarted { .. }
+        | CoreKnightEvent::ChargeMoved { .. }
+        | CoreKnightEvent::TargetlessReset { .. } => {
+            Err(HostileError::EventDoesNotAuthorizeProjectileSpawn)
+        }
+    }
+}
+
 fn build_acolyte_projectile_spec(
     pattern: &CorePatternDefinition,
     origin: CoreWorldPosition,
@@ -1461,6 +1616,10 @@ fn build_skull_projectile_spec(
     })
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "all exact hostile projectile payloads remain centralized in one fail-closed validator"
+)]
 fn validate_projectile_attack(
     attack: &ProjectileAttackDefinition,
     source_kind: HostileProjectileSourceKind,
@@ -1501,6 +1660,17 @@ fn validate_projectile_attack(
                         && attack.threat_cost == 7
                         && attack.maximum_active_instances == 5
                 }
+                KNIGHT_SHIELD_FAN_ID => {
+                    attack.projectile_count == 5
+                        && attack.speed_milli_tiles_per_second == 6_000
+                        && attack.radius_milli_tiles == 120
+                        && attack.lifetime_ticks == 40
+                        && attack.raw_damage == 18
+                        && attack.damage_type == DamageType::Physical
+                        && attack.damage_band == DamageBand::Pressure
+                        && attack.threat_cost == 5
+                        && attack.maximum_active_instances == 5
+                }
                 _ => false,
             }) && attack.memory_family == EchoMemoryFamily::FanProjectile
                 && attack.counterplay == Counterplay::Strafe
@@ -1524,10 +1694,21 @@ fn validate_projectile_attack(
                         && attack.threat_cost == 12
                         && attack.maximum_active_instances == 24
                 }
+                KNIGHT_STOP_RING_ID => {
+                    attack.projectile_count == 8
+                        && attack.speed_milli_tiles_per_second == 5_000
+                        && attack.radius_milli_tiles == 120
+                        && attack.lifetime_ticks == 48
+                        && attack.raw_damage == 20
+                        && attack.damage_band == DamageBand::Pressure
+                        && attack.threat_cost == 8
+                        && attack.maximum_active_instances == 8
+                }
                 _ => false,
-            }) && attack.speed_milli_tiles_per_second == 4_500
-                && attack.radius_milli_tiles == 130
-                && attack.damage_type == DamageType::Veil
+            }) && (attack.pattern_id == KNIGHT_STOP_RING_ID
+                || (attack.speed_milli_tiles_per_second == 4_500
+                    && attack.radius_milli_tiles == 130
+                    && attack.damage_type == DamageType::Veil))
                 && attack.memory_family == EchoMemoryFamily::RadialProjectile
                 && attack.counterplay == Counterplay::FollowGap
                 && !attack.pierces_players
@@ -1644,6 +1825,8 @@ fn rotate_core_direction(
     milli_degrees: i32,
 ) -> Result<AimDirection, HostileError> {
     let (cosine, sine) = match milli_degrees {
+        -25_000 => (0.906_307_8, -0.422_618_27),
+        -12_500 => (0.976_296, -0.216_439_62),
         -50_000 => (0.642_787_64, -0.766_044_44),
         -35_000 => (0.819_152_06, -0.573_576_45),
         -20_000 => (0.939_692_6, -0.342_020_15),
@@ -1652,18 +1835,29 @@ fn rotate_core_direction(
         0 => (1.0, 0.0),
         5_000 => (0.996_194_7, 0.087_155_744),
         10_000 => (0.984_807_7, 0.173_648_18),
+        12_500 => (0.976_296, 0.216_439_62),
         14_000 => (0.970_295_7, 0.241_921_9),
         20_000 => (0.939_692_6, 0.342_020_15),
+        25_000 => (0.906_307_8, 0.422_618_27),
         28_000 => (0.882_947_56, 0.469_471_57),
         35_000 => (0.819_152_06, 0.573_576_45),
+        36_000 => (0.809_017, 0.587_785_24),
         42_000 => (0.743_144_8, 0.669_130_6),
         50_000 => (0.642_787_64, 0.766_044_44),
         56_000 => (0.559_192_9, 0.829_037_55),
         70_000 => (0.342_020_15, 0.939_692_6),
+        72_000 => (0.309_017, 0.951_056_54),
         84_000 => (0.104_528_464, 0.994_521_9),
         98_000 => (-0.139_173_1, 0.990_268_05),
+        108_000 => (-0.309_017, 0.951_056_54),
         112_000 => (-0.374_606_58, 0.927_183_87),
         126_000 => (-0.587_785_24, 0.809_017),
+        144_000 => (-0.809_017, 0.587_785_24),
+        180_000 => (-1.0, 0.0),
+        216_000 => (-0.809_017, -0.587_785_24),
+        252_000 => (-0.309_017, -0.951_056_54),
+        288_000 => (0.309_017, -0.951_056_54),
+        324_000 => (0.809_017, -0.587_785_24),
         _ => return Err(HostileError::UnsupportedCoreProjectileAngle(milli_degrees)),
     };
     let vector = base.vector();

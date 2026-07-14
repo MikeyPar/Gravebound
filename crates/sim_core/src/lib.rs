@@ -20,6 +20,7 @@ mod core_enemy_attack;
 mod core_enemy_kit;
 mod core_enemy_locomotion;
 mod core_enemy_runtime;
+mod core_knight;
 mod core_microrealm;
 mod damage;
 mod death;
@@ -146,6 +147,9 @@ pub use core_enemy_runtime::{
     CoreAttackLock, CoreAttackLockError, CoreEnemyRuntimeError, CoreEnemyRuntimeEvent,
     CoreEnemySimulation, CoreSelectedTarget, CoreTargetCandidate, CoreTargetSelectionError,
     CoreWorldPosition, select_core_target,
+};
+pub use core_knight::{
+    CoreKnightAttackLock, CoreKnightError, CoreKnightEvent, CoreKnightSimulation, CoreKnightStep,
 };
 pub use core_microrealm::{
     CORE_MICROREALM_EMPTY_RESET_TICKS, CORE_MICROREALM_PACK_WARNING_TICKS,
