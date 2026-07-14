@@ -16,6 +16,7 @@ mod combat;
 mod consumable;
 mod core_abbot;
 mod core_boss_lock;
+mod core_caldus;
 mod core_counterplay;
 mod core_enemy;
 mod core_enemy_attack;
@@ -130,6 +131,13 @@ pub use core_boss_lock::{
     CoreBossLifeState, CoreBossLockError, CoreBossLockEvent, CoreBossLockInput, CoreBossLockPhase,
     CoreBossLockSimulation, CoreBossLockStep, CoreBossParticipant, CoreBossParticipantLock,
     scaled_caldus_health,
+};
+pub use core_caldus::{
+    CALDUS_PHASE_BREAK_TICKS, CALDUS_PHASE_ONE_LOOP_TICKS, CALDUS_PHASE_THREE_LOOP_TICKS,
+    CALDUS_PHASE_THREE_LOW_HEALTH_LOOP_TICKS, CALDUS_PHASE_TWO_LOOP_TICKS,
+    CALDUS_RING_WARNING_TICKS, CALDUS_SHIELD_WARNING_TICKS, CALDUS_SOFT_ENRAGE_TICKS,
+    CoreCaldusError, CoreCaldusEvent, CoreCaldusInput, CoreCaldusPhase, CoreCaldusSimulation,
+    CoreCaldusState, CoreCaldusTargetInput,
 };
 pub use core_counterplay::{
     CORE_COM006_CLOSE_SPAWN_DISTANCE_MILLI_TILES,
