@@ -11,11 +11,11 @@ use sim_core::{
     DungeonRoomVolumeGeometry, DungeonRoomVolumeKind, EnemyHealthActor, EnemyHealthError,
     EnemyHealthSimulation, EnemyHealthSnapshot, EnemyHealthStep, EnemyLabPlayer, EntityId,
     EntityIdAllocator, FixedRoomError, FixedRoomEvent, FixedRoomInput, FixedRoomPhase,
-    FixedRoomSimulation, HostileEvent, NormalRewardDropEvent, NormalWaveClearedHostiles,
-    NormalWaveDefinitions, NormalWaveEnemyKind, NormalWaveEntityIdError, NormalWaveError,
-    NormalWaveHandoff, NormalWaveInstanceSnapshot, NormalWaveSimulation, NormalWaveSpawn,
-    NormalWaveStep, RotatedDungeonRoom, SpawnInstanceId, Tick, TilePoint, TileRectangle,
-    normal_wave_entity_id, select_core_target,
+    FixedRoomSimulation, HostileDamagePolicy, HostileEvent, NormalRewardDropEvent,
+    NormalWaveClearedHostiles, NormalWaveDefinitions, NormalWaveEnemyKind, NormalWaveEntityIdError,
+    NormalWaveError, NormalWaveHandoff, NormalWaveInstanceSnapshot, NormalWaveSimulation,
+    NormalWaveSpawn, NormalWaveStep, RotatedDungeonRoom, SpawnInstanceId, Tick, TilePoint,
+    TileRectangle, normal_wave_entity_id, select_core_target,
 };
 use thiserror::Error;
 
@@ -671,6 +671,7 @@ pub struct CoreB2FixedRoomSimulation {
     plan: CoreFixedRoomEncounterPlan,
     definitions: CoreB2DefinitionSet,
     authority: FixedRoomSimulation,
+    damage_policy: HostileDamagePolicy,
     next_spawn_ordinal: u16,
     participant: Option<NormalWaveHandoff>,
     combat: Option<CoreB2CombatSimulation>,
@@ -693,6 +694,7 @@ impl CoreB2FixedRoomSimulation {
             plan,
             definitions,
             authority,
+            damage_policy: HostileDamagePolicy::Standard,
             next_spawn_ordinal,
             participant: Some(NormalWaveHandoff {
                 player,
@@ -724,6 +726,13 @@ impl CoreB2FixedRoomSimulation {
         self.combat
             .as_ref()
             .map_or_else(Vec::new, |combat| combat.authored_health.snapshots())
+    }
+
+    pub fn set_damage_policy(&mut self, policy: HostileDamagePolicy) {
+        self.damage_policy = policy;
+        if let Some(combat) = &mut self.combat {
+            combat.immutable_wave.set_damage_policy(policy);
+        }
     }
 
     pub fn step(
@@ -774,6 +783,7 @@ impl CoreB2FixedRoomSimulation {
                         tick,
                         self.next_spawn_ordinal,
                     )?;
+                    combat.immutable_wave.set_damage_policy(self.damage_policy);
                     combat_step = Some(combat.step(&combat_input(tick, input)?)?);
                     self.next_spawn_ordinal = self
                         .next_spawn_ordinal
@@ -1301,6 +1311,63 @@ mod tests {
         combat
     }
 
+    fn sustained_b2_trace(
+        content: &CoreDevelopmentEncounterRooms,
+    ) -> Vec<(Tick, EntityId, String, EntityId)> {
+        let plan = compile_core_fixed_room_encounters(content, 8)
+            .expect("plans")
+            .remove(1);
+        let all_entity_ids = plan
+            .assignments()
+            .iter()
+            .map(|assignment| assignment.entity_id)
+            .collect::<Vec<_>>();
+        let (player, allocator) = player_fixture();
+        let mut room =
+            CoreB2FixedRoomSimulation::new(plan, content, player, allocator).expect("B2 room");
+        room.set_damage_policy(HostileDamagePolicy::DebugInvulnerable);
+        let mut activate = room_input(1, 1);
+        activate.crossed_activation_boundary = true;
+        room.step(Tick(1), &activate).expect("activation");
+
+        let mut trace = Vec::new();
+        for tick in 2..=260 {
+            let step = room
+                .step(Tick(tick), &room_input(1, tick))
+                .expect("live-cycle tick");
+            let Some(combat) = step.combat else {
+                continue;
+            };
+            let events = combat
+                .immutable_wave
+                .hostile_spawn_events
+                .into_iter()
+                .chain(
+                    combat
+                        .authored_actors
+                        .into_iter()
+                        .flat_map(|actor| actor.hostile_spawn_events),
+                );
+            for event in events {
+                if let HostileEvent::Spawned { tick, projectile } = event {
+                    trace.push((
+                        tick,
+                        projectile.source_entity_id(),
+                        projectile.pattern_id().to_owned(),
+                        projectile.id(),
+                    ));
+                }
+            }
+        }
+        assert_eq!(room.phase(), FixedRoomPhase::Active);
+        let mut lethal = room_input(1, 261);
+        lethal.combat_step = Some(lethal_targets_step(all_entity_ids, 261));
+        let clear = room.step(Tick(261), &lethal).expect("terminal clear");
+        assert_eq!(clear.required_hostiles_remaining, 0);
+        assert_eq!(room.phase(), FixedRoomPhase::Quiet);
+        trace
+    }
+
     #[test]
     fn four_fixed_room_plans_are_exact_ordered_and_identity_disjoint() {
         let content = load_core_development_encounter_rooms(&content_root()).expect("content");
@@ -1621,6 +1688,31 @@ mod tests {
             [FixedRoomEvent::DoorsOpened]
         );
         assert_eq!(room.phase(), FixedRoomPhase::Cleared);
+    }
+
+    #[test]
+    fn b2_sustained_live_cycle_replays_all_three_projectile_families_without_softlock() {
+        let content = load_core_development_encounter_rooms(&content_root()).expect("content");
+        let first = sustained_b2_trace(&content);
+        let second = sustained_b2_trace(&content);
+        assert_eq!(first, second);
+        let patterns = first
+            .iter()
+            .map(|(_, _, pattern, _)| pattern.as_str())
+            .collect::<BTreeSet<_>>();
+        assert!(patterns.contains("pattern.enemy.drowned_pilgrim.fan"));
+        assert!(patterns.contains("pattern.enemy.bell_acolyte.alternating_fan"));
+        assert!(patterns.contains("pattern.enemy.choir_skull.rotor"));
+        let acolyte_projectiles = first
+            .iter()
+            .filter(|(_, _, pattern, _)| pattern == "pattern.enemy.bell_acolyte.alternating_fan")
+            .count();
+        let skull_projectiles = first
+            .iter()
+            .filter(|(_, _, pattern, _)| pattern == "pattern.enemy.choir_skull.rotor")
+            .count();
+        assert!(acolyte_projectiles >= 10 && acolyte_projectiles % 5 == 0);
+        assert!(skull_projectiles >= 20 && skull_projectiles % 2 == 0);
     }
 
     #[test]
