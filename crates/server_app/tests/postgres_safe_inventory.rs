@@ -1,4 +1,8 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use persistence::{
     CORE_ITEM_CONTENT_REVISION, PersistenceConfig, PersistenceError, PostgresPersistence,
@@ -388,15 +392,22 @@ struct QuicTransferOptions {
     close_database_before_first_safe_request: bool,
 }
 
+#[derive(Debug)]
+struct QuicJourneyOutcome {
+    transfers: Vec<protocol::SafeInventoryTransferResultV1>,
+    login_to_control: Duration,
+    mutation_round_trips: Vec<Duration>,
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "the disposable QUIC composition and client journey stay visible as one audit boundary"
 )]
-async fn run_quic_transfers(
+async fn run_quic_transfer_journey(
     persistence: &PostgresPersistence,
     frames: &[SafeInventoryTransferFrameV1],
     options: QuicTransferOptions,
-) -> Vec<protocol::SafeInventoryTransferResultV1> {
+) -> QuicJourneyOutcome {
     let identity = IdentityService::new(
         PostgresAccountRepository::new(persistence.clone()),
         FixedAuthority,
@@ -439,6 +450,7 @@ async fn run_quic_transfers(
         account_id: AccountId::new(ACCOUNT_ID).unwrap(),
         namespace: AuthenticatedNamespace::WipeableTest,
     };
+    let login_started = Instant::now();
     let (server_endpoint, client_endpoint, address) = endpoints();
     let connecting = client_endpoint.connect(address, "localhost").unwrap();
     let incoming = server_endpoint.accept().await.unwrap();
@@ -519,6 +531,7 @@ async fn run_quic_transfers(
                 ..
             }
         ));
+        let login_to_control = login_started.elapsed();
         let world_payload = WorldTransferPayload {
             content_revision: world_flow_revision,
             command: WorldTransferCommand::UsePortal {
@@ -554,6 +567,7 @@ async fn run_quic_transfers(
             persistence.clone().close().await;
         }
         let mut results = Vec::with_capacity(frames.len());
+        let mut mutation_round_trips = Vec::with_capacity(frames.len());
         for (index, frame) in frames.iter().enumerate() {
             if options.drop_first_safe_response && index == 0 {
                 bot_client::submit_safe_inventory_without_response(&client, *frame)
@@ -561,19 +575,36 @@ async fn run_quic_transfers(
                     .unwrap();
                 continue;
             }
+            let mutation_started = Instant::now();
             let (_, result) = bot_client::perform_safe_inventory_transfer(&client, *frame)
                 .await
                 .unwrap();
+            mutation_round_trips.push(mutation_started.elapsed());
             results.push(result);
         }
-        results
+        (results, login_to_control, mutation_round_trips)
     };
-    let ((), results) = tokio::join!(server_journey, client_journey);
+    let ((), (transfers, login_to_control, mutation_round_trips)) =
+        tokio::join!(server_journey, client_journey);
     drop(client);
     client_endpoint.wait_idle().await;
     server_endpoint.close(0_u32.into(), b"safe-inventory journey complete");
     server_endpoint.wait_idle().await;
-    results
+    QuicJourneyOutcome {
+        transfers,
+        login_to_control,
+        mutation_round_trips,
+    }
+}
+
+async fn run_quic_transfers(
+    persistence: &PostgresPersistence,
+    frames: &[SafeInventoryTransferFrameV1],
+    options: QuicTransferOptions,
+) -> Vec<protocol::SafeInventoryTransferResultV1> {
+    run_quic_transfer_journey(persistence, frames, options)
+        .await
+        .transfers
 }
 
 #[tokio::test]
@@ -667,15 +698,17 @@ async fn dropped_quic_response_retries_the_stored_lifecycle_result() {
     seed_fixture(&persistence).await;
     stage_progression_reward_and_equipment(&persistence).await;
     let frame = transfer_frame_at(4);
-    let retry = run_quic_transfers(
+    let dropped = run_quic_transfers(
         &persistence,
-        &[frame, frame],
+        &[frame],
         QuicTransferOptions {
             drop_first_safe_response: true,
             ..QuicTransferOptions::default()
         },
     )
     .await;
+    assert!(dropped.is_empty());
+    let retry = run_quic_transfers(&persistence, &[frame], QuicTransferOptions::default()).await;
     assert_eq!(retry.len(), 1);
     assert_eq!(retry[0].code, SafeInventoryResultCodeV1::Accepted);
     assert!(retry[0].replayed);
@@ -724,6 +757,78 @@ async fn duplicate_quic_sessions_converge_on_one_inventory_commit() {
     persistence.close().await;
 }
 
+fn duration_stats(samples: &mut [Duration]) -> (Duration, Duration, Duration) {
+    assert!(!samples.is_empty());
+    samples.sort_unstable();
+    let median = samples[samples.len() / 2];
+    let p95_index = (samples.len() * 95).div_ceil(100).saturating_sub(1);
+    (median, samples[p95_index], samples[samples.len() - 1])
+}
+
+#[tokio::test]
+#[ignore = "requires explicitly authorized disposable PostgreSQL"]
+async fn completes_25_item_lifecycle_journeys_within_login_budget() {
+    let persistence = disposable_database().await;
+    let mut login_samples = Vec::with_capacity(25);
+    let mut mutation_samples = Vec::with_capacity(25);
+    for journey_index in 0..25 {
+        seed_fixture(&persistence).await;
+        stage_progression_reward_and_equipment(&persistence).await;
+        let outcome = run_quic_transfer_journey(
+            &persistence,
+            &[transfer_frame_at(4)],
+            QuicTransferOptions::default(),
+        )
+        .await;
+        assert_eq!(outcome.transfers.len(), 1, "journey {journey_index}");
+        assert_eq!(
+            outcome.transfers[0].code,
+            SafeInventoryResultCodeV1::Accepted,
+            "journey {journey_index}"
+        );
+        assert!(!outcome.transfers[0].replayed, "journey {journey_index}");
+        assert_eq!(
+            outcome.mutation_round_trips.len(),
+            1,
+            "journey {journey_index}"
+        );
+        let signature = persistence
+            .core_item_lifecycle_signature_v1(ACCOUNT_ID, CHARACTER_ID)
+            .await
+            .unwrap();
+        assert_eq!(signature.safe_inventory_receipts.len(), 1);
+        assert_eq!(signature.progression.as_ref().unwrap().level, 4);
+        assert_eq!(signature.progression.as_ref().unwrap().total_xp, 675);
+
+        let mut cleanup = persistence.begin_transaction().await.unwrap();
+        let idle_transactions: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() \
+             AND state='idle in transaction'",
+        )
+        .fetch_one(cleanup.connection())
+        .await
+        .unwrap();
+        cleanup.rollback().await.unwrap();
+        assert_eq!(idle_transactions, 0, "journey {journey_index}");
+        login_samples.push(outcome.login_to_control);
+        mutation_samples.extend(outcome.mutation_round_trips);
+    }
+    let (login_median, login_p95, login_max) = duration_stats(&mut login_samples);
+    let (mutation_median, mutation_p95, mutation_max) = duration_stats(&mut mutation_samples);
+    eprintln!(
+        "GB-M03-04G journeys=25 login_ms median={:.3} p95={:.3} max={:.3}; \
+         mutation_ms median={:.3} p95={:.3} max={:.3}",
+        login_median.as_secs_f64() * 1_000.0,
+        login_p95.as_secs_f64() * 1_000.0,
+        login_max.as_secs_f64() * 1_000.0,
+        mutation_median.as_secs_f64() * 1_000.0,
+        mutation_p95.as_secs_f64() * 1_000.0,
+        mutation_max.as_secs_f64() * 1_000.0,
+    );
+    assert!(login_median < Duration::from_secs(30));
+    persistence.close().await;
+}
+
 fn assert_state_free_service_unavailable(result: &protocol::SafeInventoryTransferResultV1) {
     result.validate().unwrap();
     assert_eq!(result.code, SafeInventoryResultCodeV1::ServiceUnavailable);
@@ -761,6 +866,25 @@ async fn update_receipt_result_hash(persistence: &PostgresPersistence, hash: [u8
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(ACCOUNT_ID.as_slice())
     .bind(MUTATION_ID.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap()
+    .rows_affected();
+    assert_eq!(changed, 1);
+    transaction.commit().await.unwrap();
+}
+
+async fn update_fixture_item_content_revision(
+    persistence: &PostgresPersistence,
+    content_revision: &str,
+) {
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let changed = sqlx::query(
+        "UPDATE item_instances SET content_revision=$1 WHERE namespace_id=$2 AND item_uid=$3",
+    )
+    .bind(content_revision)
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ITEM_UID.as_slice())
     .execute(transaction.connection())
     .await
     .unwrap()
@@ -816,6 +940,46 @@ async fn database_outage_returns_a_state_free_quic_rejection() {
         .unwrap();
     assert_eq!(after_outage, before_outage);
     restarted.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires explicitly authorized disposable PostgreSQL"]
+async fn foreign_item_content_revision_fails_closed_before_storage_mutation() {
+    let persistence = disposable_database().await;
+    seed_fixture(&persistence).await;
+    stage_progression_reward_and_equipment(&persistence).await;
+    let baseline = persistence
+        .core_item_lifecycle_signature_v1(ACCOUNT_ID, CHARACTER_ID)
+        .await
+        .unwrap();
+    let alternate_revision = format!("core-dev.blake3.{}", "f".repeat(64));
+    assert_ne!(alternate_revision, CORE_ITEM_CONTENT_REVISION);
+    update_fixture_item_content_revision(&persistence, &alternate_revision).await;
+    assert!(matches!(
+        persistence
+            .core_item_lifecycle_signature_v1(ACCOUNT_ID, CHARACTER_ID)
+            .await,
+        Err(PersistenceError::CorruptStoredLifecycleSignature)
+    ));
+
+    let frame = transfer_frame_at(4);
+    let rejected = run_quic_transfers(&persistence, &[frame], QuicTransferOptions::default()).await;
+    assert_state_free_service_unavailable(&rejected[0]);
+    assert_eq!(safe_transfer_durable_counts(&persistence).await, (0, 0, 0));
+
+    update_fixture_item_content_revision(&persistence, CORE_ITEM_CONTENT_REVISION).await;
+    assert_eq!(
+        persistence
+            .core_item_lifecycle_signature_v1(ACCOUNT_ID, CHARACTER_ID)
+            .await
+            .unwrap(),
+        baseline
+    );
+    let accepted = run_quic_transfers(&persistence, &[frame], QuicTransferOptions::default()).await;
+    assert_eq!(accepted[0].code, SafeInventoryResultCodeV1::Accepted);
+    assert!(!accepted[0].replayed);
+    assert_committed_state(&persistence).await;
+    persistence.close().await;
 }
 
 #[tokio::test]
