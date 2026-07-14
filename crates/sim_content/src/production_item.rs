@@ -17,8 +17,9 @@ use content_schema::{
 };
 use serde::{Deserialize, Serialize};
 use sim_core::{
-    CrossbowPowerRequest, EquipmentRarity, WeaponDefinition, WeaponDefinitionParameters,
-    resolve_crossbow_weapon_power,
+    ArmorBaseRequest, CrossbowPowerRequest, EquipmentRarity,
+    EquipmentSlot as SimulationEquipmentSlot, WeaponDefinition, WeaponDefinitionParameters,
+    resolve_armor_base, resolve_crossbow_weapon_power,
 };
 use thiserror::Error;
 
@@ -76,6 +77,471 @@ impl CompiledProductionItemCatalog {
     #[must_use]
     pub const fn stage_policies(&self) -> &BTreeMap<String, ProductionItemStagePolicyRecord> {
         &self.stage_policies
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CoreEquipmentAxis {
+    WeaponDamage,
+    AttackIntervalMicros,
+    RangeMilliTiles,
+    ProjectileSpeedMilliTilesPerSecond,
+    ProjectileRadiusMilliTiles,
+    BoltCount,
+    PierceCount,
+    MaximumHealth,
+    Armor,
+    ResistanceBasisPoints,
+    MovementBasisPoints,
+    HealingReceivedBasisPoints,
+    NegativeStatusReductionBasisPoints,
+    DirectHitBarrierHealth,
+    MarkDamageCoefficientBasisPoints,
+    MarkDurationMillis,
+    MarkPrimaryBonusBasisPoints,
+    SlipstepDistanceMilliTiles,
+    SlipstepDurationMillis,
+    SlipstepDamageReductionBasisPoints,
+    SlipstepCooldownMillis,
+    RestedPrimaryBonusBasisPoints,
+    RestedPrimaryIdleMillis,
+    PotionHealingBasisPoints,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoreEquipmentAxisPreference {
+    Higher,
+    Lower,
+    Contextual,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreEquipmentResolvedValue {
+    pub axis: CoreEquipmentAxis,
+    pub value: i64,
+    pub preference: CoreEquipmentAxisPreference,
+    pub advanced: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreEquipmentPresentation {
+    pub template_id: String,
+    pub slot: SimulationEquipmentSlot,
+    pub item_level: u8,
+    pub behavior_key: String,
+    pub values: Vec<CoreEquipmentResolvedValue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreEquipmentChange {
+    pub axis: CoreEquipmentAxis,
+    pub before: Option<i64>,
+    pub after: Option<i64>,
+    pub delta: i64,
+    pub preference: CoreEquipmentAxisPreference,
+    pub advanced: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreEquipmentComparison {
+    pub behavior_changed: bool,
+    pub current_behavior_key: Option<String>,
+    pub incoming_behavior_key: String,
+    pub changes: Vec<CoreEquipmentChange>,
+}
+
+// Keeping the exhaustive behavior projection together makes omissions visible when the strict
+// content enum grows; each arm preserves the design document's display ordering contract.
+#[allow(clippy::too_many_lines)]
+pub fn resolve_core_equipment_presentation(
+    catalog: &CompiledProductionItemCatalog,
+    template_id: &str,
+    item_level: u8,
+    rarity: EquipmentRarity,
+) -> Result<CoreEquipmentPresentation> {
+    let item = catalog
+        .items
+        .get(template_id)
+        .with_context(|| format!("Core equipment `{template_id}` is unavailable"))?;
+    let ProductionItemTemplatePayload::Equipment {
+        slot,
+        minimum_item_level,
+        maximum_item_level,
+        core_maximum_item_level_override,
+        behavior,
+        ..
+    } = &item.payload
+    else {
+        bail!("Core item `{template_id}` is not equipment");
+    };
+    let maximum = core_maximum_item_level_override.unwrap_or(*maximum_item_level);
+    if item_level < *minimum_item_level || item_level > maximum {
+        bail!("Core equipment `{template_id}` has an illegal item level");
+    }
+    let mut values = Vec::new();
+    let behavior_key = match behavior {
+        ProductionEquipmentBehavior::Crossbow {
+            template_damage_scalar_basis_points,
+            attack_interval_micros,
+            range_milli_tiles,
+            projectile_speed_milli_tiles_per_second,
+            projectile_radius_milli_tiles,
+            bolt_angles_milli_degrees,
+            pierce_count,
+            ..
+        } => {
+            values.extend([
+                resolved(
+                    CoreEquipmentAxis::WeaponDamage,
+                    i64::from(resolve_crossbow_weapon_power(CrossbowPowerRequest {
+                        item_level,
+                        template_damage_scalar_basis_points: *template_damage_scalar_basis_points,
+                        rarity,
+                        weapon_w_affix_basis_points: 0,
+                    })?),
+                    CoreEquipmentAxisPreference::Higher,
+                    false,
+                ),
+                resolved(
+                    CoreEquipmentAxis::AttackIntervalMicros,
+                    i64::from(*attack_interval_micros),
+                    CoreEquipmentAxisPreference::Lower,
+                    false,
+                ),
+                resolved(
+                    CoreEquipmentAxis::RangeMilliTiles,
+                    i64::from(*range_milli_tiles),
+                    CoreEquipmentAxisPreference::Higher,
+                    false,
+                ),
+                resolved(
+                    CoreEquipmentAxis::ProjectileSpeedMilliTilesPerSecond,
+                    i64::from(*projectile_speed_milli_tiles_per_second),
+                    CoreEquipmentAxisPreference::Higher,
+                    true,
+                ),
+                resolved(
+                    CoreEquipmentAxis::ProjectileRadiusMilliTiles,
+                    i64::from(*projectile_radius_milli_tiles),
+                    CoreEquipmentAxisPreference::Higher,
+                    true,
+                ),
+                resolved(
+                    CoreEquipmentAxis::BoltCount,
+                    i64::try_from(bolt_angles_milli_degrees.len())
+                        .context("Core bolt count overflow")?,
+                    CoreEquipmentAxisPreference::Contextual,
+                    false,
+                ),
+                resolved(
+                    CoreEquipmentAxis::PierceCount,
+                    i64::from(*pierce_count),
+                    CoreEquipmentAxisPreference::Higher,
+                    false,
+                ),
+            ]);
+            if bolt_angles_milli_degrees.len() > 1 {
+                "behavior.crossbow.fan"
+            } else {
+                "behavior.crossbow.single_bolt"
+            }
+        }
+        ProductionEquipmentBehavior::Armor {
+            raw_health_base_hundredths,
+            raw_health_per_level_hundredths,
+            raw_armor_base_hundredths,
+            raw_armor_per_level_hundredths,
+            raw_resistance_base_basis_points,
+            raw_resistance_per_level_basis_points,
+            fixed_movement_basis_points,
+            fixed_healing_received_basis_points,
+            negative_status_duration_reduction_basis_points,
+            direct_hit_barrier,
+            ..
+        } => {
+            let armor = resolve_armor_base(ArmorBaseRequest {
+                item_level,
+                rarity,
+                raw_health_base_hundredths: *raw_health_base_hundredths,
+                raw_health_per_level_hundredths: *raw_health_per_level_hundredths,
+                raw_armor_base_hundredths: *raw_armor_base_hundredths,
+                raw_armor_per_level_hundredths: *raw_armor_per_level_hundredths,
+                raw_resistance_base_basis_points: *raw_resistance_base_basis_points,
+                raw_resistance_per_level_basis_points: *raw_resistance_per_level_basis_points,
+                barrier_raw_base_health_hundredths: direct_hit_barrier
+                    .as_ref()
+                    .map(|barrier| barrier.raw_base_health_hundredths),
+                barrier_raw_health_per_level_hundredths: direct_hit_barrier
+                    .as_ref()
+                    .map(|barrier| barrier.raw_health_per_level_hundredths),
+            })?;
+            values.extend([
+                resolved(
+                    CoreEquipmentAxis::MaximumHealth,
+                    i64::from(armor.maximum_health),
+                    CoreEquipmentAxisPreference::Higher,
+                    false,
+                ),
+                resolved(
+                    CoreEquipmentAxis::Armor,
+                    i64::from(armor.armor),
+                    CoreEquipmentAxisPreference::Higher,
+                    false,
+                ),
+                resolved(
+                    CoreEquipmentAxis::ResistanceBasisPoints,
+                    i64::from(armor.resistance_basis_points),
+                    CoreEquipmentAxisPreference::Higher,
+                    false,
+                ),
+                resolved(
+                    CoreEquipmentAxis::MovementBasisPoints,
+                    i64::from(*fixed_movement_basis_points),
+                    CoreEquipmentAxisPreference::Higher,
+                    false,
+                ),
+                resolved(
+                    CoreEquipmentAxis::HealingReceivedBasisPoints,
+                    i64::from(*fixed_healing_received_basis_points),
+                    CoreEquipmentAxisPreference::Higher,
+                    true,
+                ),
+                resolved(
+                    CoreEquipmentAxis::NegativeStatusReductionBasisPoints,
+                    i64::from(*negative_status_duration_reduction_basis_points),
+                    CoreEquipmentAxisPreference::Higher,
+                    false,
+                ),
+            ]);
+            if let Some(barrier) = armor.direct_hit_barrier_health {
+                values.push(resolved(
+                    CoreEquipmentAxis::DirectHitBarrierHealth,
+                    i64::from(barrier),
+                    CoreEquipmentAxisPreference::Higher,
+                    false,
+                ));
+                "behavior.armor.direct_hit_barrier"
+            } else {
+                "behavior.armor.passive"
+            }
+        }
+        ProductionEquipmentBehavior::ArbalistRelic {
+            mark,
+            slipstep,
+            stillness,
+        } => {
+            if let Some(mark) = mark {
+                add_optional(
+                    &mut values,
+                    CoreEquipmentAxis::RangeMilliTiles,
+                    mark.range_milli_tiles,
+                    CoreEquipmentAxisPreference::Higher,
+                    false,
+                );
+                add_optional(
+                    &mut values,
+                    CoreEquipmentAxis::ProjectileSpeedMilliTilesPerSecond,
+                    mark.projectile_speed_milli_tiles_per_second,
+                    CoreEquipmentAxisPreference::Higher,
+                    true,
+                );
+                add_optional(
+                    &mut values,
+                    CoreEquipmentAxis::MarkDamageCoefficientBasisPoints,
+                    mark.direct_damage_coefficient_basis_points,
+                    CoreEquipmentAxisPreference::Higher,
+                    false,
+                );
+                add_optional(
+                    &mut values,
+                    CoreEquipmentAxis::MarkDurationMillis,
+                    mark.duration_millis,
+                    CoreEquipmentAxisPreference::Higher,
+                    false,
+                );
+                add_optional(
+                    &mut values,
+                    CoreEquipmentAxis::MarkPrimaryBonusBasisPoints,
+                    mark.primary_bonus_basis_points,
+                    CoreEquipmentAxisPreference::Higher,
+                    false,
+                );
+                "behavior.relic.grave_mark"
+            } else if let Some(slipstep) = slipstep {
+                add_optional(
+                    &mut values,
+                    CoreEquipmentAxis::SlipstepDistanceMilliTiles,
+                    slipstep.distance_milli_tiles,
+                    CoreEquipmentAxisPreference::Higher,
+                    false,
+                );
+                add_optional(
+                    &mut values,
+                    CoreEquipmentAxis::SlipstepDurationMillis,
+                    slipstep.duration_millis,
+                    CoreEquipmentAxisPreference::Contextual,
+                    true,
+                );
+                add_optional(
+                    &mut values,
+                    CoreEquipmentAxis::SlipstepDamageReductionBasisPoints,
+                    slipstep.damage_reduction_basis_points,
+                    CoreEquipmentAxisPreference::Higher,
+                    false,
+                );
+                add_optional(
+                    &mut values,
+                    CoreEquipmentAxis::SlipstepCooldownMillis,
+                    slipstep.cooldown_millis,
+                    CoreEquipmentAxisPreference::Lower,
+                    false,
+                );
+                "behavior.relic.slipstep"
+            } else if stillness.is_some() {
+                "behavior.relic.stillness"
+            } else {
+                "behavior.relic.starter"
+            }
+        }
+        ProductionEquipmentBehavior::Charm { effect } => match effect {
+            content_schema::ProductionCharmEffect::RestedPrimaryDamage {
+                idle_millis,
+                bonus_basis_points,
+                ..
+            } => {
+                values.extend([
+                    resolved(
+                        CoreEquipmentAxis::RestedPrimaryBonusBasisPoints,
+                        i64::from(*bonus_basis_points),
+                        CoreEquipmentAxisPreference::Higher,
+                        false,
+                    ),
+                    resolved(
+                        CoreEquipmentAxis::RestedPrimaryIdleMillis,
+                        i64::from(*idle_millis),
+                        CoreEquipmentAxisPreference::Lower,
+                        true,
+                    ),
+                ]);
+                "behavior.charm.rested_primary"
+            }
+            content_schema::ProductionCharmEffect::PotionHealing { bonus_basis_points } => {
+                values.push(resolved(
+                    CoreEquipmentAxis::PotionHealingBasisPoints,
+                    i64::from(*bonus_basis_points),
+                    CoreEquipmentAxisPreference::Higher,
+                    false,
+                ));
+                "behavior.charm.potion_healing"
+            }
+            content_schema::ProductionCharmEffect::NamedNegativeStatusDuration {
+                reduction_basis_points,
+                ..
+            } => {
+                values.push(resolved(
+                    CoreEquipmentAxis::NegativeStatusReductionBasisPoints,
+                    i64::from(*reduction_basis_points),
+                    CoreEquipmentAxisPreference::Higher,
+                    false,
+                ));
+                "behavior.charm.status_duration"
+            }
+        },
+    };
+    values.sort_by_key(|value| value.axis);
+    Ok(CoreEquipmentPresentation {
+        template_id: template_id.to_owned(),
+        slot: simulation_slot(*slot),
+        item_level,
+        behavior_key: behavior_key.to_owned(),
+        values,
+    })
+}
+
+pub fn compare_core_equipment(
+    current: Option<&CoreEquipmentPresentation>,
+    incoming: &CoreEquipmentPresentation,
+) -> Result<CoreEquipmentComparison> {
+    if current.is_some_and(|item| item.slot != incoming.slot) {
+        bail!("Core equipment comparison crossed legal slots");
+    }
+    let before = current.map_or_else(BTreeMap::new, |item| {
+        item.values
+            .iter()
+            .map(|value| (value.axis, value))
+            .collect()
+    });
+    let after: BTreeMap<_, _> = incoming
+        .values
+        .iter()
+        .map(|value| (value.axis, value))
+        .collect();
+    let axes = before
+        .keys()
+        .chain(after.keys())
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let changes = axes
+        .into_iter()
+        .filter_map(|axis| {
+            let old = before.get(&axis).map(|value| value.value);
+            let new = after.get(&axis).map(|value| value.value);
+            (old != new).then(|| {
+                let metadata = after
+                    .get(&axis)
+                    .or_else(|| before.get(&axis))
+                    .expect("axis came from a map");
+                CoreEquipmentChange {
+                    axis,
+                    before: old,
+                    after: new,
+                    delta: new.unwrap_or_default() - old.unwrap_or_default(),
+                    preference: metadata.preference,
+                    advanced: metadata.advanced,
+                }
+            })
+        })
+        .collect();
+    Ok(CoreEquipmentComparison {
+        behavior_changed: current.is_none_or(|item| item.behavior_key != incoming.behavior_key),
+        current_behavior_key: current.map(|item| item.behavior_key.clone()),
+        incoming_behavior_key: incoming.behavior_key.clone(),
+        changes,
+    })
+}
+
+const fn resolved(
+    axis: CoreEquipmentAxis,
+    value: i64,
+    preference: CoreEquipmentAxisPreference,
+    advanced: bool,
+) -> CoreEquipmentResolvedValue {
+    CoreEquipmentResolvedValue {
+        axis,
+        value,
+        preference,
+        advanced,
+    }
+}
+
+fn add_optional<T: Into<i64> + Copy>(
+    values: &mut Vec<CoreEquipmentResolvedValue>,
+    axis: CoreEquipmentAxis,
+    value: Option<T>,
+    preference: CoreEquipmentAxisPreference,
+    advanced: bool,
+) {
+    if let Some(value) = value {
+        values.push(resolved(axis, value.into(), preference, advanced));
+    }
+}
+
+const fn simulation_slot(slot: EquipmentSlot) -> SimulationEquipmentSlot {
+    match slot {
+        EquipmentSlot::Weapon => SimulationEquipmentSlot::Weapon,
+        EquipmentSlot::Relic => SimulationEquipmentSlot::Relic,
+        EquipmentSlot::Armor => SimulationEquipmentSlot::Armor,
+        EquipmentSlot::Charm => SimulationEquipmentSlot::Charm,
     }
 }
 
@@ -2053,6 +2519,87 @@ mod tests {
         assert_eq!(
             compiled.plan_reward(&request, &mut DrawTape::new([10_000])),
             Err(ProductionRewardPlanningError::DrawOutOfRange)
+        );
+    }
+
+    #[test]
+    fn field_comparison_prioritizes_behavior_then_resolved_item_axes() {
+        let compiled = load_core_development_items(&content_root()).unwrap();
+        let pine = resolve_core_equipment_presentation(
+            &compiled,
+            "item.weapon.crossbow.pine_crossbow",
+            10,
+            EquipmentRarity::Forged,
+        )
+        .unwrap();
+        let fan = resolve_core_equipment_presentation(
+            &compiled,
+            "item.weapon.crossbow.mourners_fan",
+            10,
+            EquipmentRarity::Forged,
+        )
+        .unwrap();
+        let comparison = compare_core_equipment(Some(&pine), &fan).unwrap();
+        assert!(comparison.behavior_changed);
+        assert_eq!(
+            comparison.current_behavior_key.as_deref(),
+            Some("behavior.crossbow.single_bolt")
+        );
+        assert_eq!(comparison.incoming_behavior_key, "behavior.crossbow.fan");
+        assert!(
+            comparison
+                .changes
+                .iter()
+                .any(|change| change.axis == CoreEquipmentAxis::BoltCount
+                    && change.before == Some(1)
+                    && change.after == Some(3))
+        );
+        assert!(
+            comparison
+                .changes
+                .iter()
+                .any(|change| change.axis == CoreEquipmentAxis::RangeMilliTiles
+                    && change.delta == -2_000)
+        );
+    }
+
+    #[test]
+    fn armor_comparison_uses_integer_resolved_values_and_advanced_disclosure() {
+        let compiled = load_core_development_items(&content_root()).unwrap();
+        let ashplate = resolve_core_equipment_presentation(
+            &compiled,
+            "item.armor.ashplate.t1",
+            10,
+            EquipmentRarity::Forged,
+        )
+        .unwrap();
+        let saltglass = resolve_core_equipment_presentation(
+            &compiled,
+            "item.armor.saltglass.t1",
+            10,
+            EquipmentRarity::Forged,
+        )
+        .unwrap();
+        let comparison = compare_core_equipment(Some(&ashplate), &saltglass).unwrap();
+        assert!(!comparison.behavior_changed);
+        assert!(comparison.changes.iter().any(|change| change.axis
+            == CoreEquipmentAxis::ResistanceBasisPoints
+            && change.after == Some(700)));
+        assert!(comparison.changes.iter().any(|change| change.axis
+            == CoreEquipmentAxis::HealingReceivedBasisPoints
+            && change.advanced));
+        assert!(
+            compare_core_equipment(
+                Some(&ashplate),
+                &resolve_core_equipment_presentation(
+                    &compiled,
+                    "item.charm.ember_tooth.t1",
+                    1,
+                    EquipmentRarity::Forged,
+                )
+                .unwrap()
+            )
+            .is_err()
         );
     }
 }
