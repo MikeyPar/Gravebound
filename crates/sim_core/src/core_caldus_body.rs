@@ -148,6 +148,11 @@ impl CoreCaldusBodySimulation {
         self.position
     }
 
+    #[must_use]
+    pub fn simulation_position(&self) -> SimulationVector {
+        world_to_vector(self.position)
+    }
+
     pub fn advance(
         &mut self,
         arena: &ArenaGeometry,
@@ -252,6 +257,9 @@ impl CoreCaldusBodySimulation {
                     self.locked_charge = None;
                     self.active_charge = None;
                     self.completed_charge = None;
+                    if matches!(event, CoreCaldusEvent::BossDefeated { .. }) {
+                        suppress_return = true;
+                    }
                 }
                 _ => {}
             }

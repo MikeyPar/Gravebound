@@ -18,6 +18,7 @@ mod core_abbot;
 mod core_boss_lock;
 mod core_caldus;
 mod core_caldus_body;
+mod core_caldus_encounter;
 mod core_caldus_health;
 mod core_counterplay;
 mod core_enemy;
@@ -144,6 +145,10 @@ pub use core_caldus::{
 };
 pub use core_caldus_body::{
     CoreCaldusBodyError, CoreCaldusBodyEvent, CoreCaldusBodySimulation, CoreCaldusBodyTarget,
+};
+pub use core_caldus_encounter::{
+    CALDUS_CHARGE_CONTACT_DAMAGE, CoreCaldusChargeDamageEvent, CoreCaldusEncounterError,
+    CoreCaldusEncounterSimulation, CoreCaldusEncounterStep,
 };
 pub use core_caldus_health::{
     CALDUS_ARMOR, CALDUS_BREAK_DAMAGE_BASIS_POINTS, CALDUS_HURTBOX_RADIUS_TILES,
