@@ -6,9 +6,10 @@
 
 use content_schema::ContentId;
 use sim_core::{
-    CORE_MICROREALM_PACK_WARNING_TICKS, CoreMicrorealmEvent, EntityId, NormalWaveEnemyKind,
-    NormalWaveEntityIdError, NormalWaveSpawn, SpawnInstanceId, Tick, TilePoint,
-    normal_wave_entity_id,
+    ArenaAnchor, ArenaGeometry, ArenaGeometryError, CORE_MICROREALM_PACK_WARNING_TICKS,
+    CoreMicrorealmEvent, EnemyLabPlayer, EntityId, EntityIdAllocator, NormalWaveDefinitions,
+    NormalWaveEnemyKind, NormalWaveEntityIdError, NormalWaveError, NormalWaveSimulation,
+    NormalWaveSpawn, SpawnInstanceId, Tick, TilePoint, normal_wave_entity_id,
 };
 use thiserror::Error;
 
@@ -156,7 +157,96 @@ pub fn construct_core_microrealm_pack(
     })
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
+/// Instantiates the immutable plan with the existing authoritative First Playable enemy runtime.
+pub fn instantiate_core_microrealm_pack(
+    plan: &CoreMicrorealmPackPlan,
+    world_flow: &CoreDevelopmentWorldFlow,
+    player: EnemyLabPlayer,
+    hostile_projectile_ids: EntityIdAllocator,
+) -> Result<NormalWaveSimulation, CoreMicrorealmPackError> {
+    if plan.pack_id.as_str() != "pack.bell.01"
+        || plan.base_budget != 12
+        || plan.assignments.len() != 8
+        || plan.activates_at.0
+            != plan
+                .warning_started_at
+                .0
+                .checked_add(CORE_MICROREALM_PACK_WARNING_TICKS)
+                .ok_or(CoreMicrorealmPackError::TickOverflow)?
+    {
+        return Err(CoreMicrorealmPackError::DefinitionDrift);
+    }
+    let arena = microrealm_combat_arena(world_flow)?;
+    let wave = NormalWaveSimulation::new(
+        NormalWaveDefinitions::first_playable(),
+        arena,
+        plan.normal_wave_spawns(),
+        player,
+        hostile_projectile_ids,
+        plan.warning_started_at,
+    )?;
+    if wave.starts_at() != plan.warning_started_at
+        || !matches!(
+            wave.phase(),
+            sim_core::NormalWavePhase::DormantTelegraph { activates_at }
+                if activates_at == plan.activates_at
+        )
+    {
+        return Err(CoreMicrorealmPackError::DefinitionDrift);
+    }
+    Ok(wave)
+}
+
+fn microrealm_combat_arena(
+    world_flow: &CoreDevelopmentWorldFlow,
+) -> Result<ArenaGeometry, CoreMicrorealmPackError> {
+    let world = world_flow.world();
+    if world.header.id.as_str() != "world.core_microrealm_01"
+        || world.width_tiles != 48
+        || world.height_tiles != 48
+        || world.solid_shell_tiles != 1
+    {
+        return Err(CoreMicrorealmPackError::DefinitionDrift);
+    }
+    let enabled_count = usize::try_from(world.enabled_spawn_anchor_count)
+        .map_err(|_| CoreMicrorealmPackError::DefinitionDrift)?;
+    ArenaGeometry {
+        id: world.header.id.to_string(),
+        width_milli_tiles: i32::try_from(world.width_tiles)
+            .ok()
+            .and_then(|tiles| tiles.checked_mul(1_000))
+            .ok_or(CoreMicrorealmPackError::DefinitionDrift)?,
+        height_milli_tiles: i32::try_from(world.height_tiles)
+            .ok()
+            .and_then(|tiles| tiles.checked_mul(1_000))
+            .ok_or(CoreMicrorealmPackError::DefinitionDrift)?,
+        shell_thickness_milli_tiles: i32::try_from(world.solid_shell_tiles)
+            .ok()
+            .and_then(|tiles| tiles.checked_mul(1_000))
+            .ok_or(CoreMicrorealmPackError::DefinitionDrift)?,
+        player_spawn: TilePoint::new(world.player_spawn.x, world.player_spawn.y),
+        // `ArenaGeometry` carries a compatibility boss point; the Core microrealm has no boss.
+        boss_spawn: TilePoint::new(
+            world.bell_portal_area.center.x,
+            world.bell_portal_area.center.y,
+        ),
+        pillars: Vec::new(),
+        anchors: world
+            .candidate_spawn_anchors
+            .iter()
+            .take(enabled_count)
+            .enumerate()
+            .map(|(index, point)| ArenaAnchor {
+                id: format!("pack.{:02}", index + 1),
+                point: TilePoint::new(point.x, point.y),
+            })
+            .collect(),
+    }
+    .validated()
+    .map_err(Into::into)
+}
+
+#[derive(Debug, Error)]
 pub enum CoreMicrorealmPackError {
     #[error("Core microrealm pack construction requires BeginPackWarning")]
     UnexpectedLifecycleEvent,
@@ -168,14 +258,22 @@ pub enum CoreMicrorealmPackError {
     TickOverflow,
     #[error(transparent)]
     EntityId(#[from] NormalWaveEntityIdError),
+    #[error(transparent)]
+    Arena(#[from] ArenaGeometryError),
+    #[error(transparent)]
+    Wave(#[from] NormalWaveError),
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::{num::NonZeroU64, path::Path};
 
     use super::*;
     use crate::{load_core_development_encounter_rooms, load_core_development_world_flow};
+    use sim_core::{
+        CombatStep, HostileTargetState, NormalWavePhase, PlayerVitals, RedTonicSimulation,
+        SimulationVector, TonicBelt,
+    };
 
     fn content_root() -> std::path::PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content")
@@ -253,7 +351,7 @@ mod tests {
         let root = content_root();
         let encounters = load_core_development_encounter_rooms(&root).expect("encounters");
         let world = load_core_development_world_flow(&root).expect("world");
-        assert_eq!(
+        assert!(matches!(
             construct_core_microrealm_pack(
                 &encounters,
                 &world,
@@ -262,8 +360,8 @@ mod tests {
                 1,
             ),
             Err(CoreMicrorealmPackError::UnexpectedLifecycleEvent)
-        );
-        assert_eq!(
+        ));
+        assert!(matches!(
             construct_core_microrealm_pack(
                 &encounters,
                 &world,
@@ -275,7 +373,7 @@ mod tests {
                 expected: 27,
                 actual: 26,
             })
-        );
+        ));
         assert!(matches!(
             construct_core_microrealm_pack(
                 &encounters,
@@ -288,5 +386,76 @@ mod tests {
                 NormalWaveEntityIdError::ZeroRunOrdinal
             ))
         ));
+    }
+
+    #[test]
+    fn plan_instantiates_existing_wave_runtime_at_the_same_activation_boundary() {
+        let root = content_root();
+        let encounters = load_core_development_encounter_rooms(&root).expect("encounters");
+        let world = load_core_development_world_flow(&root).expect("world");
+        let plan = construct_core_microrealm_pack(
+            &encounters,
+            &world,
+            Tick(32),
+            CoreMicrorealmEvent::BeginPackWarning { warning_ticks: 27 },
+            1,
+        )
+        .expect("plan");
+        let (source, _) = crate::load_and_validate(&root).expect("FP source");
+        let fixture = crate::first_playable_authority_combat_test(&source).expect("FP fixture");
+        let definitions = fixture.definitions;
+        let player_id = EntityId::new(900).expect("player ID");
+        let player = EnemyLabPlayer {
+            target: HostileTargetState {
+                entity_id: player_id,
+                position: SimulationVector::new(8.5, 40.5),
+                target_is_immune: false,
+                resistance_basis_points: definitions.resistance_basis_points,
+                additional_direct_damage_reductions_basis_points: Vec::new(),
+                armor: definitions.starting_armor,
+                current_barrier: 0,
+                health_damage_cap_basis_points: None,
+            },
+            consumables: RedTonicSimulation::new(
+                definitions.red_tonic,
+                PlayerVitals::new(definitions.maximum_health, definitions.maximum_health)
+                    .expect("vitals"),
+                TonicBelt::first_playable(),
+            )
+            .expect("tonic"),
+            combat: definitions.combat,
+        };
+        let mut wave = instantiate_core_microrealm_pack(
+            &plan,
+            &world,
+            player,
+            EntityIdAllocator::starting_at(NonZeroU64::new(20_000).expect("projectile ID")),
+        )
+        .expect("wave");
+        assert_eq!(
+            wave.phase(),
+            NormalWavePhase::DormantTelegraph {
+                activates_at: Tick(59)
+            }
+        );
+        for tick in 32..59 {
+            let step = wave
+                .step(&CombatStep {
+                    tick: Tick(tick),
+                    ..CombatStep::default()
+                })
+                .expect("warning tick");
+            assert!(!step.activated);
+            assert!(step.hostile_spawn_events.is_empty());
+        }
+        let step = wave
+            .step(&CombatStep {
+                tick: Tick(59),
+                ..CombatStep::default()
+            })
+            .expect("activation tick");
+        assert!(step.activated);
+        assert_eq!(wave.phase(), NormalWavePhase::Active);
+        assert_eq!(wave.snapshots().len(), 8);
     }
 }
