@@ -15,6 +15,7 @@ mod collision;
 mod combat;
 mod consumable;
 mod core_abbot;
+mod core_boss_lock;
 mod core_counterplay;
 mod core_enemy;
 mod core_enemy_attack;
@@ -120,6 +121,15 @@ pub use consumable::{
 pub use core_abbot::{
     CoreAbbotError, CoreAbbotEvent, CoreAbbotRingLock, CoreAbbotRotorLock, CoreAbbotSimulation,
     CoreAbbotStep,
+};
+pub use core_boss_lock::{
+    CORE_BOSS_EMPTY_RESET_TICKS, CORE_BOSS_LOAD_TIMEOUT_TICKS, CORE_BOSS_MAXIMUM_PARTICIPANTS,
+    CORE_BOSS_MINIMUM_PARTICIPANTS, CORE_BOSS_READY_COUNTDOWN_TICKS, CORE_BOSS_RUNTIME_CAPACITY,
+    CORE_CALDUS_ADDITIONAL_PARTICIPANT_HEALTH_BASIS_POINTS, CORE_CALDUS_BASE_HEALTH,
+    CORE_CALDUS_INTRODUCTION_TICKS, CoreBossConnectionState, CoreBossEntrantInput,
+    CoreBossLifeState, CoreBossLockError, CoreBossLockEvent, CoreBossLockInput, CoreBossLockPhase,
+    CoreBossLockSimulation, CoreBossLockStep, CoreBossParticipant, CoreBossParticipantLock,
+    scaled_caldus_health,
 };
 pub use core_counterplay::{
     CORE_COM006_CLOSE_SPAWN_DISTANCE_MILLI_TILES,
