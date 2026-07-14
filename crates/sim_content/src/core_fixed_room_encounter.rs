@@ -1079,7 +1079,9 @@ fn compile_node_plan(
     })
 }
 
-fn combat_arena(room: &RotatedDungeonRoom) -> Result<ArenaGeometry, CoreFixedRoomEncounterError> {
+pub(crate) fn combat_arena(
+    room: &RotatedDungeonRoom,
+) -> Result<ArenaGeometry, CoreFixedRoomEncounterError> {
     let center = TilePoint::new(
         i32::try_from(room.width_milli_tiles / 2)
             .map_err(|_| CoreFixedRoomEncounterError::DefinitionDrift)?,
