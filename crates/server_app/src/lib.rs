@@ -7,6 +7,7 @@
 mod ash_wallet;
 mod bargain_milestone;
 mod bargain_selection;
+mod caldus_victory;
 mod combat_factory;
 mod core_lifecycle;
 mod ground_expiry;
@@ -33,6 +34,10 @@ pub use ash_wallet::{
     PostgresAshWalletService,
 };
 pub use bargain_selection::{CoreBargainAuthority, PostgresBargainService};
+pub use caldus_victory::{
+    CaldusVictoryCommitResult, CaldusVictoryCoordinatorError, CaldusVictoryOwnerCommand,
+    CaldusVictoryOwnerCommit, PostgresCaldusVictoryCoordinator,
+};
 pub use combat_factory::{
     CoreCharacterCombat, CoreCharacterCombatCompiler, CoreCharacterCombatFactory,
     CoreCombatFactoryError,
