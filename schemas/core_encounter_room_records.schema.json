@@ -1141,7 +1141,8 @@
       "enum": [
         "strafe",
         "follow_gap",
-        "leave_telegraph"
+        "leave_telegraph",
+        "move_with_rotation"
       ]
     },
     "CorePatternDisposition": {

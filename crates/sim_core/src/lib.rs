@@ -14,6 +14,7 @@ mod clock;
 mod collision;
 mod combat;
 mod consumable;
+mod core_enemy;
 mod core_microrealm;
 mod damage;
 mod death;
@@ -106,6 +107,13 @@ pub use consumable::{
     RedTonicDefinition, RedTonicDefinitionError, RedTonicDefinitionParameters, RedTonicSimulation,
     TonicBelt, TonicBeltPolicy, TonicMergeResult, TonicUseRejection,
     UNDERTAKER_KNOT_RESTORE_BASIS_POINTS, UNDERTAKER_KNOT_SHARED_COOLDOWN_TICKS, VitalsError,
+};
+pub use core_enemy::{
+    CORE_ENEMY_STATE_SEQUENCE, CoreAttackGroupRule, CoreEnemyDefinition, CoreEnemyDefinitionError,
+    CoreEnemyDefinitionParameters, CoreEnemyLocomotionDefinition, CoreEnemyLocomotionParameters,
+    CoreEnemyRole, CoreEnemyStateStage, CorePatternDefinition, CorePatternDefinitionParameters,
+    CorePatternGeometryDefinition, CorePatternGeometryParameters, CorePatternWarningDefinition,
+    CorePatternWarningParameters, CoreRadialGapRelation, CoreTargetSelection, CoreTelegraphLock,
 };
 pub use core_microrealm::{
     CORE_MICROREALM_EMPTY_RESET_TICKS, CORE_MICROREALM_PACK_WARNING_TICKS,

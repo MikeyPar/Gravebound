@@ -27,7 +27,9 @@ pub enum EnemyRole {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EchoMemoryFamily {
+    ChargeOrContact,
     FanProjectile,
+    RotatingProjectile,
     RadialProjectile,
     LaneOrBeam,
 }
@@ -37,12 +39,14 @@ pub enum Counterplay {
     Strafe,
     FollowGap,
     LeaveTelegraph,
+    MoveWithRotation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HostileDisposition {
     ConsumeOnPlayerOrSolid,
     ExpireAtAuthoredEnd,
+    OneContactHitPerCast,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

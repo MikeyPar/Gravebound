@@ -11,11 +11,15 @@ use content_schema::{
     SCHEMA_VERSION,
 };
 use sim_core::{
-    BellReedDefinition, ChainSentryDefinition, DrownedPilgrimDefinition, DungeonAnchorKind,
-    DungeonCorridor, DungeonDoorDefinition, DungeonDoorSide, DungeonRoomAnchor,
+    BellReedDefinition, ChainSentryDefinition, CoreAttackGroupRule, CoreEnemyDefinition,
+    CoreEnemyDefinitionParameters, CoreEnemyLocomotionParameters, CoreEnemyRole,
+    CoreEnemyStateStage, CorePatternDefinition, CorePatternDefinitionParameters,
+    CorePatternGeometryParameters, CorePatternWarningParameters, CoreRadialGapRelation,
+    CoreTargetSelection, CoreTelegraphLock, Counterplay, DrownedPilgrimDefinition,
+    DungeonAnchorKind, DungeonCorridor, DungeonDoorDefinition, DungeonDoorSide, DungeonRoomAnchor,
     DungeonRoomDefinition, DungeonRoomVolume, DungeonRoomVolumeGeometry, DungeonRoomVolumeKind,
-    FixedDungeonLayoutDefinition, MILLI_TILES_PER_TILE, PLAYER_COLLISION_RADIUS_MILLI_TILES,
-    PlacedDungeonRoom,
+    EchoMemoryFamily, FixedDungeonLayoutDefinition, HostileDisposition, MILLI_TILES_PER_TILE,
+    PLAYER_COLLISION_RADIUS_MILLI_TILES, PlacedDungeonRoom,
 };
 
 use crate::{
@@ -112,10 +116,7 @@ pub enum CoreEncounterBehaviorDefinition {
     ImmutableDrownedPilgrim(DrownedPilgrimDefinition),
     ImmutableBellReed(BellReedDefinition),
     ImmutableChainSentry(ChainSentryDefinition),
-    Authored {
-        behavior: content_schema::CoreAuthoredEnemyBehaviorRecord,
-        patterns: Vec<content_schema::CoreAuthoredPatternRecord>,
-    },
+    Authored(CoreEnemyDefinition),
 }
 
 /// One roster-ordered actor definition with its immutable reward and XP bindings.
@@ -363,10 +364,11 @@ fn compile_actor_definitions(
                                 })
                         })
                         .collect::<Result<Vec<_>>>()?;
-                    CoreEncounterBehaviorDefinition::Authored {
-                        behavior: (*authored_behavior).clone(),
-                        patterns,
-                    }
+                    CoreEncounterBehaviorDefinition::Authored(compile_authored_actor_definition(
+                        member,
+                        authored_behavior,
+                        &patterns,
+                    )?)
                 }
             };
             Ok(CoreEncounterActorDefinition {
@@ -378,6 +380,314 @@ fn compile_actor_definitions(
             })
         })
         .collect()
+}
+
+fn compile_authored_actor_definition(
+    member: &content_schema::CoreEncounterRosterMember,
+    behavior: &content_schema::CoreAuthoredEnemyBehaviorRecord,
+    patterns: &[content_schema::CoreAuthoredPatternRecord],
+) -> Result<CoreEnemyDefinition> {
+    let state_sequence = behavior
+        .state_sequence
+        .iter()
+        .copied()
+        .map(compile_enemy_state_stage)
+        .collect::<Vec<_>>()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("{} has an invalid state sequence", behavior.owner_id))?;
+    let patterns = patterns
+        .iter()
+        .map(compile_authored_pattern_definition)
+        .collect::<Result<Vec<_>>>()?;
+    CoreEnemyDefinition::new(CoreEnemyDefinitionParameters {
+        content_id: behavior.owner_id.to_string(),
+        role: compile_enemy_role(behavior.role),
+        state_sequence,
+        target_selection: CoreTargetSelection::NearestLivingDamageableInAggroTieLowestEntityId,
+        telegraph_lock: CoreTelegraphLock::AimAndPositionAtTelegraphStart,
+        maximum_health: behavior.maximum_health,
+        armor: behavior.armor,
+        collision_radius_milli_tiles: behavior.collision_radius_milli_tiles,
+        hurtbox_radius_milli_tiles: behavior.hurtbox_radius_milli_tiles,
+        aggro_radius_milli_tiles: behavior.aggro_radius_milli_tiles,
+        leash_radius_milli_tiles: behavior.leash_radius_milli_tiles,
+        target_reacquire_milliseconds: behavior.target_reacquire_milliseconds,
+        no_target_reset_milliseconds: behavior.no_target_reset_milliseconds,
+        spawn_warning_milliseconds: behavior.spawn_warning_milliseconds,
+        spawn_invulnerability_milliseconds: behavior.spawn_invulnerability_milliseconds,
+        introduction_milliseconds: behavior.introduction_milliseconds,
+        contact_damage: behavior.contact_damage,
+        drop_reward_on_reset: behavior.drop_reward_on_reset,
+        locomotion: compile_locomotion_parameters(&behavior.locomotion),
+        patterns,
+        reward_profile_id: member.reward_profile_id.to_string(),
+        xp_profile_id: member.xp_profile_id.to_string(),
+    })
+    .with_context(|| format!("{} failed 30 Hz definition compilation", behavior.owner_id))
+}
+
+fn compile_authored_pattern_definition(
+    pattern: &content_schema::CoreAuthoredPatternRecord,
+) -> Result<CorePatternDefinition> {
+    CorePatternDefinition::new(CorePatternDefinitionParameters {
+        id: pattern.id.to_string(),
+        owner_id: pattern.owner_id.to_string(),
+        telegraph_id: pattern.telegraph_id.to_string(),
+        audio_cue_id: pattern.audio_cue_id.to_string(),
+        major_audio_cue_id: pattern.major_audio_cue_id.as_ref().map(ToString::to_string),
+        damage_type: crate::compile_damage_type(pattern.damage_type),
+        damage_band: crate::compile_damage_band(pattern.damage_band),
+        raw_damage: pattern.raw_damage,
+        threat_cost: pattern.threat_cost,
+        warning: compile_pattern_warning(&pattern.warning),
+        cycle_milliseconds: pattern.cycle_milliseconds,
+        quiet_milliseconds: pattern.quiet_milliseconds,
+        geometry: compile_pattern_geometry(&pattern.geometry),
+        counterplay: compile_pattern_counterplay(pattern.counterplay),
+        memory_family: compile_pattern_memory(pattern.memory_family),
+        disposition: compile_pattern_disposition(pattern.disposition),
+        attack_group_rule: compile_attack_group_rule(pattern.attack_group_rule),
+        acceleration_milli_tiles_per_second_squared: pattern
+            .acceleration_milli_tiles_per_second_squared,
+        pierces_players: pattern.pierces_players,
+        status_count: pattern.statuses.len(),
+        cancel_on_phase_change: pattern.cancel_on_phase_change,
+        persisted_maximum_active_instances: pattern.maximum_active_instances,
+    })
+    .with_context(|| format!("{} failed 30 Hz pattern compilation", pattern.id))
+}
+
+const fn compile_enemy_role(role: content_schema::CoreEnemyRole) -> CoreEnemyRole {
+    match role {
+        content_schema::CoreEnemyRole::Fodder => CoreEnemyRole::Fodder,
+        content_schema::CoreEnemyRole::Pressure => CoreEnemyRole::Pressure,
+        content_schema::CoreEnemyRole::Disruptor => CoreEnemyRole::Disruptor,
+        content_schema::CoreEnemyRole::Anchor => CoreEnemyRole::Anchor,
+        content_schema::CoreEnemyRole::Elite => CoreEnemyRole::Elite,
+    }
+}
+
+const fn compile_enemy_state_stage(
+    stage: content_schema::CoreEnemyStateStage,
+) -> CoreEnemyStateStage {
+    match stage {
+        content_schema::CoreEnemyStateStage::SpawnTelegraph => CoreEnemyStateStage::SpawnTelegraph,
+        content_schema::CoreEnemyStateStage::Acquire => CoreEnemyStateStage::Acquire,
+        content_schema::CoreEnemyStateStage::MoveOrPosition => CoreEnemyStateStage::MoveOrPosition,
+        content_schema::CoreEnemyStateStage::Telegraph => CoreEnemyStateStage::Telegraph,
+        content_schema::CoreEnemyStateStage::Attack => CoreEnemyStateStage::Attack,
+        content_schema::CoreEnemyStateStage::Recover => CoreEnemyStateStage::Recover,
+    }
+}
+
+fn compile_locomotion_parameters(
+    locomotion: &content_schema::CoreEnemyLocomotion,
+) -> CoreEnemyLocomotionParameters {
+    match locomotion {
+        content_schema::CoreEnemyLocomotion::RushRetreat {
+            approach_speed_milli_tiles_per_second,
+            trigger_distance_milli_tiles,
+            charge_distance_milli_tiles,
+            charge_duration_milliseconds,
+            retreat_speed_milli_tiles_per_second,
+            retreat_duration_milliseconds,
+        } => CoreEnemyLocomotionParameters::RushRetreat {
+            approach_speed_milli_tiles_per_second: *approach_speed_milli_tiles_per_second,
+            trigger_distance_milli_tiles: *trigger_distance_milli_tiles,
+            charge_distance_milli_tiles: *charge_distance_milli_tiles,
+            charge_duration_milliseconds: *charge_duration_milliseconds,
+            retreat_speed_milli_tiles_per_second: *retreat_speed_milli_tiles_per_second,
+            retreat_duration_milliseconds: *retreat_duration_milliseconds,
+        },
+        content_schema::CoreEnemyLocomotion::MaintainDistance {
+            movement_speed_milli_tiles_per_second,
+            preferred_distance_milli_tiles,
+        } => CoreEnemyLocomotionParameters::MaintainDistance {
+            movement_speed_milli_tiles_per_second: *movement_speed_milli_tiles_per_second,
+            preferred_distance_milli_tiles: *preferred_distance_milli_tiles,
+        },
+        content_schema::CoreEnemyLocomotion::OrbitAnchor {
+            movement_speed_milli_tiles_per_second,
+            orbit_radius_milli_tiles,
+        } => CoreEnemyLocomotionParameters::OrbitAnchor {
+            movement_speed_milli_tiles_per_second: *movement_speed_milli_tiles_per_second,
+            orbit_radius_milli_tiles: *orbit_radius_milli_tiles,
+        },
+        content_schema::CoreEnemyLocomotion::PursueStopChargeHome {
+            movement_speed_milli_tiles_per_second,
+            stop_distance_milli_tiles,
+        } => CoreEnemyLocomotionParameters::PursueStopChargeHome {
+            movement_speed_milli_tiles_per_second: *movement_speed_milli_tiles_per_second,
+            stop_distance_milli_tiles: *stop_distance_milli_tiles,
+        },
+        content_schema::CoreEnemyLocomotion::Stationary => {
+            CoreEnemyLocomotionParameters::Stationary
+        }
+    }
+}
+
+fn compile_pattern_warning(
+    warning: &content_schema::CorePatternWarning,
+) -> CorePatternWarningParameters {
+    match *warning {
+        content_schema::CorePatternWarning::Standalone {
+            first_milliseconds,
+            repeated_milliseconds,
+        } => CorePatternWarningParameters::Standalone {
+            first_milliseconds,
+            repeated_milliseconds,
+        },
+        content_schema::CorePatternWarning::ParentOnly => CorePatternWarningParameters::ParentOnly,
+        content_schema::CorePatternWarning::RecoveryPreview {
+            duration_milliseconds,
+            major_audio,
+        } => CorePatternWarningParameters::RecoveryPreview {
+            duration_milliseconds,
+            major_audio,
+        },
+    }
+}
+
+fn compile_pattern_geometry(
+    geometry: &content_schema::CoreAuthoredPatternGeometry,
+) -> CorePatternGeometryParameters {
+    match geometry {
+        content_schema::CoreAuthoredPatternGeometry::Charge {
+            distance_milli_tiles,
+            duration_milliseconds,
+        } => CorePatternGeometryParameters::Charge {
+            distance_milli_tiles: *distance_milli_tiles,
+            duration_milliseconds: *duration_milliseconds,
+        },
+        content_schema::CoreAuthoredPatternGeometry::AlternatingFan {
+            first_offsets_milli_degrees,
+            second_offsets_milli_degrees,
+            projectile_speed_milli_tiles_per_second,
+            range_milli_tiles,
+            projectile_radius_milli_tiles,
+        } => CorePatternGeometryParameters::AlternatingFan {
+            first_offsets_milli_degrees: first_offsets_milli_degrees.clone(),
+            second_offsets_milli_degrees: second_offsets_milli_degrees.clone(),
+            projectile_speed_milli_tiles_per_second: *projectile_speed_milli_tiles_per_second,
+            range_milli_tiles: *range_milli_tiles,
+            projectile_radius_milli_tiles: *projectile_radius_milli_tiles,
+        },
+        content_schema::CoreAuthoredPatternGeometry::RotatingArms {
+            arm_count,
+            clockwise_milli_degrees_per_second,
+            emission_interval_milliseconds,
+            active_duration_milliseconds,
+            projectile_speed_milli_tiles_per_second,
+            range_milli_tiles,
+            projectile_radius_milli_tiles,
+        } => CorePatternGeometryParameters::RotatingArms {
+            arm_count: *arm_count,
+            clockwise_milli_degrees_per_second: *clockwise_milli_degrees_per_second,
+            emission_interval_milliseconds: *emission_interval_milliseconds,
+            active_duration_milliseconds: *active_duration_milliseconds,
+            projectile_speed_milli_tiles_per_second: *projectile_speed_milli_tiles_per_second,
+            range_milli_tiles: *range_milli_tiles,
+            projectile_radius_milli_tiles: *projectile_radius_milli_tiles,
+        },
+        content_schema::CoreAuthoredPatternGeometry::ChargeLane {
+            width_milli_tiles,
+            length_milli_tiles,
+            charge_duration_milliseconds,
+        } => CorePatternGeometryParameters::ChargeLane {
+            width_milli_tiles: *width_milli_tiles,
+            length_milli_tiles: *length_milli_tiles,
+            charge_duration_milliseconds: *charge_duration_milliseconds,
+        },
+        content_schema::CoreAuthoredPatternGeometry::RadialGap {
+            index_count,
+            omitted_adjacent_count,
+            relation,
+            projectile_speed_milli_tiles_per_second,
+            range_milli_tiles,
+            projectile_radius_milli_tiles,
+        } => CorePatternGeometryParameters::RadialGap {
+            index_count: *index_count,
+            omitted_adjacent_count: *omitted_adjacent_count,
+            relation: match relation {
+                content_schema::CoreRadialGapRelation::TargetOpposite => {
+                    CoreRadialGapRelation::TargetOpposite
+                }
+                content_schema::CoreRadialGapRelation::TargetFacing => {
+                    CoreRadialGapRelation::TargetFacing
+                }
+            },
+            projectile_speed_milli_tiles_per_second: *projectile_speed_milli_tiles_per_second,
+            range_milli_tiles: *range_milli_tiles,
+            projectile_radius_milli_tiles: *projectile_radius_milli_tiles,
+        },
+        content_schema::CoreAuthoredPatternGeometry::ProjectileFan {
+            shot_count,
+            total_arc_milli_degrees,
+            projectile_speed_milli_tiles_per_second,
+            range_milli_tiles,
+            projectile_radius_milli_tiles,
+        } => CorePatternGeometryParameters::ProjectileFan {
+            shot_count: *shot_count,
+            total_arc_milli_degrees: *total_arc_milli_degrees,
+            projectile_speed_milli_tiles_per_second: *projectile_speed_milli_tiles_per_second,
+            range_milli_tiles: *range_milli_tiles,
+            projectile_radius_milli_tiles: *projectile_radius_milli_tiles,
+        },
+    }
+}
+
+const fn compile_pattern_counterplay(
+    counterplay: content_schema::CorePatternCounterplay,
+) -> Counterplay {
+    match counterplay {
+        content_schema::CorePatternCounterplay::Strafe => Counterplay::Strafe,
+        content_schema::CorePatternCounterplay::FollowGap => Counterplay::FollowGap,
+        content_schema::CorePatternCounterplay::LeaveTelegraph => Counterplay::LeaveTelegraph,
+        content_schema::CorePatternCounterplay::MoveWithRotation => Counterplay::MoveWithRotation,
+    }
+}
+
+const fn compile_pattern_memory(
+    memory: content_schema::CorePatternMemoryFamily,
+) -> EchoMemoryFamily {
+    match memory {
+        content_schema::CorePatternMemoryFamily::ChargeOrContact => {
+            EchoMemoryFamily::ChargeOrContact
+        }
+        content_schema::CorePatternMemoryFamily::FanProjectile => EchoMemoryFamily::FanProjectile,
+        content_schema::CorePatternMemoryFamily::RotatingProjectile => {
+            EchoMemoryFamily::RotatingProjectile
+        }
+        content_schema::CorePatternMemoryFamily::RadialProjectile => {
+            EchoMemoryFamily::RadialProjectile
+        }
+    }
+}
+
+const fn compile_pattern_disposition(
+    disposition: content_schema::CorePatternDisposition,
+) -> HostileDisposition {
+    match disposition {
+        content_schema::CorePatternDisposition::OneContactHitPerCast => {
+            HostileDisposition::OneContactHitPerCast
+        }
+        content_schema::CorePatternDisposition::ConsumeOnPlayerOrSolid => {
+            HostileDisposition::ConsumeOnPlayerOrSolid
+        }
+    }
+}
+
+const fn compile_attack_group_rule(
+    rule: content_schema::CoreAttackGroupRule,
+) -> CoreAttackGroupRule {
+    match rule {
+        content_schema::CoreAttackGroupRule::DistinctProjectileHitGroups => {
+            CoreAttackGroupRule::DistinctProjectileHitGroups
+        }
+        content_schema::CoreAttackGroupRule::OneContactHitPerCast => {
+            CoreAttackGroupRule::OneContactHitPerCast
+        }
+    }
 }
 
 fn compile_room(record: &CoreRoomTemplateRecord) -> Result<DungeonRoomDefinition> {
@@ -949,11 +1259,11 @@ fn validate_authored_patterns(
     let counterplay = [
         content_schema::CorePatternCounterplay::LeaveTelegraph,
         content_schema::CorePatternCounterplay::Strafe,
-        content_schema::CorePatternCounterplay::Strafe,
+        content_schema::CorePatternCounterplay::MoveWithRotation,
         content_schema::CorePatternCounterplay::LeaveTelegraph,
         content_schema::CorePatternCounterplay::FollowGap,
         content_schema::CorePatternCounterplay::Strafe,
-        content_schema::CorePatternCounterplay::Strafe,
+        content_schema::CorePatternCounterplay::MoveWithRotation,
         content_schema::CorePatternCounterplay::FollowGap,
     ];
     let memories = [
@@ -1715,6 +2025,7 @@ fn hash_file(path: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sim_core::{CorePatternGeometryDefinition, CorePatternWarningDefinition};
 
     struct Fixture {
         source: ContentPackage,
@@ -1773,6 +2084,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the exact room, roster, tick, and scheduler signatures stay in one integration fixture"
+    )]
     fn checked_in_encounter_rooms_compile_exactly() {
         let compiled = load_core_development_encounter_rooms(&content_root())
             .expect("checked-in encounter rooms");
@@ -1805,11 +2120,119 @@ mod tests {
             .actor_definitions()
             .iter()
             .filter_map(|definition| match definition.behavior() {
-                CoreEncounterBehaviorDefinition::Authored { patterns, .. } => Some(patterns.len()),
+                CoreEncounterBehaviorDefinition::Authored(authored) => {
+                    Some(authored.parameters().patterns.len())
+                }
                 _ => None,
             })
             .collect::<Vec<_>>();
         assert_eq!(authored_pattern_counts, [1, 1, 1, 3, 2]);
+        let authored = compiled
+            .actor_definitions()
+            .iter()
+            .filter_map(|definition| match definition.behavior() {
+                CoreEncounterBehaviorDefinition::Authored(authored) => Some(authored),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(authored.iter().all(|definition| {
+            definition.target_reacquire_ticks() == 8
+                && definition.no_target_reset_ticks() == 150
+                && definition.spawn_warning_ticks() == 27
+                && definition.spawn_invulnerability_ticks() == 30
+        }));
+        assert_eq!(
+            authored
+                .iter()
+                .map(|definition| definition.introduction_ticks())
+                .collect::<Vec<_>>(),
+            [0, 0, 0, 90, 90]
+        );
+        let patterns = authored
+            .iter()
+            .flat_map(|definition| definition.parameters().patterns.iter())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            patterns
+                .iter()
+                .map(|pattern| pattern.cycle_ticks())
+                .collect::<Vec<_>>(),
+            [75, 54, 180, 180, 180, 66, 180, 180]
+        );
+        assert_eq!(
+            patterns
+                .iter()
+                .map(|pattern| pattern.quiet_ticks())
+                .collect::<Vec<_>>(),
+            [45, 0, 60, 0, 0, 0, 75, 0]
+        );
+        assert_eq!(
+            patterns
+                .iter()
+                .map(|pattern| pattern.traced_maximum_active_instances())
+                .collect::<Vec<_>>(),
+            [1, 5, 8, 1, 8, 5, 10, 12]
+        );
+        assert!(matches!(
+            patterns[0].geometry(),
+            CorePatternGeometryDefinition::Charge {
+                duration_ticks: 15,
+                ..
+            }
+        ));
+        assert!(matches!(
+            patterns[1].geometry(),
+            CorePatternGeometryDefinition::AlternatingFan {
+                projectile_lifetime_ticks: 45,
+                ..
+            }
+        ));
+        assert!(matches!(
+            patterns[2].geometry(),
+            CorePatternGeometryDefinition::RotatingArms {
+                emission_interval_ticks: 12,
+                active_ticks: 120,
+                projectile_lifetime_ticks: 47,
+                ..
+            }
+        ));
+        assert!(matches!(
+            patterns[3].geometry(),
+            CorePatternGeometryDefinition::ChargeLane {
+                charge_ticks: 17,
+                ..
+            }
+        ));
+        assert!(matches!(
+            patterns[6].geometry(),
+            CorePatternGeometryDefinition::RotatingArms {
+                emission_interval_ticks: 11,
+                active_ticks: 105,
+                projectile_lifetime_ticks: 47,
+                ..
+            }
+        ));
+        assert!(matches!(
+            patterns[7].geometry(),
+            CorePatternGeometryDefinition::RadialGap {
+                projectile_lifetime_ticks: 54,
+                ..
+            }
+        ));
+        assert!(matches!(
+            patterns[2].warning(),
+            CorePatternWarningDefinition::Standalone {
+                first_ticks: 20,
+                repeated_ticks: 15,
+            }
+        ));
+        assert!(matches!(
+            patterns[7].warning(),
+            CorePatternWarningDefinition::RecoveryPreview {
+                duration_ticks: 20,
+                major_audio: true,
+            }
+        ));
         assert_eq!(compiled.rooms().len(), 9);
         assert_eq!(compiled.pack_bell_01().base_budget, 12);
         assert_eq!(compiled.fixed_layout().main_chain_node_ids, MAIN_CHAIN);

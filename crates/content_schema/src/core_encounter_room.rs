@@ -155,6 +155,7 @@ pub enum CorePatternCounterplay {
     Strafe,
     FollowGap,
     LeaveTelegraph,
+    MoveWithRotation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

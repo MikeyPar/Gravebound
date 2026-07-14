@@ -69,7 +69,7 @@
     "pack.bell.01.name", "pack.bell.01.description",
     "layout.core_private_life_01.name", "layout.core_private_life_01.description"
   ],
-  "expected_records_blake3": "4adcda952d9ade607f533542dc4dbd8f03615cc06ad07b55d97ac621ff76ac90",
+  "expected_records_blake3": "f4e9c3829425df3915b146f72982adee25a81e1b565e1e480939480126851197",
   "expected_assets_blake3": "5c812601bc15317d96a7ea978b3f734570976fb37cfc724d3e24b168937d3bd8",
   "expected_localization_blake3": "a84a300b67f95e886f4c1046a46dd25121c80f883836181fd8340d0a1ec2c6b1"
 }

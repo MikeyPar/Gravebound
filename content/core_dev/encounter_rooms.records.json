@@ -175,7 +175,7 @@
       "warning":{"warning_kind":"standalone","first_milliseconds":650,"repeated_milliseconds":500},
       "cycle_milliseconds":6000, "quiet_milliseconds":2000,
       "geometry":{"geometry_kind":"rotating_arms","arm_count":2,"clockwise_milli_degrees_per_second":35000,"emission_interval_milliseconds":400,"active_duration_milliseconds":4000,"projectile_speed_milli_tiles_per_second":4500,"range_milli_tiles":7000,"projectile_radius_milli_tiles":120},
-      "counterplay":"strafe", "memory_family":"rotating_projectile", "disposition":"consume_on_player_or_solid", "attack_group_rule":"distinct_projectile_hit_groups",
+      "counterplay":"move_with_rotation", "memory_family":"rotating_projectile", "disposition":"consume_on_player_or_solid", "attack_group_rule":"distinct_projectile_hit_groups",
       "acceleration_milli_tiles_per_second_squared":0, "pierces_players":false, "statuses":[], "cancel_on_phase_change":true, "maximum_active_instances":8
     },
     {
@@ -214,7 +214,7 @@
       "warning":{"warning_kind":"standalone","first_milliseconds":650,"repeated_milliseconds":500},
       "cycle_milliseconds":6000, "quiet_milliseconds":2500,
       "geometry":{"geometry_kind":"rotating_arms","arm_count":2,"clockwise_milli_degrees_per_second":35000,"emission_interval_milliseconds":350,"active_duration_milliseconds":3500,"projectile_speed_milli_tiles_per_second":4500,"range_milli_tiles":7000,"projectile_radius_milli_tiles":120},
-      "counterplay":"strafe", "memory_family":"rotating_projectile", "disposition":"consume_on_player_or_solid", "attack_group_rule":"distinct_projectile_hit_groups",
+      "counterplay":"move_with_rotation", "memory_family":"rotating_projectile", "disposition":"consume_on_player_or_solid", "attack_group_rule":"distinct_projectile_hit_groups",
       "acceleration_milli_tiles_per_second_squared":0, "pierces_players":false, "statuses":[], "cancel_on_phase_change":true, "maximum_active_instances":10
     },
     {
