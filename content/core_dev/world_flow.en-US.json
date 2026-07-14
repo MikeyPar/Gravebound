@@ -70,7 +70,9 @@
     {"key": "transition.phase.resolved_to_hall", "value": "RETURNED TO LANTERN HALLS"},
     {"key": "transition.phase.safe_origin", "value": "SAFE ORIGIN"},
     {"key": "transition.status.no_progress", "value": "Waiting for an authoritative result. Progress is not estimated."},
+    {"key": "transition.status.hall_committed", "value": "COMMITTED EXTRACTION WON - HALL STATE RESTORED"},
     {"key": "transition.status.prior_safe_state", "value": "SAFE ORIGIN PRESERVED: {origin}"},
+    {"key": "transition.status.reattached", "value": "AUTHORITATIVE INSTANCE STATE RESTORED"},
     {"key": "transition.status.reconnect_attempt", "value": "RECONNECTING - ATTEMPT {attempt}"},
     {"key": "transition.status.vulnerability_warning", "value": "LINK LOST - CHARACTER REMAINS VULNERABLE FOR UP TO 3 SECONDS"}
   ]

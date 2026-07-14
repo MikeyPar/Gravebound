@@ -98,11 +98,13 @@
     "transition.phase.resolved_to_hall",
     "transition.phase.safe_origin",
     "transition.status.no_progress",
+    "transition.status.hall_committed",
     "transition.status.prior_safe_state",
+    "transition.status.reattached",
     "transition.status.reconnect_attempt",
     "transition.status.vulnerability_warning"
   ],
   "expected_records_blake3": "97b7188e26329b9430b7289d1e17d347c9b9472863b7db6bd48501fd3b773158",
   "expected_assets_blake3": "32ce9fce6f1d49d5cd6cb570fa0590a5ee5644388c2620b67846320d4b2a3759",
-  "expected_localization_blake3": "1f6c4e58c5935e3f7e1e7d322f9e263f14c8c16aea2b32701ec4ac6910adafbb"
+  "expected_localization_blake3": "895c38724abfdef4909751743d91b5cff90d7f073c553bc044601abff4763a26"
 }

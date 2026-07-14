@@ -81,7 +81,7 @@ const RECORD_LOCALIZATION_KEYS: [&str; 24] = [
     "world.core_microrealm_01.description",
     "world.core_microrealm_01.name",
 ];
-const LOCALIZATION_KEYS: [&str; 71] = [
+const LOCALIZATION_KEYS: [&str; 73] = [
     "hub.lantern_halls_01.description",
     "hub.lantern_halls_01.name",
     "landmark.lantern_fork.description",
@@ -150,7 +150,9 @@ const LOCALIZATION_KEYS: [&str; 71] = [
     "transition.phase.resolved_to_hall",
     "transition.phase.safe_origin",
     "transition.status.no_progress",
+    "transition.status.hall_committed",
     "transition.status.prior_safe_state",
+    "transition.status.reattached",
     "transition.status.reconnect_attempt",
     "transition.status.vulnerability_warning",
 ];
@@ -189,13 +191,15 @@ pub enum CoreWorldTransitionCopyKey {
     PhaseResolvedToHall,
     PhaseSafeOrigin,
     StatusNoProgress,
+    StatusHallCommitted,
     StatusPriorSafeState,
+    StatusReattached,
     StatusReconnectAttempt,
     StatusVulnerabilityWarning,
 }
 
 impl CoreWorldTransitionCopyKey {
-    pub const ALL: [Self; 27] = [
+    pub const ALL: [Self; 29] = [
         Self::ActionExit,
         Self::ActionRetry,
         Self::ActionReturnCharacterSelect,
@@ -220,7 +224,9 @@ impl CoreWorldTransitionCopyKey {
         Self::PhaseResolvedToHall,
         Self::PhaseSafeOrigin,
         Self::StatusNoProgress,
+        Self::StatusHallCommitted,
         Self::StatusPriorSafeState,
+        Self::StatusReattached,
         Self::StatusReconnectAttempt,
         Self::StatusVulnerabilityWarning,
     ];
@@ -254,7 +260,9 @@ impl CoreWorldTransitionCopyKey {
             Self::PhaseResolvedToHall => "transition.phase.resolved_to_hall",
             Self::PhaseSafeOrigin => "transition.phase.safe_origin",
             Self::StatusNoProgress => "transition.status.no_progress",
+            Self::StatusHallCommitted => "transition.status.hall_committed",
             Self::StatusPriorSafeState => "transition.status.prior_safe_state",
+            Self::StatusReattached => "transition.status.reattached",
             Self::StatusReconnectAttempt => "transition.status.reconnect_attempt",
             Self::StatusVulnerabilityWarning => "transition.status.vulnerability_warning",
         }
