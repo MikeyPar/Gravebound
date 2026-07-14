@@ -296,7 +296,7 @@ fn spawn_encounter_field(parent: &mut ChildSpawnerCommands, model: &ShowcaseMode
                         flex_direction: FlexDirection::Column,
                         padding: UiRect::all(px(10)),
                         row_gap: px(8),
-                        border: UiRect::all(px(if model.reduced_effects { 3 } else { 2 })),
+                        border: UiRect::all(px(2)),
                         ..default()
                     },
                     BackgroundColor(Color::srgb_u8(20, 23, 25)),
@@ -382,7 +382,7 @@ fn spawn_actor_tile(parent: &mut ChildSpawnerCommands, actor: &ActorCard, reduce
                 Node {
                     width: px(if actor.miniboss { 38 } else { 28 }),
                     height: px(if actor.miniboss { 38 } else { 28 }),
-                    border: UiRect::all(px(if reduced { 4 } else { 2 })),
+                    border: UiRect::all(px(2)),
                     margin: UiRect::bottom(px(4)),
                     ..default()
                 },
