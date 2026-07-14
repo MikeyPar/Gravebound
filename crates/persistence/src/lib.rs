@@ -59,10 +59,12 @@ pub use combat_loadout::{
 };
 pub use danger_checkpoint::{
     DangerCheckpointDelete, DangerCheckpointWrite, StoredDangerCheckpoint,
+    stage_danger_checkpoint_cleanup,
 };
 pub use extraction::{
     CaldusExtractionCommit, CaldusExtractionRequest, CaldusExtractionTransaction,
-    StoredExtractionAuthority, StoredExtractionResult, StoredExtractionState,
+    CaldusExtractionTransfer, StoredExtractionAuthority, StoredExtractionResult,
+    StoredExtractionState, stage_caldus_extraction_transfer,
 };
 pub use ground_expiry::{MAX_GROUND_EXPIRY_BATCH, StoredGroundExpiry, StoredGroundExpiryCandidate};
 pub use identity::{StoredCharacter, StoredIdentityAggregate, StoredMutation};
@@ -295,6 +297,10 @@ pub enum PersistenceError {
     ExtractionBindingMismatch,
     #[error("extraction lost the race to crash restore or another final resolution")]
     ExtractionSuperseded,
+    #[error("Hall transfer requires the matching committed extraction receipt")]
+    ExtractionReceiptRequired,
+    #[error("committed extraction receipt was already consumed by another transfer")]
+    ExtractionAlreadyTransferred,
 }
 
 /// Returns whether `PostgreSQL` explicitly permits the complete transaction to be retried.

@@ -7,6 +7,7 @@
 mod ash_wallet;
 mod bargain_milestone;
 mod bargain_selection;
+mod caldus_extraction;
 mod caldus_instance_presentation;
 mod caldus_victory;
 mod combat_factory;
@@ -35,6 +36,10 @@ pub use ash_wallet::{
     PostgresAshWalletService,
 };
 pub use bargain_selection::{CoreBargainAuthority, PostgresBargainService};
+pub use caldus_extraction::{
+    CaldusExtractionError, CaldusExtractionEvidenceCommand, CaldusExtractionEvidenceResult,
+    PostgresCaldusExtractionAuthority, PostgresCaldusHallTransferCoordinator,
+};
 pub use caldus_instance_presentation::{
     CaldusExitPresentation, CaldusExitPresentationCommit, CaldusInstancePresentation,
     CaldusInstancePresentationError,

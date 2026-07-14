@@ -1,7 +1,8 @@
 use sqlx::Row;
 
 use crate::{
-    PersistenceError, PostgresPersistence, StoredWorldFlowRevisionV1, WIPEABLE_CORE_NAMESPACE,
+    PersistenceError, PersistenceTransaction, PostgresPersistence, StoredWorldFlowRevisionV1,
+    WIPEABLE_CORE_NAMESPACE,
 };
 
 const ID_BYTES: usize = 16;
@@ -45,6 +46,19 @@ pub struct CaldusExtractionCommit {
     pub authority: StoredExtractionAuthority,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CaldusExtractionTransfer {
+    pub account_id: [u8; ID_BYTES],
+    pub character_id: [u8; ID_BYTES],
+    pub extraction_request_id: [u8; ID_BYTES],
+    pub extraction_receipt_id: [u8; ID_BYTES],
+    pub instance_lineage_id: [u8; ID_BYTES],
+    pub entry_restore_point_id: [u8; ID_BYTES],
+    pub transfer_mutation_id: [u8; ID_BYTES],
+    pub expected_character_version: u64,
+    pub post_character_version: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredExtractionResult {
     pub replayed: bool,
@@ -62,6 +76,90 @@ pub struct StoredExtractionResult {
 pub enum CaldusExtractionTransaction {
     Fresh(StoredExtractionResult),
     Replay(StoredExtractionResult),
+}
+
+pub async fn stage_caldus_extraction_transfer(
+    transaction: &mut PersistenceTransaction<'_>,
+    transfer: CaldusExtractionTransfer,
+) -> Result<(), PersistenceError> {
+    if [
+        transfer.account_id,
+        transfer.character_id,
+        transfer.extraction_request_id,
+        transfer.extraction_receipt_id,
+        transfer.instance_lineage_id,
+        transfer.entry_restore_point_id,
+        transfer.transfer_mutation_id,
+    ]
+    .contains(&[0; ID_BYTES])
+        || transfer.expected_character_version == 0
+        || transfer.post_character_version
+            != transfer
+                .expected_character_version
+                .checked_add(1)
+                .ok_or(PersistenceError::CorruptStoredExtraction)?
+    {
+        return Err(PersistenceError::CorruptStoredExtraction);
+    }
+    let row = sqlx::query(
+        "SELECT account_id,character_id,extraction_receipt_id,extraction_state,
+                instance_lineage_id,entry_restore_point_id,
+                expected_character_version,transfer_mutation_id,post_character_version
+         FROM character_extraction_results
+         WHERE namespace_id=$1 AND extraction_request_id=$2 FOR UPDATE",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(transfer.extraction_request_id.as_slice())
+    .fetch_optional(transaction.connection())
+    .await?
+    .ok_or(PersistenceError::ExtractionReceiptRequired)?;
+    let stored_transfer = row
+        .try_get::<Option<Vec<u8>>, _>("transfer_mutation_id")?
+        .map(fixed_bytes::<ID_BYTES>)
+        .transpose()?;
+    if stored_transfer.is_some() {
+        return Err(PersistenceError::ExtractionAlreadyTransferred);
+    }
+    let stored_receipt = row
+        .try_get::<Option<Vec<u8>>, _>("extraction_receipt_id")?
+        .map(fixed_bytes::<ID_BYTES>)
+        .transpose()?;
+    let expected_version = i64::try_from(transfer.expected_character_version)
+        .map_err(|_| PersistenceError::CorruptStoredExtraction)?;
+    let bound = fixed_bytes::<ID_BYTES>(row.try_get("account_id")?)? == transfer.account_id
+        && fixed_bytes::<ID_BYTES>(row.try_get("character_id")?)? == transfer.character_id
+        && stored_receipt == Some(transfer.extraction_receipt_id)
+        && row.try_get::<i16, _>("extraction_state")? == 1
+        && fixed_bytes::<ID_BYTES>(row.try_get("instance_lineage_id")?)?
+            == transfer.instance_lineage_id
+        && fixed_bytes::<ID_BYTES>(row.try_get("entry_restore_point_id")?)?
+            == transfer.entry_restore_point_id
+        && row.try_get::<i64, _>("expected_character_version")? == expected_version
+        && row
+            .try_get::<Option<i64>, _>("post_character_version")?
+            .is_none();
+    if !bound {
+        return Err(PersistenceError::ExtractionReceiptRequired);
+    }
+    let post_version = i64::try_from(transfer.post_character_version)
+        .map_err(|_| PersistenceError::CorruptStoredExtraction)?;
+    let updated = sqlx::query(
+        "UPDATE character_extraction_results SET transfer_mutation_id=$1,
+                post_character_version=$2,transferred_at=transaction_timestamp()
+         WHERE namespace_id=$3 AND extraction_request_id=$4
+           AND extraction_state=1 AND transfer_mutation_id IS NULL",
+    )
+    .bind(transfer.transfer_mutation_id.as_slice())
+    .bind(post_version)
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(transfer.extraction_request_id.as_slice())
+    .execute(transaction.connection())
+    .await?
+    .rows_affected();
+    if updated != 1 {
+        return Err(PersistenceError::ExtractionAlreadyTransferred);
+    }
+    Ok(())
 }
 
 impl PostgresPersistence {
