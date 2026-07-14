@@ -106,7 +106,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 27;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 28;
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -1084,6 +1084,42 @@ mod tests {
             assert!(
                 !lowercase.contains(forbidden),
                 "schema 27 leaked {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn safe_storage_schema_appends_locations_and_preserves_existing_rows() {
+        let migration = include_str!("../../../migrations/0028_character_safe_vault_locations.sql");
+        for required in [
+            "location_kind BETWEEN 0 AND 6",
+            "location_kind = 5 AND character_id IS NOT NULL",
+            "slot_index BETWEEN 0 AND 7",
+            "location_kind = 6 AND character_id IS NULL",
+            "slot_index BETWEEN 0 AND 159",
+            "item_account_owned",
+            "item_character_custody_owned",
+            "one_character_safe_equipment_per_slot",
+            "one_vault_equipment_per_slot",
+            "Schema-27 rollback requires zero rows in 5 or 6",
+        ] {
+            assert!(migration.contains(required), "schema 28 omitted {required}");
+        }
+        let lowercase = migration.to_ascii_lowercase();
+        for forbidden in [
+            "drop table",
+            "truncate",
+            "delete from",
+            "update item_instances",
+            "overflow",
+            "resolutionhold",
+            "resolution_hold",
+            "extraction",
+            "json",
+        ] {
+            assert!(
+                !lowercase.contains(forbidden),
+                "schema 28 leaked {forbidden}"
             );
         }
     }

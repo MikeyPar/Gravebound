@@ -135,6 +135,133 @@ async fn migrations_are_idempotent_exact_and_ready() {
 
 #[tokio::test]
 #[ignore = "requires explicitly authorized disposable PostgreSQL"]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the linear PostgreSQL fixture keeps schema custody assertions reviewable"
+)]
+async fn safe_storage_locations_preserve_legacy_shapes_and_enforce_custody() {
+    const ACCOUNT: [u8; 16] = [240; 16];
+    const CHARACTER: [u8; 16] = [241; 16];
+    let persistence = disposable_database().await;
+
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    sqlx::query("DELETE FROM accounts WHERE namespace_id = $1 AND account_id = $2")
+        .bind(WIPEABLE_CORE_NAMESPACE)
+        .bind(ACCOUNT.as_slice())
+        .execute(transaction.connection())
+        .await
+        .unwrap();
+    insert_account(&mut transaction, &ACCOUNT).await.unwrap();
+    insert_character(&mut transaction, &ACCOUNT, &CHARACTER, 1)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO character_inventories (namespace_id, account_id, character_id, \
+         inventory_version) VALUES ($1, $2, $3, 1)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT.as_slice())
+    .bind(CHARACTER.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    for (item_uid, creation_request_id, location_kind, slot_index) in [
+        ([242_u8; 16], [243_u8; 16], 0_i16, 0_i16),
+        ([244_u8; 16], [245_u8; 16], 5_i16, 7_i16),
+    ] {
+        sqlx::query(
+            "INSERT INTO item_instances (namespace_id,item_uid,account_id,character_id, \
+             template_id,content_revision,item_kind,item_level,rarity,creation_kind, \
+             creation_request_id,roll_index,unit_ordinal,item_version,security_state, \
+             location_kind,slot_index,provenance_kind,salvage_band,salvage_value) \
+             VALUES ($1,$2,$3,$4,'item.weapon.crossbow.pine_crossbow',$5,0,1,0,0, \
+             $6,0,0,1,$7,$8,$9,0,0,0)",
+        )
+        .bind(WIPEABLE_CORE_NAMESPACE)
+        .bind(item_uid.as_slice())
+        .bind(ACCOUNT.as_slice())
+        .bind(CHARACTER.as_slice())
+        .bind(format!("core-dev.blake3.{}", "a".repeat(64)))
+        .bind(creation_request_id.as_slice())
+        .bind(i16::from(location_kind == 0))
+        .bind(location_kind)
+        .bind(slot_index)
+        .execute(transaction.connection())
+        .await
+        .unwrap();
+    }
+    sqlx::query(
+        "INSERT INTO item_instances (namespace_id,item_uid,account_id,character_id, \
+         template_id,content_revision,item_kind,item_level,rarity,creation_kind, \
+         creation_request_id,roll_index,unit_ordinal,item_version,security_state, \
+         location_kind,slot_index,provenance_kind,salvage_band,salvage_value) \
+         VALUES ($1,$2,$3,NULL,'item.weapon.crossbow.pine_crossbow',$4,0,1,0,0, \
+         $5,0,0,1,0,6,159,0,0,0)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind([246_u8; 16].as_slice())
+    .bind(ACCOUNT.as_slice())
+    .bind(format!("core-dev.blake3.{}", "b".repeat(64)))
+    .bind([247_u8; 16].as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO item_ledger_events (namespace_id,ledger_event_id,item_uid,account_id, \
+         character_id,mutation_id,event_kind,source_kind,pre_item_version,post_item_version, \
+         post_security_state,post_location_kind) VALUES ($1,$2,$3,$4,$5,$6,0,0,0,1,0,5)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind([248_u8; 16].as_slice())
+    .bind([244_u8; 16].as_slice())
+    .bind(ACCOUNT.as_slice())
+    .bind(CHARACTER.as_slice())
+    .bind([249_u8; 16].as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    transaction.commit().await.unwrap();
+
+    let mut invalid_vault = persistence.begin_transaction().await.unwrap();
+    let result = sqlx::query(
+        "UPDATE item_instances SET location_kind = 6, security_state = 0 \
+         WHERE namespace_id = $1 AND item_uid = $2",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind([244_u8; 16].as_slice())
+    .execute(invalid_vault.connection())
+    .await;
+    assert!(result.is_err(), "Vault custody retained a character");
+    invalid_vault.rollback().await.unwrap();
+
+    let mut invalid_safe = persistence.begin_transaction().await.unwrap();
+    let result = sqlx::query(
+        "UPDATE item_instances SET location_kind = 5, slot_index = 0 \
+         WHERE namespace_id = $1 AND item_uid = $2",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind([246_u8; 16].as_slice())
+    .execute(invalid_safe.connection())
+    .await;
+    assert!(
+        result.is_err(),
+        "CharacterSafe custody accepted no character"
+    );
+    invalid_safe.rollback().await.unwrap();
+
+    let mut cleanup = persistence.begin_transaction().await.unwrap();
+    sqlx::query("DELETE FROM accounts WHERE namespace_id = $1 AND account_id = $2")
+        .bind(WIPEABLE_CORE_NAMESPACE)
+        .bind(ACCOUNT.as_slice())
+        .execute(cleanup.connection())
+        .await
+        .unwrap();
+    cleanup.commit().await.unwrap();
+    persistence.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires explicitly authorized disposable PostgreSQL"]
 async fn identity_schema_enforces_transactions_ownership_and_bounds() {
     let persistence = disposable_database().await;
     clear_accounts(&persistence).await;
