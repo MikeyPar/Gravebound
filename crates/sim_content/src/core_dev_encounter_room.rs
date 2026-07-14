@@ -2183,12 +2183,14 @@ mod tests {
                 EntityId::new(1_000 + u64::try_from(index).expect("index")).expect("entity ID"),
                 &authored_definition(&compiled, content_id),
                 SimulationVector::new(5.0, 5.0),
+                Tick(100),
             )
             .expect("authored health actor");
             assert_eq!(actor.kind(), kind);
             assert_eq!(actor.max_health(), health);
             assert_eq!(actor.armor(), armor);
             assert_eq!(actor.reward_table_id(), reward);
+            assert_eq!(actor.damageable_at(), Tick(130));
         }
     }
 

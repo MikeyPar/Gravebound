@@ -60,9 +60,20 @@ pub struct EnemyHealthActor {
     hurtbox_radius_tiles: f32,
     position: SimulationVector,
     reward_table_id: String,
+    damageable_at: Tick,
     alive: bool,
     death_tick: Option<Tick>,
     frostbind_expires_tick: Option<Tick>,
+}
+
+#[derive(Clone, Copy)]
+struct ExactEnemyHealthActor<'a> {
+    kind: EnemyHealthKind,
+    max_health: u32,
+    armor: u32,
+    hurtbox_radius_milli_tiles: u32,
+    reward_table_id: &'a str,
+    damageable_at: Tick,
 }
 
 impl EnemyHealthActor {
@@ -75,12 +86,15 @@ impl EnemyHealthActor {
         let parameters = definition.parameters();
         Self::from_exact(
             actor_id,
-            EnemyHealthKind::DrownedPilgrim,
-            parameters.health,
-            parameters.armor,
-            parameters.hurtbox_radius_milli_tiles,
             position,
-            parameters.reward_table_id.as_str(),
+            ExactEnemyHealthActor {
+                kind: EnemyHealthKind::DrownedPilgrim,
+                max_health: parameters.health,
+                armor: parameters.armor,
+                hurtbox_radius_milli_tiles: parameters.hurtbox_radius_milli_tiles,
+                reward_table_id: parameters.reward_table_id.as_str(),
+                damageable_at: Tick(0),
+            },
         )
     }
 
@@ -93,12 +107,15 @@ impl EnemyHealthActor {
         let parameters = definition.parameters();
         Self::from_exact(
             actor_id,
-            EnemyHealthKind::BellReed,
-            parameters.health,
-            parameters.armor,
-            parameters.hurtbox_radius_milli_tiles,
             position,
-            parameters.reward_table_id.as_str(),
+            ExactEnemyHealthActor {
+                kind: EnemyHealthKind::BellReed,
+                max_health: parameters.health,
+                armor: parameters.armor,
+                hurtbox_radius_milli_tiles: parameters.hurtbox_radius_milli_tiles,
+                reward_table_id: parameters.reward_table_id.as_str(),
+                damageable_at: Tick(0),
+            },
         )
     }
 
@@ -111,12 +128,15 @@ impl EnemyHealthActor {
         let parameters = definition.parameters();
         Self::from_exact(
             actor_id,
-            EnemyHealthKind::ChainSentry,
-            parameters.health,
-            parameters.armor,
-            parameters.hurtbox_radius_milli_tiles,
             position,
-            parameters.reward_table_id.as_str(),
+            ExactEnemyHealthActor {
+                kind: EnemyHealthKind::ChainSentry,
+                max_health: parameters.health,
+                armor: parameters.armor,
+                hurtbox_radius_milli_tiles: parameters.hurtbox_radius_milli_tiles,
+                reward_table_id: parameters.reward_table_id.as_str(),
+                damageable_at: Tick(0),
+            },
         )
     }
 
@@ -125,6 +145,7 @@ impl EnemyHealthActor {
         actor_id: EntityId,
         definition: &CoreEnemyDefinition,
         position: SimulationVector,
+        spawned_at: Tick,
     ) -> Result<Self, EnemyHealthError> {
         let parameters = definition.parameters();
         let kind = match parameters.content_id.as_str() {
@@ -139,35 +160,36 @@ impl EnemyHealthActor {
                 });
             }
         };
+        let damageable_at = add_ticks(spawned_at, definition.spawn_invulnerability_ticks())?;
         Ok(Self::from_exact(
             actor_id,
-            kind,
-            parameters.maximum_health,
-            u32::from(parameters.armor),
-            parameters.hurtbox_radius_milli_tiles,
             position,
-            &parameters.reward_profile_id,
+            ExactEnemyHealthActor {
+                kind,
+                max_health: parameters.maximum_health,
+                armor: u32::from(parameters.armor),
+                hurtbox_radius_milli_tiles: parameters.hurtbox_radius_milli_tiles,
+                reward_table_id: &parameters.reward_profile_id,
+                damageable_at,
+            },
         ))
     }
 
     fn from_exact(
         actor_id: EntityId,
-        kind: EnemyHealthKind,
-        max_health: u32,
-        armor: u32,
-        hurtbox_radius_milli_tiles: u32,
         position: SimulationVector,
-        reward_table_id: &str,
+        exact: ExactEnemyHealthActor<'_>,
     ) -> Self {
         Self {
             actor_id,
-            kind,
-            max_health,
-            current_health: max_health,
-            armor,
-            hurtbox_radius_tiles: milli_to_tiles(hurtbox_radius_milli_tiles),
+            kind: exact.kind,
+            max_health: exact.max_health,
+            current_health: exact.max_health,
+            armor: exact.armor,
+            hurtbox_radius_tiles: milli_to_tiles(exact.hurtbox_radius_milli_tiles),
             position,
-            reward_table_id: reward_table_id.to_owned(),
+            reward_table_id: exact.reward_table_id.to_owned(),
+            damageable_at: exact.damageable_at,
             alive: true,
             death_tick: None,
             frostbind_expires_tick: None,
@@ -220,6 +242,11 @@ impl EnemyHealthActor {
     }
 
     #[must_use]
+    pub const fn damageable_at(&self) -> Tick {
+        self.damageable_at
+    }
+
+    #[must_use]
     pub const fn frostbind_expires_tick(&self) -> Option<Tick> {
         self.frostbind_expires_tick
     }
@@ -232,6 +259,7 @@ pub struct EnemyHealthSnapshot {
     pub max_health: u32,
     pub current_health: u32,
     pub armor: u32,
+    pub damageable_at: Tick,
     pub alive: bool,
     pub death_tick: Option<Tick>,
     pub frostbind_expires_tick: Option<Tick>,
@@ -295,6 +323,7 @@ pub struct IgnoredFriendlyIntent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IgnoredIntentReason {
     TargetAlreadyDead,
+    TargetInvulnerable,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -356,6 +385,7 @@ impl EnemyHealthSimulation {
                 max_health: actor.max_health,
                 current_health: actor.current_health,
                 armor: actor.armor,
+                damageable_at: actor.damageable_at,
                 alive: actor.alive,
                 death_tick: actor.death_tick,
                 frostbind_expires_tick: actor.frostbind_expires_tick,
@@ -433,6 +463,17 @@ impl EnemyHealthSimulation {
                     contact_ordinal: intent.contact_ordinal,
                     target: intent.target,
                     reason: IgnoredIntentReason::TargetAlreadyDead,
+                });
+                continue;
+            }
+            if step.tick < actor.damageable_at {
+                output.ignored_intents.push(IgnoredFriendlyIntent {
+                    tick: step.tick,
+                    intent_index,
+                    projectile_id: intent.projectile_id,
+                    contact_ordinal: intent.contact_ordinal,
+                    target: intent.target,
+                    reason: IgnoredIntentReason::TargetInvulnerable,
                 });
                 continue;
             }
@@ -808,6 +849,62 @@ mod tests {
     }
 
     #[test]
+    fn per_actor_spawn_invulnerability_ignores_then_accepts_valid_damage() {
+        let actor = EnemyHealthActor::from_exact(
+            id(100),
+            SimulationVector::new(8.0, 3.0),
+            ExactEnemyHealthActor {
+                kind: EnemyHealthKind::BellAcolyte,
+                max_health: 160,
+                armor: 2,
+                hurtbox_radius_milli_tiles: 300,
+                reward_table_id: "reward.normal_outer",
+                damageable_at: Tick(30),
+            },
+        );
+        let mut simulation = EnemyHealthSimulation::new(vec![actor]).expect("health");
+        let early = simulation
+            .apply_combat_step(&step(
+                29,
+                vec![intent(
+                    29,
+                    1,
+                    RawDamageIntentSource::Primary,
+                    100,
+                    20,
+                    10_000,
+                    20,
+                    0,
+                )],
+            ))
+            .expect("ignored damage");
+        assert!(early.damage_events.is_empty());
+        assert_eq!(
+            early.ignored_intents[0].reason,
+            IgnoredIntentReason::TargetInvulnerable
+        );
+        assert_eq!(simulation.snapshots()[0].current_health, 160);
+
+        let boundary = simulation
+            .apply_combat_step(&step(
+                30,
+                vec![intent(
+                    30,
+                    2,
+                    RawDamageIntentSource::Primary,
+                    100,
+                    20,
+                    10_000,
+                    20,
+                    0,
+                )],
+            ))
+            .expect("boundary damage");
+        assert_eq!(boundary.damage_events.len(), 1);
+        assert_eq!(simulation.snapshots()[0].current_health, 142);
+    }
+
+    #[test]
     fn cinder_attacker_stage_covers_primary_grave_mark_and_nail_trap_intents() {
         let cases = [
             (RawDamageIntentSource::Primary, 20, 24),
@@ -1108,7 +1205,7 @@ mod tests {
         let first = replay();
         assert_eq!(
             first.to_string(),
-            "6542260da7100ff09eeb9dc30996a67f674980530c75517da74ec289a70a47ed"
+            "b7a30b7e322aad972e4f260bcd08bbf4467841fdecee10f2e1f4b32555f69db8"
         );
         assert_eq!(first, replay());
     }
