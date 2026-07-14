@@ -687,8 +687,90 @@ async fn caldus_committed_receipt_supersedes_restore_and_transfers_once_to_hall_
             ..
         }
     ));
+    let mismatched_lineage_id = [199; 16];
+    let hashes = sim_content::load_core_development_world_flow(&content_root())
+        .unwrap()
+        .hashes()
+        .clone();
+    let mut mismatch = persistence.begin_transaction().await.unwrap();
+    sqlx::query(
+        "INSERT INTO character_instance_lineages (namespace_id,account_id,character_id,
+         lineage_id,content_id,layout_id,lineage_state,closed_at,records_blake3,assets_blake3,
+         localization_blake3) VALUES ($1,$2,$3,$4,'world.core_microrealm_01',
+         'layout.core_private_life_01',2,transaction_timestamp(),$5,$6,$7)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
+    .bind(mismatched_lineage_id.as_slice())
+    .bind(&hashes.records_blake3)
+    .bind(&hashes.assets_blake3)
+    .bind(&hashes.localization_blake3)
+    .execute(mismatch.connection())
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE character_danger_checkpoints SET lineage_id=$1 WHERE namespace_id=$2
+         AND account_id=$3 AND character_id=$4",
+    )
+    .bind(mismatched_lineage_id.as_slice())
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
+    .execute(mismatch.connection())
+    .await
+    .unwrap();
+    mismatch.commit().await.unwrap();
+
     let mutation = extraction_transfer([202; 16], character_id, request_id, receipt_id);
-    let accepted = hall.transfer(owner.authenticated, 2, &mutation).await;
+    let rolled_back = hall.transfer(owner.authenticated, 2, &mutation).await;
+    assert!(matches!(
+        rolled_back,
+        protocol::WorldFlowResult::Transfer {
+            code: protocol::WorldTransferResultCode::ServiceUnavailable,
+            ..
+        }
+    ));
+    let mut rollback_check = persistence.begin_transaction().await.unwrap();
+    let rollback_state: (Option<Vec<u8>>, i16) = sqlx::query_as(
+        "SELECT x.transfer_mutation_id,w.location_kind FROM character_extraction_results x
+         JOIN character_world_locations w USING (namespace_id,account_id,character_id)
+         WHERE x.namespace_id=$1 AND x.extraction_request_id=$2",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(request_id.as_slice())
+    .fetch_one(rollback_check.connection())
+    .await
+    .unwrap();
+    rollback_check.rollback().await.unwrap();
+    assert_eq!(rollback_state, (None, 2));
+
+    let mut repair = persistence.begin_transaction().await.unwrap();
+    sqlx::query(
+        "UPDATE character_danger_checkpoints SET lineage_id=$1 WHERE namespace_id=$2
+         AND account_id=$3 AND character_id=$4",
+    )
+    .bind(lineage_id.as_slice())
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
+    .execute(repair.connection())
+    .await
+    .unwrap();
+    sqlx::query(
+        "DELETE FROM character_instance_lineages WHERE namespace_id=$1 AND account_id=$2
+         AND character_id=$3 AND lineage_id=$4",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
+    .bind(mismatched_lineage_id.as_slice())
+    .execute(repair.connection())
+    .await
+    .unwrap();
+    repair.commit().await.unwrap();
+
+    let accepted = hall.transfer(owner.authenticated, 3, &mutation).await;
     let protocol::WorldFlowResult::Transfer {
         accepted: true,
         code: protocol::WorldTransferResultCode::Accepted,
@@ -708,11 +790,11 @@ async fn caldus_committed_receipt_supersedes_restore_and_transfers_once_to_hall_
             arrival: protocol::SafeArrival::HallDefault,
         } if location_id.as_str() == "hub.lantern_halls_01"
     ));
-    let replay = hall.transfer(owner.authenticated, 3, &mutation).await;
+    let replay = hall.transfer(owner.authenticated, 4, &mutation).await;
     assert!(matches!(
         replay,
         protocol::WorldFlowResult::Transfer {
-            request_sequence: 3,
+            request_sequence: 4,
             accepted: true,
             code: protocol::WorldTransferResultCode::Accepted,
             transfer_id: Some(id),
