@@ -14,6 +14,7 @@ mod clock;
 mod collision;
 mod combat;
 mod consumable;
+mod core_counterplay;
 mod core_enemy;
 mod core_microrealm;
 mod damage;
@@ -107,6 +108,16 @@ pub use consumable::{
     RedTonicDefinition, RedTonicDefinitionError, RedTonicDefinitionParameters, RedTonicSimulation,
     TonicBelt, TonicBeltPolicy, TonicMergeResult, TonicUseRejection,
     UNDERTAKER_KNOT_RESTORE_BASIS_POINTS, UNDERTAKER_KNOT_SHARED_COOLDOWN_TICKS, VitalsError,
+};
+pub use core_counterplay::{
+    CORE_COM006_CLOSE_SPAWN_DISTANCE_MILLI_TILES,
+    CORE_COM006_CLOSE_SPAWN_GROUND_WARNING_MILLISECONDS,
+    CORE_COM006_MINIMUM_PROJECTILE_ARRIVAL_MILLISECONDS,
+    CORE_COM006_NORMAL_SAFE_CORRIDOR_MILLI_TILES, CORE_COM006_PLAYER_HURTBOX_RADIUS_MILLI_TILES,
+    CORE_COM006_PLAYER_SPEED_MILLI_TILES_PER_SECOND, CORE_COM006_ROUND_TRIP_LATENCY_MILLISECONDS,
+    CORE_COM006_STANDARD_PROJECTILE_CAP, CoreAuthoredMinSpeedPaths, CoreCounterplayDiagnostic,
+    CoreCounterplayMotionProof, CoreCounterplayRouteEvidence, CoreCounterplayRouteKind,
+    CoreProjectileFairnessProof, solve_core_authored_min_speed_paths,
 };
 pub use core_enemy::{
     CORE_ENEMY_STATE_SEQUENCE, CoreAttackGroupRule, CoreEnemyDefinition, CoreEnemyDefinitionError,

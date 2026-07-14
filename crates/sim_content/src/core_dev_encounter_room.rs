@@ -19,7 +19,7 @@ use sim_core::{
     DungeonAnchorKind, DungeonCorridor, DungeonDoorDefinition, DungeonDoorSide, DungeonRoomAnchor,
     DungeonRoomDefinition, DungeonRoomVolume, DungeonRoomVolumeGeometry, DungeonRoomVolumeKind,
     EchoMemoryFamily, FixedDungeonLayoutDefinition, HostileDisposition, MILLI_TILES_PER_TILE,
-    PLAYER_COLLISION_RADIUS_MILLI_TILES, PlacedDungeonRoom,
+    PLAYER_COLLISION_RADIUS_MILLI_TILES, PlacedDungeonRoom, solve_core_authored_min_speed_paths,
 };
 
 use crate::{
@@ -182,6 +182,23 @@ impl CoreDevelopmentEncounterRooms {
         &self.actor_definitions
     }
 
+    /// Produces executable COM-006 evidence for all eight Core-authored patterns.
+    pub fn solve_authored_min_speed_paths(
+        &self,
+    ) -> Result<sim_core::CoreAuthoredMinSpeedPaths, Vec<sim_core::CoreCounterplayDiagnostic>> {
+        let authored = self
+            .actor_definitions
+            .iter()
+            .filter_map(|actor| match &actor.behavior {
+                CoreEncounterBehaviorDefinition::Authored(definition) => Some(definition.clone()),
+                CoreEncounterBehaviorDefinition::ImmutableDrownedPilgrim(_)
+                | CoreEncounterBehaviorDefinition::ImmutableBellReed(_)
+                | CoreEncounterBehaviorDefinition::ImmutableChainSentry(_) => None,
+            })
+            .collect::<Vec<_>>();
+        solve_core_authored_min_speed_paths(&authored)
+    }
+
     #[must_use]
     pub fn rooms(&self) -> &[CoreRoomTemplateRecord] {
         &self.records.rooms
@@ -307,6 +324,11 @@ pub fn compile_core_development_encounter_rooms(
             .collect(),
     };
     compiled.compile_fixed_layout_definition()?;
+    compiled
+        .solve_authored_min_speed_paths()
+        .map_err(|diagnostics| {
+            anyhow::anyhow!("Core authored COM-006 fixture failed: {diagnostics:?}")
+        })?;
     Ok(compiled)
 }
 
@@ -2237,6 +2259,40 @@ mod tests {
                 major_audio: true,
             }
         ));
+        let com006 = compiled
+            .solve_authored_min_speed_paths()
+            .expect("Core authored COM-006 routes");
+        assert_eq!(com006.player_speed_milli_tiles_per_second, 4_500);
+        assert_eq!(com006.player_hurtbox_radius_milli_tiles, 250);
+        assert_eq!(com006.round_trip_latency_milliseconds, 120);
+        assert!(!com006.movement_ability_used);
+        assert_eq!(com006.routes.len(), 8);
+        assert_eq!(
+            com006
+                .routes
+                .iter()
+                .map(|route| route.safe_corridor_milli_tiles)
+                .collect::<Vec<_>>(),
+            [800, 1_346, 800, 800, 1_378, 800, 800, 1_422]
+        );
+        assert_eq!(
+            com006
+                .routes
+                .iter()
+                .filter_map(|route| route
+                    .projectile
+                    .as_ref()
+                    .map(|proof| proof.projectile_arrival_milliseconds))
+                .collect::<Vec<_>>(),
+            [1_000, 667, 350, 584, 667, 350]
+        );
+        assert!(com006.routes.iter().all(|route| {
+            route.encounter_projectile_cap == 300
+                && route.projectile.as_ref().is_none_or(|proof| {
+                    proof.minimum_start_distance_milli_tiles >= 1_250
+                        || proof.ground_origin_warning_milliseconds >= 750
+                })
+        }));
         assert_eq!(compiled.rooms().len(), 9);
         assert_eq!(compiled.pack_bell_01().base_budget, 12);
         assert_eq!(compiled.fixed_layout().main_chain_node_ids, MAIN_CHAIN);
