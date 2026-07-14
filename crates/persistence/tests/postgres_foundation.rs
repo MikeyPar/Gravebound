@@ -1,7 +1,9 @@
 use persistence::{
-    DangerCheckpointDelete, DangerCheckpointWrite, EXPECTED_SCHEMA_VERSION, PersistenceConfig,
-    PersistenceError, PersistenceTransaction, PostgresPersistence, StoredCharacter,
-    StoredDangerCheckpoint, StoredMutation, StoredWorldFlowRevisionV1, WIPEABLE_CORE_NAMESPACE,
+    CORE_ITEM_CONTENT_REVISION, DangerCheckpointDelete, DangerCheckpointWrite,
+    EXPECTED_SCHEMA_VERSION, PersistenceConfig, PersistenceError, PersistenceTransaction,
+    PostgresPersistence, StoredCharacter, StoredDangerCheckpoint, StoredMutation,
+    StoredSafeInventoryCommand, StoredSafeInventoryCommandKind, StoredSafeInventoryLocation,
+    StoredSafeInventoryPlacement, StoredWorldFlowRevisionV1, WIPEABLE_CORE_NAMESPACE,
 };
 const ACCOUNT_A: [u8; 16] = [1; 16];
 const ACCOUNT_B: [u8; 16] = [2; 16];
@@ -260,6 +262,183 @@ async fn safe_storage_locations_preserve_legacy_shapes_and_enforce_custody() {
         .unwrap();
     cleanup.commit().await.unwrap();
     persistence.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires explicitly authorized disposable PostgreSQL"]
+async fn safe_inventory_transfer_is_atomic_replay_safe_and_restart_durable() {
+    const ACCOUNT: [u8; 16] = [230; 16];
+    const CHARACTER: [u8; 16] = [231; 16];
+    const ITEM: [u8; 16] = [232; 16];
+    let persistence = disposable_database().await;
+    seed_safe_inventory_fixture(&persistence, ACCOUNT, CHARACTER, ITEM).await;
+
+    let snapshot = persistence
+        .load_safe_inventory_snapshot(ACCOUNT, CHARACTER)
+        .await
+        .unwrap();
+    assert_eq!(
+        (snapshot.account_version, snapshot.inventory_version),
+        (1, 1)
+    );
+    assert_eq!(snapshot.character_safe[0].item_uid, ITEM);
+    let command = StoredSafeInventoryCommand {
+        mutation_id: [233; 16],
+        canonical_request_hash: [234; 32],
+        result_hash: [235; 32],
+        kind: StoredSafeInventoryCommandKind::CharacterSafeToVault,
+        source_slot_index: 0,
+        expected_account_version: 1,
+        expected_inventory_version: 1,
+        placements: vec![StoredSafeInventoryPlacement {
+            item_uid: ITEM,
+            source: StoredSafeInventoryLocation::CharacterSafe(0),
+            destination: StoredSafeInventoryLocation::Vault(0),
+            expected_item_version: 1,
+        }],
+    };
+    let committed = persistence
+        .commit_safe_inventory_transfer(ACCOUNT, CHARACTER, &command)
+        .await
+        .unwrap();
+    assert!(!committed.replayed);
+    assert_eq!(
+        (
+            committed.post_account_version,
+            committed.post_inventory_version
+        ),
+        (2, 2)
+    );
+    persistence.close().await;
+
+    let restarted = disposable_database().await;
+    let replay = restarted
+        .commit_safe_inventory_transfer(ACCOUNT, CHARACTER, &command)
+        .await
+        .unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.result_hash, committed.result_hash);
+    let mut changed = command.clone();
+    changed.canonical_request_hash[0] ^= 1;
+    assert!(matches!(
+        restarted
+            .commit_safe_inventory_transfer(ACCOUNT, CHARACTER, &changed)
+            .await,
+        Err(PersistenceError::SafeInventoryIdempotencyConflict)
+    ));
+    assert_safe_inventory_commit(&restarted, ACCOUNT, CHARACTER, ITEM).await;
+    restarted.close().await;
+}
+
+async fn seed_safe_inventory_fixture(
+    persistence: &PostgresPersistence,
+    account_id: [u8; 16],
+    character_id: [u8; 16],
+    item_uid: [u8; 16],
+) {
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    sqlx::query("DELETE FROM accounts WHERE namespace_id = $1 AND account_id = $2")
+        .bind(WIPEABLE_CORE_NAMESPACE)
+        .bind(account_id.as_slice())
+        .execute(transaction.connection())
+        .await
+        .unwrap();
+    insert_account(&mut transaction, &account_id).await.unwrap();
+    insert_character(&mut transaction, &account_id, &character_id, 1)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE accounts SET selected_character_id = $1 WHERE namespace_id = $2 AND account_id = $3",
+    )
+    .bind(character_id.as_slice())
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO character_inventories (namespace_id,account_id,character_id,inventory_version) \
+         VALUES ($1,$2,$3,1)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO character_world_locations (namespace_id,account_id,character_id, \
+         character_version,location_kind,location_content_id,safe_arrival_kind) \
+         VALUES ($1,$2,$3,1,1,'hub.lantern_halls_01',0)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO item_instances (namespace_id,item_uid,account_id,character_id,template_id, \
+         content_revision,item_kind,item_level,rarity,creation_kind,creation_request_id,roll_index, \
+         unit_ordinal,item_version,security_state,location_kind,slot_index,provenance_kind, \
+         salvage_band,salvage_value) VALUES ($1,$2,$3,$4,'item.weapon.crossbow.pine_crossbow', \
+         $5,0,1,0,0,$6,0,0,1,0,5,0,0,0,0)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(item_uid.as_slice())
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
+    .bind(CORE_ITEM_CONTENT_REVISION)
+    .bind([236_u8; 16].as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    transaction.commit().await.unwrap();
+}
+
+async fn assert_safe_inventory_commit(
+    persistence: &PostgresPersistence,
+    account_id: [u8; 16],
+    character_id: [u8; 16],
+    item_uid: [u8; 16],
+) {
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let item: (Option<Vec<u8>>, i16, i16, i64) = sqlx::query_as(
+        "SELECT character_id,security_state,location_kind,item_version FROM item_instances \
+         WHERE namespace_id = $1 AND account_id = $2 AND item_uid = $3",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .bind(item_uid.as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    let versions: (i64, i64) = sqlx::query_as(
+        "SELECT a.state_version,i.inventory_version FROM accounts a JOIN character_inventories i \
+         ON i.namespace_id=a.namespace_id AND i.account_id=a.account_id \
+         WHERE a.namespace_id=$1 AND a.account_id=$2 AND i.character_id=$3",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    let ledgers: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM item_ledger_events WHERE namespace_id=$1 AND account_id=$2 \
+         AND item_uid=$3 AND mutation_id=$4",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .bind(item_uid.as_slice())
+    .bind([233_u8; 16].as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    transaction.rollback().await.unwrap();
+    assert_eq!(item, (None, 0, 6, 2));
+    assert_eq!(versions, (2, 2));
+    assert_eq!(ledgers, 1);
 }
 
 #[tokio::test]
