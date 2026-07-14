@@ -18,10 +18,11 @@ use sim_core::{
 use thiserror::Error;
 
 use crate::{
-    AuthenticatedAccount, AuthenticatedNamespace, PostgresProgressionAwardService,
-    PostgresRewardService, ProgressionAwardCode, ProgressionAwardCommand, ProgressionAwardEvidence,
-    ProgressionAwardOutcome, ProgressionAwardPayload, RewardGrantContext, RewardGrantError,
-    RewardGrantTransaction,
+    AuthenticatedAccount, AuthenticatedNamespace, CaldusExitPresentationCommit,
+    CaldusInstancePresentation, CaldusInstancePresentationError,
+    PostgresProgressionAwardService, PostgresRewardService, ProgressionAwardCode,
+    ProgressionAwardCommand, ProgressionAwardEvidence, ProgressionAwardOutcome,
+    ProgressionAwardPayload, RewardGrantContext, RewardGrantError, RewardGrantTransaction,
 };
 
 const CALDUS_SOURCE_ID: &str = "boss.sir_caldus";
@@ -49,6 +50,18 @@ pub struct CaldusVictoryCommitResult {
     pub eligibility: Vec<CoreCaldusEligibilityDecision>,
     pub owners: Vec<CaldusVictoryOwnerCommit>,
     pub exit: StoredCaldusVictoryExit,
+}
+
+impl CaldusVictoryCommitResult {
+    /// Projects the durable result into the matching live attempt. A caller cannot obtain this
+    /// method's receiver until item, progression, and schema-25 exit terminality all succeed.
+    pub fn present_exit(
+        &self,
+        content: &sim_content::CoreDevelopmentCaldus,
+        presentation: &mut CaldusInstancePresentation,
+    ) -> Result<CaldusExitPresentationCommit, CaldusInstancePresentationError> {
+        presentation.present_committed_exit(content, &self.exit)
+    }
 }
 
 #[derive(Debug, Clone)]

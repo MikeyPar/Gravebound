@@ -7,6 +7,7 @@
 mod ash_wallet;
 mod bargain_milestone;
 mod bargain_selection;
+mod caldus_instance_presentation;
 mod caldus_victory;
 mod combat_factory;
 mod core_lifecycle;
@@ -34,6 +35,10 @@ pub use ash_wallet::{
     PostgresAshWalletService,
 };
 pub use bargain_selection::{CoreBargainAuthority, PostgresBargainService};
+pub use caldus_instance_presentation::{
+    CaldusExitPresentation, CaldusExitPresentationCommit, CaldusInstancePresentation,
+    CaldusInstancePresentationError,
+};
 pub use caldus_victory::{
     CaldusVictoryCommitResult, CaldusVictoryCoordinatorError, CaldusVictoryOwnerCommand,
     CaldusVictoryOwnerCommit, PostgresCaldusVictoryCoordinator,
