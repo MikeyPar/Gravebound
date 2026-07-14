@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "locale": "en-US",
+  "entries": [
+    {"key":"boss.sir_caldus.name","value":"Sir Caldus, Bell-Bound Knight"},
+    {"key":"boss.sir_caldus.description","value":"A knight sealed into the Sepulcher bell, testing gaps, charges, and composure."},
+    {"key":"portal.exit.dungeon.bell_sepulcher.name","value":"Sepulcher Way Out"},
+    {"key":"portal.exit.dungeon.bell_sepulcher.description","value":"A stable passage to Lantern Halls after Caldus's reward is safely committed."}
+  ]
+}

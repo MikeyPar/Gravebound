@@ -6,9 +6,11 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+mod core_caldus;
 mod core_encounter_room;
 mod production_item;
 mod production_oath_bargain;
+pub use core_caldus::*;
 pub use core_encounter_room::*;
 pub use production_item::*;
 pub use production_oath_bargain::*;
@@ -1149,6 +1151,39 @@ mod tests {
                 "core_encounter_room_copy.schema.json",
                 serde_json::to_value(schemars::schema_for!(CoreEncounterRoomCopyFile))
                     .expect("serializable encounter-room copy schema"),
+            ),
+        ];
+        for (name, generated) in cases {
+            let text = fs::read_to_string(schema_root.join(name)).expect("checked-in schema");
+            let checked_in: serde_json::Value =
+                serde_json::from_str(&text).expect("valid checked-in schema");
+            assert_eq!(checked_in, generated, "schema drift in {name}");
+        }
+    }
+
+    #[test]
+    fn checked_in_core_caldus_schemas_match_the_rust_contracts() {
+        let schema_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../schemas");
+        let cases = [
+            (
+                "core_caldus_target.schema.json",
+                serde_json::to_value(schemars::schema_for!(CoreCaldusDevelopmentTarget))
+                    .expect("serializable Caldus target schema"),
+            ),
+            (
+                "core_caldus_records.schema.json",
+                serde_json::to_value(schemars::schema_for!(CoreCaldusRecords))
+                    .expect("serializable Caldus records schema"),
+            ),
+            (
+                "core_caldus_assets.schema.json",
+                serde_json::to_value(schemars::schema_for!(CoreCaldusAssetManifest))
+                    .expect("serializable Caldus assets schema"),
+            ),
+            (
+                "core_caldus_copy.schema.json",
+                serde_json::to_value(schemars::schema_for!(CoreCaldusCopyFile))
+                    .expect("serializable Caldus copy schema"),
             ),
         ];
         for (name, generated) in cases {

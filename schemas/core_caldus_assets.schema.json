@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CoreCaldusAssetManifest",
+  "type": "object",
+  "properties": {
+    "assets": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CoreCaldusAsset"
+      }
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "assets"
+  ],
+  "$defs": {
+    "ContentId": {
+      "description": "Stable dot-separated content identifier.",
+      "type": "string"
+    },
+    "CoreCaldusAsset": {
+      "type": "object",
+      "properties": {
+        "asset_id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "kind": {
+          "$ref": "#/$defs/CoreCaldusAssetKind"
+        },
+        "source_record_id": {
+          "$ref": "#/$defs/ContentId"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "asset_id",
+        "source_record_id",
+        "kind"
+      ]
+    },
+    "CoreCaldusAssetKind": {
+      "type": "string",
+      "enum": [
+        "boss_silhouette",
+        "boss_portrait",
+        "telegraph",
+        "warning_audio",
+        "major_warning_audio",
+        "exit_marker"
+      ]
+    }
+  }
+}

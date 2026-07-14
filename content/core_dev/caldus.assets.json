@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "assets": [
+    {"asset_id":"sprite.boss.sir_caldus","source_record_id":"boss.sir_caldus","kind":"boss_silhouette"},
+    {"asset_id":"portrait.boss.sir_caldus","source_record_id":"boss.sir_caldus","kind":"boss_portrait"},
+    {"asset_id":"boss.caldus.shield_arc.telegraph","source_record_id":"boss.caldus.shield_arc","kind":"telegraph"},
+    {"asset_id":"boss.caldus.shield_arc.warning","source_record_id":"boss.caldus.shield_arc","kind":"warning_audio"},
+    {"asset_id":"boss.caldus.shield_arc.warning.major","source_record_id":"boss.caldus.shield_arc","kind":"major_warning_audio"},
+    {"asset_id":"boss.caldus.bell_ring.telegraph","source_record_id":"boss.caldus.bell_ring","kind":"telegraph"},
+    {"asset_id":"boss.caldus.bell_ring.warning","source_record_id":"boss.caldus.bell_ring","kind":"warning_audio"},
+    {"asset_id":"boss.caldus.bell_ring.warning.major","source_record_id":"boss.caldus.bell_ring","kind":"major_warning_audio"},
+    {"asset_id":"boss.caldus.charge_lane.telegraph","source_record_id":"boss.caldus.charge_lane","kind":"telegraph"},
+    {"asset_id":"boss.caldus.charge_lane.warning","source_record_id":"boss.caldus.charge_lane","kind":"warning_audio"},
+    {"asset_id":"boss.caldus.charge_lane.warning.major","source_record_id":"boss.caldus.charge_lane","kind":"major_warning_audio"},
+    {"asset_id":"boss.caldus.charge_stop_ring.telegraph","source_record_id":"boss.caldus.charge_stop_ring","kind":"telegraph"},
+    {"asset_id":"boss.caldus.charge_stop_ring.warning","source_record_id":"boss.caldus.charge_stop_ring","kind":"warning_audio"},
+    {"asset_id":"boss.caldus.charge_stop_ring.warning.major","source_record_id":"boss.caldus.charge_stop_ring","kind":"major_warning_audio"},
+    {"asset_id":"sprite.portal.exit.dungeon.bell_sepulcher","source_record_id":"portal.exit.dungeon.bell_sepulcher","kind":"exit_marker"}
+  ]
+}

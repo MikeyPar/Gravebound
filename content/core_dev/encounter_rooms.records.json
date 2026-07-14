@@ -349,11 +349,11 @@
       "id": "arena.boss.caldus_01", "schema_version": 1, "enabled": true,
       "earliest_release_stage": "core", "localization_name_key": "arena.boss.caldus_01.name",
       "localization_description_key": "arena.boss.caldus_01.description",
-      "asset_ids": ["tilemap.arena.boss.caldus_01"], "tags": ["arena", "bell", "boss", "boss_behavior_disabled"],
+      "asset_ids": ["tilemap.arena.boss.caldus_01"], "tags": ["arena", "bell", "boss"],
       "source_document_feature_id": "CONT-ROOM-002", "width_milli_tiles": 18000, "height_milli_tiles": 18000,
       "doors": [{"id":"west","side":"west","offset_milli_tiles":9000,"width_milli_tiles":3000}],
       "volumes": [{"id":"walkable.circle","kind":"walkable_boundary","geometry":{"shape":"circle","circle":{"center":{"x":9000,"y":9000},"radius":8000}}}],
-      "anchors": [{"id":"boss","kind":"boss","point":{"x":9000,"y":9000},"bound_content_id":null},{"id":"stage","kind":"stage","point":{"x":2500,"y":9000},"bound_content_id":null},{"id":"group.north","kind":"group","point":{"x":2500,"y":6000},"bound_content_id":null},{"id":"group.south","kind":"group","point":{"x":2500,"y":12000},"bound_content_id":null},{"id":"charge.west","kind":"charge_endpoint","point":{"x":1000,"y":9000},"bound_content_id":null},{"id":"charge.east","kind":"charge_endpoint","point":{"x":17000,"y":9000},"bound_content_id":null},{"id":"charge.north","kind":"charge_endpoint","point":{"x":9000,"y":1000},"bound_content_id":null},{"id":"charge.south","kind":"charge_endpoint","point":{"x":9000,"y":17000},"bound_content_id":null}],
+      "anchors": [{"id":"boss","kind":"boss","point":{"x":9000,"y":9000},"bound_content_id":"boss.sir_caldus"},{"id":"stage","kind":"stage","point":{"x":2500,"y":9000},"bound_content_id":null},{"id":"group.north","kind":"group","point":{"x":2500,"y":6000},"bound_content_id":null},{"id":"group.south","kind":"group","point":{"x":2500,"y":12000},"bound_content_id":null},{"id":"charge.west","kind":"charge_endpoint","point":{"x":1000,"y":9000},"bound_content_id":null},{"id":"charge.east","kind":"charge_endpoint","point":{"x":17000,"y":9000},"bound_content_id":null},{"id":"charge.north","kind":"charge_endpoint","point":{"x":9000,"y":1000},"bound_content_id":null},{"id":"charge.south","kind":"charge_endpoint","point":{"x":9000,"y":17000},"bound_content_id":null}],
       "safe_noncombat": false, "authored_core_enabled": true
     }
   ],

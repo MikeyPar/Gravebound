@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "target_kind": "unpromoted_caldus_subset",
+  "target_name": "core-dev-caldus",
+  "required_boss_ids": ["boss.sir_caldus"],
+  "required_pattern_ids": ["boss.caldus.shield_arc", "boss.caldus.bell_ring", "boss.caldus.charge_lane", "boss.caldus.charge_stop_ring"],
+  "required_exit_ids": ["portal.exit.dungeon.bell_sepulcher"],
+  "required_asset_ids": [
+    "sprite.boss.sir_caldus", "portrait.boss.sir_caldus",
+    "boss.caldus.shield_arc.telegraph", "boss.caldus.shield_arc.warning", "boss.caldus.shield_arc.warning.major",
+    "boss.caldus.bell_ring.telegraph", "boss.caldus.bell_ring.warning", "boss.caldus.bell_ring.warning.major",
+    "boss.caldus.charge_lane.telegraph", "boss.caldus.charge_lane.warning", "boss.caldus.charge_lane.warning.major",
+    "boss.caldus.charge_stop_ring.telegraph", "boss.caldus.charge_stop_ring.warning", "boss.caldus.charge_stop_ring.warning.major",
+    "sprite.portal.exit.dungeon.bell_sepulcher"
+  ],
+  "required_localization_keys": ["boss.sir_caldus.name", "boss.sir_caldus.description", "portal.exit.dungeon.bell_sepulcher.name", "portal.exit.dungeon.bell_sepulcher.description"],
+  "expected_records_blake3": "0f67d81268e8a6adfae08338dcbf6577e07260547ef4d5083c3aad7b912a3e4c",
+  "expected_assets_blake3": "a1738b8117e4f39568c33b33d7bab4d0b9263c6e36fcc38036c5161b1e9136dc",
+  "expected_localization_blake3": "b3e5dd03a2cb6c534f9eaf017eb31f37dba81c8a4993e88371f7e75a4a9ea808"
+}
