@@ -151,6 +151,7 @@ impl PostgresSafeInventoryService {
             .await
             .map_err(|error| map_persistence(&error, Some(command.kind)))?
         {
+            validate_replayed_result(command, request_hash, &result)?;
             return Ok(AuthoritativeSafeInventoryTransfer { result });
         }
         let stored = self
@@ -499,6 +500,48 @@ fn result_hash(request_hash: [u8; 32], placements: &[StoredSafeInventoryPlacemen
     blake3::derive_key("gravebound.safe-inventory-result.v1", &material)
 }
 
+fn validate_replayed_result(
+    command: SafeInventoryTransferCommand,
+    request_hash: [u8; 32],
+    result: &StoredSafeInventoryResult,
+) -> Result<(), SafeInventoryServiceError> {
+    let source = match command.kind {
+        SafeInventoryTransferKind::CharacterSafeToVault
+        | SafeInventoryTransferKind::CharacterSafeToRunBackpack => {
+            StoredSafeInventoryLocation::CharacterSafe(
+                u8::try_from(command.source_slot_index)
+                    .map_err(|_| SafeInventoryServiceError::CorruptSnapshot)?,
+            )
+        }
+        SafeInventoryTransferKind::VaultToCharacterSafe => {
+            StoredSafeInventoryLocation::Vault(command.source_slot_index)
+        }
+    };
+    let placements_valid = result.placements.iter().all(|placement| {
+        placement.source == source
+            && match command.kind {
+                SafeInventoryTransferKind::CharacterSafeToVault => {
+                    matches!(placement.destination, StoredSafeInventoryLocation::Vault(_))
+                }
+                SafeInventoryTransferKind::VaultToCharacterSafe => matches!(
+                    placement.destination,
+                    StoredSafeInventoryLocation::CharacterSafe(_)
+                ),
+                SafeInventoryTransferKind::CharacterSafeToRunBackpack => matches!(
+                    placement.destination,
+                    StoredSafeInventoryLocation::RunBackpack(_)
+                ),
+            }
+    });
+    if result.mutation_id != command.mutation_id
+        || result.result_hash != result_hash(request_hash, &result.placements)
+        || !placements_valid
+    {
+        return Err(SafeInventoryServiceError::CorruptSnapshot);
+    }
+    Ok(())
+}
+
 fn map_persistence(
     error: &PersistenceError,
     kind: Option<SafeInventoryTransferKind>,
@@ -639,6 +682,54 @@ mod tests {
             expected_item_version: 1,
         };
         assert_ne!(result_hash(hash, &[placement]), result_hash(hash, &[]));
+    }
+
+    #[test]
+    fn replay_validation_recomputes_hash_and_command_shape() {
+        let command = SafeInventoryTransferCommand {
+            mutation_id: [3; 16],
+            kind: SafeInventoryTransferKind::CharacterSafeToVault,
+            source_slot_index: 2,
+            expected_account_version: 4,
+            expected_inventory_version: 7,
+        };
+        let request = request_hash([1; 16], [2; 16], command);
+        let placement = StoredSafeInventoryPlacement {
+            item_uid: [4; 16],
+            source: StoredSafeInventoryLocation::CharacterSafe(2),
+            destination: StoredSafeInventoryLocation::Vault(0),
+            expected_item_version: 9,
+        };
+        let mut replay = StoredSafeInventoryResult {
+            replayed: true,
+            mutation_id: command.mutation_id,
+            result_hash: result_hash(request, &[placement.clone()]),
+            pre_account_version: 4,
+            post_account_version: 5,
+            pre_inventory_version: 7,
+            post_inventory_version: 8,
+            placements: vec![placement],
+        };
+        validate_replayed_result(command, request, &replay).unwrap();
+
+        replay.result_hash[0] ^= 1;
+        assert!(matches!(
+            validate_replayed_result(command, request, &replay),
+            Err(SafeInventoryServiceError::CorruptSnapshot)
+        ));
+        replay.result_hash[0] ^= 1;
+        replay.placements[0].source = StoredSafeInventoryLocation::CharacterSafe(3);
+        assert!(matches!(
+            validate_replayed_result(command, request, &replay),
+            Err(SafeInventoryServiceError::CorruptSnapshot)
+        ));
+        replay.placements[0].source = StoredSafeInventoryLocation::CharacterSafe(2);
+        replay.placements[0].destination = StoredSafeInventoryLocation::CharacterSafe(0);
+        replay.result_hash = result_hash(request, &replay.placements);
+        assert!(matches!(
+            validate_replayed_result(command, request, &replay),
+            Err(SafeInventoryServiceError::CorruptSnapshot)
+        ));
     }
 
     #[test]

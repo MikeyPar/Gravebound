@@ -724,6 +724,69 @@ async fn duplicate_quic_sessions_converge_on_one_inventory_commit() {
     persistence.close().await;
 }
 
+fn assert_state_free_service_unavailable(result: &protocol::SafeInventoryTransferResultV1) {
+    result.validate().unwrap();
+    assert_eq!(result.code, SafeInventoryResultCodeV1::ServiceUnavailable);
+    assert!(!result.replayed);
+    assert_eq!(result.result_hash, [0; 32]);
+    assert_eq!((result.account_version, result.inventory_version), (0, 0));
+    assert!(result.placements.is_empty());
+}
+
+async fn update_receipt_placement_count(persistence: &PostgresPersistence, count: i16) {
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let changed = sqlx::query(
+        "UPDATE safe_inventory_mutations SET placement_count=$1 WHERE namespace_id=$2 \
+         AND account_id=$3 AND mutation_id=$4",
+    )
+    .bind(count)
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(MUTATION_ID.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap()
+    .rows_affected();
+    assert_eq!(changed, 1);
+    transaction.commit().await.unwrap();
+}
+
+async fn update_receipt_result_hash(persistence: &PostgresPersistence, hash: [u8; 32]) {
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let changed = sqlx::query(
+        "UPDATE safe_inventory_mutations SET result_hash=$1 WHERE namespace_id=$2 \
+         AND account_id=$3 AND mutation_id=$4",
+    )
+    .bind(hash.as_slice())
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(MUTATION_ID.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap()
+    .rows_affected();
+    assert_eq!(changed, 1);
+    transaction.commit().await.unwrap();
+}
+
+async fn safe_transfer_durable_counts(persistence: &PostgresPersistence) -> (i64, i64, i64) {
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let counts = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM safe_inventory_mutations WHERE namespace_id=$1 \
+         AND account_id=$2 AND mutation_id=$3),(SELECT count(*) FROM safe_inventory_placements \
+         WHERE namespace_id=$1 AND account_id=$2 AND mutation_id=$3),(SELECT count(*) FROM \
+         item_ledger_events WHERE namespace_id=$1 AND account_id=$2 AND mutation_id=$3)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(MUTATION_ID.as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    transaction.rollback().await.unwrap();
+    counts
+}
+
 #[tokio::test]
 #[ignore = "requires explicitly authorized disposable PostgreSQL"]
 async fn database_outage_returns_a_state_free_quic_rejection() {
@@ -744,18 +807,7 @@ async fn database_outage_returns_a_state_free_quic_rejection() {
     )
     .await;
     assert_eq!(results.len(), 1);
-    results[0].validate().unwrap();
-    assert_eq!(
-        results[0].code,
-        SafeInventoryResultCodeV1::ServiceUnavailable
-    );
-    assert!(!results[0].replayed);
-    assert_eq!(results[0].result_hash, [0; 32]);
-    assert_eq!(
-        (results[0].account_version, results[0].inventory_version),
-        (0, 0)
-    );
-    assert!(results[0].placements.is_empty());
+    assert_state_free_service_unavailable(&results[0]);
 
     let restarted = disposable_database().await;
     let after_outage = restarted
@@ -781,20 +833,7 @@ async fn corrupt_receipt_fails_closed_over_quic_without_a_second_mutation() {
         .await
         .unwrap();
 
-    let mut corruption = persistence.begin_transaction().await.unwrap();
-    let changed = sqlx::query(
-        "UPDATE safe_inventory_mutations SET placement_count=2 WHERE namespace_id=$1 \
-         AND account_id=$2 AND mutation_id=$3",
-    )
-    .bind(WIPEABLE_CORE_NAMESPACE)
-    .bind(ACCOUNT_ID.as_slice())
-    .bind(MUTATION_ID.as_slice())
-    .execute(corruption.connection())
-    .await
-    .unwrap()
-    .rows_affected();
-    assert_eq!(changed, 1);
-    corruption.commit().await.unwrap();
+    update_receipt_placement_count(&persistence, 2).await;
     assert!(matches!(
         persistence
             .core_item_lifecycle_signature_v1(ACCOUNT_ID, CHARACTER_ID)
@@ -804,49 +843,26 @@ async fn corrupt_receipt_fails_closed_over_quic_without_a_second_mutation() {
 
     let rejected = run_quic_transfers(&persistence, &[frame], QuicTransferOptions::default()).await;
     assert_eq!(rejected.len(), 1);
-    rejected[0].validate().unwrap();
-    assert_eq!(
-        rejected[0].code,
-        SafeInventoryResultCodeV1::ServiceUnavailable
-    );
-    assert!(!rejected[0].replayed);
-    assert_eq!(rejected[0].result_hash, [0; 32]);
-    assert_eq!(
-        (rejected[0].account_version, rejected[0].inventory_version),
-        (0, 0)
-    );
-    assert!(rejected[0].placements.is_empty());
+    assert_state_free_service_unavailable(&rejected[0]);
+    assert_eq!(safe_transfer_durable_counts(&persistence).await, (1, 1, 1));
+    update_receipt_placement_count(&persistence, 1).await;
 
-    let mut repair = persistence.begin_transaction().await.unwrap();
-    let durable_counts: (i64, i64, i64) = sqlx::query_as(
-        "SELECT (SELECT count(*) FROM safe_inventory_mutations WHERE namespace_id=$1 \
-         AND account_id=$2 AND mutation_id=$3),(SELECT count(*) FROM safe_inventory_placements \
-         WHERE namespace_id=$1 AND account_id=$2 AND mutation_id=$3),(SELECT count(*) FROM \
-         item_ledger_events WHERE namespace_id=$1 AND account_id=$2 AND mutation_id=$3)",
-    )
-    .bind(WIPEABLE_CORE_NAMESPACE)
-    .bind(ACCOUNT_ID.as_slice())
-    .bind(MUTATION_ID.as_slice())
-    .fetch_one(repair.connection())
-    .await
-    .unwrap();
-    assert_eq!(durable_counts, (1, 1, 1));
-    sqlx::query(
-        "UPDATE safe_inventory_mutations SET placement_count=1 WHERE namespace_id=$1 \
-         AND account_id=$2 AND mutation_id=$3",
-    )
-    .bind(WIPEABLE_CORE_NAMESPACE)
-    .bind(ACCOUNT_ID.as_slice())
-    .bind(MUTATION_ID.as_slice())
-    .execute(repair.connection())
-    .await
-    .unwrap();
-    repair.commit().await.unwrap();
-    let after_repair = persistence
+    let corrupted_hash = [222_u8; 32];
+    assert_ne!(corrupted_hash, committed[0].result_hash);
+    update_receipt_result_hash(&persistence, corrupted_hash).await;
+    let hash_rejected =
+        run_quic_transfers(&persistence, &[frame], QuicTransferOptions::default()).await;
+    assert_state_free_service_unavailable(&hash_rejected[0]);
+    update_receipt_result_hash(&persistence, committed[0].result_hash).await;
+    let replay = run_quic_transfers(&persistence, &[frame], QuicTransferOptions::default()).await;
+    assert_eq!(replay[0].code, SafeInventoryResultCodeV1::Accepted);
+    assert!(replay[0].replayed);
+    assert_eq!(replay[0].result_hash, committed[0].result_hash);
+    let after_repairs = persistence
         .core_item_lifecycle_signature_v1(ACCOUNT_ID, CHARACTER_ID)
         .await
         .unwrap();
-    assert_eq!(after_repair, before_corruption);
+    assert_eq!(after_repairs, before_corruption);
     persistence.close().await;
 }
 
