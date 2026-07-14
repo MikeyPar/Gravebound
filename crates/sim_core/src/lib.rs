@@ -17,6 +17,7 @@ mod consumable;
 mod core_abbot;
 mod core_boss_lock;
 mod core_caldus;
+mod core_caldus_body;
 mod core_counterplay;
 mod core_enemy;
 mod core_enemy_attack;
@@ -138,6 +139,9 @@ pub use core_caldus::{
     CALDUS_RING_WARNING_TICKS, CALDUS_SHIELD_WARNING_TICKS, CALDUS_SOFT_ENRAGE_TICKS,
     CoreCaldusError, CoreCaldusEvent, CoreCaldusInput, CoreCaldusPhase,
     CoreCaldusProjectileRelease, CoreCaldusSimulation, CoreCaldusState, CoreCaldusTargetInput,
+};
+pub use core_caldus_body::{
+    CoreCaldusBodyError, CoreCaldusBodyEvent, CoreCaldusBodySimulation, CoreCaldusBodyTarget,
 };
 pub use core_counterplay::{
     CORE_COM006_CLOSE_SPAWN_DISTANCE_MILLI_TILES,

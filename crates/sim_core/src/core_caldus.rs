@@ -184,9 +184,7 @@ struct ScheduledShield {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ScheduledCharge {
     cast_id: u64,
-    target: CoreBossParticipant,
-    target_x_milli_tiles: i32,
-    target_y_milli_tiles: i32,
+    target: Option<CoreCaldusTargetInput>,
     direction_locks_at: Tick,
     movement_starts_at: Tick,
     ends_at: Tick,
@@ -321,7 +319,7 @@ impl CoreCaldusSimulation {
             unreachable!("break and defeat returned above")
         };
         self.schedule_pattern_starts(phase, loop_tick, &targets, &mut events)?;
-        self.emit_due_scheduled(&mut events);
+        self.emit_due_scheduled(&targets, &mut events);
         self.advance_active_clock(&mut events)?;
         self.increment_global_tick()?;
         Ok(events)
@@ -576,9 +574,7 @@ impl CoreCaldusSimulation {
         });
         self.scheduled_charges.push(ScheduledCharge {
             cast_id,
-            target: target.participant,
-            target_x_milli_tiles: target.position_x_milli_tiles,
-            target_y_milli_tiles: target.position_y_milli_tiles,
+            target: Some(target),
             direction_locks_at: add_ticks(self.tick, 21)?,
             movement_starts_at: add_ticks(self.tick, 30)?,
             ends_at: add_ticks(self.tick, 47)?,
@@ -586,7 +582,11 @@ impl CoreCaldusSimulation {
         Ok(())
     }
 
-    fn emit_due_scheduled(&mut self, events: &mut Vec<CoreCaldusEvent>) {
+    fn emit_due_scheduled(
+        &mut self,
+        targets: &BTreeMap<u8, CoreCaldusTargetInput>,
+        events: &mut Vec<CoreCaldusEvent>,
+    ) {
         for shield in &self.scheduled_shields {
             if shield.telegraph_at == self.tick {
                 events.push(CoreCaldusEvent::ShieldTelegraph {
@@ -610,23 +610,26 @@ impl CoreCaldusSimulation {
         }
         self.scheduled_shields
             .retain(|shield| shield.fires_at > self.tick);
-        for charge in &self.scheduled_charges {
+        for charge in &mut self.scheduled_charges {
             if charge.direction_locks_at == self.tick {
-                events.push(CoreCaldusEvent::ChargeDirectionLocked {
-                    tick: self.tick,
-                    cast_id: charge.cast_id,
-                    target: charge.target,
-                    target_x_milli_tiles: charge.target_x_milli_tiles,
-                    target_y_milli_tiles: charge.target_y_milli_tiles,
-                });
+                charge.target = nearest_target(targets).copied();
+                if let Some(target) = charge.target {
+                    events.push(CoreCaldusEvent::ChargeDirectionLocked {
+                        tick: self.tick,
+                        cast_id: charge.cast_id,
+                        target: target.participant,
+                        target_x_milli_tiles: target.position_x_milli_tiles,
+                        target_y_milli_tiles: target.position_y_milli_tiles,
+                    });
+                }
             }
-            if charge.movement_starts_at == self.tick {
+            if charge.movement_starts_at == self.tick && charge.target.is_some() {
                 events.push(CoreCaldusEvent::ChargeMovementStarted {
                     tick: self.tick,
                     cast_id: charge.cast_id,
                 });
             }
-            if charge.ends_at == self.tick {
+            if charge.ends_at == self.tick && charge.target.is_some() {
                 events.push(CoreCaldusEvent::ChargeEnded {
                     tick: self.tick,
                     cast_id: charge.cast_id,
@@ -638,7 +641,7 @@ impl CoreCaldusSimulation {
             }
         }
         self.scheduled_charges
-            .retain(|charge| charge.ends_at > self.tick);
+            .retain(|charge| charge.target.is_some() && charge.ends_at > self.tick);
         for ring in &self.previewed_rings {
             if ring.fires_at == self.tick {
                 let phase_three = matches!(
@@ -995,6 +998,49 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(shields, [110, 176, 335, 401]);
+    }
+
+    #[test]
+    fn charge_target_position_snapshots_at_direction_lock_not_telegraph_start() {
+        let mut simulation = CoreCaldusSimulation::new(lock(1)).expect("simulation");
+        for _ in 0..120 {
+            advance(&mut simulation, 5_040, 1);
+        }
+        let phase_start = simulation.tick().0;
+        for offset in 0..=21 {
+            let position = if offset == 21 { 15_000 } else { 2_500 };
+            let events = simulation
+                .advance(&CoreCaldusInput {
+                    tick: simulation.tick(),
+                    current_health: 5_040,
+                    living_targets: vec![CoreCaldusTargetInput {
+                        participant: participant(1, 0),
+                        position_x_milli_tiles: position,
+                        position_y_milli_tiles: 9_000,
+                        squared_distance_to_boss: 1,
+                    }],
+                })
+                .expect("advance");
+            if offset == 0 {
+                assert!(events.iter().any(|event| matches!(
+                    event,
+                    CoreCaldusEvent::ChargeTelegraph {
+                        target_x_milli_tiles: 2_500,
+                        ..
+                    }
+                )));
+            }
+            if offset == 21 {
+                assert!(events.iter().any(|event| matches!(
+                    event,
+                    CoreCaldusEvent::ChargeDirectionLocked {
+                        tick,
+                        target_x_milli_tiles: 15_000,
+                        ..
+                    } if tick.0 == phase_start + 21
+                )));
+            }
+        }
     }
 
     #[test]
