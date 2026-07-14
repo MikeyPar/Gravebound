@@ -1,6 +1,10 @@
 //! Disposable native adapter for the `GB-M03-03F` transition projection.
 
-use std::{env, path::PathBuf};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use anyhow::{Context, Result};
 use bevy::{
@@ -14,9 +18,12 @@ use protocol::{
     SessionDestination, WireText, WorldFlowContentRevisionV1, WorldFlowResult,
     WorldTransferCommand, WorldTransferMutation, WorldTransferPayload, WorldTransferResultCode,
 };
+use serde::Serialize;
 use sim_content::{
     CoreDevelopmentWorldFlow, CoreWorldTransitionCopyKey, load_core_development_world_flow,
 };
+use sim_core::{MONOTONIC_GROWTH_FLOOR_BYTES, MemoryAssessment, MemorySample, TargetHardware};
+use sysinfo::{Pid, ProcessesToUpdate, System, get_current_pid};
 
 use crate::{
     CoreRetryDirective, CoreSafeOrigin, CoreSceneReadiness, CoreWorldTransitionModel,
@@ -27,6 +34,14 @@ use crate::{
 // layer is present in the swapchain. Ninety frames keeps evidence deterministic and avoids
 // accepting semantically incomplete composites.
 const EVIDENCE_SETTLE_FRAMES: u8 = 90;
+const SOAK_DURATION_ENV: &str = "GRAVEBOUND_CORE_TRANSITION_SOAK_SECONDS";
+const SOAK_REPORT_PATH_ENV: &str = "GRAVEBOUND_CORE_TRANSITION_REPORT_PATH";
+const SOAK_TARGET_VERIFIED_ENV: &str = "GRAVEBOUND_TARGET_CLASS_VERIFIED";
+const SOAK_TARGET_GPU_ENV: &str = "GRAVEBOUND_TARGET_GPU";
+const SOAK_WARMUP_SECONDS: u64 = 5;
+const SOAK_MEMORY_SAMPLE_SECONDS: u64 = 10;
+const SOAK_STATE_SECONDS: u64 = 5;
+const TARGET_MEMORY_BYTES: u64 = 1_500_000_000;
 const HALL_ID: &str = "hub.lantern_halls_01";
 const DUNGEON_ID: &str = "dungeon.bell_sepulcher";
 
@@ -56,7 +71,7 @@ enum TransitionUiAction {
     Exit,
 }
 
-#[derive(Debug, Resource)]
+#[derive(Debug, Clone, Resource)]
 struct ShowcaseViewModel {
     state: CoreTransitionShowcaseState,
     phase: CoreWorldTransitionPhase,
@@ -87,12 +102,92 @@ struct TransitionActionButton(TransitionUiAction);
 #[derive(Debug, Component)]
 struct TransitionActionStatus;
 
+#[derive(Debug, Component)]
+struct TransitionSurfaceRoot;
+
+#[derive(Debug, Clone, Serialize)]
+struct CoreTransitionPerformanceReport {
+    report_schema: String,
+    build_id: String,
+    records_blake3: String,
+    assets_blake3: String,
+    localization_blake3: String,
+    duration_ms: u64,
+    state_interval_ms: u64,
+    transitions_completed: u64,
+    rendered_frame_count: usize,
+    measured_fps_milli: u64,
+    p95_frame_time_micros: u64,
+    p99_frame_time_micros: u64,
+    memory_samples: Vec<MemorySample>,
+    peak_resident_bytes: u64,
+    memory_assessment: MemoryAssessment,
+    target_hardware: TargetHardware,
+    target_class_verified: bool,
+    accepted: bool,
+    raw_report_hash_blake3: String,
+}
+
+#[derive(Resource)]
+struct TransitionSoakState {
+    models: Vec<ShowcaseViewModel>,
+    current_model: usize,
+    warmup_elapsed: Duration,
+    measurement_elapsed: Duration,
+    state_elapsed: Duration,
+    measurement_duration: Duration,
+    transitions_completed: u64,
+    frame_times_micros: Vec<u64>,
+    memory_samples: Vec<MemorySample>,
+    next_memory_sample: Duration,
+    memory: ProcessMemorySampler,
+    report_path: PathBuf,
+    build_id: String,
+    records_blake3: String,
+    assets_blake3: String,
+    localization_blake3: String,
+    target_hardware: TargetHardware,
+    target_class_verified: bool,
+}
+
+struct ProcessMemorySampler {
+    system: System,
+    pid: Pid,
+}
+
+impl ProcessMemorySampler {
+    fn new() -> Result<Self> {
+        Ok(Self {
+            system: System::new(),
+            pid: get_current_pid().map_err(|error| {
+                anyhow::anyhow!("failed to identify transition-soak process: {error}")
+            })?,
+        })
+    }
+
+    fn resident_bytes(&mut self) -> Result<u64> {
+        self.system
+            .refresh_processes(ProcessesToUpdate::Some(&[self.pid]), true);
+        self.system
+            .process(self.pid)
+            .map(sysinfo::Process::memory)
+            .context("transition-soak process disappeared from resident-memory sampling")
+    }
+}
+
 pub fn run_core_transition_showcase(config: &CoreTransitionShowcaseConfig) -> Result<()> {
     let content = load_core_development_world_flow(&config.content_root)
         .context("unpromoted Core world-flow content failed validation")?;
     let model = build_showcase_model(&content, config.state, config.reduced_effects)?;
     let (window_width, window_height) = crate::configured_window_size()?;
     let screenshot_request = env::var_os("GRAVEBOUND_SCREENSHOT_PATH").map(PathBuf::from);
+    let soak = transition_soak_from_environment(
+        &content,
+        config.reduced_effects,
+        window_width,
+        window_height,
+    )?;
+    let is_soak = soak.is_some();
 
     let mut app = App::new();
     app.insert_resource(ClearColor(Color::srgb_u8(6, 8, 11)))
@@ -104,20 +199,117 @@ pub fn run_core_transition_showcase(config: &CoreTransitionShowcaseConfig) -> Re
                     primary_window: Some(Window {
                         title: "Gravebound - GB-M03-03F Transition Evidence".to_owned(),
                         resolution: WindowResolution::new(window_width, window_height),
-                        present_mode: PresentMode::AutoVsync,
+                        present_mode: if is_soak {
+                            PresentMode::AutoNoVsync
+                        } else {
+                            PresentMode::AutoVsync
+                        },
+                        resizable: !is_soak,
                         ..default()
                     }),
                     ..default()
                 }),
         )
-        .add_systems(Startup, spawn_transition_surface)
-        .add_systems(Update, (handle_transition_input, style_action_button));
+        .add_systems(Startup, (spawn_transition_camera, spawn_transition_surface))
+        .add_systems(
+            Update,
+            (
+                rebuild_transition_surface_if_missing,
+                handle_transition_input,
+                style_action_button,
+            )
+                .chain(),
+        );
+    if let Some(soak) = soak {
+        app.insert_resource(soak).add_systems(
+            Update,
+            advance_transition_soak.before(rebuild_transition_surface_if_missing),
+        );
+    }
     if let Some(path) = screenshot_request {
         app.insert_resource(ScreenshotRequest(path))
             .add_systems(Update, capture_evidence);
     }
     app.run();
     Ok(())
+}
+
+fn transition_soak_from_environment(
+    content: &CoreDevelopmentWorldFlow,
+    reduced_effects: bool,
+    window_width: u32,
+    window_height: u32,
+) -> Result<Option<TransitionSoakState>> {
+    let Some(duration) = env::var_os(SOAK_DURATION_ENV) else {
+        return Ok(None);
+    };
+    let duration_seconds = duration
+        .to_string_lossy()
+        .parse::<u64>()
+        .with_context(|| format!("{SOAK_DURATION_ENV} must be an integer"))?;
+    anyhow::ensure!(
+        (1..=7_200).contains(&duration_seconds),
+        "{SOAK_DURATION_ENV} must be within 1..=7200"
+    );
+    let report_path = PathBuf::from(
+        env::var_os(SOAK_REPORT_PATH_ENV)
+            .context("transition soak requires GRAVEBOUND_CORE_TRANSITION_REPORT_PATH")?,
+    );
+    let target_class_verified = match env::var(SOAK_TARGET_VERIFIED_ENV).as_deref() {
+        Ok("1") => true,
+        Ok("0") | Err(_) => false,
+        Ok(other) => anyhow::bail!("{SOAK_TARGET_VERIFIED_ENV} must be 0 or 1, got `{other}`"),
+    };
+    let states = [
+        CoreTransitionShowcaseState::HallLoading,
+        CoreTransitionShowcaseState::DungeonLoading,
+        CoreTransitionShowcaseState::RecoverableError,
+        CoreTransitionShowcaseState::FatalError,
+        CoreTransitionShowcaseState::LinkLost,
+        CoreTransitionShowcaseState::Reconnecting,
+        CoreTransitionShowcaseState::SameStateRecovery,
+        CoreTransitionShowcaseState::HallResolution,
+    ];
+    let models = states
+        .into_iter()
+        .map(|state| build_showcase_model(content, state, reduced_effects))
+        .collect::<Result<Vec<_>>>()?;
+    let mut system = System::new_all();
+    system.refresh_cpu_all();
+    let cpu = system
+        .cpus()
+        .first()
+        .map_or("unavailable", |cpu| cpu.brand())
+        .to_owned();
+    Ok(Some(TransitionSoakState {
+        models,
+        current_model: 0,
+        warmup_elapsed: Duration::ZERO,
+        measurement_elapsed: Duration::ZERO,
+        state_elapsed: Duration::ZERO,
+        measurement_duration: Duration::from_secs(duration_seconds),
+        transitions_completed: 0,
+        frame_times_micros: Vec::with_capacity(
+            usize::try_from(duration_seconds.saturating_mul(120)).unwrap_or(usize::MAX),
+        ),
+        memory_samples: Vec::new(),
+        next_memory_sample: Duration::ZERO,
+        memory: ProcessMemorySampler::new()?,
+        report_path,
+        build_id: crate::executable_build_id()?,
+        records_blake3: content.hashes().records_blake3.clone(),
+        assets_blake3: content.hashes().assets_blake3.clone(),
+        localization_blake3: content.hashes().localization_blake3.clone(),
+        target_hardware: TargetHardware {
+            operating_system: System::long_os_version().unwrap_or_else(|| "Windows".to_owned()),
+            cpu,
+            memory_bytes: system.total_memory(),
+            gpu: env::var(SOAK_TARGET_GPU_ENV).unwrap_or_else(|_| "unverified".to_owned()),
+            width_pixels: window_width,
+            height_pixels: window_height,
+        },
+        target_class_verified,
+    }))
 }
 
 fn build_showcase_model(
@@ -462,10 +654,10 @@ fn readiness(
 
 #[allow(clippy::needless_pass_by_value)]
 fn spawn_transition_surface(mut commands: Commands, model: Res<ShowcaseViewModel>) {
-    commands.spawn(Camera2d);
     let accent = phase_accent(model.phase);
     commands
         .spawn((
+            TransitionSurfaceRoot,
             Node {
                 position_type: PositionType::Absolute,
                 width: percent(100),
@@ -489,6 +681,213 @@ fn spawn_transition_surface(mut commands: Commands, model: Res<ShowcaseViewModel
             });
             spawn_footer(root, &model);
         });
+}
+
+fn spawn_transition_camera(mut commands: Commands) {
+    commands.spawn(Camera2d);
+}
+
+fn rebuild_transition_surface_if_missing(
+    commands: Commands,
+    model: Res<ShowcaseViewModel>,
+    surfaces: Query<Entity, With<TransitionSurfaceRoot>>,
+) {
+    if surfaces.is_empty() {
+        spawn_transition_surface(commands, model);
+    }
+}
+
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+fn advance_transition_soak(
+    time: Res<Time<Real>>,
+    mut soak: ResMut<TransitionSoakState>,
+    mut model: ResMut<ShowcaseViewModel>,
+    surfaces: Query<Entity, With<TransitionSurfaceRoot>>,
+    mut commands: Commands,
+    mut exit: MessageWriter<AppExit>,
+) {
+    let delta = time.delta();
+    if soak.warmup_elapsed < Duration::from_secs(SOAK_WARMUP_SECONDS) {
+        soak.warmup_elapsed = soak.warmup_elapsed.saturating_add(delta);
+        return;
+    }
+    if soak.memory_samples.is_empty() {
+        let resident_bytes = soak
+            .memory
+            .resident_bytes()
+            .expect("transition-soak resident memory must remain available");
+        soak.memory_samples.push(MemorySample {
+            elapsed_ms: 0,
+            resident_bytes,
+        });
+        soak.next_memory_sample = Duration::from_secs(SOAK_MEMORY_SAMPLE_SECONDS);
+    }
+    soak.measurement_elapsed = soak.measurement_elapsed.saturating_add(delta);
+    soak.state_elapsed = soak.state_elapsed.saturating_add(delta);
+    soak.frame_times_micros
+        .push(u64::try_from(delta.as_micros()).unwrap_or(u64::MAX).max(1));
+    if soak.state_elapsed >= Duration::from_secs(SOAK_STATE_SECONDS) {
+        soak.state_elapsed = Duration::ZERO;
+        soak.current_model = (soak.current_model + 1) % soak.models.len();
+        *model = soak.models[soak.current_model].clone();
+        soak.transitions_completed = soak.transitions_completed.saturating_add(1);
+        for entity in &surfaces {
+            commands.entity(entity).despawn();
+        }
+    }
+    if soak.measurement_elapsed >= soak.next_memory_sample {
+        sample_transition_soak_memory(&mut soak);
+        soak.next_memory_sample = soak
+            .next_memory_sample
+            .saturating_add(Duration::from_secs(SOAK_MEMORY_SAMPLE_SECONDS));
+    }
+    if soak.measurement_elapsed < soak.measurement_duration {
+        return;
+    }
+    let final_elapsed_ms = u64::try_from(soak.measurement_elapsed.as_millis()).unwrap_or(u64::MAX);
+    if soak
+        .memory_samples
+        .last()
+        .is_none_or(|sample| sample.elapsed_ms < final_elapsed_ms)
+    {
+        sample_transition_soak_memory(&mut soak);
+    }
+    let report = compile_transition_soak_report(&mut soak);
+    publish_transition_soak_report(&soak.report_path, &report)
+        .expect("transition-soak report must publish atomically");
+    exit.write(AppExit::Success);
+}
+
+fn sample_transition_soak_memory(soak: &mut TransitionSoakState) {
+    let resident_bytes = soak
+        .memory
+        .resident_bytes()
+        .expect("transition-soak resident memory must remain available");
+    soak.memory_samples.push(MemorySample {
+        elapsed_ms: u64::try_from(soak.measurement_elapsed.as_millis()).unwrap_or(u64::MAX),
+        resident_bytes,
+    });
+}
+
+fn compile_transition_soak_report(
+    soak: &mut TransitionSoakState,
+) -> CoreTransitionPerformanceReport {
+    let mut frame_times = std::mem::take(&mut soak.frame_times_micros);
+    frame_times.sort_unstable();
+    let frame_count = frame_times.len();
+    let total_micros: u128 = frame_times.iter().map(|value| u128::from(*value)).sum();
+    let measured_fps_milli = u64::try_from(
+        u128::try_from(frame_count)
+            .unwrap_or(u128::MAX)
+            .saturating_mul(1_000_000_000)
+            .checked_div(total_micros.max(1))
+            .unwrap_or(0),
+    )
+    .unwrap_or(u64::MAX);
+    let p95 = nearest_rank(&frame_times, 95);
+    let p99 = nearest_rank(&frame_times, 99);
+    let peak_resident_bytes = soak
+        .memory_samples
+        .iter()
+        .map(|sample| sample.resident_bytes)
+        .max()
+        .unwrap_or(0);
+    let memory_assessment = assess_transition_soak_memory(&soak.memory_samples);
+    let duration_ms = u64::try_from(soak.measurement_elapsed.as_millis()).unwrap_or(u64::MAX);
+    let accepted = soak.target_class_verified
+        && soak.target_hardware.width_pixels == 1_920
+        && soak.target_hardware.height_pixels == 1_080
+        && duration_ms >= 30 * 60 * 1_000
+        && soak.transitions_completed >= 8
+        && measured_fps_milli >= 60_000
+        && p95 <= 16_700
+        && p99 <= 33_300
+        && memory_assessment == MemoryAssessment::Pass;
+    let mut report = CoreTransitionPerformanceReport {
+        report_schema: "gravebound.performance.gb-m03-03f-transition.v1".to_owned(),
+        build_id: soak.build_id.clone(),
+        records_blake3: soak.records_blake3.clone(),
+        assets_blake3: soak.assets_blake3.clone(),
+        localization_blake3: soak.localization_blake3.clone(),
+        duration_ms,
+        state_interval_ms: SOAK_STATE_SECONDS * 1_000,
+        transitions_completed: soak.transitions_completed,
+        rendered_frame_count: frame_count,
+        measured_fps_milli,
+        p95_frame_time_micros: p95,
+        p99_frame_time_micros: p99,
+        memory_samples: soak.memory_samples.clone(),
+        peak_resident_bytes,
+        memory_assessment,
+        target_hardware: soak.target_hardware.clone(),
+        target_class_verified: soak.target_class_verified,
+        accepted,
+        raw_report_hash_blake3: String::new(),
+    };
+    report.raw_report_hash_blake3 = hash_transition_soak_report(&report);
+    report
+}
+
+fn nearest_rank(sorted_values: &[u64], percentile: usize) -> u64 {
+    let rank = sorted_values.len().saturating_mul(percentile).div_ceil(100);
+    sorted_values
+        .get(rank.saturating_sub(1))
+        .copied()
+        .unwrap_or(u64::MAX)
+}
+
+fn assess_transition_soak_memory(samples: &[MemorySample]) -> MemoryAssessment {
+    let duration = samples.last().map_or(0, |sample| sample.elapsed_ms)
+        - samples.first().map_or(0, |sample| sample.elapsed_ms);
+    let peak = samples
+        .iter()
+        .map(|sample| sample.resident_bytes)
+        .max()
+        .unwrap_or(0);
+    if duration < 30 * 60 * 1_000 {
+        return MemoryAssessment::InsufficientDuration;
+    }
+    if peak > TARGET_MEMORY_BYTES {
+        return MemoryAssessment::OverBudget;
+    }
+    let growth = samples
+        .last()
+        .map_or(0, |sample| sample.resident_bytes)
+        .saturating_sub(samples.first().map_or(0, |sample| sample.resident_bytes));
+    if growth >= MONOTONIC_GROWTH_FLOOR_BYTES
+        && samples
+            .windows(2)
+            .all(|pair| pair[0].resident_bytes < pair[1].resident_bytes)
+    {
+        MemoryAssessment::MonotonicGrowth
+    } else {
+        MemoryAssessment::Pass
+    }
+}
+
+fn hash_transition_soak_report(report: &CoreTransitionPerformanceReport) -> String {
+    let mut hashable = report.clone();
+    hashable.raw_report_hash_blake3.clear();
+    let bytes = serde_json::to_vec(&hashable).expect("transition report must serialize");
+    blake3::hash(&bytes).to_hex().to_string()
+}
+
+fn publish_transition_soak_report(
+    path: &Path,
+    report: &CoreTransitionPerformanceReport,
+) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create report directory {}", parent.display()))?;
+    }
+    let temporary = path.with_extension("partial.json");
+    let bytes =
+        serde_json::to_vec_pretty(report).context("failed to serialize transition report")?;
+    fs::write(&temporary, bytes)
+        .with_context(|| format!("failed to write {}", temporary.display()))?;
+    fs::rename(&temporary, path)
+        .with_context(|| format!("failed to publish {}", path.display()))?;
+    Ok(())
 }
 
 fn spawn_header(parent: &mut ChildSpawnerCommands, model: &ShowcaseViewModel, accent: Color) {
@@ -910,5 +1309,56 @@ mod tests {
             assert_eq!(standard.action_label, reduced.action_label);
             assert_eq!(standard.status_label, reduced.status_label);
         }
+    }
+
+    #[test]
+    fn transition_soak_memory_gate_requires_duration_budget_and_no_monotonic_leak() {
+        assert_eq!(
+            assess_transition_soak_memory(&[
+                MemorySample {
+                    elapsed_ms: 0,
+                    resident_bytes: 300_000_000,
+                },
+                MemorySample {
+                    elapsed_ms: 60_000,
+                    resident_bytes: 301_000_000,
+                },
+            ]),
+            MemoryAssessment::InsufficientDuration
+        );
+        assert_eq!(
+            assess_transition_soak_memory(&[
+                MemorySample {
+                    elapsed_ms: 0,
+                    resident_bytes: 300_000_000,
+                },
+                MemorySample {
+                    elapsed_ms: 900_000,
+                    resident_bytes: 305_000_000,
+                },
+                MemorySample {
+                    elapsed_ms: 1_800_000,
+                    resident_bytes: 304_000_000,
+                },
+            ]),
+            MemoryAssessment::Pass
+        );
+        assert_eq!(
+            assess_transition_soak_memory(&[
+                MemorySample {
+                    elapsed_ms: 0,
+                    resident_bytes: 300_000_000,
+                },
+                MemorySample {
+                    elapsed_ms: 900_000,
+                    resident_bytes: 305_000_000,
+                },
+                MemorySample {
+                    elapsed_ms: 1_800_000,
+                    resident_bytes: 310_000_000,
+                },
+            ]),
+            MemoryAssessment::MonotonicGrowth
+        );
     }
 }

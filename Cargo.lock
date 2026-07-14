@@ -2159,6 +2159,7 @@ dependencies = [
  "quinn",
  "rodio",
  "rustls",
+ "serde",
  "serde_json",
  "sim_content",
  "sim_core",
