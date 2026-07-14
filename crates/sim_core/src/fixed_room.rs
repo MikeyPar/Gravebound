@@ -227,6 +227,11 @@ impl FixedRoomSimulation {
             FixedRoomPhase::AwaitingDoorSafety | FixedRoomPhase::SpawnWarning
         ) && (input.required_hostiles_remaining != self.required_hostiles
             || input.required_objectives_remaining != self.required_objectives)
+            && !matches!(
+                self.phase,
+                FixedRoomPhase::SpawnWarning
+                    if self.warning_ends_at.is_some_and(|due| tick >= due)
+            )
         {
             return Err(FixedRoomError::ProgressDuringWarning);
         }
@@ -366,6 +371,25 @@ mod tests {
             [FixedRoomEvent::DoorsOpened]
         );
         assert_eq!(room.phase(), FixedRoomPhase::Cleared);
+    }
+
+    #[test]
+    fn exact_activation_tick_can_commit_authoritative_completion() {
+        let mut room = FixedRoomSimulation::new(1, 0).expect("room");
+        let mut activation = input(1);
+        activation.crossed_activation_boundary = true;
+        room.step(Tick(1), activation).expect("warning start");
+        assert_eq!(
+            room.step(Tick(28), input(0)).expect("activation clear"),
+            [
+                FixedRoomEvent::EncounterActivated,
+                FixedRoomEvent::CompletionCommitted {
+                    activation_ordinal: 1,
+                },
+                FixedRoomEvent::ClearHostileOutput,
+                FixedRoomEvent::BeginQuietPeriod { quiet_ticks: 60 },
+            ]
+        );
     }
 
     #[test]

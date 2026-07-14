@@ -4,10 +4,11 @@ use std::collections::BTreeSet;
 
 use content_schema::{ContentId, CoreFixedLayoutNode};
 use sim_core::{
-    ArenaAnchor, ArenaGeometry, DungeonAnchorKind, DungeonRoomDefinition,
+    ArenaAnchor, ArenaGeometry, CombatStep, DungeonAnchorKind, DungeonRoomDefinition,
     DungeonRoomVolumeGeometry, DungeonRoomVolumeKind, EnemyLabPlayer, EntityId, EntityIdAllocator,
-    FixedRoomError, FixedRoomSimulation, NormalWaveDefinitions, NormalWaveEnemyKind,
-    NormalWaveEntityIdError, NormalWaveError, NormalWaveSimulation, NormalWaveSpawn,
+    FixedRoomError, FixedRoomEvent, FixedRoomInput, FixedRoomPhase, FixedRoomSimulation,
+    NormalWaveClearedHostiles, NormalWaveDefinitions, NormalWaveEnemyKind, NormalWaveEntityIdError,
+    NormalWaveError, NormalWaveHandoff, NormalWaveSimulation, NormalWaveSpawn, NormalWaveStep,
     RotatedDungeonRoom, SpawnInstanceId, Tick, TilePoint, TileRectangle, normal_wave_entity_id,
 };
 use thiserror::Error;
@@ -15,6 +16,7 @@ use thiserror::Error;
 use crate::CoreDevelopmentEncounterRooms;
 
 const FIXED_COMBAT_NODE_IDS: [&str; 4] = ["B1", "B2", "B3", "B5"];
+const INITIAL_FIXED_ROUTE_ACTOR_COUNT: u16 = 25;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoreFixedRoomActorRuntimeKind {
@@ -78,10 +80,33 @@ pub fn instantiate_immutable_fixed_room_wave(
     hostile_projectile_ids: EntityIdAllocator,
     warning_started_at: Tick,
 ) -> Result<NormalWaveSimulation, CoreFixedRoomEncounterError> {
+    instantiate_immutable_fixed_room_wave_at_ordinal(
+        plan,
+        player,
+        hostile_projectile_ids,
+        warning_started_at,
+        plan.first_spawn_ordinal,
+    )
+}
+
+fn instantiate_immutable_fixed_room_wave_at_ordinal(
+    plan: &CoreFixedRoomEncounterPlan,
+    player: EnemyLabPlayer,
+    hostile_projectile_ids: EntityIdAllocator,
+    warning_started_at: Tick,
+    first_spawn_ordinal: u16,
+) -> Result<NormalWaveSimulation, CoreFixedRoomEncounterError> {
+    let run_ordinal = plan
+        .assignments
+        .first()
+        .ok_or(CoreFixedRoomEncounterError::DefinitionDrift)?
+        .instance_id
+        .run_ordinal;
     let spawns = plan
         .assignments
         .iter()
-        .map(|assignment| {
+        .enumerate()
+        .map(|(index, assignment)| {
             let kind = match assignment.runtime_kind {
                 CoreFixedRoomActorRuntimeKind::DrownedPilgrim => {
                     NormalWaveEnemyKind::DrownedPilgrim
@@ -96,8 +121,16 @@ pub fn instantiate_immutable_fixed_room_wave(
                     });
                 }
             };
+            let offset =
+                u16::try_from(index).map_err(|_| CoreFixedRoomEncounterError::DefinitionDrift)?;
+            let spawn_ordinal = first_spawn_ordinal
+                .checked_add(offset)
+                .ok_or(CoreFixedRoomEncounterError::IdentityOverflow)?;
             Ok(NormalWaveSpawn {
-                instance_id: assignment.instance_id,
+                instance_id: SpawnInstanceId {
+                    run_ordinal,
+                    spawn_ordinal,
+                },
                 kind,
                 position_milli_tiles: (assignment.x_milli_tiles, assignment.y_milli_tiles),
             })
@@ -112,6 +145,209 @@ pub fn instantiate_immutable_fixed_room_wave(
         warning_started_at,
     )
     .map_err(Into::into)
+}
+
+#[derive(Debug, Clone)]
+pub struct CoreImmutableFixedRoomInput {
+    pub crossed_activation_boundary: bool,
+    pub living_inside: u16,
+    pub living_party_outside: u16,
+    pub doorway_hurtbox_blocked: bool,
+    pub combat_step: Option<CombatStep>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CoreImmutableFixedRoomStep {
+    pub tick: Tick,
+    pub phase_after: FixedRoomPhase,
+    pub required_hostiles_remaining: u16,
+    pub lifecycle_events: Vec<FixedRoomEvent>,
+    pub wave_step: Option<NormalWaveStep>,
+    pub reset_cleared_hostiles: Option<NormalWaveClearedHostiles>,
+}
+
+/// Owns the complete `DNG-005` lifecycle for immutable B1/B5 combat rooms.
+///
+/// Required-hostile progress is derived from the wave snapshots and cannot be supplied by a
+/// caller. Reactivations advance by the complete 25-actor initial-route stride, preserving the
+/// disjoint B1/B2/B3/B5 identity ranges across every attempt.
+#[derive(Debug, Clone)]
+pub struct CoreImmutableFixedRoomSimulation {
+    plan: CoreFixedRoomEncounterPlan,
+    authority: FixedRoomSimulation,
+    next_spawn_ordinal: u16,
+    participant: Option<NormalWaveHandoff>,
+    wave: Option<NormalWaveSimulation>,
+}
+
+impl CoreImmutableFixedRoomSimulation {
+    pub fn new(
+        plan: CoreFixedRoomEncounterPlan,
+        player: EnemyLabPlayer,
+        hostile_projectile_ids: EntityIdAllocator,
+    ) -> Result<Self, CoreFixedRoomEncounterError> {
+        if plan.assignments.is_empty()
+            || plan.assignments.iter().any(|assignment| {
+                matches!(
+                    assignment.runtime_kind,
+                    CoreFixedRoomActorRuntimeKind::BellAcolyte
+                        | CoreFixedRoomActorRuntimeKind::ChoirSkull
+                        | CoreFixedRoomActorRuntimeKind::SepulcherKnight
+                )
+            })
+        {
+            return Err(CoreFixedRoomEncounterError::AuthoredRuntimeRequired {
+                node_id: plan.node_id.clone(),
+            });
+        }
+        let next_spawn_ordinal = plan.first_spawn_ordinal;
+        let authority = plan.new_authority()?;
+        Ok(Self {
+            plan,
+            authority,
+            next_spawn_ordinal,
+            participant: Some(NormalWaveHandoff {
+                player,
+                hostile_projectile_ids,
+            }),
+            wave: None,
+        })
+    }
+
+    #[must_use]
+    pub const fn phase(&self) -> FixedRoomPhase {
+        self.authority.phase()
+    }
+
+    #[must_use]
+    pub const fn activation_ordinal(&self) -> u32 {
+        self.authority.activation_ordinal()
+    }
+
+    #[must_use]
+    pub const fn wave(&self) -> Option<&NormalWaveSimulation> {
+        self.wave.as_ref()
+    }
+
+    pub fn step(
+        &mut self,
+        tick: Tick,
+        input: &CoreImmutableFixedRoomInput,
+    ) -> Result<CoreImmutableFixedRoomStep, CoreFixedRoomEncounterError> {
+        let mut staged = self.clone();
+        let step = staged.step_inner(tick, input)?;
+        *self = staged;
+        Ok(step)
+    }
+
+    fn step_inner(
+        &mut self,
+        tick: Tick,
+        input: &CoreImmutableFixedRoomInput,
+    ) -> Result<CoreImmutableFixedRoomStep, CoreFixedRoomEncounterError> {
+        let mut wave_step = None;
+        if let Some(wave) = &mut self.wave {
+            let combat_step = match input.combat_step.as_ref() {
+                Some(step) => step.clone(),
+                None if input.living_inside == 0 => CombatStep {
+                    tick,
+                    ..CombatStep::default()
+                },
+                None => return Err(CoreFixedRoomEncounterError::MissingCombatStep),
+            };
+            wave_step = Some(wave.step(&combat_step)?);
+        }
+
+        let required_hostiles_remaining = self.required_hostiles_remaining()?;
+        let lifecycle_events = self.authority.step(
+            tick,
+            FixedRoomInput {
+                crossed_activation_boundary: input.crossed_activation_boundary,
+                living_inside: input.living_inside,
+                living_party_outside: input.living_party_outside,
+                doorway_hurtbox_blocked: input.doorway_hurtbox_blocked,
+                required_hostiles_remaining,
+                required_objectives_remaining: 0,
+            },
+        )?;
+
+        let mut reset_cleared_hostiles = None;
+        for event in lifecycle_events.iter().copied() {
+            match event {
+                FixedRoomEvent::BeginGroupWarning { .. } => {
+                    let participant = self
+                        .participant
+                        .take()
+                        .ok_or(CoreFixedRoomEncounterError::MissingParticipantHandoff)?;
+                    let mut wave = instantiate_immutable_fixed_room_wave_at_ordinal(
+                        &self.plan,
+                        participant.player,
+                        participant.hostile_projectile_ids,
+                        tick,
+                        self.next_spawn_ordinal,
+                    )?;
+                    let initial_combat = input.combat_step.clone().unwrap_or(CombatStep {
+                        tick,
+                        ..CombatStep::default()
+                    });
+                    wave_step = Some(wave.step(&initial_combat)?);
+                    self.next_spawn_ordinal = self
+                        .next_spawn_ordinal
+                        .checked_add(INITIAL_FIXED_ROUTE_ACTOR_COUNT)
+                        .ok_or(CoreFixedRoomEncounterError::IdentityOverflow)?;
+                    self.wave = Some(wave);
+                }
+                FixedRoomEvent::CompletionCommitted { .. } => {
+                    self.participant = Some(
+                        self.wave
+                            .take()
+                            .ok_or(CoreFixedRoomEncounterError::MissingWave)?
+                            .into_handoff()?,
+                    );
+                }
+                FixedRoomEvent::RoomReset => {
+                    if let Some(wave) = self.wave.take() {
+                        let reset = wave.into_reset_handoff()?;
+                        self.participant = Some(reset.participant);
+                        reset_cleared_hostiles = Some(reset.cleared_hostiles);
+                    } else if self.participant.is_none() {
+                        return Err(CoreFixedRoomEncounterError::MissingParticipantHandoff);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        Ok(CoreImmutableFixedRoomStep {
+            tick,
+            phase_after: self.authority.phase(),
+            required_hostiles_remaining,
+            lifecycle_events,
+            wave_step,
+            reset_cleared_hostiles,
+        })
+    }
+
+    fn required_hostiles_remaining(&self) -> Result<u16, CoreFixedRoomEncounterError> {
+        if let Some(wave) = &self.wave {
+            return u16::try_from(
+                wave.snapshots()
+                    .iter()
+                    .filter(|snapshot| snapshot.health.alive)
+                    .count(),
+            )
+            .map_err(|_| CoreFixedRoomEncounterError::DefinitionDrift);
+        }
+        if matches!(
+            self.authority.phase(),
+            FixedRoomPhase::Quiet | FixedRoomPhase::Cleared
+        ) {
+            Ok(0)
+        } else {
+            u16::try_from(self.plan.assignments.len())
+                .map_err(|_| CoreFixedRoomEncounterError::DefinitionDrift)
+        }
+    }
 }
 
 /// Compiles the four exact initial room attempts with one monotonic run-local identity sequence.
@@ -338,6 +574,16 @@ pub enum CoreFixedRoomEncounterError {
     MissingCompatibleAnchor { node_id: String, enemy_id: String },
     #[error("fixed room {node_id} requires its Core-authored combat owner")]
     AuthoredRuntimeRequired { node_id: String },
+    #[error("an occupied immutable fixed room requires an authoritative combat step")]
+    MissingCombatStep,
+    #[error("fixed-room lifecycle has no participant handoff")]
+    MissingParticipantHandoff,
+    #[error("fixed-room lifecycle requested completion without an owned wave")]
+    MissingWave,
+    #[error("fixed-room spawn identity sequence overflowed")]
+    IdentityOverflow,
+    #[error(transparent)]
+    FixedRoom(#[from] FixedRoomError),
     #[error(transparent)]
     EntityId(#[from] NormalWaveEntityIdError),
     #[error(transparent)]
@@ -357,8 +603,9 @@ mod tests {
     use super::*;
     use crate::load_core_development_encounter_rooms;
     use sim_core::{
-        HostileTargetState, NormalWavePhase, PlayerVitals, RedTonicSimulation, SimulationVector,
-        TonicBelt,
+        CollisionTarget, FixedRoomEvent, FriendlyProjectileSource, HostileTargetState,
+        NormalWavePhase, PlayerVitals, ProjectileCollision, RawDamageIntent, RawDamageIntentSource,
+        RedTonicSimulation, SimulationVector, TonicBelt,
     };
 
     fn content_root() -> std::path::PathBuf {
@@ -393,6 +640,58 @@ mod tests {
             },
             EntityIdAllocator::starting_at(NonZeroU64::new(20_000).expect("projectile allocator")),
         )
+    }
+
+    fn room_input(living_inside: u16, tick: u64) -> CoreImmutableFixedRoomInput {
+        CoreImmutableFixedRoomInput {
+            crossed_activation_boundary: false,
+            living_inside,
+            living_party_outside: u16::from(living_inside == 0),
+            doorway_hurtbox_blocked: false,
+            combat_step: (living_inside > 0).then_some(CombatStep {
+                tick: Tick(tick),
+                ..CombatStep::default()
+            }),
+        }
+    }
+
+    fn lethal_step(wave: &NormalWaveSimulation, tick: u64) -> CombatStep {
+        let mut combat = CombatStep {
+            tick: Tick(tick),
+            ..CombatStep::default()
+        };
+        for (index, target) in wave
+            .snapshots()
+            .into_iter()
+            .map(|snapshot| snapshot.entity_id)
+            .enumerate()
+        {
+            let projectile_id = EntityId::new(60_000 + u64::try_from(index).expect("index"))
+                .expect("projectile ID");
+            combat.collisions.push(ProjectileCollision {
+                tick: Tick(tick),
+                projectile_id,
+                source: FriendlyProjectileSource::Primary,
+                target: CollisionTarget::Enemy(target),
+                final_position: SimulationVector::new(5.0, 5.0),
+                distance_travelled_tiles: 1.0,
+                contact_ordinal: 0,
+                empowered_by_slipstep: false,
+                focused_by_stillness: false,
+                projectile_continues: false,
+            });
+            combat.raw_damage_intents.push(RawDamageIntent {
+                tick: Tick(tick),
+                projectile_id,
+                source: RawDamageIntentSource::Primary,
+                target,
+                base_raw_damage: 10_000,
+                multiplier_basis_points: 10_000,
+                resolved_raw_damage: 10_000,
+                contact_ordinal: 0,
+            });
+        }
+        combat
     }
 
     #[test]
@@ -500,6 +799,155 @@ mod tests {
             let (player, allocator) = player_fixture();
             assert!(matches!(
                 instantiate_immutable_fixed_room_wave(&plans[index], player, allocator, Tick(100),),
+                Err(CoreFixedRoomEncounterError::AuthoredRuntimeRequired { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn b1_owner_derives_completion_and_honors_door_warning_quiet_boundaries() {
+        let content = load_core_development_encounter_rooms(&content_root()).expect("content");
+        let plan = compile_core_fixed_room_encounters(&content, 1)
+            .expect("plans")
+            .remove(0);
+        let (player, allocator) = player_fixture();
+        let mut room =
+            CoreImmutableFixedRoomSimulation::new(plan, player, allocator).expect("room");
+
+        let mut blocked = room_input(1, 10);
+        blocked.crossed_activation_boundary = true;
+        blocked.doorway_hurtbox_blocked = true;
+        assert_eq!(
+            room.step(Tick(10), &blocked)
+                .expect("participant lock")
+                .lifecycle_events,
+            [FixedRoomEvent::ParticipantLocked {
+                activation_ordinal: 1,
+                participant_count: 1,
+            }]
+        );
+        assert!(room.wave().is_none());
+
+        let warning = room.step(Tick(11), &room_input(1, 11)).expect("warning");
+        assert_eq!(
+            warning.lifecycle_events,
+            [
+                FixedRoomEvent::DoorsClosed,
+                FixedRoomEvent::BeginGroupWarning { warning_ticks: 27 },
+            ]
+        );
+        assert_eq!(warning.required_hostiles_remaining, 8);
+        assert_eq!(room.wave().expect("wave").starts_at(), Tick(11));
+
+        let before_failed_tick = room.wave().expect("wave").tick();
+        let mut missing_combat = room_input(1, 12);
+        missing_combat.combat_step = None;
+        assert!(matches!(
+            room.step(Tick(12), &missing_combat),
+            Err(CoreFixedRoomEncounterError::MissingCombatStep)
+        ));
+        assert_eq!(room.wave().expect("rollback").tick(), before_failed_tick);
+
+        for tick in 12..38 {
+            room.step(Tick(tick), &room_input(1, tick))
+                .expect("warning progression");
+        }
+        let mut clearing_input = room_input(1, 38);
+        clearing_input.combat_step = Some(lethal_step(room.wave().expect("wave"), 38));
+        let cleared = room.step(Tick(38), &clearing_input).expect("clear");
+        assert_eq!(cleared.required_hostiles_remaining, 0);
+        assert_eq!(
+            cleared.lifecycle_events,
+            [
+                FixedRoomEvent::EncounterActivated,
+                FixedRoomEvent::CompletionCommitted {
+                    activation_ordinal: 1,
+                },
+                FixedRoomEvent::ClearHostileOutput,
+                FixedRoomEvent::BeginQuietPeriod { quiet_ticks: 60 },
+            ]
+        );
+        assert_eq!(room.phase(), FixedRoomPhase::Quiet);
+        assert!(room.wave().is_none());
+
+        for tick in 39..98 {
+            assert!(
+                room.step(Tick(tick), &room_input(1, tick))
+                    .expect("quiet")
+                    .lifecycle_events
+                    .is_empty()
+            );
+        }
+        assert_eq!(
+            room.step(Tick(98), &room_input(1, 98))
+                .expect("doors open")
+                .lifecycle_events,
+            [FixedRoomEvent::DoorsOpened]
+        );
+        assert_eq!(room.phase(), FixedRoomPhase::Cleared);
+    }
+
+    #[test]
+    fn b5_owner_resets_hostiles_and_reactivates_with_route_disjoint_identities() {
+        let content = load_core_development_encounter_rooms(&content_root()).expect("content");
+        let plan = compile_core_fixed_room_encounters(&content, 4)
+            .expect("plans")
+            .remove(3);
+        let (player, allocator) = player_fixture();
+        let mut room =
+            CoreImmutableFixedRoomSimulation::new(plan, player, allocator).expect("room");
+
+        let mut activate = room_input(1, 1);
+        activate.crossed_activation_boundary = true;
+        room.step(Tick(1), &activate).expect("first activation");
+        assert_eq!(
+            room.wave()
+                .expect("first wave")
+                .snapshots()
+                .iter()
+                .map(|snapshot| snapshot.instance_id.spawn_ordinal)
+                .collect::<Vec<_>>(),
+            (19..=25).collect::<Vec<_>>()
+        );
+
+        for tick in 2..92 {
+            room.step(Tick(tick), &room_input(0, tick))
+                .expect("empty countdown");
+        }
+        let reset = room.step(Tick(92), &room_input(0, 92)).expect("reset");
+        assert!(reset.lifecycle_events.contains(&FixedRoomEvent::RoomReset));
+        assert!(
+            reset
+                .lifecycle_events
+                .contains(&FixedRoomEvent::DiscardUnsecuredDrops)
+        );
+        assert!(reset.reset_cleared_hostiles.is_some());
+        assert_eq!(room.phase(), FixedRoomPhase::Dormant);
+        assert!(room.wave().is_none());
+
+        let mut reactivate = room_input(1, 93);
+        reactivate.crossed_activation_boundary = true;
+        room.step(Tick(93), &reactivate).expect("reactivation");
+        assert_eq!(room.activation_ordinal(), 2);
+        assert_eq!(
+            room.wave()
+                .expect("second wave")
+                .snapshots()
+                .iter()
+                .map(|snapshot| snapshot.instance_id.spawn_ordinal)
+                .collect::<Vec<_>>(),
+            (44..=50).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn mixed_and_miniboss_plans_reject_the_immutable_room_owner() {
+        let content = load_core_development_encounter_rooms(&content_root()).expect("content");
+        let plans = compile_core_fixed_room_encounters(&content, 1).expect("plans");
+        for index in [1, 2] {
+            let (player, allocator) = player_fixture();
+            assert!(matches!(
+                CoreImmutableFixedRoomSimulation::new(plans[index].clone(), player, allocator),
                 Err(CoreFixedRoomEncounterError::AuthoredRuntimeRequired { .. })
             ));
         }
