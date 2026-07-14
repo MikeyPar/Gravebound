@@ -23,7 +23,10 @@ use crate::{
     CoreWorldTransitionPhase, CoreWorldTransitionResolution,
 };
 
-const EVIDENCE_SETTLE_FRAMES: u8 = 30;
+// Independent release launches can need more than one glyph-atlas/upload cycle before every UI
+// layer is present in the swapchain. Ninety frames keeps evidence deterministic and avoids
+// accepting semantically incomplete composites.
+const EVIDENCE_SETTLE_FRAMES: u8 = 90;
 const HALL_ID: &str = "hub.lantern_halls_01";
 const DUNGEON_ID: &str = "dungeon.bell_sepulcher";
 
