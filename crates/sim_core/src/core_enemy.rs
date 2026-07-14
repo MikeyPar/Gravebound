@@ -115,7 +115,8 @@ pub enum CorePatternWarningParameters {
     },
     ParentOnly,
     RecoveryPreview {
-        duration_milliseconds: u32,
+        ground_origin_warning_milliseconds: u32,
+        directional_gap_preview_milliseconds: u32,
         major_audio: bool,
     },
 }
@@ -128,7 +129,8 @@ pub enum CorePatternWarningDefinition {
     },
     ParentOnly,
     RecoveryPreview {
-        duration_ticks: u32,
+        ground_origin_warning_ticks: u32,
+        directional_gap_preview_ticks: u32,
         major_audio: bool,
     },
 }
@@ -531,11 +533,17 @@ fn compile_warning(
         }
         CorePatternWarningParameters::ParentOnly => Ok(CorePatternWarningDefinition::ParentOnly),
         CorePatternWarningParameters::RecoveryPreview {
-            duration_milliseconds,
+            ground_origin_warning_milliseconds,
+            directional_gap_preview_milliseconds,
             major_audio: true,
-        } if band == DamageBand::Major && duration_milliseconds >= minimum_first => {
+        } if band == DamageBand::Major
+            && ground_origin_warning_milliseconds >= 750
+            && directional_gap_preview_milliseconds >= minimum_first
+            && directional_gap_preview_milliseconds <= ground_origin_warning_milliseconds =>
+        {
             Ok(CorePatternWarningDefinition::RecoveryPreview {
-                duration_ticks: ceiling_ticks(duration_milliseconds)?,
+                ground_origin_warning_ticks: ceiling_ticks(ground_origin_warning_milliseconds)?,
+                directional_gap_preview_ticks: ceiling_ticks(directional_gap_preview_milliseconds)?,
                 major_audio: true,
             })
         }

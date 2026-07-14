@@ -221,7 +221,7 @@
       "id":"miniboss.choir_abbot.recovery_ring", "owner_id":"miniboss.choir_abbot",
       "telegraph_id":"miniboss.choir_abbot.recovery_ring.telegraph", "audio_cue_id":"miniboss.choir_abbot.recovery_ring.warning", "major_audio_cue_id":"miniboss.choir_abbot.recovery_ring.warning.major",
       "damage_type":"veil", "damage_band":"major", "raw_damage":26, "threat_cost":12,
-      "warning":{"warning_kind":"recovery_preview","duration_milliseconds":650,"major_audio":true},
+      "warning":{"warning_kind":"recovery_preview","ground_origin_warning_milliseconds":2500,"directional_gap_preview_milliseconds":650,"major_audio":true},
       "cycle_milliseconds":6000, "quiet_milliseconds":0,
       "geometry":{"geometry_kind":"radial_gap","index_count":16,"omitted_adjacent_count":4,"relation":"target_facing","projectile_speed_milli_tiles_per_second":4500,"range_milli_tiles":8000,"projectile_radius_milli_tiles":120},
       "counterplay":"follow_gap", "memory_family":"radial_projectile", "disposition":"consume_on_player_or_solid", "attack_group_rule":"distinct_projectile_hit_groups",

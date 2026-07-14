@@ -539,10 +539,12 @@ fn compile_pattern_warning(
         },
         content_schema::CorePatternWarning::ParentOnly => CorePatternWarningParameters::ParentOnly,
         content_schema::CorePatternWarning::RecoveryPreview {
-            duration_milliseconds,
+            ground_origin_warning_milliseconds,
+            directional_gap_preview_milliseconds,
             major_audio,
         } => CorePatternWarningParameters::RecoveryPreview {
-            duration_milliseconds,
+            ground_origin_warning_milliseconds,
+            directional_gap_preview_milliseconds,
             major_audio,
         },
     }
@@ -1351,7 +1353,8 @@ fn warning_is_exact(index: usize, warning: &content_schema::CorePatternWarning) 
             | (
                 7,
                 content_schema::CorePatternWarning::RecoveryPreview {
-                    duration_milliseconds: 650,
+                    ground_origin_warning_milliseconds: 2_500,
+                    directional_gap_preview_milliseconds: 650,
                     major_audio: true,
                 },
             )
@@ -2229,7 +2232,8 @@ mod tests {
         assert!(matches!(
             patterns[7].warning(),
             CorePatternWarningDefinition::RecoveryPreview {
-                duration_ticks: 20,
+                ground_origin_warning_ticks: 75,
+                directional_gap_preview_ticks: 20,
                 major_audio: true,
             }
         ));

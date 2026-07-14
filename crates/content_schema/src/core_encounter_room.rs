@@ -190,7 +190,8 @@ pub enum CorePatternWarning {
     },
     ParentOnly,
     RecoveryPreview {
-        duration_milliseconds: u32,
+        ground_origin_warning_milliseconds: u32,
+        directional_gap_preview_milliseconds: u32,
         major_audio: bool,
     },
 }

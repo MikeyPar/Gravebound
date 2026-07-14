@@ -1204,7 +1204,12 @@
         {
           "type": "object",
           "properties": {
-            "duration_milliseconds": {
+            "directional_gap_preview_milliseconds": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "ground_origin_warning_milliseconds": {
               "type": "integer",
               "format": "uint32",
               "minimum": 0
@@ -1220,7 +1225,8 @@
           "additionalProperties": false,
           "required": [
             "warning_kind",
-            "duration_milliseconds",
+            "ground_origin_warning_milliseconds",
+            "directional_gap_preview_milliseconds",
             "major_audio"
           ]
         }
