@@ -28,6 +28,7 @@ mod enemy;
 mod enemy_health;
 mod enemy_lab;
 mod entity;
+mod fixed_room;
 mod hostile;
 mod inventory;
 mod item_lifecycle;
@@ -188,6 +189,10 @@ pub use enemy_lab::{
     EnemyLabTargetSnapshot, EnemyLaneEvent, EnemyShowcaseReadiness, EnemyTimelineEvent,
 };
 pub use entity::{EntityId, EntityIdAllocator};
+pub use fixed_room::{
+    FIXED_ROOM_EMPTY_RESET_TICKS, FIXED_ROOM_GROUP_WARNING_TICKS, FIXED_ROOM_QUIET_TICKS,
+    FixedRoomError, FixedRoomEvent, FixedRoomInput, FixedRoomPhase, FixedRoomSimulation,
+};
 pub use hostile::{
     AppliedHostileDamage, EnemyActor, EnemyActorKind, EnemyActorMovement,
     HOSTILE_PROJECTILE_GRACE_TICKS, HostileCollisionTarget, HostileDamagePolicy, HostileError,
