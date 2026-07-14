@@ -123,6 +123,26 @@ impl PostgresSafeInventoryService {
         Self { persistence }
     }
 
+    async fn load_validated_replay(
+        &self,
+        account_id: [u8; 16],
+        character_id: [u8; 16],
+        command: SafeInventoryTransferCommand,
+        request_hash: [u8; 32],
+    ) -> Result<Option<AuthoritativeSafeInventoryTransfer>, SafeInventoryServiceError> {
+        let result = self
+            .persistence
+            .load_safe_inventory_replay(account_id, character_id, command.mutation_id, request_hash)
+            .await
+            .map_err(|error| map_persistence(&error, Some(command.kind)))?;
+        result
+            .map(|result| {
+                validate_replayed_result(command, request_hash, &result)?;
+                Ok(AuthoritativeSafeInventoryTransfer { result })
+            })
+            .transpose()
+    }
+
     pub async fn transfer_frame(
         &self,
         account_id: [u8; 16],
@@ -146,13 +166,10 @@ impl PostgresSafeInventoryService {
         validate_command(command)?;
         let request_hash = request_hash(account_id, character_id, command);
         if let Some(result) = self
-            .persistence
-            .load_safe_inventory_replay(account_id, character_id, command.mutation_id, request_hash)
-            .await
-            .map_err(|error| map_persistence(&error, Some(command.kind)))?
+            .load_validated_replay(account_id, character_id, command, request_hash)
+            .await?
         {
-            validate_replayed_result(command, request_hash, &result)?;
-            return Ok(AuthoritativeSafeInventoryTransfer { result });
+            return Ok(result);
         }
         let stored = self
             .persistence
@@ -162,6 +179,15 @@ impl PostgresSafeInventoryService {
         if stored.account_version != command.expected_account_version
             || stored.inventory_version != command.expected_inventory_version
         {
+            // A concurrent exact duplicate may commit between the first replay read and this
+            // snapshot. The newer aggregate and its receipt commit atomically, so recheck the
+            // receipt before exposing a stale-version result.
+            if let Some(result) = self
+                .load_validated_replay(account_id, character_id, command, request_hash)
+                .await?
+            {
+                return Ok(result);
+            }
             return Err(SafeInventoryServiceError::StaleVersion);
         }
         let (snapshot, versions) = project_snapshot(&stored)?;
