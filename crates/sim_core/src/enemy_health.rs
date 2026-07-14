@@ -11,42 +11,55 @@ use thiserror::Error;
 
 use crate::{
     BELL_REED_ID, BellReedDefinition, CHAIN_SENTRY_ID, ChainSentryDefinition, CollisionTarget,
-    CombatStep, DROWNED_PILGRIM_ID, DamageError, DamageEvent, DamageType, DirectHitParameters,
-    DirectHitRequest, DrownedPilgrimDefinition, EnemyHurtbox, EntityId, FriendlyProjectileSource,
-    HurtboxError, NORMAL_ENEMY_REWARD_TABLE_ID, ProjectileCollision, RawDamageIntent,
+    CombatStep, CoreEnemyDefinition, DROWNED_PILGRIM_ID, DamageError, DamageEvent, DamageType,
+    DirectHitParameters, DirectHitRequest, DrownedPilgrimDefinition, EnemyHurtbox, EntityId,
+    FriendlyProjectileSource, HurtboxError, ProjectileCollision, RawDamageIntent,
     RawDamageIntentSource, SimulationVector, Tick, resolve_direct_hit,
 };
 
 pub const NORMAL_REWARD_DROP_DELAY_TICKS: u32 = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum FirstPlayableEnemyKind {
+pub enum EnemyHealthKind {
     DrownedPilgrim,
     BellReed,
     ChainSentry,
+    MireLeech,
+    BellAcolyte,
+    ChoirSkull,
+    SepulcherKnight,
+    ChoirAbbot,
 }
 
-impl FirstPlayableEnemyKind {
+impl EnemyHealthKind {
     #[must_use]
     pub const fn content_id(self) -> &'static str {
         match self {
             Self::DrownedPilgrim => DROWNED_PILGRIM_ID,
             Self::BellReed => BELL_REED_ID,
             Self::ChainSentry => CHAIN_SENTRY_ID,
+            Self::MireLeech => "enemy.mire_leech",
+            Self::BellAcolyte => "enemy.bell_acolyte",
+            Self::ChoirSkull => "enemy.choir_skull",
+            Self::SepulcherKnight => "miniboss.sepulcher_knight",
+            Self::ChoirAbbot => "miniboss.choir_abbot",
         }
     }
 }
 
+/// Compatibility alias retained for First Playable callers while the shared health owner expands.
+pub type FirstPlayableEnemyKind = EnemyHealthKind;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct EnemyHealthActor {
     actor_id: EntityId,
-    kind: FirstPlayableEnemyKind,
+    kind: EnemyHealthKind,
     max_health: u32,
     current_health: u32,
     armor: u32,
     hurtbox_radius_tiles: f32,
     position: SimulationVector,
-    reward_table_id: &'static str,
+    reward_table_id: String,
     alive: bool,
     death_tick: Option<Tick>,
     frostbind_expires_tick: Option<Tick>,
@@ -62,7 +75,7 @@ impl EnemyHealthActor {
         let parameters = definition.parameters();
         Self::from_exact(
             actor_id,
-            FirstPlayableEnemyKind::DrownedPilgrim,
+            EnemyHealthKind::DrownedPilgrim,
             parameters.health,
             parameters.armor,
             parameters.hurtbox_radius_milli_tiles,
@@ -80,7 +93,7 @@ impl EnemyHealthActor {
         let parameters = definition.parameters();
         Self::from_exact(
             actor_id,
-            FirstPlayableEnemyKind::BellReed,
+            EnemyHealthKind::BellReed,
             parameters.health,
             parameters.armor,
             parameters.hurtbox_radius_milli_tiles,
@@ -98,7 +111,7 @@ impl EnemyHealthActor {
         let parameters = definition.parameters();
         Self::from_exact(
             actor_id,
-            FirstPlayableEnemyKind::ChainSentry,
+            EnemyHealthKind::ChainSentry,
             parameters.health,
             parameters.armor,
             parameters.hurtbox_radius_milli_tiles,
@@ -107,16 +120,45 @@ impl EnemyHealthActor {
         )
     }
 
+    /// Builds one strict Core-authored actor without changing the shared damage transaction.
+    pub fn core_authored(
+        actor_id: EntityId,
+        definition: &CoreEnemyDefinition,
+        position: SimulationVector,
+    ) -> Result<Self, EnemyHealthError> {
+        let parameters = definition.parameters();
+        let kind = match parameters.content_id.as_str() {
+            "enemy.mire_leech" => EnemyHealthKind::MireLeech,
+            "enemy.bell_acolyte" => EnemyHealthKind::BellAcolyte,
+            "enemy.choir_skull" => EnemyHealthKind::ChoirSkull,
+            "miniboss.sepulcher_knight" => EnemyHealthKind::SepulcherKnight,
+            "miniboss.choir_abbot" => EnemyHealthKind::ChoirAbbot,
+            content_id => {
+                return Err(EnemyHealthError::UnsupportedCoreAuthoredEnemy {
+                    content_id: content_id.to_owned(),
+                });
+            }
+        };
+        Ok(Self::from_exact(
+            actor_id,
+            kind,
+            parameters.maximum_health,
+            u32::from(parameters.armor),
+            parameters.hurtbox_radius_milli_tiles,
+            position,
+            &parameters.reward_profile_id,
+        ))
+    }
+
     fn from_exact(
         actor_id: EntityId,
-        kind: FirstPlayableEnemyKind,
+        kind: EnemyHealthKind,
         max_health: u32,
         armor: u32,
         hurtbox_radius_milli_tiles: u32,
         position: SimulationVector,
         reward_table_id: &str,
     ) -> Self {
-        debug_assert_eq!(reward_table_id, NORMAL_ENEMY_REWARD_TABLE_ID);
         Self {
             actor_id,
             kind,
@@ -125,7 +167,7 @@ impl EnemyHealthActor {
             armor,
             hurtbox_radius_tiles: milli_to_tiles(hurtbox_radius_milli_tiles),
             position,
-            reward_table_id: NORMAL_ENEMY_REWARD_TABLE_ID,
+            reward_table_id: reward_table_id.to_owned(),
             alive: true,
             death_tick: None,
             frostbind_expires_tick: None,
@@ -138,7 +180,7 @@ impl EnemyHealthActor {
     }
 
     #[must_use]
-    pub const fn kind(&self) -> FirstPlayableEnemyKind {
+    pub const fn kind(&self) -> EnemyHealthKind {
         self.kind
     }
 
@@ -173,6 +215,11 @@ impl EnemyHealthActor {
     }
 
     #[must_use]
+    pub fn reward_table_id(&self) -> &str {
+        &self.reward_table_id
+    }
+
+    #[must_use]
     pub const fn frostbind_expires_tick(&self) -> Option<Tick> {
         self.frostbind_expires_tick
     }
@@ -181,7 +228,7 @@ impl EnemyHealthActor {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EnemyHealthSnapshot {
     pub actor_id: EntityId,
-    pub kind: FirstPlayableEnemyKind,
+    pub kind: EnemyHealthKind,
     pub max_health: u32,
     pub current_health: u32,
     pub armor: u32,
@@ -193,18 +240,18 @@ pub struct EnemyHealthSnapshot {
 #[derive(Debug, Clone, PartialEq)]
 struct ScheduledNormalDrop {
     actor_id: EntityId,
-    enemy_kind: FirstPlayableEnemyKind,
-    reward_table_id: &'static str,
+    enemy_kind: EnemyHealthKind,
+    reward_table_id: String,
     death_tick: Tick,
     due_tick: Tick,
     position: SimulationVector,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct NormalRewardDropEvent {
     pub actor_id: EntityId,
-    pub enemy_kind: FirstPlayableEnemyKind,
-    pub reward_table_id: &'static str,
+    pub enemy_kind: EnemyHealthKind,
+    pub reward_table_id: String,
     pub death_tick: Tick,
     pub due_tick: Tick,
     pub position: SimulationVector,
@@ -228,7 +275,7 @@ pub struct EnemyDamageEvent {
 pub struct EnemyDeathEvent {
     pub tick: Tick,
     pub actor_id: EntityId,
-    pub enemy_kind: FirstPlayableEnemyKind,
+    pub enemy_kind: EnemyHealthKind,
     pub lethal_projectile_id: EntityId,
     pub lethal_contact_ordinal: u32,
     pub position: SimulationVector,
@@ -427,7 +474,7 @@ impl EnemyHealthSimulation {
                 self.scheduled_drops.push(ScheduledNormalDrop {
                     actor_id: actor.actor_id,
                     enemy_kind: actor.kind,
-                    reward_table_id: actor.reward_table_id,
+                    reward_table_id: actor.reward_table_id.clone(),
                     death_tick: step.tick,
                     due_tick,
                     position: actor.position,
@@ -605,6 +652,8 @@ fn milli_to_tiles(value: u32) -> f32 {
 
 #[derive(Debug, Error)]
 pub enum EnemyHealthError {
+    #[error("Core-authored health owner does not support {content_id}")]
+    UnsupportedCoreAuthoredEnemy { content_id: String },
     #[error("duplicate enemy actor ID {0}")]
     DuplicateActorId(EntityId),
     #[error("enemy actor {0} position must be finite")]
@@ -647,6 +696,7 @@ pub enum EnemyHealthError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::NORMAL_ENEMY_REWARD_TABLE_ID;
 
     fn id(value: u64) -> EntityId {
         EntityId::new(value).expect("nonzero ID")

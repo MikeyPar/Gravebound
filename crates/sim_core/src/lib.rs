@@ -179,9 +179,9 @@ pub use enemy::{
 };
 pub use enemy_health::{
     EnemyDamageEvent, EnemyDeathEvent, EnemyFrostbindEvent, EnemyHealthActor, EnemyHealthError,
-    EnemyHealthSimulation, EnemyHealthSnapshot, EnemyHealthStep, FirstPlayableEnemyKind,
-    IgnoredFriendlyIntent, IgnoredIntentReason, NORMAL_REWARD_DROP_DELAY_TICKS,
-    NormalRewardDropEvent,
+    EnemyHealthKind, EnemyHealthSimulation, EnemyHealthSnapshot, EnemyHealthStep,
+    FirstPlayableEnemyKind, IgnoredFriendlyIntent, IgnoredIntentReason,
+    NORMAL_REWARD_DROP_DELAY_TICKS, NormalRewardDropEvent,
 };
 pub use enemy_lab::{
     ActiveEnemyLane, ClearedEnemyHostiles, EnemyActorGroup, EnemyLab, EnemyLabActorIds,

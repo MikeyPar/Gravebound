@@ -2052,7 +2052,8 @@ mod tests {
     use super::*;
     use sim_core::{
         CoreEnemyKitEvent, CoreEnemyKitScheduler, CorePatternGeometryDefinition,
-        CorePatternWarningDefinition, Tick,
+        CorePatternWarningDefinition, EnemyHealthActor, EnemyHealthKind, EntityId,
+        SimulationVector, Tick,
     };
 
     struct Fixture {
@@ -2134,6 +2135,61 @@ mod tests {
             events.extend(scheduler.advance(true).expect("kit tick"));
         }
         events
+    }
+
+    #[test]
+    fn authored_room_actors_enter_shared_health_and_reward_authority_exactly() {
+        let compiled =
+            load_core_development_encounter_rooms(&content_root()).expect("encounter rooms");
+        let cases = [
+            (
+                "enemy.mire_leech",
+                EnemyHealthKind::MireLeech,
+                70,
+                0,
+                "reward.normal_outer",
+            ),
+            (
+                "enemy.bell_acolyte",
+                EnemyHealthKind::BellAcolyte,
+                160,
+                2,
+                "reward.normal_outer",
+            ),
+            (
+                "enemy.choir_skull",
+                EnemyHealthKind::ChoirSkull,
+                150,
+                1,
+                "reward.normal_outer",
+            ),
+            (
+                "miniboss.sepulcher_knight",
+                EnemyHealthKind::SepulcherKnight,
+                1_600,
+                8,
+                "reward.miniboss_t1",
+            ),
+            (
+                "miniboss.choir_abbot",
+                EnemyHealthKind::ChoirAbbot,
+                1_900,
+                6,
+                "reward.miniboss_t1",
+            ),
+        ];
+        for (index, (content_id, kind, health, armor, reward)) in cases.into_iter().enumerate() {
+            let actor = EnemyHealthActor::core_authored(
+                EntityId::new(1_000 + u64::try_from(index).expect("index")).expect("entity ID"),
+                &authored_definition(&compiled, content_id),
+                SimulationVector::new(5.0, 5.0),
+            )
+            .expect("authored health actor");
+            assert_eq!(actor.kind(), kind);
+            assert_eq!(actor.max_health(), health);
+            assert_eq!(actor.armor(), armor);
+            assert_eq!(actor.reward_table_id(), reward);
+        }
     }
 
     #[test]
