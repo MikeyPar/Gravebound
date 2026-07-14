@@ -388,6 +388,7 @@ fn hello() -> ClientHello {
 async fn run_quic_transfers(
     persistence: &PostgresPersistence,
     frames: &[SafeInventoryTransferFrameV1],
+    drop_first_safe_response: bool,
 ) -> Vec<protocol::SafeInventoryTransferResultV1> {
     let identity = IdentityService::new(
         PostgresAccountRepository::new(persistence.clone()),
@@ -447,7 +448,7 @@ async fn run_quic_transfers(
         .await
         .unwrap();
         for response_sequence in 1..=frames.len() + 3 {
-            serve_core_reliable(
+            let result = serve_core_reliable(
                 &server,
                 &identity,
                 &world_flow,
@@ -459,8 +460,10 @@ async fn run_quic_transfers(
                 u32::try_from(response_sequence).unwrap(),
                 0,
             )
-            .await
-            .unwrap();
+            .await;
+            if !drop_first_safe_response || response_sequence != 4 {
+                result.unwrap();
+            }
         }
     };
     let client_journey = async {
@@ -541,7 +544,13 @@ async fn run_quic_transfers(
             }
         ));
         let mut results = Vec::with_capacity(frames.len());
-        for frame in frames {
+        for (index, frame) in frames.iter().enumerate() {
+            if drop_first_safe_response && index == 0 {
+                bot_client::submit_safe_inventory_without_response(&client, *frame)
+                    .await
+                    .unwrap();
+                continue;
+            }
             let (_, result) = bot_client::perform_safe_inventory_transfer(&client, *frame)
                 .await
                 .unwrap();
@@ -568,6 +577,7 @@ async fn real_quic_safe_inventory_replays_across_a_new_endpoint() {
     let initial = run_quic_transfers(
         &persistence,
         &[lifecycle_frame, lifecycle_frame, lifecycle_conflict],
+        false,
     )
     .await;
     assert_eq!(initial[0].code, SafeInventoryResultCodeV1::Accepted);
@@ -589,7 +599,7 @@ async fn real_quic_safe_inventory_replays_across_a_new_endpoint() {
     let before_reconnect_digest = before_reconnect.digest().unwrap();
 
     let reconnected =
-        run_quic_transfers(&persistence, &[lifecycle_frame, lifecycle_conflict]).await;
+        run_quic_transfers(&persistence, &[lifecycle_frame, lifecycle_conflict], false).await;
     assert_eq!(reconnected[0].code, SafeInventoryResultCodeV1::Accepted);
     assert!(reconnected[0].replayed);
     assert_eq!(
@@ -609,7 +619,8 @@ async fn real_quic_safe_inventory_replays_across_a_new_endpoint() {
     persistence.close().await;
 
     let restarted = disposable_database().await;
-    let replay = run_quic_transfers(&restarted, &[lifecycle_frame, lifecycle_conflict]).await;
+    let replay =
+        run_quic_transfers(&restarted, &[lifecycle_frame, lifecycle_conflict], false).await;
     assert_eq!(replay[0].code, SafeInventoryResultCodeV1::Accepted);
     assert!(replay[0].replayed);
     assert_eq!(replay[0].result_hash, initial[0].result_hash);
@@ -629,6 +640,31 @@ async fn real_quic_safe_inventory_replays_across_a_new_endpoint() {
     assert_eq!(after_restart.digest().unwrap(), before_reconnect_digest);
     assert_committed_state(&restarted).await;
     restarted.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires explicitly authorized disposable PostgreSQL"]
+async fn dropped_quic_response_retries_the_stored_lifecycle_result() {
+    let persistence = disposable_database().await;
+    seed_fixture(&persistence).await;
+    stage_progression_reward_and_equipment(&persistence).await;
+    let frame = transfer_frame_at(4);
+    let retry = run_quic_transfers(&persistence, &[frame, frame], true).await;
+    assert_eq!(retry.len(), 1);
+    assert_eq!(retry[0].code, SafeInventoryResultCodeV1::Accepted);
+    assert!(retry[0].replayed);
+    assert_eq!(retry[0].placements.len(), 1);
+    let signature = persistence
+        .core_item_lifecycle_signature_v1(ACCOUNT_ID, CHARACTER_ID)
+        .await
+        .unwrap();
+    assert_eq!(signature.safe_inventory_receipts.len(), 1);
+    assert_eq!(
+        signature.safe_inventory_receipts[0].result_hash,
+        retry[0].result_hash
+    );
+    assert_committed_state(&persistence).await;
+    persistence.close().await;
 }
 
 #[tokio::test]

@@ -279,6 +279,27 @@ pub async fn perform_safe_inventory_transfer(
     Ok((event.clone(), result.clone()))
 }
 
+/// Submits one reliable safe-inventory mutation and intentionally abandons its response stream.
+/// Integration policy uses this to prove that a committed response loss converges through the
+/// ordinary mutation retry path; callers must retain and retry the exact mutation identity.
+pub async fn submit_safe_inventory_without_response(
+    connection: &quinn::Connection,
+    frame: SafeInventoryTransferFrameV1,
+) -> Result<(), BotTransportError> {
+    let request = encode_frame(&WireMessage::SafeInventoryTransferFrame(frame))?;
+    let (mut send, receive) = connection
+        .open_bi()
+        .await
+        .map_err(|error| BotTransportError::Quic(error.to_string()))?;
+    send.write_all(&request)
+        .await
+        .map_err(|error| BotTransportError::Quic(error.to_string()))?;
+    send.finish()
+        .map_err(|error| BotTransportError::Quic(error.to_string()))?;
+    drop(receive);
+    Ok(())
+}
+
 #[derive(Debug, Error)]
 pub enum BotTransportError {
     #[error("QUIC handshake transport failed: {0}")]
