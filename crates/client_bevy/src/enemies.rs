@@ -1365,6 +1365,16 @@ fn sync_hostile_projectiles(
                     std::f32::consts::FRAC_PI_4,
                     true,
                 ),
+                sim_core::HostileProjectileSourceKind::RotatingArms => {
+                    let direction = projectile.direction().vector();
+                    (
+                        "rotating-arm diamond",
+                        Vec2::splat(radius * 3.25),
+                        Vec2::splat(radius * 2.25),
+                        -direction.y.atan2(direction.x) + std::f32::consts::FRAC_PI_4,
+                        false,
+                    )
+                }
             };
             commands
                 .spawn((
