@@ -58,7 +58,7 @@ pub enum TransportEvent {
 
 #[derive(Debug)]
 enum ReliableCommand {
-    Gameplay(WireMessage),
+    Gameplay(Box<WireMessage>),
     Shutdown,
 }
 
@@ -137,7 +137,7 @@ impl NetworkWorkerHandle {
             return Err(NetworkTransportError::InvalidReliableCommand);
         }
         self.reliable
-            .try_send(ReliableCommand::Gameplay(message))
+            .try_send(ReliableCommand::Gameplay(Box::new(message)))
             .map_err(|_| NetworkTransportError::ReliableQueueFull)
     }
 
@@ -316,7 +316,7 @@ async fn run_connected(
             command = reliable.recv() => {
                 match command {
                     Some(ReliableCommand::Gameplay(message)) => {
-                        let request = encode_frame(&message)?;
+                        let request = encode_frame(message.as_ref())?;
                         let response = exchange_reliable_bytes(connection, &request).await?;
                         let WireMessage::ReliableEvent(event) = decode_frame(&response)? else {
                             return Err(NetworkTransportError::UnexpectedMessage);

@@ -208,7 +208,7 @@ mod tests {
         assert_eq!(decode_frame(&frame).unwrap(), input_message());
         assert_eq!(
             blake3::hash(&frame).to_hex().to_string(),
-            "98eb4f38b3982dd27d9859b3e85780f4f90336e1589200ba62c7b2893af748e6"
+            "8c72f34ff8d064a9f451b7ba6e261cf6b730845378863a1f63b5e37a65d24b0a"
         );
         let m02 = encode_m02_compatibility_frame(&input_message()).unwrap();
         assert_eq!(
@@ -392,5 +392,36 @@ mod tests {
             encode_m02_compatibility_frame(&decision),
             Err(WireCodecError::MessageUnavailableAtVersion)
         );
+    }
+
+    #[test]
+    fn protocol_1_11_binds_committed_caldus_extraction_identities() {
+        let payload = crate::WorldTransferPayload {
+            content_revision: crate::WorldFlowContentRevisionV1 {
+                records_blake3: ManifestHash::new("4".repeat(64)).unwrap(),
+                assets_blake3: ManifestHash::new("5".repeat(64)).unwrap(),
+                localization_blake3: ManifestHash::new("6".repeat(64)).unwrap(),
+            },
+            command: crate::WorldTransferCommand::UseCommittedExtraction {
+                portal_id: WireText::new("portal.exit.dungeon.bell_sepulcher").unwrap(),
+                extraction_request_id: [8; 16],
+                extraction_receipt_id: [9; 16],
+            },
+        };
+        let transfer = WireMessage::WorldFlowFrame(crate::WorldFlowFrame {
+            sequence: 12,
+            request: crate::WorldFlowRequest::Transfer(crate::WorldTransferMutation {
+                mutation_id: [10; 16],
+                character_id: [11; 16],
+                expected_character_version: 3,
+                issued_at_unix_millis: 1,
+                payload_hash: payload.canonical_hash(),
+                payload,
+            }),
+        });
+
+        let frame = encode_frame(&transfer).unwrap();
+        assert_eq!(u16::from_le_bytes([frame[6], frame[7]]), 11);
+        assert_eq!(decode_frame(&frame), Ok(transfer));
     }
 }

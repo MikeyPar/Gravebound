@@ -3,6 +3,10 @@ ALTER TABLE caldus_victory_exits
     ADD CONSTRAINT caldus_victory_exit_pair_unique
     UNIQUE (namespace_id, encounter_id, exit_instance_id);
 
+ALTER TABLE character_world_transfer_results
+    DROP CONSTRAINT transfer_command_known,
+    ADD CONSTRAINT transfer_command_known CHECK (command_kind BETWEEN 0 AND 3);
+
 CREATE TABLE character_extraction_results (
     namespace_id TEXT NOT NULL,
     account_id BYTEA NOT NULL,

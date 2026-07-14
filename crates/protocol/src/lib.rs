@@ -70,7 +70,9 @@ use thiserror::Error;
 /// First incompatible protocol generation.
 pub const PROTOCOL_MAJOR: u16 = 1;
 /// Backward-compatible feature generation within [`PROTOCOL_MAJOR`].
-pub const PROTOCOL_MINOR: u16 = 10;
+pub const PROTOCOL_MINOR: u16 = CALDUS_EXTRACTION_PROTOCOL_MINOR;
+/// Exact committed-Caldus-extraction command generation.
+pub const CALDUS_EXTRACTION_PROTOCOL_MINOR: u16 = 11;
 /// Exact Oath generation retained while Bargain messages are appended.
 pub const OATH_PROTOCOL_MINOR: u16 = 9;
 /// Exact progression projection generation retained while Oath messages are appended.

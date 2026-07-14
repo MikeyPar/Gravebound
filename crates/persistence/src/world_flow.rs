@@ -768,7 +768,7 @@ fn validate_receipt_binding(
         || !valid_revision(&receipt.content_revision)
         || receipt.expected_character_version <= 0
         || receipt.issued_at_unix_millis <= 0
-        || !(0..=2).contains(&receipt.command_kind)
+        || !(0..=3).contains(&receipt.command_kind)
         || receipt.pre_character_version <= 0
         || receipt.post_character_version <= 0
         || !(0..=20).contains(&receipt.result_code)

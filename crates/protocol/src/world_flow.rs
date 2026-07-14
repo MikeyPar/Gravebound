@@ -97,6 +97,11 @@ pub enum WorldTransferCommand {
     UsePortal {
         portal_id: WireText<WORLD_FLOW_ID_MAX_BYTES>,
     },
+    UseCommittedExtraction {
+        portal_id: WireText<WORLD_FLOW_ID_MAX_BYTES>,
+        extraction_request_id: [u8; TRANSFER_ID_BYTES],
+        extraction_receipt_id: [u8; TRANSFER_ID_BYTES],
+    },
 }
 
 impl WorldTransferCommand {
@@ -105,9 +110,21 @@ impl WorldTransferCommand {
             Self::UsePortal { portal_id } if !valid_stable_id(portal_id.as_str()) => {
                 Err(WorldFlowValidationError::UnknownTransferSource)
             }
+            Self::UseCommittedExtraction {
+                portal_id,
+                extraction_request_id,
+                extraction_receipt_id,
+            } if !valid_stable_id(portal_id.as_str())
+                || all_zero(extraction_request_id)
+                || all_zero(extraction_receipt_id)
+                || extraction_request_id == extraction_receipt_id =>
+            {
+                Err(WorldFlowValidationError::InvalidExtractionReceipt)
+            }
             Self::EnterHallFromCharacterSelect
             | Self::ReturnToCharacterSelect
-            | Self::UsePortal { .. } => Ok(()),
+            | Self::UsePortal { .. }
+            | Self::UseCommittedExtraction { .. } => Ok(()),
         }
     }
 }
@@ -318,6 +335,8 @@ pub enum WorldFlowValidationError {
     ZeroPayloadHash,
     #[error("transfer source is not part of the approved Core route")]
     UnknownTransferSource,
+    #[error("committed extraction requires distinct nonzero request and receipt identities")]
+    InvalidExtractionReceipt,
     #[error("danger location, instance lineage, or restore-point identity is invalid")]
     InstanceLocationMismatch,
     #[error("safe or danger location contains an invalid stable ID")]
@@ -409,6 +428,25 @@ mod tests {
         assert_eq!(
             zero.validate(),
             Err(WorldFlowValidationError::ZeroCharacterId)
+        );
+    }
+
+    #[test]
+    fn committed_extraction_requires_two_distinct_stable_identities() {
+        let command = WorldTransferCommand::UseCommittedExtraction {
+            portal_id: WireText::new("portal.exit.dungeon.bell_sepulcher").unwrap(),
+            extraction_request_id: [3; TRANSFER_ID_BYTES],
+            extraction_receipt_id: [4; TRANSFER_ID_BYTES],
+        };
+        assert_eq!(transfer(command).validate(), Ok(()));
+        let invalid = transfer(WorldTransferCommand::UseCommittedExtraction {
+            portal_id: WireText::new("portal.exit.dungeon.bell_sepulcher").unwrap(),
+            extraction_request_id: [3; TRANSFER_ID_BYTES],
+            extraction_receipt_id: [3; TRANSFER_ID_BYTES],
+        });
+        assert_eq!(
+            invalid.validate(),
+            Err(WorldFlowValidationError::InvalidExtractionReceipt)
         );
     }
 

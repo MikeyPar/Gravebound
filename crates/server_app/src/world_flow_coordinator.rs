@@ -96,6 +96,10 @@ where
         Ok(planned)
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the dormant route matrix is intentionally kept together for fail-closed auditability"
+    )]
     fn plan_route(
         &self,
         request_sequence: u32,
@@ -166,7 +170,11 @@ where
                     Some(transfer_id),
                 ));
             }
-            (WorldTransferCommand::UsePortal { .. }, _) => {
+            (
+                WorldTransferCommand::UsePortal { .. }
+                | WorldTransferCommand::UseCommittedExtraction { .. },
+                _,
+            ) => {
                 return Ok(staged_result(
                     request_sequence,
                     mutation,
@@ -550,6 +558,7 @@ const fn command_kind(command: &WorldTransferCommand) -> i16 {
         WorldTransferCommand::EnterHallFromCharacterSelect => 0,
         WorldTransferCommand::ReturnToCharacterSelect => 1,
         WorldTransferCommand::UsePortal { .. } => 2,
+        WorldTransferCommand::UseCommittedExtraction { .. } => 3,
     }
 }
 
