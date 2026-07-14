@@ -81,10 +81,11 @@ pub use items::{
 };
 pub use lifecycle_signature::{
     CORE_ITEM_LIFECYCLE_SIGNATURE_CONTEXT, StoredCoreItemLifecycleSignatureV1,
-    StoredLifecycleCapacitiesV1, StoredLifecycleCharacterV1, StoredLifecycleItemV1,
-    StoredLifecycleLedgerEntryV1, StoredLifecycleProgressionV1,
+    StoredLifecycleBossFirstClearV1, StoredLifecycleCapacitiesV1, StoredLifecycleCharacterV1,
+    StoredLifecycleEquipmentReceiptV1, StoredLifecycleItemV1, StoredLifecycleLedgerEntryV1,
+    StoredLifecycleProgressionV1, StoredLifecycleRewardEntryV1, StoredLifecycleRewardReceiptV1,
     StoredLifecycleSafeInventoryPlacementV1, StoredLifecycleSafeInventoryReceiptV1,
-    StoredLifecycleWorldV1,
+    StoredLifecycleStarterReceiptV1, StoredLifecycleWorldV1, StoredLifecycleXpReceiptV1,
 };
 pub use oath::{
     OathSelectionTransaction, OathSelectionTransactionState, StoredCharacterLifeEvent,
