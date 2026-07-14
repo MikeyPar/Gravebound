@@ -118,6 +118,7 @@ async fn migrations_are_idempotent_exact_and_ready() {
             "characters",
             "currency_ledger_events",
             "entry_restore_progression_v1",
+            "field_equipment_mutations",
             "gravebound_namespaces",
             "item_instances",
             "item_ledger_events",
