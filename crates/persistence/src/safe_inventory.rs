@@ -2,7 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use sqlx::{PgConnection, Row, postgres::PgRow};
 
-use crate::{PersistenceError, PostgresPersistence, WIPEABLE_CORE_NAMESPACE};
+use crate::{
+    PersistenceError, PostgresPersistence, WIPEABLE_CORE_NAMESPACE,
+    items::CORE_ITEM_CONTENT_REVISION,
+};
 
 const CHARACTER_SAFE_CAPACITY: u16 = 8;
 const VAULT_CAPACITY: u16 = 160;
@@ -166,6 +169,21 @@ pub async fn stage_world_flow_safe_inventory_preflight(
 ) -> Result<StoredSafeInventoryPreflightResult, PersistenceError> {
     if mutation_id == [0; 16] {
         return Err(PersistenceError::CorruptStoredSafeInventory);
+    }
+    // Re-read the complete storage aggregate under the caller's existing transaction before
+    // planning. Besides preventing a caller-supplied snapshot from becoming authority, decoding
+    // this locked state enforces the exact Core item content revision before the first write.
+    let current_inventory_version =
+        lock_inventory(transaction.connection(), account_id, character_id).await?;
+    let current_items =
+        lock_storage_items(transaction.connection(), account_id, character_id).await?;
+    let current_snapshot = decode_snapshot(
+        snapshot.account_version,
+        current_inventory_version,
+        current_items,
+    )?;
+    if current_snapshot != *snapshot {
+        return Err(PersistenceError::SafeInventoryBindingMismatch);
     }
     let expected = derive_preflight_placements(snapshot)?;
     if placements != expected {
@@ -513,8 +531,8 @@ async fn lock_storage_items(
     character_id: [u8; 16],
 ) -> Result<Vec<PgRow>, PersistenceError> {
     sqlx::query(
-        "SELECT item_uid, template_id, item_kind, item_version, security_state, location_kind, \
-         slot_index, character_id FROM item_instances WHERE namespace_id = $1 AND account_id = $2 \
+        "SELECT item_uid, template_id, content_revision, item_kind, item_version, security_state, \
+         location_kind, slot_index, character_id FROM item_instances WHERE namespace_id = $1 AND account_id = $2 \
          AND ((character_id = $3 AND location_kind IN (2, 5)) OR \
          (character_id IS NULL AND location_kind = 6)) ORDER BY item_uid FOR UPDATE",
     )
@@ -547,6 +565,8 @@ fn decode_snapshot(
         if item_uid == [0; 16] || !identities.insert(item_uid) {
             return Err(PersistenceError::CorruptStoredSafeInventory);
         }
+        let content_revision: String = row.try_get("content_revision")?;
+        require_core_item_content_revision(&content_revision)?;
         let location = StoredSafeInventoryLocation::decode(
             row.try_get("location_kind")?,
             row.try_get("slot_index")?,
@@ -577,6 +597,13 @@ fn decode_snapshot(
     }
     validate_stored_slots(&snapshot)?;
     Ok(snapshot)
+}
+
+fn require_core_item_content_revision(content_revision: &str) -> Result<(), PersistenceError> {
+    if content_revision != CORE_ITEM_CONTENT_REVISION {
+        return Err(PersistenceError::CorruptStoredSafeInventory);
+    }
+    Ok(())
 }
 
 fn validate_stored_slots(snapshot: &StoredSafeInventorySnapshot) -> Result<(), PersistenceError> {
@@ -1650,5 +1677,20 @@ mod tests {
         );
         let result = result_from_command(&command, false, 4, 4, 7, 8);
         assert!(validate_result(&result, command.kind).is_ok());
+    }
+
+    #[test]
+    fn item_content_authority_requires_the_exact_core_revision() {
+        assert!(require_core_item_content_revision(CORE_ITEM_CONTENT_REVISION).is_ok());
+
+        let alternate_constraint_valid_revision = format!("core-dev.blake3.{}", "f".repeat(64));
+        assert_ne!(
+            alternate_constraint_valid_revision,
+            CORE_ITEM_CONTENT_REVISION
+        );
+        assert!(matches!(
+            require_core_item_content_revision(&alternate_constraint_valid_revision),
+            Err(PersistenceError::CorruptStoredSafeInventory)
+        ));
     }
 }
