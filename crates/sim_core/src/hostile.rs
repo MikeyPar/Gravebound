@@ -265,7 +265,7 @@ impl HostileProjectileSimulation {
 
     /// Returns the monotonic allocator when a higher-level encounter transfers ownership between
     /// hostile phases. Active projectiles remain the caller's responsibility before handoff.
-    pub(crate) fn into_allocator(self) -> EntityIdAllocator {
+    pub fn into_allocator(self) -> EntityIdAllocator {
         self.projectile_ids
     }
 
