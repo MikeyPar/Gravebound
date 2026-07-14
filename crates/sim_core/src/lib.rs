@@ -16,6 +16,7 @@ mod combat;
 mod consumable;
 mod core_counterplay;
 mod core_enemy;
+mod core_enemy_kit;
 mod core_enemy_runtime;
 mod core_microrealm;
 mod damage;
@@ -126,6 +127,9 @@ pub use core_enemy::{
     CoreEnemyRole, CoreEnemyStateStage, CorePatternDefinition, CorePatternDefinitionParameters,
     CorePatternGeometryDefinition, CorePatternGeometryParameters, CorePatternWarningDefinition,
     CorePatternWarningParameters, CoreRadialGapRelation, CoreTargetSelection, CoreTelegraphLock,
+};
+pub use core_enemy_kit::{
+    CoreEnemyKitError, CoreEnemyKitEvent, CoreEnemyKitKind, CoreEnemyKitScheduler,
 };
 pub use core_enemy_runtime::{
     CoreAttackLock, CoreAttackLockError, CoreEnemyRuntimeError, CoreEnemyRuntimeEvent,

@@ -2050,7 +2050,10 @@ fn hash_file(path: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sim_core::{CorePatternGeometryDefinition, CorePatternWarningDefinition};
+    use sim_core::{
+        CoreEnemyKitEvent, CoreEnemyKitScheduler, CorePatternGeometryDefinition,
+        CorePatternWarningDefinition, Tick,
+    };
 
     struct Fixture {
         source: ContentPackage,
@@ -2106,6 +2109,31 @@ mod tests {
             &fixture.copy,
             &fixture.hashes,
         )
+    }
+
+    fn authored_definition(
+        compiled: &CoreDevelopmentEncounterRooms,
+        content_id: &str,
+    ) -> sim_core::CoreEnemyDefinition {
+        compiled
+            .actor_definitions()
+            .iter()
+            .find(|actor| actor.id().as_str() == content_id)
+            .and_then(|actor| match actor.behavior() {
+                CoreEncounterBehaviorDefinition::Authored(definition) => Some(definition.clone()),
+                CoreEncounterBehaviorDefinition::ImmutableDrownedPilgrim(_)
+                | CoreEncounterBehaviorDefinition::ImmutableBellReed(_)
+                | CoreEncounterBehaviorDefinition::ImmutableChainSentry(_) => None,
+            })
+            .expect("exact authored actor")
+    }
+
+    fn trace_kit(mut scheduler: CoreEnemyKitScheduler, final_tick: u64) -> Vec<CoreEnemyKitEvent> {
+        let mut events = Vec::new();
+        while scheduler.tick().0 <= final_tick {
+            events.extend(scheduler.advance(true).expect("kit tick"));
+        }
+        events
     }
 
     #[test]
@@ -2467,5 +2495,298 @@ mod tests {
         let mut case = fixture();
         case.copy.entries[0].value.clear();
         assert!(compile_fixture(&case).is_err());
+    }
+
+    #[test]
+    fn mire_and_acolyte_schedulers_preserve_exact_cycles_and_first_use_state() {
+        let compiled = load_core_development_encounter_rooms(&content_root()).expect("content");
+        let mire = trace_kit(
+            CoreEnemyKitScheduler::new(authored_definition(&compiled, "enemy.mire_leech"))
+                .expect("Mire scheduler"),
+            84,
+        );
+        assert_eq!(
+            mire,
+            vec![
+                CoreEnemyKitEvent::TelegraphDue {
+                    tick: Tick(0),
+                    pattern_index: 0,
+                    warning_ticks: 12,
+                    first_use: true,
+                },
+                CoreEnemyKitEvent::MireChargeDue {
+                    tick: Tick(12),
+                    pattern_index: 0,
+                    distance_milli_tiles: 2_000,
+                    duration_ticks: 15,
+                },
+                CoreEnemyKitEvent::MireRetreatDue {
+                    tick: Tick(27),
+                    speed_milli_tiles_per_second: 3_500,
+                    duration_ticks: 45,
+                },
+                CoreEnemyKitEvent::TelegraphDue {
+                    tick: Tick(75),
+                    pattern_index: 0,
+                    warning_ticks: 9,
+                    first_use: false,
+                },
+                CoreEnemyKitEvent::MireChargeDue {
+                    tick: Tick(84),
+                    pattern_index: 0,
+                    distance_milli_tiles: 2_000,
+                    duration_ticks: 15,
+                },
+            ]
+        );
+
+        let acolyte = trace_kit(
+            CoreEnemyKitScheduler::new(authored_definition(&compiled, "enemy.bell_acolyte"))
+                .expect("Acolyte scheduler"),
+            117,
+        );
+        assert_eq!(
+            acolyte,
+            vec![
+                CoreEnemyKitEvent::TelegraphDue {
+                    tick: Tick(0),
+                    pattern_index: 0,
+                    warning_ticks: 12,
+                    first_use: true,
+                },
+                CoreEnemyKitEvent::AcolyteFanDue {
+                    tick: Tick(12),
+                    pattern_index: 0,
+                    offsets_milli_degrees: vec![-50_000, -35_000, -20_000, -5_000, 10_000],
+                },
+                CoreEnemyKitEvent::TelegraphDue {
+                    tick: Tick(54),
+                    pattern_index: 0,
+                    warning_ticks: 9,
+                    first_use: false,
+                },
+                CoreEnemyKitEvent::AcolyteFanDue {
+                    tick: Tick(63),
+                    pattern_index: 0,
+                    offsets_milli_degrees: vec![-10_000, 5_000, 20_000, 35_000, 50_000],
+                },
+                CoreEnemyKitEvent::TelegraphDue {
+                    tick: Tick(108),
+                    pattern_index: 0,
+                    warning_ticks: 9,
+                    first_use: false,
+                },
+                CoreEnemyKitEvent::AcolyteFanDue {
+                    tick: Tick(117),
+                    pattern_index: 0,
+                    offsets_milli_degrees: vec![-50_000, -35_000, -20_000, -5_000, 10_000],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn knight_scheduler_resets_fan_phase_inside_each_charge_loop() {
+        let compiled = load_core_development_encounter_rooms(&content_root()).expect("content");
+        let events = trace_kit(
+            CoreEnemyKitScheduler::new(authored_definition(&compiled, "miniboss.sepulcher_knight"))
+                .expect("Knight scheduler"),
+            207,
+        );
+        let telegraphs = events
+            .iter()
+            .filter_map(|event| match event {
+                CoreEnemyKitEvent::TelegraphDue {
+                    tick,
+                    pattern_index,
+                    warning_ticks,
+                    first_use,
+                } => Some((tick.0, *pattern_index, *warning_ticks, *first_use)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            telegraphs,
+            [
+                (0, 0, 27, true),
+                (66, 2, 12, true),
+                (132, 2, 9, false),
+                (180, 0, 27, false),
+            ]
+        );
+        assert!(events.contains(&CoreEnemyKitEvent::KnightChargeDue {
+            tick: Tick(27),
+            pattern_index: 0,
+            charge_ticks: 17,
+        }));
+        assert!(events.contains(&CoreEnemyKitEvent::KnightStopRingDue {
+            tick: Tick(44),
+            pattern_index: 1,
+        }));
+        assert!(events.contains(&CoreEnemyKitEvent::KnightShieldFanDue {
+            tick: Tick(78),
+            pattern_index: 2,
+        }));
+        assert!(events.contains(&CoreEnemyKitEvent::KnightShieldFanDue {
+            tick: Tick(141),
+            pattern_index: 2,
+        }));
+        assert!(events.contains(&CoreEnemyKitEvent::KnightChargeDue {
+            tick: Tick(207),
+            pattern_index: 0,
+            charge_ticks: 17,
+        }));
+    }
+
+    #[test]
+    fn rotor_schedulers_hold_release_cadence_and_independent_volley_rounding() {
+        let compiled = load_core_development_encounter_rooms(&content_root()).expect("content");
+        let skull = trace_kit(
+            CoreEnemyKitScheduler::new(authored_definition(&compiled, "enemy.choir_skull"))
+                .expect("Skull scheduler"),
+            212,
+        );
+        assert_eq!(rotor_starts(&skull), [(20, 0, 120), (200, 1, 120)]);
+        assert_eq!(
+            rotor_volleys(&skull),
+            [
+                (32, 0, 0),
+                (44, 0, 1),
+                (56, 0, 2),
+                (68, 0, 3),
+                (80, 0, 4),
+                (92, 0, 5),
+                (104, 0, 6),
+                (116, 0, 7),
+                (128, 0, 8),
+                (140, 0, 9),
+                (212, 1, 0),
+            ]
+        );
+        assert!(skull.contains(&CoreEnemyKitEvent::RotorRecoveryStarted {
+            tick: Tick(140),
+            pattern_index: 0,
+            recovery_ticks: 60,
+        }));
+        assert!(skull.contains(&CoreEnemyKitEvent::TelegraphDue {
+            tick: Tick(185),
+            pattern_index: 0,
+            warning_ticks: 15,
+            first_use: false,
+        }));
+
+        let abbot = trace_kit(
+            CoreEnemyKitScheduler::new(authored_definition(&compiled, "miniboss.choir_abbot"))
+                .expect("Abbot scheduler"),
+            211,
+        );
+        assert_eq!(rotor_starts(&abbot), [(20, 0, 105), (200, 1, 105)]);
+        assert_eq!(
+            rotor_volleys(&abbot),
+            [
+                (31, 0, 0),
+                (41, 0, 1),
+                (52, 0, 2),
+                (62, 0, 3),
+                (73, 0, 4),
+                (83, 0, 5),
+                (94, 0, 6),
+                (104, 0, 7),
+                (115, 0, 8),
+                (125, 0, 9),
+                (211, 1, 0),
+            ]
+        );
+        assert!(abbot.contains(&CoreEnemyKitEvent::RecoveryWarningDue {
+            tick: Tick(125),
+            pattern_index: 1,
+            warning_ticks: 75,
+            directional_preview_ticks: 20,
+        }));
+        assert!(
+            abbot.contains(&CoreEnemyKitEvent::DirectionalGapPreviewDue {
+                tick: Tick(180),
+                pattern_index: 1,
+                warning_ticks: 20,
+            })
+        );
+        let boundary = abbot
+            .iter()
+            .filter(|event| match event {
+                CoreEnemyKitEvent::AbbotRecoveryRingDue { tick, .. }
+                | CoreEnemyKitEvent::RotorStarted { tick, .. } => *tick == Tick(200),
+                _ => false,
+            })
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            boundary.as_slice(),
+            [
+                CoreEnemyKitEvent::AbbotRecoveryRingDue { .. },
+                CoreEnemyKitEvent::RotorStarted { .. }
+            ]
+        ));
+    }
+
+    fn rotor_starts(events: &[CoreEnemyKitEvent]) -> Vec<(u64, u32, u32)> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                CoreEnemyKitEvent::RotorStarted {
+                    tick,
+                    cycle_index,
+                    active_ticks,
+                    ..
+                } => Some((tick.0, *cycle_index, *active_ticks)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn rotor_volleys(events: &[CoreEnemyKitEvent]) -> Vec<(u64, u32, u8)> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                CoreEnemyKitEvent::RotorVolleyDue {
+                    tick,
+                    cycle_index,
+                    volley_index,
+                    ..
+                } => Some((tick.0, *cycle_index, *volley_index)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn kit_readiness_and_reset_reanchor_without_losing_first_use_contracts() {
+        let compiled = load_core_development_encounter_rooms(&content_root()).expect("content");
+        let mut scheduler =
+            CoreEnemyKitScheduler::new(authored_definition(&compiled, "enemy.bell_acolyte"))
+                .expect("Acolyte scheduler");
+        for _ in 0..5 {
+            assert!(scheduler.advance(false).expect("gated tick").is_empty());
+        }
+        assert_eq!(
+            scheduler.advance(true).expect("ready tick"),
+            [CoreEnemyKitEvent::TelegraphDue {
+                tick: Tick(5),
+                pattern_index: 0,
+                warning_ticks: 12,
+                first_use: true,
+            }]
+        );
+        while scheduler.tick() < Tick(18) {
+            scheduler.advance(true).expect("release progression");
+        }
+        scheduler.reset().expect("exact reset");
+        assert_eq!(
+            scheduler.advance(true).expect("reset tick"),
+            [CoreEnemyKitEvent::TelegraphDue {
+                tick: Tick(18),
+                pattern_index: 0,
+                warning_ticks: 12,
+                first_use: true,
+            }]
+        );
     }
 }
