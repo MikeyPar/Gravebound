@@ -1,11 +1,24 @@
+use std::{path::PathBuf, sync::Arc};
+
 use persistence::{
     CORE_ITEM_CONTENT_REVISION, PersistenceConfig, PostgresPersistence, WIPEABLE_CORE_NAMESPACE,
 };
 use protocol::{
-    SafeInventoryDestinationV1, SafeInventoryTransferFrameV1, SafeInventoryTransferKindV1,
-    SafeInventoryTransferPayloadV1,
+    AuthTicket, CORE_SAFE_INVENTORY_FEATURE_FLAG, ClientHello, Compression, HandshakeResponse,
+    ManifestHash, Platform, ProtocolVersion, SafeInventoryDestinationV1, SafeInventoryResultCodeV1,
+    SafeInventoryTransferFrameV1, SafeInventoryTransferKindV1, SafeInventoryTransferPayloadV1,
+    WireText, WorldFlowContentRevisionV1,
 };
-use server_app::{PostgresSafeInventoryService, SafeInventoryServiceError};
+use rcgen::{CertifiedKey, generate_simple_self_signed};
+use rustls::pki_types::PrivatePkcs8KeyDer;
+use server_app::{
+    AccountId, AdmissionState, AuthenticatedAccount, AuthenticatedNamespace,
+    AuthenticationDecision, CharacterIdGenerator, CoreBargainAuthority, CoreOathSelectionAuthority,
+    CoreSafeInventoryAuthority, DisabledProgressionQueryRepository, HandshakePolicy, IdentityClock,
+    IdentityService, InMemoryAccountRepository, NoopIdentityEventSink,
+    PostgresSafeInventoryService, ProgressionQueryService, SafeInventoryServiceError,
+    WorldFlowGateService, serve_core_reliable, serve_handshake,
+};
 
 // The mandatory PostgreSQL job shares one database across integration binaries. Keep this
 // fixture's identities disjoint so cleanup never depends on another test's foreign-key graph.
@@ -14,6 +27,25 @@ const CHARACTER_ID: [u8; 16] = [211; 16];
 const ITEM_UID: [u8; 16] = [212; 16];
 const CREATION_REQUEST_ID: [u8; 16] = [213; 16];
 const MUTATION_ID: [u8; 16] = [214; 16];
+
+fn content_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../content")
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FixedAuthority;
+
+impl IdentityClock for FixedAuthority {
+    fn unix_millis(&self) -> u64 {
+        10_000
+    }
+}
+
+impl CharacterIdGenerator for FixedAuthority {
+    fn next_id(&self) -> [u8; 16] {
+        [230; 16]
+    }
+}
 
 async fn disposable_database() -> PostgresPersistence {
     let config = PersistenceConfig::from_test_environment()
@@ -151,6 +183,159 @@ fn transfer_frame() -> SafeInventoryTransferFrameV1 {
         payload_hash: payload.canonical_hash(),
         payload,
     }
+}
+
+fn endpoints() -> (quinn::Endpoint, quinn::Endpoint, std::net::SocketAddr) {
+    let CertifiedKey { cert, signing_key } =
+        generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+    let certificate = cert.der().clone();
+    let private_key = PrivatePkcs8KeyDer::from(signing_key.serialize_der());
+    let server_config =
+        quinn::ServerConfig::with_single_cert(vec![certificate.clone()], private_key.into())
+            .unwrap();
+    let server = quinn::Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap()).unwrap();
+    let address = server.local_addr().unwrap();
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(certificate).unwrap();
+    let config = quinn::ClientConfig::with_root_certificates(Arc::new(roots)).unwrap();
+    let mut client = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+    client.set_default_client_config(config);
+    (server, client, address)
+}
+
+fn policy() -> HandshakePolicy {
+    HandshakePolicy {
+        required_protocol: ProtocolVersion::current(),
+        required_client_build: WireText::new("m03-safe-inventory-journey-1").unwrap(),
+        required_manifest_hash: ManifestHash::new("a".repeat(64)).unwrap(),
+        content_bundle_version: WireText::new("core-dev").unwrap(),
+        region_id: WireText::new("loopback").unwrap(),
+        feature_flags: vec![WireText::new(CORE_SAFE_INVENTORY_FEATURE_FLAG).unwrap()],
+        admission: AdmissionState::Available,
+    }
+}
+
+fn hello() -> ClientHello {
+    ClientHello {
+        protocol_major: ProtocolVersion::current().major,
+        protocol_minor: ProtocolVersion::current().minor,
+        client_build_id: WireText::new("m03-safe-inventory-journey-1").unwrap(),
+        platform: Platform::WindowsNative,
+        supported_compression: vec![Compression::None],
+        content_manifest_hash: ManifestHash::new("a".repeat(64)).unwrap(),
+        auth_ticket: AuthTicket::new(b"disposable-safe-inventory".to_vec()).unwrap(),
+        locale: WireText::new("en-US").unwrap(),
+    }
+}
+
+async fn run_quic_transfers(
+    persistence: &PostgresPersistence,
+    expected_replayed: &[bool],
+) -> Vec<protocol::SafeInventoryTransferResultV1> {
+    let identity = IdentityService::new(
+        InMemoryAccountRepository::default(),
+        FixedAuthority,
+        FixedAuthority,
+        NoopIdentityEventSink,
+        ManifestHash::new("a".repeat(64)).unwrap(),
+    );
+    let world_flow = WorldFlowGateService::new(
+        InMemoryAccountRepository::default(),
+        FixedAuthority,
+        WorldFlowContentRevisionV1 {
+            records_blake3: ManifestHash::new("b".repeat(64)).unwrap(),
+            assets_blake3: ManifestHash::new("c".repeat(64)).unwrap(),
+            localization_blake3: ManifestHash::new("d".repeat(64)).unwrap(),
+        },
+    );
+    let progression_content =
+        sim_content::load_core_development_progression(&content_root()).unwrap();
+    let progression =
+        ProgressionQueryService::new(DisabledProgressionQueryRepository, &progression_content)
+            .unwrap();
+    let oath = CoreOathSelectionAuthority::<FixedAuthority>::disabled();
+    let bargain = CoreBargainAuthority::<FixedAuthority>::disabled();
+    let safe_inventory = CoreSafeInventoryAuthority::persistent(PostgresSafeInventoryService::new(
+        persistence.clone(),
+    ));
+    let authenticated = AuthenticatedAccount {
+        account_id: AccountId::new(ACCOUNT_ID).unwrap(),
+        namespace: AuthenticatedNamespace::WipeableTest,
+    };
+    let (server_endpoint, client_endpoint, address) = endpoints();
+    let connecting = client_endpoint.connect(address, "localhost").unwrap();
+    let incoming = server_endpoint.accept().await.unwrap();
+    let (client, server) = tokio::join!(connecting, incoming);
+    let client = client.unwrap();
+    let server = server.unwrap();
+    let server_journey = async {
+        serve_handshake(
+            &server,
+            &policy(),
+            AuthenticationDecision::Accepted,
+            WireText::new("safe-inventory-session").unwrap(),
+        )
+        .await
+        .unwrap();
+        for response_sequence in 1..=expected_replayed.len() {
+            serve_core_reliable(
+                &server,
+                &identity,
+                &world_flow,
+                &progression,
+                &oath,
+                &bargain,
+                &safe_inventory,
+                authenticated,
+                u32::try_from(response_sequence).unwrap(),
+                0,
+            )
+            .await
+            .unwrap();
+        }
+    };
+    let client_journey = async {
+        assert!(matches!(
+            bot_client::perform_handshake(&client, hello()).await.unwrap(),
+            HandshakeResponse::Accepted(server) if server.feature_flags.iter().any(
+                |flag| flag.as_str() == CORE_SAFE_INVENTORY_FEATURE_FLAG
+            )
+        ));
+        let mut results = Vec::with_capacity(expected_replayed.len());
+        for replayed in expected_replayed {
+            let (_, result) =
+                bot_client::perform_safe_inventory_transfer(&client, transfer_frame())
+                    .await
+                    .unwrap();
+            assert_eq!(result.replayed, *replayed);
+            results.push(result);
+        }
+        results
+    };
+    let ((), results) = tokio::join!(server_journey, client_journey);
+    drop(client);
+    client_endpoint.wait_idle().await;
+    server_endpoint.close(0_u32.into(), b"safe-inventory journey complete");
+    server_endpoint.wait_idle().await;
+    results
+}
+
+#[tokio::test]
+#[ignore = "requires explicitly authorized disposable PostgreSQL"]
+async fn real_quic_safe_inventory_replays_across_a_new_endpoint() {
+    let persistence = disposable_database().await;
+    seed_fixture(&persistence).await;
+    let initial = run_quic_transfers(&persistence, &[false, true]).await;
+    assert_eq!(initial[0].code, SafeInventoryResultCodeV1::Accepted);
+    assert_eq!(initial[0].result_hash, initial[1].result_hash);
+    persistence.close().await;
+
+    let restarted = disposable_database().await;
+    let replay = run_quic_transfers(&restarted, &[true]).await;
+    assert_eq!(replay[0].code, SafeInventoryResultCodeV1::Accepted);
+    assert_eq!(replay[0].result_hash, initial[0].result_hash);
+    assert_committed_state(&restarted).await;
+    restarted.close().await;
 }
 
 #[tokio::test]
