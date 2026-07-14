@@ -397,6 +397,21 @@ impl TonicBeltPolicy {
         })
     }
 
+    pub fn with_potion_output_multiplier(
+        mut self,
+        equipment_multiplier_basis_points: u32,
+    ) -> Result<Self, ConsumableError> {
+        if equipment_multiplier_basis_points < BASIS_POINTS_PER_ONE {
+            return Err(ConsumableError::InvalidBeltPolicy);
+        }
+        let equipment_bonus = equipment_multiplier_basis_points - BASIS_POINTS_PER_ONE;
+        self.potion_healing_multiplier_basis_points = self
+            .potion_healing_multiplier_basis_points
+            .checked_add(equipment_bonus)
+            .ok_or(ConsumableError::HealingArithmeticOverflow)?;
+        Ok(self)
+    }
+
     #[must_use]
     pub const fn is_active(self, index: usize) -> bool {
         index < BELT_SLOT_COUNT && self.active_slots[index]

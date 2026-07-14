@@ -254,9 +254,63 @@ pub fn compile_core_combat_definitions_for_item(
     rarity: EquipmentRarity,
     weapon_w_affix_basis_points: u16,
 ) -> Result<CoreCombatDefinitions> {
+    compile_core_combat_definitions(
+        class_package,
+        item_catalog,
+        oath_catalog,
+        oath_id,
+        bargain_ids,
+        weapon_id,
+        item_level,
+        rarity,
+        weapon_w_affix_basis_points,
+        None,
+    )
+}
+
+pub fn compile_core_combat_definitions_for_loadout(
+    class_package: &ContentPackage,
+    item_catalog: &CompiledProductionItemCatalog,
+    oath_catalog: &CompiledOathBargainCatalog,
+    oath_id: Option<&str>,
+    bargain_ids: &[&str],
+    equipment: &crate::ResolvedCoreEquipmentLoadout,
+) -> Result<CoreCombatDefinitions> {
+    let weapon = equipment.weapon();
+    compile_core_combat_definitions(
+        class_package,
+        item_catalog,
+        oath_catalog,
+        oath_id,
+        bargain_ids,
+        &weapon.template_id,
+        weapon.item_level,
+        weapon.rarity,
+        0,
+        equipment.relic(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // Internal boundary keeps every resolved authority explicit.
+fn compile_core_combat_definitions(
+    class_package: &ContentPackage,
+    item_catalog: &CompiledProductionItemCatalog,
+    oath_catalog: &CompiledOathBargainCatalog,
+    oath_id: Option<&str>,
+    bargain_ids: &[&str],
+    weapon_id: &str,
+    item_level: u8,
+    rarity: EquipmentRarity,
+    weapon_w_affix_basis_points: u16,
+    relic: Option<&crate::CoreEquipmentPresentation>,
+) -> Result<CoreCombatDefinitions> {
     let bargains = compile_core_bargain_loadout(oath_catalog, bargain_ids)?;
     let bargain_modifiers = sim_core::resolve_core_bargain_modifiers(&bargains);
-    let base_mark = first_playable_grave_mark(class_package)?;
+    let (base_mark, base_slipstep) = apply_core_relic(
+        first_playable_grave_mark(class_package)?,
+        first_playable_slipstep(class_package)?,
+        relic,
+    )?;
     let base_stillness = first_playable_stillness(class_package)?;
     let base_interval = core_crossbow_attack_interval_micros(item_catalog, weapon_id)?;
     let (oath, grave_mark, stillness, oath_health, primary_interval_micros) = match oath_id {
@@ -317,10 +371,59 @@ pub fn compile_core_combat_definitions_for_item(
             primary_interval_micros,
         )?,
         grave_mark,
-        slipstep: first_playable_slipstep(class_package)?,
+        slipstep: base_slipstep,
         stillness,
         maximum_health_multiplier_basis_points,
     })
+}
+
+fn apply_core_relic(
+    mark: GraveMarkDefinition,
+    slipstep: SlipstepDefinition,
+    relic: Option<&crate::CoreEquipmentPresentation>,
+) -> Result<(GraveMarkDefinition, SlipstepDefinition)> {
+    let Some(relic) = relic else {
+        return Ok((mark, slipstep));
+    };
+    if relic.slot != sim_core::EquipmentSlot::Relic {
+        bail!("Core combat received a non-Relic equipment replacement");
+    }
+    let value = |axis| {
+        relic
+            .values
+            .iter()
+            .find(|resolved| resolved.axis == axis)
+            .map(|resolved| resolved.value)
+            .map(u32::try_from)
+            .transpose()
+            .context("Core Relic value overflow")
+    };
+    let millis_to_ticks = |value: Option<u32>| {
+        value
+            .map(|milliseconds| {
+                u32::try_from(duration_ms_to_ticks_nearest(u64::from(milliseconds)))
+                    .context("Core Relic duration overflow")
+            })
+            .transpose()
+    };
+    let mark = mark
+        .with_equipment_overrides(
+            value(crate::CoreEquipmentAxis::RangeMilliTiles)?,
+            value(crate::CoreEquipmentAxis::ProjectileSpeedMilliTilesPerSecond)?,
+            value(crate::CoreEquipmentAxis::MarkDamageCoefficientBasisPoints)?,
+            millis_to_ticks(value(crate::CoreEquipmentAxis::MarkDurationMillis)?)?,
+            value(crate::CoreEquipmentAxis::MarkPrimaryBonusBasisPoints)?,
+        )
+        .context("Core Relic Grave Mark replacement is invalid")?;
+    let slipstep = slipstep
+        .with_equipment_overrides(
+            value(crate::CoreEquipmentAxis::SlipstepDistanceMilliTiles)?,
+            millis_to_ticks(value(crate::CoreEquipmentAxis::SlipstepDurationMillis)?)?,
+            value(crate::CoreEquipmentAxis::SlipstepDamageReductionBasisPoints)?,
+            millis_to_ticks(value(crate::CoreEquipmentAxis::SlipstepCooldownMillis)?)?,
+        )
+        .context("Core Relic Slipstep replacement is invalid")?;
+    Ok((mark, slipstep))
 }
 
 pub fn compile_core_oathed_combat_definitions(

@@ -218,6 +218,29 @@ impl SlipstepDefinition {
     pub fn travel_per_tick_tiles(&self) -> f32 {
         self.travel_tiles() / self.parameters.travel_ticks as f32
     }
+
+    pub fn with_equipment_overrides(
+        &self,
+        travel_milli_tiles: Option<u32>,
+        travel_ticks: Option<u32>,
+        direct_damage_reduction_basis_points: Option<u32>,
+        cooldown_ticks: Option<u32>,
+    ) -> Result<Self, AbilityDefinitionError> {
+        let mut parameters = self.parameters.clone();
+        if let Some(value) = travel_milli_tiles {
+            parameters.travel_milli_tiles = value;
+        }
+        if let Some(value) = travel_ticks {
+            parameters.travel_ticks = value;
+        }
+        if let Some(value) = direct_damage_reduction_basis_points {
+            parameters.direct_damage_reduction_basis_points = value;
+        }
+        if let Some(value) = cooldown_ticks {
+            parameters.cooldown_ticks = value;
+        }
+        Self::new(parameters)
+    }
 }
 
 /// Exact fixed-point inputs compiled from `ability.arbalist.grave_mark` and shared defaults.
@@ -420,6 +443,33 @@ impl GraveMarkDefinition {
         let mut parameters = self.parameters.clone();
         parameters.range_milli_tiles = range_milli_tiles;
         parameters.marked_primary_bonus_basis_points = marked_primary_bonus_basis_points;
+        Self::new(parameters)
+    }
+
+    pub fn with_equipment_overrides(
+        &self,
+        range_milli_tiles: Option<u32>,
+        projectile_speed_milli_tiles_per_second: Option<u32>,
+        weapon_damage_multiplier_basis_points: Option<u32>,
+        duration_ticks: Option<u32>,
+        marked_primary_bonus_basis_points: Option<u32>,
+    ) -> Result<Self, AbilityDefinitionError> {
+        let mut parameters = self.parameters.clone();
+        if let Some(value) = range_milli_tiles {
+            parameters.range_milli_tiles = value;
+        }
+        if let Some(value) = projectile_speed_milli_tiles_per_second {
+            parameters.projectile_speed_milli_tiles_per_second = value;
+        }
+        if let Some(value) = weapon_damage_multiplier_basis_points {
+            parameters.weapon_damage_multiplier_basis_points = value;
+        }
+        if let Some(value) = duration_ticks {
+            parameters.duration_ticks = value;
+        }
+        if let Some(value) = marked_primary_bonus_basis_points {
+            parameters.marked_primary_bonus_basis_points = value;
+        }
         Self::new(parameters)
     }
 }

@@ -19,6 +19,16 @@ pub struct CoreCharacterCombat {
     pub oath_bargain_version: u64,
     pub level: u16,
     pub maximum_health: u32,
+    pub armor: u32,
+    pub resistance_basis_points: i32,
+    pub movement_milli_tiles_per_second: u32,
+    pub healing_received_multiplier_basis_points: u32,
+    pub negative_status_reduction_basis_points: u32,
+    pub direct_hit_barrier_health: Option<u32>,
+    pub rested_primary_bonus_basis_points: u32,
+    pub rested_primary_idle_millis: u32,
+    pub relic_resonance_basis_points: u32,
+    pub equipment: sim_content::ResolvedCoreEquipmentLoadout,
     pub bargains: CoreBargainLoadout,
     pub bargain_modifiers: ResolvedCoreBargainModifiers,
     pub maximum_health_multiplier_basis_points: u32,
@@ -58,8 +68,8 @@ pub enum CoreCombatFactoryError {
     WeaponUnavailable,
     #[error("equipped weapon content does not match the active Core revision")]
     ContentMismatch,
-    #[error("rolled weapon combat projection is not active in this Core stage")]
-    RolledWeaponStageDisabled,
+    #[error("equipment rarity is unavailable in the Core stage")]
+    EquipmentRarityUnavailable,
     #[error("compiled combat content is invalid")]
     InvalidContent,
 }
@@ -108,6 +118,7 @@ impl CoreCharacterCombatCompiler {
         })
     }
 
+    #[allow(clippy::too_many_lines)] // Linear construction keeps every authoritative source/order visible.
     pub fn build_from_snapshot(
         &self,
         snapshot: &StoredCoreCombatLoadout,
@@ -140,26 +151,37 @@ impl CoreCharacterCombatCompiler {
         {
             return Err(CoreCombatFactoryError::ContentMismatch);
         }
-        // Durable affix identities/resolved values are owned by 04F. Until that projection exists,
-        // only the exact Worn starter weapon is safe to construct; rolled rewards fail closed.
-        if weapon.rarity != 0 {
-            return Err(CoreCombatFactoryError::RolledWeaponStageDisabled);
-        }
+        let equipment = sim_content::compose_core_equipment_loadout([
+            Some(self.resolve_stored_equipment(weapon, sim_core::EquipmentSlot::Weapon)?),
+            snapshot
+                .equipped_relic
+                .as_ref()
+                .map(|item| self.resolve_stored_equipment(item, sim_core::EquipmentSlot::Relic))
+                .transpose()?,
+            snapshot
+                .equipped_armor
+                .as_ref()
+                .map(|item| self.resolve_stored_equipment(item, sim_core::EquipmentSlot::Armor))
+                .transpose()?,
+            snapshot
+                .equipped_charm
+                .as_ref()
+                .map(|item| self.resolve_stored_equipment(item, sim_core::EquipmentSlot::Charm))
+                .transpose()?,
+        ])
+        .map_err(|_| CoreCombatFactoryError::InvalidContent)?;
         let bargain_ids = snapshot
             .active_bargains
             .iter()
             .map(|bargain| bargain.bargain_id.as_str())
             .collect::<Vec<_>>();
-        let definitions = sim_content::compile_core_combat_definitions_for_item(
+        let definitions = sim_content::compile_core_combat_definitions_for_loadout(
             &self.class_package,
             &self.items,
             &self.oaths,
             snapshot.oath_id.as_deref(),
             &bargain_ids,
-            &weapon.template_id,
-            u8::try_from(weapon.item_level).map_err(|_| CoreCombatFactoryError::InvalidContent)?,
-            EquipmentRarity::Worn,
-            0,
+            &equipment,
         )
         .map_err(|_| CoreCombatFactoryError::InvalidContent)?;
         let level =
@@ -174,8 +196,12 @@ impl CoreCharacterCombatCompiler {
                     .outgoing_direct_damage_basis_points,
             )
             .map_err(|_| CoreCombatFactoryError::InvalidContent)?;
+        let pre_multiplier_maximum_health = level_stats
+            .maximum_health
+            .checked_add(equipment.maximum_health_flat)
+            .ok_or(CoreCombatFactoryError::InvalidContent)?;
         let maximum_health = sim_core::resolve_oath_maximum_health(
-            level_stats.maximum_health,
+            pre_multiplier_maximum_health,
             definitions.maximum_health_multiplier_basis_points,
         )
         .map_err(|_| CoreCombatFactoryError::InvalidContent)?;
@@ -185,7 +211,16 @@ impl CoreCharacterCombatCompiler {
             &self.class_package,
             maximum_health,
             definitions.bargains.lantern_ash(),
+            equipment.potion_healing_output_multiplier_basis_points,
         )?;
+        let armor = u32::from(level_stats.armor)
+            .checked_add(equipment.armor_flat)
+            .ok_or(CoreCombatFactoryError::InvalidContent)?;
+        let movement_milli_tiles_per_second = apply_basis_points(
+            level_stats.movement_milli_tiles_per_second,
+            equipment.movement_multiplier_basis_points,
+        )?
+        .clamp(4_500, 5_600);
         let state = PlayerCombatState::with_core_choices(
             definitions.weapon,
             definitions.grave_mark,
@@ -204,6 +239,18 @@ impl CoreCharacterCombatCompiler {
             oath_bargain_version,
             level,
             maximum_health,
+            armor,
+            resistance_basis_points: equipment.resistance_basis_points.clamp(-2_500, 2_500),
+            movement_milli_tiles_per_second,
+            healing_received_multiplier_basis_points: equipment
+                .healing_received_multiplier_basis_points,
+            negative_status_reduction_basis_points: equipment
+                .negative_status_reduction_basis_points,
+            direct_hit_barrier_health: equipment.direct_hit_barrier_health,
+            rested_primary_bonus_basis_points: equipment.rested_primary_bonus_basis_points,
+            rested_primary_idle_millis: equipment.rested_primary_idle_millis,
+            relic_resonance_basis_points: equipment.relic_resonance_basis_points,
+            equipment,
             bargains: definitions.bargains,
             bargain_modifiers: definitions.bargain_modifiers,
             maximum_health_multiplier_basis_points: definitions
@@ -212,6 +259,43 @@ impl CoreCharacterCombatCompiler {
             consumables,
         })
     }
+
+    fn resolve_stored_equipment(
+        &self,
+        item: &persistence::StoredEquippedWeapon,
+        required_slot: sim_core::EquipmentSlot,
+    ) -> Result<sim_content::CoreEquipmentPresentation, CoreCombatFactoryError> {
+        if item.content_revision != self.items.revision_label() {
+            return Err(CoreCombatFactoryError::ContentMismatch);
+        }
+        let rarity = match item.rarity {
+            0 => EquipmentRarity::Worn,
+            1 => EquipmentRarity::Forged,
+            _ => return Err(CoreCombatFactoryError::EquipmentRarityUnavailable),
+        };
+        let presentation = sim_content::resolve_core_equipment_presentation(
+            &self.items,
+            &item.template_id,
+            u8::try_from(item.item_level).map_err(|_| CoreCombatFactoryError::InvalidContent)?,
+            rarity,
+        )
+        .map_err(|_| CoreCombatFactoryError::InvalidContent)?;
+        if presentation.slot != required_slot {
+            return Err(CoreCombatFactoryError::InvalidContent);
+        }
+        Ok(presentation)
+    }
+}
+
+fn apply_basis_points(
+    value: u32,
+    multiplier_basis_points: u32,
+) -> Result<u32, CoreCombatFactoryError> {
+    let numerator = u64::from(value)
+        .checked_mul(u64::from(multiplier_basis_points))
+        .and_then(|resolved| resolved.checked_add(5_000))
+        .ok_or(CoreCombatFactoryError::InvalidContent)?;
+    u32::try_from(numerator / 10_000).map_err(|_| CoreCombatFactoryError::InvalidContent)
 }
 
 fn compile_aggregate_versions(
@@ -235,6 +319,7 @@ fn compile_consumables(
     class_package: &sim_content::ContentPackage,
     maximum_health: u32,
     lantern_ash: Option<sim_core::LanternAshDefinition>,
+    equipment_potion_output_multiplier_basis_points: u32,
 ) -> Result<RedTonicSimulation, CoreCombatFactoryError> {
     let stored_current_health = u32::try_from(snapshot.current_health)
         .map_err(|_| CoreCombatFactoryError::InvalidContent)?;
@@ -257,6 +342,8 @@ fn compile_consumables(
             || Ok(TonicBeltPolicy::normal()),
             TonicBeltPolicy::lantern_ash,
         )
+        .map_err(|_| CoreCombatFactoryError::InvalidContent)?
+        .with_potion_output_multiplier(equipment_potion_output_multiplier_basis_points)
         .map_err(|_| CoreCombatFactoryError::InvalidContent)?;
     RedTonicSimulation::with_policy(
         sim_content::first_playable_red_tonic(class_package)
@@ -363,10 +450,10 @@ mod tests {
             CoreCombatFactoryError::InvalidContent
         );
         value = snapshot(&compiler, LONG_VIGIL_ID);
-        value.equipped_weapon.as_mut().unwrap().rarity = 1;
+        value.equipped_weapon.as_mut().unwrap().rarity = 2;
         assert_eq!(
             compiler.build_from_snapshot(&value).unwrap_err(),
-            CoreCombatFactoryError::RolledWeaponStageDisabled
+            CoreCombatFactoryError::EquipmentRarityUnavailable
         );
     }
 
@@ -415,6 +502,67 @@ mod tests {
     }
 
     #[test]
+    fn forged_four_slot_loadout_builds_one_authoritative_combat_projection() {
+        let compiler = compiler();
+        let mut value = snapshot(&compiler, LONG_VIGIL_ID);
+        let item = |uid: u8, template_id: &str, item_level: i16| StoredEquippedWeapon {
+            item_uid: [uid; 16],
+            template_id: template_id.into(),
+            content_revision: compiler.items.revision_label().into(),
+            item_level,
+            rarity: 1,
+        };
+        value.equipped_weapon = Some(item(10, "item.weapon.crossbow.grave_repeater", 10));
+        value.equipped_relic = Some(item(11, "item.relic.arbalist.long_lens", 10));
+        value.equipped_armor = Some(item(12, "item.armor.saltglass.t1", 10));
+        value.equipped_charm = Some(item(13, "item.charm.bell_locket.t1", 10));
+        value.current_health = 150;
+        let combat = compiler.build_from_snapshot(&value).unwrap();
+        assert_eq!(combat.maximum_health, 153);
+        assert_eq!(combat.consumables.vitals().current_health(), 150);
+        assert_eq!(combat.armor, 4);
+        assert_eq!(combat.resistance_basis_points, 700);
+        assert_eq!(combat.healing_received_multiplier_basis_points, 9_200);
+        assert_eq!(
+            combat
+                .consumables
+                .belt_policy()
+                .potion_healing_multiplier_basis_points(),
+            11_000
+        );
+        assert_eq!(combat.relic_resonance_basis_points, 10_360);
+        assert_eq!(
+            combat.state.grave_mark_definition().range_milli_tiles(),
+            15_000
+        );
+        assert_eq!(
+            combat
+                .state
+                .grave_mark_definition()
+                .projectile_speed_milli_tiles_per_second(),
+            15_000
+        );
+        assert_eq!(
+            combat
+                .state
+                .grave_mark_definition()
+                .weapon_damage_multiplier_basis_points(),
+            15_500
+        );
+        assert_eq!(
+            combat
+                .state
+                .grave_mark_definition()
+                .marked_primary_bonus_basis_points(),
+            2_000
+        );
+        assert_eq!(
+            combat.equipment.weapon().template_id,
+            "item.weapon.crossbow.grave_repeater"
+        );
+    }
+
+    #[test]
     fn lantern_loadout_preserves_both_stacks_and_locks_only_second_input() {
         let compiler = compiler();
         let mut value = snapshot(&compiler, LONG_VIGIL_ID);
@@ -427,6 +575,13 @@ mod tests {
             acquisition_ordinal: 1,
             acquired_by_offer_id: [5; 16],
             acquiring_offer_content_version: compiler.oaths.revision_label().into(),
+        });
+        value.equipped_charm = Some(StoredEquippedWeapon {
+            item_uid: [9; 16],
+            template_id: "item.charm.bell_locket.t1".into(),
+            content_revision: compiler.items.revision_label().into(),
+            item_level: 5,
+            rarity: 1,
         });
         let stack = |quantity| StoredCombatBeltStack {
             template_id: sim_core::RED_TONIC_CONTENT_ID.into(),
@@ -445,7 +600,7 @@ mod tests {
                 .consumables
                 .belt_policy()
                 .potion_healing_multiplier_basis_points(),
-            14_000
+            15_000
         );
         let result = combat
             .consumables
