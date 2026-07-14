@@ -128,8 +128,49 @@ pub struct CoreEquipmentPresentation {
     pub template_id: String,
     pub slot: SimulationEquipmentSlot,
     pub item_level: u8,
+    pub rarity: EquipmentRarity,
     pub behavior_key: String,
     pub values: Vec<CoreEquipmentResolvedValue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedCoreEquipmentLoadout {
+    pub slots: [Option<CoreEquipmentPresentation>; sim_core::EQUIPMENT_SLOT_COUNT],
+    pub maximum_health_flat: u32,
+    pub armor_flat: u32,
+    pub resistance_basis_points: i32,
+    pub movement_multiplier_basis_points: u32,
+    pub healing_received_multiplier_basis_points: u32,
+    pub negative_status_reduction_basis_points: u32,
+    pub direct_hit_barrier_health: Option<u32>,
+    pub potion_healing_output_multiplier_basis_points: u32,
+    pub rested_primary_bonus_basis_points: u32,
+    pub rested_primary_idle_millis: u32,
+    pub relic_resonance_basis_points: u32,
+}
+
+impl ResolvedCoreEquipmentLoadout {
+    #[must_use]
+    pub fn weapon(&self) -> &CoreEquipmentPresentation {
+        self.slots[SimulationEquipmentSlot::Weapon.index()]
+            .as_ref()
+            .expect("validated Core loadout always has a weapon")
+    }
+
+    #[must_use]
+    pub fn armor(&self) -> Option<&CoreEquipmentPresentation> {
+        self.slots[SimulationEquipmentSlot::Armor.index()].as_ref()
+    }
+
+    #[must_use]
+    pub fn relic(&self) -> Option<&CoreEquipmentPresentation> {
+        self.slots[SimulationEquipmentSlot::Relic.index()].as_ref()
+    }
+
+    #[must_use]
+    pub fn charm(&self) -> Option<&CoreEquipmentPresentation> {
+        self.slots[SimulationEquipmentSlot::Charm.index()].as_ref()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -453,8 +494,100 @@ pub fn resolve_core_equipment_presentation(
         template_id: template_id.to_owned(),
         slot: simulation_slot(*slot),
         item_level,
+        rarity,
         behavior_key: behavior_key.to_owned(),
         values,
+    })
+}
+
+pub fn compose_core_equipment_loadout(
+    slots: [Option<CoreEquipmentPresentation>; sim_core::EQUIPMENT_SLOT_COUNT],
+) -> Result<ResolvedCoreEquipmentLoadout> {
+    for (index, item) in slots.iter().enumerate() {
+        if item.as_ref().is_some_and(|item| item.slot.index() != index) {
+            bail!("Core equipment loadout contains an item in an illegal slot");
+        }
+    }
+    let Some(weapon) = slots[SimulationEquipmentSlot::Weapon.index()].as_ref() else {
+        bail!("Core equipment loadout requires a weapon");
+    };
+    let armor = slots[SimulationEquipmentSlot::Armor.index()].as_ref();
+    let relic = slots[SimulationEquipmentSlot::Relic.index()].as_ref();
+    let charm = slots[SimulationEquipmentSlot::Charm.index()].as_ref();
+    let value = |item: Option<&CoreEquipmentPresentation>, axis| {
+        item.and_then(|item| {
+            item.values
+                .iter()
+                .find(|resolved| resolved.axis == axis)
+                .map(|resolved| resolved.value)
+        })
+        .unwrap_or_default()
+    };
+    let unsigned = |resolved: i64| {
+        u32::try_from(resolved).context("Core equipment resolved a negative unsigned stat")
+    };
+    let signed_multiplier = |delta: i64| {
+        let resolved = 10_000_i64
+            .checked_add(delta)
+            .context("Core equipment multiplier overflow")?;
+        u32::try_from(resolved).context("Core equipment multiplier became negative")
+    };
+    let maximum_health_flat = unsigned(value(armor, CoreEquipmentAxis::MaximumHealth))?;
+    let armor_flat = unsigned(value(armor, CoreEquipmentAxis::Armor))?;
+    let resistance_basis_points =
+        i32::try_from(value(armor, CoreEquipmentAxis::ResistanceBasisPoints))
+            .context("Core equipment resistance overflow")?;
+    let movement_multiplier_basis_points =
+        signed_multiplier(value(armor, CoreEquipmentAxis::MovementBasisPoints))?;
+    let healing_received_multiplier_basis_points =
+        signed_multiplier(value(armor, CoreEquipmentAxis::HealingReceivedBasisPoints))?;
+    let negative_status_reduction_basis_points = unsigned(
+        value(armor, CoreEquipmentAxis::NegativeStatusReductionBasisPoints)
+            .checked_add(value(
+                charm,
+                CoreEquipmentAxis::NegativeStatusReductionBasisPoints,
+            ))
+            .context("Core equipment status reduction overflow")?,
+    )?;
+    let direct_hit_barrier_health = armor
+        .and_then(|item| {
+            item.values
+                .iter()
+                .find(|resolved| resolved.axis == CoreEquipmentAxis::DirectHitBarrierHealth)
+        })
+        .map(|resolved| unsigned(resolved.value))
+        .transpose()?;
+    let potion_healing_output_multiplier_basis_points =
+        signed_multiplier(value(charm, CoreEquipmentAxis::PotionHealingBasisPoints))?;
+    let rested_primary_bonus_basis_points = unsigned(value(
+        charm,
+        CoreEquipmentAxis::RestedPrimaryBonusBasisPoints,
+    ))?;
+    let rested_primary_idle_millis =
+        unsigned(value(charm, CoreEquipmentAxis::RestedPrimaryIdleMillis))?;
+    let relic_resonance_basis_points = relic.map_or(10_000, |item| {
+        let rarity_bonus = match item.rarity {
+            EquipmentRarity::Worn | EquipmentRarity::Forged => 0,
+            EquipmentRarity::Oathed => 50,
+            EquipmentRarity::Relic | EquipmentRarity::BlackUnique => 100,
+            EquipmentRarity::Sainted => 150,
+        };
+        10_000 + 40 * u32::from(item.item_level - 1) + rarity_bonus
+    });
+    debug_assert_eq!(weapon.slot, SimulationEquipmentSlot::Weapon);
+    Ok(ResolvedCoreEquipmentLoadout {
+        slots,
+        maximum_health_flat,
+        armor_flat,
+        resistance_basis_points,
+        movement_multiplier_basis_points,
+        healing_received_multiplier_basis_points,
+        negative_status_reduction_basis_points,
+        direct_hit_barrier_health,
+        potion_healing_output_multiplier_basis_points,
+        rested_primary_bonus_basis_points,
+        rested_primary_idle_millis,
+        relic_resonance_basis_points,
     })
 }
 
@@ -2601,5 +2734,50 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn four_slot_loadout_composes_exact_core_families_once() {
+        let compiled = load_core_development_items(&content_root()).unwrap();
+        let resolve = |id| {
+            resolve_core_equipment_presentation(&compiled, id, 10, EquipmentRarity::Forged).unwrap()
+        };
+        let loadout = compose_core_equipment_loadout([
+            Some(resolve("item.weapon.crossbow.pine_crossbow")),
+            Some(resolve("item.relic.arbalist.long_lens")),
+            Some(resolve("item.armor.saltglass.t1")),
+            Some(resolve("item.charm.bell_locket.t1")),
+        ])
+        .unwrap();
+        assert_eq!(loadout.maximum_health_flat, 14);
+        assert_eq!(loadout.armor_flat, 1);
+        assert_eq!(loadout.resistance_basis_points, 700);
+        assert_eq!(loadout.movement_multiplier_basis_points, 10_000);
+        assert_eq!(loadout.healing_received_multiplier_basis_points, 9_200);
+        assert_eq!(
+            loadout.potion_healing_output_multiplier_basis_points,
+            11_000
+        );
+        assert_eq!(loadout.relic_resonance_basis_points, 10_360);
+        assert_eq!(
+            loadout.relic().unwrap().behavior_key,
+            "behavior.relic.grave_mark"
+        );
+    }
+
+    #[test]
+    fn matching_named_status_reductions_add_in_basis_points() {
+        let compiled = load_core_development_items(&content_root()).unwrap();
+        let resolve = |id| {
+            resolve_core_equipment_presentation(&compiled, id, 6, EquipmentRarity::Forged).unwrap()
+        };
+        let loadout = compose_core_equipment_loadout([
+            Some(resolve("item.weapon.crossbow.pine_crossbow")),
+            Some(resolve("item.relic.arbalist.cracked_mark_lens")),
+            Some(resolve("item.armor.rootweave.t1")),
+            Some(resolve("item.charm.salt_knot.t1")),
+        ])
+        .unwrap();
+        assert_eq!(loadout.negative_status_reduction_basis_points, 2_200);
     }
 }
