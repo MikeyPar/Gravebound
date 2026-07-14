@@ -10,6 +10,7 @@ mod core_caldus_showcase;
 mod core_encounter_showcase;
 mod core_equipment_showcase;
 mod core_identity;
+mod core_item_lifecycle_showcase;
 mod core_transition_showcase;
 mod core_world_showcase;
 mod core_world_transition;
@@ -68,6 +69,9 @@ pub use core_equipment_showcase::{
 };
 pub use core_identity::{
     CoreIdentityConfig, CoreIdentityModel, CoreIdentityPhase, run_core_identity,
+};
+pub use core_item_lifecycle_showcase::{
+    CoreItemLifecycleShowcaseConfig, run_core_item_lifecycle_showcase,
 };
 pub use core_transition_showcase::{
     CoreTransitionShowcaseConfig, CoreTransitionShowcaseState, run_core_transition_showcase,

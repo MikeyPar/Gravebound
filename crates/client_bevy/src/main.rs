@@ -141,6 +141,13 @@ enum Command {
         #[arg(long, value_enum, default_value_t = CoreEquipmentEvidenceStateArg::Comparison)]
         state: CoreEquipmentEvidenceStateArg,
     },
+    /// Open the disposable GB-M03-04G item and Vault lifecycle inspection surface.
+    CoreItemLifecycleShowcase {
+        #[arg(long, default_value = "content")]
+        content_root: PathBuf,
+        #[arg(long)]
+        reduced_effects: bool,
+    },
 }
 
 fn main() {
@@ -169,12 +176,7 @@ fn run() -> anyhow::Result<()> {
             certificate,
             identity,
             content_root,
-        } => client_bevy::run_core_identity(client_bevy::CoreIdentityConfig {
-            server_address: server,
-            certificate_path: certificate,
-            test_token: identity,
-            content_root,
-        }),
+        } => run_core_identity(server, certificate, identity, content_root),
         Command::CoreWorldShowcase {
             scene,
             content_root,
@@ -202,10 +204,7 @@ fn run() -> anyhow::Result<()> {
         Command::CoreEncounterShowcase {
             content_root,
             reduced_effects,
-        } => client_bevy::run_core_encounter_showcase(client_bevy::CoreEncounterShowcaseConfig {
-            content_root,
-            reduced_effects,
-        }),
+        } => run_encounter_showcase(content_root, reduced_effects),
         Command::CoreCaldusShowcase {
             content_root,
             reduced_effects,
@@ -250,7 +249,39 @@ fn run() -> anyhow::Result<()> {
             reduced_effects,
             state,
         } => run_equipment_showcase(content_root, reduced_effects, state),
+        Command::CoreItemLifecycleShowcase {
+            content_root,
+            reduced_effects,
+        } => run_item_lifecycle_showcase(content_root, reduced_effects),
     }
+}
+
+fn run_core_identity(
+    server: SocketAddr,
+    certificate: PathBuf,
+    identity: String,
+    content_root: PathBuf,
+) -> anyhow::Result<()> {
+    client_bevy::run_core_identity(client_bevy::CoreIdentityConfig {
+        server_address: server,
+        certificate_path: certificate,
+        test_token: identity,
+        content_root,
+    })
+}
+
+fn run_encounter_showcase(content_root: PathBuf, reduced_effects: bool) -> anyhow::Result<()> {
+    client_bevy::run_core_encounter_showcase(client_bevy::CoreEncounterShowcaseConfig {
+        content_root,
+        reduced_effects,
+    })
+}
+
+fn run_item_lifecycle_showcase(content_root: PathBuf, reduced_effects: bool) -> anyhow::Result<()> {
+    client_bevy::run_core_item_lifecycle_showcase(&client_bevy::CoreItemLifecycleShowcaseConfig {
+        content_root,
+        reduced_effects,
+    })
 }
 
 fn run_equipment_showcase(
