@@ -4,20 +4,23 @@ use persistence::{
     CORE_ITEM_CONTENT_REVISION, PersistenceConfig, PostgresPersistence, WIPEABLE_CORE_NAMESPACE,
 };
 use protocol::{
-    AuthTicket, CORE_SAFE_INVENTORY_FEATURE_FLAG, ClientHello, Compression, HandshakeResponse,
-    ManifestHash, Platform, ProtocolVersion, SafeInventoryDestinationV1, SafeInventoryResultCodeV1,
-    SafeInventoryTransferFrameV1, SafeInventoryTransferKindV1, SafeInventoryTransferPayloadV1,
-    WireText, WorldFlowContentRevisionV1,
+    AccountBootstrapFrame, AccountBootstrapRequest, AccountBootstrapResult, AuthTicket,
+    CORE_SAFE_INVENTORY_FEATURE_FLAG, ClientHello, Compression, HandshakeResponse, ManifestHash,
+    Platform, ProgressionProjection, ProgressionQueryFrame, ProgressionResult, ProtocolVersion,
+    SafeInventoryDestinationV1, SafeInventoryResultCodeV1, SafeInventoryTransferFrameV1,
+    SafeInventoryTransferKindV1, SafeInventoryTransferPayloadV1, WireText,
+    WorldFlowContentRevisionV1,
 };
 use rcgen::{CertifiedKey, generate_simple_self_signed};
 use rustls::pki_types::PrivatePkcs8KeyDer;
 use server_app::{
     AccountId, AdmissionState, AuthenticatedAccount, AuthenticatedNamespace,
     AuthenticationDecision, CharacterIdGenerator, CoreBargainAuthority, CoreOathSelectionAuthority,
-    CoreSafeInventoryAuthority, DisabledProgressionQueryRepository, HandshakePolicy, IdentityClock,
-    IdentityService, InMemoryAccountRepository, NoopIdentityEventSink,
-    PostgresSafeInventoryService, ProgressionQueryService, SafeInventoryServiceError,
-    WorldFlowGateService, serve_core_reliable, serve_handshake,
+    CoreSafeInventoryAuthority, HandshakePolicy, IdentityClock, IdentityService,
+    NoopIdentityEventSink, PostgresAccountRepository, PostgresProgressionQueryRepository,
+    PostgresSafeInventoryService, PostgresWorldFlowLocationRepository, ProgressionQueryService,
+    SafeInventoryServiceError, WorldFlowGateService, initialize_postgres_starter,
+    serve_core_reliable, serve_handshake,
 };
 
 // The mandatory PostgreSQL job shares one database across integration binaries. Keep this
@@ -141,6 +144,9 @@ async fn seed_fixture(persistence: &PostgresPersistence) {
     .await
     .unwrap();
     transaction.commit().await.unwrap();
+    initialize_postgres_starter(persistence, ACCOUNT_ID, CHARACTER_ID)
+        .await
+        .unwrap();
 }
 
 async fn insert_equipment(
@@ -184,7 +190,7 @@ fn transfer_frame() -> SafeInventoryTransferFrameV1 {
         kind: SafeInventoryTransferKindV1::CharacterSafeToVault,
         source_slot_index: 0,
         expected_account_version: 1,
-        expected_inventory_version: 1,
+        expected_inventory_version: 2,
     };
     SafeInventoryTransferFrameV1 {
         mutation_id: MUTATION_ID,
@@ -245,19 +251,23 @@ fn hello() -> ClientHello {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the disposable QUIC composition and client journey stay visible as one audit boundary"
+)]
 async fn run_quic_transfers(
     persistence: &PostgresPersistence,
     frames: &[SafeInventoryTransferFrameV1],
 ) -> Vec<protocol::SafeInventoryTransferResultV1> {
     let identity = IdentityService::new(
-        InMemoryAccountRepository::default(),
+        PostgresAccountRepository::new(persistence.clone()),
         FixedAuthority,
         FixedAuthority,
         NoopIdentityEventSink,
         ManifestHash::new("a".repeat(64)).unwrap(),
     );
     let world_flow = WorldFlowGateService::new(
-        InMemoryAccountRepository::default(),
+        PostgresWorldFlowLocationRepository::new(persistence.clone()),
         FixedAuthority,
         WorldFlowContentRevisionV1 {
             records_blake3: ManifestHash::new("b".repeat(64)).unwrap(),
@@ -267,9 +277,13 @@ async fn run_quic_transfers(
     );
     let progression_content =
         sim_content::load_core_development_progression(&content_root()).unwrap();
-    let progression =
-        ProgressionQueryService::new(DisabledProgressionQueryRepository, &progression_content)
-            .unwrap();
+    let progression_revision =
+        ManifestHash::new(progression_content.hashes().records_blake3.clone()).unwrap();
+    let progression = ProgressionQueryService::new(
+        PostgresProgressionQueryRepository::new(persistence.clone(), &progression_content).unwrap(),
+        &progression_content,
+    )
+    .unwrap();
     let oath = CoreOathSelectionAuthority::<FixedAuthority>::disabled();
     let bargain = CoreBargainAuthority::<FixedAuthority>::disabled();
     let safe_inventory = CoreSafeInventoryAuthority::persistent(PostgresSafeInventoryService::new(
@@ -294,7 +308,7 @@ async fn run_quic_transfers(
         )
         .await
         .unwrap();
-        for response_sequence in 1..=frames.len() {
+        for response_sequence in 1..=frames.len() + 2 {
             serve_core_reliable(
                 &server,
                 &identity,
@@ -317,6 +331,45 @@ async fn run_quic_transfers(
             HandshakeResponse::Accepted(server) if server.feature_flags.iter().any(
                 |flag| flag.as_str() == CORE_SAFE_INVENTORY_FEATURE_FLAG
             )
+        ));
+        let (_, bootstrap) = bot_client::perform_account_bootstrap(
+            &client,
+            AccountBootstrapFrame {
+                sequence: 1,
+                request: AccountBootstrapRequest::Bootstrap,
+                content_manifest_hash: ManifestHash::new("a".repeat(64)).unwrap(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            bootstrap,
+            AccountBootstrapResult::Snapshot(snapshot)
+                if snapshot.selected_character_id == Some(CHARACTER_ID)
+                    && snapshot.characters.len() == 1
+        ));
+        let (_, progression) = bot_client::perform_progression_query(
+            &client,
+            ProgressionQueryFrame {
+                sequence: 2,
+                character_id: CHARACTER_ID,
+                progression_content_revision: progression_revision,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            progression,
+            ProgressionResult::Snapshot {
+                projection: ProgressionProjection {
+                    level: 1,
+                    total_xp: 0,
+                    current_health: 120,
+                    progression_version: 1,
+                    ..
+                },
+                ..
+            }
         ));
         let mut results = Vec::with_capacity(frames.len());
         for frame in frames {
@@ -428,7 +481,7 @@ async fn safe_inventory_service_derives_placement_and_replays_after_restart() {
     assert!(!committed.replayed);
     assert_eq!(
         (committed.account_version, committed.inventory_version),
-        (2, 2)
+        (2, 3)
     );
     assert_eq!(committed.placements.len(), 1);
     assert_eq!(
@@ -469,7 +522,7 @@ async fn concurrent_claims_for_final_vault_slot_have_one_winner() {
         kind: SafeInventoryTransferKindV1::CharacterSafeToVault,
         source_slot_index: 0,
         expected_account_version: 1,
-        expected_inventory_version: 1,
+        expected_inventory_version: 2,
     };
     let second_payload = SafeInventoryTransferPayloadV1 {
         source_slot_index: 1,
@@ -555,7 +608,7 @@ async fn injected_ledger_failure_rolls_back_item_versions_and_receipt() {
         kind: SafeInventoryTransferKindV1::CharacterSafeToVault,
         source_slot_index: 0,
         expected_account_version: 1,
-        expected_inventory_version: 1,
+        expected_inventory_version: 2,
     };
     let frame = SafeInventoryTransferFrameV1 {
         mutation_id: [220; 16],
@@ -604,7 +657,7 @@ async fn injected_ledger_failure_rolls_back_item_versions_and_receipt() {
     .await
     .unwrap();
     verify.commit().await.unwrap();
-    assert_eq!(state, (Some(CHARACTER_ID.to_vec()), 5, 0, 1, 1, 1));
+    assert_eq!(state, (Some(CHARACTER_ID.to_vec()), 5, 0, 1, 1, 2));
     assert_eq!(durable_rows, 0);
 }
 
