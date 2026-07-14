@@ -1,4 +1,8 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use persistence::{
     CaldusExtractionCommit, CaldusExtractionRequest, PersistenceConfig, PersistenceTransaction,
@@ -381,15 +385,11 @@ fn assert_accepted(result: &WorldFlowResult, version: u64, location: &str) {
     ));
 }
 
-#[tokio::test]
-#[ignore = "requires explicitly authorized disposable PostgreSQL"]
 #[allow(
     clippy::too_many_lines,
     reason = "the end-to-end authority sequence stays contiguous for route-bypass auditing"
 )]
-async fn reliable_quic_traverses_disposable_core_route_and_committed_extraction() {
-    let persistence = disposable_database().await;
-    seed_character(&persistence).await;
+async fn run_reliable_core_journey(persistence: &PostgresPersistence) -> Duration {
     let progression_content =
         sim_content::load_core_development_progression(&content_root()).unwrap();
     let route = PostgresDormantWorldFlowCoordinator::new(
@@ -421,6 +421,7 @@ async fn reliable_quic_traverses_disposable_core_route_and_committed_extraction(
         namespace: AuthenticatedNamespace::WipeableTest,
     };
     let (server_endpoint, client_endpoint, address) = endpoints();
+    let login_started = Instant::now();
     let connecting = client_endpoint.connect(address, "localhost").unwrap();
     let incoming = server_endpoint.accept().await.unwrap();
     let (client, server) = tokio::join!(connecting, incoming);
@@ -479,6 +480,7 @@ async fn reliable_quic_traverses_disposable_core_route_and_committed_extraction(
         .await
         .unwrap();
         assert_accepted(&hall, 2, HALL_ID);
+        let login_to_control = login_started.elapsed();
         let mut mismatched_danger = route_frame(
             3,
             [225; 16],
@@ -519,7 +521,7 @@ async fn reliable_quic_traverses_disposable_core_route_and_committed_extraction(
         .unwrap();
         assert_accepted(&danger, 3, WORLD_ID);
         let (extraction_request_id, extraction_receipt_id) =
-            commit_caldus_fixture(&persistence).await;
+            commit_caldus_fixture(persistence).await;
         let extraction_request = route_frame(
             5,
             [227; 16],
@@ -544,8 +546,9 @@ async fn reliable_quic_traverses_disposable_core_route_and_committed_extraction(
         .await
         .unwrap();
         assert_accepted(&extraction_replay, 4, HALL_ID);
+        login_to_control
     };
-    tokio::join!(server_journey, client_journey);
+    let ((), login_to_control) = tokio::join!(server_journey, client_journey);
 
     assert!(matches!(
         persistence.world_location(ACCOUNT_ID, CHARACTER_ID).await.unwrap(),
@@ -559,5 +562,39 @@ async fn reliable_quic_traverses_disposable_core_route_and_committed_extraction(
     client_endpoint.wait_idle().await;
     server_endpoint.close(0_u32.into(), b"journey complete");
     server_endpoint.wait_idle().await;
+    login_to_control
+}
+
+#[tokio::test]
+#[ignore = "requires explicitly authorized disposable PostgreSQL"]
+async fn reliable_quic_traverses_disposable_core_route_and_committed_extraction() {
+    let persistence = disposable_database().await;
+    seed_character(&persistence).await;
+    let login_to_control = Box::pin(run_reliable_core_journey(&persistence)).await;
+    assert!(login_to_control < Duration::from_secs(30));
+    persistence.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires explicitly authorized disposable PostgreSQL"]
+async fn reliable_quic_completes_25_scripted_core_journeys_below_login_budget() {
+    let persistence = disposable_database().await;
+    let mut login_to_control = Vec::with_capacity(25);
+    for _ in 0..25 {
+        persistence.reset_disposable_identity_data().await.unwrap();
+        seed_character(&persistence).await;
+        let elapsed = Box::pin(run_reliable_core_journey(&persistence)).await;
+        assert!(elapsed < Duration::from_secs(30));
+        login_to_control.push(elapsed);
+    }
+    login_to_control.sort_unstable();
+    let median = login_to_control[login_to_control.len() / 2];
+    assert!(median < Duration::from_secs(30));
+    println!(
+        "GB-M03-03F 25-journey login-to-control: median={}us p95={}us max={}us",
+        median.as_micros(),
+        login_to_control[23].as_micros(),
+        login_to_control[24].as_micros()
+    );
     persistence.close().await;
 }
