@@ -232,6 +232,19 @@ fn conflicting_transfer_frame_at(expected_inventory_version: u64) -> SafeInvento
     frame
 }
 
+fn stale_transfer_frame() -> SafeInventoryTransferFrameV1 {
+    let mut frame = transfer_frame_at(3);
+    frame.mutation_id = [231; 16];
+    frame
+}
+
+fn foreign_character_transfer_frame() -> SafeInventoryTransferFrameV1 {
+    let mut frame = transfer_frame_at(4);
+    frame.mutation_id = [232; 16];
+    frame.character_id = [233; 16];
+    frame
+}
+
 fn caldus_progression_command(
     progression_content: &sim_content::CoreDevelopmentProgression,
 ) -> ProgressionAwardCommand {
@@ -617,21 +630,42 @@ async fn real_quic_safe_inventory_replays_across_a_new_endpoint() {
     let lifecycle_conflict = conflicting_transfer_frame_at(4);
     let initial = run_quic_transfers(
         &persistence,
-        &[lifecycle_frame, lifecycle_frame, lifecycle_conflict],
+        &[
+            stale_transfer_frame(),
+            foreign_character_transfer_frame(),
+            lifecycle_frame,
+            lifecycle_frame,
+            lifecycle_conflict,
+        ],
         QuicTransferOptions::default(),
     )
     .await;
-    assert_eq!(initial[0].code, SafeInventoryResultCodeV1::Accepted);
-    assert!(!initial[0].replayed);
-    assert!(initial[1].replayed);
-    assert_eq!(initial[0].result_hash, initial[1].result_hash);
+    assert_eq!(initial[0].code, SafeInventoryResultCodeV1::VersionMismatch);
     assert_eq!(
-        initial[2].code,
+        initial[1].code,
+        SafeInventoryResultCodeV1::HallBindingRequired
+    );
+    for rejected in &initial[..2] {
+        rejected.validate().unwrap();
+        assert!(!rejected.replayed);
+        assert_eq!(rejected.result_hash, [0; 32]);
+        assert_eq!(
+            (rejected.account_version, rejected.inventory_version),
+            (0, 0)
+        );
+        assert!(rejected.placements.is_empty());
+    }
+    assert_eq!(initial[2].code, SafeInventoryResultCodeV1::Accepted);
+    assert!(!initial[2].replayed);
+    assert!(initial[3].replayed);
+    assert_eq!(initial[2].result_hash, initial[3].result_hash);
+    assert_eq!(
+        initial[4].code,
         SafeInventoryResultCodeV1::IdempotencyConflict
     );
-    assert!(!initial[2].replayed);
-    assert_eq!(initial[2].result_hash, [0; 32]);
-    assert!(initial[2].placements.is_empty());
+    assert!(!initial[4].replayed);
+    assert_eq!(initial[4].result_hash, [0; 32]);
+    assert!(initial[4].placements.is_empty());
     let before_reconnect = persistence
         .core_item_lifecycle_signature_v1(ACCOUNT_ID, CHARACTER_ID)
         .await
@@ -672,7 +706,7 @@ async fn real_quic_safe_inventory_replays_across_a_new_endpoint() {
     .await;
     assert_eq!(replay[0].code, SafeInventoryResultCodeV1::Accepted);
     assert!(replay[0].replayed);
-    assert_eq!(replay[0].result_hash, initial[0].result_hash);
+    assert_eq!(replay[0].result_hash, initial[2].result_hash);
     assert_eq!(
         replay[1].code,
         SafeInventoryResultCodeV1::IdempotencyConflict
