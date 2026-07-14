@@ -10,6 +10,7 @@ mod core_caldus_showcase;
 mod core_encounter_showcase;
 mod core_identity;
 mod core_world_showcase;
+mod core_world_transition;
 mod death;
 mod debug_overlay;
 mod developer_tools;
@@ -66,6 +67,10 @@ pub use core_identity::{
 pub use core_world_showcase::{
     CoreWorldShowcaseConfig, CoreWorldShowcaseEvidenceState, CoreWorldShowcaseScene,
     run_core_world_showcase,
+};
+pub use core_world_transition::{
+    CoreRetryDirective, CoreSafeOrigin, CoreSceneReadiness, CoreWorldTransitionError,
+    CoreWorldTransitionFailure, CoreWorldTransitionModel, CoreWorldTransitionPhase,
 };
 pub use network_play::{NetworkPlayConfig, run_network_playtest};
 pub use network_prediction::{
