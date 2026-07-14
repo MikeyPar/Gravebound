@@ -18,6 +18,7 @@ mod core_counterplay;
 mod core_enemy;
 mod core_enemy_attack;
 mod core_enemy_kit;
+mod core_enemy_locomotion;
 mod core_enemy_runtime;
 mod core_microrealm;
 mod damage;
@@ -136,6 +137,10 @@ pub use core_enemy_attack::{
 };
 pub use core_enemy_kit::{
     CoreEnemyKitError, CoreEnemyKitEvent, CoreEnemyKitKind, CoreEnemyKitScheduler,
+};
+pub use core_enemy_locomotion::{
+    CoreNormalLocomotionError, CoreNormalLocomotionKind, CoreNormalLocomotionSimulation,
+    CoreNormalLocomotionStep,
 };
 pub use core_enemy_runtime::{
     CoreAttackLock, CoreAttackLockError, CoreEnemyRuntimeError, CoreEnemyRuntimeEvent,

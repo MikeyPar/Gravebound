@@ -607,8 +607,9 @@ mod tests {
     use super::*;
     use crate::load_core_development_encounter_rooms;
     use sim_core::{
-        CollisionTarget, FixedRoomEvent, FriendlyProjectileSource, HostileTargetState,
-        NormalWavePhase, PlayerVitals, ProjectileCollision, RawDamageIntent, RawDamageIntentSource,
+        CollisionTarget, CoreNormalLocomotionSimulation, CoreSelectedTarget, CoreWorldPosition,
+        FixedRoomEvent, FriendlyProjectileSource, HostileTargetState, NormalWavePhase,
+        PlayerVitals, ProjectileCollision, RawDamageIntent, RawDamageIntentSource,
         RedTonicSimulation, SimulationVector, TonicBelt,
     };
 
@@ -970,5 +971,123 @@ mod tests {
                 Err(CoreFixedRoomEncounterError::AuthoredRuntimeRequired { .. })
             ));
         }
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the approved Acolyte and Skull contracts share one rotated-B2 integration trace"
+    )]
+    fn approved_b2_locomotion_reaches_exact_distance_and_clockwise_orbit_then_resets() {
+        let content = load_core_development_encounter_rooms(&content_root()).expect("content");
+        let plan = compile_core_fixed_room_encounters(&content, 1)
+            .expect("plans")
+            .remove(1);
+        let definition = |content_id: &str| {
+            content
+                .actor_definitions()
+                .iter()
+                .find(|actor| actor.id().as_str() == content_id)
+                .and_then(|actor| match actor.behavior() {
+                    crate::CoreEncounterBehaviorDefinition::Authored(definition) => {
+                        Some(definition.clone())
+                    }
+                    crate::CoreEncounterBehaviorDefinition::ImmutableDrownedPilgrim(_)
+                    | crate::CoreEncounterBehaviorDefinition::ImmutableBellReed(_)
+                    | crate::CoreEncounterBehaviorDefinition::ImmutableChainSentry(_) => None,
+                })
+                .expect("authored definition")
+        };
+
+        let acolyte_assignment = plan
+            .assignments()
+            .iter()
+            .find(|assignment| {
+                assignment.runtime_kind == CoreFixedRoomActorRuntimeKind::BellAcolyte
+            })
+            .expect("Acolyte");
+        let acolyte_home = CoreWorldPosition::new(
+            acolyte_assignment.x_milli_tiles,
+            acolyte_assignment.y_milli_tiles,
+        );
+        let mut acolyte = CoreNormalLocomotionSimulation::new(
+            &definition("enemy.bell_acolyte"),
+            acolyte_assignment.entity_id,
+            acolyte_home,
+        )
+        .expect("Acolyte locomotion");
+        let target = CoreSelectedTarget {
+            entity_id: EntityId::new(900).expect("target"),
+            position: CoreWorldPosition::new(
+                acolyte_home.x_milli_tiles + 8_000,
+                acolyte_home.y_milli_tiles,
+            ),
+            squared_distance_milli_tiles: 64_000_000,
+        };
+        let mut positioned = false;
+        for _ in 0..20 {
+            positioned = acolyte
+                .advance(plan.arena(), Some(target))
+                .expect("Acolyte movement")
+                .positioned_for_attack;
+        }
+        assert!(positioned);
+        assert_eq!(
+            acolyte.position(),
+            CoreWorldPosition::new(
+                target.position.x_milli_tiles - 6_000,
+                target.position.y_milli_tiles,
+            )
+        );
+
+        let skull_assignment = plan
+            .assignments()
+            .iter()
+            .find(|assignment| assignment.runtime_kind == CoreFixedRoomActorRuntimeKind::ChoirSkull)
+            .expect("Skull");
+        let skull_home = CoreWorldPosition::new(
+            skull_assignment.x_milli_tiles,
+            skull_assignment.y_milli_tiles,
+        );
+        let mut skull = CoreNormalLocomotionSimulation::new(
+            &definition("enemy.choir_skull"),
+            skull_assignment.entity_id,
+            skull_home,
+        )
+        .expect("Skull locomotion");
+        let mut reached_orbit = false;
+        for _ in 0..40 {
+            reached_orbit = skull
+                .advance(plan.arena(), Some(target))
+                .expect("radial movement")
+                .positioned_for_attack;
+            if reached_orbit {
+                break;
+            }
+        }
+        assert!(reached_orbit);
+        assert_eq!(
+            skull.position(),
+            CoreWorldPosition::new(skull_home.x_milli_tiles + 3_000, skull_home.y_milli_tiles)
+        );
+        for _ in 0..30 {
+            skull
+                .advance(plan.arena(), Some(target))
+                .expect("clockwise orbit");
+        }
+        let orbited = skull.position();
+        assert!(orbited.y_milli_tiles > skull_home.y_milli_tiles);
+        let dx = i64::from(orbited.x_milli_tiles - skull_home.x_milli_tiles);
+        let dy = i64::from(orbited.y_milli_tiles - skull_home.y_milli_tiles);
+        let radius_squared = dx * dx + dy * dy;
+        assert!((8_994_001..=9_006_001).contains(&radius_squared));
+
+        skull.reset();
+        assert_eq!(skull.position(), skull_home);
+        let reset_step = skull
+            .advance(plan.arena(), Some(target))
+            .expect("reset phase");
+        assert!(reset_step.to.x_milli_tiles > skull_home.x_milli_tiles);
+        assert_eq!(reset_step.to.y_milli_tiles, skull_home.y_milli_tiles);
     }
 }
