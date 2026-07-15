@@ -72,14 +72,14 @@ impl DangerCrashRestoreRequest {
     }
 
     #[must_use]
-    pub fn conflict_audit_id(&self, attempted_request_hash: [u8; 32]) -> [u8; 16] {
+    pub fn conflict_audit_id(&self, stored_request_hash: [u8; 32]) -> [u8; 16] {
         derived_identity(
             "gravebound.danger-crash-conflict-audit.v1",
             &[
                 &self.account_id,
                 &self.mutation_id,
+                &stored_request_hash,
                 &self.request_hash,
-                &attempted_request_hash,
             ],
         )
     }
@@ -449,6 +449,17 @@ mod tests {
             altered.validate(),
             Err(PersistenceError::CorruptStoredDangerCrashRestore)
         ));
+
+        let stored_hash = request.request_hash;
+        altered.request_hash = altered.expected_request_hash();
+        assert_eq!(
+            altered.conflict_audit_id(stored_hash),
+            altered.conflict_audit_id(stored_hash)
+        );
+        assert_ne!(
+            altered.conflict_audit_id(stored_hash),
+            altered.conflict_audit_id([8; 32])
+        );
     }
 
     #[test]
