@@ -5,12 +5,12 @@ use persistence::{
     LifeClockCheckpointTransactionV1, LifeClockContentAuthorityV1, LifeClockDangerAuthorityV1,
     LifeClockStateV1, LiveDamageTraceCauseV1, LiveDamageTraceContentAuthorityV1,
     LiveDamageTraceDamageTypeV1, LiveDamageTraceDangerAuthorityV1, LiveDamageTraceEntryV1,
-    LiveDamageTraceNetworkStateV1, LiveDamageTraceRecallStateV1, LiveDamageTraceStatusV1,
-    LiveDamageTraceTickCommandV1, LiveDamageTraceTickRequestV1, LiveDamageTraceTickTransactionV1,
-    PersistenceConfig, PersistenceError, PersistenceTransaction, PostgresPersistence,
-    StoredCharacter, StoredDangerCheckpoint, StoredMutation, StoredSafeInventoryCommand,
-    StoredSafeInventoryCommandKind, StoredSafeInventoryLocation, StoredSafeInventoryPlacement,
-    StoredWorldFlowRevisionV1, WIPEABLE_CORE_NAMESPACE,
+    LiveDamageTraceHeadV1, LiveDamageTraceNetworkStateV1, LiveDamageTraceRecallStateV1,
+    LiveDamageTraceStatusV1, LiveDamageTraceTickCommandV1, LiveDamageTraceTickRequestV1,
+    LiveDamageTraceTickTransactionV1, PersistenceConfig, PersistenceError, PersistenceTransaction,
+    PostgresPersistence, StoredCharacter, StoredDangerCheckpoint, StoredMutation,
+    StoredSafeInventoryCommand, StoredSafeInventoryCommandKind, StoredSafeInventoryLocation,
+    StoredSafeInventoryPlacement, StoredWorldFlowRevisionV1, WIPEABLE_CORE_NAMESPACE,
 };
 const ACCOUNT_A: [u8; 16] = [1; 16];
 const ACCOUNT_B: [u8; 16] = [2; 16];
@@ -1206,14 +1206,25 @@ async fn retained_live_trace_replays_after_pruning_and_restarts_exactly() {
         .await
         .unwrap();
 
-    let first = trace_request([101; 16], 100, 0, 120, 108);
-    assert!(matches!(
-        persistence
-            .transact_live_damage_trace_tick_v1(&first)
-            .await
-            .unwrap(),
-        LiveDamageTraceTickTransactionV1::Committed(_)
-    ));
+    let empty = persistence
+        .load_live_damage_trace_snapshot_v1(ACCOUNT_A, CHARACTER_A)
+        .await
+        .unwrap();
+    assert_eq!(empty.character_version, 2);
+    assert_eq!(empty.through_tick, 0);
+    assert!(empty.head.is_none());
+    assert!(empty.entries.is_empty());
+
+    let first = trace_request([101; 16], 100, 0, 120, 108, None);
+    let first_stored = match persistence
+        .transact_live_damage_trace_tick_v1(&first)
+        .await
+        .unwrap()
+    {
+        LiveDamageTraceTickTransactionV1::Committed(stored) => stored,
+        LiveDamageTraceTickTransactionV1::Replayed(_) => panic!("first tick unexpectedly replayed"),
+    };
+    let first_head = first_stored.head();
     assert_eq!(
         persistence
             .load_live_damage_trace_snapshot_v1(ACCOUNT_A, CHARACTER_A)
@@ -1240,11 +1251,37 @@ async fn retained_live_trace_replays_after_pruning_and_restarts_exactly() {
         Err(PersistenceError::LiveDamageTraceIdempotencyConflict)
     ));
 
-    let second = trace_request([102; 16], 401, 0, 108, 96);
-    persistence
-        .transact_live_damage_trace_tick_v1(&second)
-        .await
-        .unwrap();
+    assert!(matches!(
+        persistence
+            .transact_live_damage_trace_tick_v1(&trace_request([105; 16], 101, 0, 108, 107, None,))
+            .await,
+        Err(PersistenceError::LiveDamageTracePredecessorMismatch)
+    ));
+    let second = trace_request([102; 16], 401, 0, 108, 96, Some(first_head));
+    let interleaved = trace_request(
+        [106; 16],
+        401,
+        0,
+        108,
+        96,
+        second.command.expected_previous.clone(),
+    );
+    let (second_result, interleaved_result) = tokio::join!(
+        persistence.transact_live_damage_trace_tick_v1(&second),
+        persistence.transact_live_damage_trace_tick_v1(&interleaved),
+    );
+    let second_stored = match (second_result, interleaved_result) {
+        (
+            Ok(LiveDamageTraceTickTransactionV1::Committed(stored)),
+            Err(PersistenceError::LiveDamageTracePredecessorMismatch),
+        )
+        | (
+            Err(PersistenceError::LiveDamageTracePredecessorMismatch),
+            Ok(LiveDamageTraceTickTransactionV1::Committed(stored)),
+        ) => stored,
+        results => panic!("interleaved predecessor CAS was not single-winner: {results:?}"),
+    };
+    let second_head = second_stored.head();
     assert!(matches!(
         persistence
             .transact_live_damage_trace_tick_v1(&first)
@@ -1266,7 +1303,7 @@ async fn retained_live_trace_replays_after_pruning_and_restarts_exactly() {
     transaction.rollback().await.unwrap();
     assert_eq!((receipts, payloads, conflicts), (2, 1, 1));
 
-    let mut lethal = trace_request([103; 16], 402, 0, 96, 0).command;
+    let mut lethal = trace_request([103; 16], 402, 0, 96, 0, Some(second_head.clone())).command;
     lethal.entries[0].final_damage = 96;
     lethal.entries[0].lethal = true;
     let lethal = LiveDamageTraceTickRequestV1::seal(lethal).unwrap();
@@ -1284,9 +1321,18 @@ async fn retained_live_trace_replays_after_pruning_and_restarts_exactly() {
         .await
         .unwrap();
     assert_eq!(snapshot.through_tick, 401);
+    assert_eq!(snapshot.character_version, 2);
+    assert_eq!(snapshot.head, Some(second_head.clone()));
     assert_eq!(snapshot.entries[0].entry.source_sim_entity_id, Some(42));
     persistence
-        .transact_live_damage_trace_tick_v1(&trace_request([104; 16], 450, 0, 96, 84))
+        .transact_live_damage_trace_tick_v1(&trace_request(
+            [104; 16],
+            450,
+            0,
+            96,
+            84,
+            Some(second_head.clone()),
+        ))
         .await
         .unwrap();
     let mut transaction = persistence.begin_transaction().await.unwrap();
@@ -1296,7 +1342,7 @@ async fn retained_live_trace_replays_after_pruning_and_restarts_exactly() {
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(ACCOUNT_A.as_slice())
-    .bind([102_u8; 16].as_slice())
+    .bind(second_head.trace_tick_id.as_slice())
     .execute(transaction.connection())
     .await
     .unwrap();
@@ -1316,12 +1362,14 @@ fn trace_request(
     checkpoint_tick: u64,
     pre_health: u32,
     post_health: u32,
+    expected_previous: Option<LiveDamageTraceHeadV1>,
 ) -> LiveDamageTraceTickRequestV1 {
     LiveDamageTraceTickRequestV1::seal(LiveDamageTraceTickCommandV1 {
         account_id: ACCOUNT_A,
         character_id: CHARACTER_A,
         trace_tick_id,
         expected_character_version: 2,
+        expected_previous,
         event_tick,
         danger: LiveDamageTraceDangerAuthorityV1 {
             lineage_id: CHECKPOINT_LINEAGE,

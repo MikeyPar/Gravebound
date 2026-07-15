@@ -239,11 +239,32 @@ impl LiveDamageTraceEntryV1 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveDamageTraceHeadV1 {
+    pub trace_tick_id: [u8; ID_BYTES],
+    pub event_tick: u64,
+    pub result_digest: [u8; HASH_BYTES],
+}
+
+impl LiveDamageTraceHeadV1 {
+    fn validate(&self) -> Result<(), PersistenceError> {
+        if all_zero(&self.trace_tick_id)
+            || self.event_tick == 0
+            || i64::try_from(self.event_tick).is_err()
+            || all_zero(&self.result_digest)
+        {
+            return Err(corrupt());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LiveDamageTraceTickCommandV1 {
     pub account_id: [u8; ID_BYTES],
     pub character_id: [u8; ID_BYTES],
     pub trace_tick_id: [u8; ID_BYTES],
     pub expected_character_version: u64,
+    pub expected_previous: Option<LiveDamageTraceHeadV1>,
     pub event_tick: u64,
     pub danger: LiveDamageTraceDangerAuthorityV1,
     pub content: LiveDamageTraceContentAuthorityV1,
@@ -276,6 +297,14 @@ impl LiveDamageTraceTickCommandV1 {
         }
         self.danger.validate()?;
         self.content.validate()?;
+        if let Some(previous) = &self.expected_previous {
+            previous.validate()?;
+            if previous.event_tick >= self.event_tick
+                || previous.trace_tick_id == self.trace_tick_id
+            {
+                return Err(corrupt());
+            }
+        }
         let mut lethal = 0;
         let mut previous_ordinal = None;
         for (index, entry) in self.entries.iter().enumerate() {
@@ -333,6 +362,15 @@ pub struct StoredLiveDamageTraceTickV1 {
 }
 
 impl StoredLiveDamageTraceTickV1 {
+    #[must_use]
+    pub fn head(&self) -> LiveDamageTraceHeadV1 {
+        LiveDamageTraceHeadV1 {
+            trace_tick_id: self.command.trace_tick_id,
+            event_tick: self.command.event_tick,
+            result_digest: self.result_digest,
+        }
+    }
+
     /// Reconstructs the only acknowledgement that can represent this sealed request at the
     /// supplied database commit time. Keeping this canonicalization beside the persistence DTO
     /// prevents server adapters from copying storage-owned digest rules.
@@ -390,9 +428,11 @@ pub struct StoredLiveDamageTraceSnapshotEntryV1 {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredLiveDamageTraceSnapshotV1 {
+    pub character_version: u64,
     pub danger: LiveDamageTraceDangerAuthorityV1,
     pub content: LiveDamageTraceContentAuthorityV1,
     pub through_tick: u64,
+    pub head: Option<LiveDamageTraceHeadV1>,
     pub entries: Vec<StoredLiveDamageTraceSnapshotEntryV1>,
 }
 
@@ -483,6 +523,7 @@ impl PostgresPersistence {
             &command.danger,
         )
         .await?;
+        validate_predecessor(command, latest.as_ref())?;
         if let Some(latest) = &latest {
             if !receipt_matches_danger_root(latest, &command.danger) {
                 return Err(PersistenceError::LiveDamageTraceBindingMismatch);
@@ -556,11 +597,31 @@ impl PostgresPersistence {
         if lock_account(tx.connection(), account_id).await? != Some(character_id) {
             return Err(PersistenceError::LiveDamageTraceBindingMismatch);
         }
-        let _ = lock_character_by_id(tx.connection(), account_id, character_id).await?;
+        let character_version =
+            lock_character_by_id(tx.connection(), account_id, character_id).await?;
         let authority = load_current_danger(tx.connection(), account_id, character_id).await?;
-        let latest = load_latest_receipt(tx.connection(), account_id, character_id, &authority)
-            .await?
-            .ok_or(PersistenceError::LiveDamageTraceNotFound)?;
+        let content = LiveDamageTraceContentAuthorityV1::core();
+        validate_active_danger(
+            tx.connection(),
+            account_id,
+            character_id,
+            &authority,
+            &content,
+        )
+        .await?;
+        let latest =
+            load_latest_receipt(tx.connection(), account_id, character_id, &authority).await?;
+        let Some(latest) = latest else {
+            tx.rollback().await?;
+            return Ok(StoredLiveDamageTraceSnapshotV1 {
+                character_version,
+                danger: authority,
+                content,
+                through_tick: 0,
+                head: None,
+                entries: Vec::new(),
+            });
+        };
         if latest.danger.lineage_id != authority.lineage_id
             || latest.danger.restore_point_id != authority.restore_point_id
             || latest.content != LiveDamageTraceContentAuthorityV1::core()
@@ -592,11 +653,14 @@ impl PostgresPersistence {
         )
         .await?;
         validate_snapshot_graph(&receipts, &entries, &latest)?;
+        let head = receipt_head(&latest);
         tx.rollback().await?;
         Ok(StoredLiveDamageTraceSnapshotV1 {
+            character_version,
             danger: authority,
             content: latest.content,
             through_tick: latest.event_tick,
+            head: Some(head),
             entries,
         })
     }
@@ -954,6 +1018,25 @@ fn receipt_matches_danger_root(
         && receipt.danger.restore_point_id == danger.restore_point_id
 }
 
+fn receipt_head(receipt: &Receipt) -> LiveDamageTraceHeadV1 {
+    LiveDamageTraceHeadV1 {
+        trace_tick_id: receipt.trace_tick_id,
+        event_tick: receipt.event_tick,
+        result_digest: receipt.result_digest,
+    }
+}
+
+fn validate_predecessor(
+    command: &LiveDamageTraceTickCommandV1,
+    latest: Option<&Receipt>,
+) -> Result<(), PersistenceError> {
+    let durable = latest.map(receipt_head);
+    if command.expected_previous != durable {
+        return Err(PersistenceError::LiveDamageTracePredecessorMismatch);
+    }
+    Ok(())
+}
+
 fn stored_from_receipt(
     receipt: &Receipt,
     command: LiveDamageTraceTickCommandV1,
@@ -1057,6 +1140,15 @@ fn request_hash(
     field(&mut h, &command.character_id)?;
     field(&mut h, &command.trace_tick_id)?;
     field(&mut h, &command.expected_character_version.to_le_bytes())?;
+    match &command.expected_previous {
+        None => field(&mut h, &[0])?,
+        Some(previous) => {
+            field(&mut h, &[1])?;
+            field(&mut h, &previous.trace_tick_id)?;
+            field(&mut h, &previous.event_tick.to_le_bytes())?;
+            field(&mut h, &previous.result_digest)?;
+        }
+    }
     field(&mut h, &command.event_tick.to_le_bytes())?;
     field(&mut h, &command.danger.lineage_id)?;
     field(&mut h, &command.danger.restore_point_id)?;
@@ -1282,6 +1374,7 @@ mod tests {
             character_id: [2; 16],
             trace_tick_id: [3; 16],
             expected_character_version: 4,
+            expected_previous: None,
             event_tick: 120,
             danger: LiveDamageTraceDangerAuthorityV1 {
                 lineage_id: [5; 16],
@@ -1312,6 +1405,13 @@ mod tests {
         variants.push(c);
         let mut c = command();
         c.entries[0].source_sim_entity_id = Some(43);
+        variants.push(c);
+        let mut c = command();
+        c.expected_previous = Some(LiveDamageTraceHeadV1 {
+            trace_tick_id: [11; ID_BYTES],
+            event_tick: 119,
+            result_digest: [12; HASH_BYTES],
+        });
         variants.push(c);
         for c in variants {
             assert_ne!(
@@ -1419,5 +1519,40 @@ mod tests {
         };
         assert!(!receipt_matches_danger_root(&old, &new_root));
         assert!(receipt_matches_danger_root(&old, &old_command.danger));
+    }
+
+    #[test]
+    fn retained_head_cas_requires_exact_predecessor_and_advances() {
+        let first = command();
+        validate_predecessor(&first, None).unwrap();
+        let request = LiveDamageTraceTickRequestV1::seal(first.clone()).unwrap();
+        let receipt = receipt_from_command(
+            &first,
+            request.request_hash,
+            tick_digest(&first).unwrap(),
+            99,
+        )
+        .unwrap();
+        let head = receipt_head(&receipt);
+
+        let mut next = command();
+        next.trace_tick_id = [13; ID_BYTES];
+        next.event_tick += 1;
+        next.expected_previous = Some(head.clone());
+        LiveDamageTraceTickRequestV1::seal(next.clone()).unwrap();
+        validate_predecessor(&next, Some(&receipt)).unwrap();
+
+        let mut stale = next.clone();
+        stale.expected_previous = None;
+        assert!(matches!(
+            validate_predecessor(&stale, Some(&receipt)),
+            Err(PersistenceError::LiveDamageTracePredecessorMismatch)
+        ));
+        let mut altered = next;
+        altered.expected_previous.as_mut().unwrap().result_digest[0] ^= 1;
+        assert!(matches!(
+            validate_predecessor(&altered, Some(&receipt)),
+            Err(PersistenceError::LiveDamageTracePredecessorMismatch)
+        ));
     }
 }

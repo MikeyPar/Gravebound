@@ -152,11 +152,11 @@ pub use lifecycle_signature::{
 pub use live_damage_trace_repository::{
     LIVE_DAMAGE_TRACE_WINDOW_TICKS_V1, LiveDamageTraceCauseV1, LiveDamageTraceContentAuthorityV1,
     LiveDamageTraceDamageTypeV1, LiveDamageTraceDangerAuthorityV1, LiveDamageTraceEntryV1,
-    LiveDamageTraceNetworkStateV1, LiveDamageTraceRecallStateV1, LiveDamageTraceStatusV1,
-    LiveDamageTraceTickCommandV1, LiveDamageTraceTickRequestV1, LiveDamageTraceTickTransactionV1,
-    MAX_LIVE_DAMAGE_TRACE_ENTRIES_V1, MAX_LIVE_DAMAGE_TRACE_STATUSES_PER_ENTRY_V1,
-    StoredLiveDamageTraceSnapshotEntryV1, StoredLiveDamageTraceSnapshotV1,
-    StoredLiveDamageTraceTickV1,
+    LiveDamageTraceHeadV1, LiveDamageTraceNetworkStateV1, LiveDamageTraceRecallStateV1,
+    LiveDamageTraceStatusV1, LiveDamageTraceTickCommandV1, LiveDamageTraceTickRequestV1,
+    LiveDamageTraceTickTransactionV1, MAX_LIVE_DAMAGE_TRACE_ENTRIES_V1,
+    MAX_LIVE_DAMAGE_TRACE_STATUSES_PER_ENTRY_V1, StoredLiveDamageTraceSnapshotEntryV1,
+    StoredLiveDamageTraceSnapshotV1, StoredLiveDamageTraceTickV1,
 };
 pub use oath::{
     OathSelectionTransaction, OathSelectionTransactionState, StoredCharacterLifeEvent,
@@ -506,14 +506,29 @@ pub enum PersistenceError {
     LiveDamageTraceCharacterVersionMismatch { expected: u64, actual: u64 },
     #[error("live damage trace tick is not ordered after {previous}: attempted {attempted}")]
     LiveDamageTraceTickOrder { previous: u64, attempted: u64 },
+    #[error("live damage trace predecessor does not match the retained active-root head")]
+    LiveDamageTracePredecessorMismatch,
     #[error("live damage trace exceeds the bounded 4096-entry current window")]
     LiveDamageTraceCapacityExceeded,
     #[error("live damage trace root is terminal and rejects later standalone ingestion")]
     LiveDamageTraceTerminal,
     #[error("lethal damage evidence must be staged inside the atomic death transaction")]
     LiveDamageTraceTerminalStagingRequired,
-    #[error("no current live damage trace exists for the bound danger root")]
-    LiveDamageTraceNotFound,
+}
+
+impl PersistenceError {
+    /// Whether a transport-level failure could have occurred after `PostgreSQL` accepted `COMMIT`.
+    /// Domain, constraint, decode, pool-acquisition, and explicit rollback errors are known not to
+    /// have produced an acknowledgement and must force an authority reload instead of blind retry.
+    #[must_use]
+    pub const fn may_have_ambiguous_commit_outcome(&self) -> bool {
+        matches!(
+            self,
+            Self::Database(
+                sqlx::Error::Io(_) | sqlx::Error::Protocol(_) | sqlx::Error::WorkerCrashed
+            )
+        )
+    }
 }
 
 /// Returns whether `PostgreSQL` explicitly permits the complete transaction to be retried.
@@ -736,6 +751,23 @@ mod tests {
         for terminal_code in ["23505", "23503", "08006", "57014"] {
             assert!(!is_retryable_postgres_code(terminal_code));
         }
+    }
+
+    #[test]
+    fn only_post_commit_transport_loss_is_ambiguous_to_callers() {
+        let transport = PersistenceError::Database(sqlx::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "lost acknowledgement",
+        )));
+        assert!(transport.may_have_ambiguous_commit_outcome());
+        assert!(
+            !PersistenceError::Database(sqlx::Error::PoolTimedOut)
+                .may_have_ambiguous_commit_outcome()
+        );
+        assert!(
+            !PersistenceError::LiveDamageTracePredecessorMismatch
+                .may_have_ambiguous_commit_outcome()
+        );
     }
 
     #[test]
@@ -1291,6 +1323,7 @@ mod tests {
             "UNIQUE (namespace_id, account_id, character_id, trace_tick_id)",
             "live_trace_payload_retained_receipt_owned_v1",
             "REFERENCES character_entry_restore_points",
+            "request_hash BYTEA NOT NULL",
             "result_digest BYTEA NOT NULL",
             "DEFERRABLE INITIALLY DEFERRED",
             "source_sim_entity_id BYTEA",
