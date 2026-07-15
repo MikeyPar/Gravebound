@@ -138,7 +138,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 35;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 36;
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -879,6 +879,23 @@ mod tests {
                 "crash request authority migration leaked {prohibited}"
             );
         }
+    }
+
+    #[test]
+    fn restore_root_immutability_uses_the_typed_world_revision_columns() {
+        let migration = include_str!("../../../migrations/0036_fix_restore_root_immutability.sql");
+        for required in [
+            "CREATE OR REPLACE FUNCTION enforce_entry_restore_v3_root_immutability",
+            "NEW.records_blake3",
+            "NEW.assets_blake3",
+            "NEW.localization_blake3",
+            "NEW.restore_state BETWEEN 1 AND 4",
+            "NEW.crash_restore_mutation_id IS NULL",
+        ] {
+            assert!(migration.contains(required), "migration omitted {required}");
+        }
+        assert!(!migration.contains("NEW.content_revision"));
+        assert!(!migration.contains("OLD.content_revision"));
     }
 
     #[test]
