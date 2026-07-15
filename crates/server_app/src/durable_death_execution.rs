@@ -17,9 +17,10 @@ use persistence::{
 use thiserror::Error;
 
 use crate::{
-    CommitError, CommitResult, PreparedDurableDeathCommit, PreparedTerminal,
-    STORED_TERMINAL_RECEIPT_SCHEMA_V1, StoredTerminalReceipt, StoredTerminalReceiptV1,
-    TerminalArbiter, TerminalBinding, TerminalCandidate, TerminalKind, TerminalValidationError,
+    CommitError, CommitResult, CoreTerminalCoordinator, PreparedDurableDeathCommit,
+    PreparedTerminal, STORED_TERMINAL_RECEIPT_SCHEMA_V1, StoredTerminalReceipt,
+    StoredTerminalReceiptV1, TerminalArbiter, TerminalBinding, TerminalCandidate, TerminalKind,
+    TerminalValidationError,
 };
 
 /// Repository seam kept narrow so arbitration and post-commit validation can be tested without a
@@ -159,6 +160,19 @@ impl<Writer> DurableDeathExecutionService<Writer>
 where
     Writer: DurableDeathWriter,
 {
+    /// Executes through the complete five-producer tick barrier. This is the production-facing
+    /// composition point: the lower-level arbiter method remains available for focused authority
+    /// tests and exact replay reconstruction.
+    pub async fn execute_coordinated(
+        &self,
+        coordinator: &mut CoreTerminalCoordinator,
+        prepared_terminal: &PreparedTerminal,
+        death: &PreparedDurableDeathCommit,
+    ) -> Result<DurableDeathExecutionOutcome, DurableDeathExecutionError> {
+        self.execute_prepared(coordinator.terminal_arbiter_mut(), prepared_terminal, death)
+            .await
+    }
+
     /// Executes only the arbiter's sealed lethal winner. A repository error leaves the arbiter in
     /// `Prepared`, so ordinary departure remains blocked and the exact request can be retried.
     pub async fn execute_prepared(

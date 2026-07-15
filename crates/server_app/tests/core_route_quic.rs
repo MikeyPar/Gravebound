@@ -23,7 +23,8 @@ use rustls::pki_types::PrivatePkcs8KeyDer;
 use server_app::{
     AccountId, AdmissionState, AuthenticatedAccount, AuthenticatedNamespace,
     AuthenticationDecision, CaldusVictoryOwnerCommand, CharacterIdGenerator, CoreBargainAuthority,
-    CoreOathSelectionAuthority, CoreSafeInventoryAuthority, DeathViewService,
+    CoreOathSelectionAuthority, CoreSafeInventoryAuthority, CoreTerminalCoordinator,
+    CoreTerminalEvaluation, CoreTerminalProducer, CoreTerminalTickSeal, DeathViewService,
     DisabledDeathViewRepository, DisabledProgressionQueryRepository,
     DisposableCoreJourneyWorldFlow, DurableDeathExecutionService, HandshakePolicy, IdentityClock,
     IdentityService, InMemoryAccountRepository, NoopIdentityEventSink,
@@ -32,9 +33,9 @@ use server_app::{
     PostgresDangerEntryLifeMetricsProviderV3, PostgresDangerEntryOathBargainProviderV3,
     PostgresDeathViewRepository, PostgresDormantWorldFlowCoordinator,
     PostgresProgressionAwardService, PostgresProgressionRestoreProvider, PostgresRewardService,
-    ProgressionQueryService, SecretRewardEpoch, SubmitResult, TerminalArbiter,
-    WorldFlowIdGenerator, durable_death_terminal_candidate, recover_committed_death_arbiter,
-    serve_core_reliable, serve_handshake,
+    PreparedTerminal, ProgressionQueryService, SecretRewardEpoch, SubmitResult, TerminalArbiter,
+    TerminalCandidate, WorldFlowIdGenerator, durable_death_terminal_candidate,
+    recover_committed_death_arbiter, serve_core_reliable, serve_handshake,
 };
 use sim_core::{
     CoreBossParticipant, CoreBossParticipantLock, CoreCaldusAntiCheatState,
@@ -893,6 +894,55 @@ async fn reliable_quic_completes_25_scripted_core_journeys_below_login_budget() 
     persistence.close().await;
 }
 
+fn seal_complete_same_tick_terminal_set(
+    lethal: &TerminalCandidate,
+) -> (CoreTerminalCoordinator, PreparedTerminal) {
+    let tick = lethal.observed_tick();
+    let version = lethal.expected_state_version();
+    let mut coordinator = CoreTerminalCoordinator::new(
+        durable_death_fixture::authenticated_account(),
+        lethal.binding(),
+    )
+    .unwrap();
+    // Submit every competing terminal result in reverse priority order. GB-M03-08 will replace
+    // the opaque non-death candidates with their extraction/Recall repository plans; this already
+    // proves that their shared production barrier cannot outrank the sealed lethal plan.
+    for producer in CoreTerminalProducer::ALL.into_iter().rev() {
+        let competing = if producer == CoreTerminalProducer::LethalHealth {
+            lethal.clone()
+        } else {
+            let discriminator = 60_u8 + producer.terminal_kind().stable_code();
+            TerminalCandidate::from_server_plan(
+                lethal.binding(),
+                [discriminator; 16],
+                [discriminator + 10; 16],
+                [discriminator + 20; 32],
+                [discriminator + 30; 32],
+                version,
+                tick,
+                producer.terminal_kind(),
+            )
+            .unwrap()
+        };
+        coordinator
+            .evaluate(CoreTerminalEvaluation::candidate(
+                producer,
+                lethal.binding(),
+                tick,
+                version,
+                competing,
+            ))
+            .unwrap();
+    }
+    let CoreTerminalTickSeal::Prepared(prepared) =
+        coordinator.seal_authoritative_tick(tick, version).unwrap()
+    else {
+        panic!("same-tick terminal set must produce a winner")
+    };
+    assert_eq!(prepared.winner(), lethal);
+    (coordinator, prepared)
+}
+
 /// GDD `DTH-001`/`DTH-020` and `TECH-020`-`023`, Content Spec `CONT-ECHO-009` and
 /// `CONT-HUB-002`, and Roadmap `GB-M03-02`/`06`/`13` jointly require a committed lethal result to
 /// survive lost delivery and process restart without duplicate domain records. The lethal input in
@@ -905,28 +955,21 @@ async fn committed_death_survives_response_loss_and_full_process_restart_over_re
     durable_death_fixture::seed_danger_root(&persistence).await;
     let death = durable_death_fixture::prepare_death(persistence.clone()).await;
     let candidate = durable_death_terminal_candidate(&death).unwrap();
-    let mut arbiter = TerminalArbiter::new(candidate.binding());
-    assert!(matches!(
-        arbiter.submit(candidate.clone()),
-        SubmitResult::Accepted { .. }
-    ));
-    let prepared = arbiter
-        .prepare(death.request().plan.event.death_tick)
-        .unwrap();
+    let (mut coordinator, prepared) = seal_complete_same_tick_terminal_set(&candidate);
     let committed = DurableDeathExecutionService::new(persistence.clone())
-        .execute_prepared(&mut arbiter, &prepared, &death)
+        .execute_coordinated(&mut coordinator, &prepared, &death)
         .await
         .unwrap();
     assert!(!committed.transaction.is_replay());
     let expected_result = committed.transaction.result().clone();
-    let expected_receipt = arbiter.committed_receipt().unwrap().clone();
+    let expected_receipt = coordinator.committed_receipt().unwrap().clone();
     durable_death_fixture::assert_committed_graph(&persistence).await;
 
     // Capture one projection, abandon the following summary response, and then discard every
     // process-local authority that knew the commit acknowledgement.
     let latest_before_restart = run_lost_death_summary_session(&persistence).await;
     drop(committed);
-    drop(arbiter);
+    drop(coordinator);
     persistence.close().await;
 
     let config = PersistenceConfig::from_test_environment()

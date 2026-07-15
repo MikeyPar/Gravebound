@@ -337,6 +337,12 @@ impl CoreTerminalCoordinator {
         self.arbiter.committed_receipt()
     }
 
+    /// Narrow crate-owned bridge for terminal executors. Callers outside the server cannot bypass
+    /// the five-producer barrier or gain direct mutable access to the underlying arbiter.
+    pub(crate) fn terminal_arbiter_mut(&mut self) -> &mut TerminalArbiter {
+        &mut self.arbiter
+    }
+
     /// Records one producer's evaluation. Rejected evaluations never advance the barrier.
     pub fn evaluate(
         &mut self,
