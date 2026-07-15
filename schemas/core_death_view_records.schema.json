@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CoreDeathViewRecords",
+  "description": "Strict source records for the Core death-presentation catalog.",
+  "type": "object",
+  "properties": {
+    "content_revision": {
+      "type": "string"
+    },
+    "copy_bindings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CoreDeathViewCopyBinding"
+      }
+    },
+    "dependencies": {
+      "$ref": "#/$defs/CoreDeathViewDependencyRevisions"
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "content_revision",
+    "dependencies",
+    "copy_bindings"
+  ],
+  "$defs": {
+    "ContentId": {
+      "description": "Stable dot-separated content identifier.",
+      "type": "string"
+    },
+    "CoreDeathViewCopyBinding": {
+      "description": "One stable death-owned ID and its exact localized-copy key.",
+      "type": "object",
+      "properties": {
+        "content_id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "kind": {
+          "$ref": "#/$defs/CoreDeathViewCopyKind"
+        },
+        "localization_key": {
+          "$ref": "#/$defs/ContentId"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "content_id",
+        "kind",
+        "localization_key"
+      ]
+    },
+    "CoreDeathViewCopyKind": {
+      "description": "Closed semantic domains for death-owned copy. Dependency-owned class, item, hostile, Oath,\nand Bargain names are resolved from their own compiled packages instead of being duplicated.",
+      "type": "string",
+      "enum": [
+        "action",
+        "attack",
+        "cause",
+        "damage_type",
+        "deed",
+        "echo_outcome",
+        "error",
+        "field",
+        "hero_label",
+        "material",
+        "memorial_presentation",
+        "network_state",
+        "pattern",
+        "projection",
+        "recall_state",
+        "section",
+        "source",
+        "state",
+        "status",
+        "surface"
+      ]
+    },
+    "CoreDeathViewDependencyRevisions": {
+      "description": "Hashes of every independently compiled package that may supply a localized name to a Core\ndeath snapshot. Hashing this structure into the death records makes the closure transitive.",
+      "type": "object",
+      "properties": {
+        "caldus_assets_blake3": {
+          "type": "string"
+        },
+        "caldus_localization_blake3": {
+          "type": "string"
+        },
+        "caldus_records_blake3": {
+          "type": "string"
+        },
+        "encounter_assets_blake3": {
+          "type": "string"
+        },
+        "encounter_localization_blake3": {
+          "type": "string"
+        },
+        "encounter_records_blake3": {
+          "type": "string"
+        },
+        "identity_manifest_blake3": {
+          "type": "string"
+        },
+        "item_manifest_blake3": {
+          "type": "string"
+        },
+        "oath_bargain_manifest_blake3": {
+          "type": "string"
+        },
+        "world_assets_blake3": {
+          "type": "string"
+        },
+        "world_localization_blake3": {
+          "type": "string"
+        },
+        "world_records_blake3": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "identity_manifest_blake3",
+        "world_records_blake3",
+        "world_assets_blake3",
+        "world_localization_blake3",
+        "item_manifest_blake3",
+        "encounter_records_blake3",
+        "encounter_assets_blake3",
+        "encounter_localization_blake3",
+        "caldus_records_blake3",
+        "caldus_assets_blake3",
+        "caldus_localization_blake3",
+        "oath_bargain_manifest_blake3"
+      ]
+    }
+  }
+}

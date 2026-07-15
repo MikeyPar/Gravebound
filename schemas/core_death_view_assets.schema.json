@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CoreDeathViewAssetManifest",
+  "type": "object",
+  "properties": {
+    "assets": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CoreDeathViewAssetReference"
+      }
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "assets"
+  ],
+  "$defs": {
+    "ContentId": {
+      "description": "Stable dot-separated content identifier.",
+      "type": "string"
+    },
+    "CoreDeathViewAssetReference": {
+      "description": "Asset reference reused from a dependency package by the native summary or Memorial surface.",
+      "type": "object",
+      "properties": {
+        "asset_id": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "source_content_id": {
+          "$ref": "#/$defs/ContentId"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "asset_id",
+        "source_content_id"
+      ]
+    }
+  }
+}

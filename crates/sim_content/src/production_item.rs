@@ -36,6 +36,7 @@ pub struct CompiledProductionItemCatalog {
     reward_tables: BTreeMap<String, ProductionRewardTableRecord>,
     material_pools: BTreeMap<String, ProductionMaterialPoolRecord>,
     stage_policies: BTreeMap<String, ProductionItemStagePolicyRecord>,
+    localization: BTreeMap<String, String>,
 }
 
 impl CompiledProductionItemCatalog {
@@ -57,6 +58,15 @@ impl CompiledProductionItemCatalog {
     #[must_use]
     pub const fn items(&self) -> &BTreeMap<String, ProductionItemTemplateRecord> {
         &self.items
+    }
+
+    /// Resolves an enabled item through the exact independently hashed Core localization file.
+    #[must_use]
+    pub fn localized_item_name(&self, template_id: &str) -> Option<&str> {
+        let item = self.items.get(template_id)?;
+        self.localization
+            .get(item.header.localization_name_key.as_str())
+            .map(String::as_str)
     }
 
     #[must_use]
@@ -830,6 +840,11 @@ pub fn load_core_development_items(root: &Path) -> Result<CompiledProductionItem
     validate_item_localization(&records, &localization)?;
     let mut compiled = compile_production_item_catalog(&target, &records)?;
     compiled.hashes = hashes;
+    compiled.localization = localization
+        .entries
+        .into_iter()
+        .map(|entry| (entry.key.to_string(), entry.value))
+        .collect();
     validate_exact_core_reward_closure(&compiled)?;
     Ok(compiled)
 }
@@ -1532,6 +1547,7 @@ pub fn compile_production_item_catalog(
         reward_tables,
         material_pools,
         stage_policies,
+        localization: BTreeMap::new(),
     })
 }
 

@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CoreDeathViewDevelopmentTarget",
+  "description": "Independently hashed descriptor for the `GB-M03-06D` presentation package.",
+  "type": "object",
+  "properties": {
+    "expected_assets_blake3": {
+      "type": "string"
+    },
+    "expected_localization_blake3": {
+      "type": "string"
+    },
+    "expected_records_blake3": {
+      "type": "string"
+    },
+    "required_asset_ids": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ContentId"
+      }
+    },
+    "required_copy_ids": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ContentId"
+      }
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "target_kind": {
+      "$ref": "#/$defs/CoreDeathViewTargetKind"
+    },
+    "target_name": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "target_kind",
+    "target_name",
+    "required_copy_ids",
+    "required_asset_ids",
+    "expected_records_blake3",
+    "expected_assets_blake3",
+    "expected_localization_blake3"
+  ],
+  "$defs": {
+    "ContentId": {
+      "description": "Stable dot-separated content identifier.",
+      "type": "string"
+    },
+    "CoreDeathViewTargetKind": {
+      "description": "Identifies the wipeable Core death-presentation package. This package is deliberately\nseparate from world-flow content because a death snapshot can reference class, item,\nencounter, Oath/Bargain, and Memorial domains at once.",
+      "type": "string",
+      "enum": [
+        "unpromoted_death_view_subset"
+      ]
+    }
+  }
+}

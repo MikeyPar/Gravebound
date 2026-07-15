@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "assets": [
+    {"asset_id":"portrait.boss.sir_caldus","source_content_id":"boss.sir_caldus"},
+    {"asset_id":"portrait.miniboss.sepulcher_knight","source_content_id":"miniboss.sepulcher_knight"},
+    {"asset_id":"sprite.station.memorial_wall","source_content_id":"station.memorial_wall"}
+  ]
+}

@@ -74,6 +74,12 @@ enum Command {
         #[arg(long, default_value = "content")]
         root: PathBuf,
     },
+    /// Validate the transitive, non-promotable Core death-presentation target.
+    ValidateCoreDeathView {
+        /// Content root containing every compiled Core dependency and death-view source.
+        #[arg(long, default_value = "content")]
+        root: PathBuf,
+    },
     /// Regenerate checked-in JSON Schema contracts.
     GenerateSchemas {
         /// Destination directory for generated schemas.
@@ -115,9 +121,23 @@ fn main() -> Result<()> {
         Command::ValidateCoreOathsBargains { root } => {
             validate_core_oaths_bargains_command(&root)?;
         }
+        Command::ValidateCoreDeathView { root } => validate_core_death_view_command(&root)?,
         Command::GenerateSchemas { output } => generate_schemas_command(&output)?,
     }
 
+    Ok(())
+}
+
+fn validate_core_death_view_command(root: &std::path::Path) -> Result<()> {
+    let compiled = sim_content::load_core_development_death_view(root)?;
+    info!(
+        target = compiled.target_name(),
+        item_revision = compiled.item_content_revision(),
+        records_blake3 = compiled.hashes().records_blake3,
+        assets_blake3 = compiled.hashes().assets_blake3,
+        localization_blake3 = compiled.hashes().localization_blake3,
+        "unpromoted Core death-view target is valid"
+    );
     Ok(())
 }
 
@@ -295,6 +315,18 @@ fn generate_schemas_command(output: &std::path::Path) -> Result<()> {
     write_schema::<content_schema::CoreWorldFlowCopyFile>(
         output,
         "core_world_flow_copy.schema.json",
+    )?;
+    write_schema::<content_schema::CoreDeathViewDevelopmentTarget>(
+        output,
+        "core_death_view_target.schema.json",
+    )?;
+    write_schema::<content_schema::CoreDeathViewRecords>(
+        output,
+        "core_death_view_records.schema.json",
+    )?;
+    write_schema::<content_schema::CoreDeathViewAssetManifest>(
+        output,
+        "core_death_view_assets.schema.json",
     )?;
     write_schema::<content_schema::CoreEncounterRoomDevelopmentTarget>(
         output,

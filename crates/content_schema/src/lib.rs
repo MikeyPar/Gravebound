@@ -944,6 +944,109 @@ pub struct CoreWorldFlowCopyFile {
     pub entries: Vec<CoreLocalizedCopyEntry>,
 }
 
+/// Identifies the wipeable Core death-presentation package. This package is deliberately
+/// separate from world-flow content because a death snapshot can reference class, item,
+/// encounter, Oath/Bargain, and Memorial domains at once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CoreDeathViewTargetKind {
+    UnpromotedDeathViewSubset,
+}
+
+/// Independently hashed descriptor for the `GB-M03-06D` presentation package.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CoreDeathViewDevelopmentTarget {
+    pub schema_version: u32,
+    pub target_kind: CoreDeathViewTargetKind,
+    pub target_name: String,
+    pub required_copy_ids: Vec<ContentId>,
+    pub required_asset_ids: Vec<ContentId>,
+    pub expected_records_blake3: String,
+    pub expected_assets_blake3: String,
+    pub expected_localization_blake3: String,
+}
+
+/// Hashes of every independently compiled package that may supply a localized name to a Core
+/// death snapshot. Hashing this structure into the death records makes the closure transitive.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CoreDeathViewDependencyRevisions {
+    pub identity_manifest_blake3: String,
+    pub world_records_blake3: String,
+    pub world_assets_blake3: String,
+    pub world_localization_blake3: String,
+    pub item_manifest_blake3: String,
+    pub encounter_records_blake3: String,
+    pub encounter_assets_blake3: String,
+    pub encounter_localization_blake3: String,
+    pub caldus_records_blake3: String,
+    pub caldus_assets_blake3: String,
+    pub caldus_localization_blake3: String,
+    pub oath_bargain_manifest_blake3: String,
+}
+
+/// Closed semantic domains for death-owned copy. Dependency-owned class, item, hostile, Oath,
+/// and Bargain names are resolved from their own compiled packages instead of being duplicated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CoreDeathViewCopyKind {
+    Action,
+    Attack,
+    Cause,
+    DamageType,
+    Deed,
+    EchoOutcome,
+    Error,
+    Field,
+    HeroLabel,
+    Material,
+    MemorialPresentation,
+    NetworkState,
+    Pattern,
+    Projection,
+    RecallState,
+    Section,
+    Source,
+    State,
+    Status,
+    Surface,
+}
+
+/// One stable death-owned ID and its exact localized-copy key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CoreDeathViewCopyBinding {
+    pub content_id: ContentId,
+    pub kind: CoreDeathViewCopyKind,
+    pub localization_key: ContentId,
+}
+
+/// Strict source records for the Core death-presentation catalog.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CoreDeathViewRecords {
+    pub schema_version: u32,
+    pub content_revision: String,
+    pub dependencies: CoreDeathViewDependencyRevisions,
+    pub copy_bindings: Vec<CoreDeathViewCopyBinding>,
+}
+
+/// Asset reference reused from a dependency package by the native summary or Memorial surface.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CoreDeathViewAssetReference {
+    pub asset_id: ContentId,
+    pub source_content_id: ContentId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CoreDeathViewAssetManifest {
+    pub schema_version: u32,
+    pub assets: Vec<CoreDeathViewAssetReference>,
+}
+
 /// Required labels for every safe Core identity screen state in `GB-M03-01`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -1118,6 +1221,34 @@ mod tests {
                 "core_world_flow_copy.schema.json",
                 serde_json::to_value(schemars::schema_for!(CoreWorldFlowCopyFile))
                     .expect("serializable copy schema"),
+            ),
+        ];
+        for (name, generated) in cases {
+            let text = fs::read_to_string(schema_root.join(name)).expect("checked-in schema");
+            let checked_in: serde_json::Value =
+                serde_json::from_str(&text).expect("valid checked-in schema");
+            assert_eq!(checked_in, generated, "schema drift in {name}");
+        }
+    }
+
+    #[test]
+    fn checked_in_core_death_view_schemas_match_the_rust_contracts() {
+        let schema_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../schemas");
+        let cases = [
+            (
+                "core_death_view_target.schema.json",
+                serde_json::to_value(schemars::schema_for!(CoreDeathViewDevelopmentTarget))
+                    .expect("serializable death-view target schema"),
+            ),
+            (
+                "core_death_view_records.schema.json",
+                serde_json::to_value(schemars::schema_for!(CoreDeathViewRecords))
+                    .expect("serializable death-view records schema"),
+            ),
+            (
+                "core_death_view_assets.schema.json",
+                serde_json::to_value(schemars::schema_for!(CoreDeathViewAssetManifest))
+                    .expect("serializable death-view asset schema"),
             ),
         ];
         for (name, generated) in cases {
