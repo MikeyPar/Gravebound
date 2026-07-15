@@ -388,7 +388,7 @@ async fn checkpoint_and_advance_first_danger_clock(persistence: &PostgresPersist
         oath_bargain_version: 1,
         checkpoint_schema_version: 1,
         checkpoint_payload: vec![1],
-        checkpoint_payload_digest: hash(22),
+        checkpoint_payload_digest: *blake3::hash(&[1]).as_bytes(),
     };
     persistence
         .write_danger_checkpoint(&checkpoint)
@@ -441,9 +441,19 @@ async fn commit_sepulcher_deed(
     .await
     .unwrap();
     sqlx::query(
-        "UPDATE character_progression SET total_xp=120,progression_version=2, \
+        "UPDATE character_progression SET total_xp=120,level=2,progression_version=2, \
          updated_at=transaction_timestamp() WHERE namespace_id=$1 AND account_id=$2 \
          AND character_id=$3 AND progression_version=1",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(CHARACTER_ID.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE characters SET level=2,updated_at=transaction_timestamp() \
+         WHERE namespace_id=$1 AND account_id=$2 AND character_id=$3",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(ACCOUNT_ID.as_slice())
@@ -484,7 +494,7 @@ async fn commit_sepulcher_deed(
          discarded_xp,pre_total_xp,post_total_xp,pre_level,post_level,pre_progression_version, \
          post_progression_version,result_code,result_payload,entry_restore_point_id) \
          VALUES ($1,$2,$3,$4,$5,'miniboss.sepulcher_knight','xp.miniboss_t1',$6,1,TRUE, \
-                 300,300,0,1200,1,0,0,0,0,0,0,FALSE,120,0,120,120,0,0,120,1,1,1,2,0,$7,$8)",
+                 300,300,0,1200,1,0,0,0,0,0,0,FALSE,120,0,120,120,0,0,120,1,2,1,2,0,$7,$8)",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(ACCOUNT_ID.as_slice())
