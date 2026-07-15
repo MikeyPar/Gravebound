@@ -1506,3 +1506,13 @@ async fn assert_rollback_and_cascade(persistence: &PostgresPersistence) {
     verification.rollback().await.unwrap();
     assert_eq!((characters, mutations), (0, 0));
 }
+    sqlx::query(
+        "INSERT INTO character_world_locations (namespace_id,account_id,character_id, \
+         character_version,location_kind) VALUES ($1,$2,$3,1,0)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(SAFE_ACCOUNT.as_slice())
+    .bind(SAFE_CHARACTER.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
