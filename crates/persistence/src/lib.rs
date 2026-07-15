@@ -159,7 +159,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 39;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 40;
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -860,6 +860,32 @@ mod tests {
             assert!(
                 !migration.contains(prohibited),
                 "durable-death custody migration leaked {prohibited}"
+            );
+        }
+    }
+
+    #[test]
+    fn lifetime_and_permadeath_combat_clocks_remain_independent() {
+        let migration = include_str!("../../../migrations/0040_independent_death_clocks.sql");
+        for required in [
+            "Gravebound_Production_GDD_v1_Canonical.md",
+            "Gravebound_Content_Production_Spec_v1.md",
+            "Gravebound_Development_Roadmap_v1.md",
+            "DROP CONSTRAINT entry_restore_life_v3_ticks",
+            "captured_lifetime_ticks >= 0",
+            "rollback_permadeath_combat_ticks >= 0",
+        ] {
+            assert!(migration.contains(required), "migration omitted {required}");
+        }
+        for prohibited in [
+            "rollback_permadeath_combat_ticks <= captured_lifetime_ticks",
+            "DROP TABLE",
+            "TRUNCATE",
+            "DELETE FROM",
+        ] {
+            assert!(
+                !migration.contains(prohibited),
+                "independent clock correction leaked {prohibited}"
             );
         }
     }

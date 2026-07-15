@@ -275,7 +275,6 @@ impl DurableDeathEventV1 {
             || self.final_damage == 0
             || self.pre_hit_health == 0
             || self.final_damage < self.pre_hit_health
-            || self.permadeath_combat_ticks > self.lifetime_ticks
             || !self.versions.valid()
             || self.trace_entry_count == 0
             || usize::from(self.trace_entry_count) > MAX_DURABLE_DEATH_TRACE_ENTRIES
@@ -1897,6 +1896,10 @@ mod tests {
     fn canonical_request_and_committed_result_round_trip() {
         let request = valid_request();
         request.validate().unwrap();
+        let mut independent_clocks = request.plan.event.clone();
+        independent_clocks.lifetime_ticks = 17_000;
+        independent_clocks.permadeath_combat_ticks = 18_000;
+        independent_clocks.validate().unwrap();
         let payload = request.payload().unwrap();
         assert_eq!(
             DurableDeathCommitRequestV1::decode(&payload).unwrap(),

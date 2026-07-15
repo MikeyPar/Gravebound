@@ -145,17 +145,14 @@ impl TerminalRuntimePrestate {
         self.durable_health > 0
             && self.entry_life_version == self.root_entry_life_version
             && self.entry_life_version <= self.durable_life_version
-            && self.entry_combat_ticks <= self.entry_lifetime_ticks
             && self.entry_lifetime_ticks <= self.durable_lifetime_ticks
             && self.entry_combat_ticks <= self.durable_combat_ticks
-            && self.durable_combat_ticks <= self.durable_lifetime_ticks
     }
 
     const fn request_is_monotonic(self) -> bool {
         self.durable_life_version == self.expected_pre_life_version
             && self.durable_lifetime_ticks <= self.terminal_lifetime_ticks
             && self.durable_combat_ticks <= self.terminal_combat_ticks
-            && self.terminal_combat_ticks <= self.terminal_lifetime_ticks
     }
 }
 
@@ -2386,6 +2383,18 @@ mod tests {
         assert!(equality_boundary.stored_history_valid());
         assert!(equality_boundary.request_is_monotonic());
 
+        let independent_clocks = TerminalRuntimePrestate {
+            durable_lifetime_ticks: 100,
+            durable_combat_ticks: 4_050,
+            entry_lifetime_ticks: 90,
+            entry_combat_ticks: 4_000,
+            terminal_lifetime_ticks: 110,
+            terminal_combat_ticks: 4_090,
+            ..valid
+        };
+        assert!(independent_clocks.stored_history_valid());
+        assert!(independent_clocks.request_is_monotonic());
+
         for invalid in [
             TerminalRuntimePrestate {
                 durable_health: 0,
@@ -2413,10 +2422,6 @@ mod tests {
             },
             TerminalRuntimePrestate {
                 expected_pre_life_version: 9,
-                ..valid
-            },
-            TerminalRuntimePrestate {
-                terminal_combat_ticks: valid.terminal_lifetime_ticks + 1,
                 ..valid
             },
         ] {

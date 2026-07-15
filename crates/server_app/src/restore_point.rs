@@ -219,7 +219,8 @@ impl SafeAggregateVersionsV1 {
 ///
 /// `lifetime_ticks` is immutable crash evidence: restoration must not roll it back. The captured
 /// `permadeath_combat_ticks` is the authoritative value restored after an unrecoverable instance
-/// crash when no terminal outcome committed first.
+/// crash when no terminal outcome committed first. The clocks are independent: committed danger
+/// staging advances combat time while noncontrollable loading does not advance lifetime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LifeMetricsRestoreV2 {
     pub lifetime_ticks: u64,
@@ -229,7 +230,7 @@ pub struct LifeMetricsRestoreV2 {
 
 impl LifeMetricsRestoreV2 {
     fn validate(&self) -> Result<(), RestorePointError> {
-        if self.life_metrics_version == 0 || self.permadeath_combat_ticks > self.lifetime_ticks {
+        if self.life_metrics_version == 0 {
             return Err(RestorePointError::InvalidLifeMetrics);
         }
         Ok(())
@@ -584,7 +585,7 @@ pub struct LifeMetricsRestoreV3 {
 
 impl LifeMetricsRestoreV3 {
     fn validate(&self) -> Result<(), RestorePointError> {
-        if self.life_metrics_version == 0 || self.permadeath_combat_ticks > self.lifetime_ticks {
+        if self.life_metrics_version == 0 {
             return Err(RestorePointError::InvalidLifeMetrics);
         }
         Ok(())
@@ -1674,7 +1675,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_or_mismatched_life_metrics_fail_closed() {
+    fn life_metrics_require_matching_versions_but_keep_clocks_independent() {
         let mut zero_version = snapshot_v2();
         zero_version.life_metrics.life_metrics_version = 0;
         assert_eq!(
@@ -1682,13 +1683,15 @@ mod tests {
             Err(RestorePointError::InvalidLifeMetrics)
         );
 
-        let mut impossible_clock = snapshot_v2();
-        impossible_clock.life_metrics.permadeath_combat_ticks =
-            impossible_clock.life_metrics.lifetime_ticks + 1;
-        assert_eq!(
-            impossible_clock.validate(),
-            Err(RestorePointError::InvalidLifeMetrics)
-        );
+        let mut independent_clocks = snapshot_v2();
+        independent_clocks.life_metrics.permadeath_combat_ticks =
+            independent_clocks.life_metrics.lifetime_ticks + 1;
+        assert_eq!(independent_clocks.validate(), Ok(()));
+
+        let mut independent_v3_clocks = snapshot_v3();
+        independent_v3_clocks.life_metrics.permadeath_combat_ticks =
+            independent_v3_clocks.life_metrics.lifetime_ticks + 1;
+        assert_eq!(independent_v3_clocks.validate(), Ok(()));
 
         let mut mismatched_version = snapshot_v2();
         mismatched_version.versions.life_metrics_version += 1;
