@@ -22,6 +22,7 @@ mod ground_expiry;
 mod identity;
 mod instance;
 mod lifecycle;
+mod live_damage_trace_service;
 mod oath_selection;
 mod progression_award;
 mod progression_query;
@@ -111,6 +112,11 @@ pub use instance::{
 pub use lifecycle::{
     DirectoryTickOutput, LINK_LOST_TICKS, LifecycleError, LifecycleResponse, LogicalSessionId,
     ManagedSession, SessionDirectory, SessionOwnerId, SessionPhase, TransportId,
+};
+pub use live_damage_trace_service::{
+    LiveDamageTraceBinding, LiveDamageTraceIngestOutcome, LiveDamageTraceMutationAuthority,
+    LiveDamageTraceRepository, LiveDamageTraceService, LiveDamageTraceServiceError,
+    PreparedTerminalLiveDamageTrace,
 };
 pub use oath_selection::{CoreOathSelectionAuthority, PostgresOathSelectionService};
 pub use progression_award::{
