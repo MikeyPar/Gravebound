@@ -3,6 +3,10 @@
 //! This directory is intentionally not attached to the normal player route. It proves that one
 //! account/character/lineage identity owns one mutable combat aggregate across transport and room
 //! changes without rebuilding Bargain state from persistence.
+//!
+//! Authorities: `Gravebound_Production_GDD_v1_Canonical.md` `TECH-023`,
+//! `Gravebound_Content_Production_Spec_v1.md` Core world/content authority, and
+//! `Gravebound_Development_Roadmap_v1.md` `GB-M03-03`/`06` restart gates.
 
 use std::{collections::BTreeMap, future::Future};
 
@@ -83,6 +87,7 @@ pub struct CoreLiveCharacter {
     room_id: String,
     checkpoint_binding: CoreCheckpointBinding,
     checkpoint_dirty: bool,
+    has_persisted_checkpoint: bool,
     last_checkpoint_tick: u64,
     combat: CoreCharacterCombat,
 }
@@ -139,8 +144,8 @@ impl CoreLiveCharacter {
 
     pub fn scheduled_checkpoint(&self) -> Result<Option<StoredDangerCheckpoint>, CoreLiveError> {
         let current_tick = self.combat.state.tick().0;
-        if !self.checkpoint_dirty
-            || current_tick.saturating_sub(self.last_checkpoint_tick)
+        if self.has_persisted_checkpoint
+            && current_tick.saturating_sub(self.last_checkpoint_tick)
                 < DANGER_CHECKPOINT_INTERVAL_TICKS
         {
             return Ok(None);
@@ -149,7 +154,7 @@ impl CoreLiveCharacter {
     }
 
     pub fn lifecycle_checkpoint(&self) -> Result<Option<StoredDangerCheckpoint>, CoreLiveError> {
-        if !self.checkpoint_dirty {
+        if self.has_persisted_checkpoint && !self.checkpoint_dirty {
             return Ok(None);
         }
         self.prepare_checkpoint().map(Some)
@@ -162,6 +167,7 @@ impl CoreLiveCharacter {
         self.validate_stored_checkpoint(checkpoint)?;
         let committed_tick = u64::try_from(checkpoint.checkpoint_tick)
             .map_err(|_| CoreLiveError::InvalidCheckpoint)?;
+        self.has_persisted_checkpoint = true;
         self.last_checkpoint_tick = committed_tick;
         let current = self
             .combat
@@ -189,7 +195,9 @@ impl CoreLiveCharacter {
             .state
             .import_bell_debt_checkpoint(&decoded)
             .map_err(|_| CoreLiveError::InvalidCheckpoint)?;
-        self.last_checkpoint_tick = 0;
+        self.has_persisted_checkpoint = true;
+        self.last_checkpoint_tick = u64::try_from(checkpoint.checkpoint_tick)
+            .map_err(|_| CoreLiveError::InvalidCheckpoint)?;
         self.checkpoint_dirty = false;
         Ok(())
     }
@@ -236,6 +244,7 @@ impl CoreLiveCharacter {
             .state
             .reset_bell_debt(BellDebtResetReason::SafeTransfer);
         self.checkpoint_dirty = false;
+        self.has_persisted_checkpoint = false;
         self.last_checkpoint_tick = 0;
     }
 
@@ -467,6 +476,7 @@ impl CoreLiveDirectory {
                 room_id,
                 checkpoint_binding,
                 checkpoint_dirty: false,
+                has_persisted_checkpoint: false,
                 last_checkpoint_tick: 0,
                 combat,
             },
@@ -965,7 +975,7 @@ mod tests {
     }
 
     #[test]
-    fn clean_intervals_skip_writes_and_dirty_state_coalesces_at_exact_cadence() {
+    fn initial_and_exact_cadence_checkpoints_do_not_depend_on_bargain_dirtiness() {
         let key = CoreLifeKey::new([1; 16], [2; 16], [3; 16]).unwrap();
         let mut directory = CoreLiveDirectory::default();
         directory
@@ -976,6 +986,18 @@ mod tests {
                 checkpoint_binding(),
                 combat(),
             )
+            .unwrap();
+        let initial = directory
+            .get(key)
+            .unwrap()
+            .scheduled_checkpoint()
+            .unwrap()
+            .expect("danger entry requires an initial checkpoint");
+        assert_eq!(initial.checkpoint_tick, 0);
+        directory
+            .get_mut(key)
+            .unwrap()
+            .confirm_checkpoint(&initial)
             .unwrap();
         let world = empty_world();
         for _ in 0..DANGER_CHECKPOINT_INTERVAL_TICKS {
@@ -993,14 +1015,18 @@ mod tests {
                 .unwrap();
         }
         assert!(!directory.get(key).unwrap().is_checkpoint_dirty());
-        assert!(
-            directory
-                .get(key)
-                .unwrap()
-                .scheduled_checkpoint()
-                .unwrap()
-                .is_none()
-        );
+        let cadence = directory
+            .get(key)
+            .unwrap()
+            .scheduled_checkpoint()
+            .unwrap()
+            .expect("the 900-tick checkpoint is mandatory even when Bell Debt is clean");
+        assert_eq!(cadence.checkpoint_tick, 900);
+        directory
+            .get_mut(key)
+            .unwrap()
+            .confirm_checkpoint(&cadence)
+            .unwrap();
 
         directory
             .get_mut(key)
@@ -1018,12 +1044,20 @@ mod tests {
             })
             .unwrap()
             .unwrap();
+        assert!(
+            directory
+                .get(key)
+                .unwrap()
+                .scheduled_checkpoint()
+                .unwrap()
+                .is_none()
+        );
         let checkpoint = directory
             .get(key)
             .unwrap()
-            .scheduled_checkpoint()
+            .lifecycle_checkpoint()
             .unwrap()
-            .expect("dirty state is due after the first cadence");
+            .expect("a dirty lifecycle boundary still flushes before the next cadence");
         assert_eq!(checkpoint.checkpoint_tick, 901);
         assert_eq!(checkpoint.checkpoint_schema_version, 1);
         assert_ne!(checkpoint.composite_digest, [0; 32]);
@@ -1125,6 +1159,7 @@ mod tests {
                 room_id: "room.bell_approach".into(),
                 checkpoint_binding: checkpoint_binding(),
                 checkpoint_dirty: false,
+                has_persisted_checkpoint: false,
                 last_checkpoint_tick: 0,
                 combat: combat(),
             }
@@ -1135,7 +1170,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn coordinator_skips_clean_state_flushes_dirty_boundary_and_resumes_latest() {
+    async fn coordinator_persists_initial_checkpoint_then_flushes_dirty_boundary() {
         let key = CoreLifeKey::new([1; 16], [2; 16], [3; 16]).unwrap();
         let mut directory = CoreLiveDirectory::default();
         directory
@@ -1153,9 +1188,9 @@ mod tests {
                 .flush_scheduled(directory.get_mut(key).unwrap())
                 .await
                 .unwrap(),
-            None
+            Some(DangerCheckpointWrite::Created)
         );
-        assert_eq!(*service.repository().writes.lock().unwrap(), 0);
+        assert_eq!(*service.repository().writes.lock().unwrap(), 1);
 
         let world = empty_world();
         directory
@@ -1186,9 +1221,9 @@ mod tests {
                 .flush_lifecycle_boundary(directory.get_mut(key).unwrap())
                 .await
                 .unwrap(),
-            Some(DangerCheckpointWrite::Created)
+            Some(DangerCheckpointWrite::Advanced)
         );
-        assert_eq!(*service.repository().writes.lock().unwrap(), 1);
+        assert_eq!(*service.repository().writes.lock().unwrap(), 2);
 
         let expected = directory
             .get(key)
