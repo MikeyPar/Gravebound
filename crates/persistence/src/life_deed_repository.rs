@@ -316,7 +316,12 @@ impl PostgresPersistence {
                 transaction.rollback().await?;
                 return Err(PersistenceError::CorruptStoredLifeDeed);
             }
-            validate_projection_graph(transaction.connection(), command).await?;
+            validate_life_deed_projection_graph(
+                transaction.connection(),
+                command.account_id,
+                command.character_id,
+            )
+            .await?;
             transaction.rollback().await?;
             return Ok(LifeDeedCompletionTransactionV2::Replayed(stored));
         }
@@ -347,7 +352,12 @@ impl PostgresPersistence {
         lock_active_danger_root(transaction.connection(), command).await?;
         let life_metrics_version = lock_life_metrics(transaction.connection(), command).await?;
         if life_metrics_version != command.expected_life_metrics_version {
-            let projection_digest = projection_digest(transaction.connection(), command).await?;
+            let projection_digest = life_deed_projection_digest(
+                transaction.connection(),
+                command.account_id,
+                command.character_id,
+            )
+            .await?;
             transaction.rollback().await?;
             return Err(PersistenceError::LifeDeedMetricsVersionMismatch {
                 expected: command.expected_life_metrics_version,
@@ -355,7 +365,12 @@ impl PostgresPersistence {
                 projection_digest,
             });
         }
-        validate_projection_graph(transaction.connection(), command).await?;
+        validate_life_deed_projection_graph(
+            transaction.connection(),
+            command.account_id,
+            command.character_id,
+        )
+        .await?;
         let authority = load_reward_authority(transaction.connection(), command).await?;
         let committed_at_unix_ms = transaction_timestamp_ms(transaction.connection()).await?;
         if command.issued_at_unix_ms > committed_at_unix_ms {
@@ -976,9 +991,10 @@ async fn insert_conflict_audit(
     Ok(())
 }
 
-async fn validate_projection_graph(
+pub(crate) async fn validate_life_deed_projection_graph(
     connection: &mut PgConnection,
-    command: &LifeDeedCompletionCommandV2,
+    account_id: [u8; ID_BYTES],
+    character_id: [u8; ID_BYTES],
 ) -> Result<(), PersistenceError> {
     let divergent: bool = sqlx::query_scalar(
         "WITH ranked AS ( \
@@ -1005,8 +1021,8 @@ async fn validate_projection_graph(
                 OR actual.content_revision IS DISTINCT FROM expected.content_revision)",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
-    .bind(command.account_id.as_slice())
-    .bind(command.character_id.as_slice())
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
     .fetch_one(connection)
     .await?;
     if divergent {
@@ -1015,9 +1031,10 @@ async fn validate_projection_graph(
     Ok(())
 }
 
-async fn projection_digest(
+pub(crate) async fn life_deed_projection_digest(
     connection: &mut PgConnection,
-    command: &LifeDeedCompletionCommandV2,
+    account_id: [u8; ID_BYTES],
+    character_id: [u8; ID_BYTES],
 ) -> Result<[u8; HASH_BYTES], PersistenceError> {
     let rows = sqlx::query(
         "SELECT deed_id,reward_event_id,source_content_id,deed_kind,achieved_tick,content_revision \
@@ -1025,10 +1042,58 @@ async fn projection_digest(
          ORDER BY deed_id COLLATE \"C\"",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
-    .bind(command.account_id.as_slice())
-    .bind(command.character_id.as_slice())
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
     .fetch_all(connection)
     .await?;
+    projection_digest_from_rows(rows)
+}
+
+/// Reconstructs the latest-deed projection at a historical life-metrics boundary. Crash replay
+/// uses aggregate versions rather than timestamps so later lives cannot alter the stored result.
+pub(crate) async fn life_deed_projection_digest_at_version(
+    connection: &mut PgConnection,
+    account_id: [u8; ID_BYTES],
+    character_id: [u8; ID_BYTES],
+    post_life_metrics_version: u64,
+) -> Result<[u8; HASH_BYTES], PersistenceError> {
+    let rows = sqlx::query(
+        "WITH eligible AS ( \
+             SELECT receipt.*,result.post_life_metrics_version AS revoked_at_life_version \
+             FROM character_life_deed_completion_receipts_v2 AS receipt \
+             LEFT JOIN character_life_deed_revocations_v2 AS revocation \
+               ON revocation.namespace_id=receipt.namespace_id \
+              AND revocation.account_id=receipt.account_id \
+              AND revocation.character_id=receipt.character_id \
+              AND revocation.completion_id=receipt.completion_id \
+             LEFT JOIN danger_crash_restore_results AS result \
+               ON result.namespace_id=revocation.namespace_id \
+              AND result.account_id=revocation.account_id \
+              AND result.mutation_id=revocation.crash_mutation_id \
+             WHERE receipt.namespace_id=$1 AND receipt.account_id=$2 \
+               AND receipt.character_id=$3 AND receipt.post_life_metrics_version < $4 \
+               AND (revocation.completion_id IS NULL \
+                    OR result.post_life_metrics_version > $4) \
+         ), ranked AS ( \
+             SELECT eligible.*,row_number() OVER (PARTITION BY deed_id \
+                 ORDER BY achieved_tick DESC,completion_id DESC) AS deed_ordinal \
+             FROM eligible) \
+         SELECT deed_id,completion_id AS reward_event_id,source_content_id,deed_kind, \
+                achieved_tick,content_revision FROM ranked WHERE deed_ordinal=1 \
+         ORDER BY deed_id COLLATE \"C\"",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
+    .bind(i64_value(post_life_metrics_version)?)
+    .fetch_all(connection)
+    .await?;
+    projection_digest_from_rows(rows)
+}
+
+fn projection_digest_from_rows(
+    rows: Vec<sqlx::postgres::PgRow>,
+) -> Result<[u8; HASH_BYTES], PersistenceError> {
     let mut hasher = blake3::Hasher::new();
     update_field(&mut hasher, PROJECTION_DIGEST_CONTEXT.as_bytes())?;
     for row in rows {

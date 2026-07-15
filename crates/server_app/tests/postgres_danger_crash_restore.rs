@@ -7,9 +7,10 @@ use std::path::PathBuf;
 
 use persistence::{
     AshMutationKind, AshMutationRequest, AshWalletTransaction, CORE_ITEM_CONTENT_REVISION,
-    DangerCrashItemChangeKind, DangerCrashRestoreCode, DangerCrashRestoreRequest,
-    DangerCrashRestoreTransaction, PersistenceConfig, PersistenceError, PostgresPersistence,
-    WIPEABLE_CORE_NAMESPACE,
+    CORE_PROGRESSION_RECORDS_BLAKE3, DangerCrashItemChangeKind, DangerCrashRestoreCode,
+    DangerCrashRestoreRequest, DangerCrashRestoreTransaction, LifeDeedCompletionCommandV2,
+    LifeDeedCompletionRequestV2, LifeDeedCompletionTransactionV2, LifeDeedContentAuthorityV2,
+    PersistenceConfig, PersistenceError, PostgresPersistence, WIPEABLE_CORE_NAMESPACE,
 };
 use protocol::{
     ManifestHash, WireText, WorldFlowContentRevisionV1, WorldFlowFrame, WorldFlowRequest,
@@ -32,6 +33,10 @@ const SECOND_TRANSFER_ID: [u8; 16] = [146; 16];
 const SECOND_LINEAGE_ID: [u8; 16] = [147; 16];
 const SECOND_RESTORE_ID: [u8; 16] = [148; 16];
 const HALL_ID: &str = "hub.lantern_halls_01";
+
+fn hash(seed: u8) -> [u8; 32] {
+    [seed; 32]
+}
 
 const ENTRY_EQUIPMENT: [u8; 16] = [151; 16];
 const ENTRY_BELT: [u8; 16] = [152; 16];
@@ -361,6 +366,105 @@ async fn enter_danger(
     assert_eq!(transfer_code(&result), WorldTransferResultCode::Accepted);
 }
 
+async fn commit_sepulcher_deed(
+    persistence: &PostgresPersistence,
+    lineage_id: [u8; 16],
+    restore_point_id: [u8; 16],
+    completion_id: [u8; 16],
+) {
+    let source_instance_id = [completion_id[0].wrapping_add(1); 16];
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let inventory_version: i64 = sqlx::query_scalar(
+        "SELECT inventory_version FROM character_inventories WHERE namespace_id=$1 \
+         AND account_id=$2 AND character_id=$3 FOR UPDATE",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(CHARACTER_ID.as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE character_progression SET total_xp=120,progression_version=2, \
+         updated_at=transaction_timestamp() WHERE namespace_id=$1 AND account_id=$2 \
+         AND character_id=$3 AND progression_version=1",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(CHARACTER_ID.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO reward_requests (namespace_id,reward_request_id,account_id,character_id, \
+         source_instance_id,reward_table_id,content_revision,epoch_id,canonical_request_hash, \
+         plan_hash,result_hash,audit_digest,pre_inventory_version,post_inventory_version, \
+         request_state,reward_item_count) \
+         VALUES ($1,$2,$3,$4,$5,'reward.miniboss_t1',$6,'crash-deed-hosted-v1',$7,$8,$9,$10, \
+                 $11,$11,1,0)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(completion_id.as_slice())
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(CHARACTER_ID.as_slice())
+    .bind(source_instance_id.as_slice())
+    .bind(CORE_ITEM_CONTENT_REVISION)
+    .bind(hash(31).as_slice())
+    .bind(hash(32).as_slice())
+    .bind(hash(33).as_slice())
+    .bind(hash(34).as_slice())
+    .bind(inventory_version)
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO character_xp_award_results (namespace_id,account_id,character_id, \
+         reward_event_id,payload_hash,source_content_id,xp_profile_id, \
+         progression_content_revision,eligibility_kind,eligible,encounter_active_ticks, \
+         encounter_present_ticks,encounter_longest_inactivity_ticks,encounter_reference_health, \
+         encounter_direct_damage,encounter_effective_healing,encounter_damage_prevented, \
+         encounter_objective_credits,encounter_life_state,encounter_recall_state, \
+         encounter_trust_state,first_clear_awarded,base_xp,bonus_xp,requested_xp,applied_xp, \
+         discarded_xp,pre_total_xp,post_total_xp,pre_level,post_level,pre_progression_version, \
+         post_progression_version,result_code,result_payload,entry_restore_point_id) \
+         VALUES ($1,$2,$3,$4,$5,'miniboss.sepulcher_knight','xp.miniboss_t1',$6,1,TRUE, \
+                 300,300,0,1200,1,0,0,0,0,0,0,FALSE,120,0,120,120,0,0,120,1,1,1,2,0,$7,$8)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(CHARACTER_ID.as_slice())
+    .bind(completion_id.as_slice())
+    .bind(hash(35).as_slice())
+    .bind(CORE_PROGRESSION_RECORDS_BLAKE3)
+    .bind([1_u8].as_slice())
+    .bind(restore_point_id.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    transaction.commit().await.unwrap();
+
+    let deed = LifeDeedCompletionRequestV2::seal(LifeDeedCompletionCommandV2 {
+        account_id: ACCOUNT_ID,
+        character_id: CHARACTER_ID,
+        completion_id,
+        expected_character_version: 2,
+        expected_life_metrics_version: 1,
+        lineage_id,
+        restore_point_id,
+        achieved_tick: 500,
+        content: LifeDeedContentAuthorityV2::core(),
+        issued_at_unix_ms: 10_000,
+    })
+    .unwrap();
+    assert!(matches!(
+        persistence
+            .transact_life_deed_completion_v2(&deed)
+            .await
+            .unwrap(),
+        LifeDeedCompletionTransactionV2::Committed(_)
+    ));
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "the fixture stages one coherent danger mutation graph before the crash"
@@ -651,6 +755,20 @@ async fn assert_fresh_projection(persistence: &PostgresPersistence) {
     .await
     .unwrap();
     assert_eq!(ash, (0, 3, 1));
+    let life_deed_sidecar: (i16, i32, i32, i32) = sqlx::query_as(
+        "SELECT life_deed_contract_version,revoked_life_deed_count, \
+                octet_length(life_deed_projection_digest), \
+                octet_length(life_deed_revocation_digest) \
+         FROM danger_crash_restore_results WHERE namespace_id=$1 AND account_id=$2 \
+           AND mutation_id=$3",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind([171_u8; 16].as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    assert_eq!(life_deed_sidecar, (1, 0, 32, 32));
     let lineage_state: i16 = sqlx::query_scalar(
         "SELECT lineage_state FROM character_instance_lineages WHERE namespace_id=$1 \
          AND lineage_id=$2",
@@ -961,5 +1079,77 @@ async fn danger_crash_restore_is_exact_atomic_replay_safe_and_terminal_authorita
     assert_no_partial_restore(&restarted, [213; 16]).await;
 
     assert_terminal_precedence(&restarted).await;
+    restarted.close().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires explicitly authorized disposable PostgreSQL"]
+async fn danger_crash_restore_revokes_root_deeds_and_rebuilds_projection() {
+    let persistence = disposable_database().await;
+    reset_fixture(&persistence).await;
+    let ids = FixedIds {
+        transfer: [221; 16],
+        lineage: [222; 16],
+        restore: [223; 16],
+    };
+    enter_danger(&persistence, ids, 96, 1).await;
+    commit_sepulcher_deed(&persistence, ids.lineage, ids.restore, [224; 16]).await;
+
+    let request = crash_request(ids.restore, [225; 16]);
+    let DangerCrashRestoreTransaction::Fresh(receipt) = persistence
+        .transact_danger_crash_restore(&request)
+        .await
+        .unwrap()
+    else {
+        panic!("fresh root-bound deed crash must commit exactly once")
+    };
+    assert_eq!(receipt.code, DangerCrashRestoreCode::Restored);
+    let versions = receipt.versions.as_ref().unwrap();
+    assert_eq!((versions.progression, versions.life_metrics), (3, 3));
+
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let sidecar: (i16, i32, i32, i32) = sqlx::query_as(
+        "SELECT life_deed_contract_version,revoked_life_deed_count, \
+                octet_length(life_deed_projection_digest), \
+                octet_length(life_deed_revocation_digest) \
+         FROM danger_crash_restore_results WHERE namespace_id=$1 AND account_id=$2 \
+           AND mutation_id=$3",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(request.mutation_id.as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    assert_eq!(sidecar, (1, 1, 32, 32));
+    let graph: (i64, i64, bool, i64) = sqlx::query_as(
+        "SELECT \
+           (SELECT count(*) FROM character_life_deed_revocations_v2 WHERE namespace_id=$1 \
+             AND account_id=$2 AND crash_mutation_id=$3), \
+           (SELECT count(*) FROM character_life_deeds WHERE namespace_id=$1 \
+             AND account_id=$2 AND character_id=$4), \
+           (SELECT revoked_by_restore_point_id=$5 FROM character_xp_award_results \
+             WHERE namespace_id=$1 AND account_id=$2 AND reward_event_id=$6), \
+           (SELECT life_metrics_version FROM character_life_metrics WHERE namespace_id=$1 \
+             AND account_id=$2 AND character_id=$4)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(request.mutation_id.as_slice())
+    .bind(CHARACTER_ID.as_slice())
+    .bind(ids.restore.as_slice())
+    .bind([224_u8; 16].as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    transaction.rollback().await.unwrap();
+    assert_eq!(graph, (1, 0, true, 3));
+
+    persistence.close().await;
+    let restarted = disposable_database().await;
+    assert!(matches!(
+        restarted.transact_danger_crash_restore(&request).await.unwrap(),
+        DangerCrashRestoreTransaction::Replayed(replay) if replay == receipt
+    ));
     restarted.close().await;
 }

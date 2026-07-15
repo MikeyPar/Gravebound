@@ -177,7 +177,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 45;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 46;
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -1133,6 +1133,46 @@ mod tests {
             assert!(
                 !migration.contains(prohibited),
                 "live deed authority closure leaked {prohibited}"
+            );
+        }
+    }
+
+    #[test]
+    fn crash_life_deed_revocation_is_complete_versioned_and_forward_only() {
+        let migration =
+            include_str!("../../../migrations/0046_crash_life_deed_revocation_closure.sql");
+        for required in [
+            "Gravebound_Production_GDD_v1_Canonical.md",
+            "Gravebound_Content_Production_Spec_v1.md",
+            "Gravebound_Development_Roadmap_v1.md",
+            "SPEC-CONFLICT-009-m03-death-memorial.md",
+            "life_deed_revocation_digest BYTEA",
+            "life_deed_contract_version = 1",
+            "require_new_crash_life_deed_contract_v1",
+            "new crash result requires life deed contract 1",
+            "CREATE OR REPLACE FUNCTION enforce_danger_crash_life_deed_graph_v1",
+            "row_number() OVER (ORDER BY completion_id) - 1",
+            "ordered.revoked_at <> stored_committed_at",
+            "receipt.restore_point_id = stored_restore",
+            "revocation.completion_id IS NULL",
+            "crash result live deed revocation graph is incomplete or noncanonical",
+            "Migration 0045 introduced the revocation graph before the crash writer existed",
+            "Downgrade requires proving no contract-1 result or v2 revocation exists",
+        ] {
+            assert!(migration.contains(required), "migration omitted {required}");
+        }
+        for prohibited in [
+            "DROP TABLE",
+            "TRUNCATE",
+            "DELETE FROM",
+            "JSON",
+            "JSONB",
+            "FLOAT",
+            "DOUBLE PRECISION",
+        ] {
+            assert!(
+                !migration.contains(prohibited),
+                "crash deed revocation closure leaked {prohibited}"
             );
         }
     }

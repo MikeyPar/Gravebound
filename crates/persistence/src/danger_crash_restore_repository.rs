@@ -2,7 +2,7 @@
 //!
 //! The lock order in this module is part of the durable contract: account, character, restore
 //! root, world location and lineage, progression, inventory, run materials, Oath/Bargain, life
-//! metrics, then Ash. Every domain mutation and its normalized receipt commits in one
+//! metrics, reward-qualified deeds, then Ash. Every domain mutation and its normalized receipt commits in one
 //! `SERIALIZABLE` transaction.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -27,6 +27,10 @@ use crate::{
         inventory_digest, life_digest, oath_digest,
     },
     items::CORE_ITEM_CONTENT_REVISION,
+    life_deed_repository::{
+        life_deed_projection_digest, life_deed_projection_digest_at_version,
+        validate_life_deed_projection_graph,
+    },
     progression_restore::progression_component_digest,
 };
 
@@ -35,6 +39,10 @@ const HALL_ID: &str = "hub.lantern_halls_01";
 const LINEAGE_CRASH_FAILED: i16 = 3;
 const RESTORE_ACTIVE: i16 = 0;
 const RESTORE_CRASHED: i16 = 4;
+const LIFE_DEED_CRASH_CONTRACT_VERSION: i16 = 1;
+const LIFE_DEED_REVOCATION_SET_CONTEXT: &str =
+    "gravebound.danger-crash-life-deed-revocation-set.v1";
+const LIFE_DEED_REVOCATION_CONTEXT: &str = "gravebound.life-deed-revocation.v2";
 
 #[derive(Debug)]
 struct AccountLock {
@@ -187,6 +195,30 @@ struct AshEarn {
     content_version: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LifeDeedReceiptLock {
+    completion_id: [u8; 16],
+    deed_id: String,
+    result_digest: [u8; 32],
+    pre_life_metrics_version: u64,
+    post_life_metrics_version: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LifeDeedRevocationChange {
+    receipt: LifeDeedReceiptLock,
+    change_ordinal: u32,
+    revocation_digest: [u8; 32],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CrashLifeDeedSidecar {
+    contract_version: i16,
+    projection_digest: [u8; 32],
+    revocation_set_digest: [u8; 32],
+    changes: Vec<LifeDeedRevocationChange>,
+}
+
 impl PostgresPersistence {
     /// Applies an exact danger-entry restore or returns the durable terminal result that won.
     pub async fn transact_danger_crash_restore(
@@ -232,6 +264,7 @@ impl PostgresPersistence {
                 });
             }
             let receipt = decode_stored_receipt(&stored)?;
+            validate_stored_life_deed_sidecar(transaction.connection(), &receipt).await?;
             transaction.rollback().await?;
             return Ok(DangerCrashRestoreTransaction::Replayed(receipt));
         }
@@ -259,6 +292,7 @@ impl PostgresPersistence {
         let materials = lock_materials(transaction.connection(), request).await?;
         let oath_bargain = lock_oath_bargain(transaction.connection(), request).await?;
         let life = lock_life_metrics(transaction.connection(), request).await?;
+        let life_deeds = lock_life_deeds(transaction.connection(), request, &life).await?;
         let ash = lock_ash_snapshot(transaction.connection(), request).await?;
         validate_root_snapshot(
             &root,
@@ -353,7 +387,15 @@ impl PostgresPersistence {
             ash_changes,
         };
         receipt.validate()?;
-        insert_normalized_result(transaction.connection(), &receipt).await?;
+        let life_deed_sidecar = restore_life_deeds(
+            transaction.connection(),
+            request,
+            &receipt,
+            post_life_metrics_version,
+            &life_deeds,
+        )
+        .await?;
+        insert_normalized_result(transaction.connection(), &receipt, &life_deed_sidecar).await?;
         consume_root(transaction.connection(), request).await?;
         insert_request_result(transaction.connection(), &receipt).await?;
         force_deferred_constraints(transaction.connection()).await?;
@@ -1619,6 +1661,282 @@ async fn restore_life_metrics(
     Ok(())
 }
 
+async fn lock_life_deeds(
+    connection: &mut PgConnection,
+    request: &DangerCrashRestoreRequest,
+    life: &LifeLock,
+) -> Result<Vec<LifeDeedReceiptLock>, PersistenceError> {
+    validate_life_deed_projection_graph(connection, request.account_id, request.character_id)
+        .await
+        .map_err(|_| PersistenceError::CorruptStoredDangerCrashRestore)?;
+    let rows = sqlx::query(
+        "SELECT receipt.completion_id,receipt.deed_id,receipt.result_digest, \
+                receipt.pre_life_metrics_version,receipt.post_life_metrics_version \
+         FROM character_life_deed_completion_receipts_v2 AS receipt \
+         LEFT JOIN character_life_deed_revocations_v2 AS revocation \
+           ON revocation.namespace_id=receipt.namespace_id \
+          AND revocation.account_id=receipt.account_id \
+          AND revocation.character_id=receipt.character_id \
+          AND revocation.completion_id=receipt.completion_id \
+         WHERE receipt.namespace_id=$1 AND receipt.account_id=$2 \
+           AND receipt.character_id=$3 AND receipt.restore_point_id=$4 \
+           AND revocation.completion_id IS NULL \
+         ORDER BY receipt.completion_id FOR UPDATE OF receipt",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(request.account_id.as_slice())
+    .bind(request.character_id.as_slice())
+    .bind(request.restore_point_id.as_slice())
+    .fetch_all(connection)
+    .await?;
+    if rows.len() > 4_095 {
+        return Err(PersistenceError::CorruptStoredDangerCrashRestore);
+    }
+    rows.into_iter()
+        .map(|row| {
+            let receipt = LifeDeedReceiptLock {
+                completion_id: fixed(row.try_get("completion_id")?)?,
+                deed_id: row.try_get("deed_id")?,
+                result_digest: fixed(row.try_get("result_digest")?)?,
+                pre_life_metrics_version: positive(row.try_get("pre_life_metrics_version")?)?,
+                post_life_metrics_version: positive(row.try_get("post_life_metrics_version")?)?,
+            };
+            if !(3..=96).contains(&receipt.deed_id.len())
+                || receipt.result_digest == [0; 32]
+                || receipt.pre_life_metrics_version < life.snapshot_version
+                || receipt.post_life_metrics_version > life.version
+                || receipt.post_life_metrics_version
+                    != receipt.pre_life_metrics_version.saturating_add(1)
+            {
+                return Err(PersistenceError::CorruptStoredDangerCrashRestore);
+            }
+            Ok(receipt)
+        })
+        .collect()
+}
+
+async fn restore_life_deeds(
+    connection: &mut PgConnection,
+    request: &DangerCrashRestoreRequest,
+    crash_receipt: &DangerCrashRestoreReceipt,
+    post_life_metrics_version: u64,
+    receipts: &[LifeDeedReceiptLock],
+) -> Result<CrashLifeDeedSidecar, PersistenceError> {
+    let projection_digest = rebuild_life_deed_projection(connection, request, receipts).await?;
+    let mut changes = Vec::with_capacity(receipts.len());
+    for (ordinal, receipt) in receipts.iter().enumerate() {
+        let change_ordinal = u32::try_from(ordinal)
+            .map_err(|_| PersistenceError::CorruptStoredDangerCrashRestore)?;
+        let revocation_digest = life_deed_revocation_digest(
+            request,
+            crash_receipt,
+            post_life_metrics_version,
+            change_ordinal,
+            receipt,
+        )?;
+        sqlx::query(
+            "INSERT INTO character_life_deed_revocations_v2 \
+             (namespace_id,account_id,character_id,completion_id,restore_point_id, \
+              crash_mutation_id,change_ordinal,revocation_digest,post_projection_digest) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+        )
+        .bind(WIPEABLE_CORE_NAMESPACE)
+        .bind(request.account_id.as_slice())
+        .bind(request.character_id.as_slice())
+        .bind(receipt.completion_id.as_slice())
+        .bind(request.restore_point_id.as_slice())
+        .bind(request.mutation_id.as_slice())
+        .bind(
+            i32::try_from(change_ordinal)
+                .map_err(|_| PersistenceError::CorruptStoredDangerCrashRestore)?,
+        )
+        .bind(revocation_digest.as_slice())
+        .bind(projection_digest.as_slice())
+        .execute(&mut *connection)
+        .await?;
+        changes.push(LifeDeedRevocationChange {
+            receipt: receipt.clone(),
+            change_ordinal,
+            revocation_digest,
+        });
+    }
+    validate_life_deed_projection_graph(connection, request.account_id, request.character_id)
+        .await
+        .map_err(|_| PersistenceError::CorruptStoredDangerCrashRestore)?;
+    let historical_digest = life_deed_projection_digest_at_version(
+        connection,
+        request.account_id,
+        request.character_id,
+        post_life_metrics_version,
+    )
+    .await
+    .map_err(|_| PersistenceError::CorruptStoredDangerCrashRestore)?;
+    if historical_digest != projection_digest {
+        return Err(PersistenceError::CorruptStoredDangerCrashRestore);
+    }
+    let revocation_set_digest = life_deed_revocation_set_digest(
+        request,
+        crash_receipt,
+        post_life_metrics_version,
+        projection_digest,
+        &changes,
+    )?;
+    Ok(CrashLifeDeedSidecar {
+        contract_version: LIFE_DEED_CRASH_CONTRACT_VERSION,
+        projection_digest,
+        revocation_set_digest,
+        changes,
+    })
+}
+
+async fn rebuild_life_deed_projection(
+    connection: &mut PgConnection,
+    request: &DangerCrashRestoreRequest,
+    receipts: &[LifeDeedReceiptLock],
+) -> Result<[u8; 32], PersistenceError> {
+    let affected_deeds = receipts
+        .iter()
+        .map(|receipt| receipt.deed_id.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if !affected_deeds.is_empty() {
+        sqlx::query(
+            "DELETE FROM character_life_deeds WHERE namespace_id=$1 AND account_id=$2 \
+             AND character_id=$3 AND deed_id=ANY($4::TEXT[])",
+        )
+        .bind(WIPEABLE_CORE_NAMESPACE)
+        .bind(request.account_id.as_slice())
+        .bind(request.character_id.as_slice())
+        .bind(&affected_deeds)
+        .execute(&mut *connection)
+        .await?;
+        sqlx::query(
+            "WITH ranked AS ( \
+                 SELECT receipt.*,row_number() OVER (PARTITION BY receipt.deed_id \
+                    ORDER BY receipt.achieved_tick DESC,receipt.completion_id DESC) AS deed_ordinal \
+                 FROM character_life_deed_completion_receipts_v2 AS receipt \
+                 LEFT JOIN character_life_deed_revocations_v2 AS revocation \
+                   ON revocation.namespace_id=receipt.namespace_id \
+                  AND revocation.account_id=receipt.account_id \
+                  AND revocation.character_id=receipt.character_id \
+                  AND revocation.completion_id=receipt.completion_id \
+                 WHERE receipt.namespace_id=$1 AND receipt.account_id=$2 \
+                   AND receipt.character_id=$3 AND receipt.deed_id=ANY($4::TEXT[]) \
+                   AND receipt.restore_point_id<>$5 AND revocation.completion_id IS NULL) \
+             INSERT INTO character_life_deeds \
+                (namespace_id,account_id,character_id,deed_id,reward_event_id,source_content_id, \
+                 deed_kind,achieved_tick,content_revision,committed_at) \
+             SELECT namespace_id,account_id,character_id,deed_id,completion_id,source_content_id, \
+                    deed_kind,achieved_tick,content_revision,committed_at \
+             FROM ranked WHERE deed_ordinal=1 ORDER BY deed_id COLLATE \"C\"",
+        )
+        .bind(WIPEABLE_CORE_NAMESPACE)
+        .bind(request.account_id.as_slice())
+        .bind(request.character_id.as_slice())
+        .bind(&affected_deeds)
+        .bind(request.restore_point_id.as_slice())
+        .execute(&mut *connection)
+        .await?;
+    }
+
+    life_deed_projection_digest(connection, request.account_id, request.character_id)
+        .await
+        .map_err(|_| PersistenceError::CorruptStoredDangerCrashRestore)
+}
+
+fn life_deed_revocation_digest(
+    request: &DangerCrashRestoreRequest,
+    crash_receipt: &DangerCrashRestoreReceipt,
+    post_life_metrics_version: u64,
+    change_ordinal: u32,
+    receipt: &LifeDeedReceiptLock,
+) -> Result<[u8; 32], PersistenceError> {
+    let mut hasher = blake3::Hasher::new();
+    hash_field(&mut hasher, LIFE_DEED_REVOCATION_CONTEXT.as_bytes())?;
+    hash_crash_deed_authority(
+        &mut hasher,
+        request,
+        crash_receipt,
+        post_life_metrics_version,
+    )?;
+    hash_field(&mut hasher, &change_ordinal.to_le_bytes())?;
+    hash_locked_life_deed(&mut hasher, receipt)?;
+    nonzero_digest(&hasher)
+}
+
+fn life_deed_revocation_set_digest(
+    request: &DangerCrashRestoreRequest,
+    crash_receipt: &DangerCrashRestoreReceipt,
+    post_life_metrics_version: u64,
+    projection_digest: [u8; 32],
+    changes: &[LifeDeedRevocationChange],
+) -> Result<[u8; 32], PersistenceError> {
+    let mut hasher = blake3::Hasher::new();
+    hash_field(&mut hasher, LIFE_DEED_REVOCATION_SET_CONTEXT.as_bytes())?;
+    hash_crash_deed_authority(
+        &mut hasher,
+        request,
+        crash_receipt,
+        post_life_metrics_version,
+    )?;
+    hash_field(&mut hasher, &projection_digest)?;
+    hash_field(
+        &mut hasher,
+        &u32::try_from(changes.len())
+            .map_err(|_| PersistenceError::CorruptStoredDangerCrashRestore)?
+            .to_le_bytes(),
+    )?;
+    for change in changes {
+        hash_field(&mut hasher, &change.change_ordinal.to_le_bytes())?;
+        hash_locked_life_deed(&mut hasher, &change.receipt)?;
+        hash_field(&mut hasher, &change.revocation_digest)?;
+    }
+    nonzero_digest(&hasher)
+}
+
+fn hash_crash_deed_authority(
+    hasher: &mut blake3::Hasher,
+    request: &DangerCrashRestoreRequest,
+    crash_receipt: &DangerCrashRestoreReceipt,
+    post_life_metrics_version: u64,
+) -> Result<(), PersistenceError> {
+    hash_field(hasher, &request.account_id)?;
+    hash_field(hasher, &request.character_id)?;
+    hash_field(hasher, &request.restore_point_id)?;
+    hash_field(hasher, &request.mutation_id)?;
+    hash_field(hasher, &request.request_hash)?;
+    hash_field(hasher, &crash_receipt.digest())?;
+    hash_field(hasher, &post_life_metrics_version.to_le_bytes())
+}
+
+fn hash_locked_life_deed(
+    hasher: &mut blake3::Hasher,
+    receipt: &LifeDeedReceiptLock,
+) -> Result<(), PersistenceError> {
+    hash_field(hasher, &receipt.completion_id)?;
+    hash_field(hasher, receipt.deed_id.as_bytes())?;
+    hash_field(hasher, &receipt.result_digest)?;
+    hash_field(hasher, &receipt.pre_life_metrics_version.to_le_bytes())?;
+    hash_field(hasher, &receipt.post_life_metrics_version.to_le_bytes())
+}
+
+fn hash_field(hasher: &mut blake3::Hasher, bytes: &[u8]) -> Result<(), PersistenceError> {
+    let length = u64::try_from(bytes.len())
+        .map_err(|_| PersistenceError::CorruptStoredDangerCrashRestore)?;
+    hasher.update(&length.to_le_bytes());
+    hasher.update(bytes);
+    Ok(())
+}
+
+fn nonzero_digest(hasher: &blake3::Hasher) -> Result<[u8; 32], PersistenceError> {
+    let digest = *hasher.finalize().as_bytes();
+    if digest == [0; 32] {
+        return Err(PersistenceError::CorruptStoredDangerCrashRestore);
+    }
+    Ok(digest)
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "Ash snapshot, wallet, and every post-snapshot advancement are inspected under one final lock phase"
@@ -2170,6 +2488,173 @@ fn decode_stored_receipt(
     Ok(receipt)
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the stored crash sidecar and every immutable revocation are validated as one replay graph"
+)]
+async fn validate_stored_life_deed_sidecar(
+    connection: &mut PgConnection,
+    crash_receipt: &DangerCrashRestoreReceipt,
+) -> Result<(), PersistenceError> {
+    if crash_receipt.code != DangerCrashRestoreCode::Restored {
+        return Ok(());
+    }
+    let versions = crash_receipt
+        .versions
+        .as_ref()
+        .ok_or(PersistenceError::CorruptStoredDangerCrashRestore)?;
+    let row = sqlx::query(
+        "SELECT post_life_metrics_version,result_digest,life_deed_contract_version, \
+                revoked_life_deed_count,life_deed_projection_digest,life_deed_revocation_digest \
+         FROM danger_crash_restore_results WHERE namespace_id=$1 AND account_id=$2 \
+           AND character_id=$3 AND restore_point_id=$4 AND mutation_id=$5",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(crash_receipt.account_id.as_slice())
+    .bind(crash_receipt.character_id.as_slice())
+    .bind(crash_receipt.restore_point_id.as_slice())
+    .bind(crash_receipt.request_mutation_id.as_slice())
+    .fetch_optional(&mut *connection)
+    .await?
+    .ok_or(PersistenceError::CorruptStoredDangerCrashRestore)?;
+    let post_life_metrics_version = positive(row.try_get("post_life_metrics_version")?)?;
+    let stored_result_digest: [u8; 32] = fixed(row.try_get("result_digest")?)?;
+    let contract_version: i16 = row.try_get("life_deed_contract_version")?;
+    let stored_count: i32 = row.try_get("revoked_life_deed_count")?;
+    let stored_projection = optional_fixed::<32>(row.try_get("life_deed_projection_digest")?)?;
+    let stored_set_digest = optional_fixed::<32>(row.try_get("life_deed_revocation_digest")?)?;
+    if post_life_metrics_version != versions.life_metrics
+        || stored_result_digest != crash_receipt.digest()
+        || stored_count < 0
+    {
+        return Err(PersistenceError::CorruptStoredDangerCrashRestore);
+    }
+    let root_receipt_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM character_life_deed_completion_receipts_v2 \
+         WHERE namespace_id=$1 AND account_id=$2 AND character_id=$3 AND restore_point_id=$4",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(crash_receipt.account_id.as_slice())
+    .bind(crash_receipt.character_id.as_slice())
+    .bind(crash_receipt.restore_point_id.as_slice())
+    .fetch_one(&mut *connection)
+    .await?;
+    if contract_version == 0 {
+        if stored_count != 0
+            || stored_projection.is_some()
+            || stored_set_digest.is_some()
+            || root_receipt_count != 0
+        {
+            return Err(PersistenceError::CorruptStoredDangerCrashRestore);
+        }
+        return Ok(());
+    }
+    let (Some(projection_digest), Some(revocation_set_digest)) =
+        (stored_projection, stored_set_digest)
+    else {
+        return Err(PersistenceError::CorruptStoredDangerCrashRestore);
+    };
+    if contract_version != LIFE_DEED_CRASH_CONTRACT_VERSION
+        || projection_digest == [0; 32]
+        || revocation_set_digest == [0; 32]
+    {
+        return Err(PersistenceError::CorruptStoredDangerCrashRestore);
+    }
+
+    let rows = sqlx::query(
+        "SELECT receipt.completion_id,receipt.deed_id,receipt.result_digest, \
+                receipt.pre_life_metrics_version,receipt.post_life_metrics_version, \
+                revocation.change_ordinal,revocation.revocation_digest, \
+                revocation.post_projection_digest \
+         FROM character_life_deed_revocations_v2 AS revocation \
+         JOIN character_life_deed_completion_receipts_v2 AS receipt \
+           ON receipt.namespace_id=revocation.namespace_id \
+          AND receipt.account_id=revocation.account_id \
+          AND receipt.character_id=revocation.character_id \
+          AND receipt.completion_id=revocation.completion_id \
+         WHERE revocation.namespace_id=$1 AND revocation.account_id=$2 \
+           AND revocation.character_id=$3 AND revocation.crash_mutation_id=$4 \
+         ORDER BY revocation.completion_id",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(crash_receipt.account_id.as_slice())
+    .bind(crash_receipt.character_id.as_slice())
+    .bind(crash_receipt.request_mutation_id.as_slice())
+    .fetch_all(&mut *connection)
+    .await?;
+    if i64::try_from(rows.len()).map_err(|_| PersistenceError::CorruptStoredDangerCrashRestore)?
+        != root_receipt_count
+        || i32::try_from(rows.len())
+            .map_err(|_| PersistenceError::CorruptStoredDangerCrashRestore)?
+            != stored_count
+    {
+        return Err(PersistenceError::CorruptStoredDangerCrashRestore);
+    }
+    let request = DangerCrashRestoreRequest {
+        account_id: crash_receipt.account_id,
+        character_id: crash_receipt.character_id,
+        restore_point_id: crash_receipt.restore_point_id,
+        mutation_id: crash_receipt.request_mutation_id,
+        request_hash: crash_receipt.request_hash,
+    };
+    let mut changes = Vec::with_capacity(rows.len());
+    for (ordinal, row) in rows.into_iter().enumerate() {
+        let change_ordinal = u32::try_from(row.try_get::<i32, _>("change_ordinal")?)
+            .map_err(|_| PersistenceError::CorruptStoredDangerCrashRestore)?;
+        if change_ordinal
+            != u32::try_from(ordinal)
+                .map_err(|_| PersistenceError::CorruptStoredDangerCrashRestore)?
+            || fixed::<32>(row.try_get("post_projection_digest")?)? != projection_digest
+        {
+            return Err(PersistenceError::CorruptStoredDangerCrashRestore);
+        }
+        let receipt = LifeDeedReceiptLock {
+            completion_id: fixed(row.try_get("completion_id")?)?,
+            deed_id: row.try_get("deed_id")?,
+            result_digest: fixed(row.try_get("result_digest")?)?,
+            pre_life_metrics_version: positive(row.try_get("pre_life_metrics_version")?)?,
+            post_life_metrics_version: positive(row.try_get("post_life_metrics_version")?)?,
+        };
+        let revocation_digest: [u8; 32] = fixed(row.try_get("revocation_digest")?)?;
+        if revocation_digest
+            != life_deed_revocation_digest(
+                &request,
+                crash_receipt,
+                post_life_metrics_version,
+                change_ordinal,
+                &receipt,
+            )?
+        {
+            return Err(PersistenceError::CorruptStoredDangerCrashRestore);
+        }
+        changes.push(LifeDeedRevocationChange {
+            receipt,
+            change_ordinal,
+            revocation_digest,
+        });
+    }
+    let historical_digest = life_deed_projection_digest_at_version(
+        connection,
+        crash_receipt.account_id,
+        crash_receipt.character_id,
+        post_life_metrics_version,
+    )
+    .await
+    .map_err(|_| PersistenceError::CorruptStoredDangerCrashRestore)?;
+    if historical_digest != projection_digest
+        || life_deed_revocation_set_digest(
+            &request,
+            crash_receipt,
+            post_life_metrics_version,
+            projection_digest,
+            &changes,
+        )? != revocation_set_digest
+    {
+        return Err(PersistenceError::CorruptStoredDangerCrashRestore);
+    }
+    Ok(())
+}
+
 async fn insert_conflict_audit(
     connection: &mut PgConnection,
     request: &DangerCrashRestoreRequest,
@@ -2237,6 +2722,7 @@ async fn insert_request_result(
 async fn insert_normalized_result(
     connection: &mut PgConnection,
     receipt: &DangerCrashRestoreReceipt,
+    life_deeds: &CrashLifeDeedSidecar,
 ) -> Result<(), PersistenceError> {
     let versions = receipt
         .versions
@@ -2254,8 +2740,11 @@ async fn insert_normalized_result(
           result_code, post_account_version, post_character_version, post_progression_version, \
           post_inventory_version, post_oath_bargain_version, post_life_metrics_version, \
           post_ash_wallet_version, restored_item_count, revoked_item_count, \
-          revoked_material_count, revoked_bargain_record_count, compensated_ash_count, result_digest) \
-         VALUES ($1,$2,$3,$4,$5,$6,0,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)",
+          revoked_material_count, revoked_bargain_record_count, compensated_ash_count, \
+          life_deed_contract_version,revoked_life_deed_count,life_deed_projection_digest, \
+          life_deed_revocation_digest,result_digest) \
+         VALUES ($1,$2,$3,$4,$5,$6,0,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18, \
+                 $19,$20,$21,$22,$23)",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(receipt.account_id.as_slice())
@@ -2270,11 +2759,33 @@ async fn insert_normalized_result(
     .bind(as_i64(versions.oath_bargain)?)
     .bind(as_i64(versions.life_metrics)?)
     .bind(as_i64(versions.ash_wallet)?)
-    .bind(i32::try_from(restored_count).map_err(|_| PersistenceError::CorruptStoredDangerCrashRestore)?)
-    .bind(i32::try_from(revoked_count).map_err(|_| PersistenceError::CorruptStoredDangerCrashRestore)?)
-    .bind(i32::try_from(receipt.material_changes.len()).map_err(|_| PersistenceError::CorruptStoredDangerCrashRestore)?)
-    .bind(i32::try_from(receipt.bargain_changes.len()).map_err(|_| PersistenceError::CorruptStoredDangerCrashRestore)?)
-    .bind(i32::try_from(receipt.ash_changes.len()).map_err(|_| PersistenceError::CorruptStoredDangerCrashRestore)?)
+    .bind(
+        i32::try_from(restored_count)
+            .map_err(|_| PersistenceError::CorruptStoredDangerCrashRestore)?,
+    )
+    .bind(
+        i32::try_from(revoked_count)
+            .map_err(|_| PersistenceError::CorruptStoredDangerCrashRestore)?,
+    )
+    .bind(
+        i32::try_from(receipt.material_changes.len())
+            .map_err(|_| PersistenceError::CorruptStoredDangerCrashRestore)?,
+    )
+    .bind(
+        i32::try_from(receipt.bargain_changes.len())
+            .map_err(|_| PersistenceError::CorruptStoredDangerCrashRestore)?,
+    )
+    .bind(
+        i32::try_from(receipt.ash_changes.len())
+            .map_err(|_| PersistenceError::CorruptStoredDangerCrashRestore)?,
+    )
+    .bind(life_deeds.contract_version)
+    .bind(
+        i32::try_from(life_deeds.changes.len())
+            .map_err(|_| PersistenceError::CorruptStoredDangerCrashRestore)?,
+    )
+    .bind(life_deeds.projection_digest.as_slice())
+    .bind(life_deeds.revocation_set_digest.as_slice())
     .bind(receipt.digest().as_slice())
     .execute(&mut *connection)
     .await?;
@@ -2423,6 +2934,32 @@ mod tests {
         }
     }
 
+    fn restored_receipt(request: &DangerCrashRestoreRequest) -> DangerCrashRestoreReceipt {
+        DangerCrashRestoreReceipt {
+            contract: crate::DANGER_CRASH_RESTORE_CONTRACT.into(),
+            account_id: request.account_id,
+            character_id: request.character_id,
+            restore_point_id: request.restore_point_id,
+            request_mutation_id: request.mutation_id,
+            request_hash: request.request_hash,
+            code: DangerCrashRestoreCode::Restored,
+            committed_mutation_id: Some(request.mutation_id),
+            versions: Some(DangerCrashRestoreVersions {
+                account: 2,
+                character: 2,
+                progression: 2,
+                inventory: 2,
+                oath_bargain: 2,
+                life_metrics: 5,
+                ash_wallet: 2,
+            }),
+            item_changes: Vec::new(),
+            material_changes: Vec::new(),
+            bargain_changes: Vec::new(),
+            ash_changes: Vec::new(),
+        }
+    }
+
     #[test]
     fn terminal_precedence_maps_append_only_root_states() {
         let request = request();
@@ -2545,5 +3082,69 @@ mod tests {
         assert_eq!(decode_stored_receipt(&stored).unwrap(), receipt);
         stored.digest[0] ^= 1;
         assert!(decode_stored_receipt(&stored).is_err());
+    }
+
+    #[test]
+    fn deed_revocation_digests_bind_crash_result_versions_and_canonical_order() {
+        let request = request();
+        let crash_receipt = restored_receipt(&request);
+        let first = LifeDeedReceiptLock {
+            completion_id: [5; 16],
+            deed_id: "deed.core.sir_caldus_defeated".into(),
+            result_digest: [6; 32],
+            pre_life_metrics_version: 2,
+            post_life_metrics_version: 3,
+        };
+        let second = LifeDeedReceiptLock {
+            completion_id: [7; 16],
+            deed_id: "deed.core.sepulcher_knight_defeated".into(),
+            result_digest: [8; 32],
+            pre_life_metrics_version: 3,
+            post_life_metrics_version: 4,
+        };
+        let changes = [first, second]
+            .into_iter()
+            .enumerate()
+            .map(|(ordinal, receipt)| {
+                let change_ordinal = u32::try_from(ordinal).unwrap();
+                LifeDeedRevocationChange {
+                    revocation_digest: life_deed_revocation_digest(
+                        &request,
+                        &crash_receipt,
+                        5,
+                        change_ordinal,
+                        &receipt,
+                    )
+                    .unwrap(),
+                    receipt,
+                    change_ordinal,
+                }
+            })
+            .collect::<Vec<_>>();
+        let digest =
+            life_deed_revocation_set_digest(&request, &crash_receipt, 5, [9; 32], &changes)
+                .unwrap();
+        assert_ne!(digest, [0; 32]);
+        assert_eq!(
+            digest,
+            life_deed_revocation_set_digest(&request, &crash_receipt, 5, [9; 32], &changes,)
+                .unwrap()
+        );
+        let mut reversed = changes.clone();
+        reversed.reverse();
+        assert_ne!(
+            digest,
+            life_deed_revocation_set_digest(&request, &crash_receipt, 5, [9; 32], &reversed,)
+                .unwrap()
+        );
+        assert_ne!(
+            digest,
+            life_deed_revocation_set_digest(&request, &crash_receipt, 6, [9; 32], &changes,)
+                .unwrap()
+        );
+        assert_ne!(
+            digest,
+            life_deed_revocation_set_digest(&request, &crash_receipt, 5, [9; 32], &[]).unwrap()
+        );
     }
 }
