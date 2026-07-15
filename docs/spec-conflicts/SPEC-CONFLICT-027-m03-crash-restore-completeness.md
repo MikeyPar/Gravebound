@@ -4,7 +4,7 @@
 
 ## Authorities reviewed
 
-1. Canonical GDD `TECH-015`, `TECH-019`, `TECH-021`, and `TECH-023`: a server crash is not a death; a prior committed death or extraction wins; otherwise restoration must return the exact danger-entry equipment, Belt, health, and XP, revoke post-entry unsecured gains, roll back consumable use, and record provenance.
+1. Canonical GDD `TECH-015`, `TECH-020`, `TECH-021`, and `TECH-023`: a server crash is not a death; a prior committed death or extraction wins; otherwise restoration must return the exact danger-entry equipment, Belt, health, and XP, revoke post-entry unsecured gains, roll back consumable use, and record provenance.
 2. Content Production Specification `CONT-014` and `CONT-HUB-002`: Bargain milestone/offer state and its 10-Ash fallback are atomic durable mutations, while Realm Gate admission performs CharacterSafe preflight and creates the restore point before danger transfer.
 3. Development Roadmap `GB-M03-02`, `GB-M03-06`, `GB-M03-08`, and the M03 exit gates: persistence and terminal outcomes must survive retry/restart without duplicate item, currency, character, death, or terminal results.
 4. Accepted [`SPEC-CONFLICT-009`](SPEC-CONFLICT-009-m03-death-memorial.md): lifetime never rolls back, `permadeath_combat_ticks` rolls back to its danger-entry value, and a committed death remains final.
