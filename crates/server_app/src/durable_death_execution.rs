@@ -387,11 +387,16 @@ mod tests {
             let result = service
                 .execute_prepared(&mut arbiter, &prepared, &death)
                 .await;
-            assert!(match (expected, result) {
-                ("stored", Err(DurableDeathExecutionError::StoredResultMismatch)) => true,
-                ("repository", Err(DurableDeathExecutionError::Persistence(_))) => true,
-                _ => false,
-            });
+            assert!(matches!(
+                (expected, result),
+                (
+                    "stored",
+                    Err(DurableDeathExecutionError::StoredResultMismatch)
+                ) | (
+                    "repository",
+                    Err(DurableDeathExecutionError::Persistence(_))
+                )
+            ));
             assert_eq!(
                 arbiter.non_terminal_admission(),
                 NonTerminalAdmission::BlockedByUnresolvedTerminal

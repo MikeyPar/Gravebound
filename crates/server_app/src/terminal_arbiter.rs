@@ -856,8 +856,16 @@ mod tests {
     fn all_pairwise_same_tick_races_are_order_independent() {
         for (left_index, left_kind) in KINDS.iter().copied().enumerate() {
             for (right_index, right_kind) in KINDS.iter().copied().enumerate() {
-                let left = candidate(left_kind, (left_index + 1) as u8, 50);
-                let right = candidate(right_kind, (right_index + 11) as u8, 50);
+                let left = candidate(
+                    left_kind,
+                    u8::try_from(left_index + 1).expect("five terminal kinds fit u8"),
+                    50,
+                );
+                let right = candidate(
+                    right_kind,
+                    u8::try_from(right_index + 11).expect("terminal test IDs fit u8"),
+                    50,
+                );
                 let expected = if left.canonical_cmp(&right).is_le() {
                     left.clone()
                 } else {
@@ -884,7 +892,11 @@ mod tests {
     fn lethal_death_wins_every_same_tick_terminal_race() {
         for (index, kind) in KINDS.iter().copied().enumerate().skip(1) {
             let mut arbiter = TerminalArbiter::new(binding());
-            arbiter.submit(candidate(kind, (index + 10) as u8, 80));
+            arbiter.submit(candidate(
+                kind,
+                u8::try_from(index + 10).expect("terminal test IDs fit u8"),
+                80,
+            ));
             arbiter.submit(candidate(TerminalKind::LethalDeath, 30, 80));
             assert_eq!(
                 arbiter.prepare(80).expect("prepare").winner().kind(),
@@ -899,7 +911,11 @@ mod tests {
             let mut arbiter = TerminalArbiter::new(binding());
             for offset in 0..KINDS.len() {
                 let index = (rotation + offset) % KINDS.len();
-                arbiter.submit(candidate(KINDS[index], (index + 1) as u8, 90));
+                arbiter.submit(candidate(
+                    KINDS[index],
+                    u8::try_from(index + 1).expect("five terminal kinds fit u8"),
+                    90,
+                ));
             }
             let prepared = arbiter.prepare(90).expect("prepare");
             assert_eq!(prepared.winner().kind(), TerminalKind::LethalDeath);
@@ -1030,10 +1046,12 @@ mod tests {
                 TerminalKind::from_stable_code(kind.stable_code()),
                 Some(kind)
             );
-            assert_eq!(kind.stable_code(), (index + 1) as u8);
+            let stable_code =
+                u8::try_from(index + 1).expect("five terminal kinds fit stable u8 codes");
+            assert_eq!(kind.stable_code(), stable_code);
 
             let mut arbiter = TerminalArbiter::new(binding());
-            arbiter.submit(candidate(kind, (index + 1) as u8, 100));
+            arbiter.submit(candidate(kind, stable_code, 100));
             let (_, receipt) = prepare_and_receipt(&mut arbiter, 101);
             let stored = receipt.to_storage_v1();
             assert_eq!(stored.schema_version, STORED_TERMINAL_RECEIPT_SCHEMA_V1);
@@ -1180,7 +1198,8 @@ mod tests {
     fn bounded_capacity_reserves_lethal_precedence_and_other_overflow_fails_closed() {
         let mut arbiter = TerminalArbiter::new(binding());
         for index in 0..MAX_TERMINAL_CANDIDATES_PER_TICK {
-            let discriminator = (index + 1) as u8;
+            let discriminator =
+                u8::try_from(index + 1).expect("bounded terminal candidates fit u8");
             assert!(matches!(
                 arbiter.submit(candidate(
                     TerminalKind::VerifiedServerFaultRestoration,
