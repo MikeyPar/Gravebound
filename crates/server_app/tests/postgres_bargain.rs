@@ -303,20 +303,10 @@ async fn begin_core_danger_entry(
     )
     .await
     .unwrap();
-    sqlx::query(
-        "UPDATE character_entry_restore_points SET inventory_version = $1, \
-         oath_bargain_version = $2, life_metrics_version = $3, ash_wallet_version = $4 \
-         WHERE namespace_id = $5 AND restore_point_id = $6",
-    )
-    .bind(i64::try_from(inventory.post_inventory_version).unwrap())
-    .bind(i64::try_from(oath.oath_bargain_version).unwrap())
-    .bind(i64::try_from(life.life_metrics_version).unwrap())
-    .bind(i64::try_from(ash.ash_wallet_version).unwrap())
-    .bind(WIPEABLE_CORE_NAMESPACE)
-    .bind(ids.restore.as_slice())
-    .execute(transaction.connection())
-    .await
-    .unwrap();
+    assert_eq!(inventory.post_inventory_version, 1);
+    assert_eq!(oath.oath_bargain_version, 1);
+    assert_eq!(life.life_metrics_version, 1);
+    assert_eq!(ash.ash_wallet_version, 1);
     sqlx::query(
         "UPDATE characters SET character_state_version = 2 WHERE namespace_id = $1 \
          AND account_id = $2 AND character_id = $3",
