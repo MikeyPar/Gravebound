@@ -576,8 +576,8 @@ async fn danger_entry_atomically_risks_loadout_and_advances_combined_inventory_o
     .unwrap();
     assert_eq!(versions, (2, 2, 2));
     let component: (i64, i64, i16, i16) = sqlx::query_as(
-        "SELECT pre_inventory_version,post_inventory_version,risk_item_count, \
-         safe_placement_count FROM entry_restore_inventory_v1 \
+        "SELECT pre_inventory_version,post_inventory_version,baseline_item_count, \
+         safe_placement_count FROM entry_restore_inventory_v3 \
          WHERE namespace_id=$1 AND restore_point_id=$2",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
