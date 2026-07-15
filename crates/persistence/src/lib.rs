@@ -159,7 +159,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 40;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 41;
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -886,6 +886,33 @@ mod tests {
             assert!(
                 !migration.contains(prohibited),
                 "independent clock correction leaked {prohibited}"
+            );
+        }
+    }
+
+    #[test]
+    fn death_child_insert_window_guards_relation_specific_fields_procedurally() {
+        let migration =
+            include_str!("../../../migrations/0041_death_child_trigger_relation_guard.sql");
+        for required in [
+            "Gravebound_Production_GDD_v1_Canonical.md",
+            "Gravebound_Content_Production_Spec_v1.md",
+            "Gravebound_Development_Roadmap_v1.md",
+            "CREATE OR REPLACE FUNCTION enforce_death_child_insert_window_v1()",
+            "IF TG_TABLE_NAME = 'death_outbox_events' THEN",
+            "IF NEW.event_type = 'echo_promoted' THEN",
+        ] {
+            assert!(migration.contains(required), "migration omitted {required}");
+        }
+        for prohibited in [
+            "TG_TABLE_NAME = 'death_outbox_events' AND NEW.event_type",
+            "DROP TABLE",
+            "TRUNCATE",
+            "DELETE FROM",
+        ] {
+            assert!(
+                !migration.contains(prohibited),
+                "relation-safe death trigger correction leaked {prohibited}"
             );
         }
     }
