@@ -16,6 +16,12 @@ use crate::{
 pub const LIVE_DAMAGE_TRACE_WINDOW_TICKS_V1: u64 = 300;
 pub const MAX_LIVE_DAMAGE_TRACE_ENTRIES_V1: usize = 4_096;
 pub const MAX_LIVE_DAMAGE_TRACE_STATUSES_PER_ENTRY_V1: usize = 32;
+// Authorities: Gravebound_Production_GDD_v1_Canonical.md TECH-023,
+// Gravebound_Content_Production_Spec_v1.md CONT-HUB-002, and
+// Gravebound_Development_Roadmap_v1.md GB-M03-03/06. Both schema-open lineage phases may produce
+// terminal evidence; closed extraction/death phases remain terminal and fail closed.
+const LINEAGE_STAGED: i16 = 0;
+const LINEAGE_ACTIVE: i16 = 1;
 const ID_BYTES: usize = 16;
 const HASH_BYTES: usize = 32;
 const CONTRACT_VERSION: u16 = 1;
@@ -972,7 +978,7 @@ async fn validate_active_danger(
         )
     };
     if root.try_get::<i16, _>("restore_state")? != 0
-        || lineage.try_get::<i16, _>("lineage_state")? != 0
+        || !open_lineage_state(lineage.try_get("lineage_state")?)
         || !exact_content(&root)?
         || !exact_content(&lineage)?
         || checkpoint.and_then(|v| u64::try_from(v).ok()) != Some(danger.checkpoint_tick)
@@ -1594,6 +1600,9 @@ async fn transaction_timestamp_ms(connection: &mut PgConnection) -> Result<u64, 
 fn all_zero<const N: usize>(value: &[u8; N]) -> bool {
     value.iter().all(|byte| *byte == 0)
 }
+const fn open_lineage_state(state: i16) -> bool {
+    matches!(state, LINEAGE_STAGED | LINEAGE_ACTIVE)
+}
 fn corrupt() -> PersistenceError {
     PersistenceError::CorruptStoredLiveDamageTrace
 }
@@ -1718,6 +1727,19 @@ mod tests {
         assert_eq!(LIVE_DAMAGE_TRACE_WINDOW_TICKS_V1, 300);
         assert_eq!(MAX_LIVE_DAMAGE_TRACE_ENTRIES_V1, 4096);
         assert_eq!(MAX_LIVE_DAMAGE_TRACE_STATUSES_PER_ENTRY_V1, 32);
+    }
+
+    #[test]
+    fn terminal_trace_lineage_authority_accepts_only_schema_open_phases() {
+        // Authorities: Gravebound_Production_GDD_v1_Canonical.md,
+        // Gravebound_Content_Production_Spec_v1.md, and
+        // Gravebound_Development_Roadmap_v1.md require the same terminal winner boundary used by
+        // world flow, extraction, crash restore, and durable death.
+        assert!(open_lineage_state(LINEAGE_STAGED));
+        assert!(open_lineage_state(LINEAGE_ACTIVE));
+        assert!(!open_lineage_state(2));
+        assert!(!open_lineage_state(3));
+        assert!(!open_lineage_state(-1));
     }
 
     #[test]

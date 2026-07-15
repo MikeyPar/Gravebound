@@ -406,6 +406,25 @@ async fn reset_fixture(persistence: &PostgresPersistence) {
     transaction.commit().await.unwrap();
 }
 
+async fn promote_fixture_lineage_to_active(persistence: &PostgresPersistence) {
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let changed = sqlx::query(
+        "UPDATE character_instance_lineages SET lineage_state=1 \
+         WHERE namespace_id=$1 AND account_id=$2 AND character_id=$3 AND lineage_id=$4 \
+           AND lineage_state=0 AND closed_at IS NULL",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(CHARACTER_ID.as_slice())
+    .bind(LINEAGE_ID.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap()
+    .rows_affected();
+    assert_eq!(changed, 1);
+    transaction.commit().await.unwrap();
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "one complete canonical request graph remains contiguous for authority review"
@@ -986,6 +1005,42 @@ async fn count(persistence: &PostgresPersistence, table: &str) -> i64 {
     value
 }
 
+async fn assert_death_closed_lineage(connection: &mut sqlx::PgConnection) {
+    let lineage_state: i16 = sqlx::query_scalar(
+        "SELECT lineage_state FROM character_instance_lineages \
+         WHERE namespace_id=$1 AND account_id=$2 AND character_id=$3 AND lineage_id=$4",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(CHARACTER_ID.as_slice())
+    .bind(LINEAGE_ID.as_slice())
+    .fetch_one(connection)
+    .await
+    .unwrap();
+    assert_eq!(
+        lineage_state, 3,
+        "durable death must seal either open phase"
+    );
+}
+
+fn assert_terminal_root(root: &sqlx::postgres::PgRow) {
+    assert_eq!(root.get::<i16, _>("life_state"), 1);
+    assert_eq!(root.get::<Option<i16>, _>("roster_ordinal"), None);
+    assert_eq!(root.get::<i64, _>("character_state_version"), 3);
+    assert_eq!(root.get::<i64, _>("state_version"), 2);
+    assert_eq!(
+        root.get::<Option<Vec<u8>>, _>("selected_character_id"),
+        None
+    );
+    assert_eq!(root.get::<i32, _>("current_health"), 0);
+    assert_eq!(root.get::<i64, _>("progression_version"), 3);
+    assert_eq!(root.get::<i64, _>("inventory_version"), 3);
+    assert_eq!(root.get::<i64, _>("oath_bargain_version"), 2);
+    assert_eq!(root.get::<i64, _>("lifetime_ticks"), 20_000);
+    assert_eq!(root.get::<i64, _>("permadeath_combat_ticks"), 18_000);
+    assert_eq!(root.get::<i64, _>("life_metrics_version"), 3);
+}
+
 async fn assert_complete_graph(persistence: &PostgresPersistence, ids: RequestIds) {
     let mut transaction = persistence.begin_transaction().await.unwrap();
     let root = sqlx::query(
@@ -1007,21 +1062,8 @@ async fn assert_complete_graph(persistence: &PostgresPersistence, ids: RequestId
     .fetch_one(transaction.connection())
     .await
     .unwrap();
-    assert_eq!(root.get::<i16, _>("life_state"), 1);
-    assert_eq!(root.get::<Option<i16>, _>("roster_ordinal"), None);
-    assert_eq!(root.get::<i64, _>("character_state_version"), 3);
-    assert_eq!(root.get::<i64, _>("state_version"), 2);
-    assert_eq!(
-        root.get::<Option<Vec<u8>>, _>("selected_character_id"),
-        None
-    );
-    assert_eq!(root.get::<i32, _>("current_health"), 0);
-    assert_eq!(root.get::<i64, _>("progression_version"), 3);
-    assert_eq!(root.get::<i64, _>("inventory_version"), 3);
-    assert_eq!(root.get::<i64, _>("oath_bargain_version"), 2);
-    assert_eq!(root.get::<i64, _>("lifetime_ticks"), 20_000);
-    assert_eq!(root.get::<i64, _>("permadeath_combat_ticks"), 18_000);
-    assert_eq!(root.get::<i64, _>("life_metrics_version"), 3);
+    assert_terminal_root(&root);
+    assert_death_closed_lineage(transaction.connection()).await;
 
     let item = sqlx::query(
         "SELECT item_version,security_state,location_kind,destruction_reason FROM item_instances \
@@ -1756,6 +1798,11 @@ async fn complete_durable_death_graph_is_atomic_replayable_terminal_and_wipeable
     assert_rollback_pristine(&restarted).await;
 
     reset_fixture(&restarted).await;
+    // Authorities: Gravebound_Production_GDD_v1_Canonical.md TECH-023,
+    // Gravebound_Content_Production_Spec_v1.md CONT-HUB-002, and
+    // Gravebound_Development_Roadmap_v1.md GB-M03-03/06 require terminal death to close either
+    // schema-open lineage phase, while state-0 journeys above retain the production entry path.
+    promote_fixture_lineage_to_active(&restarted).await;
     let final_evidence = seed_hosted_death_trace(&restarted, &primary).await;
     let final_promotion = final_evidence.promotion_for(&primary);
     let committed = restarted
