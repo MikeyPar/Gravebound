@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{PersistenceError, WIPEABLE_CORE_NAMESPACE};
 
-pub const DURABLE_DEATH_SCHEMA_VERSION: u16 = 1;
+pub const DURABLE_DEATH_SCHEMA_VERSION: u16 = 2;
 pub const DURABLE_DEATH_SUMMARY_REVISION: u16 = 1;
 pub const DURABLE_DEATH_CONTRACT: &str = "permadeath-v1";
 pub const DURABLE_DEATH_TRACE_WINDOW_TICKS: u64 = 300;
@@ -27,6 +27,7 @@ const SUMMARY_HASH_CONTEXT: &str = "gravebound.durable-death.summary.v1";
 const MEMORIAL_HASH_CONTEXT: &str = "gravebound.durable-death.memorial.v1";
 const ECHO_HASH_CONTEXT: &str = "gravebound.durable-death.echo.v1";
 const RESULT_HASH_CONTEXT: &str = "gravebound.durable-death.result.v1";
+const BARGAIN_CLEANUP_ID_CONTEXT: &str = "gravebound.death.bargain-cleanup-id.v1";
 const PRESERVED_PROJECTIONS: [(DurableSummaryProjectionKindV1, &str); 5] = [
     (
         DurableSummaryProjectionKindV1::PreservedAccountRecords,
@@ -60,6 +61,79 @@ const CREATED_PROJECTIONS: [(DurableSummaryProjectionKindV1, &str); 2] = [
     ),
 ];
 
+/// Promoted server content used to validate a planned death independently from player/request
+/// material. Item entries are sorted by UTF-8 template ID and include only currently enabled
+/// templates. Signature tags are presentation-only Echo authority for equipped Weapon/Relic
+/// items; other slots must resolve without a tag.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DurableDeathContentAuthorityV1 {
+    pub content_revision: String,
+    pub records_blake3: String,
+    pub assets_blake3: String,
+    pub localization_blake3: String,
+    pub enabled_items: Vec<DurableDeathItemContentAuthorityV1>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DurableDeathItemContentAuthorityV1 {
+    pub template_id: String,
+    pub echo_signature_tag: Option<String>,
+}
+
+impl DurableDeathContentAuthorityV1 {
+    pub fn validate(&self) -> Result<(), PersistenceError> {
+        if !valid_content_revision(&self.content_revision)
+            || !valid_lower_blake3(&self.records_blake3)
+            || !valid_lower_blake3(&self.assets_blake3)
+            || !valid_lower_blake3(&self.localization_blake3)
+            || self.enabled_items.len() > MAX_DURABLE_DEATH_DESTRUCTION_ENTRIES
+            || self.enabled_items.iter().any(|item| {
+                !valid_stable_id(&item.template_id)
+                    || !valid_optional_id(item.echo_signature_tag.as_deref())
+            })
+            || self
+                .enabled_items
+                .windows(2)
+                .any(|pair| pair[0].template_id.as_bytes() >= pair[1].template_id.as_bytes())
+        {
+            return Err(PersistenceError::DurableDeathContentMismatch);
+        }
+        Ok(())
+    }
+
+    pub fn item(&self, template_id: &str) -> Option<&DurableDeathItemContentAuthorityV1> {
+        self.enabled_items
+            .binary_search_by(|item| item.template_id.as_bytes().cmp(template_id.as_bytes()))
+            .ok()
+            .map(|index| &self.enabled_items[index])
+    }
+
+    pub fn matches_event(&self, event: &DurableDeathEventV1) -> bool {
+        self.content_revision == event.content_revision
+            && self.records_blake3 == event.records_blake3
+            && self.assets_blake3 == event.assets_blake3
+            && self.localization_blake3 == event.localization_blake3
+    }
+}
+
+/// Derives the canonical life-cleanup outbox identity bound into the death request and receipt.
+pub fn derive_durable_death_bargain_cleanup_event_id(
+    death_id: [u8; 16],
+    mutation_id: [u8; 16],
+) -> [u8; 16] {
+    let mut hasher = blake3::Hasher::new_derive_key(BARGAIN_CLEANUP_ID_CONTEXT);
+    for part in [death_id.as_slice(), mutation_id.as_slice()] {
+        hasher.update(&(part.len() as u64).to_be_bytes());
+        hasher.update(part);
+    }
+    let mut value = [0_u8; 16];
+    value.copy_from_slice(&hasher.finalize().as_bytes()[..16]);
+    if value == [0; 16] {
+        value[15] = 1;
+    }
+    value
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeathVersionAdvanceV1 {
     pub pre: u64,
@@ -78,6 +152,7 @@ pub struct DeathAggregateVersionsV1 {
     pub character: DeathVersionAdvanceV1,
     pub progression: DeathVersionAdvanceV1,
     pub inventory: DeathVersionAdvanceV1,
+    pub oath_bargain: DeathVersionAdvanceV1,
     pub life_metrics: DeathVersionAdvanceV1,
 }
 
@@ -87,6 +162,7 @@ impl DeathAggregateVersionsV1 {
             && self.character.valid()
             && self.progression.valid()
             && self.inventory.valid()
+            && self.oath_bargain.valid()
             && self.life_metrics.valid()
     }
 }
@@ -129,6 +205,7 @@ pub struct DurableDeathEventV1 {
     pub character_id: [u8; 16],
     pub former_roster_ordinal: u8,
     pub mutation_id: [u8; 16],
+    pub bargain_cleanup_event_id: [u8; 16],
     pub canonical_request_hash: [u8; 32],
     pub content_revision: String,
     pub records_blake3: String,
@@ -168,6 +245,7 @@ impl DurableDeathEventV1 {
             self.account_id,
             self.character_id,
             self.mutation_id,
+            self.bargain_cleanup_event_id,
             self.instance_id,
             self.lineage_id,
             self.restore_point_id,
@@ -176,6 +254,8 @@ impl DurableDeathEventV1 {
             || self.namespace_id != WIPEABLE_CORE_NAMESPACE
             || !is_uuid_v7(self.death_id)
             || identities.contains(&[0; 16])
+            || self.bargain_cleanup_event_id
+                != derive_durable_death_bargain_cleanup_event_id(self.death_id, self.mutation_id)
             || !(1..=2).contains(&self.former_roster_ordinal)
             || is_zero_hash(self.canonical_request_hash)
             || !valid_content_revision(&self.content_revision)
@@ -1503,6 +1583,7 @@ mod tests {
             character: advance,
             progression: advance,
             inventory: advance,
+            oath_bargain: advance,
             life_metrics: advance,
         }
     }
@@ -1587,13 +1668,17 @@ mod tests {
             ledger_event_id: [10; 16],
         }];
         let mut event = DurableDeathEventV1 {
-            schema_version: 1,
+            schema_version: DURABLE_DEATH_SCHEMA_VERSION,
             namespace_id: WIPEABLE_CORE_NAMESPACE.into(),
             death_id,
             account_id,
             character_id,
             former_roster_ordinal: 1,
             mutation_id,
+            bargain_cleanup_event_id: derive_durable_death_bargain_cleanup_event_id(
+                death_id,
+                mutation_id,
+            ),
             canonical_request_hash: [1; 32],
             content_revision: content_revision.clone(),
             records_blake3: "b".repeat(64),
@@ -1678,7 +1763,7 @@ mod tests {
             ],
         };
         let mut summary = DurableDeathSummaryV1 {
-            schema_version: 1,
+            schema_version: DURABLE_DEATH_SCHEMA_VERSION,
             namespace_id: WIPEABLE_CORE_NAMESPACE.into(),
             death_id,
             summary_revision: 1,
@@ -1711,7 +1796,7 @@ mod tests {
         };
         summary.snapshot_digest = summary.expected_snapshot_digest().unwrap();
         let mut memorial = DurableMemorialRecordV1 {
-            schema_version: 1,
+            schema_version: DURABLE_DEATH_SCHEMA_VERSION,
             namespace_id: WIPEABLE_CORE_NAMESPACE.into(),
             death_id,
             account_id,
@@ -1723,7 +1808,7 @@ mod tests {
         };
         memorial.presentation_digest = memorial.expected_presentation_digest().unwrap();
         let plan = AuthoritativeDeathPlanV1 {
-            schema_version: 1,
+            schema_version: DURABLE_DEATH_SCHEMA_VERSION,
             event,
             trace,
             destruction,
@@ -1747,7 +1832,7 @@ mod tests {
 
         let echo_id = uuid_v7(11);
         let mut echo = DurableEchoRecordV1 {
-            schema_version: 1,
+            schema_version: DURABLE_DEATH_SCHEMA_VERSION,
             namespace_id: request.plan.event.namespace_id.clone(),
             echo_id,
             death_id: request.plan.event.death_id,
@@ -1972,6 +2057,47 @@ mod tests {
             .expect("fixture contains the UTF-8 name");
         malformed[name] = 0xff;
         assert!(DurableDeathCommitRequestV1::decode(&malformed).is_err());
+    }
+
+    #[test]
+    fn promoted_content_authority_is_exact_sorted_and_independent() {
+        let request = valid_request();
+        let event = &request.plan.event;
+        let mut authority = DurableDeathContentAuthorityV1 {
+            content_revision: event.content_revision.clone(),
+            records_blake3: event.records_blake3.clone(),
+            assets_blake3: event.assets_blake3.clone(),
+            localization_blake3: event.localization_blake3.clone(),
+            enabled_items: vec![
+                DurableDeathItemContentAuthorityV1 {
+                    template_id: "item.armor.core".into(),
+                    echo_signature_tag: None,
+                },
+                DurableDeathItemContentAuthorityV1 {
+                    template_id: "item.weapon.bow".into(),
+                    echo_signature_tag: Some("signature.weapon.bow".into()),
+                },
+            ],
+        };
+        authority.validate().unwrap();
+        assert!(authority.matches_event(event));
+        assert_eq!(
+            authority
+                .item("item.weapon.bow")
+                .and_then(|item| item.echo_signature_tag.as_deref()),
+            Some("signature.weapon.bow")
+        );
+
+        authority.enabled_items.swap(0, 1);
+        assert!(matches!(
+            authority.validate(),
+            Err(PersistenceError::DurableDeathContentMismatch)
+        ));
+
+        authority.enabled_items.swap(0, 1);
+        authority.records_blake3 = "f".repeat(64);
+        authority.validate().unwrap();
+        assert!(!authority.matches_event(event));
     }
 
     #[test]

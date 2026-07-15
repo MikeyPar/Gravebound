@@ -23,6 +23,7 @@ mod danger_crash_restore;
 mod danger_crash_restore_repository;
 mod danger_entry_restore;
 mod durable_death;
+mod durable_death_repository;
 mod extraction;
 mod field_equipment;
 mod ground_expiry;
@@ -86,17 +87,20 @@ pub use durable_death::{
     AuthoritativeDeathPlanV1, DURABLE_DEATH_CONTRACT, DURABLE_DEATH_SCHEMA_VERSION,
     DURABLE_DEATH_SUMMARY_REVISION, DURABLE_DEATH_TRACE_WINDOW_TICKS, DeathAggregateVersionsV1,
     DeathVersionAdvanceV1, DurableCombatTraceEntryV1, DurableDamageTypeV1, DurableDeathCauseV1,
-    DurableDeathCommitRequestV1, DurableDeathEventV1, DurableDeathResultCodeV1,
-    DurableDeathSummaryV1, DurableDestructionEntryV1, DurableDestructionLocationV1,
-    DurableEchoEnvelopeV1, DurableEchoOutcomeV1, DurableEchoRecordV1, DurableEchoStateV1,
-    DurableEchoTransitionReasonV1, DurableEchoTransitionV1, DurableEquipmentSlotV1,
-    DurableMemorialRecordV1, DurableNetworkStateV1, DurableOrderedContentIdV1,
-    DurableRecallStateV1, DurableSummaryDamageReferenceV1, DurableSummaryProjectionEntryV1,
+    DurableDeathCommitRequestV1, DurableDeathContentAuthorityV1, DurableDeathEventV1,
+    DurableDeathItemContentAuthorityV1, DurableDeathResultCodeV1, DurableDeathSummaryV1,
+    DurableDestructionEntryV1, DurableDestructionLocationV1, DurableEchoEnvelopeV1,
+    DurableEchoOutcomeV1, DurableEchoRecordV1, DurableEchoStateV1, DurableEchoTransitionReasonV1,
+    DurableEchoTransitionV1, DurableEquipmentSlotV1, DurableMemorialRecordV1,
+    DurableNetworkStateV1, DurableOrderedContentIdV1, DurableRecallStateV1,
+    DurableSummaryDamageReferenceV1, DurableSummaryProjectionEntryV1,
     DurableSummaryProjectionKindV1, DurableSummaryProjectionsV1, DurableTraceStatusV1,
     MAX_DURABLE_DEATH_DESTRUCTION_ENTRIES, MAX_DURABLE_DEATH_PLAN_PAYLOAD_BYTES,
     MAX_DURABLE_DEATH_RESULT_PAYLOAD_BYTES, MAX_DURABLE_DEATH_STATUSES_PER_ENTRY,
     MAX_DURABLE_DEATH_TRACE_ENTRIES, StoredCommittedDeathResultV1,
+    derive_durable_death_bargain_cleanup_event_id,
 };
+pub use durable_death_repository::DurableDeathTransactionV1;
 pub use extraction::{
     CaldusExtractionCommit, CaldusExtractionRequest, CaldusExtractionTransaction,
     CaldusExtractionTransfer, StoredExtractionAuthority, StoredExtractionResult,
@@ -155,7 +159,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 38;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 39;
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -359,6 +363,27 @@ pub enum PersistenceError {
     CorruptStoredDangerCrashRestore,
     #[error("stored durable death request, plan, or result violates the approved contract")]
     CorruptStoredDurableDeath,
+    #[error("durable death account or character does not exist for the authenticated owner")]
+    DurableDeathOwnerNotFound,
+    #[error(
+        "durable death expected different aggregate versions (account {account}, character {character}, progression {progression}, inventory {inventory}, oath/bargain {oath_bargain}, life metrics {life_metrics})"
+    )]
+    DurableDeathVersionMismatch {
+        account: u64,
+        character: u64,
+        progression: u64,
+        inventory: u64,
+        oath_bargain: u64,
+        life_metrics: u64,
+    },
+    #[error(
+        "durable death no longer matches selected-character, danger-root, or custody authority"
+    )]
+    DurableDeathBindingMismatch,
+    #[error("durable death references content outside the promoted server authority")]
+    DurableDeathContentMismatch,
+    #[error("durable death lost terminal arbitration to an already committed outcome")]
+    DurableDeathTerminalSuperseded,
     #[error("final-death identity was replayed with different canonical material")]
     DurableDeathIdempotencyConflict,
     #[error("danger crash restoration account or character does not exist")]
@@ -795,6 +820,46 @@ mod tests {
             assert!(
                 !migration.contains(prohibited),
                 "Ash wipe correction leaked {prohibited}"
+            );
+        }
+    }
+
+    #[test]
+    fn durable_death_custody_closure_is_exact_deferred_and_wipeable() {
+        let migration = include_str!("../../../migrations/0039_durable_death_custody_closure.sql");
+        for required in [
+            "0039 requires no death/Echo rows, death-terminal roots, or permadeath custody",
+            "pre_oath_bargain_version",
+            "post_oath_bargain_version = pre_oath_bargain_version + 1",
+            "bargain_cleanup_event_id",
+            "death_oath_bargain_state_owned",
+            "death_bargain_cleanup_outbox_owned",
+            "event_type = 'bargains_cleared_death'",
+            "character_active_bargains AS active_bargain",
+            "entry_ordinal BETWEEN 0 AND 4095",
+            "section.section_kind IN (1, 2)",
+            "item_terminal_death_owned",
+            "item_ledger_terminal_death_owned",
+            "destruction_reason IN ('ground_expired', 'crash_revoked')",
+            "reason = 'ground_expired' AND terminal_death_id IS NULL",
+            "ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED",
+            "CREATE OR REPLACE FUNCTION enforce_complete_death_graph_v1()",
+        ] {
+            assert!(migration.contains(required), "migration omitted {required}");
+        }
+        for prohibited in [
+            "DROP TABLE",
+            "TRUNCATE",
+            "DELETE FROM item_instances",
+            "DELETE FROM item_ledger_events",
+            "JSON",
+            "JSONB",
+            "FLOAT",
+            "DOUBLE PRECISION",
+        ] {
+            assert!(
+                !migration.contains(prohibited),
+                "durable-death custody migration leaked {prohibited}"
             );
         }
     }
