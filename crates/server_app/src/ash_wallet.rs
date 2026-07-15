@@ -123,8 +123,17 @@ pub struct AshWalletMutationPayload {
 
 impl AshWalletMutationPayload {
     pub fn canonical_hash(&self) -> [u8; 32] {
-        let bytes = postcard::to_stdvec(self).expect("bounded Ash payload serializes");
-        *blake3::hash(&bytes).as_bytes()
+        AshMutationRequest::canonical_payload_hash(
+            match self.kind {
+                AshWalletMutationKind::Earn => StoredAshKind::Earn,
+                AshWalletMutationKind::Spend => StoredAshKind::Spend,
+            },
+            i64::from(self.amount),
+            self.reason.as_str(),
+            &self.source_id,
+            &self.content_version,
+            None,
+        )
     }
 }
 
@@ -222,6 +231,7 @@ where
             reason_code: frame.payload.reason.as_str().into(),
             source_id: frame.payload.source_id.clone(),
             content_version: frame.payload.content_version.clone(),
+            entry_restore_point_id: None,
         };
         match self.persistence.transact_ash_mutation(&request).await {
             Ok(

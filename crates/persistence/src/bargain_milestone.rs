@@ -336,7 +336,8 @@ fn ash_shape_valid(staged: &StagedBargainMilestone, wallet: StoredAshWallet) -> 
             needs_ash
                 && request.account_id == staged.result.account_id
                 && request.mutation_id == staged.result.source_reward_event_id
-                && request.payload_hash == staged.result.payload_hash
+                && request.payload_hash == request.expected_payload_hash()
+                && request.entry_restore_point_id == Some(staged.result.entry_restore_point_id)
                 && request.expected_wallet_version == wallet.wallet_version
                 && request.kind == AshMutationKind::Earn
                 && request.amount == FALLBACK_ASH

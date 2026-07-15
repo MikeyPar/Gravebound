@@ -151,16 +151,13 @@ impl CoreBargainMilestonePlanner {
             .as_ref()
             .ok_or(PersistenceError::ProgressionAwardResultRequired)?
             .account_id;
-        let ash_request = needs_ash.then(|| AshMutationRequest {
-            account_id,
-            mutation_id: command.reward_event_id,
-            payload_hash: command.payload_hash,
-            expected_wallet_version: state.ash_wallet.wallet_version,
-            kind: AshMutationKind::Earn,
-            amount: FALLBACK_ASH,
-            reason_code: FALLBACK_REASON.into(),
-            source_id: CORE_BARGAIN_MILESTONE_ID.into(),
-            content_version: self.content_version.clone(),
+        let ash_request = needs_ash.then(|| {
+            self.fallback_ash_request(
+                account_id,
+                command.reward_event_id,
+                state.ash_wallet.wallet_version,
+                restore_point_id,
+            )
         });
         let receipt = CoreBargainMilestoneReceipt {
             result_code,
@@ -198,6 +195,35 @@ impl CoreBargainMilestonePlanner {
             offer,
             ash_request,
         })
+    }
+
+    fn fallback_ash_request(
+        &self,
+        account_id: [u8; 16],
+        mutation_id: [u8; 16],
+        expected_wallet_version: i64,
+        restore_point_id: [u8; 16],
+    ) -> AshMutationRequest {
+        let payload_hash = AshMutationRequest::canonical_payload_hash(
+            AshMutationKind::Earn,
+            i64::from(FALLBACK_ASH),
+            FALLBACK_REASON,
+            CORE_BARGAIN_MILESTONE_ID,
+            &self.content_version,
+            Some(restore_point_id),
+        );
+        AshMutationRequest {
+            account_id,
+            mutation_id,
+            payload_hash,
+            expected_wallet_version,
+            kind: AshMutationKind::Earn,
+            amount: FALLBACK_ASH,
+            reason_code: FALLBACK_REASON.into(),
+            source_id: CORE_BARGAIN_MILESTONE_ID.into(),
+            content_version: self.content_version.clone(),
+            entry_restore_point_id: Some(restore_point_id),
+        }
     }
 
     fn offer(
@@ -260,6 +286,23 @@ fn qualifies(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fallback_ash_request_hashes_and_carries_exact_restore_root() {
+        let planner = CoreBargainMilestonePlanner {
+            content_version: "core-dev.blake3.test".into(),
+            records_blake3: "records".into(),
+            assets_blake3: "assets".into(),
+            localization_blake3: "localization".into(),
+            enabled_bargain_ids: vec!["bargain.bell_debt".into()],
+        };
+        let request = planner.fallback_ash_request([1; 16], [2; 16], 3, [4; 16]);
+
+        assert_eq!(request.entry_restore_point_id, Some([4; 16]));
+        assert_eq!(request.payload_hash, request.expected_payload_hash());
+        let other_root = planner.fallback_ash_request([1; 16], [2; 16], 3, [5; 16]);
+        assert_ne!(request.payload_hash, other_root.payload_hash);
+    }
 
     #[test]
     fn core_predicate_uses_pre_award_level_and_exact_source_layout_once() {

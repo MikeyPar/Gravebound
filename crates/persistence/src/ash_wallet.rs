@@ -1,5 +1,6 @@
 //! Durable replay-first Ash Shard wallet and immutable currency ledger.
 
+use serde::Serialize;
 use sqlx::Row;
 
 use crate::{PersistenceError, PostgresPersistence, WIPEABLE_CORE_NAMESPACE};
@@ -62,6 +63,55 @@ pub struct AshMutationRequest {
     pub reason_code: String,
     pub source_id: String,
     pub content_version: String,
+    pub entry_restore_point_id: Option<[u8; 16]>,
+}
+
+impl AshMutationRequest {
+    /// Hashes the complete immutable Ash payload, including its optional danger-entry authority.
+    #[must_use]
+    pub fn canonical_payload_hash(
+        kind: AshMutationKind,
+        amount: i64,
+        reason_code: &str,
+        source_id: &str,
+        content_version: &str,
+        entry_restore_point_id: Option<[u8; 16]>,
+    ) -> [u8; 32] {
+        #[derive(Serialize)]
+        struct CanonicalAshPayload<'a> {
+            contract: &'static str,
+            kind: i16,
+            amount: i64,
+            reason_code: &'a str,
+            source_id: &'a str,
+            content_version: &'a str,
+            entry_restore_point_id: Option<[u8; 16]>,
+        }
+
+        let payload = CanonicalAshPayload {
+            contract: "gravebound.ash-mutation-payload.v2",
+            kind: kind.code(),
+            amount,
+            reason_code,
+            source_id,
+            content_version,
+            entry_restore_point_id,
+        };
+        let bytes = postcard::to_stdvec(&payload).expect("bounded Ash payload serializes");
+        *blake3::hash(&bytes).as_bytes()
+    }
+
+    #[must_use]
+    pub fn expected_payload_hash(&self) -> [u8; 32] {
+        Self::canonical_payload_hash(
+            self.kind,
+            i64::from(self.amount),
+            &self.reason_code,
+            &self.source_id,
+            &self.content_version,
+            self.entry_restore_point_id,
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,6 +126,7 @@ pub struct StoredAshMutationResult {
     pub after_balance: i32,
     pub pre_wallet_version: i64,
     pub post_wallet_version: i64,
+    pub entry_restore_point_id: Option<[u8; 16]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -170,7 +221,7 @@ pub(crate) async fn apply_ash_mutation_on_connection(
 ) -> Result<AshWalletTransaction, PersistenceError> {
     validate_request(request)?;
     if let Some(result) = load_result(connection, request).await? {
-        if result.payload_hash != request.payload_hash {
+        if !result_matches_request(&result, request) {
             return Err(PersistenceError::AshIdempotencyConflict);
         }
         return Ok(AshWalletTransaction::Replayed(result));
@@ -192,6 +243,15 @@ pub(crate) async fn apply_ash_mutation_on_connection(
         insert_ledger_event(connection, request, &result).await?;
     }
     Ok(AshWalletTransaction::Committed(result))
+}
+
+fn result_matches_request(result: &StoredAshMutationResult, request: &AshMutationRequest) -> bool {
+    result.mutation_id == request.mutation_id
+        && result.payload_hash == request.payload_hash
+        && result.expected_wallet_version == request.expected_wallet_version
+        && result.kind == request.kind
+        && result.amount == request.amount
+        && result.entry_restore_point_id == request.entry_restore_point_id
 }
 
 pub(crate) async fn lock_ash_wallet_on_connection(
@@ -221,11 +281,13 @@ fn validate_request(request: &AshMutationRequest) -> Result<(), PersistenceError
     if request.account_id == [0; 16]
         || request.mutation_id == [0; 16]
         || request.payload_hash == [0; 32]
+        || request.payload_hash != request.expected_payload_hash()
         || request.expected_wallet_version <= 0
         || !(1..=ASH_WALLET_CAP).contains(&request.amount)
         || !bounded(&request.reason_code, 64)
         || !bounded(&request.source_id, 128)
         || !bounded(&request.content_version, 128)
+        || request.entry_restore_point_id == Some([0; 16])
     {
         return Err(PersistenceError::CorruptStoredAsh);
     }
@@ -288,6 +350,7 @@ fn resolve(
         after_balance,
         pre_wallet_version: wallet.wallet_version,
         post_wallet_version,
+        entry_restore_point_id: request.entry_restore_point_id,
     })
 }
 
@@ -297,8 +360,10 @@ async fn load_result(
 ) -> Result<Option<StoredAshMutationResult>, PersistenceError> {
     let row = sqlx::query(
         "SELECT mutation_id, payload_hash, expected_wallet_version, mutation_kind, \
+                reason_code, source_id, content_version, \
                 requested_amount, result_code, \
-                before_balance, after_balance, pre_wallet_version, post_wallet_version \
+                before_balance, after_balance, pre_wallet_version, post_wallet_version, \
+                entry_restore_point_id \
          FROM ash_mutation_results WHERE namespace_id = $1 AND account_id = $2 \
          AND mutation_id = $3",
     )
@@ -327,8 +392,23 @@ fn decode_result(row: &sqlx::postgres::PgRow) -> Result<StoredAshMutationResult,
         after_balance: row.try_get("after_balance")?,
         pre_wallet_version: row.try_get("pre_wallet_version")?,
         post_wallet_version: row.try_get("post_wallet_version")?,
+        entry_restore_point_id: row
+            .try_get::<Option<Vec<u8>>, _>("entry_restore_point_id")?
+            .map(fixed_bytes)
+            .transpose()?,
     };
     validate_stored_result(&result)?;
+    let expected_payload_hash = AshMutationRequest::canonical_payload_hash(
+        result.kind,
+        i64::from(result.amount),
+        &row.try_get::<String, _>("reason_code")?,
+        &row.try_get::<String, _>("source_id")?,
+        &row.try_get::<String, _>("content_version")?,
+        result.entry_restore_point_id,
+    );
+    if result.payload_hash != expected_payload_hash {
+        return Err(PersistenceError::CorruptStoredAsh);
+    }
     Ok(result)
 }
 
@@ -340,6 +420,7 @@ fn validate_stored_result(result: &StoredAshMutationResult) -> Result<(), Persis
     };
     if result.mutation_id == [0; 16]
         || result.payload_hash == [0; 32]
+        || result.entry_restore_point_id == Some([0; 16])
         || result.expected_wallet_version <= 0
         || !(1..=ASH_WALLET_CAP).contains(&result.amount)
         || !(0..=ASH_WALLET_CAP).contains(&result.before_balance)
@@ -376,8 +457,8 @@ async fn insert_result(
          (namespace_id, account_id, mutation_id, payload_hash, expected_wallet_version, \
           mutation_kind, reason_code, \
           source_id, content_version, requested_amount, result_code, before_balance, \
-          after_balance, pre_wallet_version, post_wallet_version) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
+          after_balance, pre_wallet_version, post_wallet_version, entry_restore_point_id) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(request.account_id.as_slice())
@@ -394,6 +475,12 @@ async fn insert_result(
     .bind(result.after_balance)
     .bind(result.pre_wallet_version)
     .bind(result.post_wallet_version)
+    .bind(
+        result
+            .entry_restore_point_id
+            .as_ref()
+            .map(<[u8; 16]>::as_slice),
+    )
     .execute(connection)
     .await?;
     Ok(())
@@ -443,17 +530,20 @@ mod tests {
         amount: i32,
         expected_wallet_version: i64,
     ) -> AshMutationRequest {
-        AshMutationRequest {
+        let mut request = AshMutationRequest {
             account_id: [1; 16],
             mutation_id: [2; 16],
-            payload_hash: [3; 32],
+            payload_hash: [0; 32],
             expected_wallet_version,
             kind,
             amount,
             reason_code: "test_reason".into(),
             source_id: "test.source".into(),
             content_version: "core-dev.test".into(),
-        }
+            entry_restore_point_id: None,
+        };
+        request.payload_hash = request.expected_payload_hash();
+        request
     }
 
     #[test]
@@ -536,5 +626,46 @@ mod tests {
             validate_stored_result(&result),
             Err(PersistenceError::CorruptStoredAsh)
         ));
+
+        let mut malformed_binding = request(AshMutationKind::Earn, 1, 1);
+        malformed_binding.entry_restore_point_id = Some([0; 16]);
+        malformed_binding.payload_hash = malformed_binding.expected_payload_hash();
+        assert!(matches!(
+            validate_request(&malformed_binding),
+            Err(PersistenceError::CorruptStoredAsh)
+        ));
+    }
+
+    #[test]
+    fn canonical_payload_hash_and_result_bind_the_exact_restore_root() {
+        let mut danger_bound = request(AshMutationKind::Earn, 10, 1);
+        let ordinary_hash = danger_bound.payload_hash;
+        danger_bound.entry_restore_point_id = Some([7; 16]);
+        danger_bound.payload_hash = danger_bound.expected_payload_hash();
+
+        assert_ne!(danger_bound.payload_hash, ordinary_hash);
+        let mut other_root = danger_bound.clone();
+        other_root.entry_restore_point_id = Some([8; 16]);
+        assert_ne!(
+            other_root.expected_payload_hash(),
+            danger_bound.payload_hash
+        );
+
+        let result = resolve(
+            &danger_bound,
+            StoredAshWallet {
+                balance: 5,
+                wallet_version: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(result.entry_restore_point_id, Some([7; 16]));
+        assert!(validate_stored_result(&result).is_ok());
+        assert!(result_matches_request(&result, &danger_bound));
+
+        let mut replay_from_other_root = danger_bound;
+        replay_from_other_root.entry_restore_point_id = Some([8; 16]);
+        replay_from_other_root.payload_hash = result.payload_hash;
+        assert!(!result_matches_request(&result, &replay_from_other_root));
     }
 }
