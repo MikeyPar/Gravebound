@@ -155,7 +155,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 37;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 38;
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -776,6 +776,25 @@ mod tests {
             assert!(
                 !migration.contains(prohibited),
                 "complete death graph migration leaked {prohibited}"
+            );
+        }
+    }
+
+    #[test]
+    fn crash_restore_ash_changes_follow_only_the_wipeable_owner_cascade() {
+        let migration = include_str!("../../../migrations/0038_crash_restore_ash_wipe_cascade.sql");
+        for required in [
+            "danger_crash_restore_ash_changes",
+            "danger_crash_ash_original_owned",
+            "danger_crash_ash_compensation_owned",
+            "ON DELETE CASCADE",
+        ] {
+            assert!(migration.contains(required), "migration omitted {required}");
+        }
+        for prohibited in ["DROP TABLE", "TRUNCATE", "DELETE FROM", "JSON", "JSONB"] {
+            assert!(
+                !migration.contains(prohibited),
+                "Ash wipe correction leaked {prohibited}"
             );
         }
     }
