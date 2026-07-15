@@ -22,6 +22,7 @@ mod danger_checkpoint;
 mod danger_crash_restore;
 mod danger_crash_restore_repository;
 mod danger_entry_restore;
+mod durable_death;
 mod extraction;
 mod field_equipment;
 mod ground_expiry;
@@ -80,6 +81,21 @@ pub use danger_entry_restore::{
     StoredDangerEntryOathBargainV3, stage_danger_entry_ash_wallet_restore_v3,
     stage_danger_entry_inventory_restore_v3, stage_danger_entry_life_metrics_restore_v3,
     stage_danger_entry_oath_bargain_restore_v3,
+};
+pub use durable_death::{
+    AuthoritativeDeathPlanV1, DURABLE_DEATH_CONTRACT, DURABLE_DEATH_SCHEMA_VERSION,
+    DURABLE_DEATH_SUMMARY_REVISION, DURABLE_DEATH_TRACE_WINDOW_TICKS, DeathAggregateVersionsV1,
+    DeathVersionAdvanceV1, DurableCombatTraceEntryV1, DurableDamageTypeV1, DurableDeathCauseV1,
+    DurableDeathCommitRequestV1, DurableDeathEventV1, DurableDeathResultCodeV1,
+    DurableDeathSummaryV1, DurableDestructionEntryV1, DurableDestructionLocationV1,
+    DurableEchoEnvelopeV1, DurableEchoOutcomeV1, DurableEchoRecordV1, DurableEchoStateV1,
+    DurableEchoTransitionReasonV1, DurableEchoTransitionV1, DurableEquipmentSlotV1,
+    DurableMemorialRecordV1, DurableNetworkStateV1, DurableOrderedContentIdV1,
+    DurableRecallStateV1, DurableSummaryDamageReferenceV1, DurableSummaryProjectionEntryV1,
+    DurableSummaryProjectionKindV1, DurableSummaryProjectionsV1, DurableTraceStatusV1,
+    MAX_DURABLE_DEATH_DESTRUCTION_ENTRIES, MAX_DURABLE_DEATH_PLAN_PAYLOAD_BYTES,
+    MAX_DURABLE_DEATH_RESULT_PAYLOAD_BYTES, MAX_DURABLE_DEATH_STATUSES_PER_ENTRY,
+    MAX_DURABLE_DEATH_TRACE_ENTRIES, StoredCommittedDeathResultV1,
 };
 pub use extraction::{
     CaldusExtractionCommit, CaldusExtractionRequest, CaldusExtractionTransaction,
@@ -341,6 +357,10 @@ pub enum PersistenceError {
     DangerCheckpointFinalizationNotCommitted,
     #[error("stored danger crash restoration violates the approved terminal contract")]
     CorruptStoredDangerCrashRestore,
+    #[error("stored durable death request, plan, or result violates the approved contract")]
+    CorruptStoredDurableDeath,
+    #[error("final-death identity was replayed with different canonical material")]
+    DurableDeathIdempotencyConflict,
     #[error("danger crash restoration account or character does not exist")]
     DangerCrashRestoreOwnerNotFound,
     #[error("danger crash restoration root does not exist for the bound character")]
