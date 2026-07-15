@@ -5,9 +5,8 @@ use std::{
 };
 
 use persistence::{
-    CaldusExtractionCommit, CaldusExtractionRequest, PersistenceConfig, PersistenceTransaction,
-    PostgresPersistence, StoredExtractionAuthority, StoredWorldFlowRevisionV1,
-    WIPEABLE_CORE_NAMESPACE,
+    CaldusExtractionCommit, CaldusExtractionRequest, PersistenceConfig, PostgresPersistence,
+    StoredExtractionAuthority, StoredWorldFlowRevisionV1, WIPEABLE_CORE_NAMESPACE,
 };
 use protocol::{
     AuthTicket, CharacterLocation, ClientHello, Compression, HandshakeResponse, ManifestHash,
@@ -19,16 +18,15 @@ use rcgen::{CertifiedKey, generate_simple_self_signed};
 use rustls::pki_types::PrivatePkcs8KeyDer;
 use server_app::{
     AccountId, AdmissionState, AuthenticatedAccount, AuthenticatedNamespace,
-    AuthenticationDecision, BeltStackV1, CaldusVictoryOwnerCommand, CharacterIdGenerator,
-    CoreBargainAuthority, CoreOathSelectionAuthority, CoreSafeInventoryAuthority,
-    DisabledProgressionQueryRepository, DisposableCoreJourneyWorldFlow, EntryCaptureContext,
-    EntryRestoreProvider, HandshakePolicy, IdentityClock, IdentityService,
-    InMemoryAccountRepository, InventorySecurityRestoreV1, NoopIdentityEventSink,
-    OathBargainRestoreV1, PostgresCaldusHallTransferCoordinator, PostgresCaldusVictoryCoordinator,
+    AuthenticationDecision, CaldusVictoryOwnerCommand, CharacterIdGenerator, CoreBargainAuthority,
+    CoreOathSelectionAuthority, CoreSafeInventoryAuthority, DisabledProgressionQueryRepository,
+    DisposableCoreJourneyWorldFlow, HandshakePolicy, IdentityClock, IdentityService,
+    InMemoryAccountRepository, NoopIdentityEventSink, PostgresCaldusHallTransferCoordinator,
+    PostgresCaldusVictoryCoordinator, PostgresDangerEntryInventoryProviderV2,
+    PostgresDangerEntryLifeMetricsProviderV2, PostgresDangerEntryOathBargainProviderV2,
     PostgresDormantWorldFlowCoordinator, PostgresProgressionAwardService,
     PostgresProgressionRestoreProvider, PostgresRewardService, ProgressionQueryService,
-    RestorePointError, SecretRewardEpoch, WorldFlowIdGenerator, serve_core_reliable,
-    serve_handshake,
+    SecretRewardEpoch, WorldFlowIdGenerator, serve_core_reliable, serve_handshake,
 };
 use sim_core::{
     CoreBossParticipant, CoreBossParticipantLock, CoreCaldusAntiCheatState,
@@ -104,6 +102,18 @@ async fn seed_character(persistence: &PostgresPersistence) {
     .await
     .unwrap();
     sqlx::query(
+        "INSERT INTO character_life_metrics \
+         (namespace_id,account_id,character_id,lifetime_ticks,permadeath_combat_ticks, \
+          life_metrics_version) VALUES ($1,$2,$3,0,0,1) \
+          ON CONFLICT (namespace_id,account_id,character_id) DO NOTHING",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(CHARACTER_ID.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query(
         "INSERT INTO character_inventories
          (namespace_id,account_id,character_id,inventory_version) VALUES ($1,$2,$3,1)",
     )
@@ -171,70 +181,6 @@ impl WorldFlowIdGenerator for FixedAuthority {
 
     fn next_restore_point_id(&self) -> [u8; 16] {
         RESTORE_ID
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct FixedInventory;
-
-impl EntryRestoreProvider for FixedInventory {
-    type Snapshot = InventorySecurityRestoreV1;
-
-    async fn capture<'a>(
-        &'a self,
-        _transaction: &'a mut PersistenceTransaction<'_>,
-        _context: EntryCaptureContext,
-    ) -> Result<Self::Snapshot, RestorePointError> {
-        Ok(InventorySecurityRestoreV1 {
-            equipment: [None; 4],
-            belt: [
-                BeltStackV1 {
-                    consumable_id: None,
-                    unit_uids: vec![],
-                },
-                BeltStackV1 {
-                    consumable_id: None,
-                    unit_uids: vec![],
-                },
-            ],
-            inventory_version: 1,
-        })
-    }
-
-    async fn restore_and_revoke_post_entry<'a>(
-        &'a self,
-        _transaction: &'a mut PersistenceTransaction<'_>,
-        _context: server_app::CrashRestoreContext,
-    ) -> Result<(), RestorePointError> {
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct FixedOathBargains;
-
-impl EntryRestoreProvider for FixedOathBargains {
-    type Snapshot = OathBargainRestoreV1;
-
-    async fn capture<'a>(
-        &'a self,
-        _transaction: &'a mut PersistenceTransaction<'_>,
-        _context: EntryCaptureContext,
-    ) -> Result<Self::Snapshot, RestorePointError> {
-        Ok(OathBargainRestoreV1 {
-            oath_id: None,
-            active_bargain_ids: vec![],
-            earned_bargain_slots: 0,
-            oath_bargain_version: 1,
-        })
-    }
-
-    async fn restore_and_revoke_post_entry<'a>(
-        &'a self,
-        _transaction: &'a mut PersistenceTransaction<'_>,
-        _context: server_app::CrashRestoreContext,
-    ) -> Result<(), RestorePointError> {
-        Ok(())
     }
 }
 
@@ -429,8 +375,9 @@ async fn run_reliable_core_journey(persistence: &PostgresPersistence) -> Duratio
         FixedAuthority,
         revision(),
         PostgresProgressionRestoreProvider::new(&progression_content).unwrap(),
-        FixedInventory,
-        FixedOathBargains,
+        PostgresDangerEntryInventoryProviderV2,
+        PostgresDangerEntryOathBargainProviderV2,
+        PostgresDangerEntryLifeMetricsProviderV2,
     );
     let extraction =
         PostgresCaldusHallTransferCoordinator::new(persistence.clone(), FixedAuthority, revision());

@@ -19,6 +19,7 @@ mod bargain_milestone;
 mod caldus_victory;
 mod combat_loadout;
 mod danger_checkpoint;
+mod danger_entry_restore;
 mod extraction;
 mod field_equipment;
 mod ground_expiry;
@@ -63,6 +64,11 @@ pub use combat_loadout::{
 pub use danger_checkpoint::{
     DangerCheckpointDelete, DangerCheckpointWrite, StoredDangerCheckpoint,
     stage_danger_checkpoint_cleanup,
+};
+pub use danger_entry_restore::{
+    StoredDangerEntryInventoryItemV2, StoredDangerEntryInventoryV2, StoredDangerEntryLifeMetricsV2,
+    StoredDangerEntryOathBargainV2, stage_danger_entry_inventory_restore_v2,
+    stage_danger_entry_life_metrics_restore_v2, stage_danger_entry_oath_bargain_restore_v2,
 };
 pub use extraction::{
     CaldusExtractionCommit, CaldusExtractionRequest, CaldusExtractionTransaction,
@@ -113,7 +119,7 @@ pub use safe_inventory::{
     stage_world_flow_safe_inventory_preflight,
 };
 pub use world_flow::{
-    StoredDangerEntryRootV1, StoredSafeArrival, StoredWorldFlowCharacter,
+    StoredDangerEntryRootV2, StoredSafeArrival, StoredWorldFlowCharacter,
     StoredWorldFlowRevisionV1, StoredWorldLocation, StoredWorldTransferReceipt, WorldFlowBegin,
     WorldFlowTransaction, WorldFlowTransactionState, WorldFlowWrite, stage_world_flow_danger_entry,
 };
@@ -122,7 +128,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 32;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 33;
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -242,6 +248,8 @@ pub enum PersistenceError {
     CorruptStoredIdentity,
     #[error("stored world-flow aggregate violates the approved schema")]
     CorruptStoredWorldFlow,
+    #[error("stored danger-entry restore graph violates the v2 authority contract")]
+    CorruptStoredDangerEntryRestore,
     #[error("a fresh world-flow transaction must append one typed result")]
     WorldFlowResultRequired,
     #[error("world-flow character does not exist for the authenticated account")]
@@ -689,6 +697,45 @@ mod tests {
             assert!(
                 !migration.contains(prohibited),
                 "strict death integrity migration leaked {prohibited}"
+            );
+        }
+    }
+
+    #[test]
+    fn danger_entry_restore_v2_is_component_complete_and_clock_authoritative() {
+        let migration = include_str!("../../../migrations/0033_danger_entry_restore_v2.sql");
+        for required in [
+            "0033 requires no existing danger-entry restore points",
+            "restore_contract_v2",
+            "snapshot_contract_version = 2",
+            "restore_components_v2_complete",
+            "component_mask = 15",
+            "entry_restore_oath_bargain_v2",
+            "entry_restore_active_bargains_v2",
+            "entry_restore_life_metrics_v2",
+            "rollback_permadeath_combat_ticks",
+            "restore_v2_progression_component_required",
+            "restore_v2_inventory_component_required",
+            "restore_v2_oath_component_required",
+            "restore_v2_life_component_required",
+            "enforce_entry_restore_inventory_v2_count",
+            "enforce_entry_restore_oath_v2_count",
+            "DEFERRABLE INITIALLY DEFERRED",
+        ] {
+            assert!(migration.contains(required), "migration omitted {required}");
+        }
+        for prohibited in [
+            "DROP TABLE",
+            "TRUNCATE",
+            "JSON",
+            "JSONB",
+            "FLOAT",
+            "DOUBLE PRECISION",
+            "DELETE FROM",
+        ] {
+            assert!(
+                !migration.contains(prohibited),
+                "danger-entry restore v2 migration leaked {prohibited}"
             );
         }
     }

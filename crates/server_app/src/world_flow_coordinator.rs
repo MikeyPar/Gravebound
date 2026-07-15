@@ -4,7 +4,7 @@
 //! transaction semantics while the player route remains fail-closed in [`crate::WorldFlowGateService`].
 
 use persistence::{
-    PersistenceError, PostgresPersistence, StoredDangerEntryRootV1, StoredSafeArrival,
+    PersistenceError, PostgresPersistence, StoredDangerEntryRootV2, StoredSafeArrival,
     StoredWorldFlowRevisionV1, StoredWorldLocation, StoredWorldTransferReceipt, WorldFlowBegin,
     WorldFlowTransaction, WorldFlowTransactionState, load_world_flow_safe_inventory,
     stage_world_flow_danger_entry, stage_world_flow_safe_inventory_preflight,
@@ -17,8 +17,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AuthenticatedAccount, AuthenticatedNamespace, EntryCaptureContext, EntryRestoreProvider,
-    IdentityClock, InventorySecurityRestoreV1, OathBargainRestoreV1,
-    PostgresProgressionRestoreProvider, RestorePointError, RestorePointProviders,
+    IdentityClock, InventorySecurityRestoreV1, LifeMetricsRestoreV2, OathBargainRestoreV1,
+    PostgresProgressionRestoreProvider, RestorePointError, RestorePointProvidersV2,
     SafeInventoryServiceError, WorldFlowRepositoryError,
     safe_inventory::plan_danger_entry_safe_deposit,
     world_flow_gate::{CoreWorldFlowAuthority, stored_location_snapshot},
@@ -275,21 +275,36 @@ where
 }
 
 #[derive(Debug, Clone)]
-pub struct PostgresDormantWorldFlowCoordinator<Generator, Clock, Inventory, OathBargains> {
+pub struct PostgresDormantWorldFlowCoordinator<
+    Generator,
+    Clock,
+    Inventory,
+    OathBargains,
+    LifeMetrics,
+> {
     persistence: PostgresPersistence,
     planner: DormantWorldFlowPlanner<Generator, Clock>,
-    restore_providers:
-        RestorePointProviders<PostgresProgressionRestoreProvider, Inventory, OathBargains>,
+    restore_providers: RestorePointProvidersV2<
+        PostgresProgressionRestoreProvider,
+        Inventory,
+        OathBargains,
+        LifeMetrics,
+    >,
 }
 
-impl<Generator, Clock, Inventory, OathBargains>
-    PostgresDormantWorldFlowCoordinator<Generator, Clock, Inventory, OathBargains>
+impl<Generator, Clock, Inventory, OathBargains, LifeMetrics>
+    PostgresDormantWorldFlowCoordinator<Generator, Clock, Inventory, OathBargains, LifeMetrics>
 where
     Generator: WorldFlowIdGenerator,
     Clock: IdentityClock,
     Inventory: EntryRestoreProvider<Snapshot = InventorySecurityRestoreV1>,
     OathBargains: EntryRestoreProvider<Snapshot = OathBargainRestoreV1>,
+    LifeMetrics: EntryRestoreProvider<Snapshot = LifeMetricsRestoreV2>,
 {
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the dormant coordinator keeps each mandatory V2 provider explicit at its composition root"
+    )]
     pub fn new(
         persistence: PostgresPersistence,
         generator: Generator,
@@ -298,8 +313,10 @@ where
         progression: PostgresProgressionRestoreProvider,
         inventory: Inventory,
         oath_bargains: OathBargains,
+        life_metrics: LifeMetrics,
     ) -> Self {
-        let restore_providers = RestorePointProviders::new(progression, inventory, oath_bargains);
+        let restore_providers =
+            RestorePointProvidersV2::new(progression, inventory, oath_bargains, life_metrics);
         Self {
             persistence,
             planner: DormantWorldFlowPlanner::new(generator, clock, required_content_revision),
@@ -386,6 +403,7 @@ where
                 None,
             );
         };
+        let mut safe_placement_count = 0_u16;
         let result = if let Some(rejection) = validation {
             if stage_receipt(authenticated, mutation, write.state_mut(), &rejection).is_err() {
                 return staged_result(
@@ -398,26 +416,37 @@ where
             }
             rejection
         } else {
-            if requires_safe_preflight(mutation, write.state())
-                && let Err(code) = self
+            if requires_safe_preflight(mutation, write.state()) {
+                let preflight = self
                     .preflight_safe_inventory(&mut write, authenticated, mutation)
-                    .await
-            {
-                if code != WorldTransferResultCode::StorageResolutionRequired {
-                    return staged_result(frame.sequence, mutation, code, None, None);
-                }
-                let rejection = staged_result(frame.sequence, mutation, code, None, None);
-                if stage_receipt(authenticated, mutation, write.state_mut(), &rejection).is_err() {
-                    return staged_result(
-                        frame.sequence,
-                        mutation,
-                        WorldTransferResultCode::ServiceUnavailable,
-                        None,
-                        None,
-                    );
-                }
-                return commit_world_flow_rejection(write, rejection, frame.sequence, mutation)
                     .await;
+                match preflight {
+                    Ok(count) => safe_placement_count = count,
+                    Err(code) => {
+                        if code != WorldTransferResultCode::StorageResolutionRequired {
+                            return staged_result(frame.sequence, mutation, code, None, None);
+                        }
+                        let rejection = staged_result(frame.sequence, mutation, code, None, None);
+                        if stage_receipt(authenticated, mutation, write.state_mut(), &rejection)
+                            .is_err()
+                        {
+                            return staged_result(
+                                frame.sequence,
+                                mutation,
+                                WorldTransferResultCode::ServiceUnavailable,
+                                None,
+                                None,
+                            );
+                        }
+                        return commit_world_flow_rejection(
+                            write,
+                            rejection,
+                            frame.sequence,
+                            mutation,
+                        )
+                        .await;
+                    }
+                }
             }
             match self.planner.plan_validated(
                 authenticated,
@@ -437,7 +466,10 @@ where
                 }
             }
         };
-        if let Err(code) = self.capture_danger_entry(&mut write, mutation).await {
+        if let Err(code) = self
+            .capture_danger_entry(&mut write, mutation, safe_placement_count)
+            .await
+        {
             return staged_result(frame.sequence, mutation, code, None, None);
         }
         match write.commit(result).await {
@@ -458,7 +490,7 @@ where
         write: &mut persistence::WorldFlowWrite<'_>,
         authenticated: AuthenticatedAccount,
         mutation: &WorldTransferMutation,
-    ) -> Result<(), WorldTransferResultCode> {
+    ) -> Result<u16, WorldTransferResultCode> {
         let account_id = authenticated.account_id.as_bytes();
         let account_version = u64::try_from(write.state().account_version)
             .map_err(|_| WorldTransferResultCode::ServiceUnavailable)?;
@@ -484,13 +516,15 @@ where
         .map_err(|error| preflight_persistence_code(&error))?;
         write.state_mut().account_version = i64::try_from(staged.account_version)
             .map_err(|_| WorldTransferResultCode::ServiceUnavailable)?;
-        Ok(())
+        u16::try_from(staged.moved_item_count)
+            .map_err(|_| WorldTransferResultCode::ServiceUnavailable)
     }
 
     async fn capture_danger_entry(
         &self,
         write: &mut persistence::WorldFlowWrite<'_>,
         mutation: &WorldTransferMutation,
+        safe_placement_count: u16,
     ) -> Result<(), WorldTransferResultCode> {
         if !write.state().location_changed {
             return Ok(());
@@ -531,12 +565,14 @@ where
             .map_err(|_| WorldTransferResultCode::ServiceUnavailable)?;
         let snapshot = self
             .restore_providers
-            .capture_v1(
+            .capture_v2(
                 write.transaction_mut(),
                 EntryCaptureContext {
                     account_id,
                     character_id: mutation.character_id,
                     restore_point_id,
+                    mutation_id: mutation.mutation_id,
+                    safe_placement_count,
                 },
                 mutation.payload.content_revision.clone(),
                 account_version,
@@ -544,7 +580,7 @@ where
             )
             .await
             .map_err(restore_capture_code)?;
-        let root = StoredDangerEntryRootV1 {
+        let root = StoredDangerEntryRootV2 {
             account_id,
             character_id: mutation.character_id,
             lineage_id,
@@ -562,6 +598,8 @@ where
             inventory_version: i64::try_from(snapshot.versions.inventory_version)
                 .map_err(|_| WorldTransferResultCode::ServiceUnavailable)?,
             oath_bargain_version: i64::try_from(snapshot.versions.oath_bargain_version)
+                .map_err(|_| WorldTransferResultCode::ServiceUnavailable)?,
+            life_metrics_version: i64::try_from(snapshot.versions.life_metrics_version)
                 .map_err(|_| WorldTransferResultCode::ServiceUnavailable)?,
             composite_digest: snapshot.composite_digest().map_err(restore_capture_code)?,
         };
@@ -625,13 +663,14 @@ fn preflight_persistence_code(error: &PersistenceError) -> WorldTransferResultCo
     }
 }
 
-impl<Generator, Clock, Inventory, OathBargains> CoreWorldFlowAuthority
-    for PostgresDormantWorldFlowCoordinator<Generator, Clock, Inventory, OathBargains>
+impl<Generator, Clock, Inventory, OathBargains, LifeMetrics> CoreWorldFlowAuthority
+    for PostgresDormantWorldFlowCoordinator<Generator, Clock, Inventory, OathBargains, LifeMetrics>
 where
     Generator: WorldFlowIdGenerator,
     Clock: IdentityClock,
     Inventory: EntryRestoreProvider<Snapshot = InventorySecurityRestoreV1>,
     OathBargains: EntryRestoreProvider<Snapshot = OathBargainRestoreV1>,
+    LifeMetrics: EntryRestoreProvider<Snapshot = LifeMetricsRestoreV2>,
 {
     async fn handle_world_flow(
         &self,
@@ -653,6 +692,7 @@ const fn restore_capture_code(error: RestorePointError) -> WorldTransferResultCo
         | RestorePointError::InvalidBeltStack
         | RestorePointError::DuplicateItemUid
         | RestorePointError::InvalidOathBargains
+        | RestorePointError::InvalidLifeMetrics
         | RestorePointError::ZeroAggregateVersion
         | RestorePointError::AggregateVersionMismatch
         | RestorePointError::Encoding

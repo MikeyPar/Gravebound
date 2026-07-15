@@ -137,8 +137,11 @@ async fn migrations_are_idempotent_exact_and_ready() {
             "echo_deed_tags",
             "echo_records",
             "echo_state_transitions",
+            "entry_restore_active_bargains_v2",
             "entry_restore_inventory_items_v1",
             "entry_restore_inventory_v1",
+            "entry_restore_life_metrics_v2",
+            "entry_restore_oath_bargain_v2",
             "entry_restore_progression_v1",
             "field_equipment_mutations",
             "gravebound_namespaces",
@@ -716,6 +719,10 @@ fn danger_checkpoint(tick: i64, payload: Vec<u8>) -> StoredDangerCheckpoint {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the hosted fixture constructs one auditable component-complete danger graph"
+)]
 async fn insert_danger_checkpoint_fixture(persistence: &PostgresPersistence) {
     let mut transaction = persistence.begin_transaction().await.unwrap();
     insert_account(&mut transaction, &ACCOUNT_A).await.unwrap();
@@ -758,9 +765,9 @@ async fn insert_danger_checkpoint_fixture(persistence: &PostgresPersistence) {
         "INSERT INTO character_entry_restore_points (namespace_id, account_id, character_id, \
          restore_point_id, lineage_id, source_location_id, restore_location_id, \
          snapshot_contract_version, account_version, character_version, progression_version, \
-         inventory_version, oath_bargain_version, component_mask, composite_digest, restore_state, \
+         inventory_version, oath_bargain_version, life_metrics_version, component_mask, composite_digest, restore_state, \
          records_blake3, assets_blake3, localization_blake3) VALUES ($1, $2, $3, $4, $5, \
-         'hub.lantern_halls_01', 'hub.lantern_halls_01', 1, 1, 1, 1, 1, 1, 7, $6, 0, $7, $8, $9)",
+         'hub.lantern_halls_01', 'hub.lantern_halls_01', 2, 1, 1, 1, 1, 1, 1, 15, $6, 0, $7, $8, $9)",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(ACCOUNT_A.as_slice())
@@ -772,6 +779,44 @@ async fn insert_danger_checkpoint_fixture(persistence: &PostgresPersistence) {
     .bind("2".repeat(64))
     .bind("3".repeat(64))
     .execute(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO entry_restore_progression_v1 \
+         (namespace_id,account_id,character_id,restore_point_id,level,total_xp,current_health, \
+          progression_version) VALUES ($1,$2,$3,$4,1,0,120,1)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_A.as_slice())
+    .bind(CHARACTER_A.as_slice())
+    .bind(CHECKPOINT_RESTORE.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    persistence::stage_danger_entry_inventory_restore_v2(
+        &mut transaction,
+        ACCOUNT_A,
+        CHARACTER_A,
+        CHECKPOINT_RESTORE,
+        [89; 16],
+        0,
+    )
+    .await
+    .unwrap();
+    persistence::stage_danger_entry_oath_bargain_restore_v2(
+        &mut transaction,
+        ACCOUNT_A,
+        CHARACTER_A,
+        CHECKPOINT_RESTORE,
+    )
+    .await
+    .unwrap();
+    persistence::stage_danger_entry_life_metrics_restore_v2(
+        &mut transaction,
+        ACCOUNT_A,
+        CHARACTER_A,
+        CHECKPOINT_RESTORE,
+    )
     .await
     .unwrap();
     sqlx::query(

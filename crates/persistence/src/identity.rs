@@ -289,6 +289,7 @@ async fn persist_aggregate(
         .execute(transaction.connection())
         .await
         .map_err(PersistenceError::Database)?;
+        persist_initial_life_metrics(transaction, account_id, &character.character_id).await?;
         sqlx::query(
             "INSERT INTO character_world_locations \
              (namespace_id, account_id, character_id, character_version, location_kind, \
@@ -347,6 +348,26 @@ async fn persist_aggregate(
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(account_id.as_slice())
+    .execute(transaction.connection())
+    .await
+    .map_err(PersistenceError::Database)?;
+    Ok(())
+}
+
+async fn persist_initial_life_metrics(
+    transaction: &mut PersistenceTransaction<'_>,
+    account_id: &[u8; ID_BYTES],
+    character_id: &[u8; ID_BYTES],
+) -> Result<(), PersistenceError> {
+    sqlx::query(
+        "INSERT INTO character_life_metrics \
+         (namespace_id, account_id, character_id, lifetime_ticks, \
+          permadeath_combat_ticks, life_metrics_version) VALUES ($1, $2, $3, 0, 0, 1) \
+         ON CONFLICT (namespace_id, account_id, character_id) DO NOTHING",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
     .execute(transaction.connection())
     .await
     .map_err(PersistenceError::Database)?;

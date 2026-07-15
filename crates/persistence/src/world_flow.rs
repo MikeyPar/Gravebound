@@ -81,7 +81,7 @@ pub struct StoredWorldFlowCharacter {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StoredDangerEntryRootV1 {
+pub struct StoredDangerEntryRootV2 {
     pub account_id: [u8; ID_BYTES],
     pub character_id: [u8; ID_BYTES],
     pub lineage_id: [u8; ID_BYTES],
@@ -95,6 +95,7 @@ pub struct StoredDangerEntryRootV1 {
     pub progression_version: i64,
     pub inventory_version: i64,
     pub oath_bargain_version: i64,
+    pub life_metrics_version: i64,
     pub composite_digest: [u8; HASH_BYTES],
 }
 
@@ -270,12 +271,13 @@ impl PostgresPersistence {
     }
 }
 
-/// Stages the immutable lineage and complete v1 restore root inside a caller-owned transaction.
+/// Stages the immutable lineage and component-complete v2 restore root inside a caller-owned
+/// transaction.
 /// Provider-owned component rows may be inserted before this call because their root foreign keys
 /// are deferred until commit.
 pub async fn stage_world_flow_danger_entry(
     transaction: &mut PersistenceTransaction<'_>,
-    root: &StoredDangerEntryRootV1,
+    root: &StoredDangerEntryRootV2,
 ) -> Result<(), PersistenceError> {
     validate_danger_entry_root(root)?;
     sqlx::query(
@@ -301,10 +303,10 @@ pub async fn stage_world_flow_danger_entry(
          (namespace_id, account_id, character_id, restore_point_id, lineage_id, \
           source_location_id, restore_location_id, snapshot_contract_version, account_version, \
           character_version, progression_version, inventory_version, oath_bargain_version, \
-          component_mask, composite_digest, restore_state, records_blake3, assets_blake3, \
+          life_metrics_version, component_mask, composite_digest, restore_state, records_blake3, assets_blake3, \
           localization_blake3) \
-         VALUES ($1, $2, $3, $4, $5, $6, 'hub.lantern_halls_01', 1, $7, $8, $9, $10, \
-                 $11, 7, $12, 0, $13, $14, $15)",
+         VALUES ($1, $2, $3, $4, $5, $6, 'hub.lantern_halls_01', 2, $7, $8, $9, $10, \
+                 $11, $12, 15, $13, 0, $14, $15, $16)",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(root.account_id.as_slice())
@@ -317,6 +319,7 @@ pub async fn stage_world_flow_danger_entry(
     .bind(root.progression_version)
     .bind(root.inventory_version)
     .bind(root.oath_bargain_version)
+    .bind(root.life_metrics_version)
     .bind(root.composite_digest.as_slice())
     .bind(&root.content_revision.records_blake3)
     .bind(&root.content_revision.assets_blake3)
@@ -327,7 +330,7 @@ pub async fn stage_world_flow_danger_entry(
     Ok(())
 }
 
-fn validate_danger_entry_root(root: &StoredDangerEntryRootV1) -> Result<(), PersistenceError> {
+fn validate_danger_entry_root(root: &StoredDangerEntryRootV2) -> Result<(), PersistenceError> {
     let bounded_content_id = |value: &str| (3..=96).contains(&value.len());
     if [
         &root.account_id,
@@ -348,6 +351,7 @@ fn validate_danger_entry_root(root: &StoredDangerEntryRootV1) -> Result<(), Pers
             root.progression_version,
             root.inventory_version,
             root.oath_bargain_version,
+            root.life_metrics_version,
         ]
         .into_iter()
         .any(|version| version <= 0)

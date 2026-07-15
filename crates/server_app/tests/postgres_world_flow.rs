@@ -2,7 +2,8 @@ use std::{path::PathBuf, sync::Arc};
 
 use persistence::{
     CORE_ITEM_CONTENT_REVISION, PersistenceConfig, PersistenceTransaction, PostgresPersistence,
-    WIPEABLE_CORE_NAMESPACE,
+    WIPEABLE_CORE_NAMESPACE, stage_danger_entry_inventory_restore_v2,
+    stage_danger_entry_life_metrics_restore_v2, stage_danger_entry_oath_bargain_restore_v2,
 };
 use protocol::{
     ManifestHash, WireText, WorldFlowContentRevisionV1, WorldFlowFrame, WorldFlowRequest,
@@ -11,11 +12,12 @@ use protocol::{
 };
 use server_app::{
     AccountId, AuthenticatedAccount, AuthenticatedNamespace, BeltStackV1, CrashRestoreContext,
-    DangerEntrySnapshotV1, EntryCaptureContext, EntryRestoreProvider, IdentityClock,
-    InventorySecurityRestoreV1, OathBargainRestoreV1, PostgresDormantWorldFlowCoordinator,
-    PostgresProgressionRestoreProvider, PostgresSafeInventoryService, ProgressionRestoreV1,
-    RestorePointError, SafeAggregateVersionsV1, SafeInventoryServiceError,
-    SafeInventoryTransferCommand, SafeInventoryTransferKind, WorldFlowIdGenerator,
+    DangerEntrySnapshotV2, EntryCaptureContext, EntryRestoreProvider, IdentityClock,
+    InventorySecurityRestoreV1, ItemUid, LifeMetricsRestoreV2, OathBargainRestoreV1,
+    PostgresDormantWorldFlowCoordinator, PostgresProgressionRestoreProvider,
+    PostgresSafeInventoryService, ProgressionRestoreV1, RestorePointError, SafeAggregateVersionsV2,
+    SafeInventoryServiceError, SafeInventoryTransferCommand, SafeInventoryTransferKind,
+    WorldFlowIdGenerator,
 };
 
 const ACCOUNT_ID: [u8; 16] = [81; 16];
@@ -100,6 +102,18 @@ async fn insert_character(
     .await
     .unwrap();
     sqlx::query(
+        "INSERT INTO character_life_metrics (namespace_id, account_id, character_id, \
+         lifetime_ticks, permadeath_combat_ticks, life_metrics_version) \
+         VALUES ($1, $2, $3, 0, 0, 1) \
+         ON CONFLICT (namespace_id, account_id, character_id) DO NOTHING",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query(
         "INSERT INTO character_inventories (namespace_id, account_id, character_id, \
          inventory_version) VALUES ($1, $2, $3, 1)",
     )
@@ -167,6 +181,39 @@ async fn seed_character_safe_item(persistence: &PostgresPersistence, item_uid: [
     let mut transaction = persistence.begin_transaction().await.unwrap();
     insert_safe_equipment(&mut transaction, item_uid, Some(CHARACTER_ID), 0, 5, 0).await;
     transaction.commit().await.unwrap();
+}
+
+async fn insert_safe_belt_unit(
+    transaction: &mut PersistenceTransaction<'_>,
+    item_uid: [u8; 16],
+    slot_index: i16,
+) {
+    sqlx::query(
+        "INSERT INTO item_instances (namespace_id,item_uid,account_id,character_id,template_id, \
+         content_revision,item_kind,item_level,rarity,creation_kind,creation_request_id,roll_index, \
+         unit_ordinal,item_version,security_state,location_kind,slot_index,provenance_kind, \
+         salvage_band,salvage_value) VALUES ($1,$2,$3,$4,'item.consumable.tonic', \
+         $5,1,NULL,NULL,0,$2,0,0,1,0,1,$6,0,0,0)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(item_uid.as_slice())
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(CHARACTER_ID.as_slice())
+    .bind(CORE_ITEM_CONTENT_REVISION)
+    .bind(slot_index)
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+}
+
+async fn seed_entry_loadout(persistence: &PostgresPersistence) -> [[u8; 16]; 3] {
+    let identities = [[61; 16], [62; 16], [63; 16]];
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    insert_safe_equipment(&mut transaction, identities[0], Some(CHARACTER_ID), 0, 0, 0).await;
+    insert_safe_belt_unit(&mut transaction, identities[1], 0).await;
+    insert_safe_belt_unit(&mut transaction, identities[2], 0).await;
+    transaction.commit().await.unwrap();
+    identities
 }
 
 async fn seed_deliberate_risk_item(persistence: &PostgresPersistence, item_uid: [u8; 16]) {
@@ -258,30 +305,49 @@ impl EntryRestoreProvider for PostgresFixtureInventory {
         transaction: &'a mut PersistenceTransaction<'_>,
         context: EntryCaptureContext,
     ) -> Result<Self::Snapshot, RestorePointError> {
-        let inventory_version: i64 = sqlx::query_scalar(
-            "SELECT inventory_version FROM character_inventories WHERE namespace_id = $1 \
-             AND account_id = $2 AND character_id = $3 FOR UPDATE",
+        let stored = stage_danger_entry_inventory_restore_v2(
+            transaction,
+            context.account_id,
+            context.character_id,
+            context.restore_point_id,
+            context.mutation_id,
+            context.safe_placement_count,
         )
-        .bind(WIPEABLE_CORE_NAMESPACE)
-        .bind(context.account_id.as_slice())
-        .bind(context.character_id.as_slice())
-        .fetch_one(transaction.connection())
         .await
         .map_err(|_| RestorePointError::Persistence)?;
+        let inventory_version = stored.post_inventory_version;
+        let mut equipment = [None; 4];
+        let mut belt_ids = [Vec::new(), Vec::new()];
+        let mut belt_templates = [None, None];
+        for item in stored.items {
+            let uid = ItemUid::new(item.item_uid)?;
+            let slot = usize::try_from(item.slot_index)
+                .map_err(|_| RestorePointError::InvalidInventory)?;
+            match item.location_kind {
+                0 => equipment[slot] = Some(uid),
+                1 => {
+                    belt_ids[slot].push(uid);
+                    belt_templates[slot] = Some(
+                        WireText::new(item.template_id)
+                            .map_err(|_| RestorePointError::InvalidInventory)?,
+                    );
+                }
+                _ => return Err(RestorePointError::InvalidInventory),
+            }
+        }
         Ok(InventorySecurityRestoreV1 {
-            equipment: [None; 4],
+            equipment,
             belt: [
                 BeltStackV1 {
-                    consumable_id: None,
-                    unit_uids: vec![],
+                    consumable_id: belt_templates[0].clone(),
+                    unit_uids: std::mem::take(&mut belt_ids[0]),
                 },
                 BeltStackV1 {
-                    consumable_id: None,
-                    unit_uids: vec![],
+                    consumable_id: belt_templates[1].clone(),
+                    unit_uids: std::mem::take(&mut belt_ids[1]),
                 },
             ],
-            inventory_version: u64::try_from(inventory_version)
-                .map_err(|_| RestorePointError::InvalidInventory)?,
+            inventory_version,
         })
     }
 
@@ -305,40 +371,62 @@ impl EntryRestoreProvider for PostgresFixtureOathBargains {
         transaction: &'a mut PersistenceTransaction<'_>,
         context: EntryCaptureContext,
     ) -> Result<Self::Snapshot, RestorePointError> {
-        let (oath_id, earned_slots, version): (Option<String>, i16, i64) = sqlx::query_as(
-            "SELECT c.oath_id, ob.earned_bargain_slots, ob.oath_bargain_version \
-             FROM characters c JOIN character_oath_bargain_state ob \
-             USING (namespace_id, account_id, character_id) WHERE c.namespace_id = $1 \
-             AND c.account_id = $2 AND c.character_id = $3 FOR UPDATE OF c, ob",
+        let stored = stage_danger_entry_oath_bargain_restore_v2(
+            transaction,
+            context.account_id,
+            context.character_id,
+            context.restore_point_id,
         )
-        .bind(WIPEABLE_CORE_NAMESPACE)
-        .bind(context.account_id.as_slice())
-        .bind(context.character_id.as_slice())
-        .fetch_one(transaction.connection())
         .await
         .map_err(|_| RestorePointError::Persistence)?;
-        let active = sqlx::query_scalar::<_, String>(
-            "SELECT bargain_id FROM character_active_bargains WHERE namespace_id = $1 \
-             AND account_id = $2 AND character_id = $3 ORDER BY acquisition_ordinal FOR UPDATE",
-        )
-        .bind(WIPEABLE_CORE_NAMESPACE)
-        .bind(context.account_id.as_slice())
-        .bind(context.character_id.as_slice())
-        .fetch_all(transaction.connection())
-        .await
-        .map_err(|_| RestorePointError::Persistence)?
-        .into_iter()
-        .map(|id| WireText::new(id).map_err(|_| RestorePointError::InvalidOathBargains))
-        .collect::<Result<Vec<_>, _>>()?;
+        let active = stored
+            .active_bargain_ids
+            .into_iter()
+            .map(|id| WireText::new(id).map_err(|_| RestorePointError::InvalidOathBargains))
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(OathBargainRestoreV1 {
-            oath_id: oath_id
+            oath_id: stored
+                .oath_id
                 .map(|id| WireText::new(id).map_err(|_| RestorePointError::InvalidOathBargains))
                 .transpose()?,
             active_bargain_ids: active,
-            earned_bargain_slots: u8::try_from(earned_slots)
-                .map_err(|_| RestorePointError::InvalidOathBargains)?,
-            oath_bargain_version: u64::try_from(version)
-                .map_err(|_| RestorePointError::InvalidOathBargains)?,
+            earned_bargain_slots: stored.earned_bargain_slots,
+            oath_bargain_version: stored.oath_bargain_version,
+        })
+    }
+
+    async fn restore_and_revoke_post_entry<'a>(
+        &'a self,
+        _transaction: &'a mut PersistenceTransaction<'_>,
+        _context: CrashRestoreContext,
+    ) -> Result<(), RestorePointError> {
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PostgresFixtureLifeMetrics;
+
+impl EntryRestoreProvider for PostgresFixtureLifeMetrics {
+    type Snapshot = LifeMetricsRestoreV2;
+
+    async fn capture<'a>(
+        &'a self,
+        transaction: &'a mut PersistenceTransaction<'_>,
+        context: EntryCaptureContext,
+    ) -> Result<Self::Snapshot, RestorePointError> {
+        let stored = stage_danger_entry_life_metrics_restore_v2(
+            transaction,
+            context.account_id,
+            context.character_id,
+            context.restore_point_id,
+        )
+        .await
+        .map_err(|_| RestorePointError::Persistence)?;
+        Ok(LifeMetricsRestoreV2 {
+            lifetime_ticks: stored.captured_lifetime_ticks,
+            permadeath_combat_ticks: stored.rollback_permadeath_combat_ticks,
+            life_metrics_version: stored.life_metrics_version,
         })
     }
 
@@ -377,7 +465,13 @@ impl EntryRestoreProvider for FailingInventory {
 fn coordinator<Inventory>(
     persistence: PostgresPersistence,
     inventory: Inventory,
-) -> PostgresDormantWorldFlowCoordinator<FixedIds, FixedClock, Inventory, PostgresFixtureOathBargains>
+) -> PostgresDormantWorldFlowCoordinator<
+    FixedIds,
+    FixedClock,
+    Inventory,
+    PostgresFixtureOathBargains,
+    PostgresFixtureLifeMetrics,
+>
 where
     Inventory: EntryRestoreProvider<Snapshot = InventorySecurityRestoreV1>,
 {
@@ -390,6 +484,7 @@ where
         PostgresProgressionRestoreProvider::new(&progression).unwrap(),
         inventory,
         PostgresFixtureOathBargains,
+        PostgresFixtureLifeMetrics,
     )
 }
 
@@ -429,6 +524,7 @@ struct StoredRootProjection {
     progression_version: i64,
     inventory_version: i64,
     oath_bargain_version: i64,
+    life_metrics_version: i64,
     component_mask: i16,
     composite_digest: Vec<u8>,
 }
@@ -439,7 +535,7 @@ async fn assert_committed_danger_root(persistence: &PostgresPersistence) {
         "SELECT l.content_id, l.layout_id, r.source_location_id, r.records_blake3, \
                 r.assets_blake3, r.localization_blake3, r.account_version, \
                 r.character_version, r.progression_version, r.inventory_version, \
-                r.oath_bargain_version, r.component_mask, r.composite_digest \
+                r.oath_bargain_version, r.life_metrics_version, r.component_mask, r.composite_digest \
          FROM character_instance_lineages l JOIN character_entry_restore_points r \
          USING (namespace_id, account_id, character_id, lineage_id) \
          WHERE l.namespace_id = $1 AND l.account_id = $2 AND l.character_id = $3",
@@ -471,9 +567,10 @@ async fn assert_committed_danger_root(persistence: &PostgresPersistence) {
             root.progression_version,
             root.inventory_version,
             root.oath_bargain_version,
+            root.life_metrics_version,
             root.component_mask,
         ),
-        (1, 1, 1, 1, 1, 7)
+        (1, 1, 1, 1, 1, 1, 15)
     );
     assert_eq!(root.composite_digest, expected_snapshot(required_revision));
     assert!(matches!(
@@ -491,7 +588,7 @@ async fn assert_committed_danger_root(persistence: &PostgresPersistence) {
 }
 
 fn expected_snapshot(revision: WorldFlowContentRevisionV1) -> Vec<u8> {
-    DangerEntrySnapshotV1 {
+    DangerEntrySnapshotV2 {
         character_id: CHARACTER_ID,
         content_revision: revision,
         progression: ProgressionRestoreV1 {
@@ -520,12 +617,18 @@ fn expected_snapshot(revision: WorldFlowContentRevisionV1) -> Vec<u8> {
             earned_bargain_slots: 0,
             oath_bargain_version: 1,
         },
-        versions: SafeAggregateVersionsV1 {
+        life_metrics: LifeMetricsRestoreV2 {
+            lifetime_ticks: 0,
+            permadeath_combat_ticks: 0,
+            life_metrics_version: 1,
+        },
+        versions: SafeAggregateVersionsV2 {
             account_version: 1,
             character_version: 1,
             progression_version: 1,
             inventory_version: 1,
             oath_bargain_version: 1,
+            life_metrics_version: 1,
         },
     }
     .composite_digest()
@@ -574,6 +677,82 @@ async fn danger_entry_commits_complete_root_and_replays_after_pool_restart() {
         WorldTransferResultCode::IdempotencyConflict
     );
     assert_eq!(aggregate_counts(&restarted).await, (1, 1, 1, 1));
+}
+
+#[tokio::test]
+#[ignore = "requires explicitly authorized disposable PostgreSQL"]
+async fn danger_entry_atomically_risks_loadout_and_advances_combined_inventory_once() {
+    let persistence = disposable_database().await;
+    reset_fixture(&persistence).await;
+    let risk_items = seed_entry_loadout(&persistence).await;
+    let safe_item = [64; 16];
+    seed_character_safe_item(&persistence, safe_item).await;
+
+    let accepted = coordinator(persistence.clone(), PostgresFixtureInventory)
+        .handle(authenticated(ACCOUNT_ID), &frame(1, 92, CHARACTER_ID, 1))
+        .await;
+    assert_eq!(code(&accepted), WorldTransferResultCode::Accepted);
+
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let versions: (i64, i64, i64) = sqlx::query_as(
+        "SELECT a.state_version, i.inventory_version, r.inventory_version \
+         FROM accounts a JOIN character_inventories i USING (namespace_id,account_id) \
+         JOIN character_entry_restore_points r USING (namespace_id,account_id,character_id) \
+         WHERE a.namespace_id=$1 AND a.account_id=$2 AND i.character_id=$3",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(CHARACTER_ID.as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    assert_eq!(versions, (2, 2, 2));
+    let component: (i64, i64, i16, i16) = sqlx::query_as(
+        "SELECT pre_inventory_version,post_inventory_version,risk_item_count, \
+         safe_placement_count FROM entry_restore_inventory_v1 \
+         WHERE namespace_id=$1 AND restore_point_id=$2",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(RESTORE_ID.as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    assert_eq!(component, (1, 2, 3, 1));
+    let rows: Vec<(Vec<u8>, i16, i16, i64)> = sqlx::query_as(
+        "SELECT item_uid,location_kind,security_state,item_version FROM item_instances \
+         WHERE namespace_id=$1 AND item_uid = ANY($2) ORDER BY location_kind,slot_index,item_uid",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(risk_items.iter().map(|id| id.to_vec()).collect::<Vec<_>>())
+    .fetch_all(transaction.connection())
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0], (risk_items[0].to_vec(), 0, 1, 2));
+    assert_eq!(rows[1], (risk_items[1].to_vec(), 1, 1, 2));
+    assert_eq!(rows[2], (risk_items[2].to_vec(), 1, 1, 2));
+    let risk_ledgers: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM item_ledger_events WHERE namespace_id=$1 \
+         AND mutation_id=$2 AND post_security_state=1",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind([92; 16].as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    assert_eq!(risk_ledgers, 3);
+    let safe_projection: (i16, i16, i64) = sqlx::query_as(
+        "SELECT location_kind,security_state,item_version FROM item_instances \
+         WHERE namespace_id=$1 AND item_uid=$2",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(safe_item.as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    assert_eq!(safe_projection, (6, 0, 2));
+    transaction.rollback().await.unwrap();
+    persistence.close().await;
 }
 
 #[tokio::test]

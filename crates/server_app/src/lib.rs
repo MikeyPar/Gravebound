@@ -100,9 +100,12 @@ pub use progression_query::{
 pub use progression_restore_provider::PostgresProgressionRestoreProvider;
 pub use progression_service::PostgresProgressionAwardService;
 pub use restore_point::{
-    BeltStackV1, CrashRestoreContext, DangerEntrySnapshotV1, EntryCaptureContext,
-    EntryRestoreProvider, InventorySecurityRestoreV1, ItemUid, OathBargainRestoreV1,
-    ProgressionRestoreV1, RestorePointError, RestorePointProviders, SafeAggregateVersionsV1,
+    BeltStackV1, CrashRestoreContext, DangerEntrySnapshotV1, DangerEntrySnapshotV2,
+    EntryCaptureContext, EntryRestoreProvider, InventorySecurityRestoreV1, ItemUid,
+    LifeMetricsRestoreV2, OathBargainRestoreV1, PostgresDangerEntryInventoryProviderV2,
+    PostgresDangerEntryLifeMetricsProviderV2, PostgresDangerEntryOathBargainProviderV2,
+    ProgressionRestoreV1, RestorePointError, RestorePointProviders, RestorePointProvidersV2,
+    SafeAggregateVersionsV1, SafeAggregateVersionsV2,
 };
 pub use reward_rng::{
     ProductionRewardRng, REWARD_AUDIT_CONTEXT, REWARD_EPOCH_ID_ENV, REWARD_EPOCH_SECRET_ENV,

@@ -289,6 +289,10 @@ fn world_flow_revision() -> protocol::WorldFlowContentRevisionV1 {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the hosted fixture constructs one complete V2 danger binding for terminal-race tests"
+)]
 async fn stage_danger_binding(
     persistence: &PostgresPersistence,
     account_id: [u8; 16],
@@ -319,10 +323,10 @@ async fn stage_danger_binding(
         "INSERT INTO character_entry_restore_points (namespace_id,account_id,character_id,
          restore_point_id,lineage_id,source_location_id,restore_location_id,
          snapshot_contract_version,account_version,character_version,progression_version,
-         inventory_version,oath_bargain_version,component_mask,composite_digest,restore_state,
+         inventory_version,oath_bargain_version,life_metrics_version,component_mask,composite_digest,restore_state,
          records_blake3,assets_blake3,localization_blake3)
-         VALUES ($1,$2,$3,$4,$5,'hub.lantern_halls_01','hub.lantern_halls_01',1,
-         1,1,1,1,1,7,$6,0,$7,$8,$9)",
+         VALUES ($1,$2,$3,$4,$5,'hub.lantern_halls_01','hub.lantern_halls_01',2,
+         1,1,1,1,1,1,15,$6,0,$7,$8,$9)",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(account_id.as_slice())
@@ -333,6 +337,56 @@ async fn stage_danger_binding(
     .bind(&hashes.records_blake3)
     .bind(&hashes.assets_blake3)
     .bind(&hashes.localization_blake3)
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO entry_restore_progression_v1 \
+         (namespace_id,account_id,character_id,restore_point_id,level,total_xp,current_health, \
+          progression_version) SELECT namespace_id,account_id,character_id,$1,level,total_xp, \
+          current_health,progression_version FROM character_progression WHERE namespace_id=$2 \
+          AND account_id=$3 AND character_id=$4",
+    )
+    .bind(restore_id.as_slice())
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    let inventory = persistence::stage_danger_entry_inventory_restore_v2(
+        &mut transaction,
+        account_id,
+        character_id,
+        restore_id,
+        [88; 16],
+        0,
+    )
+    .await
+    .unwrap();
+    persistence::stage_danger_entry_oath_bargain_restore_v2(
+        &mut transaction,
+        account_id,
+        character_id,
+        restore_id,
+    )
+    .await
+    .unwrap();
+    persistence::stage_danger_entry_life_metrics_restore_v2(
+        &mut transaction,
+        account_id,
+        character_id,
+        restore_id,
+    )
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE character_entry_restore_points SET inventory_version=$1 \
+         WHERE namespace_id=$2 AND restore_point_id=$3",
+    )
+    .bind(i64::try_from(inventory.post_inventory_version).unwrap())
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(restore_id.as_slice())
     .execute(transaction.connection())
     .await
     .unwrap();

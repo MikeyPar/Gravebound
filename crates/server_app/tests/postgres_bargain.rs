@@ -197,6 +197,10 @@ async fn reset_level_five_fixture(persistence: &PostgresPersistence, ids: Fixtur
     transaction.commit().await.unwrap();
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the hosted fixture keeps the complete V2 entry graph and Bargain binding auditable"
+)]
 async fn begin_core_danger_entry(
     persistence: &PostgresPersistence,
     restores: &PostgresProgressionRestoreProvider,
@@ -225,10 +229,10 @@ async fn begin_core_danger_entry(
         "INSERT INTO character_entry_restore_points (namespace_id, account_id, character_id, \
          restore_point_id, lineage_id, source_location_id, restore_location_id, \
          snapshot_contract_version, account_version, character_version, progression_version, \
-         inventory_version, oath_bargain_version, component_mask, composite_digest, \
+         inventory_version, oath_bargain_version, life_metrics_version, component_mask, composite_digest, \
          restore_state, records_blake3, assets_blake3, localization_blake3) \
          VALUES ($1, $2, $3, $4, $5, 'hub.lantern_halls_01', 'hub.lantern_halls_01', \
-         1, 1, 1, 1, 1, 1, 7, $6, 0, $7, $8, $9)",
+         2, 1, 1, 1, 1, 1, 1, 15, $6, 0, $7, $8, $9)",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(ids.account.as_slice())
@@ -249,10 +253,51 @@ async fn begin_core_danger_entry(
                 account_id: ids.account,
                 character_id: ids.character,
                 restore_point_id: ids.restore,
+                mutation_id: [9; 16],
+                safe_placement_count: 0,
             },
         )
         .await
         .unwrap();
+    let inventory = persistence::stage_danger_entry_inventory_restore_v2(
+        &mut transaction,
+        ids.account,
+        ids.character,
+        ids.restore,
+        [9; 16],
+        0,
+    )
+    .await
+    .unwrap();
+    let oath = persistence::stage_danger_entry_oath_bargain_restore_v2(
+        &mut transaction,
+        ids.account,
+        ids.character,
+        ids.restore,
+    )
+    .await
+    .unwrap();
+    let life = persistence::stage_danger_entry_life_metrics_restore_v2(
+        &mut transaction,
+        ids.account,
+        ids.character,
+        ids.restore,
+    )
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE character_entry_restore_points SET inventory_version = $1, \
+         oath_bargain_version = $2, life_metrics_version = $3 \
+         WHERE namespace_id = $4 AND restore_point_id = $5",
+    )
+    .bind(i64::try_from(inventory.post_inventory_version).unwrap())
+    .bind(i64::try_from(oath.oath_bargain_version).unwrap())
+    .bind(i64::try_from(life.life_metrics_version).unwrap())
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ids.restore.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
     sqlx::query(
         "UPDATE characters SET character_state_version = 2 WHERE namespace_id = $1 \
          AND account_id = $2 AND character_id = $3",
