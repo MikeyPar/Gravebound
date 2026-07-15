@@ -328,7 +328,7 @@ async fn stage_danger_binding(
          component_mask,composite_digest,restore_state,
          records_blake3,assets_blake3,localization_blake3)
          VALUES ($1,$2,$3,$4,$5,'hub.lantern_halls_01','hub.lantern_halls_01',3,
-         1,1,1,2,1,1,1,31,$6,0,$7,$8,$9)",
+         1,1,1,1,1,1,1,31,$6,0,$7,$8,$9)",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(account_id.as_slice())
@@ -392,7 +392,8 @@ async fn stage_danger_binding(
     )
     .await
     .unwrap();
-    assert_eq!(inventory.post_inventory_version, 2);
+    assert_eq!(inventory.pre_inventory_version, 1);
+    assert_eq!(inventory.post_inventory_version, 1);
     sqlx::query(
         "UPDATE characters SET character_state_version=2 WHERE namespace_id=$1
          AND account_id=$2 AND character_id=$3",
