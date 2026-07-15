@@ -1014,6 +1014,7 @@ async fn validate_deeds(
             1 => {
                 major_events.insert(deed_id.clone());
             }
+            2 => {}
             _ => return Err(PersistenceError::CorruptStoredDurableDeath),
         }
         deed_ids.insert(deed_id);

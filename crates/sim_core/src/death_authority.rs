@@ -267,6 +267,9 @@ pub fn ticks_to_milliseconds(ticks: u64) -> Result<u64, DeathAuthorityError> {
 pub enum DeedCompletionKind {
     DungeonBoss,
     MajorRealmEvent,
+    /// Reward-qualified and eligible to become the final deed, but never satisfies `ECH-001`.
+    FinalDeedOnly,
+    /// Unsupported completion class; retained only so callers fail closed instead of coercing it.
     Other,
 }
 
@@ -362,7 +365,9 @@ impl DeedAggregate {
             if completion.achieved_tick.0 == 0
                 || !matches!(
                     completion.kind,
-                    DeedCompletionKind::DungeonBoss | DeedCompletionKind::MajorRealmEvent
+                    DeedCompletionKind::DungeonBoss
+                        | DeedCompletionKind::MajorRealmEvent
+                        | DeedCompletionKind::FinalDeedOnly
                 )
                 || previous_completion_id.as_deref().is_some_and(|previous| {
                     previous.as_bytes() >= completion.completion_id.as_bytes()
@@ -1427,10 +1432,25 @@ mod tests {
         }
         assert!(!duplicate_event.echo_deed_eligible());
 
+        let mut final_deed_only = DeedAggregate::new();
+        final_deed_only
+            .record(deed(
+                "completion.miniboss.knight.0001",
+                DEED_SEPULCHER_KNIGHT_DEFEATED_ID,
+                199,
+                DeedCompletionKind::FinalDeedOnly,
+            ))
+            .expect("reward-qualified miniboss deed");
+        assert!(!final_deed_only.echo_deed_eligible());
+        assert_eq!(
+            final_deed_only.final_deed().deed_id,
+            DEED_SEPULCHER_KNIGHT_DEFEATED_ID
+        );
+
         let mut boss = DeedAggregate::new();
         boss.record(deed(
-            "completion.boss.knight.0001",
-            DEED_SEPULCHER_KNIGHT_DEFEATED_ID,
+            "completion.boss.caldus.0001",
+            DEED_SIR_CALDUS_DEFEATED_ID,
             200,
             DeedCompletionKind::DungeonBoss,
         ))
@@ -1456,7 +1476,7 @@ mod tests {
                 "completion.core.a",
                 DEED_SEPULCHER_KNIGHT_DEFEATED_ID,
                 300,
-                DeedCompletionKind::DungeonBoss,
+                DeedCompletionKind::FinalDeedOnly,
             ))
             .expect("first");
         deeds
@@ -1486,7 +1506,7 @@ mod tests {
                 "completion.core.a",
                 DEED_SEPULCHER_KNIGHT_DEFEATED_ID,
                 10,
-                DeedCompletionKind::DungeonBoss,
+                DeedCompletionKind::FinalDeedOnly,
             ))
             .expect("a");
         let checkpoint = deeds.checkpoint();

@@ -28,7 +28,7 @@ const ENTRY_MUTATION_ID: [u8; 16] = [237; 16];
 const DEED_REWARD_ID: [u8; 16] = [238; 16];
 const MATERIAL_ID: &str = "material.core.iron";
 const ITEM_TEMPLATE_ID: &str = "item.weapon.crossbow.pine_crossbow";
-const DEED_ID: &str = "deed.core.sepulcher_knight_defeated";
+const DEED_ID: &str = "deed.core.sir_caldus_defeated";
 const RECORDS_BLAKE3: &str = "1111111111111111111111111111111111111111111111111111111111111111";
 const ASSETS_BLAKE3: &str = "2222222222222222222222222222222222222222222222222222222222222222";
 const LOCALIZATION_BLAKE3: &str =
@@ -384,7 +384,7 @@ async fn reset_fixture(persistence: &PostgresPersistence) {
     sqlx::query(
         "INSERT INTO character_life_deeds (namespace_id,account_id,character_id,deed_id, \
          reward_event_id,source_content_id,deed_kind,achieved_tick,content_revision) \
-         VALUES ($1,$2,$3,$4,$5,'boss.sepulcher_knight',0,19000,$6)",
+         VALUES ($1,$2,$3,$4,$5,'boss.sir_caldus',0,19000,$6)",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(ACCOUNT_ID.as_slice())

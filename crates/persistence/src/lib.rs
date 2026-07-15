@@ -170,7 +170,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 44;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 45;
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -1034,6 +1034,76 @@ mod tests {
             assert!(
                 !migration.contains(prohibited),
                 "live evidence authority closure leaked {prohibited}"
+            );
+        }
+    }
+
+    #[test]
+    fn live_deed_v2_closes_reward_restore_revocation_and_projection_authority() {
+        let migration = include_str!("../../../migrations/0045_live_deed_authority_closure.sql");
+        for required in [
+            "Gravebound_Production_GDD_v1_Canonical.md",
+            "Gravebound_Content_Production_Spec_v1.md",
+            "Gravebound_Development_Roadmap_v1.md",
+            "SPEC-CONFLICT-009-m03-death-memorial.md",
+            "character_life_deed_completion_receipts_v2",
+            "character_life_deed_revocations_v2",
+            "character_life_deed_conflict_audits_v2",
+            "source_instance_id BYTEA NOT NULL",
+            "progression_records_blake3 TEXT NOT NULL",
+            "world_records_blake3 TEXT NOT NULL",
+            "world_assets_blake3 TEXT NOT NULL",
+            "world_localization_blake3 TEXT NOT NULL",
+            "base_xp INTEGER NOT NULL",
+            "restore_point_live_deed_v2_unique",
+            "xp_live_deed_v2_unique",
+            "deed.core.sir_caldus_defeated",
+            "deed.core.sepulcher_knight_defeated",
+            "miniboss.sepulcher_knight",
+            "deed_kind = 2",
+            "reward.miniboss_t1",
+            "xp.miniboss_t1",
+            "reward.boss_caldus",
+            "xp.boss_caldus",
+            "post_life_metrics_version = pre_life_metrics_version + 1",
+            "core-dev.blake3.27818db710b7553520a162f6f8337dcd0419c459d20c6513a7e12c78fed24ebb",
+            "051f86a69b9d2a9dd911f0d92bf53b40e460ef13c9058d6f0b1f32f11b226f95",
+            "97b7188e26329b9430b7289d1e17d347c9b9472863b7db6bd48501fd3b773158",
+            "32ce9fce6f1d49d5cd6cb570fa0590a5ee5644388c2620b67846320d4b2a3759",
+            "895c38724abfdef4909751743d91b5cff90d7f073c553bc044601abff4763a26",
+            "reward.request_state = 1",
+            "reward.source_instance_id = NEW.source_instance_id",
+            "caldus_victory_exit_owners",
+            "victory.instance_lineage_id = NEW.lineage_id",
+            "xp.revoked_by_restore_point_id",
+            "life_deed_reward_authority_exact_v2",
+            "life_deed_revocation_authority_exact_v2",
+            "xp_deed_revocation_pair_exact_v2",
+            "life_deed_receipt_projection_exact_v2",
+            "life_deed_revocation_projection_exact_v2",
+            "life_deed_projection_self_exact_v2",
+            "danger_crash_life_deed_v2_shape",
+            "danger_crash_life_deed_result_exact_v1",
+            "danger_crash_life_deed_children_exact_v1",
+            "crash result live deed revocation graph is incomplete or noncanonical",
+            "character life deed projection diverges from immutable active receipts",
+            "attempted_request_hash <> stored_request_hash",
+            "no raw payload or network secret is stored",
+        ] {
+            assert!(migration.contains(required), "migration omitted {required}");
+        }
+        for prohibited in [
+            "DROP TABLE",
+            "TRUNCATE",
+            "DELETE FROM",
+            "JSON",
+            "JSONB",
+            "FLOAT",
+            "DOUBLE PRECISION",
+        ] {
+            assert!(
+                !migration.contains(prohibited),
+                "live deed authority closure leaked {prohibited}"
             );
         }
     }
