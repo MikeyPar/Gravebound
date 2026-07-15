@@ -966,7 +966,7 @@ async fn assert_bound_rejections(persistence: &PostgresPersistence) {
 
 async fn assert_selected_character_ownership(persistence: &PostgresPersistence) {
     let mut transaction = persistence.begin_transaction().await.unwrap();
-    sqlx::query(
+    let result = sqlx::query(
         "UPDATE accounts SET selected_character_id = $1 \
          WHERE namespace_id = $2 AND account_id = $3",
     )
@@ -974,9 +974,9 @@ async fn assert_selected_character_ownership(persistence: &PostgresPersistence) 
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(ACCOUNT_A.as_slice())
     .execute(transaction.connection())
-    .await
-    .unwrap();
-    assert!(transaction.commit().await.is_err());
+    .await;
+    assert!(result.is_err());
+    transaction.rollback().await.unwrap();
 }
 
 async fn assert_rollback_and_cascade(persistence: &PostgresPersistence) {
