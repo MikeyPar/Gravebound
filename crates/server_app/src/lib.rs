@@ -13,6 +13,7 @@ mod caldus_victory;
 mod combat_factory;
 mod core_journey_world_flow;
 mod core_lifecycle;
+mod core_terminal_coordinator;
 mod death_view_service;
 mod durable_death_execution;
 mod durable_death_service;
@@ -66,6 +67,11 @@ pub use core_lifecycle::{
     CoreCheckpointBinding, CoreCheckpointServiceError, CoreDangerCheckpointRepository,
     CoreDangerCheckpointService, CoreLifeKey, CoreLiveBindingId, CoreLiveCharacter,
     CoreLiveDirectory, CoreLiveError, CoreResumeOutcome, DANGER_CHECKPOINT_INTERVAL_TICKS,
+};
+pub use core_terminal_coordinator::{
+    CoreNonTerminalAdmission, CoreTerminalBarrierProgress, CoreTerminalCoordinator,
+    CoreTerminalCoordinatorError, CoreTerminalEvaluation, CoreTerminalEvaluationAccepted,
+    CoreTerminalProducer, CoreTerminalTickSeal,
 };
 pub use death_view_service::{
     DeathViewRepository, DeathViewRepositoryError, DeathViewService, DisabledDeathViewRepository,
