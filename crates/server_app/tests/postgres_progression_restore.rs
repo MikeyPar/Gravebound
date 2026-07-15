@@ -461,7 +461,9 @@ async fn assert_final_resolution_wins(
         5,
     )
     .await;
-    finalize_to_hall(persistence, SECOND_LINEAGE_ID, SECOND_RESTORE_ID, 2).await;
+    // DeathCommitted (2) is now valid only with the complete durable death graph. This fixture
+    // needs any final outcome to prove crash restore loses, so use ExtractionCommitted (3).
+    finalize_to_hall(persistence, SECOND_LINEAGE_ID, SECOND_RESTORE_ID, 3).await;
     let mut transaction = persistence.begin_transaction().await.unwrap();
     let result = restores
         .restore_and_revoke_post_entry(
