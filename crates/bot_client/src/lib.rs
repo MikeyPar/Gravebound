@@ -10,12 +10,13 @@ pub use journey::*;
 use protocol::{
     AccountBootstrapFrame, AccountBootstrapResult, BargainDecisionFrame, BargainDecisionResult,
     BargainViewFrame, BargainViewResult, CharacterMutationFrame, CharacterMutationResult,
-    ClientHello, ControlEvent, HandshakeResponse, InitialOathSelectionFrame,
-    InitialOathSelectionResult, InputFrame, OathViewFrame, OathViewResult, ProgressionQueryFrame,
-    ProgressionResult, ProtocolVersion, RELIABLE_FRAME_LIMIT, ReliableEvent, ReliableEventFrame,
-    SIMULATION_HZ, SafeInventoryTransferFrameV1, SafeInventoryTransferResultV1,
-    SessionControlFrame, SessionControlResult, SnapshotChunk, WireMessage, WorldFlowFrame,
-    WorldFlowResult, decode_frame, encode_frame,
+    ClientHello, ControlEvent, DeathViewFrameV1, DeathViewResultV1, HandshakeResponse,
+    InitialOathSelectionFrame, InitialOathSelectionResult, InputFrame, OathViewFrame,
+    OathViewResult, ProgressionQueryFrame, ProgressionResult, ProtocolVersion,
+    RELIABLE_FRAME_LIMIT, ReliableEvent, ReliableEventFrame, SIMULATION_HZ,
+    SafeInventoryTransferFrameV1, SafeInventoryTransferResultV1, SessionControlFrame,
+    SessionControlResult, SnapshotChunk, WireMessage, WorldFlowFrame, WorldFlowResult,
+    decode_frame, encode_frame,
 };
 use thiserror::Error;
 
@@ -277,6 +278,19 @@ pub async fn perform_safe_inventory_transfer(
         return Err(BotTransportError::UnexpectedMessage);
     };
     Ok((event.clone(), result.clone()))
+}
+
+/// Reads one authenticated durable-death projection through the ordinary reliable route.
+pub async fn perform_death_view(
+    connection: &quinn::Connection,
+    frame: DeathViewFrameV1,
+) -> Result<(ReliableEventFrame, DeathViewResultV1), BotTransportError> {
+    let event =
+        perform_reliable_gameplay(connection, WireMessage::DeathViewFrame(frame)).await?;
+    let ReliableEvent::DeathViewResult(result) = &event.event else {
+        return Err(BotTransportError::UnexpectedMessage);
+    };
+    Ok((event.clone(), result.as_ref().clone()))
 }
 
 /// Submits one reliable safe-inventory mutation and intentionally abandons its response stream.
