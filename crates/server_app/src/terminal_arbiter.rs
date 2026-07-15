@@ -593,6 +593,14 @@ impl TerminalArbiter {
         }
     }
 
+    /// Returns the frozen winner only while repository execution is unresolved.
+    pub fn prepared_terminal(&self) -> Option<&PreparedTerminal> {
+        match &self.state {
+            ArbiterState::Prepared(prepared) => Some(prepared),
+            ArbiterState::Open | ArbiterState::Pending { .. } | ArbiterState::Committed(_) => None,
+        }
+    }
+
     pub fn submit(&mut self, candidate: TerminalCandidate) -> SubmitResult {
         if let Err(error) = candidate.validate() {
             return SubmitResult::Rejected(SubmitRejection::Invalid(error));

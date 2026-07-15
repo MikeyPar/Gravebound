@@ -773,7 +773,7 @@ fn is_uuid_v7(value: [u8; 16]) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use persistence::{
         DeathVersionAdvanceV1, DurableDeathItemContentAuthorityV1, DurableDestructionLocationV1,
@@ -947,6 +947,10 @@ mod tests {
                 },
             }),
         }
+    }
+
+    pub(crate) fn prepared_commit() -> PreparedDurableDeathCommit {
+        build_durable_death_commit(&inputs(), &context()).expect("canonical death fixture")
     }
 
     #[test]
