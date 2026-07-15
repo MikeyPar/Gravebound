@@ -332,6 +332,50 @@ pub struct StoredLiveDamageTraceTickV1 {
     pub committed_at_unix_ms: u64,
 }
 
+impl StoredLiveDamageTraceTickV1 {
+    /// Reconstructs the only acknowledgement that can represent this sealed request at the
+    /// supplied database commit time. Keeping this canonicalization beside the persistence DTO
+    /// prevents server adapters from copying storage-owned digest rules.
+    pub fn for_committed_request(
+        request: &LiveDamageTraceTickRequestV1,
+        committed_at_unix_ms: u64,
+    ) -> Result<Self, PersistenceError> {
+        request.validate()?;
+        if committed_at_unix_ms < request.command.issued_at_unix_ms
+            || i64::try_from(committed_at_unix_ms).is_err()
+        {
+            return Err(corrupt());
+        }
+        let tick_digest = tick_digest(&request.command)?;
+        let receipt = receipt_from_command(
+            &request.command,
+            request.request_hash,
+            tick_digest,
+            committed_at_unix_ms,
+        )?;
+        Ok(Self {
+            contract_version: CONTRACT_VERSION,
+            command: request.command.clone(),
+            request_hash: request.request_hash,
+            tick_digest,
+            result_digest: receipt.result_digest,
+            committed_at_unix_ms,
+        })
+    }
+
+    /// Validates a repository acknowledgement against the exact request that produced it.
+    pub fn validate_for_request(
+        &self,
+        request: &LiveDamageTraceTickRequestV1,
+    ) -> Result<(), PersistenceError> {
+        let expected = Self::for_committed_request(request, self.committed_at_unix_ms)?;
+        if self != &expected {
+            return Err(corrupt());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LiveDamageTraceTickTransactionV1 {
     Committed(StoredLiveDamageTraceTickV1),
@@ -496,14 +540,7 @@ impl PostgresPersistence {
             .await?;
         tx.commit().await?;
         Ok(LiveDamageTraceTickTransactionV1::Committed(
-            StoredLiveDamageTraceTickV1 {
-                contract_version: CONTRACT_VERSION,
-                command: command.clone(),
-                request_hash: request.request_hash,
-                tick_digest,
-                result_digest: receipt.result_digest,
-                committed_at_unix_ms,
-            },
+            StoredLiveDamageTraceTickV1::for_committed_request(request, committed_at_unix_ms)?,
         ))
     }
 
@@ -1343,6 +1380,25 @@ mod tests {
                 receipt.result_digest
             );
         }
+    }
+
+    #[test]
+    fn stored_acknowledgement_has_one_canonical_cross_layer_shape() {
+        let request = LiveDamageTraceTickRequestV1::seal(command()).unwrap();
+        let stored = StoredLiveDamageTraceTickV1::for_committed_request(&request, 99).unwrap();
+        stored.validate_for_request(&request).unwrap();
+
+        let mut changed = stored.clone();
+        changed.result_digest[0] ^= 1;
+        assert!(changed.validate_for_request(&request).is_err());
+
+        let mut changed = stored.clone();
+        changed.tick_digest[0] ^= 1;
+        assert!(changed.validate_for_request(&request).is_err());
+
+        let mut changed = stored;
+        changed.command.expected_character_version += 1;
+        assert!(changed.validate_for_request(&request).is_err());
     }
 
     #[test]
