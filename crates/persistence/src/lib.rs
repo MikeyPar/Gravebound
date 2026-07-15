@@ -34,6 +34,7 @@ mod items;
 mod life_clock_repository;
 mod life_deed_repository;
 mod lifecycle_signature;
+mod live_damage_trace_repository;
 mod oath;
 mod progression;
 mod progression_restore;
@@ -148,6 +149,15 @@ pub use lifecycle_signature::{
     StoredLifecycleSafeInventoryPlacementV1, StoredLifecycleSafeInventoryReceiptV1,
     StoredLifecycleStarterReceiptV1, StoredLifecycleWorldV1, StoredLifecycleXpReceiptV1,
 };
+pub use live_damage_trace_repository::{
+    LIVE_DAMAGE_TRACE_WINDOW_TICKS_V1, LiveDamageTraceCauseV1, LiveDamageTraceContentAuthorityV1,
+    LiveDamageTraceDamageTypeV1, LiveDamageTraceDangerAuthorityV1, LiveDamageTraceEntryV1,
+    LiveDamageTraceNetworkStateV1, LiveDamageTraceRecallStateV1, LiveDamageTraceStatusV1,
+    LiveDamageTraceTickCommandV1, LiveDamageTraceTickRequestV1, LiveDamageTraceTickTransactionV1,
+    MAX_LIVE_DAMAGE_TRACE_ENTRIES_V1, MAX_LIVE_DAMAGE_TRACE_STATUSES_PER_ENTRY_V1,
+    StoredLiveDamageTraceSnapshotEntryV1, StoredLiveDamageTraceSnapshotV1,
+    StoredLiveDamageTraceTickV1,
+};
 pub use oath::{
     OathSelectionTransaction, OathSelectionTransactionState, StoredCharacterLifeEvent,
     StoredOathCharacter, StoredOathInventory, StoredOathMutationResult,
@@ -183,7 +193,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 47;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 48;
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -482,6 +492,28 @@ pub enum PersistenceError {
     LifeClockLinkLostWindowExpired,
     #[error("life-clock reached the exact LinkLost deadline and requires terminal resolution")]
     LifeClockTerminalResolutionRequired,
+    #[error("stored live damage trace violates the retained contract-1 authority")]
+    CorruptStoredLiveDamageTrace,
+    #[error("live damage trace account, character, or aggregate authority does not exist")]
+    LiveDamageTraceOwnerNotFound,
+    #[error("live damage trace tick identity was replayed with changed canonical material")]
+    LiveDamageTraceIdempotencyConflict,
+    #[error("live damage trace requires the selected living normal-security danger character")]
+    LiveDamageTraceBindingMismatch,
+    #[error("live damage trace does not match the promoted Core content authority")]
+    LiveDamageTraceContentMismatch,
+    #[error("live damage trace character version mismatch: expected {expected}, durable {actual}")]
+    LiveDamageTraceCharacterVersionMismatch { expected: u64, actual: u64 },
+    #[error("live damage trace tick is not ordered after {previous}: attempted {attempted}")]
+    LiveDamageTraceTickOrder { previous: u64, attempted: u64 },
+    #[error("live damage trace exceeds the bounded 4096-entry current window")]
+    LiveDamageTraceCapacityExceeded,
+    #[error("live damage trace root is terminal and rejects later standalone ingestion")]
+    LiveDamageTraceTerminal,
+    #[error("lethal damage evidence must be staged inside the atomic death transaction")]
+    LiveDamageTraceTerminalStagingRequired,
+    #[error("no current live damage trace exists for the bound danger root")]
+    LiveDamageTraceNotFound,
 }
 
 /// Returns whether `PostgreSQL` explicitly permits the complete transaction to be retried.
@@ -1239,6 +1271,49 @@ mod tests {
             assert!(
                 !migration.contains(prohibited),
                 "authoritative life-clock migration leaked {prohibited}"
+            );
+        }
+    }
+
+    #[test]
+    fn retained_live_trace_ingest_is_authoritative_replayable_and_forward_only() {
+        let migration =
+            include_str!("../../../migrations/0048_retained_live_damage_trace_ingest.sql");
+        for required in [
+            "Gravebound_Production_GDD_v1_Canonical.md",
+            "Gravebound_Content_Production_Spec_v1.md",
+            "Gravebound_Development_Roadmap_v1.md",
+            "SPEC-CONFLICT-009-m03-death-memorial.md",
+            "character_live_damage_trace_ingest_receipts_v1",
+            "character_live_damage_trace_conflict_audits_v1",
+            "checkpoint_tick >= 0 AND event_tick > 0",
+            "live_trace_ingest_payload_authority_unique",
+            "live_trace_payload_retained_receipt_owned_v1",
+            "REFERENCES character_entry_restore_points",
+            "result_digest BYTEA NOT NULL",
+            "DEFERRABLE INITIALLY DEFERRED",
+            "source_sim_entity_id BYTEA",
+            "live_trace_source_identity_parity",
+            "live_trace_ingest_receipt_append_only_v1",
+            "live_trace_conflict_audit_append_only_v1",
+            "attempted_request_hash <> stored_request_hash",
+            "retained after complete live tick pruning",
+            "Never remove retained ingest/conflict evidence",
+        ] {
+            assert!(migration.contains(required), "migration omitted {required}");
+        }
+        for prohibited in [
+            "DROP TABLE",
+            "TRUNCATE",
+            "DELETE FROM",
+            "JSON",
+            "JSONB",
+            "FLOAT",
+            "DOUBLE PRECISION",
+        ] {
+            assert!(
+                !migration.contains(prohibited),
+                "retained live trace migration leaked {prohibited}"
             );
         }
     }

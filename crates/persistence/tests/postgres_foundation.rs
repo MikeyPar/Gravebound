@@ -3,10 +3,14 @@ use persistence::{
     CORE_WORLD_RECORDS_BLAKE3, DangerCheckpointDelete, DangerCheckpointWrite,
     EXPECTED_SCHEMA_VERSION, LifeClockCheckpointCommandV1, LifeClockCheckpointRequestV1,
     LifeClockCheckpointTransactionV1, LifeClockContentAuthorityV1, LifeClockDangerAuthorityV1,
-    LifeClockStateV1, PersistenceConfig, PersistenceError, PersistenceTransaction,
-    PostgresPersistence, StoredCharacter, StoredDangerCheckpoint, StoredMutation,
-    StoredSafeInventoryCommand, StoredSafeInventoryCommandKind, StoredSafeInventoryLocation,
-    StoredSafeInventoryPlacement, StoredWorldFlowRevisionV1, WIPEABLE_CORE_NAMESPACE,
+    LifeClockStateV1, LiveDamageTraceCauseV1, LiveDamageTraceContentAuthorityV1,
+    LiveDamageTraceDamageTypeV1, LiveDamageTraceDangerAuthorityV1, LiveDamageTraceEntryV1,
+    LiveDamageTraceNetworkStateV1, LiveDamageTraceRecallStateV1, LiveDamageTraceStatusV1,
+    LiveDamageTraceTickCommandV1, LiveDamageTraceTickRequestV1, LiveDamageTraceTickTransactionV1,
+    PersistenceConfig, PersistenceError, PersistenceTransaction, PostgresPersistence,
+    StoredCharacter, StoredDangerCheckpoint, StoredMutation, StoredSafeInventoryCommand,
+    StoredSafeInventoryCommandKind, StoredSafeInventoryLocation, StoredSafeInventoryPlacement,
+    StoredWorldFlowRevisionV1, WIPEABLE_CORE_NAMESPACE,
 };
 const ACCOUNT_A: [u8; 16] = [1; 16];
 const ACCOUNT_B: [u8; 16] = [2; 16];
@@ -44,7 +48,9 @@ const EXPECTED_PUBLIC_TABLES: &[&str] = &[
     "character_life_deeds",
     "character_life_metrics",
     "character_life_outbox",
+    "character_live_damage_trace_conflict_audits_v1",
     "character_live_damage_trace_entries_v1",
+    "character_live_damage_trace_ingest_receipts_v1",
     "character_live_damage_trace_statuses_v1",
     "character_live_damage_trace_ticks_v1",
     "character_oath_bargain_state",
@@ -742,7 +748,7 @@ async fn authoritative_life_clocks_are_exact_replayable_and_restart_safe() {
         .unwrap();
     sqlx::query(
         "INSERT INTO character_world_locations (namespace_id,account_id,character_id, \
-         character_version,location_kind) VALUES ($1,$2,$3,1,0)",
+         character_version,location_kind,safe_arrival_kind) VALUES ($1,$2,$3,1,0,0)",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(SAFE_ACCOUNT.as_slice())
@@ -1172,6 +1178,185 @@ async fn authoritative_life_clocks_are_exact_replayable_and_restart_safe() {
         danger_head
     );
     persistence.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires explicitly authorized disposable PostgreSQL"]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one linear hosted fixture proves retained replay, pruning, restart, terminal, and corruption gates"
+)]
+async fn retained_live_trace_replays_after_pruning_and_restarts_exactly() {
+    let persistence = disposable_database().await;
+    clear_accounts(&persistence).await;
+    insert_danger_checkpoint_fixture(&persistence).await;
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    sqlx::query(
+        "UPDATE accounts SET selected_character_id=$1 WHERE namespace_id=$2 AND account_id=$3",
+    )
+    .bind(CHARACTER_A.as_slice())
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_A.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    transaction.commit().await.unwrap();
+    persistence
+        .write_danger_checkpoint(&danger_checkpoint(0, vec![1]))
+        .await
+        .unwrap();
+
+    let first = trace_request([101; 16], 100, 0, 120, 108);
+    assert!(matches!(
+        persistence
+            .transact_live_damage_trace_tick_v1(&first)
+            .await
+            .unwrap(),
+        LiveDamageTraceTickTransactionV1::Committed(_)
+    ));
+    assert_eq!(
+        persistence
+            .load_live_damage_trace_snapshot_v1(ACCOUNT_A, CHARACTER_A)
+            .await
+            .unwrap()
+            .entries
+            .len(),
+        1
+    );
+    assert!(matches!(
+        persistence
+            .transact_live_damage_trace_tick_v1(&first)
+            .await
+            .unwrap(),
+        LiveDamageTraceTickTransactionV1::Replayed(_)
+    ));
+    let mut changed = first.command.clone();
+    changed.entries[0].statuses[0].remaining_ticks += 1;
+    let changed = LiveDamageTraceTickRequestV1::seal(changed).unwrap();
+    assert!(matches!(
+        persistence
+            .transact_live_damage_trace_tick_v1(&changed)
+            .await,
+        Err(PersistenceError::LiveDamageTraceIdempotencyConflict)
+    ));
+
+    let second = trace_request([102; 16], 401, 0, 108, 96);
+    persistence
+        .transact_live_damage_trace_tick_v1(&second)
+        .await
+        .unwrap();
+    assert!(matches!(
+        persistence
+            .transact_live_damage_trace_tick_v1(&first)
+            .await
+            .unwrap(),
+        LiveDamageTraceTickTransactionV1::Replayed(_)
+    ));
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let (receipts, payloads, conflicts): (i64, i64, i64) = sqlx::query_as(
+        "SELECT \
+          (SELECT count(*) FROM character_live_damage_trace_ingest_receipts_v1 WHERE account_id=$1), \
+          (SELECT count(*) FROM character_live_damage_trace_ticks_v1 WHERE account_id=$1), \
+          (SELECT count(*) FROM character_live_damage_trace_conflict_audits_v1 WHERE account_id=$1)",
+    )
+    .bind(ACCOUNT_A.as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    transaction.rollback().await.unwrap();
+    assert_eq!((receipts, payloads, conflicts), (2, 1, 1));
+
+    let mut lethal = trace_request([103; 16], 402, 0, 96, 0).command;
+    lethal.entries[0].final_damage = 96;
+    lethal.entries[0].lethal = true;
+    let lethal = LiveDamageTraceTickRequestV1::seal(lethal).unwrap();
+    assert!(matches!(
+        persistence
+            .transact_live_damage_trace_tick_v1(&lethal)
+            .await,
+        Err(PersistenceError::LiveDamageTraceTerminalStagingRequired)
+    ));
+    persistence.close().await;
+
+    let persistence = disposable_database().await;
+    let snapshot = persistence
+        .load_live_damage_trace_snapshot_v1(ACCOUNT_A, CHARACTER_A)
+        .await
+        .unwrap();
+    assert_eq!(snapshot.through_tick, 401);
+    assert_eq!(snapshot.entries[0].entry.source_sim_entity_id, Some(42));
+    persistence
+        .transact_live_damage_trace_tick_v1(&trace_request([104; 16], 450, 0, 96, 84))
+        .await
+        .unwrap();
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    sqlx::query(
+        "DELETE FROM character_live_damage_trace_ticks_v1 \
+         WHERE namespace_id=$1 AND account_id=$2 AND trace_tick_id=$3",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_A.as_slice())
+    .bind([102_u8; 16].as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    transaction.commit().await.unwrap();
+    assert!(matches!(
+        persistence
+            .load_live_damage_trace_snapshot_v1(ACCOUNT_A, CHARACTER_A)
+            .await,
+        Err(PersistenceError::CorruptStoredLiveDamageTrace)
+    ));
+    persistence.close().await;
+}
+
+fn trace_request(
+    trace_tick_id: [u8; 16],
+    event_tick: u64,
+    checkpoint_tick: u64,
+    pre_health: u32,
+    post_health: u32,
+) -> LiveDamageTraceTickRequestV1 {
+    LiveDamageTraceTickRequestV1::seal(LiveDamageTraceTickCommandV1 {
+        account_id: ACCOUNT_A,
+        character_id: CHARACTER_A,
+        trace_tick_id,
+        expected_character_version: 2,
+        event_tick,
+        danger: LiveDamageTraceDangerAuthorityV1 {
+            lineage_id: CHECKPOINT_LINEAGE,
+            restore_point_id: CHECKPOINT_RESTORE,
+            checkpoint_tick,
+        },
+        content: LiveDamageTraceContentAuthorityV1::core(),
+        entries: vec![LiveDamageTraceEntryV1 {
+            event_ordinal: 0,
+            cause: LiveDamageTraceCauseV1::DirectHit,
+            source_content_id: "enemy.bell_reed".to_owned(),
+            source_entity_id: Some([103; 16]),
+            source_sim_entity_id: Some(42),
+            pattern_id: Some("pattern.enemy.bell_reed.ring".to_owned()),
+            attack_id: "attack.enemy.bell_reed.ring".to_owned(),
+            raw_damage: pre_health - post_health,
+            final_damage: pre_health - post_health,
+            damage_type: LiveDamageTraceDamageTypeV1::Veil,
+            pre_health,
+            post_health,
+            source_x_milli_tiles: 2_000,
+            source_y_milli_tiles: -1_000,
+            network_state: LiveDamageTraceNetworkStateV1::Connected,
+            recall_state: LiveDamageTraceRecallStateV1::Inactive,
+            lethal: post_health == 0,
+            statuses: vec![LiveDamageTraceStatusV1 {
+                status_ordinal: 0,
+                status_id: "status.bleed".to_owned(),
+                remaining_ticks: 30,
+                stack_count: 1,
+            }],
+        }],
+        issued_at_unix_ms: 1,
+    })
+    .unwrap()
 }
 
 #[allow(clippy::too_many_arguments)]
