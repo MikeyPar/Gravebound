@@ -52,9 +52,10 @@ pub struct StoredCoreCombatLoadout {
 }
 
 impl PostgresPersistence {
-    /// Reads identity, progression, Oath, inventory, and all four equipped slots in one
-    /// `PostgreSQL` statement snapshot. Callers never assemble combat authority from independently
-    /// timed reads.
+    /// Reads identity, world location, progression, Oath, inventory, and all four equipped slots in
+    /// one `PostgreSQL` statement snapshot. Callers never assemble combat authority from
+    /// independently timed reads. Per the canonical GDD, Content Production Spec, and M03 roadmap,
+    /// equipped/Belt items are Safe outside danger and `AtRiskEquipped` inside danger.
     #[allow(clippy::too_many_lines)] // One linear SQL snapshot keeps every combat input atomic.
     pub async fn core_combat_loadout_snapshot(
         &self,
@@ -110,28 +111,32 @@ impl PostgresPersistence {
                     ARRAY(SELECT belt.slot_index FROM item_instances belt \
                           WHERE belt.namespace_id = c.namespace_id \
                           AND belt.account_id = c.account_id AND belt.character_id = c.character_id \
-                          AND belt.item_kind = 1 AND belt.security_state = 0 \
+                          AND belt.item_kind = 1 \
+                          AND belt.security_state = CASE WHEN world.location_kind = 2 THEN 1 ELSE 0 END \
                           AND belt.location_kind = 1 GROUP BY belt.slot_index, belt.template_id, \
                           belt.content_revision ORDER BY belt.slot_index, belt.template_id, \
                           belt.content_revision) AS belt_slot_indices, \
                     ARRAY(SELECT belt.template_id FROM item_instances belt \
                           WHERE belt.namespace_id = c.namespace_id \
                           AND belt.account_id = c.account_id AND belt.character_id = c.character_id \
-                          AND belt.item_kind = 1 AND belt.security_state = 0 \
+                          AND belt.item_kind = 1 \
+                          AND belt.security_state = CASE WHEN world.location_kind = 2 THEN 1 ELSE 0 END \
                           AND belt.location_kind = 1 GROUP BY belt.slot_index, belt.template_id, \
                           belt.content_revision ORDER BY belt.slot_index, belt.template_id, \
                           belt.content_revision) AS belt_template_ids, \
                     ARRAY(SELECT belt.content_revision FROM item_instances belt \
                           WHERE belt.namespace_id = c.namespace_id \
                           AND belt.account_id = c.account_id AND belt.character_id = c.character_id \
-                          AND belt.item_kind = 1 AND belt.security_state = 0 \
+                          AND belt.item_kind = 1 \
+                          AND belt.security_state = CASE WHEN world.location_kind = 2 THEN 1 ELSE 0 END \
                           AND belt.location_kind = 1 GROUP BY belt.slot_index, belt.template_id, \
                           belt.content_revision ORDER BY belt.slot_index, belt.template_id, \
                           belt.content_revision) AS belt_content_revisions, \
                     ARRAY(SELECT COUNT(*) FROM item_instances belt \
                           WHERE belt.namespace_id = c.namespace_id \
                           AND belt.account_id = c.account_id AND belt.character_id = c.character_id \
-                          AND belt.item_kind = 1 AND belt.security_state = 0 \
+                          AND belt.item_kind = 1 \
+                          AND belt.security_state = CASE WHEN world.location_kind = 2 THEN 1 ELSE 0 END \
                           AND belt.location_kind = 1 GROUP BY belt.slot_index, belt.template_id, \
                           belt.content_revision ORDER BY belt.slot_index, belt.template_id, \
                           belt.content_revision) AS belt_quantities \
@@ -140,25 +145,31 @@ impl PostgresPersistence {
              JOIN character_progression p USING (namespace_id, account_id, character_id) \
              JOIN character_oath_bargain_state ob \
                   USING (namespace_id, account_id, character_id) \
+             JOIN character_world_locations world \
+                  USING (namespace_id, account_id, character_id) \
              LEFT JOIN character_inventories i USING (namespace_id, account_id, character_id) \
              LEFT JOIN item_instances w ON w.namespace_id = c.namespace_id \
                   AND w.account_id = c.account_id AND w.character_id = c.character_id \
-                  AND w.item_kind = 0 AND w.security_state = 0 \
+                  AND w.item_kind = 0 \
+                  AND w.security_state = CASE WHEN world.location_kind = 2 THEN 1 ELSE 0 END \
                   AND w.location_kind = 0 AND w.slot_index = 0 \
              LEFT JOIN item_instances armor_item ON armor_item.namespace_id = c.namespace_id \
                   AND armor_item.account_id = c.account_id \
                   AND armor_item.character_id = c.character_id \
-                  AND armor_item.item_kind = 0 AND armor_item.security_state = 0 \
+                  AND armor_item.item_kind = 0 \
+                  AND armor_item.security_state = CASE WHEN world.location_kind = 2 THEN 1 ELSE 0 END \
                   AND armor_item.location_kind = 0 AND armor_item.slot_index = 2 \
              LEFT JOIN item_instances relic_item ON relic_item.namespace_id = c.namespace_id \
                   AND relic_item.account_id = c.account_id \
                   AND relic_item.character_id = c.character_id \
-                  AND relic_item.item_kind = 0 AND relic_item.security_state = 0 \
+                  AND relic_item.item_kind = 0 \
+                  AND relic_item.security_state = CASE WHEN world.location_kind = 2 THEN 1 ELSE 0 END \
                   AND relic_item.location_kind = 0 AND relic_item.slot_index = 1 \
              LEFT JOIN item_instances charm_item ON charm_item.namespace_id = c.namespace_id \
                   AND charm_item.account_id = c.account_id \
                   AND charm_item.character_id = c.character_id \
-                  AND charm_item.item_kind = 0 AND charm_item.security_state = 0 \
+                  AND charm_item.item_kind = 0 \
+                  AND charm_item.security_state = CASE WHEN world.location_kind = 2 THEN 1 ELSE 0 END \
                   AND charm_item.location_kind = 0 AND charm_item.slot_index = 3 \
              WHERE c.namespace_id = $1 AND c.account_id = $2 AND c.character_id = $3",
         )
