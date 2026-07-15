@@ -1288,6 +1288,7 @@ mod tests {
             "character_live_damage_trace_conflict_audits_v1",
             "checkpoint_tick >= 0 AND event_tick > 0",
             "live_trace_ingest_payload_authority_unique",
+            "UNIQUE (namespace_id, account_id, character_id, trace_tick_id)",
             "live_trace_payload_retained_receipt_owned_v1",
             "REFERENCES character_entry_restore_points",
             "result_digest BYTEA NOT NULL",

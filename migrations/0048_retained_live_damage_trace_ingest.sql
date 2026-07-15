@@ -33,6 +33,7 @@ CREATE TABLE character_live_damage_trace_ingest_receipts_v1 (
     issued_at TIMESTAMPTZ NOT NULL,
     committed_at TIMESTAMPTZ NOT NULL DEFAULT transaction_timestamp(),
     PRIMARY KEY (namespace_id, account_id, trace_tick_id),
+    UNIQUE (namespace_id, account_id, character_id, trace_tick_id),
     UNIQUE (namespace_id, account_id, character_id, lineage_id, event_tick),
     FOREIGN KEY (namespace_id, account_id, character_id)
         REFERENCES characters(namespace_id, account_id, character_id) ON DELETE CASCADE,
