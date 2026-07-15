@@ -1,7 +1,7 @@
 use persistence::{
     AuthoritativeDeathPlanV1, CORE_ITEM_CONTENT_REVISION, DURABLE_DEATH_SCHEMA_VERSION,
     DURABLE_DEATH_SUMMARY_REVISION, DeathAggregateVersionsV1, DeathVersionAdvanceV1,
-    DurableCombatTraceEntryV1, DurableDamageTypeV1, DurableDeathCauseV1,
+    DeathViewReadError, DurableCombatTraceEntryV1, DurableDamageTypeV1, DurableDeathCauseV1,
     DurableDeathCommitRequestV1, DurableDeathContentAuthorityV1, DurableDeathEventV1,
     DurableDeathItemContentAuthorityV1, DurableDeathSummaryV1, DurableDeathTransactionV1,
     DurableDestructionEntryV1, DurableDestructionLocationV1, DurableEchoEnvelopeV1,
@@ -1048,6 +1048,60 @@ async fn wipe_account(persistence: &PostgresPersistence) {
     }
 }
 
+async fn assert_committed_death_views(persistence: &PostgresPersistence, ids: RequestIds) {
+    let latest = persistence
+        .load_latest_committed_death_view(ACCOUNT_ID)
+        .await
+        .unwrap()
+        .expect("committed account death");
+    assert_eq!(latest.death_id, ids.death_id);
+    assert_eq!(latest.character_id, CHARACTER_ID);
+    assert_eq!(latest.content_revision, CORE_ITEM_CONTENT_REVISION);
+    assert_eq!(latest.records_blake3, RECORDS_BLAKE3);
+    assert_eq!(latest.assets_blake3, ASSETS_BLAKE3);
+    assert_eq!(latest.localization_blake3, LOCALIZATION_BLAKE3);
+
+    let summary = persistence
+        .load_owned_death_summary_view(ACCOUNT_ID, ids.death_id, 0, 32)
+        .await
+        .unwrap();
+    assert_eq!(summary.death_id, ids.death_id);
+    assert_eq!(summary.last_five_damage.len(), 2);
+    assert_eq!(summary.lost.len(), usize::from(summary.lost_total_count));
+    assert!(summary.next_lost_ordinal.is_none());
+    assert_eq!(summary.records_blake3, RECORDS_BLAKE3);
+
+    let memorials = persistence
+        .load_death_memorial_page(ACCOUNT_ID, None, 32)
+        .await
+        .unwrap();
+    assert_eq!(memorials.entries.len(), 1);
+    assert_eq!(memorials.entries[0].cursor.death_id, ids.death_id);
+    assert_eq!(memorials.entries[0].records_blake3, RECORDS_BLAKE3);
+    assert!(memorials.next_cursor.is_none());
+
+    let trace = persistence
+        .load_owned_death_trace_page(ACCOUNT_ID, ids.death_id, 0, 8)
+        .await
+        .unwrap();
+    assert_eq!(trace.entries.len(), 2);
+    assert!(trace.entries.last().is_some_and(|entry| entry.lethal));
+    assert!(trace.next_ordinal.is_none());
+
+    assert_eq!(
+        persistence
+            .load_owned_death_summary_view([229; 16], ids.death_id, 0, 1)
+            .await,
+        Err(DeathViewReadError::DeathNotOwned)
+    );
+    assert_eq!(
+        persistence
+            .load_owned_death_trace_page(ACCOUNT_ID, ids.death_id, trace.total_entry_count, 1)
+            .await,
+        Err(DeathViewReadError::PageOutOfRange)
+    );
+}
+
 #[test]
 fn hosted_fixture_request_and_content_authority_are_canonical() {
     let content = content_authority();
@@ -1083,6 +1137,7 @@ async fn complete_durable_death_graph_is_atomic_replayable_terminal_and_wipeable
         .unwrap();
     assert!(replay.is_replay());
     assert_eq!(replay.result(), fresh.result());
+    assert_committed_death_views(&restarted, RequestIds::primary()).await;
     assert!(matches!(
         restarted
             .transact_durable_death(&request(RequestIds::changed_payload()), &content)

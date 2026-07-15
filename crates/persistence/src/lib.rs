@@ -22,6 +22,7 @@ mod danger_checkpoint;
 mod danger_crash_restore;
 mod danger_crash_restore_repository;
 mod danger_entry_restore;
+mod death_view_repository;
 mod durable_death;
 mod durable_death_repository;
 mod extraction;
@@ -82,6 +83,12 @@ pub use danger_entry_restore::{
     StoredDangerEntryOathBargainV3, stage_danger_entry_ash_wallet_restore_v3,
     stage_danger_entry_inventory_restore_v3, stage_danger_entry_life_metrics_restore_v3,
     stage_danger_entry_oath_bargain_restore_v3,
+};
+pub use death_view_repository::{
+    DeathViewReadError, MAX_DEATH_VIEW_LOST_PER_PAGE, MAX_DEATH_VIEW_MEMORIALS_PER_PAGE,
+    MAX_DEATH_VIEW_TRACE_PER_PAGE, StoredDeathMemorialCursorV1, StoredDeathMemorialEntryV1,
+    StoredDeathMemorialPageV1, StoredDeathSummaryViewV1, StoredDeathTracePageV1,
+    StoredLatestCommittedDeathV1,
 };
 pub use durable_death::{
     AuthoritativeDeathPlanV1, DURABLE_DEATH_CONTRACT, DURABLE_DEATH_SCHEMA_VERSION,
