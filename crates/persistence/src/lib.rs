@@ -31,6 +31,7 @@ mod field_equipment;
 mod ground_expiry;
 mod identity;
 mod items;
+mod life_deed_repository;
 mod lifecycle_signature;
 mod oath;
 mod progression;
@@ -126,6 +127,12 @@ pub use identity::{StoredCharacter, StoredIdentityAggregate, StoredMutation};
 pub use items::{
     CORE_ITEM_CONTENT_REVISION, STARTER_INITIALIZER_REVISION, STARTER_ITEM_COUNT,
     StoredStarterInitialization, StoredStarterItem,
+};
+pub use life_deed_repository::{
+    CORE_PROGRESSION_RECORDS_BLAKE3, CORE_WORLD_ASSETS_BLAKE3, CORE_WORLD_LOCALIZATION_BLAKE3,
+    CORE_WORLD_RECORDS_BLAKE3, LifeDeedCompletionCommandV2, LifeDeedCompletionRequestV2,
+    LifeDeedCompletionTransactionV2, LifeDeedContentAuthorityV2, LifeDeedKindV2,
+    LifeDeedProjectionOutcomeV2, StoredLifeDeedCompletionV2, StoredLifeDeedRevocationV2,
 };
 pub use lifecycle_signature::{
     CORE_ITEM_LIFECYCLE_SIGNATURE_CONTEXT, StoredCoreItemLifecycleSignatureV1,
@@ -427,6 +434,28 @@ pub enum PersistenceError {
     ExtractionReceiptRequired,
     #[error("committed extraction receipt was already consumed by another transfer")]
     ExtractionAlreadyTransferred,
+    #[error("stored live-deed evidence violates the approved v2 contract")]
+    CorruptStoredLifeDeed,
+    #[error("live-deed account, character, or aggregate authority does not exist")]
+    LifeDeedOwnerNotFound,
+    #[error("live-deed completion identity was replayed with changed canonical material")]
+    LifeDeedIdempotencyConflict,
+    #[error("live-deed completion requires the selected living normal-security danger character")]
+    LifeDeedBindingMismatch,
+    #[error("live-deed completion does not match the promoted Core content authority")]
+    LifeDeedContentMismatch,
+    #[error("live-deed completion lacks a terminal reward and progression result")]
+    LifeDeedRewardNotTerminal,
+    #[error("live-deed completion reward authority is inconsistent or ineligible")]
+    LifeDeedRewardMismatch,
+    #[error("live-deed character version mismatch: expected {expected}, durable {actual}")]
+    LifeDeedCharacterVersionMismatch { expected: u64, actual: u64 },
+    #[error("live-deed metrics version mismatch: expected {expected}, durable {actual}")]
+    LifeDeedMetricsVersionMismatch {
+        expected: u64,
+        actual: u64,
+        projection_digest: [u8; 32],
+    },
 }
 
 /// Returns whether `PostgreSQL` explicitly permits the complete transaction to be retried.
