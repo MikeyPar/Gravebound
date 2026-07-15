@@ -66,9 +66,11 @@ pub use danger_checkpoint::{
     stage_danger_checkpoint_cleanup,
 };
 pub use danger_entry_restore::{
-    StoredDangerEntryInventoryItemV2, StoredDangerEntryInventoryV2, StoredDangerEntryLifeMetricsV2,
-    StoredDangerEntryOathBargainV2, stage_danger_entry_inventory_restore_v2,
-    stage_danger_entry_life_metrics_restore_v2, stage_danger_entry_oath_bargain_restore_v2,
+    StoredDangerEntryActiveBargainV3, StoredDangerEntryAshWalletV3,
+    StoredDangerEntryInventoryItemV3, StoredDangerEntryInventoryV3, StoredDangerEntryLifeMetricsV3,
+    StoredDangerEntryOathBargainV3, stage_danger_entry_ash_wallet_restore_v3,
+    stage_danger_entry_inventory_restore_v3, stage_danger_entry_life_metrics_restore_v3,
+    stage_danger_entry_oath_bargain_restore_v3,
 };
 pub use extraction::{
     CaldusExtractionCommit, CaldusExtractionRequest, CaldusExtractionTransaction,
@@ -119,7 +121,7 @@ pub use safe_inventory::{
     stage_world_flow_safe_inventory_preflight,
 };
 pub use world_flow::{
-    StoredDangerEntryRootV2, StoredSafeArrival, StoredWorldFlowCharacter,
+    StoredDangerEntryRootV3, StoredSafeArrival, StoredWorldFlowCharacter,
     StoredWorldFlowRevisionV1, StoredWorldLocation, StoredWorldTransferReceipt, WorldFlowBegin,
     WorldFlowTransaction, WorldFlowTransactionState, WorldFlowWrite, stage_world_flow_danger_entry,
 };
@@ -128,7 +130,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 33;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 34;
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -736,6 +738,96 @@ mod tests {
             assert!(
                 !migration.contains(prohibited),
                 "danger-entry restore v2 migration leaked {prohibited}"
+            );
+        }
+    }
+
+    #[test]
+    fn danger_entry_restore_v3_is_exact_replay_complete_and_forward_only() {
+        let migration = include_str!("../../../migrations/0034_exact_danger_crash_restore_v3.sql");
+        for required in [
+            "0034 requires no existing danger-entry restore points",
+            "SPEC-CONFLICT-009/027/028",
+            "GDD TECH-015/020/021/023",
+            "entry_restore_inventory_item_v1_owned",
+            "restore_contract_v3",
+            "snapshot_contract_version = 3",
+            "restore_components_v3_complete",
+            "component_mask = 31",
+            "entry_restore_progression_v3",
+            "entry_restore_inventory_v3",
+            "entry_restore_inventory_items_v3",
+            "baseline_item_count BETWEEN 0 AND 64",
+            "account_id BYTEA NOT NULL",
+            "entry_restore_inventory_v3_item_capture_exact",
+            "item.creation_request_id = NEW.creation_request_id",
+            "item.item_kind = NEW.item_kind",
+            "count(*) > 6",
+            "max(item_kind) = 0 AND count(*) > 1",
+            "count(DISTINCT (item_kind, template_id, content_revision)) <> 1",
+            "danger-entry v3 inventory ordinals are not canonical",
+            "entry_restore_oath_bargain_v3",
+            "acquired_by_offer_id",
+            "entry_restore_life_metrics_v3",
+            "entry_restore_ash_wallet_v3",
+            "restore_v3_ash_component_required",
+            "location_kind = 7",
+            "reason = 'consumed'",
+            "source_kind = 4",
+            "reason = 'crash_restored'",
+            "reason = 'crash_revoked'",
+            "destruction_reason IS NOT NULL",
+            "terminal_restore_point_id IS NOT NULL",
+            "revoked_by_restore_point_id IS NOT NULL AND revoked_at IS NOT NULL",
+            "reversed_by_mutation_id IS NOT NULL",
+            "revoked_by_restore_point_id",
+            "reversed_by_restore_point_id",
+            "danger_crash_restore_results",
+            "restore_v3_crash_result_required",
+            "danger_crash_restore_item_changes",
+            "danger_crash_restore_material_changes",
+            "danger_crash_restore_bargain_changes",
+            "danger_crash_restore_ash_changes",
+            "revoked_item_count BETWEEN 0 AND 4095",
+            "restored_item_count + revoked_item_count BETWEEN 0 AND 4095",
+            "change_ordinal BETWEEN 0 AND 4094",
+            "item_ledger_crash_resolution_identity",
+            "ledger_event_kind = 4 AND ledger_source_kind = 4",
+            "danger_crash_item_change_source_exact",
+            "danger_crash_material_change_source_exact",
+            "danger_crash_bargain_change_source_exact",
+            "danger_crash_ash_change_source_exact",
+            "danger crash result child order is not canonical",
+            "danger-entry v3 component history is immutable",
+            "danger-entry v3 snapshot children are immutable",
+            "entry_restore_v3_root_terminal_complete",
+            "entry_restore_v3_root_immutable",
+            "danger-entry v3 root must begin Active",
+            "OLD.restore_state = 0",
+            "crash-revoked Bargain source history is immutable",
+            "ash_crash_binding_immutable",
+            "OLD.namespace_id, OLD.restore_point_id",
+            "enforce_danger_crash_result_counts_v3",
+            "danger crash restore result history is immutable",
+            "DEFERRABLE INITIALLY DEFERRED",
+        ] {
+            assert!(migration.contains(required), "migration omitted {required}");
+        }
+        for prohibited in [
+            "DROP TABLE",
+            "TRUNCATE",
+            "DELETE FROM item_instances",
+            "DELETE FROM item_ledger_events",
+            "JSON",
+            "JSONB",
+            "FLOAT",
+            "DOUBLE PRECISION",
+            "TECH-019",
+            "change_ordinal BETWEEN 0 AND 4095",
+        ] {
+            assert!(
+                !migration.contains(prohibited),
+                "danger-entry restore v3 migration leaked {prohibited}"
             );
         }
     }

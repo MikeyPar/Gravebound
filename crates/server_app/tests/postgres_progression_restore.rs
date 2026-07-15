@@ -185,7 +185,7 @@ async fn reset_fixture(persistence: &PostgresPersistence) {
 
 #[allow(
     clippy::too_many_lines,
-    reason = "the hosted fixture keeps the complete V2 entry graph and location transition auditable"
+    reason = "the hosted fixture keeps the complete V3 entry graph and location transition auditable"
 )]
 async fn begin_danger_entry(
     persistence: &PostgresPersistence,
@@ -218,10 +218,11 @@ async fn begin_danger_entry(
         "INSERT INTO character_entry_restore_points (namespace_id, account_id, character_id, \
          restore_point_id, lineage_id, source_location_id, restore_location_id, \
          snapshot_contract_version, account_version, character_version, progression_version, \
-         inventory_version, oath_bargain_version, life_metrics_version, component_mask, composite_digest, \
+         inventory_version, oath_bargain_version, life_metrics_version, ash_wallet_version, \
+         component_mask, composite_digest, \
          restore_state, records_blake3, assets_blake3, localization_blake3) \
          VALUES ($1, $2, $3, $4, $5, 'hub.lantern_halls_01', 'hub.lantern_halls_01', \
-         2, $6, $7, $8, 1, 1, 1, 15, $9, 0, $10, $11, $12)",
+         3, $6, $7, $8, 1, 1, 1, 1, 31, $9, 0, $10, $11, $12)",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(ACCOUNT_ID.as_slice())
@@ -255,7 +256,7 @@ async fn begin_danger_entry(
         snapshot.progression_version,
         u64::try_from(progression_version).unwrap()
     );
-    persistence::stage_danger_entry_inventory_restore_v2(
+    persistence::stage_danger_entry_inventory_restore_v3(
         &mut transaction,
         ACCOUNT_ID,
         CHARACTER_ID,
@@ -265,7 +266,7 @@ async fn begin_danger_entry(
     )
     .await
     .unwrap();
-    persistence::stage_danger_entry_oath_bargain_restore_v2(
+    persistence::stage_danger_entry_oath_bargain_restore_v3(
         &mut transaction,
         ACCOUNT_ID,
         CHARACTER_ID,
@@ -273,7 +274,15 @@ async fn begin_danger_entry(
     )
     .await
     .unwrap();
-    persistence::stage_danger_entry_life_metrics_restore_v2(
+    persistence::stage_danger_entry_life_metrics_restore_v3(
+        &mut transaction,
+        ACCOUNT_ID,
+        CHARACTER_ID,
+        restore_id,
+    )
+    .await
+    .unwrap();
+    persistence::stage_danger_entry_ash_wallet_restore_v3(
         &mut transaction,
         ACCOUNT_ID,
         CHARACTER_ID,

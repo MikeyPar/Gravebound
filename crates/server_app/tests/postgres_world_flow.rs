@@ -2,8 +2,7 @@ use std::{path::PathBuf, sync::Arc};
 
 use persistence::{
     CORE_ITEM_CONTENT_REVISION, PersistenceConfig, PersistenceTransaction, PostgresPersistence,
-    WIPEABLE_CORE_NAMESPACE, stage_danger_entry_inventory_restore_v2,
-    stage_danger_entry_life_metrics_restore_v2, stage_danger_entry_oath_bargain_restore_v2,
+    WIPEABLE_CORE_NAMESPACE,
 };
 use protocol::{
     ManifestHash, WireText, WorldFlowContentRevisionV1, WorldFlowFrame, WorldFlowRequest,
@@ -11,11 +10,13 @@ use protocol::{
     WorldTransferResultCode,
 };
 use server_app::{
-    AccountId, AuthenticatedAccount, AuthenticatedNamespace, BeltStackV1, CrashRestoreContext,
-    DangerEntrySnapshotV2, EntryCaptureContext, EntryRestoreProvider, IdentityClock,
-    InventorySecurityRestoreV1, ItemUid, LifeMetricsRestoreV2, OathBargainRestoreV1,
+    AccountId, AshWalletRestoreV3, AuthenticatedAccount, AuthenticatedNamespace,
+    CrashRestoreContext, DangerEntrySnapshotV3, EntryCaptureContext, EntryRestoreProvider,
+    IdentityClock, InventorySecurityRestoreV3, LifeMetricsRestoreV3, OathBargainRestoreV3,
+    PostgresDangerEntryAshWalletProviderV3, PostgresDangerEntryInventoryProviderV3,
+    PostgresDangerEntryLifeMetricsProviderV3, PostgresDangerEntryOathBargainProviderV3,
     PostgresDormantWorldFlowCoordinator, PostgresProgressionRestoreProvider,
-    PostgresSafeInventoryService, ProgressionRestoreV1, RestorePointError, SafeAggregateVersionsV2,
+    PostgresSafeInventoryService, ProgressionRestoreV1, RestorePointError, SafeAggregateVersionsV3,
     SafeInventoryServiceError, SafeInventoryTransferCommand, SafeInventoryTransferKind,
     WorldFlowIdGenerator,
 };
@@ -295,155 +296,10 @@ impl IdentityClock for FixedClock {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct PostgresFixtureInventory;
-
-impl EntryRestoreProvider for PostgresFixtureInventory {
-    type Snapshot = InventorySecurityRestoreV1;
-
-    async fn capture<'a>(
-        &'a self,
-        transaction: &'a mut PersistenceTransaction<'_>,
-        context: EntryCaptureContext,
-    ) -> Result<Self::Snapshot, RestorePointError> {
-        let stored = stage_danger_entry_inventory_restore_v2(
-            transaction,
-            context.account_id,
-            context.character_id,
-            context.restore_point_id,
-            context.mutation_id,
-            context.safe_placement_count,
-        )
-        .await
-        .map_err(|_| RestorePointError::Persistence)?;
-        let inventory_version = stored.post_inventory_version;
-        let mut equipment = [None; 4];
-        let mut belt_ids = [Vec::new(), Vec::new()];
-        let mut belt_templates = [None, None];
-        for item in stored.items {
-            let uid = ItemUid::new(item.item_uid)?;
-            let slot = usize::try_from(item.slot_index)
-                .map_err(|_| RestorePointError::InvalidInventory)?;
-            match item.location_kind {
-                0 => equipment[slot] = Some(uid),
-                1 => {
-                    belt_ids[slot].push(uid);
-                    belt_templates[slot] = Some(
-                        WireText::new(item.template_id)
-                            .map_err(|_| RestorePointError::InvalidInventory)?,
-                    );
-                }
-                _ => return Err(RestorePointError::InvalidInventory),
-            }
-        }
-        Ok(InventorySecurityRestoreV1 {
-            equipment,
-            belt: [
-                BeltStackV1 {
-                    consumable_id: belt_templates[0].clone(),
-                    unit_uids: std::mem::take(&mut belt_ids[0]),
-                },
-                BeltStackV1 {
-                    consumable_id: belt_templates[1].clone(),
-                    unit_uids: std::mem::take(&mut belt_ids[1]),
-                },
-            ],
-            inventory_version,
-        })
-    }
-
-    async fn restore_and_revoke_post_entry<'a>(
-        &'a self,
-        _transaction: &'a mut PersistenceTransaction<'_>,
-        _context: CrashRestoreContext,
-    ) -> Result<(), RestorePointError> {
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct PostgresFixtureOathBargains;
-
-impl EntryRestoreProvider for PostgresFixtureOathBargains {
-    type Snapshot = OathBargainRestoreV1;
-
-    async fn capture<'a>(
-        &'a self,
-        transaction: &'a mut PersistenceTransaction<'_>,
-        context: EntryCaptureContext,
-    ) -> Result<Self::Snapshot, RestorePointError> {
-        let stored = stage_danger_entry_oath_bargain_restore_v2(
-            transaction,
-            context.account_id,
-            context.character_id,
-            context.restore_point_id,
-        )
-        .await
-        .map_err(|_| RestorePointError::Persistence)?;
-        let active = stored
-            .active_bargain_ids
-            .into_iter()
-            .map(|id| WireText::new(id).map_err(|_| RestorePointError::InvalidOathBargains))
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(OathBargainRestoreV1 {
-            oath_id: stored
-                .oath_id
-                .map(|id| WireText::new(id).map_err(|_| RestorePointError::InvalidOathBargains))
-                .transpose()?,
-            active_bargain_ids: active,
-            earned_bargain_slots: stored.earned_bargain_slots,
-            oath_bargain_version: stored.oath_bargain_version,
-        })
-    }
-
-    async fn restore_and_revoke_post_entry<'a>(
-        &'a self,
-        _transaction: &'a mut PersistenceTransaction<'_>,
-        _context: CrashRestoreContext,
-    ) -> Result<(), RestorePointError> {
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct PostgresFixtureLifeMetrics;
-
-impl EntryRestoreProvider for PostgresFixtureLifeMetrics {
-    type Snapshot = LifeMetricsRestoreV2;
-
-    async fn capture<'a>(
-        &'a self,
-        transaction: &'a mut PersistenceTransaction<'_>,
-        context: EntryCaptureContext,
-    ) -> Result<Self::Snapshot, RestorePointError> {
-        let stored = stage_danger_entry_life_metrics_restore_v2(
-            transaction,
-            context.account_id,
-            context.character_id,
-            context.restore_point_id,
-        )
-        .await
-        .map_err(|_| RestorePointError::Persistence)?;
-        Ok(LifeMetricsRestoreV2 {
-            lifetime_ticks: stored.captured_lifetime_ticks,
-            permadeath_combat_ticks: stored.rollback_permadeath_combat_ticks,
-            life_metrics_version: stored.life_metrics_version,
-        })
-    }
-
-    async fn restore_and_revoke_post_entry<'a>(
-        &'a self,
-        _transaction: &'a mut PersistenceTransaction<'_>,
-        _context: CrashRestoreContext,
-    ) -> Result<(), RestorePointError> {
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
 struct FailingInventory;
 
 impl EntryRestoreProvider for FailingInventory {
-    type Snapshot = InventorySecurityRestoreV1;
+    type Snapshot = InventorySecurityRestoreV3;
 
     async fn capture<'a>(
         &'a self,
@@ -469,11 +325,12 @@ fn coordinator<Inventory>(
     FixedIds,
     FixedClock,
     Inventory,
-    PostgresFixtureOathBargains,
-    PostgresFixtureLifeMetrics,
+    PostgresDangerEntryOathBargainProviderV3,
+    PostgresDangerEntryLifeMetricsProviderV3,
+    PostgresDangerEntryAshWalletProviderV3,
 >
 where
-    Inventory: EntryRestoreProvider<Snapshot = InventorySecurityRestoreV1>,
+    Inventory: EntryRestoreProvider<Snapshot = InventorySecurityRestoreV3>,
 {
     let progression = sim_content::load_core_development_progression(&content_root()).unwrap();
     PostgresDormantWorldFlowCoordinator::new(
@@ -483,8 +340,9 @@ where
         revision(),
         PostgresProgressionRestoreProvider::new(&progression).unwrap(),
         inventory,
-        PostgresFixtureOathBargains,
-        PostgresFixtureLifeMetrics,
+        PostgresDangerEntryOathBargainProviderV3,
+        PostgresDangerEntryLifeMetricsProviderV3,
+        PostgresDangerEntryAshWalletProviderV3,
     )
 }
 
@@ -525,6 +383,8 @@ struct StoredRootProjection {
     inventory_version: i64,
     oath_bargain_version: i64,
     life_metrics_version: i64,
+    ash_wallet_version: i64,
+    snapshot_contract_version: i16,
     component_mask: i16,
     composite_digest: Vec<u8>,
 }
@@ -535,7 +395,8 @@ async fn assert_committed_danger_root(persistence: &PostgresPersistence) {
         "SELECT l.content_id, l.layout_id, r.source_location_id, r.records_blake3, \
                 r.assets_blake3, r.localization_blake3, r.account_version, \
                 r.character_version, r.progression_version, r.inventory_version, \
-                r.oath_bargain_version, r.life_metrics_version, r.component_mask, r.composite_digest \
+                r.oath_bargain_version, r.life_metrics_version, r.ash_wallet_version, \
+                r.snapshot_contract_version, r.component_mask, r.composite_digest \
          FROM character_instance_lineages l JOIN character_entry_restore_points r \
          USING (namespace_id, account_id, character_id, lineage_id) \
          WHERE l.namespace_id = $1 AND l.account_id = $2 AND l.character_id = $3",
@@ -568,9 +429,11 @@ async fn assert_committed_danger_root(persistence: &PostgresPersistence) {
             root.inventory_version,
             root.oath_bargain_version,
             root.life_metrics_version,
+            root.ash_wallet_version,
+            root.snapshot_contract_version,
             root.component_mask,
         ),
-        (1, 1, 1, 1, 1, 1, 15)
+        (1, 1, 1, 1, 1, 1, 1, 3, 31)
     );
     assert_eq!(root.composite_digest, expected_snapshot(required_revision));
     assert!(matches!(
@@ -588,7 +451,7 @@ async fn assert_committed_danger_root(persistence: &PostgresPersistence) {
 }
 
 fn expected_snapshot(revision: WorldFlowContentRevisionV1) -> Vec<u8> {
-    DangerEntrySnapshotV2 {
+    DangerEntrySnapshotV3 {
         character_id: CHARACTER_ID,
         content_revision: revision,
         progression: ProgressionRestoreV1 {
@@ -597,38 +460,34 @@ fn expected_snapshot(revision: WorldFlowContentRevisionV1) -> Vec<u8> {
             current_health: 120,
             progression_version: 1,
         },
-        inventory: InventorySecurityRestoreV1 {
-            equipment: [None; 4],
-            belt: [
-                BeltStackV1 {
-                    consumable_id: None,
-                    unit_uids: vec![],
-                },
-                BeltStackV1 {
-                    consumable_id: None,
-                    unit_uids: vec![],
-                },
-            ],
+        inventory: InventorySecurityRestoreV3 {
+            baseline_items: vec![],
+            pre_inventory_version: 1,
             inventory_version: 1,
+            safe_placement_count: 0,
         },
-        oath_bargains: OathBargainRestoreV1 {
+        oath_bargains: OathBargainRestoreV3 {
             oath_id: None,
-            active_bargain_ids: vec![],
+            active_bargains: vec![],
             earned_bargain_slots: 0,
             oath_bargain_version: 1,
         },
-        life_metrics: LifeMetricsRestoreV2 {
+        life_metrics: LifeMetricsRestoreV3 {
             lifetime_ticks: 0,
             permadeath_combat_ticks: 0,
             life_metrics_version: 1,
         },
-        versions: SafeAggregateVersionsV2 {
+        ash_wallet: AshWalletRestoreV3 {
+            ash_wallet_version: 1,
+        },
+        versions: SafeAggregateVersionsV3 {
             account_version: 1,
             character_version: 1,
             progression_version: 1,
             inventory_version: 1,
             oath_bargain_version: 1,
             life_metrics_version: 1,
+            ash_wallet_version: 1,
         },
     }
     .composite_digest()
@@ -642,7 +501,7 @@ async fn danger_entry_commits_complete_root_and_replays_after_pool_restart() {
     let persistence = disposable_database().await;
     reset_fixture(&persistence).await;
     let request = frame(1, 91, CHARACTER_ID, 1);
-    let service = coordinator(persistence.clone(), PostgresFixtureInventory);
+    let service = coordinator(persistence.clone(), PostgresDangerEntryInventoryProviderV3);
     let accepted = service.handle(authenticated(ACCOUNT_ID), &request).await;
     assert_eq!(code(&accepted), WorldTransferResultCode::Accepted);
     assert_eq!(aggregate_counts(&persistence).await, (1, 1, 1, 1));
@@ -652,7 +511,7 @@ async fn danger_entry_commits_complete_root_and_replays_after_pool_restart() {
     drop(service);
     persistence.close().await;
     let restarted = disposable_database().await;
-    let replay = coordinator(restarted.clone(), PostgresFixtureInventory)
+    let replay = coordinator(restarted.clone(), PostgresDangerEntryInventoryProviderV3)
         .handle(
             authenticated(ACCOUNT_ID),
             &WorldFlowFrame {
@@ -669,7 +528,7 @@ async fn danger_entry_commits_complete_root_and_replays_after_pool_restart() {
         unreachable!();
     };
     mutation.expected_character_version = 2;
-    let conflicted = coordinator(restarted.clone(), PostgresFixtureInventory)
+    let conflicted = coordinator(restarted.clone(), PostgresDangerEntryInventoryProviderV3)
         .handle(authenticated(ACCOUNT_ID), &conflict)
         .await;
     assert_eq!(
@@ -688,7 +547,7 @@ async fn danger_entry_atomically_risks_loadout_and_advances_combined_inventory_o
     let safe_item = [64; 16];
     seed_character_safe_item(&persistence, safe_item).await;
 
-    let accepted = coordinator(persistence.clone(), PostgresFixtureInventory)
+    let accepted = coordinator(persistence.clone(), PostgresDangerEntryInventoryProviderV3)
         .handle(authenticated(ACCOUNT_ID), &frame(1, 92, CHARACTER_ID, 1))
         .await;
     assert_eq!(code(&accepted), WorldTransferResultCode::Accepted);
@@ -736,7 +595,7 @@ async fn danger_entry_atomically_risks_loadout_and_advances_combined_inventory_o
          AND mutation_id=$2 AND post_security_state=1",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
-    .bind([92; 16].as_slice())
+    .bind([92_u8; 16].as_slice())
     .fetch_one(transaction.connection())
     .await
     .unwrap();
@@ -763,7 +622,7 @@ async fn danger_entry_deposits_character_safe_before_ids_and_captures_post_versi
     reset_fixture(&persistence).await;
     seed_character_safe_item(&persistence, SAFE_ITEM).await;
 
-    let accepted = coordinator(persistence.clone(), PostgresFixtureInventory)
+    let accepted = coordinator(persistence.clone(), PostgresDangerEntryInventoryProviderV3)
         .handle(authenticated(ACCOUNT_ID), &frame(1, 98, CHARACTER_ID, 1))
         .await;
     assert_eq!(code(&accepted), WorldTransferResultCode::Accepted);
@@ -817,7 +676,7 @@ async fn full_vault_rejects_before_item_version_identity_restore_or_location_cha
     seed_character_safe_item(&persistence, SAFE_ITEM).await;
     fill_vault(&persistence).await;
 
-    let rejected = coordinator(persistence.clone(), PostgresFixtureInventory)
+    let rejected = coordinator(persistence.clone(), PostgresDangerEntryInventoryProviderV3)
         .handle(authenticated(ACCOUNT_ID), &frame(1, 99, CHARACTER_ID, 1))
         .await;
     assert_eq!(
@@ -864,7 +723,7 @@ async fn deliberate_risk_item_remains_pending_and_permits_danger_entry() {
     reset_fixture(&persistence).await;
     seed_deliberate_risk_item(&persistence, PENDING_ITEM).await;
 
-    let accepted = coordinator(persistence.clone(), PostgresFixtureInventory)
+    let accepted = coordinator(persistence.clone(), PostgresDangerEntryInventoryProviderV3)
         .handle(authenticated(ACCOUNT_ID), &frame(1, 100, CHARACTER_ID, 1))
         .await;
     assert_eq!(code(&accepted), WorldTransferResultCode::Accepted);
@@ -903,7 +762,7 @@ async fn concurrent_manual_transfer_and_entry_have_one_serial_storage_move() {
     let persistence = disposable_database().await;
     reset_fixture(&persistence).await;
     seed_character_safe_item(&persistence, SAFE_ITEM).await;
-    let entry = coordinator(persistence.clone(), PostgresFixtureInventory);
+    let entry = coordinator(persistence.clone(), PostgresDangerEntryInventoryProviderV3);
     let manual = PostgresSafeInventoryService::new(persistence.clone());
     let entry_frame = frame(1, 101, CHARACTER_ID, 1);
     let manual_command = SafeInventoryTransferCommand {
@@ -960,7 +819,10 @@ async fn concurrent_manual_transfer_and_entry_have_one_serial_storage_move() {
 async fn concurrent_entry_has_one_lineage_and_provider_failure_rolls_back_every_row() {
     let persistence = disposable_database().await;
     reset_fixture(&persistence).await;
-    let first = Arc::new(coordinator(persistence.clone(), PostgresFixtureInventory));
+    let first = Arc::new(coordinator(
+        persistence.clone(),
+        PostgresDangerEntryInventoryProviderV3,
+    ));
     let second = Arc::clone(&first);
     let first_frame = frame(1, 92, CHARACTER_ID, 1);
     let second_frame = frame(2, 93, CHARACTER_ID, 1);
@@ -1026,7 +888,7 @@ async fn concurrent_entry_has_one_lineage_and_provider_failure_rolls_back_every_
 async fn stale_foreign_and_corrupt_state_fail_closed_without_danger_allocation() {
     let persistence = disposable_database().await;
     reset_fixture(&persistence).await;
-    let service = coordinator(persistence.clone(), PostgresFixtureInventory);
+    let service = coordinator(persistence.clone(), PostgresDangerEntryInventoryProviderV3);
     let stale = service
         .handle(authenticated(ACCOUNT_ID), &frame(1, 95, CHARACTER_ID, 2))
         .await;

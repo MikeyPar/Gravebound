@@ -746,6 +746,15 @@ async fn insert_danger_checkpoint_fixture(persistence: &PostgresPersistence) {
             .unwrap();
     }
     sqlx::query(
+        "INSERT INTO ash_wallets (namespace_id, account_id, balance, wallet_version) \
+         VALUES ($1, $2, 0, 1)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_A.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query(
         "INSERT INTO character_instance_lineages (namespace_id, account_id, character_id, \
          lineage_id, content_id, layout_id, lineage_state, records_blake3, assets_blake3, \
          localization_blake3) VALUES ($1, $2, $3, $4, 'world.core_microrealm_01', \
@@ -765,9 +774,11 @@ async fn insert_danger_checkpoint_fixture(persistence: &PostgresPersistence) {
         "INSERT INTO character_entry_restore_points (namespace_id, account_id, character_id, \
          restore_point_id, lineage_id, source_location_id, restore_location_id, \
          snapshot_contract_version, account_version, character_version, progression_version, \
-         inventory_version, oath_bargain_version, life_metrics_version, component_mask, composite_digest, restore_state, \
+         inventory_version, oath_bargain_version, life_metrics_version, ash_wallet_version, \
+         component_mask, composite_digest, restore_state, \
          records_blake3, assets_blake3, localization_blake3) VALUES ($1, $2, $3, $4, $5, \
-         'hub.lantern_halls_01', 'hub.lantern_halls_01', 2, 1, 1, 1, 1, 1, 1, 15, $6, 0, $7, $8, $9)",
+         'hub.lantern_halls_01', 'hub.lantern_halls_01', 3, 1, 1, 1, 1, 1, 1, 1, 31, \
+         $6, 0, $7, $8, $9)",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(ACCOUNT_A.as_slice())
@@ -778,6 +789,19 @@ async fn insert_danger_checkpoint_fixture(persistence: &PostgresPersistence) {
     .bind("1".repeat(64))
     .bind("2".repeat(64))
     .bind("3".repeat(64))
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO entry_restore_progression_v3 \
+         (namespace_id,account_id,character_id,restore_point_id,level,total_xp,current_health, \
+          progression_version,component_digest) VALUES ($1,$2,$3,$4,1,0,120,1,$5)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_A.as_slice())
+    .bind(CHARACTER_A.as_slice())
+    .bind(CHECKPOINT_RESTORE.as_slice())
+    .bind([92_u8; 32].as_slice())
     .execute(transaction.connection())
     .await
     .unwrap();
@@ -793,17 +817,17 @@ async fn insert_danger_checkpoint_fixture(persistence: &PostgresPersistence) {
     .execute(transaction.connection())
     .await
     .unwrap();
-    persistence::stage_danger_entry_inventory_restore_v2(
+    persistence::stage_danger_entry_inventory_restore_v3(
         &mut transaction,
         ACCOUNT_A,
         CHARACTER_A,
         CHECKPOINT_RESTORE,
-        [89; 16],
+        [89_u8; 16],
         0,
     )
     .await
     .unwrap();
-    persistence::stage_danger_entry_oath_bargain_restore_v2(
+    persistence::stage_danger_entry_oath_bargain_restore_v3(
         &mut transaction,
         ACCOUNT_A,
         CHARACTER_A,
@@ -811,7 +835,15 @@ async fn insert_danger_checkpoint_fixture(persistence: &PostgresPersistence) {
     )
     .await
     .unwrap();
-    persistence::stage_danger_entry_life_metrics_restore_v2(
+    persistence::stage_danger_entry_life_metrics_restore_v3(
+        &mut transaction,
+        ACCOUNT_A,
+        CHARACTER_A,
+        CHECKPOINT_RESTORE,
+    )
+    .await
+    .unwrap();
+    persistence::stage_danger_entry_ash_wallet_restore_v3(
         &mut transaction,
         ACCOUNT_A,
         CHARACTER_A,

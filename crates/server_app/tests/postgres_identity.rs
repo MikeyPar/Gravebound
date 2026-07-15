@@ -580,13 +580,25 @@ async fn stage_real_quic_bargain_offer(
     let world = sim_content::load_core_development_world_flow(content_root).unwrap();
     let restores = PostgresProgressionRestoreProvider::new(&progression).unwrap();
     let mut transaction = persistence.begin_transaction().await.unwrap();
-    let versions: (i64, i64, i64, i64, i64) = sqlx::query_as(
+    sqlx::query(
+        "INSERT INTO ash_wallets (namespace_id, account_id, balance, wallet_version) \
+         VALUES ($1, $2, 0, 1) ON CONFLICT (namespace_id, account_id) DO NOTHING",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    let versions: (i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
         "SELECT a.state_version, c.character_state_version, p.progression_version, \
-                i.inventory_version, ob.oath_bargain_version FROM accounts a \
+                i.inventory_version, ob.oath_bargain_version, lm.life_metrics_version, \
+                aw.wallet_version FROM accounts a \
          JOIN characters c USING (namespace_id, account_id) \
          JOIN character_progression p USING (namespace_id, account_id, character_id) \
          JOIN character_inventories i USING (namespace_id, account_id, character_id) \
          JOIN character_oath_bargain_state ob USING (namespace_id, account_id, character_id) \
+         JOIN character_life_metrics lm USING (namespace_id, account_id, character_id) \
+         JOIN ash_wallets aw USING (namespace_id, account_id) \
          WHERE a.namespace_id = $1 AND a.account_id = $2 AND c.character_id = $3",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
@@ -616,10 +628,11 @@ async fn stage_real_quic_bargain_offer(
         "INSERT INTO character_entry_restore_points (namespace_id, account_id, character_id, \
          restore_point_id, lineage_id, source_location_id, restore_location_id, \
          snapshot_contract_version, account_version, character_version, progression_version, \
-         inventory_version, oath_bargain_version, life_metrics_version, component_mask, composite_digest, \
+         inventory_version, oath_bargain_version, life_metrics_version, ash_wallet_version, \
+         component_mask, composite_digest, \
          restore_state, records_blake3, assets_blake3, localization_blake3) \
          VALUES ($1, $2, $3, $4, $5, 'hub.lantern_halls_01', 'hub.lantern_halls_01', \
-         2, $6, $7, $8, $9, $10, 1, 15, $11, 0, $12, $13, $14)",
+         3, $6, $7, $8, $9, $10, $11, $12, 31, $13, 0, $14, $15, $16)",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(account_id.as_slice())
@@ -631,6 +644,8 @@ async fn stage_real_quic_bargain_offer(
     .bind(versions.2)
     .bind(versions.3)
     .bind(versions.4)
+    .bind(versions.5)
+    .bind(versions.6)
     .bind([91_u8; 32].as_slice())
     .bind(&hashes.records_blake3)
     .bind(&hashes.assets_blake3)
@@ -651,7 +666,7 @@ async fn stage_real_quic_bargain_offer(
         )
         .await
         .unwrap();
-    let inventory = persistence::stage_danger_entry_inventory_restore_v2(
+    let inventory = persistence::stage_danger_entry_inventory_restore_v3(
         &mut transaction,
         account_id,
         character_id,
@@ -661,7 +676,7 @@ async fn stage_real_quic_bargain_offer(
     )
     .await
     .unwrap();
-    let oath = persistence::stage_danger_entry_oath_bargain_restore_v2(
+    let oath = persistence::stage_danger_entry_oath_bargain_restore_v3(
         &mut transaction,
         account_id,
         character_id,
@@ -669,7 +684,15 @@ async fn stage_real_quic_bargain_offer(
     )
     .await
     .unwrap();
-    let life = persistence::stage_danger_entry_life_metrics_restore_v2(
+    let life = persistence::stage_danger_entry_life_metrics_restore_v3(
+        &mut transaction,
+        account_id,
+        character_id,
+        RESTORE_ID,
+    )
+    .await
+    .unwrap();
+    let ash = persistence::stage_danger_entry_ash_wallet_restore_v3(
         &mut transaction,
         account_id,
         character_id,
@@ -679,12 +702,13 @@ async fn stage_real_quic_bargain_offer(
     .unwrap();
     sqlx::query(
         "UPDATE character_entry_restore_points SET inventory_version = $1, \
-         oath_bargain_version = $2, life_metrics_version = $3 \
-         WHERE namespace_id = $4 AND restore_point_id = $5",
+         oath_bargain_version = $2, life_metrics_version = $3, ash_wallet_version = $4 \
+         WHERE namespace_id = $5 AND restore_point_id = $6",
     )
     .bind(i64::try_from(inventory.post_inventory_version).unwrap())
     .bind(i64::try_from(oath.oath_bargain_version).unwrap())
     .bind(i64::try_from(life.life_metrics_version).unwrap())
+    .bind(i64::try_from(ash.ash_wallet_version).unwrap())
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(RESTORE_ID.as_slice())
     .execute(transaction.connection())

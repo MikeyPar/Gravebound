@@ -22,11 +22,12 @@ use server_app::{
     CoreOathSelectionAuthority, CoreSafeInventoryAuthority, DisabledProgressionQueryRepository,
     DisposableCoreJourneyWorldFlow, HandshakePolicy, IdentityClock, IdentityService,
     InMemoryAccountRepository, NoopIdentityEventSink, PostgresCaldusHallTransferCoordinator,
-    PostgresCaldusVictoryCoordinator, PostgresDangerEntryInventoryProviderV2,
-    PostgresDangerEntryLifeMetricsProviderV2, PostgresDangerEntryOathBargainProviderV2,
-    PostgresDormantWorldFlowCoordinator, PostgresProgressionAwardService,
-    PostgresProgressionRestoreProvider, PostgresRewardService, ProgressionQueryService,
-    SecretRewardEpoch, WorldFlowIdGenerator, serve_core_reliable, serve_handshake,
+    PostgresCaldusVictoryCoordinator, PostgresDangerEntryAshWalletProviderV3,
+    PostgresDangerEntryInventoryProviderV3, PostgresDangerEntryLifeMetricsProviderV3,
+    PostgresDangerEntryOathBargainProviderV3, PostgresDormantWorldFlowCoordinator,
+    PostgresProgressionAwardService, PostgresProgressionRestoreProvider, PostgresRewardService,
+    ProgressionQueryService, SecretRewardEpoch, WorldFlowIdGenerator, serve_core_reliable,
+    serve_handshake,
 };
 use sim_core::{
     CoreBossParticipant, CoreBossParticipantLock, CoreCaldusAntiCheatState,
@@ -375,9 +376,10 @@ async fn run_reliable_core_journey(persistence: &PostgresPersistence) -> Duratio
         FixedAuthority,
         revision(),
         PostgresProgressionRestoreProvider::new(&progression_content).unwrap(),
-        PostgresDangerEntryInventoryProviderV2,
-        PostgresDangerEntryOathBargainProviderV2,
-        PostgresDangerEntryLifeMetricsProviderV2,
+        PostgresDangerEntryInventoryProviderV3,
+        PostgresDangerEntryOathBargainProviderV3,
+        PostgresDangerEntryLifeMetricsProviderV3,
+        PostgresDangerEntryAshWalletProviderV3,
     );
     let extraction =
         PostgresCaldusHallTransferCoordinator::new(persistence.clone(), FixedAuthority, revision());

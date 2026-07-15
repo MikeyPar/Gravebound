@@ -4,7 +4,7 @@
 //! transaction semantics while the player route remains fail-closed in [`crate::WorldFlowGateService`].
 
 use persistence::{
-    PersistenceError, PostgresPersistence, StoredDangerEntryRootV2, StoredSafeArrival,
+    PersistenceError, PostgresPersistence, StoredDangerEntryRootV3, StoredSafeArrival,
     StoredWorldFlowRevisionV1, StoredWorldLocation, StoredWorldTransferReceipt, WorldFlowBegin,
     WorldFlowTransaction, WorldFlowTransactionState, load_world_flow_safe_inventory,
     stage_world_flow_danger_entry, stage_world_flow_safe_inventory_preflight,
@@ -16,10 +16,10 @@ use protocol::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AuthenticatedAccount, AuthenticatedNamespace, EntryCaptureContext, EntryRestoreProvider,
-    IdentityClock, InventorySecurityRestoreV1, LifeMetricsRestoreV2, OathBargainRestoreV1,
-    PostgresProgressionRestoreProvider, RestorePointError, RestorePointProvidersV2,
-    SafeInventoryServiceError, WorldFlowRepositoryError,
+    AshWalletRestoreV3, AuthenticatedAccount, AuthenticatedNamespace, EntryCaptureContext,
+    EntryRestoreProvider, IdentityClock, InventorySecurityRestoreV3, LifeMetricsRestoreV3,
+    OathBargainRestoreV3, PostgresProgressionRestoreProvider, RestorePointError,
+    RestorePointProvidersV3, SafeInventoryServiceError, WorldFlowRepositoryError,
     safe_inventory::plan_danger_entry_safe_deposit,
     world_flow_gate::{CoreWorldFlowAuthority, stored_location_snapshot},
 };
@@ -281,25 +281,35 @@ pub struct PostgresDormantWorldFlowCoordinator<
     Inventory,
     OathBargains,
     LifeMetrics,
+    AshWallet,
 > {
     persistence: PostgresPersistence,
     planner: DormantWorldFlowPlanner<Generator, Clock>,
-    restore_providers: RestorePointProvidersV2<
+    restore_providers: RestorePointProvidersV3<
         PostgresProgressionRestoreProvider,
         Inventory,
         OathBargains,
         LifeMetrics,
+        AshWallet,
     >,
 }
 
-impl<Generator, Clock, Inventory, OathBargains, LifeMetrics>
-    PostgresDormantWorldFlowCoordinator<Generator, Clock, Inventory, OathBargains, LifeMetrics>
+impl<Generator, Clock, Inventory, OathBargains, LifeMetrics, AshWallet>
+    PostgresDormantWorldFlowCoordinator<
+        Generator,
+        Clock,
+        Inventory,
+        OathBargains,
+        LifeMetrics,
+        AshWallet,
+    >
 where
     Generator: WorldFlowIdGenerator,
     Clock: IdentityClock,
-    Inventory: EntryRestoreProvider<Snapshot = InventorySecurityRestoreV1>,
-    OathBargains: EntryRestoreProvider<Snapshot = OathBargainRestoreV1>,
-    LifeMetrics: EntryRestoreProvider<Snapshot = LifeMetricsRestoreV2>,
+    Inventory: EntryRestoreProvider<Snapshot = InventorySecurityRestoreV3>,
+    OathBargains: EntryRestoreProvider<Snapshot = OathBargainRestoreV3>,
+    LifeMetrics: EntryRestoreProvider<Snapshot = LifeMetricsRestoreV3>,
+    AshWallet: EntryRestoreProvider<Snapshot = AshWalletRestoreV3>,
 {
     #[allow(
         clippy::too_many_arguments,
@@ -314,9 +324,15 @@ where
         inventory: Inventory,
         oath_bargains: OathBargains,
         life_metrics: LifeMetrics,
+        ash_wallet: AshWallet,
     ) -> Self {
-        let restore_providers =
-            RestorePointProvidersV2::new(progression, inventory, oath_bargains, life_metrics);
+        let restore_providers = RestorePointProvidersV3::new(
+            progression,
+            inventory,
+            oath_bargains,
+            life_metrics,
+            ash_wallet,
+        );
         Self {
             persistence,
             planner: DormantWorldFlowPlanner::new(generator, clock, required_content_revision),
@@ -565,7 +581,7 @@ where
             .map_err(|_| WorldTransferResultCode::ServiceUnavailable)?;
         let snapshot = self
             .restore_providers
-            .capture_v2(
+            .capture_v3(
                 write.transaction_mut(),
                 EntryCaptureContext {
                     account_id,
@@ -580,7 +596,7 @@ where
             )
             .await
             .map_err(restore_capture_code)?;
-        let root = StoredDangerEntryRootV2 {
+        let root = StoredDangerEntryRootV3 {
             account_id,
             character_id: mutation.character_id,
             lineage_id,
@@ -600,6 +616,8 @@ where
             oath_bargain_version: i64::try_from(snapshot.versions.oath_bargain_version)
                 .map_err(|_| WorldTransferResultCode::ServiceUnavailable)?,
             life_metrics_version: i64::try_from(snapshot.versions.life_metrics_version)
+                .map_err(|_| WorldTransferResultCode::ServiceUnavailable)?,
+            ash_wallet_version: i64::try_from(snapshot.versions.ash_wallet_version)
                 .map_err(|_| WorldTransferResultCode::ServiceUnavailable)?,
             composite_digest: snapshot.composite_digest().map_err(restore_capture_code)?,
         };
@@ -663,14 +681,22 @@ fn preflight_persistence_code(error: &PersistenceError) -> WorldTransferResultCo
     }
 }
 
-impl<Generator, Clock, Inventory, OathBargains, LifeMetrics> CoreWorldFlowAuthority
-    for PostgresDormantWorldFlowCoordinator<Generator, Clock, Inventory, OathBargains, LifeMetrics>
+impl<Generator, Clock, Inventory, OathBargains, LifeMetrics, AshWallet> CoreWorldFlowAuthority
+    for PostgresDormantWorldFlowCoordinator<
+        Generator,
+        Clock,
+        Inventory,
+        OathBargains,
+        LifeMetrics,
+        AshWallet,
+    >
 where
     Generator: WorldFlowIdGenerator,
     Clock: IdentityClock,
-    Inventory: EntryRestoreProvider<Snapshot = InventorySecurityRestoreV1>,
-    OathBargains: EntryRestoreProvider<Snapshot = OathBargainRestoreV1>,
-    LifeMetrics: EntryRestoreProvider<Snapshot = LifeMetricsRestoreV2>,
+    Inventory: EntryRestoreProvider<Snapshot = InventorySecurityRestoreV3>,
+    OathBargains: EntryRestoreProvider<Snapshot = OathBargainRestoreV3>,
+    LifeMetrics: EntryRestoreProvider<Snapshot = LifeMetricsRestoreV3>,
+    AshWallet: EntryRestoreProvider<Snapshot = AshWalletRestoreV3>,
 {
     async fn handle_world_flow(
         &self,

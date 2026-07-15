@@ -9,8 +9,9 @@ use protocol::ManifestHash;
 use server_app::{
     AccountId, AuthenticatedAccount, AuthenticatedNamespace, CaldusExtractionEvidenceCommand,
     CaldusInstancePresentation, CaldusVictoryCoordinatorError, CaldusVictoryOwnerCommand,
-    IdentityClock, PostgresCaldusExtractionAuthority, PostgresCaldusHallTransferCoordinator,
-    PostgresCaldusVictoryCoordinator, PostgresProgressionAwardService, PostgresRewardService,
+    EntryCaptureContext, EntryRestoreProvider, IdentityClock, PostgresCaldusExtractionAuthority,
+    PostgresCaldusHallTransferCoordinator, PostgresCaldusVictoryCoordinator,
+    PostgresProgressionAwardService, PostgresProgressionRestoreProvider, PostgresRewardService,
     ProgressionAwardCode, ProgressionAwardEvidence, ProgressionAwardPayload, RewardGrantContext,
     RewardGrantTransaction, SecretRewardEpoch,
 };
@@ -291,7 +292,7 @@ fn world_flow_revision() -> protocol::WorldFlowContentRevisionV1 {
 
 #[allow(
     clippy::too_many_lines,
-    reason = "the hosted fixture constructs one complete V2 danger binding for terminal-race tests"
+    reason = "the hosted fixture constructs one complete V3 danger binding for terminal-race tests"
 )]
 async fn stage_danger_binding(
     persistence: &PostgresPersistence,
@@ -323,10 +324,11 @@ async fn stage_danger_binding(
         "INSERT INTO character_entry_restore_points (namespace_id,account_id,character_id,
          restore_point_id,lineage_id,source_location_id,restore_location_id,
          snapshot_contract_version,account_version,character_version,progression_version,
-         inventory_version,oath_bargain_version,life_metrics_version,component_mask,composite_digest,restore_state,
+         inventory_version,oath_bargain_version,life_metrics_version,ash_wallet_version,
+         component_mask,composite_digest,restore_state,
          records_blake3,assets_blake3,localization_blake3)
-         VALUES ($1,$2,$3,$4,$5,'hub.lantern_halls_01','hub.lantern_halls_01',2,
-         1,1,1,1,1,1,15,$6,0,$7,$8,$9)",
+         VALUES ($1,$2,$3,$4,$5,'hub.lantern_halls_01','hub.lantern_halls_01',3,
+         1,1,1,1,1,1,1,31,$6,0,$7,$8,$9)",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(account_id.as_slice())
@@ -340,21 +342,23 @@ async fn stage_danger_binding(
     .execute(transaction.connection())
     .await
     .unwrap();
-    sqlx::query(
-        "INSERT INTO entry_restore_progression_v1 \
-         (namespace_id,account_id,character_id,restore_point_id,level,total_xp,current_health, \
-          progression_version) SELECT namespace_id,account_id,character_id,$1,level,total_xp, \
-          current_health,progression_version FROM character_progression WHERE namespace_id=$2 \
-          AND account_id=$3 AND character_id=$4",
-    )
-    .bind(restore_id.as_slice())
-    .bind(WIPEABLE_CORE_NAMESPACE)
-    .bind(account_id.as_slice())
-    .bind(character_id.as_slice())
-    .execute(transaction.connection())
-    .await
-    .unwrap();
-    let inventory = persistence::stage_danger_entry_inventory_restore_v2(
+    let progression_content =
+        sim_content::load_core_development_progression(&content_root()).unwrap();
+    PostgresProgressionRestoreProvider::new(&progression_content)
+        .unwrap()
+        .capture(
+            &mut transaction,
+            EntryCaptureContext {
+                account_id,
+                character_id,
+                restore_point_id: restore_id,
+                mutation_id: [88; 16],
+                safe_placement_count: 0,
+            },
+        )
+        .await
+        .unwrap();
+    let inventory = persistence::stage_danger_entry_inventory_restore_v3(
         &mut transaction,
         account_id,
         character_id,
@@ -364,7 +368,7 @@ async fn stage_danger_binding(
     )
     .await
     .unwrap();
-    persistence::stage_danger_entry_oath_bargain_restore_v2(
+    persistence::stage_danger_entry_oath_bargain_restore_v3(
         &mut transaction,
         account_id,
         character_id,
@@ -372,7 +376,15 @@ async fn stage_danger_binding(
     )
     .await
     .unwrap();
-    persistence::stage_danger_entry_life_metrics_restore_v2(
+    persistence::stage_danger_entry_life_metrics_restore_v3(
+        &mut transaction,
+        account_id,
+        character_id,
+        restore_id,
+    )
+    .await
+    .unwrap();
+    persistence::stage_danger_entry_ash_wallet_restore_v3(
         &mut transaction,
         account_id,
         character_id,

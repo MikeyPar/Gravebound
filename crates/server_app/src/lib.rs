@@ -100,12 +100,16 @@ pub use progression_query::{
 pub use progression_restore_provider::PostgresProgressionRestoreProvider;
 pub use progression_service::PostgresProgressionAwardService;
 pub use restore_point::{
-    BeltStackV1, CrashRestoreContext, DangerEntrySnapshotV1, DangerEntrySnapshotV2,
-    EntryCaptureContext, EntryRestoreProvider, InventorySecurityRestoreV1, ItemUid,
-    LifeMetricsRestoreV2, OathBargainRestoreV1, PostgresDangerEntryInventoryProviderV2,
-    PostgresDangerEntryLifeMetricsProviderV2, PostgresDangerEntryOathBargainProviderV2,
-    ProgressionRestoreV1, RestorePointError, RestorePointProviders, RestorePointProvidersV2,
-    SafeAggregateVersionsV1, SafeAggregateVersionsV2,
+    ActiveBargainRestoreV3, AshWalletRestoreV3, BeltStackV1, CRASH_RESTORE_ORDER_V3,
+    CrashRestoreComponentV3, CrashRestoreContext, DangerEntrySnapshotV1, DangerEntrySnapshotV2,
+    DangerEntrySnapshotV3, EntryCaptureContext, EntryInventoryLocationV3, EntryInventorySecurityV3,
+    EntryRestoreProvider, InventoryBaselineItemV3, InventorySecurityRestoreV1,
+    InventorySecurityRestoreV3, ItemUid, LifeMetricsRestoreV2, LifeMetricsRestoreV3,
+    OathBargainRestoreV1, OathBargainRestoreV3, PostgresDangerEntryAshWalletProviderV3,
+    PostgresDangerEntryInventoryProviderV3, PostgresDangerEntryLifeMetricsProviderV3,
+    PostgresDangerEntryOathBargainProviderV3, ProgressionRestoreV1, RestorePointError,
+    RestorePointProviders, RestorePointProvidersV2, RestorePointProvidersV3,
+    SafeAggregateVersionsV1, SafeAggregateVersionsV2, SafeAggregateVersionsV3,
 };
 pub use reward_rng::{
     ProductionRewardRng, REWARD_AUDIT_CONTEXT, REWARD_EPOCH_ID_ENV, REWARD_EPOCH_SECRET_ENV,

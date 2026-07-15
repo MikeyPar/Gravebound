@@ -32,6 +32,28 @@ pub async fn capture_progression_restore(
         contract,
     )
     .await?;
+    let component_digest = progression_component_digest(&progression)?;
+    sqlx::query(
+        "INSERT INTO entry_restore_progression_v3 \
+         (namespace_id, account_id, character_id, restore_point_id, level, total_xp, \
+          current_health, progression_version, component_digest) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
+    .bind(restore_point_id.as_slice())
+    .bind(progression.level)
+    .bind(progression.total_xp)
+    .bind(progression.current_health)
+    .bind(progression.progression_version)
+    .bind(component_digest.as_slice())
+    .execute(transaction.connection())
+    .await
+    .map_err(PersistenceError::Database)?;
+    // Keep the legacy component during the fail-closed route transition so the existing
+    // progression-only diagnostic can still inspect V1 history. V3 root/result authority never
+    // treats this row as completion.
     sqlx::query(
         "INSERT INTO entry_restore_progression_v1 \
          (namespace_id, account_id, character_id, restore_point_id, level, total_xp, \
@@ -479,6 +501,22 @@ fn validate_progression(
         return Err(PersistenceError::CorruptStoredProgression);
     }
     Ok(())
+}
+
+fn progression_component_digest(
+    progression: &StoredProgression,
+) -> Result<[u8; 32], PersistenceError> {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"gravebound.entry-progression.v3\0");
+    hasher.update(&progression.level.to_le_bytes());
+    hasher.update(&progression.total_xp.to_le_bytes());
+    hasher.update(&progression.current_health.to_le_bytes());
+    hasher.update(
+        &u64::try_from(progression.progression_version)
+            .map_err(|_| PersistenceError::CorruptStoredProgression)?
+            .to_le_bytes(),
+    );
+    Ok(*hasher.finalize().as_bytes())
 }
 
 fn validate_ids(
