@@ -697,17 +697,6 @@ async fn assert_terminal_precedence(persistence: &PostgresPersistence) {
             [193; 16],
         ),
         (
-            2_i16,
-            DangerCrashRestoreCode::DeathCommitted,
-            FixedIds {
-                transfer: [182; 16],
-                lineage: [186; 16],
-                restore: [191; 16],
-            },
-            194,
-            [195; 16],
-        ),
-        (
             3_i16,
             DangerCrashRestoreCode::RecallCommitted,
             FixedIds {

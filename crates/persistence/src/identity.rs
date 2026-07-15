@@ -175,7 +175,9 @@ async fn load_characters(
                 characters.level AS identity_level, character_progression.level, oath_id, \
                 life_state, security_state, character_state_version \
          FROM characters JOIN character_progression USING (namespace_id, account_id, character_id) \
-         WHERE namespace_id = $1 AND account_id = $2 ORDER BY roster_ordinal",
+         WHERE namespace_id = $1 AND account_id = $2 \
+           AND life_state = 0 AND roster_ordinal IS NOT NULL \
+         ORDER BY roster_ordinal",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(account_id.as_slice())

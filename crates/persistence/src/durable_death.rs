@@ -127,6 +127,7 @@ pub struct DurableDeathEventV1 {
     pub death_id: [u8; 16],
     pub account_id: [u8; 16],
     pub character_id: [u8; 16],
+    pub former_roster_ordinal: u8,
     pub mutation_id: [u8; 16],
     pub canonical_request_hash: [u8; 32],
     pub content_revision: String,
@@ -175,6 +176,7 @@ impl DurableDeathEventV1 {
             || self.namespace_id != WIPEABLE_CORE_NAMESPACE
             || !is_uuid_v7(self.death_id)
             || identities.contains(&[0; 16])
+            || !(1..=2).contains(&self.former_roster_ordinal)
             || is_zero_hash(self.canonical_request_hash)
             || !valid_content_revision(&self.content_revision)
             || !valid_lower_blake3(&self.records_blake3)
@@ -660,6 +662,7 @@ pub struct DurableEchoTransitionV1 {
     pub next_state: DurableEchoStateV1,
     pub reason: DurableEchoTransitionReasonV1,
     pub source_death_id: Option<[u8; 16]>,
+    pub trigger_death_id: [u8; 16],
     pub committed_at_unix_ms: u64,
 }
 
@@ -1137,8 +1140,9 @@ fn validate_echo(plan: &AuthoritativeDeathPlanV1) -> Result<(), PersistenceError
         || echo.class_id != plan.summary.class_id
         || echo.oath_id != plan.summary.oath_id
         || echo.level != 10
-        || !valid_stable_id(&echo.appearance_snapshot_id)
-        || !valid_stable_id(&echo.appearance_theme_id)
+        || echo.class_id != "class.grave_arbalist"
+        || echo.appearance_snapshot_id != "appearance.default.grave_arbalist"
+        || echo.appearance_theme_id != "theme.echo.arbalist_ash"
         || !valid_optional_id(echo.weapon_signature_tag.as_deref())
         || !valid_optional_id(echo.relic_signature_tag.as_deref())
         || echo.bargains != plan.summary.bargains
@@ -1204,6 +1208,7 @@ fn valid_creation_transition(
         && transition.next_state == DurableEchoStateV1::Dormant
         && transition.reason == DurableEchoTransitionReasonV1::EligibleDeath
         && transition.source_death_id == Some(plan.event.death_id)
+        && transition.trigger_death_id == plan.event.death_id
         && transition.committed_at_unix_ms == plan.event.committed_at_unix_ms
 }
 
@@ -1220,6 +1225,7 @@ fn valid_promotion(
             && transition.next_state == DurableEchoStateV1::Available
             && transition.reason == DurableEchoTransitionReasonV1::OldestDormantPromotion
             && transition.source_death_id.is_none()
+            && transition.trigger_death_id == plan.event.death_id
             && transition.committed_at_unix_ms == plan.event.committed_at_unix_ms
             && (transition.echo_id != created.echo_id
                 || (transition.echo_death_id == created.death_id && transition.ordinal == 1))
@@ -1541,6 +1547,7 @@ mod tests {
             death_id,
             account_id,
             character_id,
+            former_roster_ordinal: 1,
             mutation_id,
             canonical_request_hash: [1; 32],
             content_revision: content_revision.clone(),
@@ -1632,7 +1639,7 @@ mod tests {
             summary_revision: 1,
             hero_label_key: "hero.core.label".into(),
             character_name_snapshot: "Mara".into(),
-            class_id: "class.arbalist".into(),
+            class_id: "class.grave_arbalist".into(),
             level: 10,
             oath_id: Some("oath.black_bell".into()),
             bargains: vec![DurableOrderedContentIdV1 {
@@ -1704,7 +1711,7 @@ mod tests {
             class_id: request.plan.summary.class_id.clone(),
             oath_id: request.plan.summary.oath_id.clone(),
             level: 10,
-            appearance_snapshot_id: "appearance.echo.arbalist".into(),
+            appearance_snapshot_id: "appearance.default.grave_arbalist".into(),
             appearance_theme_id: "theme.echo.arbalist_ash".into(),
             weapon_signature_tag: Some("signature.weapon.bow".into()),
             relic_signature_tag: Some("signature.relic.bell".into()),
@@ -1731,6 +1738,7 @@ mod tests {
             next_state: DurableEchoStateV1::Dormant,
             reason: DurableEchoTransitionReasonV1::EligibleDeath,
             source_death_id: Some(request.plan.event.death_id),
+            trigger_death_id: request.plan.event.death_id,
             committed_at_unix_ms: request.plan.event.committed_at_unix_ms,
         };
         let promotion = DurableEchoTransitionV1 {
@@ -1741,6 +1749,7 @@ mod tests {
             next_state: DurableEchoStateV1::Available,
             reason: DurableEchoTransitionReasonV1::OldestDormantPromotion,
             source_death_id: None,
+            trigger_death_id: request.plan.event.death_id,
             committed_at_unix_ms: request.plan.event.committed_at_unix_ms,
         };
         request.plan.echo = Some(DurableEchoEnvelopeV1 {
@@ -1836,6 +1845,7 @@ mod tests {
             next_state: DurableEchoStateV1::Available,
             reason: DurableEchoTransitionReasonV1::OldestDormantPromotion,
             source_death_id: None,
+            trigger_death_id: illegal_xor.plan.event.death_id,
             committed_at_unix_ms: illegal_xor.plan.event.committed_at_unix_ms,
         });
         assert!(illegal_xor.plan.validate().is_err());
@@ -1884,6 +1894,10 @@ mod tests {
         let mut wrong_world_hash = valid_request();
         wrong_world_hash.plan.event.records_blake3 = "A".repeat(64);
         assert!(wrong_world_hash.plan.validate().is_err());
+
+        let mut invalid_roster_archive = valid_request();
+        invalid_roster_archive.plan.event.former_roster_ordinal = 0;
+        assert!(invalid_roster_archive.plan.validate().is_err());
 
         let mut malformed = valid_request().payload().unwrap();
         let name = malformed

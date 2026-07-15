@@ -155,7 +155,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 36;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 37;
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -736,6 +736,46 @@ mod tests {
             assert!(
                 !migration.contains(prohibited),
                 "strict death integrity migration leaked {prohibited}"
+            );
+        }
+    }
+
+    #[test]
+    fn complete_death_graph_is_terminal_bound_deferred_and_immutable() {
+        let migration = include_str!("../../../migrations/0037_complete_death_graph.sql");
+        for required in [
+            "0037 requires no death/Echo rows",
+            "character_roster_life_shape",
+            "former_roster_ordinal",
+            "death_mutation_id",
+            "restore_death_result_owned",
+            "death_restore_terminal_owned",
+            "echo_expected",
+            "enforce_death_destruction_source_v1",
+            "enforce_complete_death_graph_v1",
+            "death combat trace is incomplete or noncanonical",
+            "death destruction graph is incomplete or noncanonical",
+            "enforce_echo_history_v1",
+            "reject_death_history_mutation_v1",
+            "reject_dead_character_insert_v1",
+            "death_outbox_publish_only",
+            "DEFERRABLE INITIALLY DEFERRED",
+        ] {
+            assert!(migration.contains(required), "migration omitted {required}");
+        }
+        for prohibited in [
+            "DROP TABLE",
+            "TRUNCATE",
+            "DELETE FROM item_instances",
+            "DELETE FROM item_ledger_events",
+            "JSON",
+            "JSONB",
+            "FLOAT",
+            "DOUBLE PRECISION",
+        ] {
+            assert!(
+                !migration.contains(prohibited),
+                "complete death graph migration leaked {prohibited}"
             );
         }
     }

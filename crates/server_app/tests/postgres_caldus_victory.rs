@@ -955,7 +955,7 @@ async fn crash_restore_between_request_and_receipt_supersedes_caldus_extraction(
 
     let mut restore = persistence.begin_transaction().await.unwrap();
     sqlx::query(
-        "UPDATE character_entry_restore_points SET restore_state=2,
+        "UPDATE character_entry_restore_points SET restore_state=3,
          consumed_at=transaction_timestamp() WHERE namespace_id=$1 AND account_id=$2
          AND character_id=$3 AND restore_point_id=$4 AND restore_state=0",
     )
