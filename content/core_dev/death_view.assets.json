@@ -2,7 +2,27 @@
   "schema_version": 1,
   "assets": [
     {"asset_id":"portrait.boss.sir_caldus","source_content_id":"boss.sir_caldus"},
+    {"asset_id":"portrait.enemy.bell_acolyte","source_content_id":"enemy.bell_acolyte"},
+    {"asset_id":"portrait.enemy.bell_reed","source_content_id":"enemy.bell_reed"},
+    {"asset_id":"portrait.enemy.chain_sentry","source_content_id":"enemy.chain_sentry"},
+    {"asset_id":"portrait.enemy.choir_skull","source_content_id":"enemy.choir_skull"},
+    {"asset_id":"portrait.enemy.drowned_pilgrim","source_content_id":"enemy.drowned_pilgrim"},
+    {"asset_id":"portrait.enemy.mire_leech","source_content_id":"enemy.mire_leech"},
+    {"asset_id":"portrait.miniboss.choir_abbot","source_content_id":"miniboss.choir_abbot"},
     {"asset_id":"portrait.miniboss.sepulcher_knight","source_content_id":"miniboss.sepulcher_knight"},
     {"asset_id":"sprite.station.memorial_wall","source_content_id":"station.memorial_wall"}
+  ],
+  "source_portraits": [
+    {"source_content_id":"boss.sir_caldus","portrait_asset_id":"portrait.boss.sir_caldus"},
+    {"source_content_id":"enemy.bell_acolyte","portrait_asset_id":"portrait.enemy.bell_acolyte"},
+    {"source_content_id":"enemy.bell_reed","portrait_asset_id":"portrait.enemy.bell_reed"},
+    {"source_content_id":"enemy.chain_sentry","portrait_asset_id":"portrait.enemy.chain_sentry"},
+    {"source_content_id":"enemy.choir_skull","portrait_asset_id":"portrait.enemy.choir_skull"},
+    {"source_content_id":"enemy.drowned_pilgrim","portrait_asset_id":"portrait.enemy.drowned_pilgrim"},
+    {"source_content_id":"enemy.mire_leech","portrait_asset_id":"portrait.enemy.mire_leech"},
+    {"source_content_id":"environment.core.hazard","portrait_asset_id":null},
+    {"source_content_id":"miniboss.choir_abbot","portrait_asset_id":"portrait.miniboss.choir_abbot"},
+    {"source_content_id":"miniboss.sepulcher_knight","portrait_asset_id":"portrait.miniboss.sepulcher_knight"},
+    {"source_content_id":"network.disconnect","portrait_asset_id":null}
   ]
 }

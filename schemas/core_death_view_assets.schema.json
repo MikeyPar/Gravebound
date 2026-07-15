@@ -13,12 +13,19 @@
       "type": "integer",
       "format": "uint32",
       "minimum": 0
+    },
+    "source_portraits": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CoreDeathViewSourcePortraitBinding"
+      }
     }
   },
   "additionalProperties": false,
   "required": [
     "schema_version",
-    "assets"
+    "assets",
+    "source_portraits"
   ],
   "$defs": {
     "ContentId": {
@@ -40,6 +47,34 @@
       "required": [
         "asset_id",
         "source_content_id"
+      ]
+    },
+    "CoreDeathViewNullablePortraitAssetId": {
+      "description": "Explicit portrait policy for one source that can appear in a Core lethal trace. A missing\nportrait is represented by `null`; it is never inferred from a content-ID naming convention.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ContentId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "CoreDeathViewSourcePortraitBinding": {
+      "type": "object",
+      "properties": {
+        "portrait_asset_id": {
+          "description": "The wrapper makes the field itself required while retaining `null` as an explicit value.",
+          "$ref": "#/$defs/CoreDeathViewNullablePortraitAssetId"
+        },
+        "source_content_id": {
+          "$ref": "#/$defs/ContentId"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "source_content_id",
+        "portrait_asset_id"
       ]
     }
   }

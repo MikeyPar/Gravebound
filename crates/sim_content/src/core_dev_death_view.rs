@@ -94,6 +94,13 @@ const FIELD_IDS: &[&str] = &[
     "death.field.recall",
     "death.field.source_position",
 ];
+const FORMAT_IDS: &[&str] = &[
+    "death.format.damage",
+    "death.format.lifetime",
+    "death.format.position",
+    "death.format.quantity",
+    "death.format.timestamp_utc",
+];
 const HERO_IDS: &[&str] = &["hero.core.grave_arbalist"];
 const MATERIAL_IDS: &[&str] = &[
     "material.bell_brass",
@@ -173,10 +180,16 @@ const SURFACE_IDS: &[&str] = &[
 ];
 const ASSET_IDS: &[&str] = &[
     "portrait.boss.sir_caldus",
+    "portrait.enemy.bell_acolyte",
+    "portrait.enemy.bell_reed",
+    "portrait.enemy.chain_sentry",
+    "portrait.enemy.choir_skull",
+    "portrait.enemy.drowned_pilgrim",
+    "portrait.enemy.mire_leech",
+    "portrait.miniboss.choir_abbot",
     "portrait.miniboss.sepulcher_knight",
     "sprite.station.memorial_wall",
 ];
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreDeathViewHashes {
     pub records_blake3: String,
@@ -193,12 +206,25 @@ pub struct CoreDevelopmentDeathView {
     death_owned_copy: BTreeMap<String, CoreDeathViewCopyValue>,
     dependency_names: CoreDeathViewDependencyNames,
     asset_ids: BTreeSet<String>,
+    source_portraits: BTreeMap<String, Option<String>>,
+}
+
+/// Closed visual policy for a source that can own the lethal damage event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoreDeathViewSourcePortrait<'a> {
+    Asset(&'a str),
+    ExplicitlyAbsent,
 }
 
 #[derive(Debug, Clone)]
 struct CoreDeathViewCopyValue {
     kind: CoreDeathViewCopyKind,
     value: String,
+}
+
+struct ValidatedDeathViewAssets {
+    asset_ids: BTreeSet<String>,
+    source_portraits: BTreeMap<String, Option<String>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -311,6 +337,123 @@ impl CoreDevelopmentDeathView {
     pub fn contains_asset(&self, asset_id: &str) -> bool {
         self.asset_ids.contains(asset_id)
     }
+
+    /// Resolves the explicitly compiled portrait policy. `None` means the source is unknown;
+    /// `ExplicitlyAbsent` is a valid policy for environment and connection-loss sources.
+    #[must_use]
+    pub fn resolve_source_portrait(
+        &self,
+        source_content_id: &str,
+    ) -> Option<CoreDeathViewSourcePortrait<'_>> {
+        self.source_portraits
+            .get(source_content_id)
+            .map(|asset| match asset.as_deref() {
+                Some(asset) => CoreDeathViewSourcePortrait::Asset(asset),
+                None => CoreDeathViewSourcePortrait::ExplicitlyAbsent,
+            })
+    }
+
+    /// Formats a durable lifetime without rounding it upward or local widget policy.
+    #[must_use]
+    pub fn format_lifetime(&self, lifetime_ms: u64) -> String {
+        let total_seconds = lifetime_ms / 1_000;
+        let hours = total_seconds / 3_600;
+        let minutes = total_seconds % 3_600 / 60;
+        let seconds = total_seconds % 60;
+        self.interpolate(
+            "death.format.lifetime",
+            &[
+                ("hours", hours.to_string()),
+                ("minutes", format!("{minutes:02}")),
+                ("seconds", format!("{seconds:02}")),
+            ],
+        )
+    }
+
+    /// Formats an absolute durable timestamp in UTC from integer Unix milliseconds.
+    #[must_use]
+    pub fn format_timestamp_utc(&self, unix_ms: u64) -> String {
+        let total_seconds = unix_ms / 1_000;
+        let days = total_seconds / 86_400;
+        let seconds_of_day = total_seconds % 86_400;
+        let (year, month, day) = civil_date_from_unix_days(days);
+        let hour = seconds_of_day / 3_600;
+        let minute = seconds_of_day % 3_600 / 60;
+        let second = seconds_of_day % 60;
+        self.interpolate(
+            "death.format.timestamp_utc",
+            &[
+                ("year", format!("{year:04}")),
+                ("month", format!("{month:02}")),
+                ("day", format!("{day:02}")),
+                ("hour", format!("{hour:02}")),
+                ("minute", format!("{minute:02}")),
+                ("second", format!("{second:02}")),
+            ],
+        )
+    }
+
+    #[must_use]
+    pub fn format_damage(&self, damage: u32) -> String {
+        self.interpolate("death.format.damage", &[("value", damage.to_string())])
+    }
+
+    #[must_use]
+    pub fn format_position(&self, x_milli_tiles: i32, y_milli_tiles: i32) -> String {
+        self.interpolate(
+            "death.format.position",
+            &[
+                ("x", format_milli_tiles(x_milli_tiles)),
+                ("y", format_milli_tiles(y_milli_tiles)),
+            ],
+        )
+    }
+
+    #[must_use]
+    pub fn format_quantity(&self, quantity: u32) -> String {
+        self.interpolate(
+            "death.format.quantity",
+            &[("quantity", quantity.to_string())],
+        )
+    }
+
+    fn interpolate(&self, content_id: &str, values: &[(&str, String)]) -> String {
+        let mut output = self
+            .resolve_copy(CoreDeathViewCopyKind::Format, content_id)
+            .expect("validated death format template")
+            .to_owned();
+        for (name, value) in values {
+            output = output.replace(&format!("{{{name}}}"), value);
+        }
+        debug_assert!(!output.contains('{') && !output.contains('}'));
+        output
+    }
+}
+
+fn format_milli_tiles(value: i32) -> String {
+    let signed = i64::from(value);
+    let magnitude = signed.unsigned_abs();
+    let sign = if signed < 0 { "-" } else { "" };
+    format!("{sign}{}.{:03}", magnitude / 1_000, magnitude % 1_000)
+}
+
+/// Gregorian civil-date conversion derived from the 400-year era decomposition. Positive Unix
+/// days are accepted across the complete `u64` millisecond input range without platform time APIs.
+fn civil_date_from_unix_days(unix_days: u64) -> (i128, i128, i128) {
+    let z = i128::from(unix_days) + 719_468;
+    let era = z / 146_097;
+    let day_of_era = z - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    if month <= 2 {
+        year += 1;
+    }
+    (year, month, day)
 }
 
 /// Loads every dependency first and then proves the death catalog matches their exact revisions.
@@ -346,7 +489,7 @@ pub fn load_core_development_death_view(root: &Path) -> Result<CoreDevelopmentDe
         &oaths,
     )?;
     let death_owned_copy = validate_copy(&target, &records, &copy)?;
-    let asset_ids = validate_assets(root, &target, &assets)?;
+    let validated_assets = validate_assets(root, &target, &assets, &encounters, &caldus)?;
     let dependency_names = dependency_names(&identity, &items, &encounters, &caldus, &oaths)?;
 
     if death_owned_copy
@@ -362,7 +505,8 @@ pub fn load_core_development_death_view(root: &Path) -> Result<CoreDevelopmentDe
         item_content_revision: records.content_revision,
         death_owned_copy,
         dependency_names,
-        asset_ids,
+        asset_ids: validated_assets.asset_ids,
+        source_portraits: validated_assets.source_portraits,
     })
 }
 
@@ -492,14 +636,76 @@ fn validate_copy(
             bail!("Core death-view localization closure is invalid");
         }
     }
+    validate_format_templates(&values)?;
     Ok(values)
+}
+
+fn validate_format_templates(values: &BTreeMap<String, CoreDeathViewCopyValue>) -> Result<()> {
+    const REQUIRED: &[(&str, &[&str])] = &[
+        ("death.format.damage", &["value"]),
+        ("death.format.lifetime", &["hours", "minutes", "seconds"]),
+        ("death.format.position", &["x", "y"]),
+        ("death.format.quantity", &["quantity"]),
+        (
+            "death.format.timestamp_utc",
+            &["day", "hour", "minute", "month", "second", "year"],
+        ),
+    ];
+    for (content_id, expected) in REQUIRED {
+        let template = values
+            .get(*content_id)
+            .filter(|entry| entry.kind == CoreDeathViewCopyKind::Format)
+            .with_context(|| format!("missing Core death-view format {content_id}"))?;
+        let mut actual = template_placeholders(&template.value)?;
+        actual.sort_unstable();
+        let mut expected = expected
+            .iter()
+            .map(|value| (*value).to_owned())
+            .collect::<Vec<_>>();
+        expected.sort_unstable();
+        if actual != expected {
+            bail!(
+                "Core death-view format {content_id} placeholders drifted: expected={expected:?}, actual={actual:?}"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn template_placeholders(template: &str) -> Result<Vec<String>> {
+    let mut placeholders = Vec::new();
+    let mut remainder = template;
+    while let Some(open) = remainder.find(['{', '}']) {
+        let marker = remainder.as_bytes()[open];
+        if marker == b'}' {
+            bail!("Core death-view format contains an unmatched closing brace");
+        }
+        let after_open = &remainder[open + 1..];
+        let close = after_open
+            .find('}')
+            .context("Core death-view format contains an unmatched opening brace")?;
+        let name = &after_open[..close];
+        if name.is_empty()
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+            || name.contains('{')
+        {
+            bail!("Core death-view format contains an invalid placeholder");
+        }
+        placeholders.push(name.to_owned());
+        remainder = &after_open[close + 1..];
+    }
+    Ok(placeholders)
 }
 
 fn validate_assets(
     root: &Path,
     target: &CoreDeathViewDevelopmentTarget,
     assets: &CoreDeathViewAssetManifest,
-) -> Result<BTreeSet<String>> {
+    encounters: &CoreDevelopmentEncounterRooms,
+    caldus: &CoreDevelopmentCaldus,
+) -> Result<ValidatedDeathViewAssets> {
     if assets.schema_version != SCHEMA_VERSION
         || assets.assets.len() != target.required_asset_ids.len()
     {
@@ -540,7 +746,68 @@ fn validate_assets(
             );
         }
     }
-    Ok(output)
+
+    let actor_sources = encounters
+        .actor_definitions()
+        .iter()
+        .map(|actor| actor.id().as_str())
+        .chain(std::iter::once(caldus.boss().header.id.as_str()))
+        .collect::<BTreeSet<_>>();
+    let portraitless_sources = SOURCE_IDS.iter().copied().collect::<BTreeSet<_>>();
+    if !actor_sources.is_disjoint(&portraitless_sources) {
+        bail!("Core death-view actor and portraitless source policies overlap");
+    }
+    let expected_sources = actor_sources
+        .union(&portraitless_sources)
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let configured_sources = assets
+        .source_portraits
+        .iter()
+        .map(|binding| binding.source_content_id.as_str())
+        .collect::<BTreeSet<_>>();
+    if assets.source_portraits.len() != expected_sources.len()
+        || configured_sources != expected_sources
+        || !assets
+            .source_portraits
+            .windows(2)
+            .all(|pair| pair[0].source_content_id.as_str() < pair[1].source_content_id.as_str())
+    {
+        bail!("Core death-view source portrait closure drifted");
+    }
+
+    let mut source_portraits = BTreeMap::new();
+    for binding in &assets.source_portraits {
+        let source_id = binding.source_content_id.as_str();
+        let portrait_asset = binding.portrait_asset_id.as_ref();
+        let valid_policy = if actor_sources.contains(source_id) {
+            let expected_asset = format!("portrait.{source_id}");
+            portrait_asset.is_some_and(|asset_id| {
+                asset_id.as_str() == expected_asset
+                    && available.contains(&(asset_id.as_str(), source_id))
+                    && output.contains(asset_id.as_str())
+            })
+        } else {
+            portraitless_sources.contains(source_id) && portrait_asset.is_none()
+        };
+        if !valid_policy
+            || source_portraits
+                .insert(
+                    binding.source_content_id.to_string(),
+                    portrait_asset.map(ToString::to_string),
+                )
+                .is_some()
+        {
+            bail!(
+                "Core death-view source portrait {} drifted",
+                binding.source_content_id
+            );
+        }
+    }
+    Ok(ValidatedDeathViewAssets {
+        asset_ids: output,
+        source_portraits,
+    })
 }
 
 fn dependency_revisions(
@@ -653,7 +920,7 @@ fn expected_kind(id: &str) -> Result<CoreDeathViewCopyKind> {
 }
 
 #[allow(clippy::type_complexity)]
-fn copy_groups() -> [(&'static [&'static str], CoreDeathViewCopyKind); 20] {
+fn copy_groups() -> [(&'static [&'static str], CoreDeathViewCopyKind); 21] {
     [
         (ACTION_IDS, CoreDeathViewCopyKind::Action),
         (ATTACK_IDS, CoreDeathViewCopyKind::Attack),
@@ -663,6 +930,7 @@ fn copy_groups() -> [(&'static [&'static str], CoreDeathViewCopyKind); 20] {
         (ECHO_OUTCOME_IDS, CoreDeathViewCopyKind::EchoOutcome),
         (ERROR_IDS, CoreDeathViewCopyKind::Error),
         (FIELD_IDS, CoreDeathViewCopyKind::Field),
+        (FORMAT_IDS, CoreDeathViewCopyKind::Format),
         (HERO_IDS, CoreDeathViewCopyKind::HeroLabel),
         (MATERIAL_IDS, CoreDeathViewCopyKind::Material),
         (
@@ -761,6 +1029,28 @@ mod tests {
         for asset_id in ASSET_IDS {
             assert!(catalog.contains_asset(asset_id));
         }
+        assert_eq!(
+            catalog.resolve_source_portrait("enemy.drowned_pilgrim"),
+            Some(CoreDeathViewSourcePortrait::Asset(
+                "portrait.enemy.drowned_pilgrim"
+            ))
+        );
+        assert_eq!(
+            catalog.resolve_source_portrait("environment.core.hazard"),
+            Some(CoreDeathViewSourcePortrait::ExplicitlyAbsent)
+        );
+        assert_eq!(catalog.resolve_source_portrait("enemy.unknown"), None);
+        assert_eq!(catalog.format_lifetime(3_723_999), "1h 02m 03s");
+        assert_eq!(
+            catalog.format_timestamp_utc(1_704_067_199_999),
+            "2023-12-31 23:59:59 UTC"
+        );
+        assert_eq!(catalog.format_damage(27), "27 HP");
+        assert_eq!(
+            catalog.format_position(-1_250, 2_005),
+            "(-1.250, 2.005) tiles"
+        );
+        assert_eq!(catalog.format_quantity(3), "×3");
     }
 
     #[test]
@@ -769,6 +1059,8 @@ mod tests {
         let catalog = load_core_development_death_view(&root).unwrap();
         let encounters = load_core_development_encounter_rooms(&root).unwrap();
         let caldus = load_core_development_caldus(&root).unwrap();
+        let assets: CoreDeathViewAssetManifest =
+            crate::read_json(&root.join(CORE_DEATH_VIEW_ASSETS_PATH)).unwrap();
 
         let reachable_sources = encounters
             .actor_definitions()
@@ -777,8 +1069,29 @@ mod tests {
             .chain(std::iter::once(caldus.boss().header.id.as_str()))
             .chain(SOURCE_IDS.iter().copied())
             .collect::<BTreeSet<_>>();
+        let configured_sources = assets
+            .source_portraits
+            .iter()
+            .map(|binding| binding.source_content_id.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(configured_sources, reachable_sources);
         for source_id in reachable_sources {
             assert!(catalog.resolve_source(source_id).is_some(), "{source_id}");
+            let portrait = catalog.resolve_source_portrait(source_id);
+            if SOURCE_IDS.contains(&source_id) {
+                assert_eq!(
+                    portrait,
+                    Some(CoreDeathViewSourcePortrait::ExplicitlyAbsent),
+                    "{source_id}"
+                );
+            } else {
+                match portrait {
+                    Some(CoreDeathViewSourcePortrait::Asset(asset_id)) => {
+                        assert_eq!(asset_id, format!("portrait.{source_id}"));
+                    }
+                    other => panic!("actor source {source_id} lacks its portrait: {other:?}"),
+                }
+            }
         }
         for attack_id in ATTACK_IDS
             .iter()
@@ -796,6 +1109,47 @@ mod tests {
         for status_id in STATUS_IDS {
             assert!(catalog.resolve_status(status_id).is_some(), "{status_id}");
         }
+    }
+
+    #[test]
+    fn canonical_formatting_covers_leap_days_and_integer_boundaries() {
+        let catalog = load_core_development_death_view(&content_root()).unwrap();
+        assert_eq!(catalog.format_timestamp_utc(0), "1970-01-01 00:00:00 UTC");
+        assert_eq!(catalog.format_timestamp_utc(999), "1970-01-01 00:00:00 UTC");
+        assert_eq!(
+            catalog.format_timestamp_utc(951_782_400_000),
+            "2000-02-29 00:00:00 UTC"
+        );
+        assert_eq!(
+            catalog.format_timestamp_utc(1_709_164_800_000),
+            "2024-02-29 00:00:00 UTC"
+        );
+        assert_eq!(
+            catalog.format_timestamp_utc(4_107_542_399_000),
+            "2100-02-28 23:59:59 UTC"
+        );
+        assert_eq!(
+            catalog.format_timestamp_utc(4_107_542_400_000),
+            "2100-03-01 00:00:00 UTC"
+        );
+        assert_eq!(
+            catalog.format_timestamp_utc(u64::MAX),
+            "584556019-04-03 14:25:51 UTC"
+        );
+        assert_eq!(
+            catalog.format_position(i32::MIN, -1),
+            "(-2147483.648, -0.001) tiles"
+        );
+        assert_eq!(catalog.format_position(0, 1), "(0.000, 0.001) tiles");
+        assert_eq!(
+            catalog.format_position(i32::MAX, 0),
+            "(2147483.647, 0.000) tiles"
+        );
+        assert_eq!(catalog.format_lifetime(999), "0h 00m 00s");
+        assert_eq!(catalog.format_damage(u32::MAX), "4294967295 HP");
+        assert_eq!(catalog.format_quantity(u32::MAX), "×4294967295");
+        let maximum_lifetime = catalog.format_lifetime(u64::MAX);
+        assert!(!maximum_lifetime.contains(['{', '}']), "{maximum_lifetime}");
     }
 
     #[test]
@@ -858,5 +1212,54 @@ mod tests {
         let mut changed_copy = copy;
         changed_copy.entries[0].value.clear();
         assert!(validate_copy(&target, &records, &changed_copy).is_err());
+    }
+
+    #[test]
+    fn format_and_source_portrait_drift_fail_closed() {
+        let root = content_root();
+        let target: CoreDeathViewDevelopmentTarget =
+            crate::read_json(&root.join(CORE_DEATH_VIEW_TARGET_PATH)).unwrap();
+        let records: CoreDeathViewRecords =
+            crate::read_json(&root.join(CORE_DEATH_VIEW_RECORDS_PATH)).unwrap();
+        let copy: CoreWorldFlowCopyFile =
+            crate::read_json(&root.join(CORE_DEATH_VIEW_COPY_PATH)).unwrap();
+        let assets: CoreDeathViewAssetManifest =
+            crate::read_json(&root.join(CORE_DEATH_VIEW_ASSETS_PATH)).unwrap();
+        let encounters = load_core_development_encounter_rooms(&root).unwrap();
+        let caldus = load_core_development_caldus(&root).unwrap();
+
+        let mut changed_template = copy;
+        let lifetime = changed_template
+            .entries
+            .iter_mut()
+            .find(|entry| entry.key.as_str() == "death.format.lifetime")
+            .unwrap();
+        lifetime.value = "{hours}:{minutes}".to_owned();
+        assert!(validate_copy(&target, &records, &changed_template).is_err());
+
+        let mut omitted_portrait = serde_json::to_value(&assets).unwrap();
+        let portrait_rows = omitted_portrait
+            .get_mut("source_portraits")
+            .and_then(serde_json::Value::as_array_mut)
+            .unwrap();
+        portrait_rows
+            .iter_mut()
+            .find(|row| row["source_content_id"] == "environment.core.hazard")
+            .and_then(serde_json::Value::as_object_mut)
+            .unwrap()
+            .remove("portrait_asset_id");
+        assert!(
+            serde_json::from_value::<CoreDeathViewAssetManifest>(omitted_portrait).is_err(),
+            "portrait policy must distinguish an explicit null from an omitted field"
+        );
+
+        let mut changed_portrait = assets;
+        let pilgrim = changed_portrait
+            .source_portraits
+            .iter_mut()
+            .find(|binding| binding.source_content_id.as_str() == "enemy.drowned_pilgrim")
+            .unwrap();
+        pilgrim.portrait_asset_id.0 = None;
+        assert!(validate_assets(&root, &target, &changed_portrait, &encounters, &caldus).is_err());
     }
 }

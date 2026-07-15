@@ -23,11 +23,11 @@ pub const MAX_DURABLE_DEATH_RESULT_PAYLOAD_BYTES: usize = 65_536;
 /// `content/core_dev/death_view.*`. These values are independent of the world-flow revision kept
 /// on the durable event and retained live trace.
 pub const CORE_DEATH_VIEW_RECORDS_BLAKE3: &str =
-    "8189586e8583efd104b7a063f9f8752159b011ace763b78abea54c69ddcd7765";
+    "349730a1246857978d1412510ee23af46624ec80dbb3333be42aad2e47f1f8e0";
 pub const CORE_DEATH_VIEW_ASSETS_BLAKE3: &str =
-    "05b8f00f6b3f82f7176473facff3d3e0e90385ccf106d290662acc74b4b3fff9";
+    "0160f06954c88aba61392f72af66031d6f7ff4a592beb24f7ebe9f1981cc7a68";
 pub const CORE_DEATH_VIEW_LOCALIZATION_BLAKE3: &str =
-    "a6e41565d606a6711a8ec962cf81fa7e2fae74323fb69db98fe38695872ca025";
+    "c10bcc96887aac7db8c855f19d991e6185f46d1df39f7a37d3a31cb4b9ca1b92";
 
 const PLAN_HASH_CONTEXT: &str = "gravebound.durable-death.plan.v1";
 const REQUEST_HASH_CONTEXT: &str = "gravebound.durable-death.request.v1";

@@ -999,6 +999,7 @@ pub enum CoreDeathViewCopyKind {
     EchoOutcome,
     Error,
     Field,
+    Format,
     HeroLabel,
     Material,
     MemorialPresentation,
@@ -1040,11 +1041,87 @@ pub struct CoreDeathViewAssetReference {
     pub source_content_id: ContentId,
 }
 
+/// Explicit portrait policy for one source that can appear in a Core lethal trace. A missing
+/// portrait is represented by `null`; it is never inferred from a content-ID naming convention.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(transparent)]
+#[schemars(transparent)]
+pub struct CoreDeathViewNullablePortraitAssetId(pub Option<ContentId>);
+
+impl CoreDeathViewNullablePortraitAssetId {
+    #[must_use]
+    pub const fn as_ref(&self) -> Option<&ContentId> {
+        self.0.as_ref()
+    }
+}
+
+impl<'de> Deserialize<'de> for CoreDeathViewNullablePortraitAssetId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct RequiredNullablePortraitVisitor;
+
+        impl serde::de::Visitor<'_> for RequiredNullablePortraitVisitor {
+            type Value = CoreDeathViewNullablePortraitAssetId;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a validated portrait asset ID or explicit null")
+            }
+
+            fn visit_unit<E>(self) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(CoreDeathViewNullablePortraitAssetId(None))
+            }
+
+            fn visit_none<E>(self) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(CoreDeathViewNullablePortraitAssetId(None))
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                ContentId::parse(value)
+                    .map(|value| CoreDeathViewNullablePortraitAssetId(Some(value)))
+                    .map_err(E::custom)
+            }
+
+            fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                ContentId::parse(value)
+                    .map(|value| CoreDeathViewNullablePortraitAssetId(Some(value)))
+                    .map_err(E::custom)
+            }
+        }
+
+        // `deserialize_any` is intentional: Serde's missing-field adapter rejects this required
+        // field, while explicit JSON null still reaches `visit_unit`/`visit_none`.
+        deserializer.deserialize_any(RequiredNullablePortraitVisitor)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CoreDeathViewSourcePortraitBinding {
+    pub source_content_id: ContentId,
+    /// The wrapper makes the field itself required while retaining `null` as an explicit value.
+    pub portrait_asset_id: CoreDeathViewNullablePortraitAssetId,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CoreDeathViewAssetManifest {
     pub schema_version: u32,
     pub assets: Vec<CoreDeathViewAssetReference>,
+    pub source_portraits: Vec<CoreDeathViewSourcePortraitBinding>,
 }
 
 /// Required labels for every safe Core identity screen state in `GB-M03-01`.

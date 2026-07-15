@@ -47,6 +47,11 @@
     "death.field.network",
     "death.field.recall",
     "death.field.source_position",
+    "death.format.damage",
+    "death.format.lifetime",
+    "death.format.position",
+    "death.format.quantity",
+    "death.format.timestamp_utc",
     "death.memorial.empty",
     "death.memorial.title",
     "death.network.connected",
@@ -109,10 +114,17 @@
   ],
   "required_asset_ids": [
     "portrait.boss.sir_caldus",
+    "portrait.enemy.bell_acolyte",
+    "portrait.enemy.bell_reed",
+    "portrait.enemy.chain_sentry",
+    "portrait.enemy.choir_skull",
+    "portrait.enemy.drowned_pilgrim",
+    "portrait.enemy.mire_leech",
+    "portrait.miniboss.choir_abbot",
     "portrait.miniboss.sepulcher_knight",
     "sprite.station.memorial_wall"
   ],
-  "expected_records_blake3": "8189586e8583efd104b7a063f9f8752159b011ace763b78abea54c69ddcd7765",
-  "expected_assets_blake3": "05b8f00f6b3f82f7176473facff3d3e0e90385ccf106d290662acc74b4b3fff9",
-  "expected_localization_blake3": "a6e41565d606a6711a8ec962cf81fa7e2fae74323fb69db98fe38695872ca025"
+  "expected_records_blake3": "349730a1246857978d1412510ee23af46624ec80dbb3333be42aad2e47f1f8e0",
+  "expected_assets_blake3": "0160f06954c88aba61392f72af66031d6f7ff4a592beb24f7ebe9f1981cc7a68",
+  "expected_localization_blake3": "c10bcc96887aac7db8c855f19d991e6185f46d1df39f7a37d3a31cb4b9ca1b92"
 }
