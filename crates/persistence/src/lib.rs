@@ -130,7 +130,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 34;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 35;
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -828,6 +828,45 @@ mod tests {
             assert!(
                 !migration.contains(prohibited),
                 "danger-entry restore v3 migration leaked {prohibited}"
+            );
+        }
+    }
+
+    #[test]
+    fn crash_restore_request_authority_is_terminal_replay_and_source_bound() {
+        let migration =
+            include_str!("../../../migrations/0035_crash_restore_request_authority.sql");
+        for required in [
+            "danger_crash_restore_request_results",
+            "danger_crash_restore_conflict_audits",
+            "outcome_code BETWEEN 0 AND 4",
+            "outcome_code = 0 AND observed_restore_state = 4",
+            "attempted_request_hash <> stored_request_hash",
+            "danger_crash_request_terminal_source_exact",
+            "new crash restoration receipt lacks its normalized result",
+            "danger crash request history is immutable",
+            "CREATE OR REPLACE FUNCTION enforce_danger_crash_item_change_source_v3",
+            "baseline.restore_point_id = NEW.restore_point_id",
+            "NEW.change_kind = 1 AND EXISTS",
+            "bargain_offer_crash_restore_same_entry",
+            "offer.entry_restore_point_id = NEW.restore_point_id",
+            "milestone.entry_restore_point_id = NEW.restore_point_id",
+            "DEFERRABLE INITIALLY DEFERRED",
+        ] {
+            assert!(migration.contains(required), "migration omitted {required}");
+        }
+        for prohibited in [
+            "DROP TABLE",
+            "TRUNCATE",
+            "DELETE FROM",
+            "JSON",
+            "JSONB",
+            "FLOAT",
+            "DOUBLE PRECISION",
+        ] {
+            assert!(
+                !migration.contains(prohibited),
+                "crash request authority migration leaked {prohibited}"
             );
         }
     }
