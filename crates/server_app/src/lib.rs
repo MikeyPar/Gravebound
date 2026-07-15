@@ -31,6 +31,7 @@ mod runtime;
 mod safe_inventory;
 mod session;
 mod starter_items;
+mod terminal_arbiter;
 mod world_flow_coordinator;
 mod world_flow_gate;
 
@@ -142,6 +143,12 @@ pub use session::{
 pub use starter_items::{
     CORE_ITEM_CONTENT_REVISION, STARTER_RELIC_ID, STARTER_TONIC_ID, STARTER_WEAPON_ID,
     StarterItemError, StarterItemPlan, initialize_postgres_starter,
+};
+pub use terminal_arbiter::{
+    CommitError, CommitResult, MAX_TERMINAL_CANDIDATES_PER_TICK, NonTerminalAdmission,
+    PrepareError, PreparedTerminal, STORED_TERMINAL_RECEIPT_SCHEMA_V1, StoredReceiptError,
+    StoredTerminalReceipt, StoredTerminalReceiptV1, SubmitRejection, SubmitResult, TerminalArbiter,
+    TerminalBinding, TerminalCandidate, TerminalKind, TerminalValidationError,
 };
 pub use world_flow_coordinator::{
     DormantWorldFlowPlanner, PostgresDormantWorldFlowCoordinator, WorldFlowIdGenerator,
