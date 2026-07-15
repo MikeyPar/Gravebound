@@ -11,6 +11,24 @@ const ID_BYTES: usize = 16;
 const MAX_EVENT_PAYLOAD_BYTES: usize = 65_536;
 pub const BARGAIN_LIFE_CLEANUP_EVENT_SCHEMA_VERSION: u16 = 1;
 
+/// Controls which terminal aggregate owns danger-checkpoint finalization.
+///
+/// The canonical GDD `DTH-001`/`TECH-023`, Content Production Spec danger-entry authority, and
+/// Development Roadmap `GB-M03-06` atomic-death gate require durable death to retain the normalized
+/// live trace until it has been promoted into the immutable death graph. Other life-end owners keep
+/// the established eager checkpoint cleanup behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DangerCheckpointCleanupPolicy {
+    Remove,
+    PreserveForDurableDeath,
+}
+
+impl DangerCheckpointCleanupPolicy {
+    const fn removes_checkpoint(self) -> bool {
+        matches!(self, Self::Remove)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BargainLifeEndReason {
     Death,
@@ -81,6 +99,37 @@ pub async fn cleanup_bargains_for_life_end(
     transaction: &mut PersistenceTransaction<'_>,
     command: &BargainLifeCleanupCommand,
 ) -> Result<BargainLifeCleanupResult, PersistenceError> {
+    cleanup_bargains_for_life_end_with_checkpoint_policy(
+        transaction,
+        command,
+        DangerCheckpointCleanupPolicy::Remove,
+    )
+    .await
+}
+
+pub(crate) async fn cleanup_bargains_for_durable_death(
+    transaction: &mut PersistenceTransaction<'_>,
+    command: &BargainLifeCleanupCommand,
+) -> Result<BargainLifeCleanupResult, PersistenceError> {
+    let checkpoint_policy = durable_death_checkpoint_policy(command.reason)?;
+    cleanup_bargains_for_life_end_with_checkpoint_policy(transaction, command, checkpoint_policy)
+        .await
+}
+
+fn durable_death_checkpoint_policy(
+    reason: BargainLifeEndReason,
+) -> Result<DangerCheckpointCleanupPolicy, PersistenceError> {
+    if reason != BargainLifeEndReason::Death {
+        return Err(PersistenceError::CorruptBargainCleanup);
+    }
+    Ok(DangerCheckpointCleanupPolicy::PreserveForDurableDeath)
+}
+
+async fn cleanup_bargains_for_life_end_with_checkpoint_policy(
+    transaction: &mut PersistenceTransaction<'_>,
+    command: &BargainLifeCleanupCommand,
+    checkpoint_policy: DangerCheckpointCleanupPolicy,
+) -> Result<BargainLifeCleanupResult, PersistenceError> {
     validate_command(command)?;
     let version: i64 = sqlx::query_scalar(
         "SELECT oath_bargain_version FROM character_oath_bargain_state WHERE namespace_id = $1 \
@@ -130,17 +179,8 @@ pub async fn cleanup_bargains_for_life_end(
     .bind(command.character_id.as_slice())
     .execute(transaction.connection())
     .await?;
-    let removed_danger_checkpoint = sqlx::query(
-        "DELETE FROM character_danger_checkpoints WHERE namespace_id = $1 AND account_id = $2 \
-         AND character_id = $3",
-    )
-    .bind(WIPEABLE_CORE_NAMESPACE)
-    .bind(command.account_id.as_slice())
-    .bind(command.character_id.as_slice())
-    .execute(transaction.connection())
-    .await?
-    .rows_affected()
-        == 1;
+    let removed_danger_checkpoint =
+        apply_checkpoint_policy(transaction, command, checkpoint_policy).await?;
     let updated = sqlx::query(
         "UPDATE character_oath_bargain_state SET oath_bargain_version = $1, \
          updated_at = transaction_timestamp() WHERE namespace_id = $2 AND account_id = $3 \
@@ -177,6 +217,27 @@ pub async fn cleanup_bargains_for_life_end(
         removed_danger_checkpoint,
         event_payload,
     })
+}
+
+async fn apply_checkpoint_policy(
+    transaction: &mut PersistenceTransaction<'_>,
+    command: &BargainLifeCleanupCommand,
+    checkpoint_policy: DangerCheckpointCleanupPolicy,
+) -> Result<bool, PersistenceError> {
+    if !checkpoint_policy.removes_checkpoint() {
+        return Ok(false);
+    }
+    let removed = sqlx::query(
+        "DELETE FROM character_danger_checkpoints WHERE namespace_id = $1 AND account_id = $2 \
+         AND character_id = $3",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(command.account_id.as_slice())
+    .bind(command.character_id.as_slice())
+    .execute(transaction.connection())
+    .await?
+    .rows_affected();
+    Ok(removed == 1)
 }
 
 fn encode_cleanup_event(
@@ -274,6 +335,20 @@ mod tests {
                 acquisition_ordinal: 2,
                 acquired_by_offer_id: [4; ID_BYTES],
             }]),
+            Err(PersistenceError::CorruptBargainCleanup)
+        ));
+    }
+
+    #[test]
+    fn checkpoint_cleanup_policy_keeps_terminal_ownership_explicit() {
+        assert!(DangerCheckpointCleanupPolicy::Remove.removes_checkpoint());
+        assert!(!DangerCheckpointCleanupPolicy::PreserveForDurableDeath.removes_checkpoint());
+        assert_eq!(
+            durable_death_checkpoint_policy(BargainLifeEndReason::Death).unwrap(),
+            DangerCheckpointCleanupPolicy::PreserveForDurableDeath
+        );
+        assert!(matches!(
+            durable_death_checkpoint_policy(BargainLifeEndReason::Retirement),
             Err(PersistenceError::CorruptBargainCleanup)
         ));
     }

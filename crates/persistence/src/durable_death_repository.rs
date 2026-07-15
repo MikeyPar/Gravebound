@@ -22,7 +22,7 @@ use crate::{
     PersistenceTransaction, PostgresPersistence, StoredCommittedDeathResultV1,
     WIPEABLE_CORE_NAMESPACE,
     bargain_cleanup::{
-        BargainLifeCleanupCommand, BargainLifeEndReason, cleanup_bargains_for_life_end,
+        BargainLifeCleanupCommand, BargainLifeEndReason, cleanup_bargains_for_durable_death,
     },
     canonical_death_terminal_payload_hash_v1,
     death_live_trace_promotion::{
@@ -443,9 +443,10 @@ impl PostgresPersistence {
     }
 }
 
-/// Removes the opaque live Bell Debt checkpoint before the immutable death root is published.
-/// A checkpoint from another lineage/content authority is corruption, not state that terminal
-/// resolution may silently discard. Any later error rolls this deletion back with the death.
+/// Removes the opaque live Bell Debt checkpoint after the immutable death graph and outbox are
+/// staged. A missing checkpoint or one from another lineage/content authority is corruption, not
+/// state that terminal resolution may silently discard. Any later error rolls this deletion back
+/// with the death.
 async fn clear_terminal_danger_checkpoint(
     connection: &mut PgConnection,
     event: &crate::DurableDeathEventV1,
@@ -460,11 +461,11 @@ async fn clear_terminal_danger_checkpoint(
     .bind(event.character_id.as_slice())
     .fetch_optional(&mut *connection)
     .await?;
-    if let Some(row) = deleted
-        && (exact_id(row.try_get("lineage_id")?)? != event.lineage_id
-            || row.try_get::<String, _>("records_blake3")? != event.records_blake3
-            || row.try_get::<String, _>("assets_blake3")? != event.assets_blake3
-            || row.try_get::<String, _>("localization_blake3")? != event.localization_blake3)
+    let row = deleted.ok_or(PersistenceError::CorruptStoredDurableDeath)?;
+    if exact_id(row.try_get("lineage_id")?)? != event.lineage_id
+        || row.try_get::<String, _>("records_blake3")? != event.records_blake3
+        || row.try_get::<String, _>("assets_blake3")? != event.assets_blake3
+        || row.try_get::<String, _>("localization_blake3")? != event.localization_blake3
     {
         return Err(PersistenceError::DurableDeathBindingMismatch);
     }
@@ -898,7 +899,7 @@ async fn cleanup_and_validate_bargains(
     }
     let pre_version = i64_value(event.versions.oath_bargain.pre)?;
     let post_version = i64_value(event.versions.oath_bargain.post)?;
-    let result = cleanup_bargains_for_life_end(
+    let result = cleanup_bargains_for_durable_death(
         transaction,
         &BargainLifeCleanupCommand {
             account_id: event.account_id,
@@ -926,6 +927,7 @@ async fn cleanup_and_validate_bargains(
     }
     if result.pre_oath_bargain_version != pre_version
         || result.post_oath_bargain_version != post_version
+        || result.removed_danger_checkpoint
     {
         return Err(PersistenceError::CorruptStoredDurableDeath);
     }
@@ -1635,11 +1637,53 @@ async fn insert_live_trace_promotion(
     {
         return Err(PersistenceError::CorruptStoredDurableDeath);
     }
+    validate_live_trace_promotion_boundary(connection, plan, promotion, live_window).await?;
     let receipt_window_digest =
         canonical_live_damage_trace_receipt_window_digest_v1(&live_window.receipts)?;
     insert_live_trace_promotion_root(connection, plan, promotion, receipt_window_digest).await?;
     let receipt_ordinals = insert_live_trace_receipt_links(connection, plan, live_window).await?;
     insert_live_trace_entry_provenance(connection, plan, promotion, &receipt_ordinals).await
+}
+
+/// Reasserts the normalized source graph at the irreversible promotion boundary.
+///
+/// GDD `DTH-001`/`DTH-020` and `TECH-020..023`, the Content Production Spec's exact encounter
+/// authority, and Roadmap `GB-M03-02`/`06`/`13` require the retained receipt, normalized payload,
+/// durable trace, and Echo projection to commit together or not at all.
+async fn validate_live_trace_promotion_boundary(
+    connection: &mut PgConnection,
+    plan: &AuthoritativeDeathPlanV1,
+    promotion: &DurableDeathTracePromotionV1,
+    live_window: &LockedLiveDamageTracePromotionWindowV1,
+) -> Result<(), PersistenceError> {
+    let counts: (i64, i64, i64) = sqlx::query_as(
+        "SELECT \
+            (SELECT count(*) FROM character_live_damage_trace_ticks_v1 \
+             WHERE namespace_id=$1 AND account_id=$2 AND character_id=$3 \
+               AND lineage_id=$4 AND restore_point_id=$5), \
+            (SELECT count(*) FROM character_live_damage_trace_entries_v1 \
+             WHERE namespace_id=$1 AND account_id=$2 AND character_id=$3 \
+               AND lineage_id=$4 AND restore_point_id=$5), \
+            (SELECT count(*) FROM character_live_damage_trace_statuses_v1 \
+             WHERE namespace_id=$1 AND account_id=$2 AND character_id=$3 \
+               AND lineage_id=$4 AND restore_point_id=$5)",
+    )
+    .bind(&plan.event.namespace_id)
+    .bind(plan.event.account_id.as_slice())
+    .bind(plan.event.character_id.as_slice())
+    .bind(promotion.lineage_id().as_slice())
+    .bind(promotion.restore_point_id().as_slice())
+    .fetch_one(connection)
+    .await?;
+    let expected_receipts = i64::try_from(live_window.receipts.len())
+        .map_err(|_| PersistenceError::CorruptStoredDurableDeath)?;
+    let expected_entries = i64::try_from(live_window.entries.len())
+        .map_err(|_| PersistenceError::CorruptStoredDurableDeath)?;
+    let expected_statuses = i64::from(promotion.status_count());
+    if counts != (expected_receipts, expected_entries, expected_statuses) {
+        return Err(PersistenceError::CorruptStoredDurableDeath);
+    }
+    Ok(())
 }
 
 async fn insert_live_trace_promotion_root(

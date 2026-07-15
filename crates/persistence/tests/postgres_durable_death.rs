@@ -1041,6 +1041,18 @@ fn assert_terminal_root(root: &sqlx::postgres::PgRow) {
     assert_eq!(root.get::<i64, _>("life_metrics_version"), 3);
 }
 
+async fn assert_normalized_live_trace_absent(persistence: &PostgresPersistence) {
+    // GDD TECH-023, Content Production Spec exact encounter authority, and Roadmap
+    // GB-M03-02/06/13 require terminal cleanup only after the immutable trace has committed.
+    for table in [
+        "character_live_damage_trace_ticks_v1",
+        "character_live_damage_trace_entries_v1",
+        "character_live_damage_trace_statuses_v1",
+    ] {
+        assert_eq!(count(persistence, table).await, 0, "{table}");
+    }
+}
+
 async fn assert_complete_graph(persistence: &PostgresPersistence, ids: RequestIds) {
     let mut transaction = persistence.begin_transaction().await.unwrap();
     let root = sqlx::query(
@@ -1109,6 +1121,7 @@ async fn assert_complete_graph(persistence: &PostgresPersistence, ids: RequestId
     assert_eq!(echo.get::<i16, _>("state"), 1);
     assert_eq!(echo.get::<i16, _>("power_band"), 1);
     transaction.rollback().await.unwrap();
+    assert_normalized_live_trace_absent(persistence).await;
 
     for (table, expected) in [
         ("character_danger_checkpoints", 0),
@@ -1133,6 +1146,18 @@ async fn assert_complete_graph(persistence: &PostgresPersistence, ids: RequestId
 
 async fn assert_rollback_pristine(persistence: &PostgresPersistence) {
     assert_eq!(count(persistence, "character_danger_checkpoints").await, 1);
+    assert_eq!(
+        count(persistence, "character_live_damage_trace_ticks_v1").await,
+        1
+    );
+    assert_eq!(
+        count(persistence, "character_live_damage_trace_entries_v1").await,
+        1
+    );
+    assert_eq!(
+        count(persistence, "character_live_damage_trace_statuses_v1").await,
+        1
+    );
     assert_eq!(count(persistence, "death_events").await, 0);
     assert_eq!(count(persistence, "death_mutation_results").await, 0);
     assert_eq!(count(persistence, "echo_records").await, 0);
@@ -1731,6 +1756,7 @@ async fn complete_durable_death_graph_is_atomic_replayable_terminal_and_wipeable
         .unwrap();
     assert!(replay.is_replay());
     assert_eq!(replay.result(), fresh.result());
+    assert_normalized_live_trace_absent(&restarted).await;
     assert_committed_terminal_recovery(&restarted, fresh.result(), &primary_promotion).await;
     assert_committed_death_views(&restarted, RequestIds::primary()).await;
     let altered_promotion = evidence.altered_predecessor_promotion_for(&primary);
