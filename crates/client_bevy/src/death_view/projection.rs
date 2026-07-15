@@ -8,9 +8,9 @@ use std::collections::BTreeSet;
 
 use content_schema::CoreDeathViewCopyKind;
 use protocol::{
-    DeathCauseV1, DeathDamageTypeV1, DeathEchoOutcomeV1, DeathNetworkStateV1, DeathRecallStateV1,
-    DeathSummaryProjectionEntryV1, DeathSummaryProjectionKindV1, DeathSummaryViewV1,
-    DeathTraceEntryV1, DeathViewContentRevisionV1, LatestCommittedDeathV1,
+    DeathCauseV1, DeathDamageTypeV1, DeathEchoOutcomeV1, DeathMemorialEntryV1, DeathNetworkStateV1,
+    DeathRecallStateV1, DeathSummaryProjectionEntryV1, DeathSummaryProjectionKindV1,
+    DeathSummaryViewV1, DeathTraceEntryV1, DeathViewContentRevisionV1, LatestCommittedDeathV1,
 };
 use sim_content::CoreDevelopmentDeathView;
 use thiserror::Error;
@@ -90,7 +90,9 @@ pub struct DeathDamageEventPresentation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeathLethalCausePresentation {
     pub section_title: String,
-    pub cause: DeathLocalizedValue,
+    /// Terminal summaries retain the stored cause. Memorial summaries omit it because the
+    /// append-only Summary response carries every DTH-020 display field but not `DeathCauseV1`.
+    pub cause: Option<DeathLocalizedValue>,
     pub killer: DeathLocalizedValue,
     pub pattern: Option<DeathLocalizedValue>,
     pub attack: DeathLocalizedValue,
@@ -98,6 +100,12 @@ pub struct DeathLethalCausePresentation {
     pub damage_type: DeathLocalizedValue,
     pub source_x_milli_tiles: i32,
     pub source_y_milli_tiles: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeathSummaryContext {
+    Terminal,
+    Memorial,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -184,8 +192,11 @@ pub struct DeathSummaryActionsPresentation {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeathSummaryPresentation {
+    pub context: DeathSummaryContext,
     pub death_id: [u8; 16],
-    pub character_id: [u8; 16],
+    /// The terminal path is anchored to the selected durable character. Historical Memorial
+    /// Summary responses deliberately reveal no character aggregate identity.
+    pub character_id: Option<[u8; 16]>,
     pub death_at_unix_ms: u64,
     pub death_tick: u64,
     pub content_revision: String,
@@ -229,6 +240,8 @@ pub enum DeathViewProjectionError {
     },
     #[error("loss continuation is invalid: {0}")]
     InvalidLossContinuation(&'static str),
+    #[error("Memorial page is invalid: {0}")]
+    InvalidMemorialPage(&'static str),
 }
 
 pub(crate) fn validate_latest(
@@ -261,6 +274,63 @@ pub(crate) fn project_summary(
     catalog: &CoreDevelopmentDeathView,
 ) -> Result<DeathSummaryPresentation, DeathViewProjectionError> {
     validate_summary_anchor(latest, summary, required_revision, catalog)?;
+    let anchor = SummaryProjectionAnchor {
+        context: DeathSummaryContext::Terminal,
+        character_id: Some(latest.character_id),
+        death_at_unix_ms: latest.death_at_unix_ms,
+        cause: Some(latest.cause),
+        killer_content_id: latest.killer_content_id.as_str(),
+        killer_pattern_id: latest
+            .killer_pattern_id
+            .as_ref()
+            .map(protocol::WireText::as_str),
+        network_state: latest.network_state,
+        recall_state: latest.recall_state,
+    };
+    project_summary_with_anchor(summary, anchor, catalog)
+}
+
+pub(crate) fn project_memorial_summary(
+    memorial: &DeathMemorialEntryV1,
+    summary: &DeathSummaryViewV1,
+    required_revision: &DeathViewContentRevisionV1,
+    catalog: &CoreDevelopmentDeathView,
+) -> Result<DeathSummaryPresentation, DeathViewProjectionError> {
+    validate_memorial_summary_anchor(memorial, summary, required_revision, catalog)?;
+    let lethal = summary
+        .last_five_damage
+        .last()
+        .ok_or(DeathViewProjectionError::AnchorMismatch("lethal trace"))?;
+    let anchor = SummaryProjectionAnchor {
+        context: DeathSummaryContext::Memorial,
+        character_id: None,
+        death_at_unix_ms: memorial.cursor.death_at_unix_ms,
+        cause: None,
+        killer_content_id: lethal.source_content_id.as_str(),
+        killer_pattern_id: lethal.pattern_id.as_ref().map(protocol::WireText::as_str),
+        network_state: lethal.network_state,
+        recall_state: lethal.recall_state,
+    };
+    project_summary_with_anchor(summary, anchor, catalog)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SummaryProjectionAnchor<'a> {
+    context: DeathSummaryContext,
+    character_id: Option<[u8; 16]>,
+    death_at_unix_ms: u64,
+    cause: Option<DeathCauseV1>,
+    killer_content_id: &'a str,
+    killer_pattern_id: Option<&'a str>,
+    network_state: DeathNetworkStateV1,
+    recall_state: DeathRecallStateV1,
+}
+
+fn project_summary_with_anchor(
+    summary: &DeathSummaryViewV1,
+    anchor: SummaryProjectionAnchor<'_>,
+    catalog: &CoreDevelopmentDeathView,
+) -> Result<DeathSummaryPresentation, DeathViewProjectionError> {
     let timeline = summary
         .last_five_damage
         .iter()
@@ -274,15 +344,16 @@ pub(crate) fn project_summary(
     validate_loss_set(&lost, summary.lost_total_count, summary.next_lost_ordinal)?;
 
     let hero = project_hero(summary, catalog)?;
-    let lethal_cause = project_lethal_cause(latest, &lethal, catalog)?;
+    let lethal_cause = project_lethal_cause(anchor, &lethal, catalog)?;
     let timeline = project_timeline(timeline, catalog)?;
-    let network = project_network(latest, catalog)?;
-    let actions = project_actions(catalog)?;
+    let network = project_network(anchor.network_state, anchor.recall_state, catalog)?;
+    let actions = project_actions(anchor.context, catalog)?;
 
     Ok(DeathSummaryPresentation {
+        context: anchor.context,
         death_id: summary.death_id,
-        character_id: latest.character_id,
-        death_at_unix_ms: latest.death_at_unix_ms,
+        character_id: anchor.character_id,
+        death_at_unix_ms: anchor.death_at_unix_ms,
         death_tick: summary.death_tick,
         content_revision: summary.content_revision.as_str().to_owned(),
         presentation_revision: summary.presentation_revision.clone(),
@@ -327,7 +398,7 @@ pub(crate) fn project_summary(
 }
 
 fn project_lethal_cause(
-    latest: &LatestCommittedDeathV1,
+    anchor: SummaryProjectionAnchor<'_>,
     lethal: &DeathDamageEventPresentation,
     catalog: &CoreDevelopmentDeathView,
 ) -> Result<DeathLethalCausePresentation, DeathViewProjectionError> {
@@ -337,12 +408,14 @@ fn project_lethal_cause(
             CoreDeathViewCopyKind::Section,
             "death.section.what_happened",
         )?,
-        cause: cause_value(latest.cause, catalog)?,
-        killer: source_value(latest.killer_content_id.as_str(), catalog)?,
-        pattern: latest
+        cause: anchor
+            .cause
+            .map(|cause| cause_value(cause, catalog))
+            .transpose()?,
+        killer: source_value(anchor.killer_content_id, catalog)?,
+        pattern: anchor
             .killer_pattern_id
-            .as_ref()
-            .map(|id| pattern_value(id.as_str(), catalog))
+            .map(|id| pattern_value(id, catalog))
             .transpose()?,
         attack: lethal.attack.clone(),
         final_damage: lethal.final_damage,
@@ -367,7 +440,8 @@ fn project_timeline(
 }
 
 fn project_network(
-    latest: &LatestCommittedDeathV1,
+    network_state: DeathNetworkStateV1,
+    recall_state: DeathRecallStateV1,
     catalog: &CoreDevelopmentDeathView,
 ) -> Result<DeathNetworkPresentation, DeathViewProjectionError> {
     Ok(DeathNetworkPresentation {
@@ -376,12 +450,13 @@ fn project_network(
             CoreDeathViewCopyKind::Section,
             "death.section.network",
         )?,
-        network: network_value(latest.network_state, catalog)?,
-        recall: recall_value(latest.recall_state, catalog)?,
+        network: network_value(network_state, catalog)?,
+        recall: recall_value(recall_state, catalog)?,
     })
 }
 
 fn project_actions(
+    context: DeathSummaryContext,
     catalog: &CoreDevelopmentDeathView,
 ) -> Result<DeathSummaryActionsPresentation, DeathViewProjectionError> {
     let enabled = |action, content_id| -> Result<_, DeathViewProjectionError> {
@@ -392,7 +467,7 @@ fn project_actions(
             unavailable_detail: None,
         })
     };
-    Ok(DeathSummaryActionsPresentation {
+    let mut actions = DeathSummaryActionsPresentation {
         primary: DeathSummaryActionPresentation {
             action: DeathSummaryAction::CreateSuccessor,
             label: copy(
@@ -418,7 +493,15 @@ fn project_actions(
                 "death.action.character_select",
             )?,
         ],
-    })
+    };
+    if context == DeathSummaryContext::Memorial {
+        // Historical Memorial inspection is permanently read-only. Keep this explicit so the
+        // later GB-M03-07 terminal enablement cannot leak successor creation into old deaths.
+        actions.primary.state = DeathSummaryActionState::Disabled;
+        actions.secondary[1].state = DeathSummaryActionState::Disabled;
+        actions.secondary[2].state = DeathSummaryActionState::Disabled;
+    }
+    Ok(actions)
 }
 
 pub(crate) fn project_summary_continuation(
@@ -430,6 +513,27 @@ pub(crate) fn project_summary_continuation(
     catalog: &CoreDevelopmentDeathView,
 ) -> Result<DeathSummaryLossContinuation, DeathViewProjectionError> {
     validate_summary_anchor(latest, page, required_revision, catalog)?;
+    project_loss_continuation(anchor, page, current, catalog)
+}
+
+pub(crate) fn project_memorial_summary_continuation(
+    memorial: &DeathMemorialEntryV1,
+    anchor: &DeathSummaryViewV1,
+    page: &DeathSummaryViewV1,
+    current: &DeathSummaryPresentation,
+    required_revision: &DeathViewContentRevisionV1,
+    catalog: &CoreDevelopmentDeathView,
+) -> Result<DeathSummaryLossContinuation, DeathViewProjectionError> {
+    validate_memorial_summary_anchor(memorial, page, required_revision, catalog)?;
+    project_loss_continuation(anchor, page, current, catalog)
+}
+
+fn project_loss_continuation(
+    anchor: &DeathSummaryViewV1,
+    page: &DeathSummaryViewV1,
+    current: &DeathSummaryPresentation,
+    catalog: &CoreDevelopmentDeathView,
+) -> Result<DeathSummaryLossContinuation, DeathViewProjectionError> {
     if !summary_metadata_matches(anchor, page) {
         return Err(DeathViewProjectionError::InvalidLossContinuation(
             "snapshot metadata changed",
@@ -456,6 +560,39 @@ pub(crate) fn project_summary_continuation(
         additions,
         next_lost_ordinal: page.next_lost_ordinal,
     })
+}
+
+fn validate_memorial_summary_anchor(
+    memorial: &DeathMemorialEntryV1,
+    summary: &DeathSummaryViewV1,
+    required_revision: &DeathViewContentRevisionV1,
+    catalog: &CoreDevelopmentDeathView,
+) -> Result<(), DeathViewProjectionError> {
+    validate_authority(
+        &summary.presentation_revision,
+        summary.content_revision.as_str(),
+        required_revision,
+        catalog,
+    )?;
+    if memorial.presentation_revision != *required_revision {
+        return Err(DeathViewProjectionError::AuthorityMismatch(
+            "memorial presentation revision",
+        ));
+    }
+    if summary.death_id != memorial.cursor.death_id
+        || summary.summary_revision != memorial.summary_revision
+        || summary.snapshot_digest != memorial.summary_snapshot_digest
+        || summary.presentation_revision != memorial.presentation_revision
+        || summary.character_name_snapshot != memorial.character_name_snapshot
+        || summary.class_id != memorial.class_id
+        || summary.level != memorial.level
+        || summary.echo_outcome != memorial.echo_outcome
+    {
+        return Err(DeathViewProjectionError::AnchorMismatch(
+            "memorial entry and summary",
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

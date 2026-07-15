@@ -181,11 +181,13 @@ impl TerminalDeathModel {
                     self.refresh_latest = None;
                 }
             }
-            PendingDeathViewQuery::Summary { intent, .. } => {
+            PendingDeathViewQuery::TerminalSummary { intent, .. } => {
                 if *intent == TerminalQueryIntent::Initial {
                     self.phase = TerminalDeathPhase::LoadingSummary;
                 }
             }
+            PendingDeathViewQuery::MemorialPage { .. }
+            | PendingDeathViewQuery::MemorialSummary { .. } => {}
         }
     }
 
@@ -333,7 +335,7 @@ impl TerminalDeathModel {
         let next = summary
             .next_lost_ordinal
             .ok_or(DeathViewClientError::NoAdditionalLossPage)?;
-        Ok(PendingDeathViewQuery::Summary {
+        Ok(PendingDeathViewQuery::TerminalSummary {
             death_id: summary.death_id,
             lost_start_ordinal: next,
             lost_limit: limit,

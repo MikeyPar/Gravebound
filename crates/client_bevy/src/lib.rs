@@ -91,11 +91,13 @@ pub use death_view::{
     DeathHeroPresentation, DeathLethalCausePresentation, DeathLocalizedValue,
     DeathLossPresentation, DeathNetworkPresentation, DeathStatusPresentation, DeathSummaryAction,
     DeathSummaryActionPresentation, DeathSummaryActionState, DeathSummaryActionsPresentation,
-    DeathSummaryPresentation, DeathSummarySection, DeathTimelinePresentation,
+    DeathSummaryContext, DeathSummaryPresentation, DeathSummarySection, DeathTimelinePresentation,
     DeathViewApplyDisposition, DeathViewApplyOutcome, DeathViewClientError, DeathViewClientModel,
-    DeathViewFailure, DeathViewProjectionError, DeathViewRetryDirective, PendingDeathViewQuery,
-    PendingDeathViewRequest, TERMINAL_SUMMARY_LOSS_PAGE_LIMIT, TerminalDeathModel,
-    TerminalDeathPhase, TerminalQueryIntent,
+    DeathViewFailure, DeathViewProjectionError, DeathViewRetryDirective,
+    MEMORIAL_IDENTITY_FILTER_BYTES, MEMORIAL_MAX_CACHED_ENTRIES, MEMORIAL_MAX_CACHED_PAGES,
+    MEMORIAL_PAGE_LIMIT, MemorialDetailPhase, MemorialDetailQueryIntent, MemorialListPhase,
+    MemorialPageQueryIntent, MemorialWallModel, PendingDeathViewQuery, PendingDeathViewRequest,
+    TERMINAL_SUMMARY_LOSS_PAGE_LIMIT, TerminalDeathModel, TerminalDeathPhase, TerminalQueryIntent,
 };
 pub use network_play::{NetworkPlayConfig, run_network_playtest};
 pub use network_prediction::{

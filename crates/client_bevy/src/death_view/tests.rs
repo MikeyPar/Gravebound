@@ -11,23 +11,23 @@ use protocol::{
 use super::*;
 
 const CHARACTER_ID: [u8; 16] = [2; 16];
-const ITEM_ID: &str = "item.weapon.crossbow.pine_crossbow";
+pub(super) const ITEM_ID: &str = "item.weapon.crossbow.pine_crossbow";
 const MATERIAL_ID: &str = "material.bell_brass";
 const SOURCE_ID: &str = "miniboss.sepulcher_knight";
 const PATTERN_ID: &str = "miniboss.sepulcher_knight.charge_lane";
 
-fn catalog() -> sim_content::CoreDevelopmentDeathView {
+pub(super) fn catalog() -> sim_content::CoreDevelopmentDeathView {
     sim_content::load_core_development_death_view(
         &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content"),
     )
     .unwrap()
 }
 
-fn model() -> DeathViewClientModel {
+pub(super) fn model() -> DeathViewClientModel {
     DeathViewClientModel::new(catalog()).unwrap()
 }
 
-fn revision() -> DeathViewContentRevisionV1 {
+pub(super) fn revision() -> DeathViewContentRevisionV1 {
     static REVISION: OnceLock<DeathViewContentRevisionV1> = OnceLock::new();
     REVISION
         .get_or_init(|| {
@@ -44,14 +44,14 @@ fn revision() -> DeathViewContentRevisionV1 {
         .clone()
 }
 
-fn content_revision() -> String {
+pub(super) fn content_revision() -> String {
     static CONTENT_REVISION: OnceLock<String> = OnceLock::new();
     CONTENT_REVISION
         .get_or_init(|| catalog().item_content_revision().to_owned())
         .clone()
 }
 
-const fn uuid_v7(seed: u8) -> [u8; 16] {
+pub(super) const fn uuid_v7(seed: u8) -> [u8; 16] {
     let mut value = [seed; 16];
     value[6] = 0x70 | (seed & 0x0f);
     value[8] = 0x80 | (seed & 0x3f);
@@ -79,7 +79,7 @@ fn latest() -> LatestCommittedDeathV1 {
     }
 }
 
-fn trace_entry(ordinal: u16, lethal: bool) -> DeathTraceEntryV1 {
+pub(super) fn trace_entry(ordinal: u16, lethal: bool) -> DeathTraceEntryV1 {
     DeathTraceEntryV1 {
         ordinal,
         event_tick: 300 + u64::from(ordinal),
@@ -121,7 +121,7 @@ fn fixed_projection(
     }
 }
 
-fn fixed_preserved() -> Vec<DeathSummaryProjectionEntryV1> {
+pub(super) fn fixed_preserved() -> Vec<DeathSummaryProjectionEntryV1> {
     [
         (
             DeathSummaryProjectionKindV1::PreservedAccountRecords,
@@ -150,7 +150,7 @@ fn fixed_preserved() -> Vec<DeathSummaryProjectionEntryV1> {
     .collect()
 }
 
-fn fixed_created() -> Vec<DeathSummaryProjectionEntryV1> {
+pub(super) fn fixed_created() -> Vec<DeathSummaryProjectionEntryV1> {
     vec![
         fixed_projection(
             0,
@@ -165,7 +165,7 @@ fn fixed_created() -> Vec<DeathSummaryProjectionEntryV1> {
     ]
 }
 
-fn item_loss(ordinal: u16) -> DeathSummaryProjectionEntryV1 {
+pub(super) fn item_loss(ordinal: u16) -> DeathSummaryProjectionEntryV1 {
     let mut item_uid = [0; 16];
     item_uid[..2].copy_from_slice(&ordinal.to_be_bytes());
     item_uid[2] = 1;
@@ -188,7 +188,7 @@ fn material_loss(ordinal: u16) -> DeathSummaryProjectionEntryV1 {
     }
 }
 
-fn summary_page(
+pub(super) fn summary_page(
     lost_total_count: u16,
     lost_start_ordinal: u16,
     lost: Vec<DeathSummaryProjectionEntryV1>,
@@ -393,10 +393,20 @@ fn acknowledged_summary_projects_exact_order_copy_and_action_gates() {
             DeathSummarySection::Actions,
         ]
     );
+    assert_eq!(summary.context, DeathSummaryContext::Terminal);
+    assert_eq!(summary.character_id, Some(CHARACTER_ID));
     assert_eq!(summary.hero.character_name, "Mara Ash");
     assert_eq!(summary.hero.class.label, "Grave Arbalist");
     assert_eq!(summary.hero.lifetime_ms, 600_000);
     assert_eq!(summary.lethal_cause.killer.label, "Sepulcher Knight");
+    assert_eq!(
+        summary
+            .lethal_cause
+            .cause
+            .as_ref()
+            .map(|cause| cause.content_id.as_str()),
+        Some("death.cause.direct_hit")
+    );
     assert_eq!(summary.lethal_cause.source_x_milli_tiles, 1_000);
     assert_eq!(summary.lethal_cause.source_y_milli_tiles, -2_000);
     assert_eq!(summary.timeline.events[0].source_y_milli_tiles, -2_000);

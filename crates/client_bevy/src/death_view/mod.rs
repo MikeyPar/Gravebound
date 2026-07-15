@@ -9,29 +9,37 @@
 //! `CONT-HUB-002`, `CONT-LOC-001`), and `Gravebound_Development_Roadmap_v1.md`
 //! (`GB-M03-02`, `GB-M03-06`, `GB-M03-07`).
 
+mod memorial;
 mod projection;
 mod summary;
 
+pub use memorial::{
+    MEMORIAL_IDENTITY_FILTER_BYTES, MEMORIAL_MAX_CACHED_ENTRIES, MEMORIAL_MAX_CACHED_PAGES,
+    MEMORIAL_PAGE_LIMIT, MemorialDetailPhase, MemorialListPhase, MemorialWallModel,
+};
 pub use projection::{
     DEATH_SUMMARY_SECTION_ORDER, DeathDamageEventPresentation, DeathFixedProjectionPresentation,
     DeathHeroPresentation, DeathLethalCausePresentation, DeathLocalizedValue,
     DeathLossPresentation, DeathNetworkPresentation, DeathStatusPresentation, DeathSummaryAction,
     DeathSummaryActionPresentation, DeathSummaryActionState, DeathSummaryActionsPresentation,
-    DeathSummaryPresentation, DeathSummarySection, DeathTimelinePresentation,
+    DeathSummaryContext, DeathSummaryPresentation, DeathSummarySection, DeathTimelinePresentation,
     DeathViewProjectionError,
 };
 pub use summary::{TerminalDeathModel, TerminalDeathPhase};
 
 use content_schema::CoreDeathViewCopyKind;
 use protocol::{
-    DEATH_VIEW_MAX_LOST_PROJECTIONS_PER_PAGE, DEATH_VIEW_SCHEMA_VERSION,
-    DeathViewContentRevisionV1, DeathViewFrameV1, DeathViewRequestV1, DeathViewResultCodeV1,
-    DeathViewResultV1, ManifestHash,
+    DEATH_VIEW_MAX_LOST_PROJECTIONS_PER_PAGE, DEATH_VIEW_SCHEMA_VERSION, DeathMemorialCursorV1,
+    DeathMemorialEntryV1, DeathViewContentRevisionV1, DeathViewFrameV1, DeathViewRequestV1,
+    DeathViewResultCodeV1, DeathViewResultV1, ManifestHash,
 };
 use sim_content::CoreDevelopmentDeathView;
 use thiserror::Error;
 
-use self::projection::{project_summary, project_summary_continuation, validate_latest};
+use self::projection::{
+    project_memorial_summary, project_memorial_summary_continuation, project_summary,
+    project_summary_continuation, validate_latest,
+};
 use crate::core_world_transition::{
     CoreWorldTransitionModel, CoreWorldTransitionPhase, CoreWorldTransitionResolution,
 };
@@ -45,17 +53,42 @@ pub enum TerminalQueryIntent {
     Continuation,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemorialPageQueryIntent {
+    Initial,
+    Refresh,
+    Continuation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemorialDetailQueryIntent {
+    Initial,
+    Refresh,
+    Continuation,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PendingDeathViewQuery {
     Latest {
         character_id: [u8; 16],
         intent: TerminalQueryIntent,
     },
-    Summary {
+    TerminalSummary {
         death_id: [u8; 16],
         lost_start_ordinal: u16,
         lost_limit: u16,
         intent: TerminalQueryIntent,
+    },
+    MemorialPage {
+        after: Option<DeathMemorialCursorV1>,
+        limit: u8,
+        intent: MemorialPageQueryIntent,
+    },
+    MemorialSummary {
+        anchor: Box<DeathMemorialEntryV1>,
+        lost_start_ordinal: u16,
+        lost_limit: u16,
+        intent: MemorialDetailQueryIntent,
     },
 }
 
@@ -63,7 +96,7 @@ impl PendingDeathViewQuery {
     fn request(&self) -> DeathViewRequestV1 {
         match self {
             Self::Latest { .. } => DeathViewRequestV1::LatestCommitted,
-            Self::Summary {
+            Self::TerminalSummary {
                 death_id,
                 lost_start_ordinal,
                 lost_limit,
@@ -73,7 +106,28 @@ impl PendingDeathViewQuery {
                 lost_start_ordinal: *lost_start_ordinal,
                 lost_limit: *lost_limit,
             },
+            Self::MemorialPage { after, limit, .. } => DeathViewRequestV1::MemorialPage {
+                after: *after,
+                limit: *limit,
+            },
+            Self::MemorialSummary {
+                anchor,
+                lost_start_ordinal,
+                lost_limit,
+                ..
+            } => DeathViewRequestV1::Summary {
+                death_id: anchor.cursor.death_id,
+                lost_start_ordinal: *lost_start_ordinal,
+                lost_limit: *lost_limit,
+            },
         }
+    }
+
+    const fn is_memorial(&self) -> bool {
+        matches!(
+            self,
+            Self::MemorialPage { .. } | Self::MemorialSummary { .. }
+        )
     }
 }
 
@@ -88,6 +142,7 @@ pub enum DeathViewRetryDirective {
     Unavailable,
     RetryIdenticalQuery,
     RefreshLatest,
+    RefreshMemorial,
     Reconnect,
     RestartAfterUpdate,
 }
@@ -145,6 +200,12 @@ pub enum DeathViewClientError {
     NoResponsePending,
     #[error("the summary has no additional loss page")]
     NoAdditionalLossPage,
+    #[error("the Memorial Wall does not permit this operation")]
+    InvalidMemorialPhase,
+    #[error("the requested Memorial entry is not held by the validated cache")]
+    MemorialEntryNotHeld,
+    #[error("the Memorial list has no additional page")]
+    NoAdditionalMemorialPage,
     #[error("latest committed-death anchor is missing")]
     MissingLatestAnchor,
     #[error("summary snapshot anchor is missing")]
@@ -165,6 +226,7 @@ pub struct DeathViewClientModel {
     pending: Option<PendingDeathViewRequest>,
     last_accepted_result: Option<DeathViewResultV1>,
     terminal: TerminalDeathModel,
+    memorial: MemorialWallModel,
 }
 
 impl DeathViewClientModel {
@@ -185,12 +247,18 @@ impl DeathViewClientModel {
             pending: None,
             last_accepted_result: None,
             terminal: TerminalDeathModel::default(),
+            memorial: MemorialWallModel::default(),
         })
     }
 
     #[must_use]
     pub const fn terminal(&self) -> &TerminalDeathModel {
         &self.terminal
+    }
+
+    #[must_use]
+    pub const fn memorial(&self) -> &MemorialWallModel {
+        &self.memorial
     }
 
     #[must_use]
@@ -288,9 +356,66 @@ impl DeathViewClientModel {
         self.start_query(query)
     }
 
+    /// Opens the Core Memorial surface after the authenticated Hall station interaction has
+    /// succeeded. The pure model owns no interaction authority; callers must not invoke this for
+    /// local proximity or predicted input alone.
+    pub fn open_memorial_wall(&mut self) -> Result<DeathViewFrameV1, DeathViewClientError> {
+        self.memorial.validate_open()?;
+        self.start_query(PendingDeathViewQuery::MemorialPage {
+            after: None,
+            limit: MEMORIAL_PAGE_LIMIT,
+            intent: MemorialPageQueryIntent::Initial,
+        })
+    }
+
+    pub fn refresh_memorial_wall(&mut self) -> Result<DeathViewFrameV1, DeathViewClientError> {
+        self.memorial.validate_refresh()?;
+        self.start_query(Self::memorial_refresh_query())
+    }
+
+    pub fn load_older_memorials(&mut self) -> Result<DeathViewFrameV1, DeathViewClientError> {
+        let query = self.memorial.continuation_query()?;
+        self.start_query(query)
+    }
+
+    pub fn select_memorial(
+        &mut self,
+        cursor: DeathMemorialCursorV1,
+    ) -> Result<DeathViewFrameV1, DeathViewClientError> {
+        let query = self.memorial.selection_query(cursor)?;
+        self.start_query(query)
+    }
+
+    pub fn load_more_memorial_losses(&mut self) -> Result<DeathViewFrameV1, DeathViewClientError> {
+        let query = self.memorial.detail_continuation_query()?;
+        self.start_query(query)
+    }
+
+    pub fn close_memorial_detail(&mut self) -> Result<(), DeathViewClientError> {
+        if self.pending.is_some() {
+            return Err(DeathViewClientError::QueryInFlight);
+        }
+        self.memorial.close_detail()
+    }
+
+    pub fn close_memorial_wall(&mut self) -> Result<(), DeathViewClientError> {
+        if self.pending.is_some() {
+            return Err(DeathViewClientError::QueryInFlight);
+        }
+        self.memorial.close()
+    }
+
     pub fn retry(&mut self) -> Result<DeathViewFrameV1, DeathViewClientError> {
         let query = self
             .terminal
+            .retry_query()
+            .ok_or(DeathViewClientError::NoRetryAvailable)?;
+        self.start_query(query)
+    }
+
+    pub fn retry_memorial(&mut self) -> Result<DeathViewFrameV1, DeathViewClientError> {
+        let query = self
+            .memorial
             .retry_query()
             .ok_or(DeathViewClientError::NoRetryAvailable)?;
         self.start_query(query)
@@ -306,13 +431,19 @@ impl DeathViewClientModel {
             .ok_or(DeathViewClientError::NoResponsePending)?;
         let mut failure = self.failure(DeathViewResultCodeV1::ServiceUnavailable)?;
         failure.retry = DeathViewRetryDirective::RetryIdenticalQuery;
+        let memorial_query = retry_query.is_memorial();
         self.pending = None;
         self.last_accepted_result = None;
-        self.terminal.record_failure(
-            TerminalDeathPhase::RecoverableError,
-            failure,
-            Some(retry_query),
-        );
+        if memorial_query {
+            self.memorial
+                .record_failure(&retry_query, failure, Some(retry_query.clone()));
+        } else {
+            self.terminal.record_failure(
+                TerminalDeathPhase::RecoverableError,
+                failure,
+                Some(retry_query),
+            );
+        }
         Ok(())
     }
 
@@ -363,10 +494,15 @@ impl DeathViewClientModel {
             DeathViewResultV1::Summary { summary, .. } => {
                 self.apply_summary(result, &pending, summary)
             }
+            DeathViewResultV1::MemorialPage {
+                entries,
+                next_cursor,
+                ..
+            } => self.apply_memorial_page(result, &pending, entries, *next_cursor),
             DeathViewResultV1::Error { code, .. } => self.apply_error(result, &pending, *code),
-            DeathViewResultV1::MemorialPage { .. } | DeathViewResultV1::TracePage { .. } => Ok(
-                DeathViewApplyOutcome::ignored(DeathViewApplyDisposition::IgnoredUnexpectedKind),
-            ),
+            DeathViewResultV1::TracePage { .. } => Ok(DeathViewApplyOutcome::ignored(
+                DeathViewApplyDisposition::IgnoredUnexpectedKind,
+            )),
         };
         match outcome {
             Err(DeathViewClientError::Projection(error)) => {
@@ -385,7 +521,11 @@ impl DeathViewClientModel {
             return Err(DeathViewClientError::QueryInFlight);
         }
         let (frame, next_sequence) = self.prepare_frame(&query)?;
-        self.terminal.mark_query_issued(&query);
+        if query.is_memorial() {
+            self.memorial.mark_query_issued(&query);
+        } else {
+            self.terminal.mark_query_issued(&query);
+        }
         self.pending = Some(PendingDeathViewRequest {
             sequence: frame.sequence,
             query,
@@ -452,7 +592,7 @@ impl DeathViewClientModel {
             &self.presentation_revision,
             &self.presentation,
         )?;
-        let summary_query = PendingDeathViewQuery::Summary {
+        let summary_query = PendingDeathViewQuery::TerminalSummary {
             death_id: death.death_id,
             lost_start_ordinal: 0,
             lost_limit: TERMINAL_SUMMARY_LOSS_PAGE_LIMIT,
@@ -479,34 +619,87 @@ impl DeathViewClientModel {
         pending: &PendingDeathViewRequest,
         summary: &protocol::DeathSummaryViewV1,
     ) -> Result<DeathViewApplyOutcome, DeathViewClientError> {
-        let PendingDeathViewQuery::Summary { intent, .. } = &pending.query else {
+        match &pending.query {
+            PendingDeathViewQuery::TerminalSummary { intent, .. } => {
+                let latest = self.terminal.latest_for(*intent)?;
+                if *intent == TerminalQueryIntent::Continuation {
+                    let continuation = project_summary_continuation(
+                        latest,
+                        self.terminal.summary_anchor()?,
+                        summary,
+                        self.terminal
+                            .summary()
+                            .ok_or(DeathViewClientError::MissingSummaryAnchor)?,
+                        &self.presentation_revision,
+                        &self.presentation,
+                    )?;
+                    self.terminal.accept_summary_continuation(continuation)?;
+                } else {
+                    let presentation = project_summary(
+                        latest,
+                        summary,
+                        &self.presentation_revision,
+                        &self.presentation,
+                    )?;
+                    self.terminal
+                        .accept_summary(*intent, summary.clone(), presentation);
+                }
+            }
+            PendingDeathViewQuery::MemorialSummary { anchor, intent, .. } => {
+                if *intent == MemorialDetailQueryIntent::Continuation {
+                    let continuation = project_memorial_summary_continuation(
+                        anchor,
+                        self.memorial.detail_anchor()?,
+                        summary,
+                        self.memorial.retained_detail()?,
+                        &self.presentation_revision,
+                        &self.presentation,
+                    )?;
+                    self.memorial.accept_detail_continuation(continuation)?;
+                } else {
+                    let presentation = project_memorial_summary(
+                        anchor,
+                        summary,
+                        &self.presentation_revision,
+                        &self.presentation,
+                    )?;
+                    self.memorial
+                        .accept_detail(*intent, anchor, summary.clone(), presentation)?;
+                }
+            }
+            PendingDeathViewQuery::Latest { .. } | PendingDeathViewQuery::MemorialPage { .. } => {
+                return Ok(DeathViewApplyOutcome::ignored(
+                    DeathViewApplyDisposition::IgnoredUnexpectedKind,
+                ));
+            }
+        }
+        self.pending = None;
+        self.last_accepted_result = Some(result.clone());
+        Ok(DeathViewApplyOutcome {
+            disposition: DeathViewApplyDisposition::Applied,
+            follow_up: None,
+        })
+    }
+
+    fn apply_memorial_page(
+        &mut self,
+        result: &DeathViewResultV1,
+        pending: &PendingDeathViewRequest,
+        entries: &[DeathMemorialEntryV1],
+        next_cursor: Option<DeathMemorialCursorV1>,
+    ) -> Result<DeathViewApplyOutcome, DeathViewClientError> {
+        let PendingDeathViewQuery::MemorialPage { after, intent, .. } = &pending.query else {
             return Ok(DeathViewApplyOutcome::ignored(
                 DeathViewApplyDisposition::IgnoredUnexpectedKind,
             ));
         };
-        let latest = self.terminal.latest_for(*intent)?;
-        if *intent == TerminalQueryIntent::Continuation {
-            let continuation = project_summary_continuation(
-                latest,
-                self.terminal.summary_anchor()?,
-                summary,
-                self.terminal
-                    .summary()
-                    .ok_or(DeathViewClientError::MissingSummaryAnchor)?,
-                &self.presentation_revision,
-                &self.presentation,
-            )?;
-            self.terminal.accept_summary_continuation(continuation)?;
-        } else {
-            let presentation = project_summary(
-                latest,
-                summary,
-                &self.presentation_revision,
-                &self.presentation,
-            )?;
-            self.terminal
-                .accept_summary(*intent, summary.clone(), presentation);
-        }
+        self.memorial.accept_page(
+            *intent,
+            *after,
+            entries.to_vec(),
+            next_cursor,
+            &self.presentation_revision,
+        )?;
         self.pending = None;
         self.last_accepted_result = Some(result.clone());
         Ok(DeathViewApplyOutcome {
@@ -521,10 +714,17 @@ impl DeathViewClientModel {
         pending: &PendingDeathViewRequest,
         code: DeathViewResultCodeV1,
     ) -> Result<DeathViewApplyOutcome, DeathViewClientError> {
-        let (phase, directive, retry_query) = self.failure_policy(&pending.query, code);
         let mut failure = self.failure(code)?;
-        failure.retry = directive;
-        self.terminal.record_failure(phase, failure, retry_query);
+        if pending.query.is_memorial() {
+            let (directive, retry_query) = Self::memorial_failure_policy(&pending.query, code);
+            failure.retry = directive;
+            self.memorial
+                .record_failure(&pending.query, failure, retry_query);
+        } else {
+            let (phase, directive, retry_query) = self.failure_policy(&pending.query, code);
+            failure.retry = directive;
+            self.terminal.record_failure(phase, failure, retry_query);
+        }
         self.pending = None;
         self.last_accepted_result = Some(result.clone());
         Ok(DeathViewApplyOutcome {
@@ -573,7 +773,8 @@ impl DeathViewClientModel {
             ),
             DeathViewProjectionError::MissingCopy { .. }
             | DeathViewProjectionError::AnchorMismatch(_)
-            | DeathViewProjectionError::InvalidLossContinuation(_) => (
+            | DeathViewProjectionError::InvalidLossContinuation(_)
+            | DeathViewProjectionError::InvalidMemorialPage(_) => (
                 TerminalDeathPhase::FatalRecordError,
                 DeathViewResultCodeV1::CorruptStoredRecord,
                 DeathViewRetryDirective::Unavailable,
@@ -589,18 +790,32 @@ impl DeathViewClientModel {
         code: DeathViewResultCodeV1,
         directive: DeathViewRetryDirective,
     ) -> Result<(), DeathViewClientError> {
+        let query = self.pending.as_ref().map(|pending| pending.query.clone());
         let failure = self.failure(code);
         self.pending = None;
         self.last_accepted_result = Some(result.clone());
         match failure {
             Ok(mut failure) => {
                 failure.retry = directive;
-                self.terminal.record_failure(phase, failure, None);
+                if let Some(query) = query.filter(PendingDeathViewQuery::is_memorial) {
+                    self.memorial.record_unrenderable_failure(
+                        &query,
+                        code == DeathViewResultCodeV1::ContentMismatch,
+                        Some(failure),
+                    );
+                } else {
+                    self.terminal.record_failure(phase, failure, None);
+                }
                 Ok(())
             }
             Err(copy_error) => {
-                self.terminal
-                    .record_unrenderable_failure(TerminalDeathPhase::FatalContentError);
+                if let Some(query) = query.filter(PendingDeathViewQuery::is_memorial) {
+                    self.memorial
+                        .record_unrenderable_failure(&query, true, None);
+                } else {
+                    self.terminal
+                        .record_unrenderable_failure(TerminalDeathPhase::FatalContentError);
+                }
                 Err(copy_error)
             }
         }
@@ -661,6 +876,55 @@ impl DeathViewClientModel {
                 },
             })
     }
+
+    fn memorial_failure_policy(
+        pending: &PendingDeathViewQuery,
+        code: DeathViewResultCodeV1,
+    ) -> (DeathViewRetryDirective, Option<PendingDeathViewQuery>) {
+        match code {
+            DeathViewResultCodeV1::Unauthenticated => {
+                (DeathViewRetryDirective::Reconnect, Some(pending.clone()))
+            }
+            DeathViewResultCodeV1::FeatureDisabled
+            | DeathViewResultCodeV1::DeathNotOwned
+            | DeathViewResultCodeV1::CorruptStoredRecord => {
+                (DeathViewRetryDirective::Unavailable, None)
+            }
+            DeathViewResultCodeV1::DeathNotFound => (
+                DeathViewRetryDirective::RefreshMemorial,
+                Some(Self::memorial_refresh_query()),
+            ),
+            DeathViewResultCodeV1::PageOutOfRange => {
+                let retry_query = match pending {
+                    PendingDeathViewQuery::MemorialSummary { anchor, .. } => {
+                        PendingDeathViewQuery::MemorialSummary {
+                            anchor: anchor.clone(),
+                            lost_start_ordinal: 0,
+                            lost_limit: TERMINAL_SUMMARY_LOSS_PAGE_LIMIT,
+                            intent: MemorialDetailQueryIntent::Refresh,
+                        }
+                    }
+                    _ => Self::memorial_refresh_query(),
+                };
+                (DeathViewRetryDirective::RefreshMemorial, Some(retry_query))
+            }
+            DeathViewResultCodeV1::ContentMismatch => {
+                (DeathViewRetryDirective::RestartAfterUpdate, None)
+            }
+            DeathViewResultCodeV1::ServiceUnavailable => (
+                DeathViewRetryDirective::RetryIdenticalQuery,
+                Some(pending.clone()),
+            ),
+        }
+    }
+
+    fn memorial_refresh_query() -> PendingDeathViewQuery {
+        PendingDeathViewQuery::MemorialPage {
+            after: None,
+            limit: MEMORIAL_PAGE_LIMIT,
+            intent: MemorialPageQueryIntent::Refresh,
+        }
+    }
 }
 
 fn result_sequence(result: &DeathViewResultV1) -> u32 {
@@ -693,7 +957,7 @@ fn result_matches_query(result: &DeathViewResultV1, query: &PendingDeathViewQuer
                 summary,
                 ..
             },
-            PendingDeathViewQuery::Summary {
+            PendingDeathViewQuery::TerminalSummary {
                 death_id,
                 lost_start_ordinal,
                 lost_limit,
@@ -704,6 +968,29 @@ fn result_matches_query(result: &DeathViewResultV1, query: &PendingDeathViewQuer
                 && summary.death_id == *death_id
                 && summary.lost_start_ordinal == *lost_start_ordinal
         }
+        (
+            DeathViewResultV1::Summary {
+                requested_lost_limit,
+                summary,
+                ..
+            },
+            PendingDeathViewQuery::MemorialSummary {
+                anchor,
+                lost_start_ordinal,
+                lost_limit,
+                ..
+            },
+        ) => {
+            requested_lost_limit == lost_limit
+                && summary.death_id == anchor.cursor.death_id
+                && summary.lost_start_ordinal == *lost_start_ordinal
+        }
+        (
+            DeathViewResultV1::MemorialPage {
+                requested_limit, ..
+            },
+            PendingDeathViewQuery::MemorialPage { limit, .. },
+        ) => requested_limit == limit,
         _ => false,
     }
 }
@@ -721,5 +1008,7 @@ const fn error_copy_id(code: DeathViewResultCodeV1) -> &'static str {
     }
 }
 
+#[cfg(test)]
+mod memorial_tests;
 #[cfg(test)]
 mod tests;
