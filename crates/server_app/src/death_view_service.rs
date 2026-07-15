@@ -9,8 +9,8 @@
 use std::future::Future;
 
 use persistence::{
-    DeathViewReadError, DurableCombatTraceEntryV1, DurableDamageTypeV1, DurableDeathCauseV1,
-    DurableEchoOutcomeV1, DurableNetworkStateV1, DurableRecallStateV1,
+    CORE_ITEM_CONTENT_REVISION, DeathViewReadError, DurableCombatTraceEntryV1, DurableDamageTypeV1,
+    DurableDeathCauseV1, DurableEchoOutcomeV1, DurableNetworkStateV1, DurableRecallStateV1,
     DurableSummaryProjectionEntryV1, DurableSummaryProjectionKindV1, PostgresPersistence,
     StoredDeathMemorialCursorV1, StoredDeathMemorialEntryV1, StoredDeathSummaryViewV1,
     StoredDeathTracePageV1, StoredLatestCommittedDeathV1,
@@ -356,7 +356,7 @@ fn authority_matches(
     records_blake3 == required.records_blake3.as_str()
         && assets_blake3 == required.assets_blake3.as_str()
         && localization_blake3 == required.localization_blake3.as_str()
-        && content_revision == format!("core-dev.blake3.{records_blake3}")
+        && content_revision == CORE_ITEM_CONTENT_REVISION
 }
 
 fn latest_projection(
@@ -699,5 +699,27 @@ mod tests {
                 .as_str(),
             "core_death_views"
         );
+    }
+
+    /// GDD `TECH-020`-`022`, Content Spec `CONT-ECHO-009`, and Roadmap `GB-M03-02`/`06` require
+    /// immutable views to accept exactly the promoted content revision committed by the writer.
+    #[test]
+    fn stored_view_authority_uses_the_canonical_item_content_revision() {
+        let required = revision('a');
+        let hash = "a".repeat(64);
+        assert!(authority_matches(
+            CORE_ITEM_CONTENT_REVISION,
+            &hash,
+            &hash,
+            &hash,
+            &required,
+        ));
+        assert!(!authority_matches(
+            &format!("core-dev.blake3.{hash}"),
+            &hash,
+            &hash,
+            &hash,
+            &required,
+        ));
     }
 }
