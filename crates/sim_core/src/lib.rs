@@ -32,6 +32,7 @@ mod core_microrealm;
 mod core_mire;
 mod damage;
 mod death;
+mod death_authority;
 mod debug_state;
 mod dungeon_room;
 mod encounter;
@@ -219,6 +220,21 @@ pub use death::{
     LocalDamageObservation, LocalDeathCause, LocalDeathCommit, LocalDeathError, LocalDeathId,
     LocalRestartCommit, LocalRunLifecycle, LocalRunPhase, LocalVictoryRestartCommit,
     RunEntityCounts,
+};
+pub use death_authority::{
+    AuthoritativeDeathCause, AuthoritativeDeathCauseKind, AuthoritativeDeathInputs,
+    DEATH_AUTHORITY_SCHEMA_VERSION, DEATH_TRACE_WINDOW_TICKS, DEED_NONE_EN_US, DEED_NONE_ID,
+    DEED_SEPULCHER_KNIGHT_DEFEATED_ID, DEED_SIR_CALDUS_DEFEATED_ID, DamageTraceAggregate,
+    DamageTraceCheckpointV1, DamageTraceEntry, DamageTraceObservation, DangerEntryClockSnapshot,
+    DangerTerminalOutcome, DeathAuthorityError, DeathClockAggregate, DeathClockCheckpointV1,
+    DeathClockSnapshot, DeathTraceNetworkState, DeathTraceRecallState, DeathTraceStatus,
+    DeathTraceTerminalSnapshot, DeedAggregate, DeedCheckpointV1, DeedCompletionKind,
+    DeedCompletionMode, DeedCompletionObservation, DeedIneligibilityReason, DeedLifeState,
+    DeedRecallState, DeedRecordOutcome, ECHO_COMBAT_ELIGIBILITY_TICKS, FinalDeed,
+    LINK_LOST_VULNERABILITY_TICKS, LifeClockTickState, MAX_DEATH_TRACE_ENTRIES,
+    MAX_DEATH_TRACE_STATUS_TICKS, MAX_DEATH_TRACE_STATUSES, RECALL_CHANNEL_TICKS,
+    RewardQualifiedDeed, compile_authoritative_death_inputs, core_deed_en_us,
+    ticks_to_milliseconds,
 };
 pub use debug_state::{
     DebugBossState, DebugEnemyState, DebugStateError, LocalDebugStateInput, LocalDebugStateSnapshot,
