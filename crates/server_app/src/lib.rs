@@ -14,6 +14,7 @@ mod combat_factory;
 mod core_journey_world_flow;
 mod core_lifecycle;
 mod death_view_service;
+mod durable_death_service;
 mod field_equipment;
 mod ground_expiry;
 mod identity;
@@ -68,6 +69,12 @@ pub use core_lifecycle::{
 pub use death_view_service::{
     DeathViewRepository, DeathViewRepositoryError, DeathViewService, DisabledDeathViewRepository,
     PostgresDeathViewRepository,
+};
+pub use durable_death_service::{
+    DeathEntityIdentityAuthority, DeathHeroSnapshot, DeathLineageState, DeathMutationAuthority,
+    DeathProvenance, DeathWorldAuthority, DurableDeathBuildError, EchoAvailabilityProjection,
+    EligibleEchoProjection, PreparedDurableDeathCommit, ServerAuthoredDeathContext,
+    build_durable_death_commit,
 };
 pub use field_equipment::{
     AuthoritativeFieldEquipmentCommit, AuthoritativeFieldEquipmentPreview,
