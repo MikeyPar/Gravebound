@@ -384,7 +384,9 @@ async fn checkpoint_and_advance_first_danger_clock(persistence: &PostgresPersist
         composite_digest: hash(21),
         character_version: 2,
         progression_version: 1,
-        inventory_version: 1,
+        // Danger entry risks the seeded equipment and Belt stack atomically, advancing the
+        // inventory aggregate once before any checkpoint may bind to it.
+        inventory_version: 2,
         oath_bargain_version: 1,
         checkpoint_schema_version: 1,
         checkpoint_payload: vec![1],
