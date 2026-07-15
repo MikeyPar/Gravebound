@@ -232,7 +232,7 @@ async fn reset_fixture(persistence: &PostgresPersistence) {
          inventory_version,oath_bargain_version,life_metrics_version,ash_wallet_version, \
          component_mask,composite_digest,restore_state,records_blake3,assets_blake3, \
          localization_blake3) VALUES ($1,$2,$3,$4,$5,'hub.lantern_halls_01', \
-         'hub.lantern_halls_01',3,1,1,1,1,1,1,1,31,$6,0,$7,$8,$9)",
+         'hub.lantern_halls_01',3,1,1,1,2,1,1,1,31,$6,0,$7,$8,$9)",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(ACCOUNT_ID.as_slice())
@@ -345,6 +345,28 @@ async fn reset_fixture(persistence: &PostgresPersistence) {
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(ACCOUNT_ID.as_slice())
     .bind(CHARACTER_ID.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    let checkpoint_payload = [1_u8];
+    let checkpoint_payload_digest = blake3::hash(&checkpoint_payload);
+    sqlx::query(
+        "INSERT INTO character_danger_checkpoints (namespace_id,account_id,character_id, \
+         lineage_id,checkpoint_tick,component_mask,composite_digest,character_version, \
+         progression_version,inventory_version,oath_bargain_version,records_blake3, \
+         assets_blake3,localization_blake3,checkpoint_schema_version,checkpoint_payload, \
+         checkpoint_payload_digest) VALUES ($1,$2,$3,$4,19990,15,$5,2,2,2,1,$6,$7,$8,1,$9,$10)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(CHARACTER_ID.as_slice())
+    .bind(LINEAGE_ID.as_slice())
+    .bind([94_u8; 32].as_slice())
+    .bind(RECORDS_BLAKE3)
+    .bind(ASSETS_BLAKE3)
+    .bind(LOCALIZATION_BLAKE3)
+    .bind(checkpoint_payload.as_slice())
+    .bind(checkpoint_payload_digest.as_bytes().as_slice())
     .execute(transaction.connection())
     .await
     .unwrap();
@@ -729,6 +751,10 @@ async fn count(persistence: &PostgresPersistence, table: &str) -> i64 {
         "character_life_outbox" => {
             "SELECT count(*) FROM character_life_outbox WHERE namespace_id=$1 AND account_id=$2"
         }
+        "character_danger_checkpoints" => {
+            "SELECT count(*) FROM character_danger_checkpoints \
+             WHERE namespace_id=$1 AND account_id=$2"
+        }
         "death_events" => {
             "SELECT count(*) FROM death_events WHERE namespace_id=$1 AND account_id=$2"
         }
@@ -862,6 +888,7 @@ async fn assert_complete_graph(persistence: &PostgresPersistence, ids: RequestId
     transaction.rollback().await.unwrap();
 
     for (table, expected) in [
+        ("character_danger_checkpoints", 0),
         ("death_events", 1),
         ("death_combat_trace_entries", 2),
         ("death_summary_snapshots", 1),
@@ -877,6 +904,7 @@ async fn assert_complete_graph(persistence: &PostgresPersistence, ids: RequestId
 }
 
 async fn assert_rollback_pristine(persistence: &PostgresPersistence) {
+    assert_eq!(count(persistence, "character_danger_checkpoints").await, 1);
     assert_eq!(count(persistence, "death_events").await, 0);
     assert_eq!(count(persistence, "death_mutation_results").await, 0);
     assert_eq!(count(persistence, "echo_records").await, 0);

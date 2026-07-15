@@ -325,6 +325,7 @@ impl PostgresPersistence {
             &root,
             plan,
         )?;
+        clear_terminal_danger_checkpoint(transaction.connection(), event).await?;
         validate_destruction_sources(
             &items,
             &materials,
@@ -356,6 +357,34 @@ impl PostgresPersistence {
         transaction.commit().await?;
         Ok(DurableDeathTransactionV1::Fresh(result))
     }
+}
+
+/// Removes the opaque live Bell Debt checkpoint before the immutable death root is published.
+/// A checkpoint from another lineage/content authority is corruption, not state that terminal
+/// resolution may silently discard. Any later error rolls this deletion back with the death.
+async fn clear_terminal_danger_checkpoint(
+    connection: &mut PgConnection,
+    event: &crate::DurableDeathEventV1,
+) -> Result<(), PersistenceError> {
+    let deleted = sqlx::query(
+        "DELETE FROM character_danger_checkpoints \
+         WHERE namespace_id=$1 AND account_id=$2 AND character_id=$3 \
+         RETURNING lineage_id,records_blake3,assets_blake3,localization_blake3",
+    )
+    .bind(&event.namespace_id)
+    .bind(event.account_id.as_slice())
+    .bind(event.character_id.as_slice())
+    .fetch_optional(connection)
+    .await?;
+    if let Some(row) = deleted
+        && (exact_id(row.try_get("lineage_id")?)? != event.lineage_id
+            || row.try_get::<String, _>("records_blake3")? != event.records_blake3
+            || row.try_get::<String, _>("assets_blake3")? != event.assets_blake3
+            || row.try_get::<String, _>("localization_blake3")? != event.localization_blake3)
+    {
+        return Err(PersistenceError::DurableDeathBindingMismatch);
+    }
+    Ok(())
 }
 
 async fn transaction_timestamp_ms(connection: &mut PgConnection) -> Result<u64, PersistenceError> {
