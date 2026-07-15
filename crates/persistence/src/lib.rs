@@ -170,7 +170,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 42;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 43;
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -947,6 +947,57 @@ mod tests {
             assert!(
                 !migration.contains(prohibited),
                 "Echo promotion authority migration leaked {prohibited}"
+            );
+        }
+    }
+
+    #[test]
+    fn live_death_evidence_is_normalized_bounded_and_terminal_guarded() {
+        let migration = include_str!("../../../migrations/0043_live_death_evidence.sql");
+        for required in [
+            "Gravebound_Production_GDD_v1_Canonical.md",
+            "Gravebound_Content_Production_Spec_v1.md",
+            "Gravebound_Development_Roadmap_v1.md",
+            "SPEC-CONFLICT-009-m03-death-memorial.md",
+            "character_life_clock_checkpoint_receipts_v1",
+            "character_life_deed_completion_receipts_v1",
+            "character_live_damage_trace_ticks_v1",
+            "character_live_damage_trace_entries_v1",
+            "character_live_damage_trace_statuses_v1",
+            "post_life_metrics_version = pre_life_metrics_version + 1",
+            "UNIQUE (namespace_id, account_id, character_id, authoritative_tick)",
+            "danger_entry_life_metrics_version <= pre_life_metrics_version",
+            "danger_entry_permadeath_combat_ticks <= pre_permadeath_combat_ticks",
+            "life_clock_checkpoint_entry_exact_v1",
+            "life_clock_checkpoint_receipt_append_only_v1",
+            "life_deed_completion_receipt_append_only_v1",
+            "dead_life_clock_checkpoint_insert_v1",
+            "dead_life_deed_completion_insert_v1",
+            "dead_live_trace_tick_insert_v1",
+            "live_trace_tick_graph_complete_v1",
+            "live_trace_entry_graph_complete_v1",
+            "live_trace_status_graph_complete_v1",
+            "window_entry_count > 4096 OR maximum_tick - minimum_tick > 300",
+            "live_trace_absent_after_death_v1",
+            "death_requires_live_trace_cleanup_v1",
+            "AFTER INSERT ON death_events",
+            "ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED",
+        ] {
+            assert!(migration.contains(required), "migration omitted {required}");
+        }
+        for prohibited in [
+            "ALTER TABLE character_life_metrics",
+            "ALTER TABLE character_life_deeds",
+            "DROP TABLE",
+            "TRUNCATE",
+            "JSON",
+            "JSONB",
+            "FLOAT",
+            "DOUBLE PRECISION",
+        ] {
+            assert!(
+                !migration.contains(prohibited),
+                "live death-evidence migration leaked {prohibited}"
             );
         }
     }
