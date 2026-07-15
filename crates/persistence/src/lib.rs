@@ -199,7 +199,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 49;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 50;
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -954,7 +954,15 @@ mod tests {
         ] {
             assert!(migration.contains(required), "migration omitted {required}");
         }
-        for prohibited in ["DROP TABLE", "TRUNCATE", "DELETE FROM", "JSON", "JSONB"] {
+        for prohibited in [
+            "DROP TABLE",
+            "DROP TRIGGER",
+            "DROP FUNCTION",
+            "TRUNCATE",
+            "DELETE FROM",
+            "JSON",
+            "JSONB",
+        ] {
             assert!(
                 !migration.contains(prohibited),
                 "Ash wipe correction leaked {prohibited}"
@@ -1406,6 +1414,33 @@ mod tests {
             assert!(
                 !migration.contains(prohibited),
                 "death live-trace promotion migration leaked {prohibited}"
+            );
+        }
+    }
+
+    #[test]
+    fn death_live_trace_provenance_diagnostics_are_forward_only_and_exact() {
+        let migration =
+            include_str!("../../../migrations/0050_death_live_trace_provenance_diagnostics.sql");
+        for required in [
+            "Gravebound_Production_GDD_v1_Canonical.md",
+            "Gravebound_Content_Production_Spec_v1.md",
+            "Gravebound_Development_Roadmap_v1.md",
+            "SPEC-CONFLICT-009-m03-death-memorial.md",
+            "CREATE OR REPLACE FUNCTION enforce_death_live_trace_provenance_source_v1()",
+            "has no exact retained live entry",
+            "differs from retained live authority",
+            "differs from durable trace authority",
+            "has divergent durable statuses",
+            "status_id COLLATE \"C\"",
+            "Never rewrite migration 0049",
+        ] {
+            assert!(migration.contains(required), "migration omitted {required}");
+        }
+        for prohibited in ["DROP TABLE", "TRUNCATE", "DELETE FROM", "JSON", "JSONB"] {
+            assert!(
+                !migration.contains(prohibited),
+                "provenance diagnostics migration leaked {prohibited}"
             );
         }
     }
