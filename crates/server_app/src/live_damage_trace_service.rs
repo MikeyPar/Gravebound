@@ -154,6 +154,23 @@ impl PreparedTerminalLiveDamageTrace {
     pub fn full_window(&self) -> &[StoredLiveDamageTraceSnapshotEntryV1] {
         &self.full_window
     }
+
+    #[cfg(test)]
+    pub(crate) fn from_test_authority(
+        request: LiveDamageTraceTickRequestV1,
+        aggregate: DamageTraceAggregate,
+        full_window: Vec<StoredLiveDamageTraceSnapshotEntryV1>,
+    ) -> Result<Self, LiveDamageTraceServiceError> {
+        let terminal_snapshot = aggregate
+            .terminal_snapshot()
+            .map_err(LiveDamageTraceServiceError::Simulation)?;
+        Ok(Self {
+            request,
+            aggregate,
+            terminal_snapshot,
+            full_window,
+        })
+    }
 }
 
 /// Successful state transition from one complete authoritative tick.
@@ -244,6 +261,9 @@ pub struct LiveDamageTraceService<Repository> {
     binding: LiveDamageTraceBinding,
     identities: DeathEntityIdentityAuthority,
     aggregate: DamageTraceAggregate,
+    /// Exact normalized receipt identity retained beside every aggregate entry. Simulation state
+    /// alone cannot reconstruct historical trace-tick IDs after acknowledgement or restart.
+    window: Vec<StoredLiveDamageTraceSnapshotEntryV1>,
     head: Option<LiveDamageTraceHeadV1>,
     pending: Option<PendingLiveDamageTraceTick>,
     terminal: Option<PreparedTerminalLiveDamageTrace>,
@@ -354,6 +374,7 @@ where
             binding,
             identities,
             aggregate,
+            window: snapshot.entries,
             head: snapshot.head,
             pending: None,
             terminal: None,
@@ -404,17 +425,7 @@ where
                 .aggregate
                 .terminal_snapshot()
                 .map_err(LiveDamageTraceServiceError::Simulation)?;
-            let full_window = staged
-                .aggregate
-                .entries()
-                .iter()
-                .map(|entry| {
-                    Ok(StoredLiveDamageTraceSnapshotEntryV1 {
-                        event_tick: entry.tick.0,
-                        entry: map_entry_to_persistence(entry, &self.identities)?,
-                    })
-                })
-                .collect::<Result<Vec<_>, LiveDamageTraceServiceError>>()?;
+            let full_window = append_stored_window(&self.window, &staged.request.command)?;
             let prepared = PreparedTerminalLiveDamageTrace {
                 request: staged.request,
                 aggregate: staged.aggregate,
@@ -463,6 +474,7 @@ where
             self.reload_required = true;
             return Err(error);
         }
+        self.window = append_stored_window(&self.window, &stored.command)?;
         self.aggregate = pending.aggregate;
         self.binding.character_version = stored.command.expected_character_version;
         self.binding.danger = stored.command.danger.clone();
@@ -474,6 +486,38 @@ where
             Ok(LiveDamageTraceIngestOutcome::Committed(stored))
         }
     }
+}
+
+fn append_stored_window(
+    current: &[StoredLiveDamageTraceSnapshotEntryV1],
+    command: &LiveDamageTraceTickCommandV1,
+) -> Result<Vec<StoredLiveDamageTraceSnapshotEntryV1>, LiveDamageTraceServiceError> {
+    let cutoff = command
+        .event_tick
+        .saturating_sub(LIVE_DAMAGE_TRACE_WINDOW_TICKS_V1);
+    let mut window = current
+        .iter()
+        .filter(|entry| entry.event_tick >= cutoff)
+        .cloned()
+        .collect::<Vec<_>>();
+    if window
+        .last()
+        .is_some_and(|entry| entry.event_tick >= command.event_tick)
+        || window
+            .len()
+            .checked_add(command.entries.len())
+            .is_none_or(|count| count > MAX_LIVE_DAMAGE_TRACE_ENTRIES_V1)
+    {
+        return Err(LiveDamageTraceServiceError::CorruptSnapshot);
+    }
+    window.extend(command.entries.iter().cloned().map(|entry| {
+        StoredLiveDamageTraceSnapshotEntryV1 {
+            trace_tick_id: command.trace_tick_id,
+            event_tick: command.event_tick,
+            entry,
+        }
+    }));
+    Ok(window)
 }
 
 fn validate_mutation(
@@ -654,10 +698,13 @@ fn reconstruct_snapshot(
             .head
             .as_ref()
             .is_none_or(|head| head.event_tick != snapshot.through_tick)
-        || snapshot
-            .entries
-            .last()
-            .is_none_or(|entry| entry.event_tick != snapshot.through_tick)
+        || snapshot.entries.last().is_none_or(|entry| {
+            entry.event_tick != snapshot.through_tick
+                || snapshot
+                    .head
+                    .as_ref()
+                    .is_none_or(|head| head.trace_tick_id != entry.trace_tick_id)
+        })
     {
         return Err(LiveDamageTraceServiceError::CorruptSnapshot);
     }
@@ -978,6 +1025,7 @@ mod tests {
         through_tick: u64,
         entries: Vec<StoredLiveDamageTraceSnapshotEntryV1>,
     ) -> StoredLiveDamageTraceSnapshotV1 {
+        let head_tick_id = entries.last().map(|entry| entry.trace_tick_id);
         StoredLiveDamageTraceSnapshotV1 {
             character_version: binding().character_version,
             danger: binding().danger,
@@ -985,7 +1033,7 @@ mod tests {
             through_tick,
             entries,
             head: (through_tick > 0).then_some(LiveDamageTraceHeadV1 {
-                trace_tick_id: [8; 16],
+                trace_tick_id: head_tick_id.unwrap_or([8; 16]),
                 event_tick: through_tick,
                 result_digest: [9; 32],
             }),
@@ -1003,6 +1051,7 @@ mod tests {
         let mut aggregate = DamageTraceAggregate::new();
         let compiled = aggregate.record_tick([observation]).unwrap().remove(0);
         StoredLiveDamageTraceSnapshotEntryV1 {
+            trace_tick_id: [u8::try_from(tick % 251 + 1).unwrap(); 16],
             event_tick: tick,
             entry: map_entry_to_persistence(&compiled, &identities()).unwrap(),
         }

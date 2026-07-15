@@ -10,8 +10,8 @@
 use std::future::Future;
 
 use persistence::{
-    DurableDeathCommitRequestV1, DurableDeathContentAuthorityV1, DurableDeathTransactionV1,
-    PersistenceError, PostgresPersistence, StoredCommittedDeathResultV1,
+    DurableDeathCommitRequestV1, DurableDeathContentAuthorityV1, DurableDeathTracePromotionV1,
+    DurableDeathTransactionV1, PersistenceError, PostgresPersistence, StoredCommittedDeathResultV1,
     StoredCommittedDeathTerminalV1,
 };
 use thiserror::Error;
@@ -29,6 +29,7 @@ pub trait DurableDeathWriter: Send + Sync {
         &self,
         request: &DurableDeathCommitRequestV1,
         content: &DurableDeathContentAuthorityV1,
+        promotion: &DurableDeathTracePromotionV1,
     ) -> impl Future<Output = Result<DurableDeathTransactionV1, PersistenceError>> + Send;
 }
 
@@ -47,8 +48,10 @@ impl DurableDeathWriter for PostgresPersistence {
         &self,
         request: &DurableDeathCommitRequestV1,
         content: &DurableDeathContentAuthorityV1,
+        promotion: &DurableDeathTracePromotionV1,
     ) -> Result<DurableDeathTransactionV1, PersistenceError> {
-        self.transact_durable_death(request, content).await
+        self.transact_durable_death(request, content, promotion)
+            .await
     }
 }
 
@@ -140,7 +143,7 @@ pub fn committed_death_terminal_receipt(
         restore_point_id: stored.restore_point_id,
         terminal_id: result.death_id,
         mutation_id: result.mutation_id,
-        payload_hash: result.canonical_request_hash,
+        payload_hash: stored.terminal_payload_hash,
         server_plan_hash: result.canonical_plan_hash,
         result_hash: stored.result_hash,
         expected_state_version: result.versions.account.pre,
@@ -174,7 +177,7 @@ where
 
         let transaction = self
             .writer
-            .transact(&death.request, &death.content)
+            .transact(death.request(), death.content(), death.promotion())
             .await
             .map_err(DurableDeathExecutionError::Persistence)?;
         let result = transaction.result();
@@ -186,7 +189,7 @@ where
         // wall-clock acknowledgement time here would make the reconstructed receipt diverge.
         let receipt = StoredTerminalReceipt::from_prepared(
             prepared_terminal,
-            death.request.plan.event.death_tick,
+            death.request().plan.event.death_tick,
             result_hash,
         )
         .map_err(DurableDeathExecutionError::InvalidTerminalAuthority)?;
@@ -204,7 +207,10 @@ where
 pub fn durable_death_terminal_candidate(
     death: &PreparedDurableDeathCommit,
 ) -> Result<TerminalCandidate, DurableDeathExecutionError> {
-    let event = &death.request.plan.event;
+    death
+        .validate_terminal_binding()
+        .map_err(DurableDeathExecutionError::Persistence)?;
+    let event = &death.request().plan.event;
     let binding = TerminalBinding::new(
         event.account_id,
         event.character_id,
@@ -216,8 +222,8 @@ pub fn durable_death_terminal_candidate(
         binding,
         event.death_id,
         event.mutation_id,
-        death.request.canonical_request_hash,
-        death.request.canonical_plan_hash,
+        death.promotion().terminal_payload_hash(),
+        death.request().canonical_plan_hash,
         event.versions.account.pre,
         event.death_tick,
         TerminalKind::LethalDeath,
@@ -232,7 +238,7 @@ fn validate_stored_result_intent(
     result
         .validate()
         .map_err(|_| DurableDeathExecutionError::StoredResultMismatch)?;
-    let mut committed_request = death.request.clone();
+    let mut committed_request = death.request().clone();
     committed_request
         .bind_commit_time(result.committed_at_unix_ms)
         .map_err(|_| DurableDeathExecutionError::StoredResultMismatch)?;
@@ -315,6 +321,7 @@ mod tests {
             &self,
             request: &DurableDeathCommitRequestV1,
             _content: &DurableDeathContentAuthorityV1,
+            _promotion: &DurableDeathTracePromotionV1,
         ) -> Result<DurableDeathTransactionV1, PersistenceError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             if matches!(self.mode, FakeMode::Unavailable) {
@@ -349,15 +356,15 @@ mod tests {
             SubmitResult::Accepted { .. }
         ));
         let prepared = arbiter
-            .prepare(death.request.plan.event.death_tick)
+            .prepare(death.request().plan.event.death_tick)
             .expect("sealed lethal tick");
         (arbiter, prepared)
     }
 
     fn committed_terminal_fixture() -> StoredCommittedDeathTerminalV1 {
         let death = prepared_commit();
-        let event = &death.request.plan.event;
-        let mut request = death.request.clone();
+        let event = &death.request().plan.event;
+        let mut request = death.request().clone();
         request
             .bind_commit_time(
                 request
@@ -375,6 +382,8 @@ mod tests {
             lineage_id: event.lineage_id,
             restore_point_id: event.restore_point_id,
             death_tick: event.death_tick,
+            promotion_digest: death.promotion().promotion_digest(),
+            terminal_payload_hash: death.promotion().terminal_payload_hash(),
         }
     }
 
@@ -382,7 +391,7 @@ mod tests {
     fn candidate_binds_the_complete_sealed_death_authority() {
         let death = prepared_commit();
         let candidate = durable_death_terminal_candidate(&death).unwrap();
-        let event = &death.request.plan.event;
+        let event = &death.request().plan.event;
         assert_eq!(candidate.binding().account_id(), &event.account_id);
         assert_eq!(candidate.binding().character_id(), &event.character_id);
         assert_eq!(candidate.binding().lineage_id(), &event.lineage_id);
@@ -394,11 +403,11 @@ mod tests {
         assert_eq!(candidate.mutation_id(), &event.mutation_id);
         assert_eq!(
             candidate.payload_hash(),
-            &death.request.canonical_request_hash
+            &death.promotion().terminal_payload_hash()
         );
         assert_eq!(
             candidate.server_plan_hash(),
-            &death.request.canonical_plan_hash
+            &death.request().canonical_plan_hash
         );
         assert_eq!(
             candidate.expected_state_version(),
@@ -406,6 +415,28 @@ mod tests {
         );
         assert_eq!(candidate.observed_tick(), event.death_tick);
         assert_eq!(candidate.kind(), TerminalKind::LethalDeath);
+    }
+
+    #[test]
+    fn cross_bound_promotion_cannot_enter_terminal_arbitration() {
+        let death = prepared_commit();
+        let changed_request = DurableDeathCommitRequestV1::seal(
+            death.request().plan.clone(),
+            death.request().issued_at_unix_ms + 1,
+        )
+        .unwrap();
+        let cross_bound = PreparedDurableDeathCommit::from_test_parts(
+            changed_request,
+            death.content().clone(),
+            death.promotion().clone(),
+        );
+
+        assert!(matches!(
+            durable_death_terminal_candidate(&cross_bound),
+            Err(DurableDeathExecutionError::Persistence(
+                PersistenceError::CorruptStoredDurableDeath
+            ))
+        ));
     }
 
     #[tokio::test]
@@ -433,7 +464,7 @@ mod tests {
         let receipt = arbiter.committed_receipt().unwrap();
         assert_eq!(
             receipt.committed_tick(),
-            death.request.plan.event.death_tick
+            death.request().plan.event.death_tick
         );
         let stored = receipt.to_storage_v1();
         assert_eq!(

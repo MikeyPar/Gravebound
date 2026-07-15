@@ -1565,7 +1565,7 @@ const fn corrupt() -> PersistenceError {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn uuid_v7(seed: u8) -> [u8; 16] {
@@ -1602,7 +1602,7 @@ mod tests {
     }
 
     #[allow(clippy::too_many_lines)]
-    fn valid_request() -> DurableDeathCommitRequestV1 {
+    pub(crate) fn valid_request() -> DurableDeathCommitRequestV1 {
         let death_id = uuid_v7(7);
         let account_id = [1; 16];
         let character_id = [2; 16];

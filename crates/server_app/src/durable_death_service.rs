@@ -21,13 +21,13 @@ use persistence::{
     AuthoritativeDeathPlanV1, DURABLE_DEATH_SCHEMA_VERSION, DURABLE_DEATH_SUMMARY_REVISION,
     DeathAggregateVersionsV1, DurableCombatTraceEntryV1, DurableDamageTypeV1, DurableDeathCauseV1,
     DurableDeathCommitRequestV1, DurableDeathContentAuthorityV1, DurableDeathEventV1,
-    DurableDeathSummaryV1, DurableDestructionEntryV1, DurableEchoEnvelopeV1, DurableEchoOutcomeV1,
-    DurableEchoRecordV1, DurableEchoStateV1, DurableEchoTransitionReasonV1,
-    DurableEchoTransitionV1, DurableMemorialRecordV1, DurableNetworkStateV1,
-    DurableOrderedContentIdV1, DurableRecallStateV1, DurableSummaryDamageReferenceV1,
-    DurableSummaryProjectionEntryV1, DurableSummaryProjectionKindV1, DurableSummaryProjectionsV1,
-    DurableTraceStatusV1, PersistenceError, WIPEABLE_CORE_NAMESPACE,
-    derive_durable_death_bargain_cleanup_event_id,
+    DurableDeathSummaryV1, DurableDeathTracePromotionV1, DurableDestructionEntryV1,
+    DurableEchoEnvelopeV1, DurableEchoOutcomeV1, DurableEchoRecordV1, DurableEchoStateV1,
+    DurableEchoTransitionReasonV1, DurableEchoTransitionV1, DurableMemorialRecordV1,
+    DurableNetworkStateV1, DurableOrderedContentIdV1, DurableRecallStateV1,
+    DurableSummaryDamageReferenceV1, DurableSummaryProjectionEntryV1,
+    DurableSummaryProjectionKindV1, DurableSummaryProjectionsV1, DurableTraceStatusV1,
+    PersistenceError, WIPEABLE_CORE_NAMESPACE, derive_durable_death_bargain_cleanup_event_id,
 };
 use sim_core::{
     AuthoritativeDeathCauseKind, AuthoritativeDeathInputs, DEATH_AUTHORITY_SCHEMA_VERSION,
@@ -37,6 +37,7 @@ use sim_core::{
 };
 use thiserror::Error;
 
+use crate::PreparedTerminalLiveDamageTrace;
 use crate::identity::{AuthenticatedAccount, AuthenticatedNamespace};
 
 const DURABLE_TRACE_DIGEST_CONTEXT: &str = "gravebound.durable-death.trace.v1";
@@ -139,6 +140,9 @@ pub struct ServerAuthoredDeathContext {
     pub destruction: Vec<DurableDestructionEntryV1>,
     pub hero: DeathHeroSnapshot,
     pub entity_identities: DeathEntityIdentityAuthority,
+    /// Lethal evidence prepared only by the server-owned live trace service. Its private fields
+    /// prevent a client or external crate from constructing an alternate terminal window.
+    pub terminal_trace: PreparedTerminalLiveDamageTrace,
     /// Must be present exactly when the simulation time-and-deed predicate is eligible.
     pub echo: Option<EligibleEchoProjection>,
 }
@@ -146,8 +150,46 @@ pub struct ServerAuthoredDeathContext {
 /// A sealed request paired with the promoted content authority that must validate it at commit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedDurableDeathCommit {
-    pub request: DurableDeathCommitRequestV1,
-    pub content: DurableDeathContentAuthorityV1,
+    request: DurableDeathCommitRequestV1,
+    content: DurableDeathContentAuthorityV1,
+    promotion: DurableDeathTracePromotionV1,
+}
+
+impl PreparedDurableDeathCommit {
+    #[must_use]
+    pub const fn request(&self) -> &DurableDeathCommitRequestV1 {
+        &self.request
+    }
+
+    #[must_use]
+    pub const fn content(&self) -> &DurableDeathContentAuthorityV1 {
+        &self.content
+    }
+
+    #[must_use]
+    pub const fn promotion(&self) -> &DurableDeathTracePromotionV1 {
+        &self.promotion
+    }
+
+    /// Rechecks the cross-domain terminal binding before the prepared value can enter arbitration.
+    /// Construction is private to this module, but callers still fail closed if memory or future
+    /// internal refactors ever present mismatched request and promotion authority.
+    pub fn validate_terminal_binding(&self) -> Result<(), PersistenceError> {
+        self.promotion.validate_request_binding(&self.request)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_test_parts(
+        request: DurableDeathCommitRequestV1,
+        content: DurableDeathContentAuthorityV1,
+        promotion: DurableDeathTracePromotionV1,
+    ) -> Self {
+        Self {
+            request,
+            content,
+            promotion,
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -187,6 +229,7 @@ pub fn build_durable_death_commit(
 ) -> Result<PreparedDurableDeathCommit, DurableDeathBuildError> {
     validate_server_authority(context)?;
     validate_simulation_evidence(inputs)?;
+    validate_terminal_evidence(inputs, &context.terminal_trace)?;
 
     let trace = map_trace(inputs, &context.entity_identities)?;
     let destruction = context.destruction.clone();
@@ -310,11 +353,37 @@ pub fn build_durable_death_commit(
     if !context.content.matches_event(&request.plan.event) {
         return Err(PersistenceError::DurableDeathContentMismatch.into());
     }
+    let promotion = DurableDeathTracePromotionV1::seal(
+        &request,
+        context.terminal_trace.request().clone(),
+        context.terminal_trace.full_window(),
+    )?;
 
     Ok(PreparedDurableDeathCommit {
         request,
         content: context.content.clone(),
+        promotion,
     })
+}
+
+fn validate_terminal_evidence(
+    inputs: &AuthoritativeDeathInputs,
+    terminal: &PreparedTerminalLiveDamageTrace,
+) -> Result<(), DurableDeathBuildError> {
+    let rebuilt = terminal.aggregate().terminal_snapshot().map_err(|_| {
+        DurableDeathBuildError::EvidenceMismatch("terminal aggregate is not lethal")
+    })?;
+    if terminal.terminal_snapshot() != &rebuilt
+        || terminal.terminal_snapshot().trace != inputs.trace
+        || terminal.terminal_snapshot().last_five != inputs.last_five
+        || terminal.terminal_snapshot().cause != inputs.cause
+        || terminal.terminal_snapshot().canonical_hash_blake3 != inputs.trace_digest
+    {
+        return Err(DurableDeathBuildError::EvidenceMismatch(
+            "prepared live terminal does not match authoritative death inputs",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_server_authority(
@@ -777,7 +846,11 @@ pub(crate) mod tests {
     use super::*;
     use persistence::{
         DeathVersionAdvanceV1, DurableDeathItemContentAuthorityV1, DurableDestructionLocationV1,
-        DurableEquipmentSlotV1,
+        DurableEquipmentSlotV1, LiveDamageTraceCauseV1, LiveDamageTraceContentAuthorityV1,
+        LiveDamageTraceDamageTypeV1, LiveDamageTraceDangerAuthorityV1, LiveDamageTraceEntryV1,
+        LiveDamageTraceHeadV1, LiveDamageTraceNetworkStateV1, LiveDamageTraceRecallStateV1,
+        LiveDamageTraceStatusV1, LiveDamageTraceTickCommandV1, LiveDamageTraceTickRequestV1,
+        StoredLiveDamageTraceSnapshotEntryV1,
     };
     use sim_core::{
         AuthoritativeDeathCause, DeathClockSnapshot, DeathTraceStatus, FinalDeed, Tick,
@@ -873,8 +946,92 @@ pub(crate) mod tests {
         }
     }
 
+    fn live_trace_tick_id(tick: u64) -> [u8; 16] {
+        [u8::try_from(tick % 251 + 1).unwrap(); 16]
+    }
+
+    fn live_trace_entry(entry: &DamageTraceEntry) -> LiveDamageTraceEntryV1 {
+        LiveDamageTraceEntryV1 {
+            event_ordinal: entry.event_ordinal,
+            cause: LiveDamageTraceCauseV1::DirectHit,
+            source_content_id: entry.source_content_id.clone(),
+            source_entity_id: entry.source_entity_id.map(|_| [10; 16]),
+            source_sim_entity_id: entry.source_entity_id.map(EntityId::get),
+            pattern_id: entry.pattern_id.clone(),
+            attack_id: entry.attack_id.clone(),
+            raw_damage: entry.raw_damage,
+            final_damage: entry.final_damage,
+            damage_type: LiveDamageTraceDamageTypeV1::Veil,
+            pre_health: entry.pre_health,
+            post_health: entry.post_health,
+            source_x_milli_tiles: entry.source_x_milli_tiles,
+            source_y_milli_tiles: entry.source_y_milli_tiles,
+            network_state: LiveDamageTraceNetworkStateV1::Degraded,
+            recall_state: LiveDamageTraceRecallStateV1::Channeling,
+            lethal: entry.lethal,
+            statuses: entry
+                .statuses
+                .iter()
+                .enumerate()
+                .map(|(ordinal, status)| LiveDamageTraceStatusV1 {
+                    status_ordinal: u8::try_from(ordinal).unwrap(),
+                    status_id: status.status_id.clone(),
+                    remaining_ticks: status.remaining_ticks,
+                    stack_count: status.stack_count,
+                })
+                .collect(),
+        }
+    }
+
+    fn terminal_trace_fixture(
+        inputs: &AuthoritativeDeathInputs,
+        content: LiveDamageTraceContentAuthorityV1,
+    ) -> PreparedTerminalLiveDamageTrace {
+        let full_window = inputs
+            .trace
+            .iter()
+            .map(|entry| StoredLiveDamageTraceSnapshotEntryV1 {
+                trace_tick_id: live_trace_tick_id(entry.tick.0),
+                event_tick: entry.tick.0,
+                entry: live_trace_entry(entry),
+            })
+            .collect::<Vec<_>>();
+        let lethal = full_window.last().unwrap();
+        let previous = &full_window[full_window.len() - 2];
+        let request = LiveDamageTraceTickRequestV1::seal(LiveDamageTraceTickCommandV1 {
+            account_id: [1; 16],
+            character_id: [2; 16],
+            trace_tick_id: lethal.trace_tick_id,
+            expected_character_version: versions().character.pre,
+            expected_previous: Some(LiveDamageTraceHeadV1 {
+                trace_tick_id: previous.trace_tick_id,
+                event_tick: previous.event_tick,
+                result_digest: [90; 32],
+            }),
+            event_tick: lethal.event_tick,
+            danger: LiveDamageTraceDangerAuthorityV1 {
+                lineage_id: [6; 16],
+                restore_point_id: [7; 16],
+                checkpoint_tick: 900,
+            },
+            content,
+            entries: vec![lethal.entry.clone()],
+            issued_at_unix_ms: 1_800,
+        })
+        .unwrap();
+        let aggregate = DamageTraceAggregate::from_checkpoint(DamageTraceCheckpointV1 {
+            schema_version: DEATH_AUTHORITY_SCHEMA_VERSION,
+            entries: inputs.trace.clone(),
+        })
+        .unwrap();
+        PreparedTerminalLiveDamageTrace::from_test_authority(request, aggregate, full_window)
+            .unwrap()
+    }
+
     fn context() -> ServerAuthoredDeathContext {
         let content_revision = format!("core-dev.blake3.{}", "a".repeat(64));
+        let live_content = LiveDamageTraceContentAuthorityV1::core();
+        let terminal_trace = terminal_trace_fixture(&inputs(), live_content.clone());
         ServerAuthoredDeathContext {
             mutation: DeathMutationAuthority {
                 authenticated_account: AuthenticatedAccount {
@@ -900,9 +1057,9 @@ pub(crate) mod tests {
             },
             content: DurableDeathContentAuthorityV1 {
                 content_revision,
-                records_blake3: "b".repeat(64),
-                assets_blake3: "c".repeat(64),
-                localization_blake3: "d".repeat(64),
+                records_blake3: live_content.records_blake3,
+                assets_blake3: live_content.assets_blake3,
+                localization_blake3: live_content.localization_blake3,
                 enabled_items: vec![DurableDeathItemContentAuthorityV1 {
                     template_id: "item.weapon.caldus_bow".into(),
                     echo_signature_tag: Some("signature.weapon.bow".into()),
@@ -932,6 +1089,7 @@ pub(crate) mod tests {
             entity_identities: DeathEntityIdentityAuthority {
                 by_sim_entity: BTreeMap::from([(EntityId::new(41).unwrap(), [10; 16])]),
             },
+            terminal_trace,
             echo: Some(EligibleEchoProjection {
                 echo_id: uuid_v7(11),
                 appearance_snapshot_id: "appearance.default.grave_arbalist".into(),

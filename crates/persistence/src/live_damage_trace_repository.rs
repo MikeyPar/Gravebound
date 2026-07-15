@@ -24,6 +24,7 @@ const REQUEST_CONTEXT: &str = "gravebound.live-damage-trace.request.v1";
 const TICK_CONTEXT: &str = "gravebound.live-damage-trace.tick.v1";
 const RESULT_CONTEXT: &str = "gravebound.live-damage-trace.result.v1";
 const CONFLICT_CONTEXT: &str = "gravebound.live-damage-trace.conflict.v1";
+const PROMOTION_RECEIPT_WINDOW_CONTEXT: &str = "gravebound.death-live-trace-receipt-window.v1";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LiveDamageTraceContentAuthorityV1 {
@@ -342,7 +343,7 @@ impl LiveDamageTraceTickRequestV1 {
             request_hash,
         })
     }
-    fn validate(&self) -> Result<(), PersistenceError> {
+    pub(crate) fn validate(&self) -> Result<(), PersistenceError> {
         self.command.validate()?;
         if all_zero(&self.request_hash) || self.request_hash != request_hash(&self.command)? {
             return Err(corrupt());
@@ -422,6 +423,7 @@ pub enum LiveDamageTraceTickTransactionV1 {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredLiveDamageTraceSnapshotEntryV1 {
+    pub trace_tick_id: [u8; ID_BYTES],
     pub event_tick: u64,
     pub entry: LiveDamageTraceEntryV1,
 }
@@ -452,6 +454,33 @@ struct Receipt {
     tick_digest: [u8; HASH_BYTES],
     result_digest: [u8; HASH_BYTES],
     committed_at_unix_ms: u64,
+}
+
+/// Transaction-locked retained authority copied into migration 0049's immutable death graph.
+/// This stays crate-private so only the durable terminal writer can promote it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LiveDamageTracePromotionReceiptV1 {
+    pub account_id: [u8; ID_BYTES],
+    pub character_id: [u8; ID_BYTES],
+    pub trace_tick_id: [u8; ID_BYTES],
+    pub expected_character_version: u64,
+    pub danger: LiveDamageTraceDangerAuthorityV1,
+    pub event_tick: u64,
+    pub entry_count: usize,
+    pub status_count: usize,
+    pub lethal_count: usize,
+    pub content: LiveDamageTraceContentAuthorityV1,
+    pub request_hash: [u8; HASH_BYTES],
+    pub tick_digest: [u8; HASH_BYTES],
+    pub result_digest: [u8; HASH_BYTES],
+    pub issued_at_unix_ms: u64,
+    pub committed_at_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LockedLiveDamageTracePromotionWindowV1 {
+    pub receipts: Vec<LiveDamageTracePromotionReceiptV1>,
+    pub entries: Vec<StoredLiveDamageTraceSnapshotEntryV1>,
 }
 
 impl PostgresPersistence {
@@ -666,6 +695,222 @@ impl PostgresPersistence {
     }
 }
 
+/// Inserts the one lethal tick inside the already account/character-locked death transaction.
+/// The ordinary public trace writer rejects lethal input, so this crate-private seam cannot become
+/// a second terminal route.
+pub(crate) async fn insert_terminal_live_damage_trace_tick_v1(
+    connection: &mut PgConnection,
+    request: &LiveDamageTraceTickRequestV1,
+    committed_at_unix_ms: u64,
+) -> Result<StoredLiveDamageTraceTickV1, PersistenceError> {
+    request.validate()?;
+    let command = &request.command;
+    if command.entries.iter().filter(|entry| entry.lethal).count() != 1
+        || command.entries.last().is_none_or(|entry| !entry.lethal)
+    {
+        return Err(PersistenceError::LiveDamageTraceTerminalStagingRequired);
+    }
+    validate_active_danger(
+        connection,
+        command.account_id,
+        command.character_id,
+        &command.danger,
+        &command.content,
+    )
+    .await?;
+    let latest = load_latest_receipt(
+        connection,
+        command.account_id,
+        command.character_id,
+        &command.danger,
+    )
+    .await?;
+    validate_predecessor(command, latest.as_ref())?;
+    if let Some(latest) = &latest
+        && (latest.lethal_count != 0 || command.event_tick <= latest.event_tick)
+    {
+        return Err(PersistenceError::LiveDamageTraceTerminal);
+    }
+    let stored = StoredLiveDamageTraceTickV1::for_committed_request(request, committed_at_unix_ms)?;
+    let cutoff = command
+        .event_tick
+        .saturating_sub(LIVE_DAMAGE_TRACE_WINDOW_TICKS_V1);
+    sqlx::query(
+        "DELETE FROM character_live_damage_trace_ticks_v1 \
+         WHERE namespace_id=$1 AND account_id=$2 AND character_id=$3 \
+           AND lineage_id=$4 AND restore_point_id=$5 AND event_tick<$6",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(command.account_id.as_slice())
+    .bind(command.character_id.as_slice())
+    .bind(command.danger.lineage_id.as_slice())
+    .bind(command.danger.restore_point_id.as_slice())
+    .bind(i64_value(cutoff)?)
+    .execute(&mut *connection)
+    .await?;
+    let retained_entries: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM character_live_damage_trace_entries_v1 \
+         WHERE namespace_id=$1 AND account_id=$2 AND character_id=$3 \
+           AND lineage_id=$4 AND restore_point_id=$5",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(command.account_id.as_slice())
+    .bind(command.character_id.as_slice())
+    .bind(command.danger.lineage_id.as_slice())
+    .bind(command.danger.restore_point_id.as_slice())
+    .fetch_one(&mut *connection)
+    .await?;
+    if usize::try_from(retained_entries)
+        .ok()
+        .and_then(|count| count.checked_add(command.entries.len()))
+        .is_none_or(|count| count > MAX_LIVE_DAMAGE_TRACE_ENTRIES_V1)
+    {
+        return Err(PersistenceError::LiveDamageTraceCapacityExceeded);
+    }
+    insert_payload(
+        connection,
+        command,
+        request.request_hash,
+        stored.tick_digest,
+    )
+    .await?;
+    let receipt = receipt_from_command(
+        command,
+        request.request_hash,
+        stored.tick_digest,
+        committed_at_unix_ms,
+    )?;
+    insert_receipt(connection, &receipt, command.issued_at_unix_ms).await?;
+    Ok(stored)
+}
+
+pub(crate) async fn load_locked_live_damage_trace_promotion_window_v1(
+    connection: &mut PgConnection,
+    account_id: [u8; ID_BYTES],
+    character_id: [u8; ID_BYTES],
+    danger: &LiveDamageTraceDangerAuthorityV1,
+    through_tick: u64,
+) -> Result<LockedLiveDamageTracePromotionWindowV1, PersistenceError> {
+    let receipts =
+        load_window_receipts(connection, account_id, character_id, danger, through_tick).await?;
+    let entries =
+        load_snapshot_entries(connection, account_id, character_id, danger, through_tick).await?;
+    let latest = receipts.last().ok_or_else(corrupt)?;
+    validate_snapshot_graph(&receipts, &entries, latest)?;
+    let rows = sqlx::query(
+        "SELECT trace_tick_id, \
+                floor(extract(epoch FROM issued_at)*1000)::bigint AS issued_at_ms, \
+                floor(extract(epoch FROM committed_at)*1000)::bigint AS committed_at_ms \
+         FROM character_live_damage_trace_ingest_receipts_v1 \
+         WHERE namespace_id=$1 AND account_id=$2 AND character_id=$3 \
+           AND lineage_id=$4 AND restore_point_id=$5 AND event_tick>=$6 AND event_tick<=$7 \
+         ORDER BY event_tick,trace_tick_id FOR UPDATE",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
+    .bind(danger.lineage_id.as_slice())
+    .bind(danger.restore_point_id.as_slice())
+    .bind(i64_value(
+        through_tick.saturating_sub(LIVE_DAMAGE_TRACE_WINDOW_TICKS_V1),
+    )?)
+    .bind(i64_value(through_tick)?)
+    .fetch_all(&mut *connection)
+    .await?;
+    if rows.len() != receipts.len() {
+        return Err(corrupt());
+    }
+    let promoted = receipts
+        .into_iter()
+        .zip(rows)
+        .map(|(receipt, row)| {
+            if exact_id(row.try_get("trace_tick_id")?)? != receipt.trace_tick_id {
+                return Err(corrupt());
+            }
+            Ok(LiveDamageTracePromotionReceiptV1 {
+                account_id: receipt.account_id,
+                character_id: receipt.character_id,
+                trace_tick_id: receipt.trace_tick_id,
+                expected_character_version: receipt.expected_character_version,
+                danger: receipt.danger,
+                event_tick: receipt.event_tick,
+                entry_count: receipt.entry_count,
+                status_count: receipt.status_count,
+                lethal_count: receipt.lethal_count,
+                content: receipt.content,
+                request_hash: receipt.request_hash,
+                tick_digest: receipt.tick_digest,
+                result_digest: receipt.result_digest,
+                issued_at_unix_ms: positive_u64(row.try_get("issued_at_ms")?)?,
+                committed_at_unix_ms: positive_u64(row.try_get("committed_at_ms")?)?,
+            })
+        })
+        .collect::<Result<Vec<_>, PersistenceError>>()?;
+    Ok(LockedLiveDamageTracePromotionWindowV1 {
+        receipts: promoted,
+        entries,
+    })
+}
+
+pub(crate) fn canonical_live_damage_trace_receipt_window_digest_v1(
+    receipts: &[LiveDamageTracePromotionReceiptV1],
+) -> Result<[u8; HASH_BYTES], PersistenceError> {
+    if receipts.is_empty() || receipts.len() > 301 {
+        return Err(corrupt());
+    }
+    let mut hasher = blake3::Hasher::new_derive_key(PROMOTION_RECEIPT_WINDOW_CONTEXT);
+    for (ordinal, receipt) in receipts.iter().enumerate() {
+        field(
+            &mut hasher,
+            &u16::try_from(ordinal)
+                .map_err(corrupt_conversion)?
+                .to_le_bytes(),
+        )?;
+        field(&mut hasher, &receipt.account_id)?;
+        field(&mut hasher, &receipt.character_id)?;
+        field(&mut hasher, &receipt.trace_tick_id)?;
+        field(
+            &mut hasher,
+            &receipt.expected_character_version.to_le_bytes(),
+        )?;
+        field(&mut hasher, &receipt.danger.lineage_id)?;
+        field(&mut hasher, &receipt.danger.restore_point_id)?;
+        field(&mut hasher, &receipt.danger.checkpoint_tick.to_le_bytes())?;
+        field(&mut hasher, &receipt.event_tick.to_le_bytes())?;
+        field(
+            &mut hasher,
+            &u32::try_from(receipt.entry_count)
+                .map_err(corrupt_conversion)?
+                .to_le_bytes(),
+        )?;
+        field(
+            &mut hasher,
+            &u32::try_from(receipt.status_count)
+                .map_err(corrupt_conversion)?
+                .to_le_bytes(),
+        )?;
+        field(
+            &mut hasher,
+            &u32::try_from(receipt.lethal_count)
+                .map_err(corrupt_conversion)?
+                .to_le_bytes(),
+        )?;
+        field(&mut hasher, receipt.content.records_blake3.as_bytes())?;
+        field(&mut hasher, receipt.content.assets_blake3.as_bytes())?;
+        field(&mut hasher, receipt.content.localization_blake3.as_bytes())?;
+        field(&mut hasher, &receipt.request_hash)?;
+        field(&mut hasher, &receipt.tick_digest)?;
+        field(&mut hasher, &receipt.result_digest)?;
+        field(&mut hasher, &receipt.issued_at_unix_ms.to_le_bytes())?;
+        field(&mut hasher, &receipt.committed_at_unix_ms.to_le_bytes())?;
+    }
+    let digest = *hasher.finalize().as_bytes();
+    if all_zero(&digest) {
+        return Err(corrupt());
+    }
+    Ok(digest)
+}
+
 async fn lock_account(
     connection: &mut PgConnection,
     account: [u8; ID_BYTES],
@@ -835,10 +1080,9 @@ fn validate_snapshot_graph(
     let mut entry_index = 0;
     for receipt in receipts {
         let start = entry_index;
-        while entries
-            .get(entry_index)
-            .is_some_and(|entry| entry.event_tick == receipt.event_tick)
-        {
+        while entries.get(entry_index).is_some_and(|entry| {
+            entry.trace_tick_id == receipt.trace_tick_id && entry.event_tick == receipt.event_tick
+        }) {
             entry_index += 1;
         }
         let tick_entries = entries[start..entry_index]
@@ -1082,14 +1326,14 @@ async fn load_snapshot_entries(
         {
             return Err(corrupt());
         }
-        let tick_id: Vec<u8> = row.try_get("trace_tick_id")?;
+        let trace_tick_id = exact_id(row.try_get("trace_tick_id")?)?;
         let event_ordinal = nonnegative_u32(row.try_get("event_ordinal")?)?;
         if previous_order.is_some_and(|previous| previous >= (event_tick, event_ordinal)) {
             return Err(corrupt());
         }
         previous_order = Some((event_tick, event_ordinal));
         let statuses = sqlx::query("SELECT status_ordinal,status_id,remaining_ticks,stack_count FROM character_live_damage_trace_statuses_v1 WHERE namespace_id=$1 AND account_id=$2 AND trace_tick_id=$3 AND event_ordinal=$4 ORDER BY status_ordinal")
-            .bind(WIPEABLE_CORE_NAMESPACE).bind(account.as_slice()).bind(&tick_id).bind(i32::try_from(event_ordinal).map_err(corrupt_conversion)?).fetch_all(&mut *connection).await?.into_iter().map(|status| Ok(LiveDamageTraceStatusV1 { status_ordinal: u8::try_from(status.try_get::<i16,_>("status_ordinal")?).map_err(corrupt_conversion)?, status_id: status.try_get("status_id")?, remaining_ticks: nonnegative_u32(status.try_get("remaining_ticks")?)?, stack_count: u16::try_from(status.try_get::<i16,_>("stack_count")?).map_err(corrupt_conversion)? })).collect::<Result<Vec<_>, PersistenceError>>()?;
+            .bind(WIPEABLE_CORE_NAMESPACE).bind(account.as_slice()).bind(trace_tick_id.as_slice()).bind(i32::try_from(event_ordinal).map_err(corrupt_conversion)?).fetch_all(&mut *connection).await?.into_iter().map(|status| Ok(LiveDamageTraceStatusV1 { status_ordinal: u8::try_from(status.try_get::<i16,_>("status_ordinal")?).map_err(corrupt_conversion)?, status_id: status.try_get("status_id")?, remaining_ticks: nonnegative_u32(status.try_get("remaining_ticks")?)?, stack_count: u16::try_from(status.try_get::<i16,_>("stack_count")?).map_err(corrupt_conversion)? })).collect::<Result<Vec<_>, PersistenceError>>()?;
         if statuses.len() != nonnegative_usize(row.try_get("status_count")?)? {
             return Err(corrupt());
         }
@@ -1123,7 +1367,11 @@ async fn load_snapshot_entries(
         if exact_hash(row.try_get("entry_digest")?)? != entry_digest(event_tick, &entry)? {
             return Err(corrupt());
         }
-        result.push(StoredLiveDamageTraceSnapshotEntryV1 { event_tick, entry });
+        result.push(StoredLiveDamageTraceSnapshotEntryV1 {
+            trace_tick_id,
+            event_tick,
+            entry,
+        });
     }
     if result.len() > MAX_LIVE_DAMAGE_TRACE_ENTRIES_V1 {
         return Err(corrupt());
@@ -1221,6 +1469,21 @@ fn entry_digest(
         field(&mut h, &status.stack_count.to_le_bytes())?;
     }
     Ok(*h.finalize().as_bytes())
+}
+
+/// Returns the one canonical digest for a validated normalized live-trace entry.
+///
+/// Promotion uses this crate-private seam so the immutable death graph cannot drift from the
+/// digest stored by the live ingestion repository.
+pub(crate) fn canonical_live_damage_trace_entry_digest_v1(
+    event_tick: u64,
+    entry: &LiveDamageTraceEntryV1,
+) -> Result<[u8; HASH_BYTES], PersistenceError> {
+    if event_tick == 0 || i64::try_from(event_tick).is_err() {
+        return Err(corrupt());
+    }
+    entry.validate()?;
+    entry_digest(event_tick, entry)
 }
 fn conflict_id(request: &LiveDamageTraceTickRequestV1) -> Result<[u8; ID_BYTES], PersistenceError> {
     let mut h = blake3::Hasher::new();

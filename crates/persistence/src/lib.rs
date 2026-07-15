@@ -22,6 +22,7 @@ mod danger_checkpoint;
 mod danger_crash_restore;
 mod danger_crash_restore_repository;
 mod danger_entry_restore;
+mod death_live_trace_promotion;
 mod death_view_repository;
 mod durable_death;
 mod durable_death_repository;
@@ -87,6 +88,11 @@ pub use danger_entry_restore::{
     StoredDangerEntryOathBargainV3, stage_danger_entry_ash_wallet_restore_v3,
     stage_danger_entry_inventory_restore_v3, stage_danger_entry_life_metrics_restore_v3,
     stage_danger_entry_oath_bargain_restore_v3,
+};
+pub use death_live_trace_promotion::{
+    DEATH_LIVE_TRACE_PROMOTION_DIGEST_CONTEXT_V1, DEATH_TERMINAL_PAYLOAD_HASH_CONTEXT_V1,
+    DurableDeathTraceEntryProvenanceV1, DurableDeathTracePromotionV1,
+    canonical_death_terminal_payload_hash_v1,
 };
 pub use death_view_repository::{
     DeathViewReadError, MAX_DEATH_VIEW_LOST_PER_PAGE, MAX_DEATH_VIEW_MEMORIALS_PER_PAGE,
@@ -420,6 +426,8 @@ pub enum PersistenceError {
     DurableDeathTerminalSuperseded,
     #[error("final-death identity was replayed with different canonical material")]
     DurableDeathIdempotencyConflict,
+    #[error("final-death live-trace promotion was replayed with different canonical material")]
+    DurableDeathTracePromotionConflict,
     #[error("danger crash restoration account or character does not exist")]
     DangerCrashRestoreOwnerNotFound,
     #[error("danger crash restoration root does not exist for the bound character")]
@@ -1348,6 +1356,56 @@ mod tests {
             assert!(
                 !migration.contains(prohibited),
                 "retained live trace migration leaked {prohibited}"
+            );
+        }
+    }
+
+    #[test]
+    fn death_live_trace_promotion_is_mandatory_complete_and_forward_only() {
+        let migration = include_str!("../../../migrations/0049_death_live_trace_promotion.sql");
+        for required in [
+            "Gravebound_Production_GDD_v1_Canonical.md",
+            "Gravebound_Content_Production_Spec_v1.md",
+            "Gravebound_Development_Roadmap_v1.md",
+            "SPEC-CONFLICT-009-m03-death-memorial.md",
+            "0049 requires no existing deaths",
+            "death_live_trace_sets_v1",
+            "death_live_trace_receipt_links_v1",
+            "death_live_trace_entry_provenance_v1",
+            "death_live_trace_promotion_conflict_audits_v1",
+            "terminal_payload_hash BYTEA NOT NULL",
+            "REFERENCES character_live_damage_trace_ingest_receipts_v1",
+            "REFERENCES death_combat_trace_entries",
+            "enforce_death_live_trace_promotion_graph_v1",
+            "death_requires_live_trace_promotion_v1",
+            "DEFERRABLE INITIALLY DEFERRED",
+            "promotion.receipt_count - 1",
+            "receipt.lethal_count <> 0",
+            "receipt.expected_character_version = death.pre_character_version",
+            "receipt.receipt_committed_at IS DISTINCT FROM retained.committed_at",
+            "provenance.cause_kind = death.cause_kind",
+            "character_live_damage_trace_ingest_receipts_v1 AS retained",
+            "enforce_death_live_trace_provenance_source_v1",
+            "death_live_trace_provenance_source_exact_v1",
+            "EXCEPT",
+            "death_live_trace_conflict_authority_v1",
+            "attempted_promotion_digest <> stored_promotion_digest",
+            "never rewrite migrations 0043 or 0048",
+        ] {
+            assert!(migration.contains(required), "migration omitted {required}");
+        }
+        for prohibited in [
+            "DROP TABLE",
+            "TRUNCATE",
+            "DELETE FROM",
+            "JSON",
+            "JSONB",
+            "FLOAT",
+            "DOUBLE PRECISION",
+        ] {
+            assert!(
+                !migration.contains(prohibited),
+                "death live-trace promotion migration leaked {prohibited}"
             );
         }
     }

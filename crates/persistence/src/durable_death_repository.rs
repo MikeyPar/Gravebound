@@ -13,16 +13,32 @@ use sqlx::{PgConnection, Row};
 
 use crate::{
     AuthoritativeDeathPlanV1, DurableDamageTypeV1, DurableDeathCauseV1,
-    DurableDeathCommitRequestV1, DurableDeathContentAuthorityV1, DurableDestructionEntryV1,
+    DurableDeathCommitRequestV1, DurableDeathContentAuthorityV1,
+    DurableDeathTraceEntryProvenanceV1, DurableDeathTracePromotionV1, DurableDestructionEntryV1,
     DurableDestructionLocationV1, DurableEchoEnvelopeV1, DurableEchoOutcomeV1, DurableEchoStateV1,
     DurableEquipmentSlotV1, DurableNetworkStateV1, DurableRecallStateV1,
-    DurableSummaryProjectionEntryV1, DurableSummaryProjectionKindV1, PersistenceError,
+    DurableSummaryProjectionEntryV1, DurableSummaryProjectionKindV1,
+    LiveDamageTraceContentAuthorityV1, LiveDamageTraceDangerAuthorityV1, PersistenceError,
     PersistenceTransaction, PostgresPersistence, StoredCommittedDeathResultV1,
     WIPEABLE_CORE_NAMESPACE,
     bargain_cleanup::{
         BargainLifeCleanupCommand, BargainLifeEndReason, cleanup_bargains_for_life_end,
     },
+    canonical_death_terminal_payload_hash_v1,
+    death_live_trace_promotion::{
+        DurableDeathTracePromotionDigestMaterialV1,
+        canonical_stored_death_trace_promotion_digest_v1,
+    },
     derive_durable_death_bargain_cleanup_event_id,
+    live_damage_trace_repository::{
+        LiveDamageTraceCauseV1, LiveDamageTraceDamageTypeV1, LiveDamageTraceEntryV1,
+        LiveDamageTraceNetworkStateV1, LiveDamageTracePromotionReceiptV1,
+        LiveDamageTraceRecallStateV1, LiveDamageTraceStatusV1,
+        LockedLiveDamageTracePromotionWindowV1, canonical_live_damage_trace_entry_digest_v1,
+        canonical_live_damage_trace_receipt_window_digest_v1,
+        insert_terminal_live_damage_trace_tick_v1,
+        load_locked_live_damage_trace_promotion_window_v1,
+    },
 };
 
 const MAX_TRANSACTION_ATTEMPTS: u8 = 3;
@@ -30,6 +46,8 @@ const DEATH_CONFLICT_AUDIT_ID_CONTEXT: &str = "gravebound.death.conflict-audit-i
 const DEATH_CONFLICT_AUDIT_DIGEST_CONTEXT: &str = "gravebound.death.conflict-audit.v1";
 const DEATH_ACCEPTED_AUDIT_ID_CONTEXT: &str = "gravebound.death.accepted-audit-id.v1";
 const DEATH_OUTBOX_ID_CONTEXT: &str = "gravebound.death.outbox-id.v1";
+const DEATH_TRACE_PROMOTION_CONFLICT_AUDIT_ID_CONTEXT: &str =
+    "gravebound.death-live-trace-promotion-conflict-audit-id.v1";
 
 const LIFE_STATE_LIVING: i16 = 0;
 const LIFE_STATE_DEAD: i16 = 1;
@@ -197,6 +215,48 @@ struct StoredResultRow {
     digest: [u8; 32],
 }
 
+#[derive(Debug)]
+pub(crate) struct StoredDeathTracePromotionRow {
+    pub account_id: [u8; 16],
+    pub character_id: [u8; 16],
+    pub promotion_digest: [u8; 32],
+    pub terminal_payload_hash: [u8; 32],
+}
+
+struct StoredDeathTracePromotionRoot {
+    account_id: [u8; 16],
+    character_id: [u8; 16],
+    lineage_id: [u8; 16],
+    restore_point_id: [u8; 16],
+    contract_version: u16,
+    first_event_tick: u64,
+    death_tick: u64,
+    receipt_count: u16,
+    entry_count: u16,
+    status_count: u32,
+    lethal_trace_tick_id: [u8; 16],
+    records_blake3: String,
+    assets_blake3: String,
+    localization_blake3: String,
+    receipt_window_digest: [u8; 32],
+    promotion_digest: [u8; 32],
+    terminal_payload_hash: [u8; 32],
+}
+
+struct StoredDeathTraceProvenanceLink {
+    entry: DurableDeathTraceEntryProvenanceV1,
+    receipt_ordinal: usize,
+    durable_event_tick: u64,
+    durable_entry: LiveDamageTraceEntryV1,
+}
+
+struct StoredDeathTraceProvenanceGraph {
+    entries: Vec<DurableDeathTraceEntryProvenanceV1>,
+    entries_per_receipt: Vec<usize>,
+    statuses_per_receipt: Vec<usize>,
+    lethal_per_receipt: Vec<usize>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ItemLocationBinding {
     location_kind: i16,
@@ -250,9 +310,11 @@ impl PostgresPersistence {
         &self,
         request: &DurableDeathCommitRequestV1,
         content: &DurableDeathContentAuthorityV1,
+        promotion: &DurableDeathTracePromotionV1,
     ) -> Result<DurableDeathTransactionV1, PersistenceError> {
         content.validate()?;
         request.validate()?;
+        promotion.validate_request_binding(request)?;
         if !content.matches_event(&request.plan.event) {
             return Err(PersistenceError::DurableDeathContentMismatch);
         }
@@ -263,7 +325,10 @@ impl PostgresPersistence {
             return Err(PersistenceError::DurableDeathBindingMismatch);
         }
         for attempt in 1..=MAX_TRANSACTION_ATTEMPTS {
-            match self.transact_durable_death_once(request, content).await {
+            match self
+                .transact_durable_death_once(request, content, promotion)
+                .await
+            {
                 Err(error)
                     if attempt < MAX_TRANSACTION_ATTEMPTS
                         && crate::is_retryable_transaction_failure(&error) => {}
@@ -281,12 +346,13 @@ impl PostgresPersistence {
         &self,
         request: &DurableDeathCommitRequestV1,
         content: &DurableDeathContentAuthorityV1,
+        promotion: &DurableDeathTracePromotionV1,
     ) -> Result<DurableDeathTransactionV1, PersistenceError> {
         let mut transaction = self.begin_transaction().await?;
         let account = lock_account(transaction.connection(), request.plan.event.account_id).await?;
 
         if let Some(stored) = load_result_by_mutation(transaction.connection(), request).await? {
-            return finish_replay_or_conflict(transaction, request, stored).await;
+            return finish_replay_or_conflict(transaction, request, promotion, stored).await;
         }
         if let Some(stored) =
             load_result_by_final_identity(transaction.connection(), request).await?
@@ -304,6 +370,21 @@ impl PostgresPersistence {
         let root = lock_root(transaction.connection(), event).await?;
         validate_account_character_root(&account, &character, &root, plan, content)?;
         lock_and_validate_world(transaction.connection(), plan, &character, content).await?;
+        insert_terminal_live_damage_trace_tick_v1(
+            transaction.connection(),
+            promotion.lethal_request(),
+            committed_at_unix_ms,
+        )
+        .await?;
+        let live_window = load_locked_live_damage_trace_promotion_window_v1(
+            transaction.connection(),
+            event.account_id,
+            event.character_id,
+            &promotion.lethal_request().command.danger,
+            event.death_tick,
+        )
+        .await?;
+        promotion.validate_against(&committed_request, &live_window.entries)?;
         let progression = lock_progression(transaction.connection(), event).await?;
         let inventory_version = lock_inventory(transaction.connection(), event).await?;
         let items = lock_at_risk_items(transaction.connection(), event).await?;
@@ -322,7 +403,6 @@ impl PostgresPersistence {
             &root,
             plan,
         )?;
-        clear_terminal_danger_checkpoint(transaction.connection(), event).await?;
         validate_destruction_sources(
             &items,
             &materials,
@@ -341,6 +421,8 @@ impl PostgresPersistence {
         insert_death_event(transaction.connection(), &committed_request).await?;
         finalize_character_identity(transaction.connection(), plan).await?;
         insert_trace(transaction.connection(), plan).await?;
+        insert_live_trace_promotion(transaction.connection(), plan, promotion, &live_window)
+            .await?;
         insert_summary(transaction.connection(), plan).await?;
         insert_memorial(transaction.connection(), plan).await?;
         insert_destruction(transaction.connection(), plan).await?;
@@ -350,6 +432,7 @@ impl PostgresPersistence {
         insert_result(transaction.connection(), &committed_request, &result).await?;
         insert_accepted_audit(transaction.connection(), &committed_request, &result).await?;
         insert_outbox(transaction.connection(), plan, &result).await?;
+        clear_terminal_danger_checkpoint(transaction.connection(), event).await?;
         force_deferred_constraints(transaction.connection()).await?;
         transaction.commit().await?;
         Ok(DurableDeathTransactionV1::Fresh(result))
@@ -371,7 +454,7 @@ async fn clear_terminal_danger_checkpoint(
     .bind(&event.namespace_id)
     .bind(event.account_id.as_slice())
     .bind(event.character_id.as_slice())
-    .fetch_optional(connection)
+    .fetch_optional(&mut *connection)
     .await?;
     if let Some(row) = deleted
         && (exact_id(row.try_get("lineage_id")?)? != event.lineage_id
@@ -1536,6 +1619,143 @@ async fn insert_trace(
     Ok(())
 }
 
+async fn insert_live_trace_promotion(
+    connection: &mut PgConnection,
+    plan: &AuthoritativeDeathPlanV1,
+    promotion: &DurableDeathTracePromotionV1,
+    live_window: &LockedLiveDamageTracePromotionWindowV1,
+) -> Result<(), PersistenceError> {
+    if live_window.receipts.len() != usize::from(promotion.receipt_count())
+        || live_window.entries.len() != usize::from(promotion.entry_count())
+    {
+        return Err(PersistenceError::CorruptStoredDurableDeath);
+    }
+    let receipt_window_digest =
+        canonical_live_damage_trace_receipt_window_digest_v1(&live_window.receipts)?;
+    insert_live_trace_promotion_root(connection, plan, promotion, receipt_window_digest).await?;
+    let receipt_ordinals = insert_live_trace_receipt_links(connection, plan, live_window).await?;
+    insert_live_trace_entry_provenance(connection, plan, promotion, &receipt_ordinals).await
+}
+
+async fn insert_live_trace_promotion_root(
+    connection: &mut PgConnection,
+    plan: &AuthoritativeDeathPlanV1,
+    promotion: &DurableDeathTracePromotionV1,
+    receipt_window_digest: [u8; 32],
+) -> Result<(), PersistenceError> {
+    sqlx::query(
+        "INSERT INTO death_live_trace_sets_v1 (namespace_id,death_id,account_id,character_id,\
+            lineage_id,restore_point_id,contract_version,first_event_tick,death_tick,receipt_count,\
+            entry_count,status_count,lethal_trace_tick_id,records_blake3,assets_blake3,\
+            localization_blake3,receipt_window_digest,promotion_digest,terminal_payload_hash) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)",
+    )
+    .bind(&plan.event.namespace_id)
+    .bind(plan.event.death_id.as_slice())
+    .bind(plan.event.account_id.as_slice())
+    .bind(plan.event.character_id.as_slice())
+    .bind(promotion.lineage_id().as_slice())
+    .bind(promotion.restore_point_id().as_slice())
+    .bind(i16_value(promotion.contract_version())?)
+    .bind(i64_value(promotion.first_event_tick())?)
+    .bind(i64_value(promotion.death_tick())?)
+    .bind(i16_value(promotion.receipt_count())?)
+    .bind(i32_value(u32::from(promotion.entry_count()))?)
+    .bind(i32_value(promotion.status_count())?)
+    .bind(promotion.lethal_trace_tick_id().as_slice())
+    .bind(promotion.records_blake3())
+    .bind(promotion.assets_blake3())
+    .bind(promotion.localization_blake3())
+    .bind(receipt_window_digest.as_slice())
+    .bind(promotion.promotion_digest().as_slice())
+    .bind(promotion.terminal_payload_hash().as_slice())
+    .execute(&mut *connection)
+    .await?;
+    Ok(())
+}
+
+async fn insert_live_trace_receipt_links(
+    connection: &mut PgConnection,
+    plan: &AuthoritativeDeathPlanV1,
+    live_window: &LockedLiveDamageTracePromotionWindowV1,
+) -> Result<BTreeMap<[u8; 16], u16>, PersistenceError> {
+    let mut receipt_ordinals = BTreeMap::new();
+    for (ordinal, receipt) in live_window.receipts.iter().enumerate() {
+        let receipt_ordinal =
+            u16::try_from(ordinal).map_err(|_| PersistenceError::CorruptStoredDurableDeath)?;
+        if receipt_ordinals
+            .insert(receipt.trace_tick_id, receipt_ordinal)
+            .is_some()
+        {
+            return Err(PersistenceError::CorruptStoredDurableDeath);
+        }
+        let inserted = sqlx::query(
+            "INSERT INTO death_live_trace_receipt_links_v1 (namespace_id,death_id,\
+                receipt_ordinal,account_id,character_id,trace_tick_id,expected_character_version,\
+                lineage_id,restore_point_id,checkpoint_tick,event_tick,entry_count,status_count,\
+                lethal_count,records_blake3,assets_blake3,localization_blake3,request_hash,\
+                tick_digest,result_digest,issued_at,receipt_committed_at) \
+             SELECT namespace_id,$2,$3,account_id,character_id,trace_tick_id,\
+                expected_character_version,lineage_id,restore_point_id,checkpoint_tick,event_tick,\
+                entry_count,status_count,lethal_count,records_blake3,assets_blake3,\
+                localization_blake3,request_hash,tick_digest,result_digest,issued_at,committed_at \
+             FROM character_live_damage_trace_ingest_receipts_v1 \
+             WHERE namespace_id=$1 AND account_id=$4 AND character_id=$5 AND trace_tick_id=$6",
+        )
+        .bind(&plan.event.namespace_id)
+        .bind(plan.event.death_id.as_slice())
+        .bind(i16_value(receipt_ordinal)?)
+        .bind(receipt.account_id.as_slice())
+        .bind(receipt.character_id.as_slice())
+        .bind(receipt.trace_tick_id.as_slice())
+        .execute(&mut *connection)
+        .await?;
+        if inserted.rows_affected() != 1 {
+            return Err(PersistenceError::CorruptStoredDurableDeath);
+        }
+    }
+    Ok(receipt_ordinals)
+}
+
+async fn insert_live_trace_entry_provenance(
+    connection: &mut PgConnection,
+    plan: &AuthoritativeDeathPlanV1,
+    promotion: &DurableDeathTracePromotionV1,
+    receipt_ordinals: &BTreeMap<[u8; 16], u16>,
+) -> Result<(), PersistenceError> {
+    for provenance in promotion.entries() {
+        let receipt_ordinal = receipt_ordinals
+            .get(&provenance.trace_tick_id)
+            .copied()
+            .ok_or(PersistenceError::CorruptStoredDurableDeath)?;
+        sqlx::query(
+            "INSERT INTO death_live_trace_entry_provenance_v1 (namespace_id,death_id,\
+                trace_ordinal,receipt_ordinal,trace_tick_id,event_tick,event_ordinal,cause_kind,\
+                source_entity_id,source_sim_entity_id,status_count,live_entry_digest) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
+        )
+        .bind(&plan.event.namespace_id)
+        .bind(plan.event.death_id.as_slice())
+        .bind(i16_value(provenance.trace_ordinal)?)
+        .bind(i16_value(receipt_ordinal)?)
+        .bind(provenance.trace_tick_id.as_slice())
+        .bind(i64_value(provenance.event_tick)?)
+        .bind(i32_value(provenance.event_ordinal)?)
+        .bind(death_cause(provenance.cause))
+        .bind(provenance.source_entity_id.map(|value| value.to_vec()))
+        .bind(
+            provenance
+                .source_sim_entity_id
+                .map(|value| value.to_le_bytes().to_vec()),
+        )
+        .bind(i16_value(provenance.status_count)?)
+        .bind(provenance.live_entry_digest.as_slice())
+        .execute(&mut *connection)
+        .await?;
+    }
+    Ok(())
+}
+
 async fn insert_summary(
     connection: &mut PgConnection,
     plan: &AuthoritativeDeathPlanV1,
@@ -2048,8 +2268,9 @@ async fn load_result(
 }
 
 async fn finish_replay_or_conflict(
-    transaction: crate::PersistenceTransaction<'_>,
+    mut transaction: crate::PersistenceTransaction<'_>,
     request: &DurableDeathCommitRequestV1,
+    promotion: &DurableDeathTracePromotionV1,
     stored: StoredResultRow,
 ) -> Result<DurableDeathTransactionV1, PersistenceError> {
     if stored.account_id != request.plan.event.account_id
@@ -2061,9 +2282,548 @@ async fn finish_replay_or_conflict(
     {
         return finish_conflict(transaction, request, &stored).await;
     }
+    let stored_promotion = load_strict_stored_trace_promotion_v1(
+        transaction.connection(),
+        &request.plan.event.namespace_id,
+        stored.death_id,
+        stored.request_hash,
+    )
+    .await?
+    .ok_or(PersistenceError::CorruptStoredDurableDeath)?;
+    if stored_promotion.account_id != stored.account_id
+        || stored_promotion.character_id != stored.character_id
+        || promotion.account_id() != stored.account_id
+        || promotion.character_id() != stored.character_id
+        || promotion.death_id() != stored.death_id
+    {
+        return Err(PersistenceError::CorruptStoredDurableDeath);
+    }
+    if stored_promotion.promotion_digest != promotion.promotion_digest() {
+        return finish_trace_promotion_conflict(transaction, promotion, &stored_promotion, &stored)
+            .await;
+    }
+    if stored_promotion.terminal_payload_hash != promotion.terminal_payload_hash() {
+        return Err(PersistenceError::CorruptStoredDurableDeath);
+    }
     let result = decode_stored_result(&stored, request)?;
     transaction.rollback().await?;
     Ok(DurableDeathTransactionV1::Replayed(result))
+}
+
+pub(crate) async fn load_strict_stored_trace_promotion_v1(
+    connection: &mut PgConnection,
+    namespace_id: &str,
+    death_id: [u8; 16],
+    canonical_request_hash: [u8; 32],
+) -> Result<Option<StoredDeathTracePromotionRow>, PersistenceError> {
+    // Restart/replay integrity remains governed jointly by the canonical production GDD,
+    // content production spec, and development roadmap; SPEC-CONFLICT-009 only narrows their
+    // death/memorial persistence boundary and does not relax semantic graph validation.
+    let Some(root) = load_stored_trace_promotion_root(connection, namespace_id, death_id).await?
+    else {
+        return Ok(None);
+    };
+
+    let receipts = load_stored_trace_promotion_receipts(connection, namespace_id, death_id).await?;
+
+    let provenance =
+        load_stored_trace_promotion_provenance(connection, namespace_id, death_id, &receipts)
+            .await?;
+    let entries = &provenance.entries;
+
+    let lethal_receipt = receipts
+        .last()
+        .ok_or(PersistenceError::CorruptStoredDurableDeath)?;
+    let receipt_window_digest = canonical_live_damage_trace_receipt_window_digest_v1(&receipts)?;
+    let promotion_digest = canonical_stored_death_trace_promotion_digest_v1(
+        &DurableDeathTracePromotionDigestMaterialV1 {
+            contract_version: root.contract_version,
+            death_id,
+            account_id: root.account_id,
+            character_id: root.character_id,
+            lineage_id: root.lineage_id,
+            restore_point_id: root.restore_point_id,
+            checkpoint_tick: lethal_receipt.danger.checkpoint_tick,
+            terminal_character_version: lethal_receipt.expected_character_version,
+            records_blake3: &root.records_blake3,
+            assets_blake3: &root.assets_blake3,
+            localization_blake3: &root.localization_blake3,
+            first_event_tick: root.first_event_tick,
+            death_tick: root.death_tick,
+            receipt_count: root.receipt_count,
+            entry_count: root.entry_count,
+            status_count: root.status_count,
+            lethal_trace_tick_id: root.lethal_trace_tick_id,
+        },
+        lethal_receipt.request_hash,
+        entries,
+    )?;
+    let terminal_payload_hash =
+        canonical_death_terminal_payload_hash_v1(canonical_request_hash, promotion_digest)?;
+    let receipt_graph_valid = receipts.iter().enumerate().all(|(ordinal, receipt)| {
+        receipt.account_id == root.account_id
+            && receipt.character_id == root.character_id
+            && receipt.danger.lineage_id == root.lineage_id
+            && receipt.danger.restore_point_id == root.restore_point_id
+            && receipt.content.records_blake3 == root.records_blake3
+            && receipt.content.assets_blake3 == root.assets_blake3
+            && receipt.content.localization_blake3 == root.localization_blake3
+            && provenance.entries_per_receipt[ordinal] == receipt.entry_count
+            && provenance.statuses_per_receipt[ordinal] == receipt.status_count
+            && provenance.lethal_per_receipt[ordinal] == receipt.lethal_count
+            && ((ordinal + 1 == receipts.len() && receipt.lethal_count == 1)
+                || (ordinal + 1 < receipts.len() && receipt.lethal_count == 0))
+            && (ordinal == 0 || receipts[ordinal - 1].event_tick < receipt.event_tick)
+    });
+    let entry_status_count = entries.iter().try_fold(0_u32, |total, entry| {
+        total
+            .checked_add(u32::from(entry.status_count))
+            .ok_or(PersistenceError::CorruptStoredDurableDeath)
+    })?;
+    if !receipt_graph_valid
+        || receipts.len() != usize::from(root.receipt_count)
+        || entries.len() != usize::from(root.entry_count)
+        || entry_status_count != root.status_count
+        || receipts
+            .first()
+            .is_none_or(|receipt| receipt.event_tick != root.first_event_tick)
+        || lethal_receipt.trace_tick_id != root.lethal_trace_tick_id
+        || lethal_receipt.event_tick != root.death_tick
+        || receipt_window_digest != root.receipt_window_digest
+        || promotion_digest != root.promotion_digest
+        || terminal_payload_hash != root.terminal_payload_hash
+    {
+        return Err(PersistenceError::CorruptStoredDurableDeath);
+    }
+    Ok(Some(StoredDeathTracePromotionRow {
+        account_id: root.account_id,
+        character_id: root.character_id,
+        promotion_digest,
+        terminal_payload_hash,
+    }))
+}
+
+async fn load_stored_trace_promotion_root(
+    connection: &mut PgConnection,
+    namespace_id: &str,
+    death_id: [u8; 16],
+) -> Result<Option<StoredDeathTracePromotionRoot>, PersistenceError> {
+    sqlx::query(
+        "SELECT account_id,character_id,lineage_id,restore_point_id,contract_version,\
+                first_event_tick,death_tick,receipt_count,entry_count,status_count,\
+                lethal_trace_tick_id,records_blake3,assets_blake3,localization_blake3,\
+                receipt_window_digest,promotion_digest,terminal_payload_hash \
+         FROM death_live_trace_sets_v1 WHERE namespace_id=$1 AND death_id=$2 FOR UPDATE",
+    )
+    .bind(namespace_id)
+    .bind(death_id.as_slice())
+    .fetch_optional(connection)
+    .await?
+    .as_ref()
+    .map(decode_stored_trace_promotion_root)
+    .transpose()
+}
+
+fn decode_stored_trace_promotion_root(
+    row: &sqlx::postgres::PgRow,
+) -> Result<StoredDeathTracePromotionRoot, PersistenceError> {
+    Ok(StoredDeathTracePromotionRoot {
+        account_id: exact_id(row.try_get("account_id")?)?,
+        character_id: exact_id(row.try_get("character_id")?)?,
+        lineage_id: exact_id(row.try_get("lineage_id")?)?,
+        restore_point_id: exact_id(row.try_get("restore_point_id")?)?,
+        contract_version: u16::try_from(row.try_get::<i16, _>("contract_version")?)
+            .map_err(|_| PersistenceError::CorruptStoredDurableDeath)?,
+        first_event_tick: positive(row.try_get("first_event_tick")?)?,
+        death_tick: positive(row.try_get("death_tick")?)?,
+        receipt_count: u16::try_from(row.try_get::<i16, _>("receipt_count")?)
+            .map_err(|_| PersistenceError::CorruptStoredDurableDeath)?,
+        entry_count: u16::try_from(row.try_get::<i32, _>("entry_count")?)
+            .map_err(|_| PersistenceError::CorruptStoredDurableDeath)?,
+        status_count: u32_value(row.try_get("status_count")?)?,
+        lethal_trace_tick_id: exact_id(row.try_get("lethal_trace_tick_id")?)?,
+        records_blake3: row.try_get("records_blake3")?,
+        assets_blake3: row.try_get("assets_blake3")?,
+        localization_blake3: row.try_get("localization_blake3")?,
+        receipt_window_digest: exact_hash(row.try_get("receipt_window_digest")?)?,
+        promotion_digest: exact_hash(row.try_get("promotion_digest")?)?,
+        terminal_payload_hash: exact_hash(row.try_get("terminal_payload_hash")?)?,
+    })
+}
+
+async fn load_stored_trace_promotion_receipts(
+    connection: &mut PgConnection,
+    namespace_id: &str,
+    death_id: [u8; 16],
+) -> Result<Vec<LiveDamageTracePromotionReceiptV1>, PersistenceError> {
+    let rows = sqlx::query(
+        "SELECT receipt_ordinal,account_id,character_id,trace_tick_id,\
+                expected_character_version,lineage_id,restore_point_id,checkpoint_tick,event_tick,\
+                entry_count,status_count,lethal_count,records_blake3,assets_blake3,\
+                localization_blake3,request_hash,tick_digest,result_digest,\
+                floor(extract(epoch FROM issued_at)*1000)::bigint AS issued_at_ms,\
+                floor(extract(epoch FROM receipt_committed_at)*1000)::bigint AS committed_at_ms \
+         FROM death_live_trace_receipt_links_v1 WHERE namespace_id=$1 AND death_id=$2 \
+         ORDER BY receipt_ordinal FOR UPDATE",
+    )
+    .bind(namespace_id)
+    .bind(death_id.as_slice())
+    .fetch_all(connection)
+    .await?;
+    rows.iter()
+        .enumerate()
+        .map(|(ordinal, row)| decode_stored_trace_promotion_receipt(row, ordinal))
+        .collect()
+}
+
+fn decode_stored_trace_promotion_receipt(
+    row: &sqlx::postgres::PgRow,
+    expected_ordinal: usize,
+) -> Result<LiveDamageTracePromotionReceiptV1, PersistenceError> {
+    if usize::try_from(row.try_get::<i16, _>("receipt_ordinal")?).ok() != Some(expected_ordinal) {
+        return Err(PersistenceError::CorruptStoredDurableDeath);
+    }
+    Ok(LiveDamageTracePromotionReceiptV1 {
+        account_id: exact_id(row.try_get("account_id")?)?,
+        character_id: exact_id(row.try_get("character_id")?)?,
+        trace_tick_id: exact_id(row.try_get("trace_tick_id")?)?,
+        expected_character_version: positive(row.try_get("expected_character_version")?)?,
+        danger: LiveDamageTraceDangerAuthorityV1 {
+            lineage_id: exact_id(row.try_get("lineage_id")?)?,
+            restore_point_id: exact_id(row.try_get("restore_point_id")?)?,
+            checkpoint_tick: nonnegative(row.try_get("checkpoint_tick")?)?,
+        },
+        event_tick: positive(row.try_get("event_tick")?)?,
+        entry_count: usize::try_from(row.try_get::<i16, _>("entry_count")?)
+            .map_err(|_| PersistenceError::CorruptStoredDurableDeath)?,
+        status_count: usize::try_from(row.try_get::<i16, _>("status_count")?)
+            .map_err(|_| PersistenceError::CorruptStoredDurableDeath)?,
+        lethal_count: usize::try_from(row.try_get::<i16, _>("lethal_count")?)
+            .map_err(|_| PersistenceError::CorruptStoredDurableDeath)?,
+        content: LiveDamageTraceContentAuthorityV1 {
+            records_blake3: row.try_get("records_blake3")?,
+            assets_blake3: row.try_get("assets_blake3")?,
+            localization_blake3: row.try_get("localization_blake3")?,
+        },
+        request_hash: exact_hash(row.try_get("request_hash")?)?,
+        tick_digest: exact_hash(row.try_get("tick_digest")?)?,
+        result_digest: exact_hash(row.try_get("result_digest")?)?,
+        issued_at_unix_ms: positive(row.try_get("issued_at_ms")?)?,
+        committed_at_unix_ms: positive(row.try_get("committed_at_ms")?)?,
+    })
+}
+
+async fn load_stored_trace_promotion_provenance(
+    connection: &mut PgConnection,
+    namespace_id: &str,
+    death_id: [u8; 16],
+    receipts: &[LiveDamageTracePromotionReceiptV1],
+) -> Result<StoredDeathTraceProvenanceGraph, PersistenceError> {
+    let mut statuses =
+        load_stored_durable_trace_statuses(connection, namespace_id, death_id).await?;
+    let rows = sqlx::query(
+        "SELECT provenance.trace_ordinal,provenance.receipt_ordinal,provenance.trace_tick_id,\
+                provenance.event_tick,provenance.event_ordinal,provenance.cause_kind,\
+                provenance.source_entity_id,provenance.source_sim_entity_id,\
+                provenance.status_count,provenance.live_entry_digest,\
+                trace.event_tick AS durable_event_tick,\
+                trace.event_ordinal AS durable_event_ordinal,\
+                trace.source_content_id AS durable_source_content_id,\
+                trace.source_entity_id AS durable_source_entity_id,\
+                trace.pattern_id AS durable_pattern_id,trace.attack_id AS durable_attack_id,\
+                trace.raw_damage AS durable_raw_damage,trace.final_damage AS durable_final_damage,\
+                trace.damage_type AS durable_damage_type,trace.pre_health AS durable_pre_health,\
+                trace.post_health AS durable_post_health,\
+                trace.source_x_milli_tiles AS durable_source_x_milli_tiles,\
+                trace.source_y_milli_tiles AS durable_source_y_milli_tiles,\
+                trace.network_state AS durable_network_state,\
+                trace.recall_state AS durable_recall_state,trace.lethal AS durable_lethal \
+         FROM death_live_trace_entry_provenance_v1 AS provenance \
+         JOIN death_combat_trace_entries AS trace \
+           ON trace.namespace_id=provenance.namespace_id \
+          AND trace.death_id=provenance.death_id \
+         AND trace.trace_ordinal=provenance.trace_ordinal \
+         WHERE provenance.namespace_id=$1 AND provenance.death_id=$2 \
+         ORDER BY provenance.trace_ordinal FOR UPDATE OF provenance,trace",
+    )
+    .bind(namespace_id)
+    .bind(death_id.as_slice())
+    .fetch_all(connection)
+    .await?;
+    let links = rows
+        .iter()
+        .enumerate()
+        .map(|(ordinal, row)| decode_stored_trace_provenance_link(row, ordinal, &mut statuses))
+        .collect::<Result<Vec<_>, PersistenceError>>()?;
+    if !statuses.is_empty() {
+        return Err(PersistenceError::CorruptStoredDurableDeath);
+    }
+    build_stored_trace_provenance_graph(links, receipts)
+}
+
+async fn load_stored_durable_trace_statuses(
+    connection: &mut PgConnection,
+    namespace_id: &str,
+    death_id: [u8; 16],
+) -> Result<BTreeMap<u16, Vec<LiveDamageTraceStatusV1>>, PersistenceError> {
+    let rows = sqlx::query(
+        "SELECT trace_ordinal,status_ordinal,status_id,remaining_ticks,stack_count \
+         FROM death_combat_trace_statuses \
+         WHERE namespace_id=$1 AND death_id=$2 \
+         ORDER BY trace_ordinal,status_ordinal FOR UPDATE",
+    )
+    .bind(namespace_id)
+    .bind(death_id.as_slice())
+    .fetch_all(connection)
+    .await?;
+    let mut statuses = BTreeMap::<u16, Vec<LiveDamageTraceStatusV1>>::new();
+    for row in rows {
+        let trace_ordinal = u16::try_from(row.try_get::<i16, _>("trace_ordinal")?)
+            .map_err(|_| PersistenceError::CorruptStoredDurableDeath)?;
+        let entry_statuses = statuses.entry(trace_ordinal).or_default();
+        let status_ordinal = u8::try_from(row.try_get::<i16, _>("status_ordinal")?)
+            .map_err(|_| PersistenceError::CorruptStoredDurableDeath)?;
+        if usize::from(status_ordinal) != entry_statuses.len() {
+            return Err(PersistenceError::CorruptStoredDurableDeath);
+        }
+        entry_statuses.push(LiveDamageTraceStatusV1 {
+            status_ordinal,
+            status_id: row.try_get("status_id")?,
+            remaining_ticks: u32_value(row.try_get("remaining_ticks")?)?,
+            stack_count: u16::try_from(row.try_get::<i16, _>("stack_count")?)
+                .map_err(|_| PersistenceError::CorruptStoredDurableDeath)?,
+        });
+    }
+    Ok(statuses)
+}
+
+fn decode_stored_trace_provenance_link(
+    row: &sqlx::postgres::PgRow,
+    expected_ordinal: usize,
+    statuses: &mut BTreeMap<u16, Vec<LiveDamageTraceStatusV1>>,
+) -> Result<StoredDeathTraceProvenanceLink, PersistenceError> {
+    let trace_ordinal = u16::try_from(row.try_get::<i16, _>("trace_ordinal")?)
+        .map_err(|_| PersistenceError::CorruptStoredDurableDeath)?;
+    if usize::from(trace_ordinal) != expected_ordinal {
+        return Err(PersistenceError::CorruptStoredDurableDeath);
+    }
+    let source_sim_entity_id = row
+        .try_get::<Option<Vec<u8>>, _>("source_sim_entity_id")?
+        .map(decode_source_sim_entity_id)
+        .transpose()?;
+    let cause = decode_death_cause(row.try_get("cause_kind")?)?;
+    let durable_event_tick = positive(row.try_get("durable_event_tick")?)?;
+    let durable_entry = LiveDamageTraceEntryV1 {
+        event_ordinal: u32_value(row.try_get("durable_event_ordinal")?)?,
+        cause: live_trace_cause(cause),
+        source_content_id: row
+            .try_get::<Option<String>, _>("durable_source_content_id")?
+            .ok_or(PersistenceError::CorruptStoredDurableDeath)?,
+        source_entity_id: optional_id(row.try_get("durable_source_entity_id")?)?,
+        source_sim_entity_id,
+        pattern_id: row.try_get("durable_pattern_id")?,
+        attack_id: row
+            .try_get::<Option<String>, _>("durable_attack_id")?
+            .ok_or(PersistenceError::CorruptStoredDurableDeath)?,
+        raw_damage: u32_value(row.try_get("durable_raw_damage")?)?,
+        final_damage: u32_value(row.try_get("durable_final_damage")?)?,
+        damage_type: decode_live_trace_damage_type(row.try_get("durable_damage_type")?)?,
+        pre_health: positive_u32(row.try_get("durable_pre_health")?)?,
+        post_health: u32_value(row.try_get("durable_post_health")?)?,
+        source_x_milli_tiles: row.try_get("durable_source_x_milli_tiles")?,
+        source_y_milli_tiles: row.try_get("durable_source_y_milli_tiles")?,
+        network_state: decode_live_trace_network_state(row.try_get("durable_network_state")?)?,
+        recall_state: decode_live_trace_recall_state(row.try_get("durable_recall_state")?)?,
+        lethal: row.try_get("durable_lethal")?,
+        statuses: statuses.remove(&trace_ordinal).unwrap_or_default(),
+    };
+    Ok(StoredDeathTraceProvenanceLink {
+        entry: DurableDeathTraceEntryProvenanceV1 {
+            trace_ordinal,
+            trace_tick_id: exact_id(row.try_get("trace_tick_id")?)?,
+            event_tick: positive(row.try_get("event_tick")?)?,
+            event_ordinal: u32_value(row.try_get("event_ordinal")?)?,
+            cause,
+            source_entity_id: optional_id(row.try_get("source_entity_id")?)?,
+            source_sim_entity_id,
+            status_count: u16::try_from(row.try_get::<i16, _>("status_count")?)
+                .map_err(|_| PersistenceError::CorruptStoredDurableDeath)?,
+            live_entry_digest: exact_hash(row.try_get("live_entry_digest")?)?,
+        },
+        receipt_ordinal: usize::try_from(row.try_get::<i16, _>("receipt_ordinal")?)
+            .map_err(|_| PersistenceError::CorruptStoredDurableDeath)?,
+        durable_event_tick,
+        durable_entry,
+    })
+}
+
+fn build_stored_trace_provenance_graph(
+    links: Vec<StoredDeathTraceProvenanceLink>,
+    receipts: &[LiveDamageTracePromotionReceiptV1],
+) -> Result<StoredDeathTraceProvenanceGraph, PersistenceError> {
+    let mut graph = StoredDeathTraceProvenanceGraph {
+        entries: Vec::with_capacity(links.len()),
+        entries_per_receipt: vec![0; receipts.len()],
+        statuses_per_receipt: vec![0; receipts.len()],
+        lethal_per_receipt: vec![0; receipts.len()],
+    };
+    let mut durable_by_sim = BTreeMap::new();
+    let mut sim_by_durable = BTreeMap::new();
+    let mut previous_order = None;
+    for link in links {
+        let receipt = receipts
+            .get(link.receipt_ordinal)
+            .ok_or(PersistenceError::CorruptStoredDurableDeath)?;
+        let durable_order = (link.durable_event_tick, link.durable_entry.event_ordinal);
+        if receipt.trace_tick_id != link.entry.trace_tick_id
+            || receipt.event_tick != link.entry.event_tick
+            || link.entry.event_tick != link.durable_event_tick
+            || link.entry.event_ordinal != link.durable_entry.event_ordinal
+            || link.entry.source_entity_id != link.durable_entry.source_entity_id
+            || usize::from(link.entry.status_count) != link.durable_entry.statuses.len()
+            || previous_order.is_some_and(|previous| previous >= durable_order)
+            || link.entry.live_entry_digest
+                != canonical_live_damage_trace_entry_digest_v1(
+                    link.durable_event_tick,
+                    &link.durable_entry,
+                )?
+        {
+            return Err(PersistenceError::CorruptStoredDurableDeath);
+        }
+        validate_stored_trace_identity_pair(
+            &mut durable_by_sim,
+            &mut sim_by_durable,
+            &link.durable_entry,
+        )?;
+        previous_order = Some(durable_order);
+        graph.entries_per_receipt[link.receipt_ordinal] += 1;
+        graph.statuses_per_receipt[link.receipt_ordinal] = graph.statuses_per_receipt
+            [link.receipt_ordinal]
+            .checked_add(usize::from(link.entry.status_count))
+            .ok_or(PersistenceError::CorruptStoredDurableDeath)?;
+        if link.durable_entry.lethal {
+            graph.lethal_per_receipt[link.receipt_ordinal] += 1;
+        }
+        graph.entries.push(link.entry);
+    }
+    Ok(graph)
+}
+
+fn validate_stored_trace_identity_pair(
+    durable_by_sim: &mut BTreeMap<u64, [u8; 16]>,
+    sim_by_durable: &mut BTreeMap<[u8; 16], u64>,
+    entry: &LiveDamageTraceEntryV1,
+) -> Result<(), PersistenceError> {
+    match (entry.source_sim_entity_id, entry.source_entity_id) {
+        (None, None) => Ok(()),
+        (Some(sim), Some(durable)) => {
+            if durable_by_sim
+                .insert(sim, durable)
+                .is_some_and(|existing| existing != durable)
+                || sim_by_durable
+                    .insert(durable, sim)
+                    .is_some_and(|existing| existing != sim)
+            {
+                Err(PersistenceError::CorruptStoredDurableDeath)
+            } else {
+                Ok(())
+            }
+        }
+        _ => Err(PersistenceError::CorruptStoredDurableDeath),
+    }
+}
+
+const fn live_trace_cause(value: DurableDeathCauseV1) -> LiveDamageTraceCauseV1 {
+    match value {
+        DurableDeathCauseV1::DirectHit => LiveDamageTraceCauseV1::DirectHit,
+        DurableDeathCauseV1::DamageOverTime => LiveDamageTraceCauseV1::DamageOverTime,
+        DurableDeathCauseV1::Environment => LiveDamageTraceCauseV1::Environment,
+        DurableDeathCauseV1::Disconnect => LiveDamageTraceCauseV1::Disconnect,
+    }
+}
+
+fn decode_live_trace_damage_type(
+    value: i16,
+) -> Result<LiveDamageTraceDamageTypeV1, PersistenceError> {
+    match value {
+        0 => Ok(LiveDamageTraceDamageTypeV1::Physical),
+        1 => Ok(LiveDamageTraceDamageTypeV1::Veil),
+        _ => Err(PersistenceError::CorruptStoredDurableDeath),
+    }
+}
+
+fn decode_live_trace_network_state(
+    value: i16,
+) -> Result<LiveDamageTraceNetworkStateV1, PersistenceError> {
+    match value {
+        0 => Ok(LiveDamageTraceNetworkStateV1::Connected),
+        1 => Ok(LiveDamageTraceNetworkStateV1::Degraded),
+        2 => Ok(LiveDamageTraceNetworkStateV1::LinkLost),
+        3 => Ok(LiveDamageTraceNetworkStateV1::Reattached),
+        _ => Err(PersistenceError::CorruptStoredDurableDeath),
+    }
+}
+
+fn decode_live_trace_recall_state(
+    value: i16,
+) -> Result<LiveDamageTraceRecallStateV1, PersistenceError> {
+    match value {
+        0 => Ok(LiveDamageTraceRecallStateV1::Inactive),
+        1 => Ok(LiveDamageTraceRecallStateV1::Channeling),
+        2 => Ok(LiveDamageTraceRecallStateV1::CompletionPending),
+        _ => Err(PersistenceError::CorruptStoredDurableDeath),
+    }
+}
+
+fn decode_source_sim_entity_id(value: Vec<u8>) -> Result<u64, PersistenceError> {
+    let bytes: [u8; 8] = value
+        .try_into()
+        .map_err(|_| PersistenceError::CorruptStoredDurableDeath)?;
+    let identity = u64::from_le_bytes(bytes);
+    if identity == 0 {
+        return Err(PersistenceError::CorruptStoredDurableDeath);
+    }
+    Ok(identity)
+}
+
+async fn finish_trace_promotion_conflict(
+    mut transaction: crate::PersistenceTransaction<'_>,
+    promotion: &DurableDeathTracePromotionV1,
+    stored_promotion: &StoredDeathTracePromotionRow,
+    stored_result: &StoredResultRow,
+) -> Result<DurableDeathTransactionV1, PersistenceError> {
+    let audit_id = derived_id(
+        DEATH_TRACE_PROMOTION_CONFLICT_AUDIT_ID_CONTEXT,
+        &[
+            stored_result.death_id.as_slice(),
+            stored_promotion.promotion_digest.as_slice(),
+            promotion.promotion_digest().as_slice(),
+        ],
+    );
+    sqlx::query(
+        "INSERT INTO death_live_trace_promotion_conflict_audits_v1 (namespace_id,account_id,\
+            character_id,death_id,audit_id,conflict_code,stored_promotion_digest,\
+            attempted_promotion_digest,stored_terminal_payload_hash,attempted_terminal_payload_hash,\
+            attempted_issued_at) \
+         VALUES ($1,$2,$3,$4,$5,0,$6,$7,$8,$9,to_timestamp($10::double precision/1000.0)) \
+         ON CONFLICT (namespace_id,death_id,attempted_promotion_digest) DO NOTHING",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(stored_promotion.account_id.as_slice())
+    .bind(stored_promotion.character_id.as_slice())
+    .bind(stored_result.death_id.as_slice())
+    .bind(audit_id.as_slice())
+    .bind(stored_promotion.promotion_digest.as_slice())
+    .bind(promotion.promotion_digest().as_slice())
+    .bind(stored_promotion.terminal_payload_hash.as_slice())
+    .bind(promotion.terminal_payload_hash().as_slice())
+    .bind(i64_value(
+        promotion.lethal_request().command.issued_at_unix_ms,
+    )?)
+    .execute(transaction.connection())
+    .await?;
+    transaction.commit().await?;
+    Err(PersistenceError::DurableDeathTracePromotionConflict)
 }
 
 async fn finish_conflict(
@@ -2136,6 +2896,16 @@ fn death_cause(value: DurableDeathCauseV1) -> i16 {
         DurableDeathCauseV1::DamageOverTime => 1,
         DurableDeathCauseV1::Environment => 2,
         DurableDeathCauseV1::Disconnect => 3,
+    }
+}
+
+fn decode_death_cause(value: i16) -> Result<DurableDeathCauseV1, PersistenceError> {
+    match value {
+        0 => Ok(DurableDeathCauseV1::DirectHit),
+        1 => Ok(DurableDeathCauseV1::DamageOverTime),
+        2 => Ok(DurableDeathCauseV1::Environment),
+        3 => Ok(DurableDeathCauseV1::Disconnect),
+        _ => Err(PersistenceError::CorruptStoredDurableDeath),
     }
 }
 
@@ -2264,6 +3034,13 @@ fn u32_value(value: i32) -> Result<u32, PersistenceError> {
     u32::try_from(value).map_err(|_| PersistenceError::CorruptStoredDurableDeath)
 }
 
+fn positive_u32(value: i32) -> Result<u32, PersistenceError> {
+    u32::try_from(value)
+        .ok()
+        .filter(|value| *value > 0)
+        .ok_or(PersistenceError::CorruptStoredDurableDeath)
+}
+
 fn i16_value(value: u16) -> Result<i16, PersistenceError> {
     i16::try_from(value).map_err(|_| PersistenceError::CorruptStoredDurableDeath)
 }
@@ -2354,6 +3131,136 @@ mod tests {
         assert!(i32_value(u32::MAX).is_err());
         assert!(exact_id(vec![0; 15]).is_err());
         assert!(exact_hash(vec![0; 31]).is_err());
+    }
+
+    fn stored_trace_link(
+        ordinal: u16,
+        source_entity_id: [u8; 16],
+        source_sim_entity_id: u64,
+        lethal: bool,
+        statuses: Vec<LiveDamageTraceStatusV1>,
+    ) -> (
+        StoredDeathTraceProvenanceLink,
+        LiveDamageTracePromotionReceiptV1,
+    ) {
+        let trace_tick_id = [u8::try_from(ordinal + 1).unwrap(); 16];
+        let event_tick = 100 + u64::from(ordinal);
+        let event_ordinal = u32::from(ordinal);
+        let status_count = u16::try_from(statuses.len()).unwrap();
+        let durable_entry = LiveDamageTraceEntryV1 {
+            event_ordinal,
+            cause: LiveDamageTraceCauseV1::DirectHit,
+            source_content_id: "enemy.core.trace_test".into(),
+            source_entity_id: Some(source_entity_id),
+            source_sim_entity_id: Some(source_sim_entity_id),
+            pattern_id: Some("pattern.core.trace_test".into()),
+            attack_id: "attack.core.trace_test".into(),
+            raw_damage: if lethal { 10 } else { 2 },
+            final_damage: if lethal { 10 } else { 2 },
+            damage_type: LiveDamageTraceDamageTypeV1::Physical,
+            pre_health: 10,
+            post_health: if lethal { 0 } else { 8 },
+            source_x_milli_tiles: 1_000,
+            source_y_milli_tiles: 2_000,
+            network_state: LiveDamageTraceNetworkStateV1::Connected,
+            recall_state: LiveDamageTraceRecallStateV1::Inactive,
+            lethal,
+            statuses,
+        };
+        let live_entry_digest =
+            canonical_live_damage_trace_entry_digest_v1(event_tick, &durable_entry).unwrap();
+        (
+            StoredDeathTraceProvenanceLink {
+                entry: DurableDeathTraceEntryProvenanceV1 {
+                    trace_ordinal: ordinal,
+                    trace_tick_id,
+                    event_tick,
+                    event_ordinal,
+                    cause: DurableDeathCauseV1::DirectHit,
+                    source_entity_id: Some(source_entity_id),
+                    source_sim_entity_id: Some(source_sim_entity_id),
+                    status_count,
+                    live_entry_digest,
+                },
+                receipt_ordinal: usize::from(ordinal),
+                durable_event_tick: event_tick,
+                durable_entry,
+            },
+            LiveDamageTracePromotionReceiptV1 {
+                account_id: [11; 16],
+                character_id: [12; 16],
+                trace_tick_id,
+                expected_character_version: 7,
+                danger: LiveDamageTraceDangerAuthorityV1 {
+                    lineage_id: [13; 16],
+                    restore_point_id: [14; 16],
+                    checkpoint_tick: 1,
+                },
+                event_tick,
+                entry_count: 1,
+                status_count: usize::from(status_count),
+                lethal_count: usize::from(lethal),
+                content: LiveDamageTraceContentAuthorityV1 {
+                    records_blake3: "a".repeat(64),
+                    assets_blake3: "b".repeat(64),
+                    localization_blake3: "c".repeat(64),
+                },
+                request_hash: [15; 32],
+                tick_digest: [16; 32],
+                result_digest: [17; 32],
+                issued_at_unix_ms: 1,
+                committed_at_unix_ms: 2,
+            },
+        )
+    }
+
+    #[test]
+    fn stored_trace_semantics_and_identity_bijection_fail_closed() {
+        let status = LiveDamageTraceStatusV1 {
+            status_ordinal: 0,
+            status_id: "status.core.trace_test".into(),
+            remaining_ticks: 30,
+            stack_count: 1,
+        };
+        let (first, first_receipt) = stored_trace_link(0, [21; 16], 101, false, vec![status]);
+        let (second, second_receipt) = stored_trace_link(1, [22; 16], 102, true, Vec::new());
+        let receipts = vec![first_receipt, second_receipt];
+        assert!(build_stored_trace_provenance_graph(vec![first, second], &receipts).is_ok());
+
+        let (mut altered_ordinal, altered_ordinal_receipt) =
+            stored_trace_link(0, [21; 16], 101, false, Vec::new());
+        altered_ordinal.entry.event_ordinal += 1;
+        assert!(
+            build_stored_trace_provenance_graph(vec![altered_ordinal], &[altered_ordinal_receipt],)
+                .is_err()
+        );
+
+        let (mut altered_status, status_receipt) = stored_trace_link(
+            0,
+            [21; 16],
+            101,
+            false,
+            vec![LiveDamageTraceStatusV1 {
+                status_ordinal: 0,
+                status_id: "status.core.trace_test".into(),
+                remaining_ticks: 30,
+                stack_count: 1,
+            }],
+        );
+        altered_status.durable_entry.statuses[0].remaining_ticks += 1;
+        assert!(
+            build_stored_trace_provenance_graph(vec![altered_status], &[status_receipt]).is_err()
+        );
+
+        let (first, first_receipt) = stored_trace_link(0, [21; 16], 101, false, Vec::new());
+        let (second, second_receipt) = stored_trace_link(1, [22; 16], 101, true, Vec::new());
+        assert!(
+            build_stored_trace_provenance_graph(
+                vec![first, second],
+                &[first_receipt, second_receipt],
+            )
+            .is_err()
+        );
     }
 
     #[test]
