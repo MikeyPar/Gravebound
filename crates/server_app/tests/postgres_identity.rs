@@ -617,6 +617,21 @@ async fn stage_real_quic_bargain_offer(
     .fetch_one(transaction.connection())
     .await
     .unwrap();
+    let risks_safe_loadout = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM item_instances WHERE namespace_id = $1 \
+         AND account_id = $2 AND character_id = $3 AND location_kind IN (0, 1))",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    let entry_inventory_version = if risks_safe_loadout {
+        versions.3.checked_add(1).unwrap()
+    } else {
+        versions.3
+    };
     let hashes = world.hashes();
     sqlx::query(
         "INSERT INTO character_instance_lineages (namespace_id, account_id, character_id, \
@@ -652,7 +667,7 @@ async fn stage_real_quic_bargain_offer(
     .bind(versions.0)
     .bind(versions.1)
     .bind(versions.2)
-    .bind(versions.3)
+    .bind(entry_inventory_version)
     .bind(versions.4)
     .bind(versions.5)
     .bind(versions.6)
@@ -710,20 +725,19 @@ async fn stage_real_quic_bargain_offer(
     )
     .await
     .unwrap();
-    sqlx::query(
-        "UPDATE character_entry_restore_points SET inventory_version = $1, \
-         oath_bargain_version = $2, life_metrics_version = $3, ash_wallet_version = $4 \
-         WHERE namespace_id = $5 AND restore_point_id = $6",
-    )
-    .bind(i64::try_from(inventory.post_inventory_version).unwrap())
-    .bind(i64::try_from(oath.oath_bargain_version).unwrap())
-    .bind(i64::try_from(life.life_metrics_version).unwrap())
-    .bind(i64::try_from(ash.ash_wallet_version).unwrap())
-    .bind(WIPEABLE_CORE_NAMESPACE)
-    .bind(RESTORE_ID.as_slice())
-    .execute(transaction.connection())
-    .await
-    .unwrap();
+    assert_eq!(
+        i64::try_from(inventory.post_inventory_version).unwrap(),
+        entry_inventory_version
+    );
+    assert_eq!(
+        i64::try_from(oath.oath_bargain_version).unwrap(),
+        versions.4
+    );
+    assert_eq!(
+        i64::try_from(life.life_metrics_version).unwrap(),
+        versions.5
+    );
+    assert_eq!(i64::try_from(ash.ash_wallet_version).unwrap(), versions.6);
     let danger_version = versions.1 + 1;
     sqlx::query(
         "UPDATE characters SET character_state_version = $1 WHERE namespace_id = $2 \
