@@ -1041,16 +1041,30 @@ fn assert_terminal_root(root: &sqlx::postgres::PgRow) {
     assert_eq!(root.get::<i64, _>("life_metrics_version"), 3);
 }
 
+async fn normalized_live_trace_counts(persistence: &PostgresPersistence) -> (i64, i64, i64) {
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let counts = sqlx::query_as(
+        "SELECT \
+            (SELECT count(*) FROM character_live_damage_trace_ticks_v1 \
+             WHERE namespace_id=$1 AND account_id=$2), \
+            (SELECT count(*) FROM character_live_damage_trace_entries_v1 \
+             WHERE namespace_id=$1 AND account_id=$2), \
+            (SELECT count(*) FROM character_live_damage_trace_statuses_v1 \
+             WHERE namespace_id=$1 AND account_id=$2)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    transaction.rollback().await.unwrap();
+    counts
+}
+
 async fn assert_normalized_live_trace_absent(persistence: &PostgresPersistence) {
     // GDD TECH-023, Content Production Spec exact encounter authority, and Roadmap
     // GB-M03-02/06/13 require terminal cleanup only after the immutable trace has committed.
-    for table in [
-        "character_live_damage_trace_ticks_v1",
-        "character_live_damage_trace_entries_v1",
-        "character_live_damage_trace_statuses_v1",
-    ] {
-        assert_eq!(count(persistence, table).await, 0, "{table}");
-    }
+    assert_eq!(normalized_live_trace_counts(persistence).await, (0, 0, 0));
 }
 
 async fn assert_complete_graph(persistence: &PostgresPersistence, ids: RequestIds) {
@@ -1146,18 +1160,7 @@ async fn assert_complete_graph(persistence: &PostgresPersistence, ids: RequestId
 
 async fn assert_rollback_pristine(persistence: &PostgresPersistence) {
     assert_eq!(count(persistence, "character_danger_checkpoints").await, 1);
-    assert_eq!(
-        count(persistence, "character_live_damage_trace_ticks_v1").await,
-        1
-    );
-    assert_eq!(
-        count(persistence, "character_live_damage_trace_entries_v1").await,
-        1
-    );
-    assert_eq!(
-        count(persistence, "character_live_damage_trace_statuses_v1").await,
-        1
-    );
+    assert_eq!(normalized_live_trace_counts(persistence).await, (1, 1, 1));
     assert_eq!(count(persistence, "death_events").await, 0);
     assert_eq!(count(persistence, "death_mutation_results").await, 0);
     assert_eq!(count(persistence, "echo_records").await, 0);
