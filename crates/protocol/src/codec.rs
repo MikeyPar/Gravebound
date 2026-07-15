@@ -1,7 +1,10 @@
 use postcard::{from_bytes, to_stdvec};
 use thiserror::Error;
 
-use crate::{M02_PROTOCOL_MINOR, MessageKind, PROTOCOL_MAJOR, ProtocolVersion, WireMessage};
+use crate::{
+    M02_PROTOCOL_MINOR, MessageKind, PROTOCOL_MAJOR, ProtocolVersion,
+    SAFE_INVENTORY_PROTOCOL_MINOR, WireMessage,
+};
 
 const MAGIC: [u8; 4] = *b"GBN1";
 pub const FRAME_HEADER_BYTES: usize = 14;
@@ -15,18 +18,20 @@ pub fn encode_frame(message: &WireMessage) -> Result<Vec<u8>, WireCodecError> {
 /// Reproduces canonical M02 bytes for immutable fixtures and package verification. These frames
 /// are not accepted by the current exact-minor live decoder.
 pub fn encode_m02_compatibility_frame(message: &WireMessage) -> Result<Vec<u8>, WireCodecError> {
-    if matches!(
-        message.kind(),
-        MessageKind::AccountBootstrapFrame
-            | MessageKind::CharacterMutationFrame
-            | MessageKind::WorldFlowFrame
-            | MessageKind::ProgressionQueryFrame
-            | MessageKind::OathViewFrame
-            | MessageKind::InitialOathSelectionFrame
-            | MessageKind::BargainViewFrame
-            | MessageKind::BargainDecisionFrame
-            | MessageKind::SafeInventoryTransferFrame
-    ) {
+    if message_uses_death_view(message)
+        || matches!(
+            message.kind(),
+            MessageKind::AccountBootstrapFrame
+                | MessageKind::CharacterMutationFrame
+                | MessageKind::WorldFlowFrame
+                | MessageKind::ProgressionQueryFrame
+                | MessageKind::OathViewFrame
+                | MessageKind::InitialOathSelectionFrame
+                | MessageKind::BargainViewFrame
+                | MessageKind::BargainDecisionFrame
+                | MessageKind::SafeInventoryTransferFrame
+        )
+    {
         return Err(WireCodecError::MessageUnavailableAtVersion);
     }
     encode_frame_for_version(
@@ -35,6 +40,34 @@ pub fn encode_m02_compatibility_frame(message: &WireMessage) -> Result<Vec<u8>, 
             major: PROTOCOL_MAJOR,
             minor: M02_PROTOCOL_MINOR,
         },
+    )
+}
+
+/// Reproduces protocol 1.12 bytes for append-only compatibility verification. Death views are
+/// intentionally unavailable before their negotiated protocol generation.
+pub fn encode_protocol_1_12_compatibility_frame(
+    message: &WireMessage,
+) -> Result<Vec<u8>, WireCodecError> {
+    if message_uses_death_view(message) {
+        return Err(WireCodecError::MessageUnavailableAtVersion);
+    }
+    encode_frame_for_version(
+        message,
+        ProtocolVersion {
+            major: PROTOCOL_MAJOR,
+            minor: SAFE_INVENTORY_PROTOCOL_MINOR,
+        },
+    )
+}
+
+const fn message_uses_death_view(message: &WireMessage) -> bool {
+    matches!(
+        message,
+        WireMessage::DeathViewFrame(_)
+            | WireMessage::ReliableEvent(crate::ReliableEventFrame {
+                event: crate::ReliableEvent::DeathViewResult(_),
+                ..
+            })
     )
 }
 
@@ -128,6 +161,7 @@ const fn message_kind_byte(kind: MessageKind) -> u8 {
         MessageKind::BargainViewFrame => 15,
         MessageKind::BargainDecisionFrame => 16,
         MessageKind::SafeInventoryTransferFrame => 17,
+        MessageKind::DeathViewFrame => 18,
     }
 }
 
@@ -150,6 +184,7 @@ const fn message_kind_from_byte(value: u8) -> Result<MessageKind, WireCodecError
         15 => Ok(MessageKind::BargainViewFrame),
         16 => Ok(MessageKind::BargainDecisionFrame),
         17 => Ok(MessageKind::SafeInventoryTransferFrame),
+        18 => Ok(MessageKind::DeathViewFrame),
         other => Err(WireCodecError::UnknownMessageKind(other)),
     }
 }
@@ -211,6 +246,11 @@ mod tests {
         assert_eq!(decode_frame(&frame).unwrap(), input_message());
         assert_eq!(
             blake3::hash(&frame).to_hex().to_string(),
+            "cbb46a116eccddb9ee20d1e15dfb773164083e76310f294a68b3626d8ab35a5c"
+        );
+        let protocol_1_12 = encode_protocol_1_12_compatibility_frame(&input_message()).unwrap();
+        assert_eq!(
+            blake3::hash(&protocol_1_12).to_hex().to_string(),
             "04b734acd84cf09bf65e76c5773ffea1892682b91600996902099aec8a7d7266"
         );
         let m02 = encode_m02_compatibility_frame(&input_message()).unwrap();
@@ -424,8 +464,11 @@ mod tests {
         });
 
         let frame = encode_frame(&transfer).unwrap();
-        assert_eq!(u16::from_le_bytes([frame[6], frame[7]]), 12);
-        assert_eq!(decode_frame(&frame), Ok(transfer));
+        assert_eq!(u16::from_le_bytes([frame[6], frame[7]]), 13);
+        assert_eq!(decode_frame(&frame), Ok(transfer.clone()));
+
+        let compatibility = encode_protocol_1_12_compatibility_frame(&transfer).unwrap();
+        assert_eq!(u16::from_le_bytes([compatibility[6], compatibility[7]]), 12);
     }
 
     #[test]
@@ -445,9 +488,12 @@ mod tests {
                 payload,
             });
         let frame = encode_frame(&transfer).unwrap();
-        assert_eq!(u16::from_le_bytes([frame[6], frame[7]]), 12);
+        assert_eq!(u16::from_le_bytes([frame[6], frame[7]]), 13);
         assert_eq!(frame[8], 17);
         assert_eq!(decode_frame(&frame), Ok(transfer.clone()));
+        let compatibility = encode_protocol_1_12_compatibility_frame(&transfer).unwrap();
+        assert_eq!(u16::from_le_bytes([compatibility[6], compatibility[7]]), 12);
+        assert_eq!(compatibility[8], 17);
         assert_eq!(
             encode_m02_compatibility_frame(&transfer),
             Err(WireCodecError::MessageUnavailableAtVersion)
@@ -471,6 +517,83 @@ mod tests {
         });
         let frame = encode_frame(&rejection).unwrap();
         assert_eq!(decode_frame(&frame), Ok(rejection));
+    }
+
+    #[test]
+    fn protocol_1_13_appends_only_authenticated_death_views_at_kind_18() {
+        let mut death_id = [14; 16];
+        death_id[6] = 0x7e;
+        death_id[8] = 0x8e;
+        let request = WireMessage::DeathViewFrame(crate::DeathViewFrameV1 {
+            schema_version: crate::DEATH_VIEW_SCHEMA_VERSION,
+            sequence: 13,
+            content_revision: crate::DeathViewContentRevisionV1 {
+                records_blake3: ManifestHash::new("7".repeat(64)).unwrap(),
+                assets_blake3: ManifestHash::new("8".repeat(64)).unwrap(),
+                localization_blake3: ManifestHash::new("9".repeat(64)).unwrap(),
+            },
+            request: crate::DeathViewRequestV1::Summary {
+                death_id,
+                lost_start_ordinal: 0,
+                lost_limit: 16,
+            },
+        });
+        let frame = encode_frame(&request).unwrap();
+        assert_eq!(u16::from_le_bytes([frame[6], frame[7]]), 13);
+        assert_eq!(frame[8], 18);
+        assert_eq!(decode_frame(&frame), Ok(request.clone()));
+        assert_eq!(
+            blake3::hash(&frame).to_hex().to_string(),
+            "b45fa66d66579c56bfb415d7e78542e257e3ad40ad7a1849a045ce0552a915f3"
+        );
+        assert_eq!(
+            encode_protocol_1_12_compatibility_frame(&request),
+            Err(WireCodecError::MessageUnavailableAtVersion)
+        );
+
+        let result = WireMessage::ReliableEvent(crate::ReliableEventFrame {
+            sequence: 1,
+            server_tick: 1,
+            event: crate::ReliableEvent::DeathViewResult(Box::new(
+                crate::DeathViewResultV1::Error {
+                    schema_version: crate::DEATH_VIEW_SCHEMA_VERSION,
+                    request_sequence: 13,
+                    code: crate::DeathViewResultCodeV1::DeathNotOwned,
+                },
+            )),
+        });
+        assert_eq!(
+            encode_protocol_1_12_compatibility_frame(&result),
+            Err(WireCodecError::MessageUnavailableAtVersion)
+        );
+    }
+
+    #[test]
+    fn append_only_message_kind_bytes_one_through_seventeen_are_unchanged() {
+        let legacy = [
+            MessageKind::ClientHello,
+            MessageKind::HandshakeResponse,
+            MessageKind::InputFrame,
+            MessageKind::ActionFrame,
+            MessageKind::SnapshotChunk,
+            MessageKind::ReliableEvent,
+            MessageKind::MutationRequest,
+            MessageKind::SessionControlFrame,
+            MessageKind::AccountBootstrapFrame,
+            MessageKind::CharacterMutationFrame,
+            MessageKind::WorldFlowFrame,
+            MessageKind::ProgressionQueryFrame,
+            MessageKind::OathViewFrame,
+            MessageKind::InitialOathSelectionFrame,
+            MessageKind::BargainViewFrame,
+            MessageKind::BargainDecisionFrame,
+            MessageKind::SafeInventoryTransferFrame,
+        ];
+        assert_eq!(
+            legacy.map(message_kind_byte),
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
+        );
+        assert_eq!(message_kind_byte(MessageKind::DeathViewFrame), 18);
     }
 
     #[test]

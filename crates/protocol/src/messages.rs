@@ -6,10 +6,10 @@ use thiserror::Error;
 use crate::{
     AccountBootstrapFrame, AccountBootstrapResult, BargainDecisionFrame, BargainDecisionResult,
     BargainViewFrame, BargainViewResult, CharacterMutationFrame, CharacterMutationResult,
-    ClientHello, HandshakeResponse, InitialOathSelectionFrame, InitialOathSelectionResult,
-    NetworkChannel, OathViewFrame, OathViewResult, ProgressionQueryFrame, ProgressionResult,
-    SafeInventoryTransferFrameV1, SafeInventoryTransferResultV1, WireText, WorldFlowFrame,
-    WorldFlowResult,
+    ClientHello, DeathViewFrameV1, DeathViewResultV1, HandshakeResponse, InitialOathSelectionFrame,
+    InitialOathSelectionResult, NetworkChannel, OathViewFrame, OathViewResult,
+    ProgressionQueryFrame, ProgressionResult, SafeInventoryTransferFrameV1,
+    SafeInventoryTransferResultV1, WireText, WorldFlowFrame, WorldFlowResult,
 };
 
 pub const FIXED_VECTOR_SCALE: i16 = 1_000;
@@ -40,6 +40,7 @@ pub enum MessageKind {
     BargainViewFrame,
     BargainDecisionFrame,
     SafeInventoryTransferFrame,
+    DeathViewFrame,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -442,6 +443,7 @@ pub enum ReliableEvent {
     BargainViewResult(BargainViewResult),
     BargainDecisionResult(BargainDecisionResult),
     SafeInventoryTransferResult(SafeInventoryTransferResultV1),
+    DeathViewResult(Box<DeathViewResultV1>),
 }
 
 impl ReliableEvent {
@@ -460,7 +462,8 @@ impl ReliableEvent {
             | Self::WorldFlowResult(_)
             | Self::ProgressionResult(_)
             | Self::OathViewResult(_)
-            | Self::BargainViewResult(_) => NetworkChannel::Control,
+            | Self::BargainViewResult(_)
+            | Self::DeathViewResult(_) => NetworkChannel::Control,
             Self::SocialPing { .. } => NetworkChannel::Social,
         }
     }
@@ -502,6 +505,9 @@ impl ReliableEvent {
             Self::SafeInventoryTransferResult(result) => result
                 .validate()
                 .map_err(|_| MessageValidationError::SafeInventory),
+            Self::DeathViewResult(result) => result
+                .validate()
+                .map_err(|_| MessageValidationError::DeathView),
             _ => Ok(()),
         }
     }
@@ -543,6 +549,7 @@ pub enum WireMessage {
     BargainViewFrame(BargainViewFrame),
     BargainDecisionFrame(BargainDecisionFrame),
     SafeInventoryTransferFrame(SafeInventoryTransferFrameV1),
+    DeathViewFrame(DeathViewFrameV1),
 }
 
 impl WireMessage {
@@ -566,6 +573,7 @@ impl WireMessage {
             Self::BargainViewFrame(_) => MessageKind::BargainViewFrame,
             Self::BargainDecisionFrame(_) => MessageKind::BargainDecisionFrame,
             Self::SafeInventoryTransferFrame(_) => MessageKind::SafeInventoryTransferFrame,
+            Self::DeathViewFrame(_) => MessageKind::DeathViewFrame,
         }
     }
 
@@ -579,7 +587,8 @@ impl WireMessage {
             | Self::WorldFlowFrame(_)
             | Self::ProgressionQueryFrame(_)
             | Self::OathViewFrame(_)
-            | Self::BargainViewFrame(_) => NetworkChannel::Control,
+            | Self::BargainViewFrame(_)
+            | Self::DeathViewFrame(_) => NetworkChannel::Control,
             Self::InputFrame(_) => NetworkChannel::Input,
             Self::ActionFrame(_) => NetworkChannel::Action,
             Self::SnapshotChunk(_) => NetworkChannel::Snapshot,
@@ -638,6 +647,9 @@ impl WireMessage {
             Self::SafeInventoryTransferFrame(value) => value
                 .validate()
                 .map_err(|_| MessageValidationError::SafeInventory),
+            Self::DeathViewFrame(value) => value
+                .validate()
+                .map_err(|_| MessageValidationError::DeathView),
         }
     }
 }
@@ -656,6 +668,8 @@ pub enum MessageValidationError {
     Bargain,
     #[error("safe-inventory message failed semantic validation")]
     SafeInventory,
+    #[error("death-view message failed semantic validation")]
+    DeathView,
     #[error("message sequence must be nonzero")]
     ZeroSequence,
     #[error("fixed-point vector component must remain within -1000..=1000")]

@@ -8,6 +8,7 @@ mod account;
 mod bargain;
 mod bounded;
 mod codec;
+mod death_view;
 mod field_equipment;
 mod handshake;
 mod messages;
@@ -35,7 +36,20 @@ pub use bargain::{
 pub use bounded::{AuthTicket, BoundedValueError, ManifestHash, WireText};
 pub use codec::{
     DATAGRAM_FRAME_LIMIT, FRAME_HEADER_BYTES, RELIABLE_FRAME_LIMIT, WireCodecError, decode_frame,
-    encode_frame, encode_m02_compatibility_frame,
+    encode_frame, encode_m02_compatibility_frame, encode_protocol_1_12_compatibility_frame,
+};
+pub use death_view::{
+    DEATH_VIEW_CHARACTER_NAME_MAX_BYTES, DEATH_VIEW_DIGEST_BYTES, DEATH_VIEW_ID_BYTES,
+    DEATH_VIEW_ID_MAX_BYTES, DEATH_VIEW_MAX_BARGAINS, DEATH_VIEW_MAX_LOST_PROJECTIONS,
+    DEATH_VIEW_MAX_LOST_PROJECTIONS_PER_PAGE, DEATH_VIEW_MAX_MEMORIALS_PER_PAGE,
+    DEATH_VIEW_MAX_STATUSES_PER_TRACE_ENTRY, DEATH_VIEW_MAX_SUMMARY_DAMAGE_ENTRIES,
+    DEATH_VIEW_MAX_TRACE_ENTRIES, DEATH_VIEW_MAX_TRACE_ENTRIES_PER_PAGE, DEATH_VIEW_SCHEMA_VERSION,
+    DEATH_VIEW_TRACE_WINDOW_TICKS, DeathCauseV1, DeathCharacterName, DeathDamageTypeV1,
+    DeathEchoOutcomeV1, DeathMemorialCursorV1, DeathMemorialEntryV1, DeathNetworkStateV1,
+    DeathRecallStateV1, DeathSummaryProjectionEntryV1, DeathSummaryProjectionKindV1,
+    DeathSummaryViewV1, DeathTraceEntryV1, DeathTracePageV1, DeathTraceStatusV1,
+    DeathViewContentRevisionV1, DeathViewFrameV1, DeathViewRequestV1, DeathViewResultCodeV1,
+    DeathViewResultV1, DeathViewValidationError, LatestCommittedDeathV1,
 };
 pub use field_equipment::{
     FIELD_EQUIPMENT_CHANGE_CAPACITY, FIELD_EQUIPMENT_ID_MAX_BYTES, FIELD_EQUIPMENT_ITEM_UID_BYTES,
@@ -88,7 +102,9 @@ use thiserror::Error;
 /// First incompatible protocol generation.
 pub const PROTOCOL_MAJOR: u16 = 1;
 /// Backward-compatible feature generation within [`PROTOCOL_MAJOR`].
-pub const PROTOCOL_MINOR: u16 = SAFE_INVENTORY_PROTOCOL_MINOR;
+pub const PROTOCOL_MINOR: u16 = DEATH_VIEW_PROTOCOL_MINOR;
+/// Exact authenticated durable-death view generation.
+pub const DEATH_VIEW_PROTOCOL_MINOR: u16 = 13;
 /// Exact safe-inventory reliable mutation generation.
 pub const SAFE_INVENTORY_PROTOCOL_MINOR: u16 = 12;
 /// Exact committed-Caldus-extraction command generation.
@@ -129,6 +145,8 @@ pub const CORE_TEST_IDENTITY_FEATURE_FLAG: &str = "core_test_identity_character_
 pub const CORE_WORLD_FLOW_FEATURE_FLAG: &str = "core_world_flow_integration";
 /// Advertised only by the disposable integrated item/Vault lifecycle harness.
 pub const CORE_SAFE_INVENTORY_FEATURE_FLAG: &str = "core_safe_inventory_integration";
+/// Advertises the authenticated, read-only durable-death query surface.
+pub const CORE_DEATH_VIEW_FEATURE_FLAG: &str = "core_death_views";
 /// Build admitted by the explicit wipeable Core identity development endpoint.
 pub const M03_CORE_DEV_BUILD_ID: &str = "m03-core-dev-identity-1";
 /// Non-promotable content target label advertised by the Core identity endpoint.
@@ -326,5 +344,18 @@ mod tests {
         let mut rates = UpdateRates::canonical();
         rates.interpolation_delay_ms = 80;
         assert_eq!(rates.validate(), Err(ProtocolFoundationError::ClientTiming));
+    }
+
+    #[test]
+    fn death_views_require_protocol_1_13_and_explicit_feature_negotiation() {
+        assert_eq!(PROTOCOL_MINOR, 13);
+        assert_eq!(DEATH_VIEW_PROTOCOL_MINOR, 13);
+        assert_eq!(SAFE_INVENTORY_PROTOCOL_MINOR, 12);
+        assert!(
+            WireText::<{ crate::handshake::FEATURE_FLAG_MAX_BYTES }>::new(
+                CORE_DEATH_VIEW_FEATURE_FLAG
+            )
+            .is_ok()
+        );
     }
 }
