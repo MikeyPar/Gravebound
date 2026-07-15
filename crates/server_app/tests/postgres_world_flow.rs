@@ -60,6 +60,15 @@ async fn insert_character(
     .await
     .unwrap();
     sqlx::query(
+        "INSERT INTO ash_wallets (namespace_id, account_id, balance, wallet_version) \
+         VALUES ($1, $2, 0, 1)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query(
         "INSERT INTO characters (namespace_id, account_id, character_id, roster_ordinal, \
          class_id, level, oath_id, life_state, security_state, character_state_version) \
          VALUES ($1, $2, $3, 1, 'class.grave_arbalist', 1, NULL, 0, 0, 1)",
