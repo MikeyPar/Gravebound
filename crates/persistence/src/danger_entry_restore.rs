@@ -2,6 +2,7 @@
 
 use std::collections::BTreeSet;
 
+use serde::Serialize;
 use sqlx::Row;
 
 use crate::{
@@ -662,7 +663,7 @@ fn risk_transition_event_id(mutation_id: [u8; 16], item_uid: [u8; 16]) -> [u8; 1
     value
 }
 
-fn inventory_digest(
+pub(crate) fn inventory_digest(
     pre_version: u64,
     post_version: u64,
     safe_placement_count: u16,
@@ -690,7 +691,7 @@ fn inventory_digest(
     *hasher.finalize().as_bytes()
 }
 
-fn oath_digest(
+pub(crate) fn oath_digest(
     oath_id: Option<&str>,
     earned_slots: u8,
     version: u64,
@@ -718,7 +719,7 @@ fn oath_digest(
     *hasher.finalize().as_bytes()
 }
 
-fn life_digest(lifetime_ticks: u64, combat_ticks: u64, version: u64) -> [u8; 32] {
+pub(crate) fn life_digest(lifetime_ticks: u64, combat_ticks: u64, version: u64) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new_derive_key("gravebound.entry-life-metrics.v3");
     hasher.update(&lifetime_ticks.to_le_bytes());
     hasher.update(&combat_ticks.to_le_bytes());
@@ -726,10 +727,134 @@ fn life_digest(lifetime_ticks: u64, combat_ticks: u64, version: u64) -> [u8; 32]
     *hasher.finalize().as_bytes()
 }
 
-fn ash_digest(version: u64) -> [u8; 32] {
+pub(crate) fn ash_digest(version: u64) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new_derive_key("gravebound.entry-ash-wallet.v3");
     hasher.update(&version.to_le_bytes());
     *hasher.finalize().as_bytes()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct DangerEntrySnapshotDigestV3 {
+    pub character_id: [u8; 16],
+    pub content_revision: DangerEntryContentRevisionDigestV3,
+    pub progression: DangerEntryProgressionDigestV3,
+    pub inventory: DangerEntryInventoryDigestV3,
+    pub oath_bargains: DangerEntryOathDigestV3,
+    pub life_metrics: DangerEntryLifeDigestV3,
+    pub ash_wallet: DangerEntryAshDigestV3,
+    pub versions: DangerEntryVersionsDigestV3,
+}
+
+impl DangerEntrySnapshotDigestV3 {
+    pub(crate) fn composite_digest(&self) -> Result<[u8; 32], PersistenceError> {
+        let bytes = postcard::to_stdvec(self)
+            .map_err(|_| PersistenceError::CorruptStoredDangerCrashRestore)?;
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"gravebound.danger-entry-restore.v3\0");
+        hasher.update(&bytes);
+        Ok(*hasher.finalize().as_bytes())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[allow(
+    clippy::struct_field_names,
+    reason = "field names mirror the server V3 content-revision postcard contract"
+)]
+pub(crate) struct DangerEntryContentRevisionDigestV3 {
+    pub records_blake3: String,
+    pub assets_blake3: String,
+    pub localization_blake3: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub(crate) struct DangerEntryProgressionDigestV3 {
+    pub level: u16,
+    pub xp: u32,
+    pub current_health: u32,
+    pub progression_version: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct DangerEntryInventoryDigestV3 {
+    pub baseline_items: Vec<DangerEntryInventoryItemDigestV3>,
+    pub pre_inventory_version: u64,
+    pub inventory_version: u64,
+    pub safe_placement_count: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct DangerEntryInventoryItemDigestV3 {
+    pub item_uid: [u8; 16],
+    pub template_id: String,
+    pub content_revision: String,
+    pub creation_kind: u8,
+    pub creation_request_id: [u8; 16],
+    pub roll_index: u16,
+    pub unit_ordinal: u16,
+    pub provenance_kind: u8,
+    pub location: DangerEntryInventoryLocationDigestV3,
+    pub slot_index: u8,
+    pub item_version: u64,
+    pub security: DangerEntryInventorySecurityDigestV3,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub(crate) enum DangerEntryInventoryLocationDigestV3 {
+    Equipment,
+    Belt,
+    RunBackpack,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub(crate) enum DangerEntryInventorySecurityDigestV3 {
+    AtRiskEquipped,
+    AtRiskPending,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct DangerEntryOathDigestV3 {
+    pub oath_id: Option<String>,
+    pub active_bargains: Vec<DangerEntryActiveBargainDigestV3>,
+    pub earned_bargain_slots: u8,
+    pub oath_bargain_version: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct DangerEntryActiveBargainDigestV3 {
+    pub acquisition_ordinal: u8,
+    pub bargain_id: String,
+    pub acquired_by_offer_id: [u8; 16],
+    pub source_reward_event_id: [u8; 16],
+    pub content_version: String,
+    pub content_revision: DangerEntryContentRevisionDigestV3,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub(crate) struct DangerEntryLifeDigestV3 {
+    pub lifetime_ticks: u64,
+    pub permadeath_combat_ticks: u64,
+    pub life_metrics_version: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub(crate) struct DangerEntryAshDigestV3 {
+    pub ash_wallet_version: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[allow(
+    clippy::struct_field_names,
+    reason = "field names mirror the server V3 aggregate-version postcard contract"
+)]
+pub(crate) struct DangerEntryVersionsDigestV3 {
+    pub account_version: u64,
+    pub character_version: u64,
+    pub progression_version: u64,
+    pub inventory_version: u64,
+    pub oath_bargain_version: u64,
+    pub life_metrics_version: u64,
+    pub ash_wallet_version: u64,
 }
 
 fn decode_active_bargain(
@@ -810,6 +935,116 @@ fn fixed_bytes(bytes: Vec<u8>) -> Result<[u8; 16], PersistenceError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the server V3 parity fixture is intentionally exact"
+    )]
+    fn persistence_v3_root_digest_matches_server_fixture() {
+        let revision = DangerEntryContentRevisionDigestV3 {
+            records_blake3: "a".repeat(64),
+            assets_blake3: "b".repeat(64),
+            localization_blake3: "c".repeat(64),
+        };
+        let item_revision = format!("core-dev.blake3.{}", "d".repeat(64));
+        let snapshot = DangerEntrySnapshotDigestV3 {
+            character_id: [1; 16],
+            content_revision: revision.clone(),
+            progression: DangerEntryProgressionDigestV3 {
+                level: 10,
+                xp: 4_200,
+                current_health: 120,
+                progression_version: 5,
+            },
+            inventory: DangerEntryInventoryDigestV3 {
+                baseline_items: vec![
+                    DangerEntryInventoryItemDigestV3 {
+                        item_uid: [2; 16],
+                        template_id: "weapon.iron_arbalest".into(),
+                        content_revision: item_revision.clone(),
+                        creation_kind: 0,
+                        creation_request_id: [10; 16],
+                        roll_index: 0,
+                        unit_ordinal: 0,
+                        provenance_kind: 0,
+                        location: DangerEntryInventoryLocationDigestV3::Equipment,
+                        slot_index: 0,
+                        item_version: 2,
+                        security: DangerEntryInventorySecurityDigestV3::AtRiskEquipped,
+                    },
+                    DangerEntryInventoryItemDigestV3 {
+                        item_uid: [3; 16],
+                        template_id: "consumable.red_tonic".into(),
+                        content_revision: item_revision.clone(),
+                        creation_kind: 1,
+                        creation_request_id: [11; 16],
+                        roll_index: 2,
+                        unit_ordinal: 1,
+                        provenance_kind: 1,
+                        location: DangerEntryInventoryLocationDigestV3::Belt,
+                        slot_index: 0,
+                        item_version: 4,
+                        security: DangerEntryInventorySecurityDigestV3::AtRiskEquipped,
+                    },
+                    DangerEntryInventoryItemDigestV3 {
+                        item_uid: [4; 16],
+                        template_id: "relic.ember_glass".into(),
+                        content_revision: item_revision,
+                        creation_kind: 2,
+                        creation_request_id: [12; 16],
+                        roll_index: 3,
+                        unit_ordinal: 0,
+                        provenance_kind: 2,
+                        location: DangerEntryInventoryLocationDigestV3::RunBackpack,
+                        slot_index: 5,
+                        item_version: 7,
+                        security: DangerEntryInventorySecurityDigestV3::AtRiskPending,
+                    },
+                ],
+                pre_inventory_version: 6,
+                inventory_version: 7,
+                safe_placement_count: 1,
+            },
+            oath_bargains: DangerEntryOathDigestV3 {
+                oath_id: Some("oath.arbalist.long_vigil".into()),
+                active_bargains: vec![DangerEntryActiveBargainDigestV3 {
+                    acquisition_ordinal: 1,
+                    bargain_id: "bargain.cinder_hunger".into(),
+                    acquired_by_offer_id: [20; 16],
+                    source_reward_event_id: [21; 16],
+                    content_version: "core-dev".into(),
+                    content_revision: revision,
+                }],
+                earned_bargain_slots: 1,
+                oath_bargain_version: 9,
+            },
+            life_metrics: DangerEntryLifeDigestV3 {
+                lifetime_ticks: 36_000,
+                permadeath_combat_ticks: 900,
+                life_metrics_version: 3,
+            },
+            ash_wallet: DangerEntryAshDigestV3 {
+                ash_wallet_version: 8,
+            },
+            versions: DangerEntryVersionsDigestV3 {
+                account_version: 2,
+                character_version: 11,
+                progression_version: 5,
+                inventory_version: 7,
+                oath_bargain_version: 9,
+                life_metrics_version: 3,
+                ash_wallet_version: 8,
+            },
+        };
+        assert_eq!(
+            snapshot.composite_digest().unwrap(),
+            [
+                62, 92, 98, 12, 238, 99, 91, 222, 86, 244, 12, 154, 10, 49, 205, 162, 82, 102, 107,
+                128, 16, 210, 21, 158, 193, 103, 238, 190, 128, 111, 24, 66,
+            ]
+        );
+    }
 
     #[test]
     fn risk_ledger_identity_is_domain_separated_and_deterministic() {

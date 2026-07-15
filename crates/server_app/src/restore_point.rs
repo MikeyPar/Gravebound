@@ -1720,6 +1720,13 @@ mod tests {
 
     #[test]
     fn v3_digest_binds_backpack_provenance_bargain_authority_and_ash() {
+        assert_eq!(
+            snapshot_v3().composite_digest().unwrap(),
+            [
+                62, 92, 98, 12, 238, 99, 91, 222, 86, 244, 12, 154, 10, 49, 205, 162, 82, 102, 107,
+                128, 16, 210, 21, 158, 193, 103, 238, 190, 128, 111, 24, 66,
+            ]
+        );
         assert_v3_digest_changes(|value| {
             value.inventory.baseline_items[2].slot_index = 6;
         });

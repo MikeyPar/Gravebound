@@ -503,7 +503,7 @@ fn validate_progression(
     Ok(())
 }
 
-fn progression_component_digest(
+pub(crate) fn progression_component_digest(
     progression: &StoredProgression,
 ) -> Result<[u8; 32], PersistenceError> {
     let mut hasher = blake3::Hasher::new();

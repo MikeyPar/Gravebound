@@ -20,6 +20,7 @@ mod caldus_victory;
 mod combat_loadout;
 mod danger_checkpoint;
 mod danger_crash_restore;
+mod danger_crash_restore_repository;
 mod danger_entry_restore;
 mod extraction;
 mod field_equipment;
@@ -340,6 +341,12 @@ pub enum PersistenceError {
     DangerCheckpointFinalizationNotCommitted,
     #[error("stored danger crash restoration violates the approved terminal contract")]
     CorruptStoredDangerCrashRestore,
+    #[error("danger crash restoration account or character does not exist")]
+    DangerCrashRestoreOwnerNotFound,
+    #[error("danger crash restoration root does not exist for the bound character")]
+    DangerCrashRestorePointNotFound,
+    #[error("danger crash restoration cannot unambiguously compensate danger-bound Ash")]
+    DangerCrashRestoreAmbiguousAsh,
     #[error("Bargain life-end cleanup input or stored state is corrupt")]
     CorruptBargainCleanup,
     #[error("Bargain life-end cleanup expected a different aggregate version")]
