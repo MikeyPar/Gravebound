@@ -922,6 +922,9 @@ async fn count(persistence: &PostgresPersistence, table: &str) -> i64 {
         "item_instances" => {
             "SELECT count(*) FROM item_instances WHERE namespace_id=$1 AND account_id=$2"
         }
+        "item_ledger_events" => {
+            "SELECT count(*) FROM item_ledger_events WHERE namespace_id=$1 AND account_id=$2"
+        }
         "character_run_material_stacks" => {
             "SELECT count(*) FROM character_run_material_stacks \
              WHERE namespace_id=$1 AND account_id=$2"
@@ -956,6 +959,9 @@ async fn count(persistence: &PostgresPersistence, table: &str) -> i64 {
         }
         "death_mutation_results" => {
             "SELECT count(*) FROM death_mutation_results WHERE namespace_id=$1 AND account_id=$2"
+        }
+        "death_audit_events" => {
+            "SELECT count(*) FROM death_audit_events WHERE namespace_id=$1 AND account_id=$2"
         }
         "echo_records" => {
             "SELECT count(*) FROM echo_records WHERE namespace_id=$1 AND account_id=$2"
@@ -1139,12 +1145,14 @@ async fn assert_complete_graph(persistence: &PostgresPersistence, ids: RequestId
 
     for (table, expected) in [
         ("character_danger_checkpoints", 0),
+        ("item_ledger_events", 2),
         ("death_events", 1),
         ("death_combat_trace_entries", 2),
         ("death_summary_snapshots", 1),
         ("memorial_records", 1),
         ("death_destruction_entries", 2),
         ("death_mutation_results", 1),
+        ("death_audit_events", 1),
         ("echo_records", 1),
         ("echo_state_transitions", 2),
         ("death_outbox_events", 3),
@@ -1159,32 +1167,60 @@ async fn assert_complete_graph(persistence: &PostgresPersistence, ids: RequestId
 }
 
 async fn assert_rollback_pristine(persistence: &PostgresPersistence) {
-    assert_eq!(count(persistence, "character_danger_checkpoints").await, 1);
+    // GDD TECH-021/023, Content Spec CONT-ECHO-009, and Roadmap GB-M03-02D/06/13 require every
+    // participant to roll back together. Check both the live authority heads and every immutable
+    // family that could otherwise leak a partial terminal result.
+    for (table, expected) in [
+        ("character_danger_checkpoints", 1),
+        ("character_life_outbox", 0),
+        ("item_ledger_events", 1),
+        ("death_events", 0),
+        ("death_combat_trace_entries", 0),
+        ("death_summary_snapshots", 0),
+        ("memorial_records", 0),
+        ("death_destruction_entries", 0),
+        ("death_mutation_results", 0),
+        ("death_audit_events", 0),
+        ("death_outbox_events", 0),
+        ("echo_records", 0),
+        ("echo_state_transitions", 0),
+        ("character_live_damage_trace_ingest_receipts_v1", 1),
+        ("death_live_trace_sets_v1", 0),
+        ("death_live_trace_receipt_links_v1", 0),
+        ("death_live_trace_entry_provenance_v1", 0),
+        ("death_live_trace_promotion_conflict_audits_v1", 0),
+    ] {
+        assert_eq!(count(persistence, table).await, expected, "{table}");
+    }
     assert_eq!(normalized_live_trace_counts(persistence).await, (1, 1, 1));
-    assert_eq!(count(persistence, "death_events").await, 0);
-    assert_eq!(count(persistence, "death_mutation_results").await, 0);
-    assert_eq!(count(persistence, "echo_records").await, 0);
-    assert_eq!(count(persistence, "character_life_outbox").await, 0);
-    assert_eq!(
-        count(
-            persistence,
-            "character_live_damage_trace_ingest_receipts_v1"
-        )
-        .await,
-        1
-    );
-    assert_eq!(count(persistence, "death_live_trace_sets_v1").await, 0);
     let mut transaction = persistence.begin_transaction().await.unwrap();
     let row = sqlx::query(
         "SELECT account.state_version,account.selected_character_id,character.life_state, \
                 character.roster_ordinal,character.character_state_version,item.item_version, \
-                item.security_state,item.location_kind,oath.oath_bargain_version, \
-                progression.current_health,life.lifetime_ticks,life.permadeath_combat_ticks \
+                item.security_state,item.location_kind,item.destruction_reason IS NULL \
+                    AS item_not_destroyed,item.terminal_death_id IS NULL AS item_not_terminal, \
+                oath.oath_bargain_version,progression.current_health, \
+                progression.progression_version,inventory.inventory_version, \
+                life.lifetime_ticks,life.permadeath_combat_ticks,life.life_metrics_version, \
+                world.character_version AS world_character_version,world.location_kind \
+                    AS world_location_kind,world.instance_lineage_id,world.entry_restore_point_id, \
+                root.restore_state,root.death_mutation_id IS NULL AS root_not_terminal, \
+                lineage.lineage_state,lineage.closed_at IS NULL AS lineage_open, \
+                material.quantity,material.material_version,material.security_state \
+                    AS material_security_state,material.terminal_reason IS NULL \
+                    AS material_not_terminal,material.terminal_death_id IS NULL \
+                    AS material_without_death \
          FROM accounts AS account JOIN characters AS character USING (namespace_id,account_id) \
          JOIN item_instances AS item USING (namespace_id,account_id,character_id) \
          JOIN character_oath_bargain_state AS oath USING (namespace_id,account_id,character_id) \
          JOIN character_progression AS progression USING (namespace_id,account_id,character_id) \
+         JOIN character_inventories AS inventory USING (namespace_id,account_id,character_id) \
          JOIN character_life_metrics AS life USING (namespace_id,account_id,character_id) \
+         JOIN character_world_locations AS world USING (namespace_id,account_id,character_id) \
+         JOIN character_entry_restore_points AS root USING (namespace_id,account_id,character_id) \
+         JOIN character_instance_lineages AS lineage USING (namespace_id,account_id,character_id) \
+         JOIN character_run_material_stacks AS material \
+             USING (namespace_id,account_id,character_id) \
          WHERE account.namespace_id=$1 AND account.account_id=$2 AND character.character_id=$3",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
@@ -1201,10 +1237,31 @@ async fn assert_rollback_pristine(persistence: &PostgresPersistence) {
     assert_eq!(row.get::<i64, _>("item_version"), 2);
     assert_eq!(row.get::<i16, _>("security_state"), 1);
     assert_eq!(row.get::<i16, _>("location_kind"), 0);
+    assert!(row.get::<bool, _>("item_not_destroyed"));
+    assert!(row.get::<bool, _>("item_not_terminal"));
     assert_eq!(row.get::<i64, _>("oath_bargain_version"), 1);
     assert_eq!(row.get::<i32, _>("current_health"), 50);
+    assert_eq!(row.get::<i64, _>("progression_version"), 2);
+    assert_eq!(row.get::<i64, _>("inventory_version"), 2);
     assert_eq!(row.get::<i64, _>("lifetime_ticks"), 19_990);
     assert_eq!(row.get::<i64, _>("permadeath_combat_ticks"), 17_990);
+    assert_eq!(row.get::<i64, _>("life_metrics_version"), 2);
+    assert_eq!(row.get::<i64, _>("world_character_version"), 2);
+    assert_eq!(row.get::<i16, _>("world_location_kind"), 2);
+    assert_eq!(row.get::<Vec<u8>, _>("instance_lineage_id"), LINEAGE_ID);
+    assert_eq!(
+        row.get::<Vec<u8>, _>("entry_restore_point_id"),
+        RESTORE_POINT_ID
+    );
+    assert_eq!(row.get::<i16, _>("restore_state"), 0);
+    assert!(row.get::<bool, _>("root_not_terminal"));
+    assert_eq!(row.get::<i16, _>("lineage_state"), 0);
+    assert!(row.get::<bool, _>("lineage_open"));
+    assert_eq!(row.get::<i32, _>("quantity"), 7);
+    assert_eq!(row.get::<i64, _>("material_version"), 1);
+    assert_eq!(row.get::<i16, _>("material_security_state"), 2);
+    assert!(row.get::<bool, _>("material_not_terminal"));
+    assert!(row.get::<bool, _>("material_without_death"));
     transaction.rollback().await.unwrap();
 }
 
@@ -1373,39 +1430,207 @@ async fn rewrite_first_durable_trace_status_remaining_ticks(
     original
 }
 
-async fn set_summary_insert_rejection(persistence: &PostgresPersistence, enabled: bool) {
+#[derive(Clone, Copy)]
+enum FaultTriggerTiming {
+    Before {
+        operation: &'static str,
+        predicate: Option<&'static str>,
+    },
+    DeferredAfterInsert,
+}
+
+#[derive(Clone, Copy)]
+struct DurableDeathFaultBoundary {
+    label: &'static str,
+    table: &'static str,
+    timing: FaultTriggerTiming,
+}
+
+const DURABLE_DEATH_FAULT_BOUNDARIES: [DurableDeathFaultBoundary; 7] = [
+    DurableDeathFaultBoundary {
+        label: "bargain cleanup",
+        table: "character_oath_bargain_state",
+        timing: FaultTriggerTiming::Before {
+            operation: "UPDATE",
+            predicate: None,
+        },
+    },
+    DurableDeathFaultBoundary {
+        label: "item ledger",
+        table: "item_ledger_events",
+        timing: FaultTriggerTiming::Before {
+            operation: "INSERT",
+            predicate: Some("NEW.terminal_death_id IS NOT NULL"),
+        },
+    },
+    DurableDeathFaultBoundary {
+        label: "memorial snapshot",
+        table: "memorial_records",
+        timing: FaultTriggerTiming::Before {
+            operation: "INSERT",
+            predicate: None,
+        },
+    },
+    DurableDeathFaultBoundary {
+        label: "Echo Dormant transition",
+        table: "echo_state_transitions",
+        timing: FaultTriggerTiming::Before {
+            operation: "INSERT",
+            predicate: Some("NEW.transition_ordinal = 0"),
+        },
+    },
+    DurableDeathFaultBoundary {
+        label: "Echo Available promotion",
+        table: "echo_state_transitions",
+        timing: FaultTriggerTiming::Before {
+            operation: "INSERT",
+            predicate: Some("NEW.transition_ordinal = 1"),
+        },
+    },
+    DurableDeathFaultBoundary {
+        label: "terminal receipt",
+        table: "death_mutation_results",
+        timing: FaultTriggerTiming::Before {
+            operation: "INSERT",
+            predicate: None,
+        },
+    },
+    DurableDeathFaultBoundary {
+        label: "deferred outbox commit",
+        table: "death_outbox_events",
+        timing: FaultTriggerTiming::DeferredAfterInsert,
+    },
+];
+
+async fn install_durable_death_fault(
+    persistence: &PostgresPersistence,
+    boundary: DurableDeathFaultBoundary,
+) {
     let mut transaction = persistence.begin_transaction().await.unwrap();
+    let drop_trigger = format!(
+        "DROP TRIGGER IF EXISTS fixture_reject_durable_death_boundary ON {}",
+        boundary.table
+    );
+    // Identifiers and operations come only from the closed constant matrix above; no external or
+    // runtime-authored value enters this test-only DDL.
+    sqlx::query(sqlx::AssertSqlSafe(drop_trigger))
+        .execute(transaction.connection())
+        .await
+        .unwrap();
     sqlx::query(
-        "DROP TRIGGER IF EXISTS fixture_reject_durable_death_summary \
-         ON death_summary_snapshots",
+        "CREATE OR REPLACE FUNCTION fixture_reject_durable_death_boundary_v1() \
+         RETURNS TRIGGER LANGUAGE plpgsql AS $$ BEGIN \
+         RAISE EXCEPTION 'injected durable-death boundary rejection'; END $$",
     )
     .execute(transaction.connection())
     .await
     .unwrap();
-    if enabled {
-        sqlx::query(
-            "CREATE OR REPLACE FUNCTION fixture_reject_durable_death_summary_v1() \
-             RETURNS TRIGGER LANGUAGE plpgsql AS $$ BEGIN \
-             RAISE EXCEPTION 'injected durable-death summary rejection'; END $$",
-        )
+    let create_trigger = match boundary.timing {
+        FaultTriggerTiming::Before {
+            operation,
+            predicate,
+        } => {
+            let predicate = predicate.map_or_else(String::new, |value| format!(" WHEN ({value})"));
+            format!(
+                "CREATE TRIGGER fixture_reject_durable_death_boundary BEFORE {operation} \
+                 ON {} FOR EACH ROW{predicate} \
+                 EXECUTE FUNCTION fixture_reject_durable_death_boundary_v1()",
+                boundary.table
+            )
+        }
+        FaultTriggerTiming::DeferredAfterInsert => format!(
+            "CREATE CONSTRAINT TRIGGER fixture_reject_durable_death_boundary AFTER INSERT \
+             ON {} DEFERRABLE INITIALLY DEFERRED FOR EACH ROW \
+             EXECUTE FUNCTION fixture_reject_durable_death_boundary_v1()",
+            boundary.table
+        ),
+    };
+    sqlx::query(sqlx::AssertSqlSafe(create_trigger))
         .execute(transaction.connection())
         .await
         .unwrap();
-        sqlx::query(
-            "CREATE TRIGGER fixture_reject_durable_death_summary BEFORE INSERT \
-             ON death_summary_snapshots FOR EACH ROW \
-             EXECUTE FUNCTION fixture_reject_durable_death_summary_v1()",
-        )
+    transaction.commit().await.unwrap();
+}
+
+async fn remove_durable_death_fault(
+    persistence: &PostgresPersistence,
+    boundary: DurableDeathFaultBoundary,
+) {
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let drop_trigger = format!(
+        "DROP TRIGGER IF EXISTS fixture_reject_durable_death_boundary ON {}",
+        boundary.table
+    );
+    sqlx::query(sqlx::AssertSqlSafe(drop_trigger))
         .execute(transaction.connection())
         .await
         .unwrap();
-    } else {
-        sqlx::query("DROP FUNCTION IF EXISTS fixture_reject_durable_death_summary_v1()")
-            .execute(transaction.connection())
+    sqlx::query("DROP FUNCTION IF EXISTS fixture_reject_durable_death_boundary_v1()")
+        .execute(transaction.connection())
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+}
+
+async fn install_serialization_retry_fault(persistence: &PostgresPersistence) {
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    sqlx::query("DROP TRIGGER IF EXISTS fixture_retry_durable_death_serialization ON death_events")
+        .execute(transaction.connection())
+        .await
+        .unwrap();
+    sqlx::query("DROP FUNCTION IF EXISTS fixture_retry_durable_death_serialization_v1()")
+        .execute(transaction.connection())
+        .await
+        .unwrap();
+    sqlx::query("DROP SEQUENCE IF EXISTS fixture_durable_death_serialization_attempt_v1")
+        .execute(transaction.connection())
+        .await
+        .unwrap();
+    sqlx::query("CREATE SEQUENCE fixture_durable_death_serialization_attempt_v1 START WITH 1")
+        .execute(transaction.connection())
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE FUNCTION fixture_retry_durable_death_serialization_v1() \
+         RETURNS TRIGGER LANGUAGE plpgsql AS $$ DECLARE attempt BIGINT; BEGIN \
+         attempt := nextval('fixture_durable_death_serialization_attempt_v1'); \
+         IF attempt = 1 THEN RAISE EXCEPTION 'injected serialization victim' \
+             USING ERRCODE = '40001'; END IF; RETURN NEW; END $$",
+    )
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER fixture_retry_durable_death_serialization BEFORE INSERT ON death_events \
+         FOR EACH ROW EXECUTE FUNCTION fixture_retry_durable_death_serialization_v1()",
+    )
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    transaction.commit().await.unwrap();
+}
+
+async fn remove_serialization_retry_fault(persistence: &PostgresPersistence) -> i64 {
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let attempts: i64 =
+        sqlx::query_scalar("SELECT last_value FROM fixture_durable_death_serialization_attempt_v1")
+            .fetch_one(transaction.connection())
             .await
             .unwrap();
-    }
+    sqlx::query("DROP TRIGGER IF EXISTS fixture_retry_durable_death_serialization ON death_events")
+        .execute(transaction.connection())
+        .await
+        .unwrap();
+    sqlx::query("DROP FUNCTION IF EXISTS fixture_retry_durable_death_serialization_v1()")
+        .execute(transaction.connection())
+        .await
+        .unwrap();
+    sqlx::query("DROP SEQUENCE IF EXISTS fixture_durable_death_serialization_attempt_v1")
+        .execute(transaction.connection())
+        .await
+        .unwrap();
     transaction.commit().await.unwrap();
+    attempts
 }
 
 async fn assert_post_death_rejection(persistence: &PostgresPersistence) {
@@ -1812,19 +2037,63 @@ async fn complete_durable_death_graph_is_atomic_replayable_terminal_and_wipeable
     assert_eq!(left.result(), right.result());
     assert_complete_graph(&restarted, RequestIds::primary()).await;
 
-    reset_fixture(&restarted).await;
-    let rejected_request = request(RequestIds::primary());
-    let rejected_evidence = seed_hosted_death_trace(&restarted, &rejected_request).await;
-    let rejected_promotion = rejected_evidence.promotion_for(&rejected_request);
-    set_summary_insert_rejection(&restarted, true).await;
-    assert!(matches!(
-        restarted
+    for boundary in DURABLE_DEATH_FAULT_BOUNDARIES {
+        reset_fixture(&restarted).await;
+        let rejected_request = request(RequestIds::primary());
+        let rejected_evidence = seed_hosted_death_trace(&restarted, &rejected_request).await;
+        let rejected_promotion = rejected_evidence.promotion_for(&rejected_request);
+        install_durable_death_fault(&restarted, boundary).await;
+        let rejected = restarted
             .transact_durable_death(&rejected_request, &content, &rejected_promotion)
-            .await,
-        Err(PersistenceError::Database(_))
+            .await;
+        remove_durable_death_fault(&restarted, boundary).await;
+        assert!(
+            matches!(rejected, Err(PersistenceError::Database(_))),
+            "{} failpoint must reject the transaction",
+            boundary.label
+        );
+        assert_rollback_pristine(&restarted).await;
+
+        let retry = restarted
+            .transact_durable_death(&rejected_request, &content, &rejected_promotion)
+            .await
+            .unwrap();
+        assert!(
+            matches!(retry, DurableDeathTransactionV1::Fresh(_)),
+            "{} retry must converge to one fresh commit",
+            boundary.label
+        );
+        let replay = restarted
+            .transact_durable_death(&rejected_request, &content, &rejected_promotion)
+            .await
+            .unwrap();
+        assert!(replay.is_replay(), "{} exact replay", boundary.label);
+        assert_eq!(replay.result(), retry.result(), "{} result", boundary.label);
+        assert_complete_graph(&restarted, RequestIds::primary()).await;
+    }
+
+    reset_fixture(&restarted).await;
+    let serialization_request = request(RequestIds::primary());
+    let serialization_evidence = seed_hosted_death_trace(&restarted, &serialization_request).await;
+    let serialization_promotion = serialization_evidence.promotion_for(&serialization_request);
+    install_serialization_retry_fault(&restarted).await;
+    let serialization_result = restarted
+        .transact_durable_death(&serialization_request, &content, &serialization_promotion)
+        .await;
+    let serialization_attempts = remove_serialization_retry_fault(&restarted).await;
+    let serialization_fresh = serialization_result.unwrap();
+    assert!(matches!(
+        serialization_fresh,
+        DurableDeathTransactionV1::Fresh(_)
     ));
-    set_summary_insert_rejection(&restarted, false).await;
-    assert_rollback_pristine(&restarted).await;
+    assert_eq!(serialization_attempts, 2);
+    let serialization_replay = restarted
+        .transact_durable_death(&serialization_request, &content, &serialization_promotion)
+        .await
+        .unwrap();
+    assert!(serialization_replay.is_replay());
+    assert_eq!(serialization_replay.result(), serialization_fresh.result());
+    assert_complete_graph(&restarted, RequestIds::primary()).await;
 
     reset_fixture(&restarted).await;
     // Authorities: Gravebound_Production_GDD_v1_Canonical.md TECH-023,
