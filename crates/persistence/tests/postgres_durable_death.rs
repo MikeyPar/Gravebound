@@ -221,7 +221,7 @@ async fn reset_fixture(persistence: &PostgresPersistence) {
     sqlx::query(
         "INSERT INTO character_instance_lineages (namespace_id,account_id,character_id,lineage_id, \
          content_id,layout_id,lineage_state,records_blake3,assets_blake3,localization_blake3) \
-         VALUES ($1,$2,$3,$4,'world.core_microrealm_01','layout.core_private_life_01',1,$5,$6,$7)",
+         VALUES ($1,$2,$3,$4,'world.core_microrealm_01','layout.core_private_life_01',0,$5,$6,$7)",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(ACCOUNT_ID.as_slice())

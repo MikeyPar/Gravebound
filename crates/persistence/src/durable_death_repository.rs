@@ -52,6 +52,10 @@ const DEATH_TRACE_PROMOTION_CONFLICT_AUDIT_ID_CONTEXT: &str =
 const LIFE_STATE_LIVING: i16 = 0;
 const LIFE_STATE_DEAD: i16 = 1;
 const WORLD_LOCATION_DANGER: i16 = 2;
+// GDD TECH-023, Content Spec CONT-HUB-002, and Roadmap GB-M03-03/06 all permit terminal
+// resolution from either canonical open lineage phase: state 0 is the production danger-entry
+// stage, while state 1 remains an append-only compatible active phase.
+const LINEAGE_STAGED: i16 = 0;
 const LINEAGE_ACTIVE: i16 = 1;
 const LINEAGE_DEATH_FAILED: i16 = 3;
 const RESTORE_ACTIVE: i16 = 0;
@@ -627,7 +631,7 @@ async fn lock_and_validate_world(
     if row.try_get::<i16, _>("location_kind")? != WORLD_LOCATION_DANGER
         || optional_id(row.try_get("instance_lineage_id")?)? != Some(event.lineage_id)
         || optional_id(row.try_get("entry_restore_point_id")?)? != Some(event.restore_point_id)
-        || lineage_state != LINEAGE_ACTIVE
+        || !open_lineage_state(lineage_state)
     {
         return Err(PersistenceError::DurableDeathBindingMismatch);
     }
@@ -1318,13 +1322,14 @@ async fn finalize_aggregate_heads(
         sqlx::query(
             "UPDATE character_instance_lineages SET lineage_state=$1, \
                     closed_at=transaction_timestamp() WHERE namespace_id=$2 AND account_id=$3 \
-                  AND character_id=$4 AND lineage_id=$5 AND lineage_state=$6",
+                  AND character_id=$4 AND lineage_id=$5 AND lineage_state IN ($6,$7)",
         )
         .bind(LINEAGE_DEATH_FAILED)
         .bind(&event.namespace_id)
         .bind(event.account_id.as_slice())
         .bind(event.character_id.as_slice())
         .bind(event.lineage_id.as_slice())
+        .bind(LINEAGE_STAGED)
         .bind(LINEAGE_ACTIVE)
         .execute(&mut *connection)
         .await?
@@ -3061,12 +3066,19 @@ fn expect_one(rows: u64) -> Result<(), PersistenceError> {
     }
 }
 
+const fn open_lineage_state(state: i16) -> bool {
+    matches!(state, LINEAGE_STAGED | LINEAGE_ACTIVE)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn discriminants_match_the_append_only_schema_contract() {
+        assert!(open_lineage_state(LINEAGE_STAGED));
+        assert!(open_lineage_state(LINEAGE_ACTIVE));
+        assert!(!open_lineage_state(LINEAGE_DEATH_FAILED));
         assert_eq!(death_cause(DurableDeathCauseV1::Disconnect), 3);
         assert_eq!(damage_type(DurableDamageTypeV1::Veil), 1);
         assert_eq!(network_state(DurableNetworkStateV1::LinkLost), 2);
