@@ -36,6 +36,9 @@ async fn disposable_database() -> PostgresPersistence {
     let persistence = PostgresPersistence::connect(&config).await.unwrap();
     persistence.verify_disposable_test_database().await.unwrap();
     persistence.migrate().await.unwrap();
+    // Hosted binaries share one disposable database in CI. Reset only after the destructive-test
+    // guard so globally keyed restore/lineage identities cannot leak in from an earlier binary.
+    persistence.reset_disposable_identity_data().await.unwrap();
     persistence
 }
 
