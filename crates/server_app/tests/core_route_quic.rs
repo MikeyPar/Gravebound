@@ -23,12 +23,12 @@ use rustls::pki_types::PrivatePkcs8KeyDer;
 use server_app::{
     AccountId, AdmissionState, AuthenticatedAccount, AuthenticatedNamespace,
     AuthenticationDecision, CaldusVictoryOwnerCommand, CharacterIdGenerator, CoreBargainAuthority,
-    CoreOathSelectionAuthority, CoreSafeInventoryAuthority, CoreTerminalCoordinator,
-    CoreTerminalEvaluation, CoreTerminalProducer, CoreTerminalTickSeal, DeathViewService,
-    DisabledDeathViewRepository, DisabledProgressionQueryRepository,
-    DisposableCoreJourneyWorldFlow, DurableDeathExecutionService, HandshakePolicy, IdentityClock,
-    IdentityService, InMemoryAccountRepository, NoopIdentityEventSink,
-    PostgresCaldusHallTransferCoordinator, PostgresCaldusVictoryCoordinator,
+    CoreNonTerminalAdmission, CoreOathSelectionAuthority, CoreSafeInventoryAuthority,
+    CoreTerminalCoordinator, CoreTerminalEvaluation, CoreTerminalProducer, CoreTerminalTickSeal,
+    DeathViewService, DisabledDeathViewRepository, DisabledProgressionQueryRepository,
+    DisposableCoreJourneyWorldFlow, DurableDeathExecutionError, DurableDeathExecutionService,
+    HandshakePolicy, IdentityClock, IdentityService, InMemoryAccountRepository,
+    NoopIdentityEventSink, PostgresCaldusHallTransferCoordinator, PostgresCaldusVictoryCoordinator,
     PostgresDangerEntryAshWalletProviderV3, PostgresDangerEntryInventoryProviderV3,
     PostgresDangerEntryLifeMetricsProviderV3, PostgresDangerEntryOathBargainProviderV3,
     PostgresDeathViewRepository, PostgresDormantWorldFlowCoordinator,
@@ -956,6 +956,29 @@ async fn committed_death_survives_response_loss_and_full_process_restart_over_re
     let death = durable_death_fixture::prepare_death(persistence.clone()).await;
     let candidate = durable_death_terminal_candidate(&death).unwrap();
     let (mut coordinator, prepared) = seal_complete_same_tick_terminal_set(&candidate);
+
+    // GDD TECH-021/023, Content Spec CONT-ECHO-009, and Roadmap GB-M03-02D/06 require an
+    // unresolved terminal to block departure during a real database outage and converge after a
+    // new process authority reconnects. Closing the pool exercises the production writer error,
+    // not a fake repository mode.
+    let unavailable_writer = persistence.clone();
+    persistence.close().await;
+    assert!(matches!(
+        DurableDeathExecutionService::new(unavailable_writer)
+            .execute_coordinated(&mut coordinator, &prepared, &death)
+            .await,
+        Err(DurableDeathExecutionError::Persistence(_))
+    ));
+    assert_eq!(
+        coordinator.non_terminal_admission(),
+        CoreNonTerminalAdmission::BlockedByUnresolvedTerminal
+    );
+
+    let config = PersistenceConfig::from_test_environment()
+        .expect("TEST_DATABASE_URL must identify dedicated disposable PostgreSQL");
+    let persistence = PostgresPersistence::connect(&config).await.unwrap();
+    persistence.verify_disposable_test_database().await.unwrap();
+    persistence.migrate().await.unwrap();
     let committed = DurableDeathExecutionService::new(persistence.clone())
         .execute_coordinated(&mut coordinator, &prepared, &death)
         .await
@@ -972,8 +995,6 @@ async fn committed_death_survives_response_loss_and_full_process_restart_over_re
     drop(coordinator);
     persistence.close().await;
 
-    let config = PersistenceConfig::from_test_environment()
-        .expect("TEST_DATABASE_URL must identify dedicated disposable PostgreSQL");
     let restarted = PostgresPersistence::connect(&config).await.unwrap();
     restarted.verify_disposable_test_database().await.unwrap();
     restarted.migrate().await.unwrap();
