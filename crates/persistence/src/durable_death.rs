@@ -716,11 +716,28 @@ impl AuthoritativeDeathPlanV1 {
 
     pub fn canonical_plan_hash(&self) -> Result<[u8; 32], PersistenceError> {
         self.validate()?;
-        // The event persists the enclosing request hash. Excluding only that back-reference avoids
-        // a hash cycle; request validation then requires the persisted value to match exactly.
+        // PostgreSQL authors commit time inside the serializable transaction. Normalize that
+        // timestamp and the two digests derived from it so intent identity remains stable when the
+        // repository binds the exact transaction timestamp. The event's request back-reference is
+        // likewise excluded to avoid a hash cycle.
         let mut material = self.clone();
         material.event.canonical_request_hash = [0; 32];
+        material.clear_commit_authority();
         canonical_digest(PLAN_HASH_CONTEXT, &material)
+    }
+
+    fn clear_commit_authority(&mut self) {
+        self.event.committed_at_unix_ms = 0;
+        self.memorial.death_at_unix_ms = 0;
+        self.memorial.presentation_digest = [0; 32];
+        if let Some(echo) = &mut self.echo {
+            echo.created.created_at_unix_ms = 0;
+            echo.created.snapshot_digest = [0; 32];
+            echo.creation_transition.committed_at_unix_ms = 0;
+            if let Some(promotion) = &mut echo.promotion {
+                promotion.committed_at_unix_ms = 0;
+            }
+        }
     }
 }
 
@@ -787,6 +804,34 @@ impl DurableDeathCommitRequestV1 {
                 canonical_plan_hash: self.canonical_plan_hash,
             },
         )
+    }
+
+    /// Rebinds every database-authored timestamp to one `PostgreSQL` transaction instant without
+    /// changing canonical request/plan identity. Timestamp-derived snapshot digests are rebuilt.
+    pub fn bind_commit_time(&mut self, committed_at_unix_ms: u64) -> Result<(), PersistenceError> {
+        if committed_at_unix_ms == 0 || committed_at_unix_ms < self.issued_at_unix_ms {
+            return Err(corrupt());
+        }
+        let original_plan_hash = self.canonical_plan_hash;
+        let original_request_hash = self.canonical_request_hash;
+        self.plan.event.committed_at_unix_ms = committed_at_unix_ms;
+        self.plan.memorial.death_at_unix_ms = committed_at_unix_ms;
+        if let Some(echo) = &mut self.plan.echo {
+            echo.created.created_at_unix_ms = committed_at_unix_ms;
+            echo.creation_transition.committed_at_unix_ms = committed_at_unix_ms;
+            if let Some(promotion) = &mut echo.promotion {
+                promotion.committed_at_unix_ms = committed_at_unix_ms;
+            }
+            echo.created.snapshot_digest = echo.created.expected_snapshot_digest()?;
+        }
+        self.plan.memorial.presentation_digest =
+            self.plan.memorial.expected_presentation_digest()?;
+        if self.plan.canonical_plan_hash()? != original_plan_hash
+            || self.expected_request_hash()? != original_request_hash
+        {
+            return Err(corrupt());
+        }
+        self.validate()
     }
 
     pub fn validate(&self) -> Result<(), PersistenceError> {
@@ -1780,6 +1825,27 @@ mod tests {
             result
         );
         assert_ne!(result.digest().unwrap(), [0; 32]);
+    }
+
+    #[test]
+    fn postgres_commit_time_rebinding_preserves_intent_identity() {
+        let mut request = valid_request();
+        enable_new_echo_promotion(&mut request);
+        request.validate().unwrap();
+        let plan_hash = request.canonical_plan_hash;
+        let request_hash = request.canonical_request_hash;
+
+        request.bind_commit_time(2_500).unwrap();
+
+        assert_eq!(request.plan.event.committed_at_unix_ms, 2_500);
+        assert_eq!(request.plan.memorial.death_at_unix_ms, 2_500);
+        let echo = request.plan.echo.as_ref().unwrap();
+        assert_eq!(echo.created.created_at_unix_ms, 2_500);
+        assert_eq!(echo.creation_transition.committed_at_unix_ms, 2_500);
+        assert_eq!(echo.promotion.as_ref().unwrap().committed_at_unix_ms, 2_500);
+        assert_eq!(request.canonical_plan_hash, plan_hash);
+        assert_eq!(request.canonical_request_hash, request_hash);
+        StoredCommittedDeathResultV1::from_request(&request).unwrap();
     }
 
     #[test]
