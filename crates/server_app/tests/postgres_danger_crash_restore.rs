@@ -165,6 +165,10 @@ async fn disposable_database() -> PostgresPersistence {
     persistence
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "fixture builds one complete restore aggregate"
+)]
 async fn reset_fixture(persistence: &PostgresPersistence) {
     let mut transaction = persistence.begin_transaction().await.unwrap();
     sqlx::query("DELETE FROM accounts WHERE namespace_id=$1 AND account_id=$2")
@@ -253,16 +257,19 @@ async fn reset_fixture(persistence: &PostgresPersistence) {
     .execute(transaction.connection())
     .await
     .unwrap();
-    sqlx::query(
-        "INSERT INTO character_life_metrics (namespace_id,account_id,character_id,lifetime_ticks, \
-         permadeath_combat_ticks,life_metrics_version) VALUES ($1,$2,$3,100,40,1)",
+    let life_metrics_updated = sqlx::query(
+        "UPDATE character_life_metrics SET lifetime_ticks=100,permadeath_combat_ticks=40 \
+         WHERE namespace_id=$1 AND account_id=$2 AND character_id=$3 \
+           AND life_metrics_version=1",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(ACCOUNT_ID.as_slice())
     .bind(CHARACTER_ID.as_slice())
     .execute(transaction.connection())
     .await
-    .unwrap();
+    .unwrap()
+    .rows_affected();
+    assert_eq!(life_metrics_updated, 1);
     transaction.commit().await.unwrap();
 }
 
