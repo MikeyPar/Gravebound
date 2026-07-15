@@ -13,6 +13,7 @@ mod caldus_victory;
 mod combat_factory;
 mod core_journey_world_flow;
 mod core_lifecycle;
+mod death_view_service;
 mod field_equipment;
 mod ground_expiry;
 mod identity;
@@ -62,6 +63,10 @@ pub use core_lifecycle::{
     CoreCheckpointBinding, CoreCheckpointServiceError, CoreDangerCheckpointRepository,
     CoreDangerCheckpointService, CoreLifeKey, CoreLiveBindingId, CoreLiveCharacter,
     CoreLiveDirectory, CoreLiveError, CoreResumeOutcome, DANGER_CHECKPOINT_INTERVAL_TICKS,
+};
+pub use death_view_service::{
+    DeathViewRepository, DeathViewRepositoryError, DeathViewService, DisabledDeathViewRepository,
+    PostgresDeathViewRepository,
 };
 pub use field_equipment::{
     AuthoritativeFieldEquipmentCommit, AuthoritativeFieldEquipmentPreview,
@@ -504,11 +509,12 @@ where
 /// World-flow messages share the reliable transport but cannot mutate identity state, and the
 /// normal world-flow authority remains fail-closed until its downstream packages are complete.
 #[allow(clippy::too_many_arguments)]
-pub async fn serve_core_reliable<R, C, G, E, W, P, OC, BC>(
+pub async fn serve_core_reliable<R, C, G, E, W, P, D, OC, BC>(
     connection: &quinn::Connection,
     identity: &IdentityService<R, C, G, E>,
     world_flow: &W,
     progression: &ProgressionQueryService<P>,
+    death_views: &DeathViewService<D>,
     oath: &CoreOathSelectionAuthority<OC>,
     bargain: &CoreBargainAuthority<BC>,
     safe_inventory: &CoreSafeInventoryAuthority,
@@ -523,6 +529,7 @@ where
     E: IdentityEventSink,
     W: CoreWorldFlowAuthority,
     P: ProgressionQueryRepository,
+    D: DeathViewRepository,
     OC: IdentityClock,
     BC: IdentityClock,
 {
@@ -554,6 +561,9 @@ where
         WireMessage::ProgressionQueryFrame(frame) => protocol::ReliableEvent::ProgressionResult(
             progression.handle(authenticated, &frame).await,
         ),
+        WireMessage::DeathViewFrame(frame) => protocol::ReliableEvent::DeathViewResult(Box::new(
+            death_views.handle(authenticated, &frame).await,
+        )),
         WireMessage::OathViewFrame(frame) => {
             protocol::ReliableEvent::OathViewResult(oath.view(authenticated, &frame).await)
         }

@@ -32,9 +32,10 @@ use tracing::{debug, info, warn};
 use crate::{
     AccountId, AccountRepository, AdmissionState, AuthenticatedAccount, AuthenticatedNamespace,
     AuthenticationDecision, CharacterIdGenerator, CoreBargainAuthority, CoreOathSelectionAuthority,
-    CoreSafeInventoryAuthority, DisabledProgressionQueryRepository, HandshakePolicy, IdentityClock,
-    IdentityService, InMemoryAccountRepository, InstanceError, InstanceScheduler,
-    NoopIdentityEventSink, PostgresAccountRepository, PostgresBargainService,
+    CoreSafeInventoryAuthority, DeathViewRepository, DeathViewService, DisabledDeathViewRepository,
+    DisabledProgressionQueryRepository, HandshakePolicy, IdentityClock, IdentityService,
+    InMemoryAccountRepository, InstanceError, InstanceScheduler, NoopIdentityEventSink,
+    PostgresAccountRepository, PostgresBargainService, PostgresDeathViewRepository,
     PostgresOathSelectionService, PostgresProgressionQueryRepository,
     PostgresWorldFlowLocationRepository, ProgressionQueryRepository, ProgressionQueryService,
     SERVER_SHUTDOWN_CLOSE_CODE, SessionOwnerId, TransportId, WorldFlowGateService,
@@ -500,12 +501,18 @@ struct CoreShrineAuthorities {
     bargain: CoreBargainAuthority<SystemIdentityClock>,
 }
 
+struct CoreReadRepositories<Progression, DeathViews> {
+    progression: Progression,
+    death_views: DeathViews,
+}
+
 /// Explicit Core-development endpoint. It never creates an [`InstanceScheduler`] and therefore
 /// cannot silently route identity clients into the M02 combat laboratory.
 pub struct BoundCoreIdentityServer<
     R = InMemoryAccountRepository,
     W = InMemoryAccountRepository,
     P = DisabledProgressionQueryRepository,
+    D = DisabledDeathViewRepository,
 > {
     endpoint: quinn::Endpoint,
     certificate: CertificateDer<'static>,
@@ -514,13 +521,14 @@ pub struct BoundCoreIdentityServer<
     authority: Arc<CoreIdentityAuthority<R>>,
     world_flow: Arc<WorldFlowGateService<W, SystemIdentityClock>>,
     progression: Arc<ProgressionQueryService<P>>,
+    death_views: Arc<DeathViewService<D>>,
     oath: Arc<CoreOathSelectionAuthority<SystemIdentityClock>>,
     bargain: Arc<CoreBargainAuthority<SystemIdentityClock>>,
     safe_inventory: Arc<CoreSafeInventoryAuthority>,
     persistence_enabled: bool,
 }
 
-impl<R, W, P> fmt::Debug for BoundCoreIdentityServer<R, W, P> {
+impl<R, W, P, D> fmt::Debug for BoundCoreIdentityServer<R, W, P, D> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("BoundCoreIdentityServer")
@@ -540,7 +548,10 @@ impl BoundCoreIdentityServer {
             config,
             repository.clone(),
             repository,
-            DisabledProgressionQueryRepository,
+            CoreReadRepositories {
+                progression: DisabledProgressionQueryRepository,
+                death_views: DisabledDeathViewRepository,
+            },
             &progression_content,
             CoreShrineAuthorities {
                 oath: CoreOathSelectionAuthority::disabled(),
@@ -556,6 +567,7 @@ impl
         PostgresAccountRepository,
         PostgresWorldFlowLocationRepository,
         PostgresProgressionQueryRepository,
+        PostgresDeathViewRepository,
     >
 {
     pub fn bind_persistent(
@@ -570,6 +582,16 @@ impl
         let progression =
             PostgresProgressionQueryRepository::new(persistence.clone(), &progression_content)
                 .map_err(|error| LocalServerRuntimeError::Content(error.to_string()))?;
+        let death_content = sim_content::load_core_development_world_flow(&config.content_root)
+            .map_err(|error| LocalServerRuntimeError::Content(error.to_string()))?;
+        let death_revision = protocol::DeathViewContentRevisionV1 {
+            records_blake3: ManifestHash::new(death_content.hashes().records_blake3.clone())?,
+            assets_blake3: ManifestHash::new(death_content.hashes().assets_blake3.clone())?,
+            localization_blake3: ManifestHash::new(
+                death_content.hashes().localization_blake3.clone(),
+            )?,
+        };
+        let death_views = PostgresDeathViewRepository::new(persistence.clone(), death_revision);
         let oath_content = sim_content::load_core_development_oaths_bargains(&config.content_root)
             .map_err(|error| LocalServerRuntimeError::Content(error.to_string()))?;
         let oath = PostgresOathSelectionService::new(
@@ -586,7 +608,10 @@ impl
             config,
             repository,
             world_flow,
-            progression,
+            CoreReadRepositories {
+                progression,
+                death_views,
+            },
             &progression_content,
             CoreShrineAuthorities { oath, bargain },
             true,
@@ -594,17 +619,18 @@ impl
     }
 }
 
-impl<R, W, P> BoundCoreIdentityServer<R, W, P>
+impl<R, W, P, D> BoundCoreIdentityServer<R, W, P, D>
 where
     R: AccountRepository + 'static,
     W: WorldFlowLocationRepository + 'static,
     P: ProgressionQueryRepository + 'static,
+    D: DeathViewRepository + 'static,
 {
     fn bind_with_repositories(
         config: &CoreIdentityServerConfig,
         repository: R,
         world_flow_repository: W,
-        progression_repository: P,
+        reads: CoreReadRepositories<P, D>,
         progression_content: &sim_content::CoreDevelopmentProgression,
         shrines: CoreShrineAuthorities,
         persistence_enabled: bool,
@@ -624,6 +650,11 @@ where
                 world_flow_content.hashes().localization_blake3.clone(),
             )?,
         };
+        let death_view_revision = protocol::DeathViewContentRevisionV1 {
+            records_blake3: world_flow_revision.records_blake3.clone(),
+            assets_blake3: world_flow_revision.assets_blake3.clone(),
+            localization_blake3: world_flow_revision.localization_blake3.clone(),
+        };
         let CertifiedKey { cert, signing_key } =
             generate_simple_self_signed(vec![LOCAL_SERVER_NAME.to_owned()])?;
         let certificate = cert.der().clone();
@@ -632,13 +663,17 @@ where
             quinn::ServerConfig::with_single_cert(vec![certificate.clone()], private_key.into())?;
         let endpoint = quinn::Endpoint::server(server_config, config.bind_address)?;
         let local_address = endpoint.local_addr()?;
+        let mut feature_flags = vec![WireText::new(CORE_TEST_IDENTITY_FEATURE_FLAG)?];
+        if persistence_enabled {
+            feature_flags.push(WireText::new(protocol::CORE_DEATH_VIEW_FEATURE_FLAG)?);
+        }
         let policy = HandshakePolicy {
             required_protocol: ProtocolVersion::current(),
             required_client_build: WireText::new(CORE_IDENTITY_BUILD_ID)?,
             required_manifest_hash: required_manifest_hash.clone(),
             content_bundle_version: WireText::new(CORE_IDENTITY_CONTENT_TARGET)?,
             region_id: WireText::new(LOCAL_REGION_ID)?,
-            feature_flags: vec![WireText::new(CORE_TEST_IDENTITY_FEATURE_FLAG)?],
+            feature_flags,
             admission: AdmissionState::Available,
         };
         let authority = Arc::new(IdentityService::new(
@@ -654,9 +689,13 @@ where
             world_flow_revision,
         ));
         let progression = Arc::new(
-            ProgressionQueryService::new(progression_repository, progression_content)
+            ProgressionQueryService::new(reads.progression, progression_content)
                 .map_err(|error| LocalServerRuntimeError::Content(error.to_string()))?,
         );
+        let death_views = Arc::new(DeathViewService::new(
+            reads.death_views,
+            death_view_revision,
+        ));
         let oath = Arc::new(shrines.oath);
         let bargain = Arc::new(shrines.bargain);
         let safe_inventory = Arc::new(CoreSafeInventoryAuthority::disabled());
@@ -668,6 +707,7 @@ where
             authority,
             world_flow,
             progression,
+            death_views,
             oath,
             bargain,
             safe_inventory,
@@ -712,13 +752,14 @@ where
                     let authority = Arc::clone(&self.authority);
                     let world_flow = Arc::clone(&self.world_flow);
                     let progression = Arc::clone(&self.progression);
+                    let death_views = Arc::clone(&self.death_views);
                     let oath = Arc::clone(&self.oath);
                     let bargain = Arc::clone(&self.bargain);
                     let safe_inventory = Arc::clone(&self.safe_inventory);
                     let accepted = Arc::clone(&accepted);
                     let rejected = Arc::clone(&rejected);
                     workers.spawn(async move {
-                        match serve_core_identity_connection(incoming, policy, authority, world_flow, progression, oath, bargain, safe_inventory).await {
+                        match serve_core_identity_connection(incoming, policy, authority, world_flow, progression, death_views, oath, bargain, safe_inventory).await {
                             Ok(true) => { accepted.fetch_add(1, Ordering::Relaxed); }
                             Ok(false) => { rejected.fetch_add(1, Ordering::Relaxed); }
                             Err(error) => warn!(%error, "Core identity connection ended"),
@@ -751,12 +792,13 @@ where
     clippy::too_many_arguments,
     reason = "each injected authority retains an independently auditable fail-closed boundary"
 )]
-async fn serve_core_identity_connection<R, W, P>(
+async fn serve_core_identity_connection<R, W, P, D>(
     incoming: quinn::Incoming,
     policy: HandshakePolicy,
     authority: Arc<CoreIdentityAuthority<R>>,
     world_flow: Arc<WorldFlowGateService<W, SystemIdentityClock>>,
     progression: Arc<ProgressionQueryService<P>>,
+    death_views: Arc<DeathViewService<D>>,
     oath: Arc<CoreOathSelectionAuthority<SystemIdentityClock>>,
     bargain: Arc<CoreBargainAuthority<SystemIdentityClock>>,
     safe_inventory: Arc<CoreSafeInventoryAuthority>,
@@ -765,6 +807,7 @@ where
     R: AccountRepository,
     W: WorldFlowLocationRepository,
     P: ProgressionQueryRepository,
+    D: DeathViewRepository,
 {
     let connection = incoming.await?;
     let (mut send, mut receive) = connection.accept_bi().await?;
@@ -804,6 +847,7 @@ where
             authority.as_ref(),
             world_flow.as_ref(),
             progression.as_ref(),
+            death_views.as_ref(),
             oath.as_ref(),
             bargain.as_ref(),
             safe_inventory.as_ref(),
@@ -1156,6 +1200,12 @@ mod tests {
                 .feature_flags
                 .iter()
                 .all(|flag| flag.as_str() != protocol::CORE_SAFE_INVENTORY_FEATURE_FLAG)
+        );
+        assert!(
+            server_hello
+                .feature_flags
+                .iter()
+                .all(|flag| flag.as_str() != protocol::CORE_DEATH_VIEW_FEATURE_FLAG)
         );
         let (_, initial) =
             bot_client::perform_account_bootstrap(&connection, bootstrap(&content_root, 1))

@@ -16,9 +16,10 @@ use protocol::{
     AuthTicket, BargainContentRevisionV1, BargainDecision, BargainDecisionFrame,
     BargainDecisionPayload, BargainDecisionResult, BargainOfferCell, BargainResultCode,
     BargainViewFrame, CharacterMutationFrame, CharacterMutationPayload, ClientHello, Compression,
-    HandshakeResponse, InitialOathSelectionFrame, InitialOathSelectionPayload, ManifestHash,
-    OathContentRevisionV1, OathResultCode, OathSelectionState, OathViewFrame, Platform,
-    ProgressionQueryFrame, ProgressionResult, ProtocolVersion, WireText, WorldFlowFrame,
+    DEATH_VIEW_SCHEMA_VERSION, DeathViewContentRevisionV1, DeathViewFrameV1, DeathViewRequestV1,
+    DeathViewResultV1, HandshakeResponse, InitialOathSelectionFrame, InitialOathSelectionPayload,
+    ManifestHash, OathContentRevisionV1, OathResultCode, OathSelectionState, OathViewFrame,
+    Platform, ProgressionQueryFrame, ProgressionResult, ProtocolVersion, WireText, WorldFlowFrame,
     WorldFlowRequest, WorldFlowResult, WorldTransferCommand, WorldTransferMutation,
     WorldTransferPayload, WorldTransferResultCode,
 };
@@ -151,6 +152,15 @@ fn world_flow_revision(content_root: &Path) -> protocol::WorldFlowContentRevisio
         assets_blake3: ManifestHash::new(compiled.hashes().assets_blake3.clone()).unwrap(),
         localization_blake3: ManifestHash::new(compiled.hashes().localization_blake3.clone())
             .unwrap(),
+    }
+}
+
+fn death_view_revision(content_root: &Path) -> DeathViewContentRevisionV1 {
+    let revision = world_flow_revision(content_root);
+    DeathViewContentRevisionV1 {
+        records_blake3: revision.records_blake3,
+        assets_blake3: revision.assets_blake3,
+        localization_blake3: revision.localization_blake3,
     }
 }
 
@@ -1429,6 +1439,27 @@ async fn postgres_real_quic_server_restart_preserves_authoritative_roster() {
             .iter()
             .all(|flag| flag.as_str() != protocol::CORE_WORLD_FLOW_FEATURE_FLAG)
     );
+    assert!(
+        server_hello
+            .feature_flags
+            .iter()
+            .any(|flag| flag.as_str() == protocol::CORE_DEATH_VIEW_FEATURE_FLAG)
+    );
+    let (_, latest_death) = bot_client::perform_death_view(
+        &connection,
+        DeathViewFrameV1 {
+            schema_version: DEATH_VIEW_SCHEMA_VERSION,
+            sequence: 50,
+            content_revision: death_view_revision(&content_root),
+            request: DeathViewRequestV1::LatestCommitted,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        latest_death,
+        DeathViewResultV1::Latest { death: None, .. }
+    ));
     let (_, initial) =
         bot_client::perform_account_bootstrap(&connection, wire_bootstrap(&content_root, 1))
             .await
@@ -1488,6 +1519,21 @@ async fn postgres_real_quic_server_restart_preserves_authoritative_roster() {
     bot_client::perform_handshake(&connection, wire_hello(&content_root, ticket))
         .await
         .unwrap();
+    let (_, latest_death_after_restart) = bot_client::perform_death_view(
+        &connection,
+        DeathViewFrameV1 {
+            schema_version: DEATH_VIEW_SCHEMA_VERSION,
+            sequence: 51,
+            content_revision: death_view_revision(&content_root),
+            request: DeathViewRequestV1::LatestCommitted,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        latest_death_after_restart,
+        DeathViewResultV1::Latest { death: None, .. }
+    ));
     // Reliable request sequences restart with the new connection; durable account state does not.
     let (_, restored) =
         bot_client::perform_account_bootstrap(&connection, wire_bootstrap(&content_root, 1))

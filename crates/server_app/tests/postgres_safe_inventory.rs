@@ -10,11 +10,11 @@ use persistence::{
 };
 use protocol::{
     AccountBootstrapFrame, AccountBootstrapRequest, AccountBootstrapResult, AuthTicket,
-    CORE_SAFE_INVENTORY_FEATURE_FLAG, ClientHello, Compression, HandshakeResponse, ManifestHash,
-    Platform, ProgressionProjection, ProgressionQueryFrame, ProgressionResult, ProtocolVersion,
-    SafeInventoryDestinationV1, SafeInventoryResultCodeV1, SafeInventoryTransferFrameV1,
-    SafeInventoryTransferKindV1, SafeInventoryTransferPayloadV1, WireText,
-    WorldFlowContentRevisionV1, WorldFlowFrame, WorldFlowRequest, WorldFlowResult,
+    CORE_SAFE_INVENTORY_FEATURE_FLAG, ClientHello, Compression, DeathViewContentRevisionV1,
+    HandshakeResponse, ManifestHash, Platform, ProgressionProjection, ProgressionQueryFrame,
+    ProgressionResult, ProtocolVersion, SafeInventoryDestinationV1, SafeInventoryResultCodeV1,
+    SafeInventoryTransferFrameV1, SafeInventoryTransferKindV1, SafeInventoryTransferPayloadV1,
+    WireText, WorldFlowContentRevisionV1, WorldFlowFrame, WorldFlowRequest, WorldFlowResult,
     WorldTransferCommand, WorldTransferMutation, WorldTransferPayload, WorldTransferResultCode,
 };
 use rcgen::{CertifiedKey, generate_simple_self_signed};
@@ -22,9 +22,10 @@ use rustls::pki_types::PrivatePkcs8KeyDer;
 use server_app::{
     AccountId, AdmissionState, AuthenticatedAccount, AuthenticatedNamespace,
     AuthenticationDecision, CharacterIdGenerator, CoreBargainAuthority, CoreOathSelectionAuthority,
-    CoreSafeInventoryAuthority, FieldEquipmentConfirmCommand, FieldEquipmentPreviewSource,
-    HandshakePolicy, IdentityClock, IdentityService, NoopIdentityEventSink,
-    PostgresAccountRepository, PostgresFieldEquipmentService, PostgresProgressionAwardService,
+    CoreSafeInventoryAuthority, DeathViewService, DisabledDeathViewRepository,
+    FieldEquipmentConfirmCommand, FieldEquipmentPreviewSource, HandshakePolicy, IdentityClock,
+    IdentityService, NoopIdentityEventSink, PostgresAccountRepository,
+    PostgresFieldEquipmentService, PostgresProgressionAwardService,
     PostgresProgressionQueryRepository, PostgresRewardService, PostgresSafeInventoryService,
     PostgresWorldFlowLocationRepository, ProgressionAwardCode, ProgressionAwardCommand,
     ProgressionAwardEvidence, ProgressionAwardPayload, ProgressionQueryService, RewardGrantContext,
@@ -466,6 +467,14 @@ async fn run_quic_transfer_journey(
         &progression_content,
     )
     .unwrap();
+    let death_views = DeathViewService::new(
+        DisabledDeathViewRepository,
+        DeathViewContentRevisionV1 {
+            records_blake3: world_flow_revision.records_blake3.clone(),
+            assets_blake3: world_flow_revision.assets_blake3.clone(),
+            localization_blake3: world_flow_revision.localization_blake3.clone(),
+        },
+    );
     let oath = CoreOathSelectionAuthority::<FixedAuthority>::disabled();
     let bargain = CoreBargainAuthority::<FixedAuthority>::disabled();
     let safe_inventory = CoreSafeInventoryAuthority::persistent(PostgresSafeInventoryService::new(
@@ -497,6 +506,7 @@ async fn run_quic_transfer_journey(
                 &identity,
                 &world_flow,
                 &progression,
+                &death_views,
                 &oath,
                 &bargain,
                 &safe_inventory,

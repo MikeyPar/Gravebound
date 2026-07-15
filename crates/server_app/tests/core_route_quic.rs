@@ -9,17 +9,18 @@ use persistence::{
     StoredExtractionAuthority, StoredWorldFlowRevisionV1, WIPEABLE_CORE_NAMESPACE,
 };
 use protocol::{
-    AuthTicket, CharacterLocation, ClientHello, Compression, HandshakeResponse, ManifestHash,
-    Platform, ProtocolVersion, SafeArrival, WireText, WorldFlowContentRevisionV1, WorldFlowFrame,
-    WorldFlowRequest, WorldFlowResult, WorldTransferCommand, WorldTransferMutation,
-    WorldTransferPayload, WorldTransferResultCode,
+    AuthTicket, CharacterLocation, ClientHello, Compression, DeathViewContentRevisionV1,
+    HandshakeResponse, ManifestHash, Platform, ProtocolVersion, SafeArrival, WireText,
+    WorldFlowContentRevisionV1, WorldFlowFrame, WorldFlowRequest, WorldFlowResult,
+    WorldTransferCommand, WorldTransferMutation, WorldTransferPayload, WorldTransferResultCode,
 };
 use rcgen::{CertifiedKey, generate_simple_self_signed};
 use rustls::pki_types::PrivatePkcs8KeyDer;
 use server_app::{
     AccountId, AdmissionState, AuthenticatedAccount, AuthenticatedNamespace,
     AuthenticationDecision, CaldusVictoryOwnerCommand, CharacterIdGenerator, CoreBargainAuthority,
-    CoreOathSelectionAuthority, CoreSafeInventoryAuthority, DisabledProgressionQueryRepository,
+    CoreOathSelectionAuthority, CoreSafeInventoryAuthority, DeathViewService,
+    DisabledDeathViewRepository, DisabledProgressionQueryRepository,
     DisposableCoreJourneyWorldFlow, HandshakePolicy, IdentityClock, IdentityService,
     InMemoryAccountRepository, NoopIdentityEventSink, PostgresCaldusHallTransferCoordinator,
     PostgresCaldusVictoryCoordinator, PostgresDangerEntryAshWalletProviderV3,
@@ -394,6 +395,15 @@ async fn run_reliable_core_journey(persistence: &PostgresPersistence) -> Duratio
     let progression =
         ProgressionQueryService::new(DisabledProgressionQueryRepository, &progression_content)
             .unwrap();
+    let route_revision = revision();
+    let death_views = DeathViewService::new(
+        DisabledDeathViewRepository,
+        DeathViewContentRevisionV1 {
+            records_blake3: route_revision.records_blake3,
+            assets_blake3: route_revision.assets_blake3,
+            localization_blake3: route_revision.localization_blake3,
+        },
+    );
     let oath = CoreOathSelectionAuthority::<FixedAuthority>::disabled();
     let bargain = CoreBargainAuthority::<FixedAuthority>::disabled();
     let safe_inventory = CoreSafeInventoryAuthority::disabled();
@@ -424,6 +434,7 @@ async fn run_reliable_core_journey(persistence: &PostgresPersistence) -> Duratio
                 &identity,
                 &world_flow,
                 &progression,
+                &death_views,
                 &oath,
                 &bargain,
                 &safe_inventory,

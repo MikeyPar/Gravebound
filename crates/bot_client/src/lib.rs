@@ -285,8 +285,7 @@ pub async fn perform_death_view(
     connection: &quinn::Connection,
     frame: DeathViewFrameV1,
 ) -> Result<(ReliableEventFrame, DeathViewResultV1), BotTransportError> {
-    let event =
-        perform_reliable_gameplay(connection, WireMessage::DeathViewFrame(frame)).await?;
+    let event = perform_reliable_gameplay(connection, WireMessage::DeathViewFrame(frame)).await?;
     let ReliableEvent::DeathViewResult(result) = &event.event else {
         return Err(BotTransportError::UnexpectedMessage);
     };
