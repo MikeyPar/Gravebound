@@ -166,7 +166,7 @@ async fn reset_fixture(persistence: &PostgresPersistence) {
     .unwrap();
     sqlx::query(
         "INSERT INTO character_progression (namespace_id,account_id,character_id,total_xp,level, \
-         current_health,progression_version) VALUES ($1,$2,$3,9000,10,120,1)",
+         current_health,progression_version) VALUES ($1,$2,$3,2700,10,120,1)",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(ACCOUNT_ID.as_slice())
