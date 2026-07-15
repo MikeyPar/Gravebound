@@ -741,6 +741,16 @@ async fn authoritative_life_clocks_are_exact_replayable_and_restart_safe() {
         .await
         .unwrap();
     sqlx::query(
+        "INSERT INTO character_world_locations (namespace_id,account_id,character_id, \
+         character_version,location_kind) VALUES ($1,$2,$3,1,0)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(SAFE_ACCOUNT.as_slice())
+    .bind(SAFE_CHARACTER.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query(
         "UPDATE accounts SET selected_character_id=$1 WHERE namespace_id=$2 AND account_id=$3",
     )
     .bind(SAFE_CHARACTER.as_slice())
@@ -1506,13 +1516,3 @@ async fn assert_rollback_and_cascade(persistence: &PostgresPersistence) {
     verification.rollback().await.unwrap();
     assert_eq!((characters, mutations), (0, 0));
 }
-    sqlx::query(
-        "INSERT INTO character_world_locations (namespace_id,account_id,character_id, \
-         character_version,location_kind) VALUES ($1,$2,$3,1,0)",
-    )
-    .bind(WIPEABLE_CORE_NAMESPACE)
-    .bind(SAFE_ACCOUNT.as_slice())
-    .bind(SAFE_CHARACTER.as_slice())
-    .execute(transaction.connection())
-    .await
-    .unwrap();
