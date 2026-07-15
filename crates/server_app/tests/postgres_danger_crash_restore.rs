@@ -713,6 +713,14 @@ async fn earn_ash(
     reason = "the assertion audits the full cross-aggregate crash result in one snapshot"
 )]
 async fn assert_fresh_projection(persistence: &PostgresPersistence) {
+    assert!(
+        persistence
+            .danger_checkpoint(ACCOUNT_ID, CHARACTER_ID)
+            .await
+            .unwrap()
+            .is_none(),
+        "crash restore must remove the process-resume checkpoint and its live trace payload"
+    );
     let mut transaction = persistence.begin_transaction().await.unwrap();
     let root: (i16, Option<Vec<u8>>, i16) = sqlx::query_as(
         "SELECT restore_state,crash_restore_mutation_id,component_mask \

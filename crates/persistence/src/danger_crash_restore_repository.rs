@@ -343,6 +343,13 @@ impl PostgresPersistence {
 
         let post_account_version = increment(account.version)?;
         let post_character_version = increment(character.version)?;
+        crate::stage_danger_checkpoint_cleanup(
+            &mut transaction,
+            request.account_id,
+            request.character_id,
+            root.lineage_id,
+        )
+        .await?;
         return_to_hall(
             transaction.connection(),
             request,
