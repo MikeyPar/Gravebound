@@ -1499,11 +1499,12 @@ async fn insert_death_event(
             post_inventory_version, pre_life_metrics_version, post_life_metrics_version, \
             trace_digest, former_roster_ordinal, echo_expected, preexisting_available_echo_id, \
             promoted_echo_id, world_records_blake3, world_assets_blake3, \
-            world_localization_blake3, bargain_cleanup_event_id, pre_oath_bargain_version, \
-            post_oath_bargain_version) \
+            world_localization_blake3, presentation_records_blake3, \
+            presentation_assets_blake3, presentation_localization_blake3, \
+            bargain_cleanup_event_id, pre_oath_bargain_version, post_oath_bargain_version) \
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20, \
                  $21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38, \
-                 $39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49)",
+                 $39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52)",
     )
     .bind(&event.namespace_id)
     .bind(event.death_id.as_slice())
@@ -1565,6 +1566,9 @@ async fn insert_death_event(
     .bind(&event.records_blake3)
     .bind(&event.assets_blake3)
     .bind(&event.localization_blake3)
+    .bind(&event.presentation.records_blake3)
+    .bind(&event.presentation.assets_blake3)
+    .bind(&event.presentation.localization_blake3)
     .bind(event.bargain_cleanup_event_id.as_slice())
     .bind(i64_value(event.versions.oath_bargain.pre)?)
     .bind(i64_value(event.versions.oath_bargain.post)?)

@@ -6,16 +6,18 @@
 //! `GB-M03-13`. This fixture enters through production server authority and never constructs a
 //! client-authored lethal command.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, path::Path, sync::Arc};
 
 use persistence::{
-    CORE_ITEM_CONTENT_REVISION, CORE_WORLD_ASSETS_BLAKE3, CORE_WORLD_LOCALIZATION_BLAKE3,
-    CORE_WORLD_RECORDS_BLAKE3, DeathAggregateVersionsV1, DeathVersionAdvanceV1,
-    DurableDeathContentAuthorityV1, DurableDeathItemContentAuthorityV1, DurableDestructionEntryV1,
-    DurableDestructionLocationV1, DurableEquipmentSlotV1, LiveDamageTraceContentAuthorityV1,
-    LiveDamageTraceDangerAuthorityV1, PostgresPersistence, WIPEABLE_CORE_NAMESPACE,
-    stage_danger_entry_ash_wallet_restore_v3, stage_danger_entry_inventory_restore_v3,
-    stage_danger_entry_life_metrics_restore_v3, stage_danger_entry_oath_bargain_restore_v3,
+    CORE_DEATH_VIEW_ASSETS_BLAKE3, CORE_DEATH_VIEW_LOCALIZATION_BLAKE3,
+    CORE_DEATH_VIEW_RECORDS_BLAKE3, CORE_ITEM_CONTENT_REVISION, CORE_WORLD_ASSETS_BLAKE3,
+    CORE_WORLD_LOCALIZATION_BLAKE3, CORE_WORLD_RECORDS_BLAKE3, DeathAggregateVersionsV1,
+    DeathVersionAdvanceV1, DurableDeathContentAuthorityV1, DurableDeathItemContentAuthorityV1,
+    DurableDestructionEntryV1, DurableDestructionLocationV1, DurableEquipmentSlotV1,
+    LiveDamageTraceContentAuthorityV1, LiveDamageTraceDangerAuthorityV1, PostgresPersistence,
+    WIPEABLE_CORE_NAMESPACE, stage_danger_entry_ash_wallet_restore_v3,
+    stage_danger_entry_inventory_restore_v3, stage_danger_entry_life_metrics_restore_v3,
+    stage_danger_entry_oath_bargain_restore_v3,
 };
 use protocol::{DeathViewContentRevisionV1, ManifestHash};
 use server_app::{
@@ -46,7 +48,7 @@ pub const LETHAL_TRACE_TICK_ID: [u8; 16] = [240; 16];
 pub const DEATH_ID: [u8; 16] = uuid_v7(41);
 pub const ECHO_ID: [u8; 16] = uuid_v7(42);
 pub const DEATH_MUTATION_ID: [u8; 16] = uuid_v7(43);
-pub const MATERIAL_ID: &str = "material.core.iron";
+pub const MATERIAL_ID: &str = "material.bell_brass";
 pub const ITEM_TEMPLATE_ID: &str = "item.weapon.crossbow.pine_crossbow";
 pub const DEED_ID: &str = "deed.core.sir_caldus_defeated";
 pub const SOURCE_SIM_ENTITY_ID: u64 = 81;
@@ -69,9 +71,9 @@ pub fn authenticated_account() -> AuthenticatedAccount {
 
 pub fn death_view_revision() -> DeathViewContentRevisionV1 {
     DeathViewContentRevisionV1 {
-        records_blake3: ManifestHash::new(CORE_WORLD_RECORDS_BLAKE3).unwrap(),
-        assets_blake3: ManifestHash::new(CORE_WORLD_ASSETS_BLAKE3).unwrap(),
-        localization_blake3: ManifestHash::new(CORE_WORLD_LOCALIZATION_BLAKE3).unwrap(),
+        records_blake3: ManifestHash::new(CORE_DEATH_VIEW_RECORDS_BLAKE3).unwrap(),
+        assets_blake3: ManifestHash::new(CORE_DEATH_VIEW_ASSETS_BLAKE3).unwrap(),
+        localization_blake3: ManifestHash::new(CORE_DEATH_VIEW_LOCALIZATION_BLAKE3).unwrap(),
     }
 }
 
@@ -366,10 +368,10 @@ fn observation(tick: u64, pre_health: u32, final_damage: u32) -> DamageTraceObse
         tick: Tick(tick),
         event_ordinal: 0,
         cause_kind: AuthoritativeDeathCauseKind::DirectHit,
-        source_content_id: "enemy.sepulcher_knight".into(),
+        source_content_id: "miniboss.sepulcher_knight".into(),
         source_entity_id: Some(EntityId::new(SOURCE_SIM_ENTITY_ID).unwrap()),
-        pattern_id: Some("pattern.sepulcher.lance".into()),
-        attack_id: "attack.sepulcher.lance".into(),
+        pattern_id: Some("miniboss.sepulcher_knight.charge_lane".into()),
+        attack_id: "miniboss.sepulcher_knight.charge_lane".into(),
         raw_damage: final_damage,
         final_damage,
         damage_type: DamageType::Physical,
@@ -406,6 +408,12 @@ fn versions() -> DeathAggregateVersionsV1 {
     reason = "the trace, simulation evidence, and sealed server context stay contiguous for audit"
 )]
 pub async fn prepare_death(persistence: PostgresPersistence) -> PreparedDurableDeathCommit {
+    let presentation = Arc::new(
+        sim_content::load_core_development_death_view(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content"),
+        )
+        .unwrap(),
+    );
     let danger = LiveDamageTraceDangerAuthorityV1 {
         lineage_id: LINEAGE_ID,
         restore_point_id: RESTORE_POINT_ID,
@@ -423,6 +431,7 @@ pub async fn prepare_death(persistence: PostgresPersistence) -> PreparedDurableD
         LiveDamageTraceBinding::new(ACCOUNT_ID, CHARACTER_ID, 2, danger.clone(), content.clone())
             .unwrap(),
         identities.clone(),
+        presentation.clone(),
     )
     .await
     .unwrap();
@@ -555,7 +564,7 @@ pub async fn prepare_death(persistence: PostgresPersistence) -> PreparedDurableD
             },
         }),
     };
-    build_durable_death_commit(&inputs, &server_context).unwrap()
+    build_durable_death_commit(&inputs, &server_context, &presentation).unwrap()
 }
 
 async fn count(persistence: &PostgresPersistence, query: &'static str) -> i64 {

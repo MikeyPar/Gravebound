@@ -101,21 +101,22 @@ pub use death_view_repository::{
     StoredLatestCommittedDeathV1,
 };
 pub use durable_death::{
-    AuthoritativeDeathPlanV1, DURABLE_DEATH_CONTRACT, DURABLE_DEATH_SCHEMA_VERSION,
+    AuthoritativeDeathPlanV1, CORE_DEATH_VIEW_ASSETS_BLAKE3, CORE_DEATH_VIEW_LOCALIZATION_BLAKE3,
+    CORE_DEATH_VIEW_RECORDS_BLAKE3, DURABLE_DEATH_CONTRACT, DURABLE_DEATH_SCHEMA_VERSION,
     DURABLE_DEATH_SUMMARY_REVISION, DURABLE_DEATH_TRACE_WINDOW_TICKS, DeathAggregateVersionsV1,
     DeathVersionAdvanceV1, DurableCombatTraceEntryV1, DurableDamageTypeV1, DurableDeathCauseV1,
     DurableDeathCommitRequestV1, DurableDeathContentAuthorityV1, DurableDeathEventV1,
-    DurableDeathItemContentAuthorityV1, DurableDeathResultCodeV1, DurableDeathSummaryV1,
-    DurableDestructionEntryV1, DurableDestructionLocationV1, DurableEchoEnvelopeV1,
-    DurableEchoOutcomeV1, DurableEchoRecordV1, DurableEchoStateV1, DurableEchoTransitionReasonV1,
-    DurableEchoTransitionV1, DurableEquipmentSlotV1, DurableMemorialRecordV1,
-    DurableNetworkStateV1, DurableOrderedContentIdV1, DurableRecallStateV1,
-    DurableSummaryDamageReferenceV1, DurableSummaryProjectionEntryV1,
-    DurableSummaryProjectionKindV1, DurableSummaryProjectionsV1, DurableTraceStatusV1,
-    MAX_DURABLE_DEATH_DESTRUCTION_ENTRIES, MAX_DURABLE_DEATH_PLAN_PAYLOAD_BYTES,
-    MAX_DURABLE_DEATH_RESULT_PAYLOAD_BYTES, MAX_DURABLE_DEATH_STATUSES_PER_ENTRY,
-    MAX_DURABLE_DEATH_TRACE_ENTRIES, StoredCommittedDeathResultV1,
-    derive_durable_death_bargain_cleanup_event_id,
+    DurableDeathItemContentAuthorityV1, DurableDeathPresentationAuthorityV1,
+    DurableDeathResultCodeV1, DurableDeathSummaryV1, DurableDestructionEntryV1,
+    DurableDestructionLocationV1, DurableEchoEnvelopeV1, DurableEchoOutcomeV1, DurableEchoRecordV1,
+    DurableEchoStateV1, DurableEchoTransitionReasonV1, DurableEchoTransitionV1,
+    DurableEquipmentSlotV1, DurableMemorialRecordV1, DurableNetworkStateV1,
+    DurableOrderedContentIdV1, DurableRecallStateV1, DurableSummaryDamageReferenceV1,
+    DurableSummaryProjectionEntryV1, DurableSummaryProjectionKindV1, DurableSummaryProjectionsV1,
+    DurableTraceStatusV1, MAX_DURABLE_DEATH_DESTRUCTION_ENTRIES,
+    MAX_DURABLE_DEATH_PLAN_PAYLOAD_BYTES, MAX_DURABLE_DEATH_RESULT_PAYLOAD_BYTES,
+    MAX_DURABLE_DEATH_STATUSES_PER_ENTRY, MAX_DURABLE_DEATH_TRACE_ENTRIES,
+    StoredCommittedDeathResultV1, derive_durable_death_bargain_cleanup_event_id,
 };
 pub use durable_death_repository::DurableDeathTransactionV1;
 pub use durable_terminal_recovery::{
@@ -199,7 +200,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 50;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 51;
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -1441,6 +1442,39 @@ mod tests {
             assert!(
                 !migration.contains(prohibited),
                 "provenance diagnostics migration leaked {prohibited}"
+            );
+        }
+    }
+
+    #[test]
+    fn death_presentation_authority_is_additive_disjoint_and_fail_closed() {
+        let migration = include_str!("../../../migrations/0051_death_presentation_authority.sql");
+        for required in [
+            "Gravebound_Production_GDD_v1_Canonical.md",
+            "Gravebound_Content_Production_Spec_v1.md",
+            "Gravebound_Development_Roadmap_v1.md",
+            "SPEC-CONFLICT-009-m03-death-memorial.md",
+            "0051 requires no existing death rows",
+            "presentation_records_blake3 TEXT NOT NULL",
+            "presentation_assets_blake3 TEXT NOT NULL",
+            "presentation_localization_blake3 TEXT NOT NULL",
+            "death_presentation_revision_exact",
+            "never presentation/localization authority",
+            "Never drop these columns in place",
+            "copy world_* values into presentation_*",
+        ] {
+            assert!(migration.contains(required), "migration omitted {required}");
+        }
+        for prohibited in [
+            "DROP TABLE",
+            "TRUNCATE",
+            "UPDATE death_events",
+            "JSON",
+            "JSONB",
+        ] {
+            assert!(
+                !migration.contains(prohibited),
+                "death presentation migration leaked {prohibited}"
             );
         }
     }

@@ -3,12 +3,13 @@
 //! This module owns transport and scheduling only. Gameplay authority remains in
 //! [`InstanceScheduler`], and every gameplay value still comes from validated `fp.1.0.0` data.
 
+use persistence::DurableDeathPresentationAuthorityV1;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
     future::Future,
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -582,16 +583,7 @@ impl
         let progression =
             PostgresProgressionQueryRepository::new(persistence.clone(), &progression_content)
                 .map_err(|error| LocalServerRuntimeError::Content(error.to_string()))?;
-        let death_content = sim_content::load_core_development_world_flow(&config.content_root)
-            .map_err(|error| LocalServerRuntimeError::Content(error.to_string()))?;
-        let death_revision = protocol::DeathViewContentRevisionV1 {
-            records_blake3: ManifestHash::new(death_content.hashes().records_blake3.clone())?,
-            assets_blake3: ManifestHash::new(death_content.hashes().assets_blake3.clone())?,
-            localization_blake3: ManifestHash::new(
-                death_content.hashes().localization_blake3.clone(),
-            )?,
-        };
-        let death_views = PostgresDeathViewRepository::new(persistence.clone(), death_revision);
+        let death_views = PostgresDeathViewRepository::new(persistence.clone());
         let oath_content = sim_content::load_core_development_oaths_bargains(&config.content_root)
             .map_err(|error| LocalServerRuntimeError::Content(error.to_string()))?;
         let oath = PostgresOathSelectionService::new(
@@ -650,11 +642,7 @@ where
                 world_flow_content.hashes().localization_blake3.clone(),
             )?,
         };
-        let death_view_revision = protocol::DeathViewContentRevisionV1 {
-            records_blake3: world_flow_revision.records_blake3.clone(),
-            assets_blake3: world_flow_revision.assets_blake3.clone(),
-            localization_blake3: world_flow_revision.localization_blake3.clone(),
-        };
+        let death_view_revision = load_death_view_revision(&config.content_root)?;
         let CertifiedKey { cert, signing_key } =
             generate_simple_self_signed(vec![LOCAL_SERVER_NAME.to_owned()])?;
         let certificate = cert.der().clone();
@@ -786,6 +774,30 @@ where
             persistence_enabled: self.persistence_enabled,
         })
     }
+}
+
+fn load_death_view_revision(
+    content_root: &Path,
+) -> Result<protocol::DeathViewContentRevisionV1, LocalServerRuntimeError> {
+    let content = sim_content::load_core_development_death_view(content_root)
+        .map_err(|error| LocalServerRuntimeError::Content(error.to_string()))?;
+    let hashes = content.hashes();
+    let persistence_authority = DurableDeathPresentationAuthorityV1::core();
+    if hashes.records_blake3 != persistence_authority.records_blake3
+        || hashes.assets_blake3 != persistence_authority.assets_blake3
+        || hashes.localization_blake3 != persistence_authority.localization_blake3
+        || content.item_content_revision() != persistence::CORE_ITEM_CONTENT_REVISION
+    {
+        return Err(LocalServerRuntimeError::Content(
+            "compiled Core death presentation does not match the durable death authority"
+                .to_owned(),
+        ));
+    }
+    Ok(protocol::DeathViewContentRevisionV1 {
+        records_blake3: ManifestHash::new(hashes.records_blake3.clone())?,
+        assets_blake3: ManifestHash::new(hashes.assets_blake3.clone())?,
+        localization_blake3: ManifestHash::new(hashes.localization_blake3.clone())?,
+    })
 }
 
 #[allow(
@@ -1090,6 +1102,37 @@ mod tests {
             localization_blake3: ManifestHash::new(compiled.hashes().localization_blake3.clone())
                 .unwrap(),
         }
+    }
+
+    #[test]
+    fn death_views_use_the_dedicated_transitive_content_authority() {
+        let root = content_root();
+        let death = load_death_view_revision(&root).unwrap();
+        let compiled = sim_content::load_core_development_death_view(&root).unwrap();
+        let durable = DurableDeathPresentationAuthorityV1::core();
+        assert_eq!(
+            death.records_blake3.as_str(),
+            compiled.hashes().records_blake3
+        );
+        assert_eq!(
+            death.assets_blake3.as_str(),
+            compiled.hashes().assets_blake3
+        );
+        assert_eq!(
+            death.localization_blake3.as_str(),
+            compiled.hashes().localization_blake3
+        );
+        assert_eq!(death.records_blake3.as_str(), durable.records_blake3);
+        assert_eq!(death.assets_blake3.as_str(), durable.assets_blake3);
+        assert_eq!(
+            death.localization_blake3.as_str(),
+            durable.localization_blake3
+        );
+
+        let world = world_flow_revision(&root);
+        assert_ne!(death.records_blake3, world.records_blake3);
+        assert_ne!(death.assets_blake3, world.assets_blake3);
+        assert_ne!(death.localization_blake3, world.localization_blake3);
     }
 
     fn current_unix_millis() -> u64 {

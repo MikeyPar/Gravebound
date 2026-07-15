@@ -156,11 +156,12 @@ fn world_flow_revision(content_root: &Path) -> protocol::WorldFlowContentRevisio
 }
 
 fn death_view_revision(content_root: &Path) -> DeathViewContentRevisionV1 {
-    let revision = world_flow_revision(content_root);
+    let content = sim_content::load_core_development_death_view(content_root).unwrap();
     DeathViewContentRevisionV1 {
-        records_blake3: revision.records_blake3,
-        assets_blake3: revision.assets_blake3,
-        localization_blake3: revision.localization_blake3,
+        records_blake3: ManifestHash::new(content.hashes().records_blake3.clone()).unwrap(),
+        assets_blake3: ManifestHash::new(content.hashes().assets_blake3.clone()).unwrap(),
+        localization_blake3: ManifestHash::new(content.hashes().localization_blake3.clone())
+            .unwrap(),
     }
 }
 

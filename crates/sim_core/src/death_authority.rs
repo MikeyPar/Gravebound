@@ -1093,10 +1093,10 @@ mod tests {
             tick: Tick(tick),
             event_ordinal: ordinal,
             cause_kind: AuthoritativeDeathCauseKind::DirectHit,
-            source_content_id: "enemy.core.bell_acolyte".to_owned(),
+            source_content_id: "enemy.bell_acolyte".to_owned(),
             source_entity_id: Some(id(7)),
-            pattern_id: Some("pattern.core.bell_acolyte.fan".to_owned()),
-            attack_id: "attack.core.bell_acolyte.fan".to_owned(),
+            pattern_id: Some("pattern.enemy.bell_acolyte.alternating_fan".to_owned()),
+            attack_id: "pattern.enemy.bell_acolyte.alternating_fan".to_owned(),
             raw_damage: final_damage,
             final_damage,
             damage_type: DamageType::Physical,
@@ -1752,7 +1752,7 @@ mod tests {
             .canonical_hash_blake3;
         assert_eq!(
             blake3::Hash::from_bytes(digest).to_hex().as_str(),
-            "fa8f932d1f7999edc957d1f2ddad67df94d244d4c86a181a6de24a91ccb030ed"
+            "6eba2febc5a18ac9c4adc2e156a3d4575b334126f237e4c8a628445121ac6175"
         );
 
         let checkpoint = trace.checkpoint();

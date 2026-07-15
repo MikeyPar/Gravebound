@@ -9,11 +9,11 @@
 use std::future::Future;
 
 use persistence::{
-    CORE_ITEM_CONTENT_REVISION, DeathViewReadError, DurableCombatTraceEntryV1, DurableDamageTypeV1,
-    DurableDeathCauseV1, DurableEchoOutcomeV1, DurableNetworkStateV1, DurableRecallStateV1,
-    DurableSummaryProjectionEntryV1, DurableSummaryProjectionKindV1, PostgresPersistence,
-    StoredDeathMemorialCursorV1, StoredDeathMemorialEntryV1, StoredDeathSummaryViewV1,
-    StoredDeathTracePageV1, StoredLatestCommittedDeathV1,
+    DeathViewReadError, DurableCombatTraceEntryV1, DurableDamageTypeV1, DurableDeathCauseV1,
+    DurableDeathPresentationAuthorityV1, DurableEchoOutcomeV1, DurableNetworkStateV1,
+    DurableRecallStateV1, DurableSummaryProjectionEntryV1, DurableSummaryProjectionKindV1,
+    PostgresPersistence, StoredDeathMemorialCursorV1, StoredDeathMemorialEntryV1,
+    StoredDeathSummaryViewV1, StoredDeathTracePageV1, StoredLatestCommittedDeathV1,
 };
 use protocol::{
     DEATH_VIEW_SCHEMA_VERSION, DeathCauseV1, DeathCharacterName, DeathDamageTypeV1,
@@ -21,7 +21,7 @@ use protocol::{
     DeathRecallStateV1, DeathSummaryProjectionEntryV1, DeathSummaryProjectionKindV1,
     DeathSummaryViewV1, DeathTraceEntryV1, DeathTracePageV1, DeathTraceStatusV1,
     DeathViewContentRevisionV1, DeathViewFrameV1, DeathViewRequestV1, DeathViewResultCodeV1,
-    DeathViewResultV1, LatestCommittedDeathV1, WireText,
+    DeathViewResultV1, LatestCommittedDeathV1, ManifestHash, WireText,
 };
 
 use crate::{AuthenticatedAccount, AuthenticatedNamespace};
@@ -32,6 +32,7 @@ pub enum DeathViewRepositoryError {
     DeathNotFound,
     DeathNotOwned,
     PageOutOfRange,
+    ContentMismatch,
     CorruptStoredRecord,
     ServiceUnavailable,
 }
@@ -117,19 +118,12 @@ impl DeathViewRepository for DisabledDeathViewRepository {
 #[derive(Debug, Clone)]
 pub struct PostgresDeathViewRepository {
     persistence: PostgresPersistence,
-    content_revision: DeathViewContentRevisionV1,
 }
 
 impl PostgresDeathViewRepository {
     #[must_use]
-    pub const fn new(
-        persistence: PostgresPersistence,
-        content_revision: DeathViewContentRevisionV1,
-    ) -> Self {
-        Self {
-            persistence,
-            content_revision,
-        }
+    pub const fn new(persistence: PostgresPersistence) -> Self {
+        Self { persistence }
     }
 }
 
@@ -143,12 +137,6 @@ impl DeathViewRepository for PostgresDeathViewRepository {
             .load_latest_committed_death_view(account_id)
             .await
             .map_err(map_read_error)?;
-        if stored
-            .as_ref()
-            .is_some_and(|view| !authority_matches_latest(view, &self.content_revision))
-        {
-            return Err(DeathViewRepositoryError::CorruptStoredRecord);
-        }
         stored.map(latest_projection).transpose()
     }
 
@@ -164,9 +152,6 @@ impl DeathViewRepository for PostgresDeathViewRepository {
             .load_owned_death_summary_view(account_id, death_id, lost_start_ordinal, lost_limit)
             .await
             .map_err(map_read_error)?;
-        if !authority_matches_summary(&stored, &self.content_revision) {
-            return Err(DeathViewRepositoryError::CorruptStoredRecord);
-        }
         summary_projection(stored)
     }
 
@@ -182,13 +167,6 @@ impl DeathViewRepository for PostgresDeathViewRepository {
             .load_death_memorial_page(account_id, after.map(stored_cursor), limit)
             .await
             .map_err(map_read_error)?;
-        if stored
-            .entries
-            .iter()
-            .any(|entry| !authority_matches_memorial(entry, &self.content_revision))
-        {
-            return Err(DeathViewRepositoryError::CorruptStoredRecord);
-        }
         Ok((
             stored
                 .entries
@@ -300,63 +278,33 @@ where
                 }),
         };
         match result {
-            Ok(result) if result.validate().is_ok() => result,
-            Ok(_) => error(frame.sequence, DeathViewResultCodeV1::CorruptStoredRecord),
+            Ok(result) if result.validate().is_err() => {
+                error(frame.sequence, DeathViewResultCodeV1::CorruptStoredRecord)
+            }
+            Ok(result) if !result_uses_supported_presentation(&result, &self.content_revision) => {
+                error(frame.sequence, DeathViewResultCodeV1::ContentMismatch)
+            }
+            Ok(result) => result,
             Err(cause) => error(frame.sequence, result_code(cause)),
         }
     }
 }
 
-fn authority_matches_latest(
-    stored: &StoredLatestCommittedDeathV1,
+fn result_uses_supported_presentation(
+    result: &DeathViewResultV1,
     required: &DeathViewContentRevisionV1,
 ) -> bool {
-    authority_matches(
-        &stored.content_revision,
-        &stored.records_blake3,
-        &stored.assets_blake3,
-        &stored.localization_blake3,
-        required,
-    )
-}
-
-fn authority_matches_summary(
-    stored: &StoredDeathSummaryViewV1,
-    required: &DeathViewContentRevisionV1,
-) -> bool {
-    authority_matches(
-        &stored.content_revision,
-        &stored.records_blake3,
-        &stored.assets_blake3,
-        &stored.localization_blake3,
-        required,
-    )
-}
-
-fn authority_matches_memorial(
-    stored: &StoredDeathMemorialEntryV1,
-    required: &DeathViewContentRevisionV1,
-) -> bool {
-    authority_matches(
-        &stored.content_revision,
-        &stored.records_blake3,
-        &stored.assets_blake3,
-        &stored.localization_blake3,
-        required,
-    )
-}
-
-fn authority_matches(
-    content_revision: &str,
-    records_blake3: &str,
-    assets_blake3: &str,
-    localization_blake3: &str,
-    required: &DeathViewContentRevisionV1,
-) -> bool {
-    records_blake3 == required.records_blake3.as_str()
-        && assets_blake3 == required.assets_blake3.as_str()
-        && localization_blake3 == required.localization_blake3.as_str()
-        && content_revision == CORE_ITEM_CONTENT_REVISION
+    match result {
+        DeathViewResultV1::Latest { death, .. } => death
+            .as_ref()
+            .is_none_or(|death| death.presentation_revision == *required),
+        DeathViewResultV1::Summary { summary, .. } => summary.presentation_revision == *required,
+        DeathViewResultV1::MemorialPage { entries, .. } => entries
+            .iter()
+            .all(|entry| entry.presentation_revision == *required),
+        DeathViewResultV1::TracePage { page, .. } => page.presentation_revision == *required,
+        DeathViewResultV1::Error { .. } => true,
+    }
 }
 
 fn latest_projection(
@@ -378,6 +326,7 @@ fn latest_projection(
         destruction_digest: stored.destruction_digest,
         summary_snapshot_digest: stored.summary_snapshot_digest,
         content_revision: text(stored.content_revision)?,
+        presentation_revision: presentation_revision(stored.presentation)?,
     })
 }
 
@@ -427,6 +376,7 @@ fn summary_projection(
         echo_outcome: echo_outcome(stored.echo_outcome),
         death_tick: stored.death_tick,
         content_revision: text(stored.content_revision)?,
+        presentation_revision: presentation_revision(stored.presentation)?,
         snapshot_digest: stored.snapshot_digest,
     })
 }
@@ -445,6 +395,18 @@ fn memorial_projection(
         class_id: text(stored.class_id)?,
         level: stored.level,
         echo_outcome: echo_outcome(stored.echo_outcome),
+        presentation_revision: presentation_revision(stored.presentation)?,
+    })
+}
+
+fn presentation_revision(
+    stored: DurableDeathPresentationAuthorityV1,
+) -> Result<DeathViewContentRevisionV1, DeathViewRepositoryError> {
+    Ok(DeathViewContentRevisionV1 {
+        records_blake3: ManifestHash::new(stored.records_blake3).map_err(|_| corrupt())?,
+        assets_blake3: ManifestHash::new(stored.assets_blake3).map_err(|_| corrupt())?,
+        localization_blake3: ManifestHash::new(stored.localization_blake3)
+            .map_err(|_| corrupt())?,
     })
 }
 
@@ -453,6 +415,7 @@ fn trace_page_projection(
 ) -> Result<DeathTracePageV1, DeathViewRepositoryError> {
     Ok(DeathTracePageV1 {
         death_id: stored.death_id,
+        presentation_revision: presentation_revision(stored.presentation)?,
         death_tick: stored.death_tick,
         total_entry_count: stored.total_entry_count,
         trace_digest: stored.trace_digest,
@@ -619,6 +582,7 @@ const fn result_code(error: DeathViewRepositoryError) -> DeathViewResultCodeV1 {
         DeathViewRepositoryError::DeathNotFound => DeathViewResultCodeV1::DeathNotFound,
         DeathViewRepositoryError::DeathNotOwned => DeathViewResultCodeV1::DeathNotOwned,
         DeathViewRepositoryError::PageOutOfRange => DeathViewResultCodeV1::PageOutOfRange,
+        DeathViewRepositoryError::ContentMismatch => DeathViewResultCodeV1::ContentMismatch,
         DeathViewRepositoryError::CorruptStoredRecord => DeathViewResultCodeV1::CorruptStoredRecord,
         DeathViewRepositoryError::ServiceUnavailable => DeathViewResultCodeV1::ServiceUnavailable,
     }
@@ -663,6 +627,107 @@ mod tests {
         }
     }
 
+    fn historical_death_id() -> [u8; 16] {
+        let mut death_id = [1; 16];
+        death_id[6] = 0x71;
+        death_id[8] = 0x81;
+        death_id
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct HistoricalRepository;
+
+    impl DeathViewRepository for HistoricalRepository {
+        async fn latest(
+            &self,
+            _account_id: [u8; 16],
+        ) -> Result<Option<LatestCommittedDeathV1>, DeathViewRepositoryError> {
+            Ok(Some(LatestCommittedDeathV1 {
+                death_id: historical_death_id(),
+                character_id: [2; 16],
+                death_at_unix_ms: 1,
+                death_tick: 1,
+                cause: DeathCauseV1::DirectHit,
+                killer_content_id: WireText::new("enemy.bell_acolyte").unwrap(),
+                killer_pattern_id: Some(
+                    WireText::new("pattern.enemy.bell_acolyte.alternating_fan").unwrap(),
+                ),
+                network_state: DeathNetworkStateV1::Connected,
+                recall_state: DeathRecallStateV1::Inactive,
+                trace_entry_count: 1,
+                trace_digest: [3; 32],
+                destruction_entry_count: 0,
+                destruction_digest: [4; 32],
+                summary_snapshot_digest: [5; 32],
+                content_revision: WireText::new(format!("core-dev.blake3.{}", "c".repeat(64)))
+                    .unwrap(),
+                presentation_revision: revision('b'),
+            }))
+        }
+
+        async fn summary(
+            &self,
+            _account_id: [u8; 16],
+            _death_id: [u8; 16],
+            _lost_start_ordinal: u16,
+            _lost_limit: u16,
+        ) -> Result<DeathSummaryViewV1, DeathViewRepositoryError> {
+            Err(DeathViewRepositoryError::FeatureDisabled)
+        }
+
+        async fn memorial_page(
+            &self,
+            _account_id: [u8; 16],
+            _after: Option<DeathMemorialCursorV1>,
+            _limit: u8,
+        ) -> Result<
+            (Vec<DeathMemorialEntryV1>, Option<DeathMemorialCursorV1>),
+            DeathViewRepositoryError,
+        > {
+            Err(DeathViewRepositoryError::FeatureDisabled)
+        }
+
+        async fn trace_page(
+            &self,
+            _account_id: [u8; 16],
+            _death_id: [u8; 16],
+            _start_ordinal: u16,
+            _limit: u8,
+        ) -> Result<DeathTracePageV1, DeathViewRepositoryError> {
+            Ok(DeathTracePageV1 {
+                death_id: historical_death_id(),
+                presentation_revision: revision('b'),
+                death_tick: 1,
+                total_entry_count: 1,
+                trace_digest: [3; 32],
+                start_ordinal: 0,
+                entries: vec![DeathTraceEntryV1 {
+                    ordinal: 0,
+                    event_tick: 1,
+                    event_ordinal: 0,
+                    source_content_id: WireText::new("enemy.bell_acolyte").unwrap(),
+                    source_entity_id: Some([6; 16]),
+                    pattern_id: Some(
+                        WireText::new("pattern.enemy.bell_acolyte.alternating_fan").unwrap(),
+                    ),
+                    attack_id: WireText::new("pattern.enemy.bell_acolyte.alternating_fan").unwrap(),
+                    raw_damage: 10,
+                    final_damage: 10,
+                    damage_type: DeathDamageTypeV1::Veil,
+                    pre_health: 10,
+                    post_health: 0,
+                    source_x_milli_tiles: 1,
+                    source_y_milli_tiles: 1,
+                    network_state: DeathNetworkStateV1::Connected,
+                    recall_state: DeathRecallStateV1::Inactive,
+                    lethal: true,
+                    statuses: Vec::new(),
+                }],
+                next_ordinal: None,
+            })
+        }
+    }
+
     #[tokio::test]
     async fn disabled_repository_is_typed_and_never_fabricates_a_snapshot() {
         let service = DeathViewService::new(DisabledDeathViewRepository, revision('a'));
@@ -701,25 +766,31 @@ mod tests {
         );
     }
 
-    /// GDD `TECH-020`-`022`, Content Spec `CONT-ECHO-009`, and Roadmap `GB-M03-02`/`06` require
-    /// immutable views to accept exactly the promoted content revision committed by the writer.
-    #[test]
-    fn stored_view_authority_uses_the_canonical_item_content_revision() {
-        let required = revision('a');
-        let hash = "a".repeat(64);
-        assert!(authority_matches(
-            CORE_ITEM_CONTENT_REVISION,
-            &hash,
-            &hash,
-            &hash,
-            &required,
-        ));
-        assert!(!authority_matches(
-            &format!("core-dev.blake3.{hash}"),
-            &hash,
-            &hash,
-            &hash,
-            &required,
-        ));
+    /// GDD `TECH-020`-`022`, Content Spec `CONT-LOC-001`/`CONT-HUB-002`, and Roadmap
+    /// `GB-M03-02`/`06` require a valid older Memorial revision to remain durable data. A process
+    /// that has not retained that package reports a typed compatibility miss, never corruption.
+    #[tokio::test]
+    async fn historical_presentation_revision_is_content_mismatch_not_corruption() {
+        let result = DeathViewService::new(HistoricalRepository, revision('a'))
+            .handle(authenticated(), &latest_frame())
+            .await;
+        assert_eq!(result, error(1, DeathViewResultCodeV1::ContentMismatch));
+
+        let trace = DeathViewFrameV1 {
+            schema_version: DEATH_VIEW_SCHEMA_VERSION,
+            sequence: 2,
+            content_revision: revision('a'),
+            request: DeathViewRequestV1::TracePage {
+                death_id: historical_death_id(),
+                start_ordinal: 0,
+                limit: 1,
+            },
+        };
+        assert_eq!(
+            DeathViewService::new(HistoricalRepository, revision('a'))
+                .handle(authenticated(), &trace)
+                .await,
+            error(2, DeathViewResultCodeV1::ContentMismatch)
+        );
     }
 }

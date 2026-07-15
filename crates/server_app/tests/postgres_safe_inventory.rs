@@ -46,6 +46,16 @@ fn content_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../content")
 }
 
+fn death_view_revision() -> DeathViewContentRevisionV1 {
+    let content = sim_content::load_core_development_death_view(&content_root()).unwrap();
+    DeathViewContentRevisionV1 {
+        records_blake3: ManifestHash::new(content.hashes().records_blake3.clone()).unwrap(),
+        assets_blake3: ManifestHash::new(content.hashes().assets_blake3.clone()).unwrap(),
+        localization_blake3: ManifestHash::new(content.hashes().localization_blake3.clone())
+            .unwrap(),
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct FixedAuthority;
 
@@ -467,14 +477,7 @@ async fn run_quic_transfer_journey(
         &progression_content,
     )
     .unwrap();
-    let death_views = DeathViewService::new(
-        DisabledDeathViewRepository,
-        DeathViewContentRevisionV1 {
-            records_blake3: world_flow_revision.records_blake3.clone(),
-            assets_blake3: world_flow_revision.assets_blake3.clone(),
-            localization_blake3: world_flow_revision.localization_blake3.clone(),
-        },
-    );
+    let death_views = DeathViewService::new(DisabledDeathViewRepository, death_view_revision());
     let oath = CoreOathSelectionAuthority::<FixedAuthority>::disabled();
     let bargain = CoreBargainAuthority::<FixedAuthority>::disabled();
     let safe_inventory = CoreSafeInventoryAuthority::persistent(PostgresSafeInventoryService::new(

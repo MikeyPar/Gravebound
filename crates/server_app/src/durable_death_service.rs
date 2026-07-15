@@ -17,18 +17,20 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use content_schema::CoreDeathViewCopyKind;
 use persistence::{
     AuthoritativeDeathPlanV1, DURABLE_DEATH_SCHEMA_VERSION, DURABLE_DEATH_SUMMARY_REVISION,
     DeathAggregateVersionsV1, DurableCombatTraceEntryV1, DurableDamageTypeV1, DurableDeathCauseV1,
     DurableDeathCommitRequestV1, DurableDeathContentAuthorityV1, DurableDeathEventV1,
-    DurableDeathSummaryV1, DurableDeathTracePromotionV1, DurableDestructionEntryV1,
-    DurableEchoEnvelopeV1, DurableEchoOutcomeV1, DurableEchoRecordV1, DurableEchoStateV1,
-    DurableEchoTransitionReasonV1, DurableEchoTransitionV1, DurableMemorialRecordV1,
-    DurableNetworkStateV1, DurableOrderedContentIdV1, DurableRecallStateV1,
-    DurableSummaryDamageReferenceV1, DurableSummaryProjectionEntryV1,
+    DurableDeathPresentationAuthorityV1, DurableDeathSummaryV1, DurableDeathTracePromotionV1,
+    DurableDestructionEntryV1, DurableEchoEnvelopeV1, DurableEchoOutcomeV1, DurableEchoRecordV1,
+    DurableEchoStateV1, DurableEchoTransitionReasonV1, DurableEchoTransitionV1,
+    DurableMemorialRecordV1, DurableNetworkStateV1, DurableOrderedContentIdV1,
+    DurableRecallStateV1, DurableSummaryDamageReferenceV1, DurableSummaryProjectionEntryV1,
     DurableSummaryProjectionKindV1, DurableSummaryProjectionsV1, DurableTraceStatusV1,
     PersistenceError, WIPEABLE_CORE_NAMESPACE, derive_durable_death_bargain_cleanup_event_id,
 };
+use sim_content::CoreDevelopmentDeathView;
 use sim_core::{
     AuthoritativeDeathCauseKind, AuthoritativeDeathInputs, DEATH_AUTHORITY_SCHEMA_VERSION,
     DEED_NONE_ID, DamageTraceAggregate, DamageTraceCheckpointV1, DamageTraceEntry, DamageType,
@@ -204,6 +206,8 @@ pub enum DurableDeathBuildError {
     MissingEntityIdentity(u64),
     #[error("Echo projection material does not match authoritative eligibility")]
     EchoEligibilityMismatch,
+    #[error("death presentation content is missing or incompatible: {0}")]
+    PresentationContentMismatch(&'static str),
     #[error("durable death DTO validation failed")]
     Persistence(#[source] PersistenceError),
 }
@@ -226,10 +230,12 @@ impl From<PersistenceError> for DurableDeathBuildError {
 pub fn build_durable_death_commit(
     inputs: &AuthoritativeDeathInputs,
     context: &ServerAuthoredDeathContext,
+    presentation: &CoreDevelopmentDeathView,
 ) -> Result<PreparedDurableDeathCommit, DurableDeathBuildError> {
     validate_server_authority(context)?;
     validate_simulation_evidence(inputs)?;
     validate_terminal_evidence(inputs, &context.terminal_trace)?;
+    validate_presentation_content(inputs, context, presentation)?;
 
     let trace = map_trace(inputs, &context.entity_identities)?;
     let destruction = context.destruction.clone();
@@ -270,6 +276,11 @@ pub fn build_durable_death_commit(
         records_blake3: context.content.records_blake3.clone(),
         assets_blake3: context.content.assets_blake3.clone(),
         localization_blake3: context.content.localization_blake3.clone(),
+        presentation: DurableDeathPresentationAuthorityV1 {
+            records_blake3: presentation.hashes().records_blake3.clone(),
+            assets_blake3: presentation.hashes().assets_blake3.clone(),
+            localization_blake3: presentation.hashes().localization_blake3.clone(),
+        },
         instance_id: context.world.instance_id,
         lineage_id: context.world.lineage_id,
         restore_point_id: context.world.restore_point_id,
@@ -364,6 +375,113 @@ pub fn build_durable_death_commit(
         content: context.content.clone(),
         promotion,
     })
+}
+
+fn validate_presentation_content(
+    inputs: &AuthoritativeDeathInputs,
+    context: &ServerAuthoredDeathContext,
+    presentation: &CoreDevelopmentDeathView,
+) -> Result<(), DurableDeathBuildError> {
+    let hashes = presentation.hashes();
+    let world = persistence::LiveDamageTraceContentAuthorityV1::core();
+    let durable_presentation = DurableDeathPresentationAuthorityV1::core();
+    if context.content.content_revision != presentation.item_content_revision()
+        || context.content.records_blake3 != world.records_blake3
+        || context.content.assets_blake3 != world.assets_blake3
+        || context.content.localization_blake3 != world.localization_blake3
+        || hashes.records_blake3 != durable_presentation.records_blake3
+        || hashes.assets_blake3 != durable_presentation.assets_blake3
+        || hashes.localization_blake3 != durable_presentation.localization_blake3
+    {
+        return Err(DurableDeathBuildError::PresentationContentMismatch(
+            "revision binding",
+        ));
+    }
+    if presentation
+        .resolve_copy(
+            CoreDeathViewCopyKind::HeroLabel,
+            &context.hero.hero_label_key,
+        )
+        .is_none()
+        || presentation.resolve_class(&context.hero.class_id).is_none()
+        || context
+            .hero
+            .oath_id
+            .as_deref()
+            .is_some_and(|id| presentation.resolve_oath(id).is_none())
+        || context
+            .hero
+            .bargain_ids
+            .iter()
+            .any(|id| presentation.resolve_bargain(id).is_none())
+        || presentation
+            .resolve_copy(
+                CoreDeathViewCopyKind::MemorialPresentation,
+                &context.hero.memorial_presentation_key,
+            )
+            .is_none()
+    {
+        return Err(DurableDeathBuildError::PresentationContentMismatch(
+            "hero or Memorial snapshot",
+        ));
+    }
+    if presentation
+        .resolve_copy(CoreDeathViewCopyKind::Deed, &inputs.final_deed.deed_id)
+        .is_none()
+        || context.echo.as_ref().is_some_and(|echo| {
+            echo.deed_tags.iter().any(|id| {
+                presentation
+                    .resolve_copy(CoreDeathViewCopyKind::Deed, id)
+                    .is_none()
+            })
+        })
+    {
+        return Err(DurableDeathBuildError::PresentationContentMismatch(
+            "deed snapshot",
+        ));
+    }
+    for item in &context.content.enabled_items {
+        if presentation.resolve_item(&item.template_id).is_none() {
+            return Err(DurableDeathBuildError::PresentationContentMismatch(
+                "enabled item",
+            ));
+        }
+    }
+    for entry in &inputs.trace {
+        if presentation
+            .resolve_source(&entry.source_content_id)
+            .is_none()
+            || presentation.resolve_attack(&entry.attack_id).is_none()
+            || entry
+                .pattern_id
+                .as_deref()
+                .is_some_and(|id| presentation.resolve_pattern(id).is_none())
+            || entry
+                .statuses
+                .iter()
+                .any(|status| presentation.resolve_status(&status.status_id).is_none())
+        {
+            return Err(DurableDeathBuildError::PresentationContentMismatch(
+                "combat trace",
+            ));
+        }
+    }
+    for entry in &context.destruction {
+        let resolved = match entry {
+            DurableDestructionEntryV1::Item { content_id, .. } => {
+                presentation.resolve_item(content_id)
+            }
+            DurableDestructionEntryV1::RunMaterial { material_id, .. } => {
+                presentation.resolve_copy(CoreDeathViewCopyKind::Material, material_id)
+            }
+        };
+        if resolved.is_none() {
+            return Err(DurableDeathBuildError::PresentationContentMismatch(
+                "destruction projection",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn validate_terminal_evidence(
@@ -863,6 +981,20 @@ pub(crate) mod tests {
         value
     }
 
+    fn presentation() -> CoreDevelopmentDeathView {
+        sim_content::load_core_development_death_view(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content"),
+        )
+        .expect("valid Core death-presentation content")
+    }
+
+    fn build_test_commit(
+        inputs: &AuthoritativeDeathInputs,
+        context: &ServerAuthoredDeathContext,
+    ) -> Result<PreparedDurableDeathCommit, DurableDeathBuildError> {
+        build_durable_death_commit(inputs, context, &presentation())
+    }
+
     fn trace_entry(
         tick: u64,
         event_ordinal: u32,
@@ -874,10 +1006,10 @@ pub(crate) mod tests {
             tick: Tick(tick),
             event_ordinal,
             cause_kind: AuthoritativeDeathCauseKind::DirectHit,
-            source_content_id: "enemy.sir_caldus".into(),
+            source_content_id: "boss.sir_caldus".into(),
             source_entity_id: Some(EntityId::new(41).unwrap()),
             pattern_id: Some("boss.caldus.bell_ring".into()),
-            attack_id: "attack.caldus.bell_ring".into(),
+            attack_id: "boss.caldus.bell_ring".into(),
             raw_damage: final_damage,
             final_damage,
             damage_type: DamageType::Veil,
@@ -1029,7 +1161,7 @@ pub(crate) mod tests {
     }
 
     fn context() -> ServerAuthoredDeathContext {
-        let content_revision = format!("core-dev.blake3.{}", "a".repeat(64));
+        let content_revision = persistence::CORE_ITEM_CONTENT_REVISION.to_owned();
         let live_content = LiveDamageTraceContentAuthorityV1::core();
         let terminal_trace = terminal_trace_fixture(&inputs(), live_content.clone());
         ServerAuthoredDeathContext {
@@ -1061,14 +1193,14 @@ pub(crate) mod tests {
                 assets_blake3: live_content.assets_blake3,
                 localization_blake3: live_content.localization_blake3,
                 enabled_items: vec![DurableDeathItemContentAuthorityV1 {
-                    template_id: "item.weapon.caldus_bow".into(),
+                    template_id: "item.weapon.crossbow.pine_crossbow".into(),
                     echo_signature_tag: Some("signature.weapon.bow".into()),
                 }],
             },
             versions: versions(),
             destruction: vec![DurableDestructionEntryV1::Item {
                 ordinal: 0,
-                content_id: "item.weapon.caldus_bow".into(),
+                content_id: "item.weapon.crossbow.pine_crossbow".into(),
                 item_uid: [8; 16],
                 location: DurableDestructionLocationV1::Equipment {
                     slot: DurableEquipmentSlotV1::Weapon,
@@ -1078,13 +1210,13 @@ pub(crate) mod tests {
                 ledger_event_id: [9; 16],
             }],
             hero: DeathHeroSnapshot {
-                hero_label_key: "hero.core.label".into(),
+                hero_label_key: "hero.core.grave_arbalist".into(),
                 character_name: "Mara".into(),
                 class_id: "class.grave_arbalist".into(),
                 level: 10,
-                oath_id: Some("oath.black_bell".into()),
+                oath_id: Some("oath.arbalist.long_vigil".into()),
                 bargain_ids: vec!["bargain.cinder_hunger".into()],
-                memorial_presentation_key: "memorial.core.default".into(),
+                memorial_presentation_key: "memorial.presentation.core_default".into(),
             },
             entity_identities: DeathEntityIdentityAuthority {
                 by_sim_entity: BTreeMap::from([(EntityId::new(41).unwrap(), [10; 16])]),
@@ -1108,14 +1240,14 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn prepared_commit() -> PreparedDurableDeathCommit {
-        build_durable_death_commit(&inputs(), &context()).expect("canonical death fixture")
+        build_test_commit(&inputs(), &context()).expect("canonical death fixture")
     }
 
     #[test]
     fn maps_authoritative_evidence_and_server_identity_exactly() {
         let inputs = inputs();
         let context = context();
-        let prepared = build_durable_death_commit(&inputs, &context).unwrap();
+        let prepared = build_test_commit(&inputs, &context).unwrap();
         prepared.request.validate().unwrap();
         let plan = &prepared.request.plan;
 
@@ -1134,8 +1266,8 @@ pub(crate) mod tests {
         assert_eq!(plan.event.restore_point_id, context.world.restore_point_id);
         assert_eq!(plan.event.death_tick, 1_000);
         assert_eq!(plan.event.cause, DurableDeathCauseV1::DirectHit);
-        assert_eq!(plan.event.killer_content_id, "enemy.sir_caldus");
-        assert_eq!(plan.event.killer_attack_id, "attack.caldus.bell_ring");
+        assert_eq!(plan.event.killer_content_id, "boss.sir_caldus");
+        assert_eq!(plan.event.killer_attack_id, "boss.caldus.bell_ring");
         assert_eq!(plan.trace[0].source_entity_id, Some([10; 16]));
         assert_eq!(plan.trace[0].statuses[0].ordinal, 0);
         assert_eq!(plan.summary.final_deed_id, inputs.final_deed.deed_id);
@@ -1152,7 +1284,7 @@ pub(crate) mod tests {
 
     #[test]
     fn lifetime_and_combat_clocks_remain_independent() {
-        let prepared = build_durable_death_commit(&inputs(), &context()).unwrap();
+        let prepared = build_test_commit(&inputs(), &context()).unwrap();
         assert_eq!(prepared.request.plan.event.lifetime_ticks, 17_000);
         assert_eq!(prepared.request.plan.event.permadeath_combat_ticks, 18_000);
         assert!(
@@ -1166,7 +1298,7 @@ pub(crate) mod tests {
         let mut changed_trace = inputs();
         changed_trace.trace[0].raw_damage += 1;
         assert!(matches!(
-            build_durable_death_commit(&changed_trace, &context()),
+            build_test_commit(&changed_trace, &context()),
             Err(DurableDeathBuildError::EvidenceMismatch(_))
         ));
 
@@ -1176,21 +1308,21 @@ pub(crate) mod tests {
             lethal_entry: changed_cause.cause.lethal_entry.clone(),
         };
         assert!(matches!(
-            build_durable_death_commit(&changed_cause, &context()),
+            build_test_commit(&changed_cause, &context()),
             Err(DurableDeathBuildError::EvidenceMismatch(_))
         ));
 
         let mut changed_last_five = inputs();
         changed_last_five.last_five.remove(0);
         assert!(matches!(
-            build_durable_death_commit(&changed_last_five, &context()),
+            build_test_commit(&changed_last_five, &context()),
             Err(DurableDeathBuildError::EvidenceMismatch(_))
         ));
 
         let mut changed_digest = inputs();
         changed_digest.trace_digest[0] ^= 1;
         assert!(matches!(
-            build_durable_death_commit(&changed_digest, &context()),
+            build_test_commit(&changed_digest, &context()),
             Err(DurableDeathBuildError::EvidenceMismatch(_))
         ));
     }
@@ -1200,14 +1332,14 @@ pub(crate) mod tests {
         let mut wrong_mutation = context();
         wrong_mutation.mutation.mutation_id[6] = 0x40;
         assert!(matches!(
-            build_durable_death_commit(&inputs(), &wrong_mutation),
+            build_test_commit(&inputs(), &wrong_mutation),
             Err(DurableDeathBuildError::InvalidIdentity)
         ));
 
         let mut wrong_content = context();
         wrong_content.content.enabled_items.clear();
         assert!(matches!(
-            build_durable_death_commit(&inputs(), &wrong_content),
+            build_test_commit(&inputs(), &wrong_content),
             Err(DurableDeathBuildError::Persistence(
                 PersistenceError::DurableDeathContentMismatch
             ))
@@ -1216,7 +1348,7 @@ pub(crate) mod tests {
         let mut missing_entity = context();
         missing_entity.entity_identities.by_sim_entity.clear();
         assert!(matches!(
-            build_durable_death_commit(&inputs(), &missing_entity),
+            build_test_commit(&inputs(), &missing_entity),
             Err(DurableDeathBuildError::MissingEntityIdentity(41))
         ));
     }
@@ -1226,7 +1358,7 @@ pub(crate) mod tests {
         let mut missing = context();
         missing.echo = None;
         assert!(matches!(
-            build_durable_death_commit(&inputs(), &missing),
+            build_test_commit(&inputs(), &missing),
             Err(DurableDeathBuildError::EchoEligibilityMismatch)
         ));
 
@@ -1234,13 +1366,13 @@ pub(crate) mod tests {
         ineligible_inputs.clocks.permadeath_combat_ticks = 17_999;
         ineligible_inputs.clocks.echo_time_eligible = false;
         assert!(matches!(
-            build_durable_death_commit(&ineligible_inputs, &context()),
+            build_test_commit(&ineligible_inputs, &context()),
             Err(DurableDeathBuildError::EchoEligibilityMismatch)
         ));
 
         let mut ineligible_context = context();
         ineligible_context.echo = None;
-        let prepared = build_durable_death_commit(&ineligible_inputs, &ineligible_context).unwrap();
+        let prepared = build_test_commit(&ineligible_inputs, &ineligible_context).unwrap();
         assert!(prepared.request.plan.echo.is_none());
         assert_eq!(
             prepared.request.plan.summary.echo_outcome,
@@ -1250,13 +1382,13 @@ pub(crate) mod tests {
         let mut level_nine = context();
         level_nine.hero.level = 9;
         level_nine.echo = None;
-        let prepared = build_durable_death_commit(&inputs(), &level_nine).unwrap();
+        let prepared = build_test_commit(&inputs(), &level_nine).unwrap();
         assert!(prepared.request.plan.echo.is_none());
 
         let level_ten = context();
         assert_eq!(level_ten.hero.level, 10);
         assert!(
-            build_durable_death_commit(&inputs(), &level_ten)
+            build_test_commit(&inputs(), &level_ten)
                 .unwrap()
                 .request
                 .plan
@@ -1274,13 +1406,13 @@ pub(crate) mod tests {
             let mut with_echo = context();
             with_echo.world.lineage_state = DeathLineageState::ActivePermadeath(provenance);
             assert!(matches!(
-                build_durable_death_commit(&inputs(), &with_echo),
+                build_test_commit(&inputs(), &with_echo),
                 Err(DurableDeathBuildError::EchoEligibilityMismatch)
             ));
 
             let mut without_echo = with_echo;
             without_echo.echo = None;
-            let prepared = build_durable_death_commit(&inputs(), &without_echo).unwrap();
+            let prepared = build_test_commit(&inputs(), &without_echo).unwrap();
             assert!(prepared.request.plan.echo.is_none());
             assert_eq!(
                 prepared.request.plan.summary.echo_outcome,
@@ -1299,7 +1431,7 @@ pub(crate) mod tests {
             let mut context = context();
             context.world.lineage_state = lineage_state;
             assert!(matches!(
-                build_durable_death_commit(&inputs(), &context),
+                build_test_commit(&inputs(), &context),
                 Err(DurableDeathBuildError::WorldAuthorityMismatch)
             ));
         }
@@ -1313,7 +1445,7 @@ pub(crate) mod tests {
             "deed.core.sir_caldus_defeated".into(),
             "deed.core.sepulcher_knight_defeated".into(),
         ];
-        let prepared = build_durable_death_commit(&inputs(), &context).unwrap();
+        let prepared = build_test_commit(&inputs(), &context).unwrap();
         let tags = &prepared
             .request
             .plan
@@ -1331,7 +1463,7 @@ pub(crate) mod tests {
             "deed.core.sir_caldus_defeated".into(),
         ];
         assert!(matches!(
-            build_durable_death_commit(&inputs(), &duplicate),
+            build_test_commit(&inputs(), &duplicate),
             Err(DurableDeathBuildError::EchoEligibilityMismatch)
         ));
 
@@ -1340,7 +1472,7 @@ pub(crate) mod tests {
             EchoAvailabilityProjection::ExistingAvailable {
                 echo_id: uuid_v7(12),
             };
-        let prepared = build_durable_death_commit(&inputs(), &preexisting).unwrap();
+        let prepared = build_test_commit(&inputs(), &preexisting).unwrap();
         let echo = prepared.request.plan.echo.as_ref().unwrap();
         assert_eq!(echo.preexisting_available_echo_id, Some(uuid_v7(12)));
         assert!(echo.promotion.is_none());
@@ -1349,7 +1481,7 @@ pub(crate) mod tests {
 
     #[test]
     fn content_revision_is_bound_across_event_summary_memorial_and_echo() {
-        let prepared = build_durable_death_commit(&inputs(), &context()).unwrap();
+        let prepared = build_test_commit(&inputs(), &context()).unwrap();
         let plan = &prepared.request.plan;
         assert_eq!(
             plan.event.content_revision,
@@ -1367,5 +1499,101 @@ pub(crate) mod tests {
             plan.memorial.summary_snapshot_digest,
             plan.summary.snapshot_digest
         );
+    }
+
+    #[test]
+    fn dedicated_presentation_revision_is_required_before_commit_construction() {
+        let mut ctx = context();
+        ctx.content.records_blake3 = "0".repeat(64);
+        assert!(matches!(
+            build_test_commit(&inputs(), &ctx),
+            Err(DurableDeathBuildError::PresentationContentMismatch(
+                "revision binding"
+            ))
+        ));
+
+        let mut ctx = context();
+        ctx.content.content_revision = format!("core-dev.blake3.{}", "0".repeat(64));
+        assert!(matches!(
+            build_test_commit(&inputs(), &ctx),
+            Err(DurableDeathBuildError::PresentationContentMismatch(
+                "revision binding"
+            ))
+        ));
+    }
+
+    #[test]
+    fn every_stored_presentation_domain_fails_closed() {
+        let presentation = presentation();
+
+        let mut ctx = context();
+        ctx.hero.class_id = "status.bleed".into();
+        assert!(matches!(
+            validate_presentation_content(&inputs(), &ctx, &presentation),
+            Err(DurableDeathBuildError::PresentationContentMismatch(
+                "hero or Memorial snapshot"
+            ))
+        ));
+
+        let mut ctx = context();
+        ctx.echo.as_mut().unwrap().deed_tags = vec!["deed.core.unknown".into()];
+        assert!(matches!(
+            validate_presentation_content(&inputs(), &ctx, &presentation),
+            Err(DurableDeathBuildError::PresentationContentMismatch(
+                "deed snapshot"
+            ))
+        ));
+
+        let mut ctx = context();
+        ctx.content.enabled_items[0].template_id = "item.core.unknown".into();
+        assert!(matches!(
+            validate_presentation_content(&inputs(), &ctx, &presentation),
+            Err(DurableDeathBuildError::PresentationContentMismatch(
+                "enabled item"
+            ))
+        ));
+
+        let mut death_inputs = inputs();
+        death_inputs.trace[0].source_content_id = "source.core.unknown".into();
+        assert!(matches!(
+            validate_presentation_content(&death_inputs, &context(), &presentation),
+            Err(DurableDeathBuildError::PresentationContentMismatch(
+                "combat trace"
+            ))
+        ));
+
+        let mut death_inputs = inputs();
+        death_inputs.trace[0].attack_id = "attack.caldus.bell_ring".into();
+        assert!(matches!(
+            validate_presentation_content(&death_inputs, &context(), &presentation),
+            Err(DurableDeathBuildError::PresentationContentMismatch(
+                "combat trace"
+            ))
+        ));
+
+        let mut death_inputs = inputs();
+        death_inputs.trace[0].statuses[0].status_id = "class.grave_arbalist".into();
+        assert!(matches!(
+            validate_presentation_content(&death_inputs, &context(), &presentation),
+            Err(DurableDeathBuildError::PresentationContentMismatch(
+                "combat trace"
+            ))
+        ));
+
+        let mut ctx = context();
+        ctx.destruction[0] = DurableDestructionEntryV1::RunMaterial {
+            ordinal: 0,
+            material_id: "material.core.unknown".into(),
+            destroyed_quantity: 1,
+            pre_material_quantity: 1,
+            pre_material_version: 1,
+            post_material_version: 2,
+        };
+        assert!(matches!(
+            validate_presentation_content(&inputs(), &ctx, &presentation),
+            Err(DurableDeathBuildError::PresentationContentMismatch(
+                "destruction projection"
+            ))
+        ));
     }
 }

@@ -1,21 +1,22 @@
 use persistence::{
-    AuthoritativeDeathPlanV1, CORE_ITEM_CONTENT_REVISION, CORE_WORLD_ASSETS_BLAKE3,
+    AuthoritativeDeathPlanV1, CORE_DEATH_VIEW_ASSETS_BLAKE3, CORE_DEATH_VIEW_LOCALIZATION_BLAKE3,
+    CORE_DEATH_VIEW_RECORDS_BLAKE3, CORE_ITEM_CONTENT_REVISION, CORE_WORLD_ASSETS_BLAKE3,
     CORE_WORLD_LOCALIZATION_BLAKE3, CORE_WORLD_RECORDS_BLAKE3, DURABLE_DEATH_SCHEMA_VERSION,
     DURABLE_DEATH_SUMMARY_REVISION, DeathAggregateVersionsV1, DeathVersionAdvanceV1,
     DeathViewReadError, DurableCombatTraceEntryV1, DurableDamageTypeV1, DurableDeathCauseV1,
     DurableDeathCommitRequestV1, DurableDeathContentAuthorityV1, DurableDeathEventV1,
-    DurableDeathItemContentAuthorityV1, DurableDeathSummaryV1, DurableDeathTracePromotionV1,
-    DurableDeathTransactionV1, DurableDestructionEntryV1, DurableDestructionLocationV1,
-    DurableEchoEnvelopeV1, DurableEchoOutcomeV1, DurableEchoRecordV1, DurableEchoStateV1,
-    DurableEchoTransitionReasonV1, DurableEchoTransitionV1, DurableEquipmentSlotV1,
-    DurableMemorialRecordV1, DurableNetworkStateV1, DurableOrderedContentIdV1,
-    DurableRecallStateV1, DurableSummaryDamageReferenceV1, DurableSummaryProjectionEntryV1,
-    DurableSummaryProjectionKindV1, DurableSummaryProjectionsV1, DurableTraceStatusV1,
-    LiveDamageTraceCauseV1, LiveDamageTraceContentAuthorityV1, LiveDamageTraceDamageTypeV1,
-    LiveDamageTraceDangerAuthorityV1, LiveDamageTraceEntryV1, LiveDamageTraceNetworkStateV1,
-    LiveDamageTraceRecallStateV1, LiveDamageTraceStatusV1, LiveDamageTraceTickCommandV1,
-    LiveDamageTraceTickRequestV1, LiveDamageTraceTickTransactionV1, PersistenceConfig,
-    PersistenceError, PostgresPersistence, StoredLiveDamageTraceSnapshotEntryV1,
+    DurableDeathItemContentAuthorityV1, DurableDeathPresentationAuthorityV1, DurableDeathSummaryV1,
+    DurableDeathTracePromotionV1, DurableDeathTransactionV1, DurableDestructionEntryV1,
+    DurableDestructionLocationV1, DurableEchoEnvelopeV1, DurableEchoOutcomeV1, DurableEchoRecordV1,
+    DurableEchoStateV1, DurableEchoTransitionReasonV1, DurableEchoTransitionV1,
+    DurableEquipmentSlotV1, DurableMemorialRecordV1, DurableNetworkStateV1,
+    DurableOrderedContentIdV1, DurableRecallStateV1, DurableSummaryDamageReferenceV1,
+    DurableSummaryProjectionEntryV1, DurableSummaryProjectionKindV1, DurableSummaryProjectionsV1,
+    DurableTraceStatusV1, LiveDamageTraceCauseV1, LiveDamageTraceContentAuthorityV1,
+    LiveDamageTraceDamageTypeV1, LiveDamageTraceDangerAuthorityV1, LiveDamageTraceEntryV1,
+    LiveDamageTraceNetworkStateV1, LiveDamageTraceRecallStateV1, LiveDamageTraceStatusV1,
+    LiveDamageTraceTickCommandV1, LiveDamageTraceTickRequestV1, LiveDamageTraceTickTransactionV1,
+    PersistenceConfig, PersistenceError, PostgresPersistence, StoredLiveDamageTraceSnapshotEntryV1,
     WIPEABLE_CORE_NAMESPACE, canonical_death_terminal_payload_hash_v1,
     stage_danger_entry_ash_wallet_restore_v3, stage_danger_entry_inventory_restore_v3,
     stage_danger_entry_life_metrics_restore_v3, stage_danger_entry_oath_bargain_restore_v3,
@@ -32,7 +33,7 @@ const ITEM_UID: [u8; 16] = [235; 16];
 const ITEM_LEDGER_ID: [u8; 16] = [236; 16];
 const ENTRY_MUTATION_ID: [u8; 16] = [237; 16];
 const DEED_REWARD_ID: [u8; 16] = [238; 16];
-const MATERIAL_ID: &str = "material.core.iron";
+const MATERIAL_ID: &str = "material.bell_brass";
 const ITEM_TEMPLATE_ID: &str = "item.weapon.crossbow.pine_crossbow";
 const DEED_ID: &str = "deed.core.sir_caldus_defeated";
 const RECORDS_BLAKE3: &str = CORE_WORLD_RECORDS_BLAKE3;
@@ -227,9 +228,9 @@ async fn reset_fixture(persistence: &PostgresPersistence) {
     .bind(ACCOUNT_ID.as_slice())
     .bind(CHARACTER_ID.as_slice())
     .bind(LINEAGE_ID.as_slice())
-    .bind(RECORDS_BLAKE3)
-    .bind(ASSETS_BLAKE3)
-    .bind(LOCALIZATION_BLAKE3)
+    .bind(CORE_WORLD_RECORDS_BLAKE3)
+    .bind(CORE_WORLD_ASSETS_BLAKE3)
+    .bind(CORE_WORLD_LOCALIZATION_BLAKE3)
     .execute(transaction.connection())
     .await
     .unwrap();
@@ -248,9 +249,9 @@ async fn reset_fixture(persistence: &PostgresPersistence) {
     .bind(RESTORE_POINT_ID.as_slice())
     .bind(LINEAGE_ID.as_slice())
     .bind([91_u8; 32].as_slice())
-    .bind(RECORDS_BLAKE3)
-    .bind(ASSETS_BLAKE3)
-    .bind(LOCALIZATION_BLAKE3)
+    .bind(CORE_WORLD_RECORDS_BLAKE3)
+    .bind(CORE_WORLD_ASSETS_BLAKE3)
+    .bind(CORE_WORLD_LOCALIZATION_BLAKE3)
     .execute(transaction.connection())
     .await
     .unwrap();
@@ -370,9 +371,9 @@ async fn reset_fixture(persistence: &PostgresPersistence) {
     .bind(CHARACTER_ID.as_slice())
     .bind(LINEAGE_ID.as_slice())
     .bind([94_u8; 32].as_slice())
-    .bind(RECORDS_BLAKE3)
-    .bind(ASSETS_BLAKE3)
-    .bind(LOCALIZATION_BLAKE3)
+    .bind(CORE_WORLD_RECORDS_BLAKE3)
+    .bind(CORE_WORLD_ASSETS_BLAKE3)
+    .bind(CORE_WORLD_LOCALIZATION_BLAKE3)
     .bind(checkpoint_payload.as_slice())
     .bind(checkpoint_payload_digest.as_bytes().as_slice())
     .execute(transaction.connection())
@@ -435,10 +436,10 @@ fn request(ids: RequestIds) -> DurableDeathCommitRequestV1 {
             ordinal: 0,
             event_tick: 19_990,
             event_ordinal: 0,
-            source_content_id: "enemy.sepulcher_knight".into(),
+            source_content_id: "miniboss.sepulcher_knight".into(),
             source_entity_id: Some([81; 16]),
-            pattern_id: Some("pattern.sepulcher.lance".into()),
-            attack_id: "attack.sepulcher.lance".into(),
+            pattern_id: Some("miniboss.sepulcher_knight.charge_lane".into()),
+            attack_id: "miniboss.sepulcher_knight.charge_lane".into(),
             raw_damage: 10,
             final_damage: 10,
             damage_type: DurableDamageTypeV1::Physical,
@@ -460,10 +461,10 @@ fn request(ids: RequestIds) -> DurableDeathCommitRequestV1 {
             ordinal: 1,
             event_tick: 20_000,
             event_ordinal: 0,
-            source_content_id: "enemy.sepulcher_knight".into(),
+            source_content_id: "miniboss.sepulcher_knight".into(),
             source_entity_id: Some([81; 16]),
-            pattern_id: Some("pattern.sepulcher.lance".into()),
-            attack_id: "attack.sepulcher.lance".into(),
+            pattern_id: Some("miniboss.sepulcher_knight.charge_lane".into()),
+            attack_id: "miniboss.sepulcher_knight.charge_lane".into(),
             raw_damage: 60,
             final_damage: 60,
             damage_type: DurableDamageTypeV1::Physical,
@@ -523,6 +524,7 @@ fn request(ids: RequestIds) -> DurableDeathCommitRequestV1 {
         records_blake3: RECORDS_BLAKE3.into(),
         assets_blake3: ASSETS_BLAKE3.into(),
         localization_blake3: LOCALIZATION_BLAKE3.into(),
+        presentation: DurableDeathPresentationAuthorityV1::core(),
         instance_id: INSTANCE_ID,
         lineage_id: LINEAGE_ID,
         restore_point_id: RESTORE_POINT_ID,
@@ -531,9 +533,9 @@ fn request(ids: RequestIds) -> DurableDeathCommitRequestV1 {
         death_tick: 20_000,
         committed_at_unix_ms: ISSUED_AT_UNIX_MS,
         cause: DurableDeathCauseV1::DirectHit,
-        killer_content_id: "enemy.sepulcher_knight".into(),
-        killer_pattern_id: Some("pattern.sepulcher.lance".into()),
-        killer_attack_id: "attack.sepulcher.lance".into(),
+        killer_content_id: "miniboss.sepulcher_knight".into(),
+        killer_pattern_id: Some("miniboss.sepulcher_knight.charge_lane".into()),
+        killer_attack_id: "miniboss.sepulcher_knight.charge_lane".into(),
         raw_damage: 60,
         final_damage: 60,
         damage_type: DurableDamageTypeV1::Physical,
@@ -1861,9 +1863,19 @@ async fn assert_committed_death_views(persistence: &PostgresPersistence, ids: Re
     assert_eq!(latest.death_id, ids.death_id);
     assert_eq!(latest.character_id, CHARACTER_ID);
     assert_eq!(latest.content_revision, CORE_ITEM_CONTENT_REVISION);
-    assert_eq!(latest.records_blake3, RECORDS_BLAKE3);
-    assert_eq!(latest.assets_blake3, ASSETS_BLAKE3);
-    assert_eq!(latest.localization_blake3, LOCALIZATION_BLAKE3);
+    assert_eq!(
+        latest.presentation.records_blake3,
+        CORE_DEATH_VIEW_RECORDS_BLAKE3
+    );
+    assert_eq!(
+        latest.presentation.assets_blake3,
+        CORE_DEATH_VIEW_ASSETS_BLAKE3
+    );
+    assert_eq!(
+        latest.presentation.localization_blake3,
+        CORE_DEATH_VIEW_LOCALIZATION_BLAKE3
+    );
+    assert_stored_death_authorities(persistence, ids.death_id).await;
 
     let summary = persistence
         .load_owned_death_summary_view(ACCOUNT_ID, ids.death_id, 0, 32)
@@ -1873,7 +1885,10 @@ async fn assert_committed_death_views(persistence: &PostgresPersistence, ids: Re
     assert_eq!(summary.last_five_damage.len(), 2);
     assert_eq!(summary.lost.len(), usize::from(summary.lost_total_count));
     assert!(summary.next_lost_ordinal.is_none());
-    assert_eq!(summary.records_blake3, RECORDS_BLAKE3);
+    assert_eq!(
+        summary.presentation,
+        DurableDeathPresentationAuthorityV1::core()
+    );
 
     let memorials = persistence
         .load_death_memorial_page(ACCOUNT_ID, None, 32)
@@ -1881,13 +1896,20 @@ async fn assert_committed_death_views(persistence: &PostgresPersistence, ids: Re
         .unwrap();
     assert_eq!(memorials.entries.len(), 1);
     assert_eq!(memorials.entries[0].cursor.death_id, ids.death_id);
-    assert_eq!(memorials.entries[0].records_blake3, RECORDS_BLAKE3);
+    assert_eq!(
+        memorials.entries[0].presentation,
+        DurableDeathPresentationAuthorityV1::core()
+    );
     assert!(memorials.next_cursor.is_none());
 
     let trace = persistence
         .load_owned_death_trace_page(ACCOUNT_ID, ids.death_id, 0, 8)
         .await
         .unwrap();
+    assert_eq!(
+        trace.presentation,
+        DurableDeathPresentationAuthorityV1::core()
+    );
     assert_eq!(trace.entries.len(), 2);
     assert!(trace.entries.last().is_some_and(|entry| entry.lethal));
     assert!(trace.next_ordinal.is_none());
@@ -1904,6 +1926,38 @@ async fn assert_committed_death_views(persistence: &PostgresPersistence, ids: Re
             .await,
         Err(DeathViewReadError::PageOutOfRange)
     );
+}
+
+async fn assert_stored_death_authorities(persistence: &PostgresPersistence, death_id: [u8; 16]) {
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let authority = sqlx::query(
+        "SELECT world_records_blake3,world_assets_blake3,world_localization_blake3,\
+                presentation_records_blake3,presentation_assets_blake3,\
+                presentation_localization_blake3 \
+         FROM death_events WHERE namespace_id=$1 AND death_id=$2",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(death_id.as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    for (column, expected) in [
+        ("world_records_blake3", RECORDS_BLAKE3),
+        ("world_assets_blake3", ASSETS_BLAKE3),
+        ("world_localization_blake3", LOCALIZATION_BLAKE3),
+        (
+            "presentation_records_blake3",
+            CORE_DEATH_VIEW_RECORDS_BLAKE3,
+        ),
+        ("presentation_assets_blake3", CORE_DEATH_VIEW_ASSETS_BLAKE3),
+        (
+            "presentation_localization_blake3",
+            CORE_DEATH_VIEW_LOCALIZATION_BLAKE3,
+        ),
+    ] {
+        assert_eq!(authority.get::<String, _>(column), expected, "{column}");
+    }
+    transaction.rollback().await.unwrap();
 }
 
 /// Hosted restart projection required by GDD TECH-015/021/023, Content CONT-BOSS-005 and

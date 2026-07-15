@@ -12,11 +12,12 @@ use thiserror::Error;
 
 use crate::{
     DURABLE_DEATH_SUMMARY_REVISION, DURABLE_DEATH_TRACE_WINDOW_TICKS, DurableCombatTraceEntryV1,
-    DurableDamageTypeV1, DurableDeathCauseV1, DurableEchoOutcomeV1, DurableNetworkStateV1,
-    DurableOrderedContentIdV1, DurableRecallStateV1, DurableSummaryProjectionEntryV1,
-    DurableSummaryProjectionKindV1, DurableTraceStatusV1, MAX_DURABLE_DEATH_DESTRUCTION_ENTRIES,
-    MAX_DURABLE_DEATH_STATUSES_PER_ENTRY, MAX_DURABLE_DEATH_TRACE_ENTRIES, PostgresPersistence,
-    StoredCommittedDeathResultV1, WIPEABLE_CORE_NAMESPACE,
+    DurableDamageTypeV1, DurableDeathCauseV1, DurableDeathPresentationAuthorityV1,
+    DurableEchoOutcomeV1, DurableNetworkStateV1, DurableOrderedContentIdV1, DurableRecallStateV1,
+    DurableSummaryProjectionEntryV1, DurableSummaryProjectionKindV1, DurableTraceStatusV1,
+    MAX_DURABLE_DEATH_DESTRUCTION_ENTRIES, MAX_DURABLE_DEATH_STATUSES_PER_ENTRY,
+    MAX_DURABLE_DEATH_TRACE_ENTRIES, PostgresPersistence, StoredCommittedDeathResultV1,
+    WIPEABLE_CORE_NAMESPACE,
 };
 
 pub const MAX_DEATH_VIEW_LOST_PER_PAGE: u16 = 32;
@@ -93,9 +94,7 @@ pub struct StoredLatestCommittedDeathV1 {
     pub destruction_digest: [u8; 32],
     pub summary_snapshot_digest: [u8; 32],
     pub content_revision: String,
-    pub records_blake3: String,
-    pub assets_blake3: String,
-    pub localization_blake3: String,
+    pub presentation: DurableDeathPresentationAuthorityV1,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,9 +120,7 @@ pub struct StoredDeathSummaryViewV1 {
     pub echo_outcome: DurableEchoOutcomeV1,
     pub death_tick: u64,
     pub content_revision: String,
-    pub records_blake3: String,
-    pub assets_blake3: String,
-    pub localization_blake3: String,
+    pub presentation: DurableDeathPresentationAuthorityV1,
     pub snapshot_digest: [u8; 32],
 }
 
@@ -139,9 +136,7 @@ pub struct StoredDeathMemorialEntryV1 {
     pub level: u8,
     pub echo_outcome: DurableEchoOutcomeV1,
     pub content_revision: String,
-    pub records_blake3: String,
-    pub assets_blake3: String,
-    pub localization_blake3: String,
+    pub presentation: DurableDeathPresentationAuthorityV1,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,6 +148,7 @@ pub struct StoredDeathMemorialPageV1 {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredDeathTracePageV1 {
     pub death_id: [u8; 16],
+    pub presentation: DurableDeathPresentationAuthorityV1,
     pub death_tick: u64,
     pub total_entry_count: u16,
     pub trace_digest: [u8; 32],
@@ -165,7 +161,8 @@ const LATEST_SQL: &str = "SELECT death.death_id, death.character_id, \
         floor(extract(epoch FROM death.committed_at) * 1000)::bigint AS death_at_ms, \
         death.death_tick, death.cause_kind, death.killer_content_id, death.killer_pattern_id, \
         death.network_state, death.recall_state, death.trace_digest, death.content_revision, \
-        death.world_records_blake3, death.world_assets_blake3, death.world_localization_blake3, \
+        death.presentation_records_blake3, death.presentation_assets_blake3, \
+        death.presentation_localization_blake3, \
         summary.snapshot_digest, result.result_payload, result.result_hash, \
         (SELECT count(*)::bigint FROM death_combat_trace_entries AS trace \
           WHERE trace.namespace_id=death.namespace_id AND trace.death_id=death.death_id) AS trace_count, \
@@ -181,8 +178,9 @@ const SUMMARY_SQL: &str = "SELECT death.death_id, death.character_id, death.deat
         summary.summary_revision, summary.hero_label_key, summary.character_name_snapshot, \
         summary.class_id, summary.level, summary.oath_id, summary.lifetime_ms, \
         summary.final_deed_id, summary.echo_outcome, summary.content_revision, \
-        summary.snapshot_digest, death.world_records_blake3, death.world_assets_blake3, \
-        death.world_localization_blake3, result.result_payload, result.result_hash, \
+        summary.snapshot_digest, death.presentation_records_blake3, \
+        death.presentation_assets_blake3, death.presentation_localization_blake3, \
+        result.result_payload, result.result_hash, \
         (SELECT count(*)::bigint FROM death_combat_trace_entries AS trace \
           WHERE trace.namespace_id=death.namespace_id AND trace.death_id=death.death_id) AS trace_count, \
         (SELECT count(*)::bigint FROM death_summary_projection_entries AS projection \
@@ -204,7 +202,8 @@ const MEMORIAL_SQL: &str = "SELECT memorial.death_id, \
         memorial.summary_revision, memorial.presentation_key, memorial.presentation_digest, \
         summary.snapshot_digest, summary.character_name_snapshot, summary.class_id, \
         summary.level, summary.echo_outcome, summary.content_revision, \
-        death.world_records_blake3, death.world_assets_blake3, death.world_localization_blake3, \
+        death.presentation_records_blake3, death.presentation_assets_blake3, \
+        death.presentation_localization_blake3, \
         result.result_payload, result.result_hash \
      FROM memorial_records AS memorial \
      JOIN death_summary_snapshots AS summary USING (namespace_id, death_id) \
@@ -320,6 +319,8 @@ impl PostgresPersistence {
         }
         let row = sqlx::query(
             "SELECT death.character_id, death.death_tick, death.trace_digest, \
+                death.presentation_records_blake3, death.presentation_assets_blake3, \
+                death.presentation_localization_blake3, \
                 result.result_payload, result.result_hash, \
                 (SELECT count(*)::bigint FROM death_combat_trace_entries AS trace \
                   WHERE trace.namespace_id=death.namespace_id \
@@ -359,6 +360,7 @@ impl PostgresPersistence {
             .filter(|next| *next < trace_count);
         Ok(StoredDeathTracePageV1 {
             death_id,
+            presentation: presentation_from_row(&row)?,
             death_tick,
             total_entry_count: trace_count,
             trace_digest,
@@ -406,9 +408,7 @@ fn latest_from_row(
         destruction_digest: result.destruction_digest,
         summary_snapshot_digest: summary_digest,
         content_revision: content_revision(value(row, "content_revision")?)?,
-        records_blake3: lower_blake3(value(row, "world_records_blake3")?)?,
-        assets_blake3: lower_blake3(value(row, "world_assets_blake3")?)?,
-        localization_blake3: lower_blake3(value(row, "world_localization_blake3")?)?,
+        presentation: presentation_from_row(row)?,
     })
 }
 
@@ -501,9 +501,7 @@ async fn summary_from_row(
         echo_outcome,
         death_tick,
         content_revision: content_revision(value(row, "content_revision")?)?,
-        records_blake3: lower_blake3(value(row, "world_records_blake3")?)?,
-        assets_blake3: lower_blake3(value(row, "world_assets_blake3")?)?,
-        localization_blake3: lower_blake3(value(row, "world_localization_blake3")?)?,
+        presentation: presentation_from_row(row)?,
         snapshot_digest,
     })
 }
@@ -544,10 +542,20 @@ fn memorial_from_row(
         level: core_level(value(row, "level")?)?,
         echo_outcome,
         content_revision: content_revision(value(row, "content_revision")?)?,
-        records_blake3: lower_blake3(value(row, "world_records_blake3")?)?,
-        assets_blake3: lower_blake3(value(row, "world_assets_blake3")?)?,
-        localization_blake3: lower_blake3(value(row, "world_localization_blake3")?)?,
+        presentation: presentation_from_row(row)?,
     })
+}
+
+fn presentation_from_row(
+    row: &PgRow,
+) -> Result<DurableDeathPresentationAuthorityV1, DeathViewReadError> {
+    let presentation = DurableDeathPresentationAuthorityV1 {
+        records_blake3: lower_blake3(value(row, "presentation_records_blake3")?)?,
+        assets_blake3: lower_blake3(value(row, "presentation_assets_blake3")?)?,
+        localization_blake3: lower_blake3(value(row, "presentation_localization_blake3")?)?,
+    };
+    presentation.validate().map_err(|_| corrupt_error())?;
+    Ok(presentation)
 }
 
 fn result_character_id(row: &PgRow) -> Result<[u8; 16], DeathViewReadError> {
@@ -1255,9 +1263,11 @@ mod tests {
             level: 10,
             echo_outcome: DurableEchoOutcomeV1::Dormant,
             content_revision: format!("core-dev.blake3.{}", "a".repeat(64)),
-            records_blake3: "a".repeat(64),
-            assets_blake3: "b".repeat(64),
-            localization_blake3: "c".repeat(64),
+            presentation: DurableDeathPresentationAuthorityV1 {
+                records_blake3: "a".repeat(64),
+                assets_blake3: "b".repeat(64),
+                localization_blake3: "c".repeat(64),
+            },
         };
         assert!(validate_memorial_order(&[entry(2, 1), entry(1, 1)]).is_ok());
         assert!(validate_memorial_order(&[entry(2, 1), entry(2, 2)]).is_ok());

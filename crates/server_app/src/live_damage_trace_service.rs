@@ -8,9 +8,10 @@
 //! or terminal material. A lethal tick is staged here for the later `06C` single-writer death
 //! transaction and is never submitted to the standalone live-trace repository.
 
-use std::{collections::BTreeSet, future::Future};
+use std::{collections::BTreeSet, future::Future, sync::Arc};
 
 use persistence::{
+    CORE_ITEM_CONTENT_REVISION, DurableDeathPresentationAuthorityV1,
     LIVE_DAMAGE_TRACE_WINDOW_TICKS_V1, LiveDamageTraceCauseV1, LiveDamageTraceContentAuthorityV1,
     LiveDamageTraceDamageTypeV1, LiveDamageTraceDangerAuthorityV1, LiveDamageTraceEntryV1,
     LiveDamageTraceHeadV1, LiveDamageTraceNetworkStateV1, LiveDamageTraceRecallStateV1,
@@ -19,6 +20,7 @@ use persistence::{
     PostgresPersistence, StoredLiveDamageTraceSnapshotEntryV1, StoredLiveDamageTraceSnapshotV1,
     StoredLiveDamageTraceTickV1,
 };
+use sim_content::CoreDevelopmentDeathView;
 use sim_core::{
     AuthoritativeDeathCauseKind, DEATH_AUTHORITY_SCHEMA_VERSION, DamageTraceAggregate,
     DamageTraceCheckpointV1, DamageTraceEntry, DamageTraceObservation, DamageType,
@@ -196,6 +198,8 @@ pub enum LiveDamageTraceServiceError {
     MissingEntityIdentity(u64),
     #[error("stored simulation entity {0} does not match its durable server identity")]
     EntityIdentityMismatch(u64),
+    #[error("live damage-trace presentation content is missing or incompatible: {0}")]
+    PresentationContentMismatch(&'static str),
     #[error("stored live damage-trace snapshot is corrupt or only partially authoritative")]
     CorruptSnapshot,
     #[error("stored live damage-trace result does not match the exact sealed request")]
@@ -259,6 +263,7 @@ struct PendingLiveDamageTraceTick {
 pub struct LiveDamageTraceService<Repository> {
     repository: Repository,
     binding: LiveDamageTraceBinding,
+    presentation: Arc<CoreDevelopmentDeathView>,
     identities: DeathEntityIdentityAuthority,
     aggregate: DamageTraceAggregate,
     /// Exact normalized receipt identity retained beside every aggregate entry. Simulation state
@@ -361,17 +366,20 @@ where
         repository: Repository,
         binding: LiveDamageTraceBinding,
         mut identities: DeathEntityIdentityAuthority,
+        presentation: Arc<CoreDevelopmentDeathView>,
     ) -> Result<Self, LiveDamageTraceServiceError> {
         binding.validate()?;
         validate_identity_authority(&identities)?;
+        validate_presentation_authority(&presentation)?;
         let snapshot = repository
             .load_snapshot(binding.account_id, binding.character_id)
             .await
             .map_err(LiveDamageTraceServiceError::Persistence)?;
-        let aggregate = reconstruct_snapshot(&snapshot, &binding, &mut identities)?;
+        let aggregate = reconstruct_snapshot(&snapshot, &binding, &mut identities, &presentation)?;
         Ok(Self {
             repository,
             binding,
+            presentation,
             identities,
             aggregate,
             window: snapshot.entries,
@@ -404,6 +412,7 @@ where
         if observations.is_empty() {
             return Ok(LiveDamageTraceIngestOutcome::EmptyTick);
         }
+        validate_observations(&observations, &self.presentation)?;
 
         let staged = stage_tick(
             &self.aggregate,
@@ -548,6 +557,79 @@ fn validate_identity_authority(
     Ok(())
 }
 
+fn validate_presentation_authority(
+    presentation: &CoreDevelopmentDeathView,
+) -> Result<(), LiveDamageTraceServiceError> {
+    let expected = DurableDeathPresentationAuthorityV1::core();
+    let actual = presentation.hashes();
+    if presentation.item_content_revision() != CORE_ITEM_CONTENT_REVISION
+        || actual.records_blake3 != expected.records_blake3
+        || actual.assets_blake3 != expected.assets_blake3
+        || actual.localization_blake3 != expected.localization_blake3
+    {
+        return Err(LiveDamageTraceServiceError::PresentationContentMismatch(
+            "catalog revision",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_observations(
+    observations: &[DamageTraceObservation],
+    presentation: &CoreDevelopmentDeathView,
+) -> Result<(), LiveDamageTraceServiceError> {
+    for observation in observations {
+        validate_trace_presentation_ids(
+            presentation,
+            &observation.source_content_id,
+            observation.pattern_id.as_deref(),
+            &observation.attack_id,
+            observation
+                .statuses
+                .iter()
+                .map(|status| status.status_id.as_str()),
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_stored_entry_presentation(
+    entry: &LiveDamageTraceEntryV1,
+    presentation: &CoreDevelopmentDeathView,
+) -> Result<(), LiveDamageTraceServiceError> {
+    validate_trace_presentation_ids(
+        presentation,
+        &entry.source_content_id,
+        entry.pattern_id.as_deref(),
+        &entry.attack_id,
+        entry
+            .statuses
+            .iter()
+            .map(|status| status.status_id.as_str()),
+    )
+}
+
+fn validate_trace_presentation_ids<'a>(
+    presentation: &CoreDevelopmentDeathView,
+    source_content_id: &str,
+    pattern_id: Option<&str>,
+    attack_id: &str,
+    status_ids: impl Iterator<Item = &'a str>,
+) -> Result<(), LiveDamageTraceServiceError> {
+    if presentation.resolve_source(source_content_id).is_none()
+        || presentation.resolve_attack(attack_id).is_none()
+        || pattern_id.is_some_and(|id| presentation.resolve_pattern(id).is_none())
+        || status_ids
+            .into_iter()
+            .any(|id| presentation.resolve_status(id).is_none())
+    {
+        return Err(LiveDamageTraceServiceError::PresentationContentMismatch(
+            "combat producer IDs",
+        ));
+    }
+    Ok(())
+}
+
 fn merge_identity_authority(
     target: &mut DeathEntityIdentityAuthority,
     incoming: &DeathEntityIdentityAuthority,
@@ -678,6 +760,7 @@ fn reconstruct_snapshot(
     snapshot: &StoredLiveDamageTraceSnapshotV1,
     binding: &LiveDamageTraceBinding,
     identities: &mut DeathEntityIdentityAuthority,
+    presentation: &CoreDevelopmentDeathView,
 ) -> Result<DamageTraceAggregate, LiveDamageTraceServiceError> {
     if snapshot.character_version != binding.character_version
         || snapshot.danger != binding.danger
@@ -714,6 +797,7 @@ fn reconstruct_snapshot(
     let mut previous = None;
     let mut entries = Vec::with_capacity(snapshot.entries.len());
     for stored in &snapshot.entries {
+        validate_stored_entry_presentation(&stored.entry, presentation)?;
         if stored.event_tick < cutoff || stored.event_tick > snapshot.through_tick {
             return Err(LiveDamageTraceServiceError::CorruptSnapshot);
         }
@@ -960,6 +1044,15 @@ mod tests {
         }
     }
 
+    fn presentation() -> Arc<CoreDevelopmentDeathView> {
+        Arc::new(
+            sim_content::load_core_development_death_view(
+                &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content"),
+            )
+            .expect("valid checked-in Core death-presentation catalog"),
+        )
+    }
+
     fn binding() -> LiveDamageTraceBinding {
         LiveDamageTraceBinding {
             account_id: [1; 16],
@@ -994,10 +1087,10 @@ mod tests {
             tick: Tick(tick),
             event_ordinal: ordinal,
             cause_kind: AuthoritativeDeathCauseKind::DirectHit,
-            source_content_id: "enemy.core.bell_acolyte".to_owned(),
+            source_content_id: "enemy.bell_acolyte".to_owned(),
             source_entity_id: sim_entity.map(entity),
-            pattern_id: Some("pattern.core.bell_acolyte.fan".to_owned()),
-            attack_id: "attack.core.bell_acolyte.fan".to_owned(),
+            pattern_id: Some("pattern.enemy.bell_acolyte.alternating_fan".to_owned()),
+            attack_id: "pattern.enemy.bell_acolyte.alternating_fan".to_owned(),
             raw_damage: final_damage,
             final_damage,
             damage_type: DamageType::Veil,
@@ -1006,12 +1099,12 @@ mod tests {
             source_position: SimulationVector::new(12.125, -7.501),
             statuses: vec![
                 DeathTraceStatus {
-                    status_id: "status.core.veil_mark".to_owned(),
+                    status_id: "status.marked".to_owned(),
                     remaining_ticks: 20,
                     stack_count: 2,
                 },
                 DeathTraceStatus {
-                    status_id: "status.core.ash_burn".to_owned(),
+                    status_id: "status.bleed".to_owned(),
                     remaining_ticks: 10,
                     stack_count: 1,
                 },
@@ -1060,10 +1153,14 @@ mod tests {
     #[tokio::test]
     async fn unordered_tick_is_canonical_and_preserves_sparse_ordinals_and_fixed_point() {
         let repository = FakeRepository::default();
-        let mut service =
-            LiveDamageTraceService::start_or_resume(repository, binding(), identities())
-                .await
-                .unwrap();
+        let mut service = LiveDamageTraceService::start_or_resume(
+            repository,
+            binding(),
+            identities(),
+            presentation(),
+        )
+        .await
+        .unwrap();
         let outcome = service
             .ingest_tick(
                 mutation(5),
@@ -1085,7 +1182,7 @@ mod tests {
         assert_eq!(stored.command.entries[0].source_y_milli_tiles, -7_501);
         assert_eq!(
             stored.command.entries[0].statuses[0].status_id,
-            "status.core.ash_burn"
+            "status.bleed"
         );
         assert_eq!(service.checkpoint().entries.len(), 2);
     }
@@ -1093,10 +1190,14 @@ mod tests {
     #[tokio::test]
     async fn empty_tick_is_noop_and_missing_entity_fails_before_repository() {
         let repository = FakeRepository::default();
-        let mut service =
-            LiveDamageTraceService::start_or_resume(repository.clone(), binding(), identities())
-                .await
-                .unwrap();
+        let mut service = LiveDamageTraceService::start_or_resume(
+            repository.clone(),
+            binding(),
+            identities(),
+            presentation(),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             service.ingest_tick(mutation(5), vec![]).await.unwrap(),
             LiveDamageTraceIngestOutcome::EmptyTick
@@ -1117,10 +1218,14 @@ mod tests {
     async fn response_loss_keeps_exact_request_and_retry_replays_before_promotion() {
         let repository = FakeRepository::default();
         repository.lose_first_response();
-        let mut service =
-            LiveDamageTraceService::start_or_resume(repository.clone(), binding(), identities())
-                .await
-                .unwrap();
+        let mut service = LiveDamageTraceService::start_or_resume(
+            repository.clone(),
+            binding(),
+            identities(),
+            presentation(),
+        )
+        .await
+        .unwrap();
         let observations = vec![observation(100, 3, Some(42), 100, 10)];
         assert!(matches!(
             service.ingest_tick(mutation(5), observations.clone()).await,
@@ -1153,10 +1258,14 @@ mod tests {
     #[tokio::test]
     async fn acknowledged_tick_advances_current_version_and_checkpoint_authority() {
         let repository = FakeRepository::default();
-        let mut service =
-            LiveDamageTraceService::start_or_resume(repository, binding(), identities())
-                .await
-                .unwrap();
+        let mut service = LiveDamageTraceService::start_or_resume(
+            repository,
+            binding(),
+            identities(),
+            presentation(),
+        )
+        .await
+        .unwrap();
         service
             .ingest_tick(mutation(5), vec![observation(100, 3, Some(42), 100, 10)])
             .await
@@ -1183,10 +1292,14 @@ mod tests {
     #[tokio::test]
     async fn lethal_tick_is_prepared_exactly_and_never_calls_standalone_repository() {
         let repository = FakeRepository::default();
-        let mut service =
-            LiveDamageTraceService::start_or_resume(repository.clone(), binding(), identities())
-                .await
-                .unwrap();
+        let mut service = LiveDamageTraceService::start_or_resume(
+            repository.clone(),
+            binding(),
+            identities(),
+            presentation(),
+        )
+        .await
+        .unwrap();
         let outcome = service
             .ingest_tick(mutation(5), vec![observation(100, 7, Some(42), 10, 10)])
             .await
@@ -1224,9 +1337,14 @@ mod tests {
         let first = stored_entry(100, observation(100, 3, Some(42), 100, 10));
         let last = stored_entry(400, observation(400, 7, Some(77), 90, 10));
         repository.set_snapshot(snapshot_from_entries(400, vec![first, last]));
-        let service = LiveDamageTraceService::start_or_resume(repository, binding(), identities())
-            .await
-            .unwrap();
+        let service = LiveDamageTraceService::start_or_resume(
+            repository,
+            binding(),
+            identities(),
+            presentation(),
+        )
+        .await
+        .unwrap();
         let checkpoint = service.checkpoint();
         assert_eq!(checkpoint.entries.len(), 2);
         assert_eq!(checkpoint.entries[0].tick, Tick(100));
@@ -1259,10 +1377,14 @@ mod tests {
         for snapshot in cases {
             let repository = FakeRepository::default();
             repository.set_snapshot(snapshot);
-            let error =
-                LiveDamageTraceService::start_or_resume(repository, binding(), identities())
-                    .await
-                    .unwrap_err();
+            let error = LiveDamageTraceService::start_or_resume(
+                repository,
+                binding(),
+                identities(),
+                presentation(),
+            )
+            .await
+            .unwrap_err();
             assert!(matches!(
                 error,
                 LiveDamageTraceServiceError::CorruptSnapshot
@@ -1296,10 +1418,14 @@ mod tests {
             }
         }
 
-        let mut service =
-            LiveDamageTraceService::start_or_resume(CorruptRepository, binding(), identities())
-                .await
-                .unwrap();
+        let mut service = LiveDamageTraceService::start_or_resume(
+            CorruptRepository,
+            binding(),
+            identities(),
+            presentation(),
+        )
+        .await
+        .unwrap();
         assert!(matches!(
             service
                 .ingest_tick(mutation(5), vec![observation(100, 3, Some(42), 100, 10)])
@@ -1335,10 +1461,14 @@ mod tests {
             }
         }
 
-        let mut service =
-            LiveDamageTraceService::start_or_resume(RejectedRepository, binding(), identities())
-                .await
-                .unwrap();
+        let mut service = LiveDamageTraceService::start_or_resume(
+            RejectedRepository,
+            binding(),
+            identities(),
+            presentation(),
+        )
+        .await
+        .unwrap();
         assert!(matches!(
             service
                 .ingest_tick(mutation(5), vec![observation(100, 3, Some(42), 100, 10)])
@@ -1360,9 +1490,10 @@ mod tests {
         let repository = FakeRepository::default();
         let mut initial = identities();
         initial.by_sim_entity.remove(&entity(77));
-        let mut service = LiveDamageTraceService::start_or_resume(repository, binding(), initial)
-            .await
-            .unwrap();
+        let mut service =
+            LiveDamageTraceService::start_or_resume(repository, binding(), initial, presentation())
+                .await
+                .unwrap();
         service
             .register_entity_identities(&DeathEntityIdentityAuthority {
                 by_sim_entity: BTreeMap::from([(entity(77), [77; 16])]),
@@ -1416,6 +1547,7 @@ mod tests {
             repository,
             binding(),
             DeathEntityIdentityAuthority::default(),
+            presentation(),
         )
         .await
         .unwrap();
@@ -1441,9 +1573,77 @@ mod tests {
             snapshot.character_version = character_version;
             repository.set_snapshot(snapshot);
             assert!(matches!(
-                LiveDamageTraceService::start_or_resume(repository, binding(), identities()).await,
+                LiveDamageTraceService::start_or_resume(
+                    repository,
+                    binding(),
+                    identities(),
+                    presentation(),
+                )
+                .await,
                 Err(LiveDamageTraceServiceError::CorruptSnapshot)
             ));
         }
+    }
+
+    #[tokio::test]
+    async fn unknown_producer_ids_fail_before_trace_state_or_persistence_changes() {
+        let repository = FakeRepository::default();
+        let mut service = LiveDamageTraceService::start_or_resume(
+            repository.clone(),
+            binding(),
+            identities(),
+            presentation(),
+        )
+        .await
+        .unwrap();
+
+        let mut invalid = Vec::new();
+        let mut source = observation(100, 1, Some(42), 100, 10);
+        source.source_content_id = "source.core.unknown".into();
+        invalid.push(source);
+        let mut pattern = observation(100, 1, Some(42), 100, 10);
+        pattern.pattern_id = Some("pattern.core.unknown".into());
+        invalid.push(pattern);
+        let mut attack = observation(100, 1, Some(42), 100, 10);
+        attack.attack_id = "attack.core.unknown".into();
+        invalid.push(attack);
+        let mut status = observation(100, 1, Some(42), 100, 10);
+        status.statuses[0].status_id = "status.core.unknown".into();
+        invalid.push(status);
+
+        for observation in invalid {
+            assert!(matches!(
+                service.ingest_tick(mutation(5), vec![observation]).await,
+                Err(LiveDamageTraceServiceError::PresentationContentMismatch(
+                    "combat producer IDs"
+                ))
+            ));
+            assert!(service.checkpoint().entries.is_empty());
+            assert!(service.pending_request().is_none());
+            assert!(service.prepared_terminal().is_none());
+        }
+        assert_eq!(repository.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn resumed_trace_revalidates_stored_producer_ids_before_acceptance() {
+        let repository = FakeRepository::default();
+        let mut retained = stored_entry(100, observation(100, 1, Some(42), 100, 10));
+        retained.entry.source_content_id = "source.core.unknown".into();
+        repository.set_snapshot(snapshot_from_entries(100, vec![retained]));
+
+        assert!(matches!(
+            LiveDamageTraceService::start_or_resume(
+                repository.clone(),
+                binding(),
+                identities(),
+                presentation(),
+            )
+            .await,
+            Err(LiveDamageTraceServiceError::PresentationContentMismatch(
+                "combat producer IDs"
+            ))
+        ));
+        assert_eq!(repository.calls(), 0);
     }
 }

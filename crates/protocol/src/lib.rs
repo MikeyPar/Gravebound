@@ -104,7 +104,7 @@ pub const PROTOCOL_MAJOR: u16 = 1;
 /// Backward-compatible feature generation within [`PROTOCOL_MAJOR`].
 pub const PROTOCOL_MINOR: u16 = DEATH_VIEW_PROTOCOL_MINOR;
 /// Exact authenticated durable-death view generation.
-pub const DEATH_VIEW_PROTOCOL_MINOR: u16 = 13;
+pub const DEATH_VIEW_PROTOCOL_MINOR: u16 = 14;
 /// Exact safe-inventory reliable mutation generation.
 pub const SAFE_INVENTORY_PROTOCOL_MINOR: u16 = 12;
 /// Exact committed-Caldus-extraction command generation.
@@ -347,9 +347,9 @@ mod tests {
     }
 
     #[test]
-    fn death_views_require_protocol_1_13_and_explicit_feature_negotiation() {
-        assert_eq!(PROTOCOL_MINOR, 13);
-        assert_eq!(DEATH_VIEW_PROTOCOL_MINOR, 13);
+    fn death_views_require_protocol_1_14_and_explicit_feature_negotiation() {
+        assert_eq!(PROTOCOL_MINOR, 14);
+        assert_eq!(DEATH_VIEW_PROTOCOL_MINOR, 14);
         assert_eq!(SAFE_INVENTORY_PROTOCOL_MINOR, 12);
         assert!(
             WireText::<{ crate::handshake::FEATURE_FLAG_MAX_BYTES }>::new(

@@ -217,12 +217,133 @@ pub enum WireCodecError {
 
 #[cfg(test)]
 mod tests {
+    use serde::Serialize;
+
     use super::*;
     use crate::{
         AccountBootstrapFrame, AccountBootstrapRequest, CharacterMutationFrame,
         CharacterMutationPayload, GRAVE_ARBALIST_CLASS_ID, InputFrame, ManifestHash, WireMessage,
         WireText,
     };
+
+    #[derive(Serialize)]
+    #[allow(
+        dead_code,
+        reason = "variant ordinals reproduce the immutable protocol 1.13 fixture"
+    )]
+    enum LegacyWireMessageV1 {
+        ClientHello,
+        HandshakeResponse,
+        InputFrame,
+        ActionFrame,
+        SnapshotChunk,
+        ReliableEvent(LegacyReliableEventFrameV1),
+    }
+
+    #[derive(Serialize)]
+    struct LegacyReliableEventFrameV1 {
+        sequence: u32,
+        server_tick: u64,
+        event: LegacyReliableEventV1,
+    }
+
+    #[derive(Serialize)]
+    #[allow(
+        dead_code,
+        reason = "variant ordinals reproduce the immutable protocol 1.13 fixture"
+    )]
+    enum LegacyReliableEventV1 {
+        ActionResult,
+        PatternStarted,
+        MutationResult,
+        Control,
+        SocialPing,
+        AccountBootstrapResult,
+        CharacterMutationResult,
+        WorldFlowResult,
+        ProgressionResult,
+        OathViewResult,
+        InitialOathSelectionResult,
+        BargainViewResult,
+        BargainDecisionResult,
+        SafeInventoryTransferResult,
+        DeathViewResult(Box<LegacyDeathViewResultV1>),
+    }
+
+    #[derive(Serialize)]
+    enum LegacyDeathViewResultV1 {
+        Latest {
+            schema_version: u16,
+            request_sequence: u32,
+            death: Option<LegacyLatestCommittedDeathV1>,
+        },
+    }
+
+    #[derive(Serialize)]
+    struct LegacyLatestCommittedDeathV1 {
+        death_id: [u8; crate::DEATH_VIEW_ID_BYTES],
+        character_id: [u8; crate::DEATH_VIEW_ID_BYTES],
+        death_at_unix_ms: u64,
+        death_tick: u64,
+        cause: crate::DeathCauseV1,
+        killer_content_id: WireText<{ crate::DEATH_VIEW_ID_MAX_BYTES }>,
+        killer_pattern_id: Option<WireText<{ crate::DEATH_VIEW_ID_MAX_BYTES }>>,
+        network_state: crate::DeathNetworkStateV1,
+        recall_state: crate::DeathRecallStateV1,
+        trace_entry_count: u16,
+        trace_digest: [u8; crate::DEATH_VIEW_DIGEST_BYTES],
+        destruction_entry_count: u16,
+        destruction_digest: [u8; crate::DEATH_VIEW_DIGEST_BYTES],
+        summary_snapshot_digest: [u8; crate::DEATH_VIEW_DIGEST_BYTES],
+        content_revision: WireText<{ crate::DEATH_VIEW_ID_MAX_BYTES }>,
+    }
+
+    fn protocol_1_13_latest_success_fixture() -> Vec<u8> {
+        let mut death_id = [14; crate::DEATH_VIEW_ID_BYTES];
+        death_id[6] = 0x7e;
+        death_id[8] = 0x8e;
+        let message = LegacyWireMessageV1::ReliableEvent(LegacyReliableEventFrameV1 {
+            sequence: 1,
+            server_tick: 301,
+            event: LegacyReliableEventV1::DeathViewResult(Box::new(
+                LegacyDeathViewResultV1::Latest {
+                    schema_version: 1,
+                    request_sequence: 13,
+                    death: Some(LegacyLatestCommittedDeathV1 {
+                        death_id,
+                        character_id: [15; crate::DEATH_VIEW_ID_BYTES],
+                        death_at_unix_ms: 1,
+                        death_tick: 301,
+                        cause: crate::DeathCauseV1::DirectHit,
+                        killer_content_id: WireText::new("boss.sir_caldus").unwrap(),
+                        killer_pattern_id: Some(WireText::new("boss.caldus.bell_ring").unwrap()),
+                        network_state: crate::DeathNetworkStateV1::Connected,
+                        recall_state: crate::DeathRecallStateV1::Inactive,
+                        trace_entry_count: 2,
+                        trace_digest: [2; crate::DEATH_VIEW_DIGEST_BYTES],
+                        destruction_entry_count: 1,
+                        destruction_digest: [3; crate::DEATH_VIEW_DIGEST_BYTES],
+                        summary_snapshot_digest: [4; crate::DEATH_VIEW_DIGEST_BYTES],
+                        content_revision: WireText::new(format!(
+                            "core-dev.blake3.{}",
+                            "d".repeat(64)
+                        ))
+                        .unwrap(),
+                    }),
+                },
+            )),
+        });
+        let payload = to_stdvec(&message).unwrap();
+        let mut frame = Vec::with_capacity(FRAME_HEADER_BYTES + payload.len());
+        frame.extend_from_slice(&MAGIC);
+        frame.extend_from_slice(&PROTOCOL_MAJOR.to_le_bytes());
+        frame.extend_from_slice(&13_u16.to_le_bytes());
+        frame.push(message_kind_byte(MessageKind::ReliableEvent));
+        frame.push(0);
+        frame.extend_from_slice(&u32::try_from(payload.len()).unwrap().to_le_bytes());
+        frame.extend_from_slice(&payload);
+        frame
+    }
 
     fn input_message() -> WireMessage {
         WireMessage::InputFrame(InputFrame {
@@ -246,7 +367,7 @@ mod tests {
         assert_eq!(decode_frame(&frame).unwrap(), input_message());
         assert_eq!(
             blake3::hash(&frame).to_hex().to_string(),
-            "cbb46a116eccddb9ee20d1e15dfb773164083e76310f294a68b3626d8ab35a5c"
+            "c05d1157b68f5a26ad31f70e7b61c114ae0ad6bc7b96888b1c0d127b60224832"
         );
         let protocol_1_12 = encode_protocol_1_12_compatibility_frame(&input_message()).unwrap();
         assert_eq!(
@@ -464,7 +585,7 @@ mod tests {
         });
 
         let frame = encode_frame(&transfer).unwrap();
-        assert_eq!(u16::from_le_bytes([frame[6], frame[7]]), 13);
+        assert_eq!(u16::from_le_bytes([frame[6], frame[7]]), 14);
         assert_eq!(decode_frame(&frame), Ok(transfer.clone()));
 
         let compatibility = encode_protocol_1_12_compatibility_frame(&transfer).unwrap();
@@ -488,7 +609,7 @@ mod tests {
                 payload,
             });
         let frame = encode_frame(&transfer).unwrap();
-        assert_eq!(u16::from_le_bytes([frame[6], frame[7]]), 13);
+        assert_eq!(u16::from_le_bytes([frame[6], frame[7]]), 14);
         assert_eq!(frame[8], 17);
         assert_eq!(decode_frame(&frame), Ok(transfer.clone()));
         let compatibility = encode_protocol_1_12_compatibility_frame(&transfer).unwrap();
@@ -520,7 +641,7 @@ mod tests {
     }
 
     #[test]
-    fn protocol_1_13_appends_only_authenticated_death_views_at_kind_18() {
+    fn protocol_1_14_versions_authenticated_death_views_at_kind_18() {
         let mut death_id = [14; 16];
         death_id[6] = 0x7e;
         death_id[8] = 0x8e;
@@ -539,12 +660,12 @@ mod tests {
             },
         });
         let frame = encode_frame(&request).unwrap();
-        assert_eq!(u16::from_le_bytes([frame[6], frame[7]]), 13);
+        assert_eq!(u16::from_le_bytes([frame[6], frame[7]]), 14);
         assert_eq!(frame[8], 18);
         assert_eq!(decode_frame(&frame), Ok(request.clone()));
         assert_eq!(
             blake3::hash(&frame).to_hex().to_string(),
-            "b45fa66d66579c56bfb415d7e78542e257e3ad40ad7a1849a045ce0552a915f3"
+            "0f2c3a3d3b12a3a81b132fa4f79421cfcd44f94708d79c65e7c127bcf5df458f"
         );
         assert_eq!(
             encode_protocol_1_12_compatibility_frame(&request),
@@ -565,6 +686,22 @@ mod tests {
         assert_eq!(
             encode_protocol_1_12_compatibility_frame(&result),
             Err(WireCodecError::MessageUnavailableAtVersion)
+        );
+
+        let legacy = protocol_1_13_latest_success_fixture();
+        assert_eq!(u16::from_le_bytes([legacy[6], legacy[7]]), 13);
+        assert_eq!(legacy[8], message_kind_byte(MessageKind::ReliableEvent));
+        assert_eq!(legacy.len(), 279);
+        assert_eq!(
+            blake3::hash(&legacy).to_hex().to_string(),
+            "aec8a61cd02890c4894abb69a98ced7a47e6a25e0ece2ade83ebf012fb595c1c"
+        );
+        assert_eq!(
+            decode_frame(&legacy),
+            Err(WireCodecError::IncompatibleVersion(ProtocolVersion {
+                major: PROTOCOL_MAJOR,
+                minor: 13,
+            }))
         );
     }
 

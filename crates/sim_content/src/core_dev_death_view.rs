@@ -764,6 +764,41 @@ mod tests {
     }
 
     #[test]
+    fn every_enabled_core_trace_producer_resolves_before_danger_admission() {
+        let root = content_root();
+        let catalog = load_core_development_death_view(&root).unwrap();
+        let encounters = load_core_development_encounter_rooms(&root).unwrap();
+        let caldus = load_core_development_caldus(&root).unwrap();
+
+        let reachable_sources = encounters
+            .actor_definitions()
+            .iter()
+            .map(|actor| actor.id().as_str())
+            .chain(std::iter::once(caldus.boss().header.id.as_str()))
+            .chain(SOURCE_IDS.iter().copied())
+            .collect::<BTreeSet<_>>();
+        for source_id in reachable_sources {
+            assert!(catalog.resolve_source(source_id).is_some(), "{source_id}");
+        }
+        for attack_id in ATTACK_IDS
+            .iter()
+            .copied()
+            .chain(PATTERN_IDS.iter().copied())
+        {
+            assert!(catalog.resolve_attack(attack_id).is_some(), "{attack_id}");
+        }
+        for pattern_id in PATTERN_IDS {
+            assert!(
+                catalog.resolve_pattern(pattern_id).is_some(),
+                "{pattern_id}"
+            );
+        }
+        for status_id in STATUS_IDS {
+            assert!(catalog.resolve_status(status_id).is_some(), "{status_id}");
+        }
+    }
+
+    #[test]
     fn every_death_owned_id_has_one_semantic_kind() {
         let ids = required_copy_ids();
         assert_eq!(ids.iter().collect::<BTreeSet<_>>().len(), ids.len());

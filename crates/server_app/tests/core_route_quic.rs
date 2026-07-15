@@ -13,10 +13,10 @@ use persistence::{
 };
 use protocol::{
     AuthTicket, CharacterLocation, ClientHello, Compression, DEATH_VIEW_SCHEMA_VERSION,
-    DeathViewContentRevisionV1, DeathViewFrameV1, DeathViewRequestV1, DeathViewResultV1,
-    HandshakeResponse, ManifestHash, Platform, ProtocolVersion, SafeArrival, WireText,
-    WorldFlowContentRevisionV1, WorldFlowFrame, WorldFlowRequest, WorldFlowResult,
-    WorldTransferCommand, WorldTransferMutation, WorldTransferPayload, WorldTransferResultCode,
+    DeathViewFrameV1, DeathViewRequestV1, DeathViewResultV1, HandshakeResponse, ManifestHash,
+    Platform, ProtocolVersion, SafeArrival, WireText, WorldFlowContentRevisionV1, WorldFlowFrame,
+    WorldFlowRequest, WorldFlowResult, WorldTransferCommand, WorldTransferMutation,
+    WorldTransferPayload, WorldTransferResultCode,
 };
 use rcgen::{CertifiedKey, generate_simple_self_signed};
 use rustls::pki_types::PrivatePkcs8KeyDer;
@@ -438,10 +438,7 @@ async fn run_lost_death_summary_session(persistence: &PostgresPersistence) -> De
     let world_flow = disposable_world_flow(persistence.clone());
     let progression = disabled_progression();
     let death_views = DeathViewService::new(
-        PostgresDeathViewRepository::new(
-            persistence.clone(),
-            durable_death_fixture::death_view_revision(),
-        ),
+        PostgresDeathViewRepository::new(persistence.clone()),
         durable_death_fixture::death_view_revision(),
     );
     let oath = CoreOathSelectionAuthority::<FixedAuthority>::disabled();
@@ -558,10 +555,7 @@ async fn run_restarted_death_read_session(
     let world_flow = disposable_world_flow(persistence.clone());
     let progression = disabled_progression();
     let death_views = DeathViewService::new(
-        PostgresDeathViewRepository::new(
-            persistence.clone(),
-            durable_death_fixture::death_view_revision(),
-        ),
+        PostgresDeathViewRepository::new(persistence.clone()),
         durable_death_fixture::death_view_revision(),
     );
     let oath = CoreOathSelectionAuthority::<FixedAuthority>::disabled();
@@ -697,14 +691,9 @@ async fn run_reliable_core_journey(persistence: &PostgresPersistence) -> Duratio
     let progression =
         ProgressionQueryService::new(DisabledProgressionQueryRepository, &progression_content)
             .unwrap();
-    let route_revision = revision();
     let death_views = DeathViewService::new(
         DisabledDeathViewRepository,
-        DeathViewContentRevisionV1 {
-            records_blake3: route_revision.records_blake3,
-            assets_blake3: route_revision.assets_blake3,
-            localization_blake3: route_revision.localization_blake3,
-        },
+        durable_death_fixture::death_view_revision(),
     );
     let oath = CoreOathSelectionAuthority::<FixedAuthority>::disabled();
     let bargain = CoreBargainAuthority::<FixedAuthority>::disabled();
@@ -1032,34 +1021,55 @@ async fn committed_death_survives_response_loss_and_full_process_restart_over_re
     assert_eq!(replay_arbiter.committed_receipt(), Some(&expected_receipt));
 
     let (latest, summary, memorial, trace) = run_restarted_death_read_session(&restarted).await;
+    assert_committed_death_view_results(
+        &latest_before_restart,
+        &latest,
+        &summary,
+        &memorial,
+        &trace,
+    );
+    durable_death_fixture::assert_committed_graph(&restarted).await;
+    restarted.close().await;
+}
+
+fn assert_committed_death_view_results(
+    latest_before_restart: &DeathViewResultV1,
+    latest: &DeathViewResultV1,
+    summary: &DeathViewResultV1,
+    memorial: &DeathViewResultV1,
+    trace: &DeathViewResultV1,
+) {
     assert_eq!(latest, latest_before_restart);
     assert!(matches!(
         latest,
         DeathViewResultV1::Latest {
-            death: Some(ref latest),
+            death: Some(latest),
             ..
         } if latest.death_id == durable_death_fixture::DEATH_ID
+            && latest.presentation_revision == durable_death_fixture::death_view_revision()
     ));
     assert!(matches!(
         summary,
-        DeathViewResultV1::Summary { ref summary, .. }
+        DeathViewResultV1::Summary { summary, .. }
             if summary.death_id == durable_death_fixture::DEATH_ID
                 && summary.echo_outcome == protocol::DeathEchoOutcomeV1::Available
                 && summary.lost.len() == 2
+                && summary.presentation_revision == durable_death_fixture::death_view_revision()
     ));
     assert!(matches!(
         memorial,
-        DeathViewResultV1::MemorialPage { ref entries, next_cursor: None, .. }
+        DeathViewResultV1::MemorialPage { entries, next_cursor: None, .. }
             if entries.len() == 1
                 && entries[0].cursor.death_id == durable_death_fixture::DEATH_ID
+                && entries[0].presentation_revision
+                    == durable_death_fixture::death_view_revision()
     ));
     assert!(matches!(
         trace,
-        DeathViewResultV1::TracePage { ref page, .. }
+        DeathViewResultV1::TracePage { page, .. }
             if page.death_id == durable_death_fixture::DEATH_ID
                 && page.entries.len() == 2
                 && page.entries.last().is_some_and(|entry| entry.lethal)
+                && page.presentation_revision == durable_death_fixture::death_view_revision()
     ));
-    durable_death_fixture::assert_committed_graph(&restarted).await;
-    restarted.close().await;
 }

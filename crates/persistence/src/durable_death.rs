@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{PersistenceError, WIPEABLE_CORE_NAMESPACE};
 
-pub const DURABLE_DEATH_SCHEMA_VERSION: u16 = 2;
+pub const DURABLE_DEATH_SCHEMA_VERSION: u16 = 3;
 pub const DURABLE_DEATH_SUMMARY_REVISION: u16 = 1;
 pub const DURABLE_DEATH_CONTRACT: &str = "permadeath-v1";
 pub const DURABLE_DEATH_TRACE_WINDOW_TICKS: u64 = 300;
@@ -18,6 +18,16 @@ pub const MAX_DURABLE_DEATH_STATUSES_PER_ENTRY: usize = 32;
 pub const MAX_DURABLE_DEATH_DESTRUCTION_ENTRIES: usize = 4_096;
 pub const MAX_DURABLE_DEATH_PLAN_PAYLOAD_BYTES: usize = 1_048_576;
 pub const MAX_DURABLE_DEATH_RESULT_PAYLOAD_BYTES: usize = 65_536;
+
+/// Exact transitive `GB-M03-06D` presentation revision compiled from
+/// `content/core_dev/death_view.*`. These values are independent of the world-flow revision kept
+/// on the durable event and retained live trace.
+pub const CORE_DEATH_VIEW_RECORDS_BLAKE3: &str =
+    "8189586e8583efd104b7a063f9f8752159b011ace763b78abea54c69ddcd7765";
+pub const CORE_DEATH_VIEW_ASSETS_BLAKE3: &str =
+    "05b8f00f6b3f82f7176473facff3d3e0e90385ccf106d290662acc74b4b3fff9";
+pub const CORE_DEATH_VIEW_LOCALIZATION_BLAKE3: &str =
+    "a6e41565d606a6711a8ec962cf81fa7e2fae74323fb69db98fe38695872ca025";
 
 const PLAN_HASH_CONTEXT: &str = "gravebound.durable-death.plan.v1";
 const REQUEST_HASH_CONTEXT: &str = "gravebound.durable-death.request.v1";
@@ -78,6 +88,36 @@ pub struct DurableDeathContentAuthorityV1 {
 pub struct DurableDeathItemContentAuthorityV1 {
     pub template_id: String,
     pub echo_signature_tag: Option<String>,
+}
+
+/// Immutable localization/asset authority for rendering one stored death or Memorial snapshot.
+/// It is sealed into the death request separately from the danger world's content authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DurableDeathPresentationAuthorityV1 {
+    pub records_blake3: String,
+    pub assets_blake3: String,
+    pub localization_blake3: String,
+}
+
+impl DurableDeathPresentationAuthorityV1 {
+    #[must_use]
+    pub fn core() -> Self {
+        Self {
+            records_blake3: CORE_DEATH_VIEW_RECORDS_BLAKE3.to_owned(),
+            assets_blake3: CORE_DEATH_VIEW_ASSETS_BLAKE3.to_owned(),
+            localization_blake3: CORE_DEATH_VIEW_LOCALIZATION_BLAKE3.to_owned(),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), PersistenceError> {
+        if !valid_lower_blake3(&self.records_blake3)
+            || !valid_lower_blake3(&self.assets_blake3)
+            || !valid_lower_blake3(&self.localization_blake3)
+        {
+            return Err(PersistenceError::DurableDeathContentMismatch);
+        }
+        Ok(())
+    }
 }
 
 impl DurableDeathContentAuthorityV1 {
@@ -211,6 +251,7 @@ pub struct DurableDeathEventV1 {
     pub records_blake3: String,
     pub assets_blake3: String,
     pub localization_blake3: String,
+    pub presentation: DurableDeathPresentationAuthorityV1,
     pub instance_id: [u8; 16],
     pub lineage_id: [u8; 16],
     pub restore_point_id: [u8; 16],
@@ -262,6 +303,7 @@ impl DurableDeathEventV1 {
             || !valid_lower_blake3(&self.records_blake3)
             || !valid_lower_blake3(&self.assets_blake3)
             || !valid_lower_blake3(&self.localization_blake3)
+            || self.presentation.validate().is_err()
             || !valid_stable_id(&self.region_id)
             || !valid_stable_id(&self.room_id)
             || self.death_tick == 0
@@ -1683,6 +1725,7 @@ pub(crate) mod tests {
             records_blake3: "b".repeat(64),
             assets_blake3: "c".repeat(64),
             localization_blake3: "d".repeat(64),
+            presentation: DurableDeathPresentationAuthorityV1::core(),
             instance_id: [4; 16],
             lineage_id: [5; 16],
             restore_point_id: [6; 16],
@@ -2048,6 +2091,14 @@ pub(crate) mod tests {
         let mut wrong_world_hash = valid_request();
         wrong_world_hash.plan.event.records_blake3 = "A".repeat(64);
         assert!(wrong_world_hash.plan.validate().is_err());
+
+        let mut wrong_presentation_hash = valid_request();
+        wrong_presentation_hash
+            .plan
+            .event
+            .presentation
+            .records_blake3 = "A".repeat(64);
+        assert!(wrong_presentation_hash.plan.validate().is_err());
 
         let mut invalid_roster_archive = valid_request();
         invalid_roster_archive.plan.event.former_roster_ordinal = 0;

@@ -1,4 +1,4 @@
-//! Authenticated, read-only durable-death views for protocol 1.13.
+//! Authenticated, read-only durable-death views for protocol 1.14.
 //!
 //! The contract follows `Gravebound_Production_GDD_v1_Canonical.md` (`DTH-001`, `DTH-020`,
 //! `TECH-020`-`022`), `Gravebound_Content_Production_Spec_v1.md` (`CONT-HUB-002`), and
@@ -14,7 +14,7 @@ use thiserror::Error;
 
 use crate::{ManifestHash, NetworkChannel, WireText};
 
-pub const DEATH_VIEW_SCHEMA_VERSION: u16 = 1;
+pub const DEATH_VIEW_SCHEMA_VERSION: u16 = 2;
 pub const DEATH_VIEW_ID_BYTES: usize = 16;
 pub const DEATH_VIEW_DIGEST_BYTES: usize = 32;
 pub const DEATH_VIEW_ID_MAX_BYTES: usize = 96;
@@ -243,6 +243,7 @@ pub struct LatestCommittedDeathV1 {
     pub destruction_digest: [u8; DEATH_VIEW_DIGEST_BYTES],
     pub summary_snapshot_digest: [u8; DEATH_VIEW_DIGEST_BYTES],
     pub content_revision: WireText<DEATH_VIEW_ID_MAX_BYTES>,
+    pub presentation_revision: DeathViewContentRevisionV1,
 }
 
 impl LatestCommittedDeathV1 {
@@ -411,6 +412,7 @@ pub struct DeathSummaryViewV1 {
     pub death_tick: u64,
     pub content_revision: WireText<DEATH_VIEW_ID_MAX_BYTES>,
     pub snapshot_digest: [u8; DEATH_VIEW_DIGEST_BYTES],
+    pub presentation_revision: DeathViewContentRevisionV1,
 }
 
 impl DeathSummaryViewV1 {
@@ -516,6 +518,7 @@ pub struct DeathMemorialEntryV1 {
     pub class_id: WireText<DEATH_VIEW_ID_MAX_BYTES>,
     pub level: u8,
     pub echo_outcome: DeathEchoOutcomeV1,
+    pub presentation_revision: DeathViewContentRevisionV1,
 }
 
 impl DeathMemorialEntryV1 {
@@ -543,6 +546,7 @@ pub struct DeathTracePageV1 {
     pub start_ordinal: u16,
     pub entries: Vec<DeathTraceEntryV1>,
     pub next_ordinal: Option<u16>,
+    pub presentation_revision: DeathViewContentRevisionV1,
 }
 
 impl DeathTracePageV1 {
@@ -980,8 +984,102 @@ mod tests {
             echo_outcome: DeathEchoOutcomeV1::Available,
             death_tick: 301,
             content_revision: WireText::new(format!("core-dev.blake3.{}", "d".repeat(64))).unwrap(),
+            presentation_revision: content_revision(),
             snapshot_digest: [9; 32],
         }
+    }
+
+    #[test]
+    fn schema_v2_successful_response_layouts_have_pinned_wire_bytes() {
+        let latest = LatestCommittedDeathV1 {
+            death_id: uuid_v7(1),
+            character_id: [2; 16],
+            death_at_unix_ms: 1,
+            death_tick: 301,
+            cause: DeathCauseV1::DirectHit,
+            killer_content_id: WireText::new("enemy.bell_warden").unwrap(),
+            killer_pattern_id: Some(WireText::new("pattern.bell_ring").unwrap()),
+            network_state: DeathNetworkStateV1::Connected,
+            recall_state: DeathRecallStateV1::Inactive,
+            trace_entry_count: 2,
+            trace_digest: [2; 32],
+            destruction_entry_count: 1,
+            destruction_digest: [3; 32],
+            summary_snapshot_digest: [4; 32],
+            content_revision: WireText::new(format!("core-dev.blake3.{}", "d".repeat(64))).unwrap(),
+            presentation_revision: content_revision(),
+        };
+        let memorial = DeathMemorialEntryV1 {
+            cursor: DeathMemorialCursorV1 {
+                death_at_unix_ms: 1,
+                death_id: uuid_v7(1),
+            },
+            summary_revision: 1,
+            summary_snapshot_digest: [4; 32],
+            presentation_key: WireText::new("memorial.default").unwrap(),
+            presentation_digest: [5; 32],
+            character_name_snapshot: DeathCharacterName::new("Mara").unwrap(),
+            class_id: WireText::new("class.grave_arbalist").unwrap(),
+            level: 10,
+            echo_outcome: DeathEchoOutcomeV1::Dormant,
+            presentation_revision: content_revision(),
+        };
+        let trace = DeathTracePageV1 {
+            death_id: uuid_v7(1),
+            death_tick: 301,
+            total_entry_count: 2,
+            trace_digest: [2; 32],
+            start_ordinal: 0,
+            entries: vec![trace_entry(0, false), trace_entry(1, true)],
+            next_ordinal: None,
+            presentation_revision: content_revision(),
+        };
+        let results = [
+            DeathViewResultV1::Latest {
+                schema_version: DEATH_VIEW_SCHEMA_VERSION,
+                request_sequence: 1,
+                death: Some(latest),
+            },
+            DeathViewResultV1::Summary {
+                schema_version: DEATH_VIEW_SCHEMA_VERSION,
+                request_sequence: 1,
+                requested_lost_limit: 1,
+                summary: summary(),
+            },
+            DeathViewResultV1::MemorialPage {
+                schema_version: DEATH_VIEW_SCHEMA_VERSION,
+                request_sequence: 1,
+                requested_limit: 1,
+                entries: vec![memorial],
+                next_cursor: None,
+            },
+            DeathViewResultV1::TracePage {
+                schema_version: DEATH_VIEW_SCHEMA_VERSION,
+                request_sequence: 1,
+                requested_limit: 2,
+                page: trace,
+            },
+        ];
+        let hashes = results.map(|result| {
+            assert_eq!(result.validate(), Ok(()));
+            let message = crate::WireMessage::ReliableEvent(crate::ReliableEventFrame {
+                sequence: 1,
+                server_tick: 301,
+                event: crate::ReliableEvent::DeathViewResult(Box::new(result)),
+            });
+            let frame = crate::encode_frame(&message).unwrap();
+            assert_eq!(crate::decode_frame(&frame), Ok(message));
+            blake3::hash(&frame).to_hex().to_string()
+        });
+        assert_eq!(
+            hashes,
+            [
+                "a75ca0fd3b87b078d42019616fd1bfbe5c9c570774f932b63ccb4b4d314caeee".to_owned(),
+                "c61301e9c5b47b146b3f6e06596072ad2e8d5eabf3da2dd670535e40c352fdba".to_owned(),
+                "88872c328f6b17dc702e5ecd65d32b1fbf9dcdadd216196563aa3dd894b0c428".to_owned(),
+                "2f7f8e142d6e8f1c5ca90a6a096bdf42de32adc49318c137f8dd50307fc095a8".to_owned(),
+            ]
+        );
     }
 
     #[test]
@@ -1051,6 +1149,7 @@ mod tests {
     fn trace_pages_require_contiguous_order_and_one_terminal_lethal_entry() {
         let page = DeathTracePageV1 {
             death_id: uuid_v7(1),
+            presentation_revision: content_revision(),
             death_tick: 301,
             total_entry_count: 2,
             trace_digest: [2; 32],
@@ -1093,6 +1192,7 @@ mod tests {
             requested_limit: DEATH_VIEW_MAX_TRACE_ENTRIES_PER_PAGE,
             page: DeathTracePageV1 {
                 death_id: uuid_v7(1),
+                presentation_revision: content_revision(),
                 death_tick: 307,
                 total_entry_count: u16::from(DEATH_VIEW_MAX_TRACE_ENTRIES_PER_PAGE),
                 trace_digest: [2; 32],
@@ -1146,6 +1246,7 @@ mod tests {
             class_id: WireText::new("class.grave_arbalist").unwrap(),
             level: 10,
             echo_outcome: DeathEchoOutcomeV1::Dormant,
+            presentation_revision: content_revision(),
         };
         let entries = vec![entry(20, 2), entry(10, 1)];
         assert_eq!(
