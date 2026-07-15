@@ -422,6 +422,26 @@ async fn checkpoint_and_advance_first_danger_clock(persistence: &PostgresPersist
     ));
 }
 
+async fn advance_progression_for_deed(connection: &mut sqlx::PgConnection) {
+    let updated = sqlx::query(
+        "WITH advanced AS ( \
+             UPDATE character_progression SET total_xp=120,level=2,progression_version=2, \
+                    updated_at=transaction_timestamp() \
+             WHERE namespace_id=$1 AND account_id=$2 AND character_id=$3 \
+                   AND progression_version=1 RETURNING 1) \
+         UPDATE characters SET level=2,updated_at=transaction_timestamp() \
+         WHERE namespace_id=$1 AND account_id=$2 AND character_id=$3 \
+               AND EXISTS (SELECT 1 FROM advanced)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(CHARACTER_ID.as_slice())
+    .execute(connection)
+    .await
+    .unwrap();
+    assert_eq!(updated.rows_affected(), 1);
+}
+
 async fn commit_sepulcher_deed(
     persistence: &PostgresPersistence,
     lineage_id: [u8; 16],
@@ -440,27 +460,7 @@ async fn commit_sepulcher_deed(
     .fetch_one(transaction.connection())
     .await
     .unwrap();
-    sqlx::query(
-        "UPDATE character_progression SET total_xp=120,level=2,progression_version=2, \
-         updated_at=transaction_timestamp() WHERE namespace_id=$1 AND account_id=$2 \
-         AND character_id=$3 AND progression_version=1",
-    )
-    .bind(WIPEABLE_CORE_NAMESPACE)
-    .bind(ACCOUNT_ID.as_slice())
-    .bind(CHARACTER_ID.as_slice())
-    .execute(transaction.connection())
-    .await
-    .unwrap();
-    sqlx::query(
-        "UPDATE characters SET level=2,updated_at=transaction_timestamp() \
-         WHERE namespace_id=$1 AND account_id=$2 AND character_id=$3",
-    )
-    .bind(WIPEABLE_CORE_NAMESPACE)
-    .bind(ACCOUNT_ID.as_slice())
-    .bind(CHARACTER_ID.as_slice())
-    .execute(transaction.connection())
-    .await
-    .unwrap();
+    advance_progression_for_deed(transaction.connection()).await;
     sqlx::query(
         "INSERT INTO reward_requests (namespace_id,reward_request_id,account_id,character_id, \
          source_instance_id,reward_table_id,content_revision,epoch_id,canonical_request_hash, \
