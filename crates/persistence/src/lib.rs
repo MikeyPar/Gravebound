@@ -25,6 +25,7 @@ mod danger_entry_restore;
 mod death_view_repository;
 mod durable_death;
 mod durable_death_repository;
+mod durable_terminal_recovery;
 mod extraction;
 mod field_equipment;
 mod ground_expiry;
@@ -108,6 +109,9 @@ pub use durable_death::{
     derive_durable_death_bargain_cleanup_event_id,
 };
 pub use durable_death_repository::DurableDeathTransactionV1;
+pub use durable_terminal_recovery::{
+    DURABLE_TERMINAL_RECOVERY_SCHEMA_VERSION, StoredCommittedDeathTerminalV1,
+};
 pub use extraction::{
     CaldusExtractionCommit, CaldusExtractionRequest, CaldusExtractionTransaction,
     CaldusExtractionTransfer, StoredExtractionAuthority, StoredExtractionResult,

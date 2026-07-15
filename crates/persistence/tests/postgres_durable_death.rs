@@ -1186,6 +1186,38 @@ async fn assert_committed_death_views(persistence: &PostgresPersistence, ids: Re
     );
 }
 
+/// Hosted restart projection required by GDD TECH-015/021/023, Content CONT-BOSS-005 and
+/// CONT-HUB-002, and Roadmap GB-M03-06/08: the existing death graph is the only terminal writer.
+async fn assert_committed_terminal_recovery(
+    persistence: &PostgresPersistence,
+    expected: &persistence::StoredCommittedDeathResultV1,
+) {
+    let terminal = persistence
+        .load_committed_death_terminal_v1(ACCOUNT_ID, CHARACTER_ID)
+        .await
+        .unwrap()
+        .expect("committed terminal recovery projection");
+    terminal.validate().unwrap();
+    assert_eq!(&terminal.result, expected);
+    assert_eq!(terminal.result_hash, expected.digest().unwrap());
+    assert_eq!(terminal.lineage_id, LINEAGE_ID);
+    assert_eq!(terminal.restore_point_id, RESTORE_POINT_ID);
+    assert_eq!(terminal.death_tick, 20_000);
+    assert_eq!(
+        persistence
+            .load_committed_death_terminal_v1([229; 16], CHARACTER_ID)
+            .await
+            .unwrap(),
+        None
+    );
+    assert!(matches!(
+        persistence
+            .load_committed_death_terminal_v1([0; 16], CHARACTER_ID)
+            .await,
+        Err(PersistenceError::DurableDeathBindingMismatch)
+    ));
+}
+
 #[test]
 fn hosted_fixture_request_and_content_authority_are_canonical() {
     let content = content_authority();
@@ -1212,6 +1244,7 @@ async fn complete_durable_death_graph_is_atomic_replayable_terminal_and_wipeable
         .unwrap();
     assert!(matches!(fresh, DurableDeathTransactionV1::Fresh(_)));
     assert_complete_graph(&persistence, RequestIds::primary()).await;
+    assert_committed_terminal_recovery(&persistence, fresh.result()).await;
     assert_cross_account_promotion_guards(&persistence).await;
     persistence.close().await;
 
@@ -1222,6 +1255,7 @@ async fn complete_durable_death_graph_is_atomic_replayable_terminal_and_wipeable
         .unwrap();
     assert!(replay.is_replay());
     assert_eq!(replay.result(), fresh.result());
+    assert_committed_terminal_recovery(&restarted, fresh.result()).await;
     assert_committed_death_views(&restarted, RequestIds::primary()).await;
     assert!(matches!(
         restarted

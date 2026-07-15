@@ -73,7 +73,9 @@ pub use death_view_service::{
 };
 pub use durable_death_execution::{
     DurableDeathExecutionError, DurableDeathExecutionOutcome, DurableDeathExecutionService,
-    DurableDeathWriter, PostgresDurableDeathExecutionService, durable_death_terminal_candidate,
+    DurableDeathTerminalReader, DurableDeathWriter, PostgresDurableDeathExecutionService,
+    committed_death_terminal_receipt, durable_death_terminal_candidate,
+    recover_committed_death_arbiter,
 };
 pub use durable_death_service::{
     DeathEntityIdentityAuthority, DeathHeroSnapshot, DeathLineageState, DeathMutationAuthority,

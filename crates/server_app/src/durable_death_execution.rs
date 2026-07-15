@@ -12,11 +12,13 @@ use std::future::Future;
 use persistence::{
     DurableDeathCommitRequestV1, DurableDeathContentAuthorityV1, DurableDeathTransactionV1,
     PersistenceError, PostgresPersistence, StoredCommittedDeathResultV1,
+    StoredCommittedDeathTerminalV1,
 };
 use thiserror::Error;
 
 use crate::{
-    CommitError, CommitResult, PreparedDurableDeathCommit, PreparedTerminal, StoredTerminalReceipt,
+    CommitError, CommitResult, PreparedDurableDeathCommit, PreparedTerminal,
+    STORED_TERMINAL_RECEIPT_SCHEMA_V1, StoredTerminalReceipt, StoredTerminalReceiptV1,
     TerminalArbiter, TerminalBinding, TerminalCandidate, TerminalKind, TerminalValidationError,
 };
 
@@ -30,6 +32,16 @@ pub trait DurableDeathWriter: Send + Sync {
     ) -> impl Future<Output = Result<DurableDeathTransactionV1, PersistenceError>> + Send;
 }
 
+/// Read-only recovery seam for the narrow crash window after `PostgreSQL` commits but before the
+/// in-memory arbiter records its receipt. The death graph remains the single durable authority.
+pub trait DurableDeathTerminalReader: Send + Sync {
+    fn load_committed_terminal(
+        &self,
+        account_id: [u8; 16],
+        character_id: [u8; 16],
+    ) -> impl Future<Output = Result<Option<StoredCommittedDeathTerminalV1>, PersistenceError>> + Send;
+}
+
 impl DurableDeathWriter for PostgresPersistence {
     async fn transact(
         &self,
@@ -37,6 +49,17 @@ impl DurableDeathWriter for PostgresPersistence {
         content: &DurableDeathContentAuthorityV1,
     ) -> Result<DurableDeathTransactionV1, PersistenceError> {
         self.transact_durable_death(request, content).await
+    }
+}
+
+impl DurableDeathTerminalReader for PostgresPersistence {
+    async fn load_committed_terminal(
+        &self,
+        account_id: [u8; 16],
+        character_id: [u8; 16],
+    ) -> Result<Option<StoredCommittedDeathTerminalV1>, PersistenceError> {
+        self.load_committed_death_terminal_v1(account_id, character_id)
+            .await
     }
 }
 
@@ -70,8 +93,63 @@ pub enum DurableDeathExecutionError {
     Persistence(#[source] PersistenceError),
     #[error("stored death result is corrupt or does not match the sealed request")]
     StoredResultMismatch,
+    #[error("stored committed-death terminal authority is corrupt")]
+    StoredTerminalRecoveryMismatch,
     #[error("terminal receipt could not be published: {0:?}")]
     TerminalCommit(CommitError),
+}
+
+/// Rebuilds the terminal aggregate from the committed `PostgreSQL` death graph. `None` means no
+/// committed death exists for this owned character; corrupt or partially bound rows fail closed.
+pub async fn recover_committed_death_arbiter<Reader>(
+    reader: &Reader,
+    account_id: [u8; 16],
+    character_id: [u8; 16],
+) -> Result<Option<TerminalArbiter>, DurableDeathExecutionError>
+where
+    Reader: DurableDeathTerminalReader,
+{
+    let Some(stored) = reader
+        .load_committed_terminal(account_id, character_id)
+        .await
+        .map_err(DurableDeathExecutionError::Persistence)?
+    else {
+        return Ok(None);
+    };
+    let receipt = committed_death_terminal_receipt(&stored)?;
+    TerminalArbiter::from_stored_receipt(receipt)
+        .map(Some)
+        .map_err(|_| DurableDeathExecutionError::StoredTerminalRecoveryMismatch)
+}
+
+/// Converts a validated persistence projection into the append-only terminal storage contract.
+/// The durable death ID is the terminal ID, and the death tick is both observation and commit tick
+/// so response loss and restart cannot manufacture wall-clock-dependent receipt bytes.
+pub fn committed_death_terminal_receipt(
+    stored: &StoredCommittedDeathTerminalV1,
+) -> Result<StoredTerminalReceipt, DurableDeathExecutionError> {
+    stored
+        .validate()
+        .map_err(|_| DurableDeathExecutionError::StoredTerminalRecoveryMismatch)?;
+    let result = &stored.result;
+    StoredTerminalReceipt::from_storage(&StoredTerminalReceiptV1 {
+        schema_version: STORED_TERMINAL_RECEIPT_SCHEMA_V1,
+        account_id: result.account_id,
+        character_id: result.character_id,
+        lineage_id: stored.lineage_id,
+        restore_point_id: stored.restore_point_id,
+        terminal_id: result.death_id,
+        mutation_id: result.mutation_id,
+        payload_hash: result.canonical_request_hash,
+        server_plan_hash: result.canonical_plan_hash,
+        result_hash: stored.result_hash,
+        expected_state_version: result.versions.account.pre,
+        post_state_version: result.versions.account.post,
+        observed_tick: stored.death_tick,
+        committed_tick: stored.death_tick,
+        terminal_kind_code: TerminalKind::LethalDeath.stable_code(),
+    })
+    .map_err(|_| DurableDeathExecutionError::StoredTerminalRecoveryMismatch)
 }
 
 impl<Writer> DurableDeathExecutionService<Writer>
@@ -177,6 +255,34 @@ mod tests {
         NonTerminalAdmission, SubmitResult, durable_death_service::tests::prepared_commit,
     };
 
+    #[derive(Debug, Clone)]
+    struct FakeTerminalReader {
+        mode: FakeTerminalReaderMode,
+    }
+
+    #[derive(Debug, Clone)]
+    enum FakeTerminalReaderMode {
+        Stored(Box<StoredCommittedDeathTerminalV1>),
+        Absent,
+        Unavailable,
+    }
+
+    impl DurableDeathTerminalReader for FakeTerminalReader {
+        async fn load_committed_terminal(
+            &self,
+            _account_id: [u8; 16],
+            _character_id: [u8; 16],
+        ) -> Result<Option<StoredCommittedDeathTerminalV1>, PersistenceError> {
+            match &self.mode {
+                FakeTerminalReaderMode::Stored(stored) => Ok(Some(stored.as_ref().clone())),
+                FakeTerminalReaderMode::Absent => Ok(None),
+                FakeTerminalReaderMode::Unavailable => {
+                    Err(PersistenceError::DurableDeathTerminalSuperseded)
+                }
+            }
+        }
+    }
+
     #[derive(Debug, Clone, Copy)]
     enum FakeMode {
         Fresh,
@@ -246,6 +352,30 @@ mod tests {
             .prepare(death.request.plan.event.death_tick)
             .expect("sealed lethal tick");
         (arbiter, prepared)
+    }
+
+    fn committed_terminal_fixture() -> StoredCommittedDeathTerminalV1 {
+        let death = prepared_commit();
+        let event = &death.request.plan.event;
+        let mut request = death.request.clone();
+        request
+            .bind_commit_time(
+                request
+                    .issued_at_unix_ms
+                    .checked_add(10)
+                    .expect("fixture commit time"),
+            )
+            .expect("bind commit time");
+        let result = StoredCommittedDeathResultV1::from_request(&request).expect("stored result");
+        let result_hash = result.digest().expect("result digest");
+        StoredCommittedDeathTerminalV1 {
+            schema_version: persistence::DURABLE_TERMINAL_RECOVERY_SCHEMA_VERSION,
+            result,
+            result_hash,
+            lineage_id: event.lineage_id,
+            restore_point_id: event.restore_point_id,
+            death_tick: event.death_tick,
+        }
     }
 
     #[test]
@@ -403,5 +533,74 @@ mod tests {
             );
             assert!(arbiter.committed_receipt().is_none());
         }
+    }
+
+    #[tokio::test]
+    async fn committed_graph_reconstructs_the_exact_terminal_receipt_after_process_loss() {
+        let stored = committed_terminal_fixture();
+        let expected = committed_death_terminal_receipt(&stored).expect("receipt");
+        let reader = FakeTerminalReader {
+            mode: FakeTerminalReaderMode::Stored(Box::new(stored.clone())),
+        };
+
+        let recovered = recover_committed_death_arbiter(
+            &reader,
+            stored.result.account_id,
+            stored.result.character_id,
+        )
+        .await
+        .expect("recover")
+        .expect("committed death");
+
+        assert_eq!(recovered.committed_receipt(), Some(&expected));
+        assert_eq!(
+            recovered.non_terminal_admission(),
+            NonTerminalAdmission::BlockedByCommittedTerminal
+        );
+        assert_eq!(expected.terminal_id(), &stored.result.death_id);
+        assert_eq!(expected.mutation_id(), &stored.result.mutation_id);
+        assert_eq!(expected.result_hash(), &stored.result_hash);
+        assert_eq!(expected.committed_tick(), stored.death_tick);
+    }
+
+    #[tokio::test]
+    async fn absent_or_unavailable_recovery_is_typed_and_never_synthesizes_a_terminal() {
+        let absent = FakeTerminalReader {
+            mode: FakeTerminalReaderMode::Absent,
+        };
+        assert!(
+            recover_committed_death_arbiter(&absent, [1; 16], [2; 16])
+                .await
+                .expect("absence is valid")
+                .is_none()
+        );
+
+        let unavailable = FakeTerminalReader {
+            mode: FakeTerminalReaderMode::Unavailable,
+        };
+        assert!(matches!(
+            recover_committed_death_arbiter(&unavailable, [1; 16], [2; 16]).await,
+            Err(DurableDeathExecutionError::Persistence(
+                PersistenceError::DurableDeathTerminalSuperseded
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn corrupt_recovery_projection_fails_closed() {
+        let mut stored = committed_terminal_fixture();
+        stored.result_hash[0] ^= 0xff;
+        let reader = FakeTerminalReader {
+            mode: FakeTerminalReaderMode::Stored(Box::new(stored.clone())),
+        };
+        assert!(matches!(
+            recover_committed_death_arbiter(
+                &reader,
+                stored.result.account_id,
+                stored.result.character_id
+            )
+            .await,
+            Err(DurableDeathExecutionError::StoredTerminalRecoveryMismatch)
+        ));
     }
 }
