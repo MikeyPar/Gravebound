@@ -249,7 +249,7 @@ async fn reset_fixture(persistence: &PostgresPersistence) {
     sqlx::query(
         "INSERT INTO entry_restore_progression_v3 (namespace_id,account_id,character_id, \
          restore_point_id,level,total_xp,current_health,progression_version,component_digest) \
-         VALUES ($1,$2,$3,$4,10,9000,120,1,$5)",
+         VALUES ($1,$2,$3,$4,10,2700,120,1,$5)",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(ACCOUNT_ID.as_slice())
@@ -262,7 +262,7 @@ async fn reset_fixture(persistence: &PostgresPersistence) {
     sqlx::query(
         "INSERT INTO entry_restore_progression_v1 (namespace_id,account_id,character_id, \
          restore_point_id,level,total_xp,current_health,progression_version) \
-         VALUES ($1,$2,$3,$4,10,9000,120,1)",
+         VALUES ($1,$2,$3,$4,10,2700,120,1)",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(ACCOUNT_ID.as_slice())
