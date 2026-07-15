@@ -1019,6 +1019,90 @@ async fn assert_post_death_rejection(persistence: &PostgresPersistence) {
     transaction.rollback().await.unwrap();
 }
 
+async fn assert_cross_account_promotion_guards(persistence: &PostgresPersistence) {
+    for (constraint_name, constraint_sql, include_outbox) in [
+        (
+            "echo_promotion_trigger_account_exact",
+            "SET CONSTRAINTS echo_promotion_trigger_account_exact IMMEDIATE",
+            false,
+        ),
+        (
+            "echo_promotion_outbox_trigger_exact",
+            "SET CONSTRAINTS echo_promotion_outbox_trigger_exact IMMEDIATE",
+            true,
+        ),
+    ] {
+        let mut transaction = persistence.begin_transaction().await.unwrap();
+        sqlx::query(
+            "CREATE TEMP TABLE fixture_foreign_death ON COMMIT DROP AS \
+             SELECT * FROM death_events WHERE namespace_id=$1 AND death_id=$2",
+        )
+        .bind(WIPEABLE_CORE_NAMESPACE)
+        .bind(RequestIds::primary().death_id.as_slice())
+        .execute(transaction.connection())
+        .await
+        .unwrap();
+        let foreign_death_id = uuid_v7(91);
+        sqlx::query("UPDATE fixture_foreign_death SET death_id=$1,account_id=$2,mutation_id=$3")
+            .bind(foreign_death_id.as_slice())
+            .bind([92_u8; 16].as_slice())
+            .bind([93_u8; 16].as_slice())
+            .execute(transaction.connection())
+            .await
+            .unwrap();
+        // The adversarial fixture bypasses the older death graph only to materialize a durable
+        // foreign-account trigger candidate. The 0042 guards themselves remain enabled.
+        sqlx::query("ALTER TABLE death_events DISABLE TRIGGER ALL")
+            .execute(transaction.connection())
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO death_events SELECT * FROM fixture_foreign_death")
+            .execute(transaction.connection())
+            .await
+            .unwrap();
+        sqlx::query("ALTER TABLE death_events ENABLE TRIGGER ALL")
+            .execute(transaction.connection())
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO echo_state_transitions \
+             (namespace_id,echo_id,transition_ordinal,previous_state,next_state,reason_kind, \
+              source_death_id,trigger_death_id) VALUES ($1,$2,2,0,1,1,NULL,$3)",
+        )
+        .bind(WIPEABLE_CORE_NAMESPACE)
+        .bind(RequestIds::primary().echo_id.as_slice())
+        .bind(foreign_death_id.as_slice())
+        .execute(transaction.connection())
+        .await
+        .unwrap();
+        if include_outbox {
+            sqlx::query(
+                "INSERT INTO death_outbox_events \
+                 (namespace_id,death_id,event_id,event_type,echo_id,event_payload, \
+                  echo_transition_ordinal,trigger_death_id) \
+                 VALUES ($1,$2,$3,'echo_promoted',$4,$5,2,$6)",
+            )
+            .bind(WIPEABLE_CORE_NAMESPACE)
+            .bind(RequestIds::primary().death_id.as_slice())
+            .bind([94_u8; 16].as_slice())
+            .bind(RequestIds::primary().echo_id.as_slice())
+            .bind([1_u8].as_slice())
+            .bind(foreign_death_id.as_slice())
+            .execute(transaction.connection())
+            .await
+            .unwrap();
+        }
+        let rejected = sqlx::query(constraint_sql)
+            .execute(transaction.connection())
+            .await;
+        assert!(
+            rejected.is_err(),
+            "{constraint_name} accepted cross-account promotion authority"
+        );
+        transaction.rollback().await.unwrap();
+    }
+}
+
 async fn wipe_account(persistence: &PostgresPersistence) {
     let mut transaction = persistence.begin_transaction().await.unwrap();
     let deleted = sqlx::query("DELETE FROM accounts WHERE namespace_id=$1 AND account_id=$2")
@@ -1128,6 +1212,7 @@ async fn complete_durable_death_graph_is_atomic_replayable_terminal_and_wipeable
         .unwrap();
     assert!(matches!(fresh, DurableDeathTransactionV1::Fresh(_)));
     assert_complete_graph(&persistence, RequestIds::primary()).await;
+    assert_cross_account_promotion_guards(&persistence).await;
     persistence.close().await;
 
     let restarted = reconnect_database().await;

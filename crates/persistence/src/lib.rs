@@ -166,7 +166,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 41;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 42;
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -920,6 +920,29 @@ mod tests {
             assert!(
                 !migration.contains(prohibited),
                 "relation-safe death trigger correction leaked {prohibited}"
+            );
+        }
+    }
+
+    #[test]
+    fn echo_promotion_trigger_authority_is_account_bound() {
+        let migration = include_str!("../../../migrations/0042_echo_promotion_account_binding.sql");
+        for required in [
+            "Gravebound_Production_GDD_v1_Canonical.md",
+            "Gravebound_Content_Production_Spec_v1.md",
+            "Gravebound_Development_Roadmap_v1.md",
+            "SPEC-CONFLICT-009-m03-death-memorial.md",
+            "echo_promotion_trigger_account_exact",
+            "echo_promotion_outbox_trigger_exact",
+            "transition.trigger_death_id = outbox.trigger_death_id",
+            "echo.account_id = trigger_death.account_id",
+        ] {
+            assert!(migration.contains(required), "migration omitted {required}");
+        }
+        for prohibited in ["DROP TABLE", "TRUNCATE", "DELETE FROM"] {
+            assert!(
+                !migration.contains(prohibited),
+                "Echo promotion authority migration leaked {prohibited}"
             );
         }
     }
