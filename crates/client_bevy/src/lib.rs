@@ -15,6 +15,7 @@ mod core_transition_showcase;
 mod core_world_showcase;
 mod core_world_transition;
 mod death;
+mod death_view;
 mod debug_overlay;
 mod developer_tools;
 mod encounter;
@@ -84,6 +85,17 @@ pub use core_world_transition::{
     CoreRetryDirective, CoreSafeOrigin, CoreSceneReadiness, CoreWorldTransitionError,
     CoreWorldTransitionFailure, CoreWorldTransitionModel, CoreWorldTransitionPhase,
     CoreWorldTransitionResolution,
+};
+pub use death_view::{
+    DEATH_SUMMARY_SECTION_ORDER, DeathDamageEventPresentation, DeathFixedProjectionPresentation,
+    DeathHeroPresentation, DeathLethalCausePresentation, DeathLocalizedValue,
+    DeathLossPresentation, DeathNetworkPresentation, DeathStatusPresentation, DeathSummaryAction,
+    DeathSummaryActionPresentation, DeathSummaryActionState, DeathSummaryActionsPresentation,
+    DeathSummaryPresentation, DeathSummarySection, DeathTimelinePresentation,
+    DeathViewApplyDisposition, DeathViewApplyOutcome, DeathViewClientError, DeathViewClientModel,
+    DeathViewFailure, DeathViewProjectionError, DeathViewRetryDirective, PendingDeathViewQuery,
+    PendingDeathViewRequest, TERMINAL_SUMMARY_LOSS_PAGE_LIMIT, TerminalDeathModel,
+    TerminalDeathPhase, TerminalQueryIntent,
 };
 pub use network_play::{NetworkPlayConfig, run_network_playtest};
 pub use network_prediction::{

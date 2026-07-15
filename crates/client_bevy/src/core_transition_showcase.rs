@@ -321,7 +321,11 @@ fn build_showcase_model(
     let projection = projection_for_state(state, revision)?;
 
     let title = content
-        .transition_copy(projection.phase_copy_key())
+        .transition_copy(
+            projection
+                .phase_copy_key()
+                .context("transition showcase cannot render the durable-death handoff")?,
+        )
         .to_owned();
     let detail = projection
         .failure()

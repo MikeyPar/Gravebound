@@ -24,6 +24,7 @@ pub enum CoreWorldTransitionPhase {
     LinkLost,
     Reconnecting,
     ResolvedToHall,
+    ResolvedToDeathSummary,
     ResolvedToCharacterSelect,
 }
 
@@ -183,8 +184,15 @@ impl CoreWorldTransitionModel {
     }
 
     #[must_use]
-    pub const fn phase_copy_key(&self) -> CoreWorldTransitionCopyKey {
-        match self.phase {
+    pub const fn character_id(&self) -> [u8; 16] {
+        self.character_id
+    }
+
+    /// Death-summary copy belongs to the independently versioned death catalog, so the terminal
+    /// handoff intentionally has no world-flow copy key.
+    #[must_use]
+    pub const fn phase_copy_key(&self) -> Option<CoreWorldTransitionCopyKey> {
+        let key = match self.phase {
             CoreWorldTransitionPhase::SafeOrigin => CoreWorldTransitionCopyKey::PhaseSafeOrigin,
             CoreWorldTransitionPhase::RequestingTransfer => {
                 CoreWorldTransitionCopyKey::PhaseRequestingTransfer
@@ -205,10 +213,12 @@ impl CoreWorldTransitionModel {
             CoreWorldTransitionPhase::ResolvedToHall => {
                 CoreWorldTransitionCopyKey::PhaseResolvedToHall
             }
+            CoreWorldTransitionPhase::ResolvedToDeathSummary => return None,
             CoreWorldTransitionPhase::ResolvedToCharacterSelect => {
                 CoreWorldTransitionCopyKey::PhaseResolvedToCharacterSelect
             }
-        }
+        };
+        Some(key)
     }
 
     pub fn begin_transfer(
@@ -460,7 +470,7 @@ impl CoreWorldTransitionModel {
                 self.failure = None;
                 self.retry = CoreRetryDirective::Unavailable;
                 self.resolution = CoreWorldTransitionResolution::DeathCommitted;
-                self.phase = CoreWorldTransitionPhase::ResolvedToCharacterSelect;
+                self.phase = CoreWorldTransitionPhase::ResolvedToDeathSummary;
                 Ok(())
             }
             SessionDestination::Closed => {
@@ -477,6 +487,7 @@ impl CoreWorldTransitionModel {
         if matches!(
             self.phase,
             CoreWorldTransitionPhase::FatalError
+                | CoreWorldTransitionPhase::ResolvedToDeathSummary
                 | CoreWorldTransitionPhase::ResolvedToCharacterSelect
                 | CoreWorldTransitionPhase::ResolvedToHall
         ) {
@@ -560,17 +571,20 @@ impl CoreWorldTransitionModel {
         self.loading_completion = None;
         self.reconnect_attempt = None;
         match code {
-            WorldTransferResultCode::CharacterDead
-            | WorldTransferResultCode::NoSelectedCharacter => {
+            WorldTransferResultCode::CharacterDead => {
                 self.current_snapshot = None;
                 self.pending_mutation = None;
                 self.pending_request_sequence = None;
                 self.retry = CoreRetryDirective::Unavailable;
-                self.resolution = if code == WorldTransferResultCode::CharacterDead {
-                    CoreWorldTransitionResolution::DeathCommitted
-                } else {
-                    CoreWorldTransitionResolution::None
-                };
+                self.resolution = CoreWorldTransitionResolution::DeathCommitted;
+                self.phase = CoreWorldTransitionPhase::ResolvedToDeathSummary;
+            }
+            WorldTransferResultCode::NoSelectedCharacter => {
+                self.current_snapshot = None;
+                self.pending_mutation = None;
+                self.pending_request_sequence = None;
+                self.retry = CoreRetryDirective::Unavailable;
+                self.resolution = CoreWorldTransitionResolution::None;
                 self.phase = CoreWorldTransitionPhase::ResolvedToCharacterSelect;
             }
             _ if transfer_is_fatal(code) => {
@@ -887,10 +901,7 @@ mod tests {
             WorldTransferResultCode::IncompleteRestorePoint,
             WorldTransferResultCode::StorageResolutionRequired,
         ];
-        let resolved_character_select = [
-            WorldTransferResultCode::NoSelectedCharacter,
-            WorldTransferResultCode::CharacterDead,
-        ];
+        let resolved_character_select = [WorldTransferResultCode::NoSelectedCharacter];
         let fatal = [
             WorldTransferResultCode::CharacterNotFound,
             WorldTransferResultCode::CharacterNotOwned,
@@ -939,9 +950,64 @@ mod tests {
                 let failure = model.failure().unwrap();
                 assert_eq!(failure, CoreWorldTransitionFailure::Transfer(code));
                 assert!(compiled.localized(failure.localization_key()).is_some());
-                assert!(compiled.transition_copy(model.phase_copy_key()).len() > 1);
+                assert!(
+                    compiled
+                        .transition_copy(model.phase_copy_key().unwrap())
+                        .len()
+                        > 1
+                );
             }
         }
+
+        let mut dead = CoreWorldTransitionModel::new(revision(), hall(1)).unwrap();
+        let command = mutation(111, 1);
+        dead.begin_transfer(1, command.clone()).unwrap();
+        dead.apply_world_flow_result(&transfer_result(
+            command.mutation_id,
+            WorldTransferResultCode::CharacterDead,
+            None,
+        ))
+        .unwrap();
+        assert_eq!(
+            dead.phase(),
+            CoreWorldTransitionPhase::ResolvedToDeathSummary
+        );
+        assert_eq!(
+            dead.resolution(),
+            CoreWorldTransitionResolution::DeathCommitted
+        );
+        assert_eq!(dead.character_id(), [7; 16]);
+        assert!(dead.current_snapshot().is_none());
+        assert_eq!(dead.phase_copy_key(), None);
+    }
+
+    #[test]
+    fn committed_death_handoff_atomically_starts_the_durable_latest_read() {
+        let mut transition = CoreWorldTransitionModel::new(revision(), hall(1)).unwrap();
+        let command = mutation(112, 1);
+        transition.begin_transfer(1, command.clone()).unwrap();
+        transition
+            .apply_world_flow_result(&transfer_result(
+                command.mutation_id,
+                WorldTransferResultCode::CharacterDead,
+                None,
+            ))
+            .unwrap();
+        let death_presentation = sim_content::load_core_development_death_view(&content_root())
+            .expect("compiled death presentation");
+        let mut death_view = crate::death_view::DeathViewClientModel::new(death_presentation)
+            .expect("death-view coordinator");
+        let latest_request = death_view
+            .begin_world_transition_death_handoff(&transition)
+            .expect("committed death handoff");
+        assert_eq!(
+            latest_request.request,
+            protocol::DeathViewRequestV1::LatestCommitted
+        );
+        assert_eq!(
+            death_view.pending().map(|pending| pending.sequence),
+            Some(latest_request.sequence)
+        );
     }
 
     #[test]
@@ -1104,8 +1170,10 @@ mod tests {
             .unwrap();
         assert_eq!(
             death_model.phase(),
-            CoreWorldTransitionPhase::ResolvedToCharacterSelect
+            CoreWorldTransitionPhase::ResolvedToDeathSummary
         );
+        assert_eq!(death_model.character_id(), [7; 16]);
+        assert_eq!(death_model.phase_copy_key(), None);
         assert!(death_model.current_snapshot().is_none());
         assert_eq!(
             death_model.reconnect_resolved(SessionDestination::LanternHalls, Some(hall(2))),
