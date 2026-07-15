@@ -807,7 +807,7 @@ async fn load_current_danger_authority(
     let (Some(lineage_id), Some(restore_point_id)) = (lineage, restore) else {
         return Err(PersistenceError::CorruptStoredLifeClock);
     };
-    load_active_danger_authority(
+    match load_active_danger_authority(
         connection,
         account_id,
         character_id,
@@ -816,7 +816,13 @@ async fn load_current_danger_authority(
         &LifeClockContentAuthorityV1::core(),
     )
     .await
-    .map(Some)
+    {
+        Ok(authority) => Ok(Some(authority)),
+        Err(PersistenceError::LifeClockBindingMismatch) => {
+            Err(PersistenceError::CorruptStoredLifeClock)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 async fn validate_restart_metrics(
