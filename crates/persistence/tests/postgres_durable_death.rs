@@ -1,16 +1,22 @@
 use persistence::{
-    AuthoritativeDeathPlanV1, CORE_ITEM_CONTENT_REVISION, DURABLE_DEATH_SCHEMA_VERSION,
+    AuthoritativeDeathPlanV1, CORE_ITEM_CONTENT_REVISION, CORE_WORLD_ASSETS_BLAKE3,
+    CORE_WORLD_LOCALIZATION_BLAKE3, CORE_WORLD_RECORDS_BLAKE3, DURABLE_DEATH_SCHEMA_VERSION,
     DURABLE_DEATH_SUMMARY_REVISION, DeathAggregateVersionsV1, DeathVersionAdvanceV1,
     DeathViewReadError, DurableCombatTraceEntryV1, DurableDamageTypeV1, DurableDeathCauseV1,
     DurableDeathCommitRequestV1, DurableDeathContentAuthorityV1, DurableDeathEventV1,
-    DurableDeathItemContentAuthorityV1, DurableDeathSummaryV1, DurableDeathTransactionV1,
-    DurableDestructionEntryV1, DurableDestructionLocationV1, DurableEchoEnvelopeV1,
-    DurableEchoOutcomeV1, DurableEchoRecordV1, DurableEchoStateV1, DurableEchoTransitionReasonV1,
-    DurableEchoTransitionV1, DurableEquipmentSlotV1, DurableMemorialRecordV1,
-    DurableNetworkStateV1, DurableOrderedContentIdV1, DurableRecallStateV1,
-    DurableSummaryDamageReferenceV1, DurableSummaryProjectionEntryV1,
+    DurableDeathItemContentAuthorityV1, DurableDeathSummaryV1, DurableDeathTracePromotionV1,
+    DurableDeathTransactionV1, DurableDestructionEntryV1, DurableDestructionLocationV1,
+    DurableEchoEnvelopeV1, DurableEchoOutcomeV1, DurableEchoRecordV1, DurableEchoStateV1,
+    DurableEchoTransitionReasonV1, DurableEchoTransitionV1, DurableEquipmentSlotV1,
+    DurableMemorialRecordV1, DurableNetworkStateV1, DurableOrderedContentIdV1,
+    DurableRecallStateV1, DurableSummaryDamageReferenceV1, DurableSummaryProjectionEntryV1,
     DurableSummaryProjectionKindV1, DurableSummaryProjectionsV1, DurableTraceStatusV1,
-    PersistenceConfig, PersistenceError, PostgresPersistence, WIPEABLE_CORE_NAMESPACE,
+    LiveDamageTraceCauseV1, LiveDamageTraceContentAuthorityV1, LiveDamageTraceDamageTypeV1,
+    LiveDamageTraceDangerAuthorityV1, LiveDamageTraceEntryV1, LiveDamageTraceNetworkStateV1,
+    LiveDamageTraceRecallStateV1, LiveDamageTraceStatusV1, LiveDamageTraceTickCommandV1,
+    LiveDamageTraceTickRequestV1, LiveDamageTraceTickTransactionV1, PersistenceConfig,
+    PersistenceError, PostgresPersistence, StoredLiveDamageTraceSnapshotEntryV1,
+    WIPEABLE_CORE_NAMESPACE, canonical_death_terminal_payload_hash_v1,
     stage_danger_entry_ash_wallet_restore_v3, stage_danger_entry_inventory_restore_v3,
     stage_danger_entry_life_metrics_restore_v3, stage_danger_entry_oath_bargain_restore_v3,
 };
@@ -29,11 +35,13 @@ const DEED_REWARD_ID: [u8; 16] = [238; 16];
 const MATERIAL_ID: &str = "material.core.iron";
 const ITEM_TEMPLATE_ID: &str = "item.weapon.crossbow.pine_crossbow";
 const DEED_ID: &str = "deed.core.sir_caldus_defeated";
-const RECORDS_BLAKE3: &str = "1111111111111111111111111111111111111111111111111111111111111111";
-const ASSETS_BLAKE3: &str = "2222222222222222222222222222222222222222222222222222222222222222";
-const LOCALIZATION_BLAKE3: &str =
-    "3333333333333333333333333333333333333333333333333333333333333333";
+const RECORDS_BLAKE3: &str = CORE_WORLD_RECORDS_BLAKE3;
+const ASSETS_BLAKE3: &str = CORE_WORLD_ASSETS_BLAKE3;
+const LOCALIZATION_BLAKE3: &str = CORE_WORLD_LOCALIZATION_BLAKE3;
 const ISSUED_AT_UNIX_MS: u64 = 1;
+const NONLETHAL_TRACE_TICK_ID: [u8; 16] = [239; 16];
+const LETHAL_TRACE_TICK_ID: [u8; 16] = [240; 16];
+const SOURCE_SIM_ENTITY_ID: u64 = 81;
 
 #[derive(Clone, Copy)]
 #[allow(
@@ -406,7 +414,7 @@ fn request(ids: RequestIds) -> DurableDeathCommitRequestV1 {
     let trace = vec![
         DurableCombatTraceEntryV1 {
             ordinal: 0,
-            event_tick: 19_900,
+            event_tick: 19_990,
             event_ordinal: 0,
             source_content_id: "enemy.sepulcher_knight".into(),
             source_entity_id: Some([81; 16]),
@@ -695,6 +703,157 @@ fn request(ids: RequestIds) -> DurableDeathCommitRequestV1 {
     .unwrap()
 }
 
+/// Hosted lethal evidence required jointly by canonical GDD `DTH-001`, Content Spec
+/// `CONT-ECHO-009`, and Roadmap `GB-M03-02`/`06`/`13`. The first tick is committed through the
+/// production live repository; the lethal suffix remains sealed for the atomic death writer.
+#[derive(Clone)]
+struct HostedDeathTraceEvidence {
+    lethal_request: LiveDamageTraceTickRequestV1,
+    full_window: Vec<StoredLiveDamageTraceSnapshotEntryV1>,
+}
+
+impl HostedDeathTraceEvidence {
+    fn promotion_for(&self, death: &DurableDeathCommitRequestV1) -> DurableDeathTracePromotionV1 {
+        DurableDeathTracePromotionV1::seal(death, self.lethal_request.clone(), &self.full_window)
+            .unwrap()
+    }
+
+    fn altered_predecessor_promotion_for(
+        &self,
+        death: &DurableDeathCommitRequestV1,
+    ) -> DurableDeathTracePromotionV1 {
+        let mut command = self.lethal_request.command.clone();
+        command.expected_previous.as_mut().unwrap().result_digest[0] ^= 1;
+        let lethal_request = LiveDamageTraceTickRequestV1::seal(command).unwrap();
+        DurableDeathTracePromotionV1::seal(death, lethal_request, &self.full_window).unwrap()
+    }
+}
+
+async fn seed_hosted_death_trace(
+    persistence: &PostgresPersistence,
+    death: &DurableDeathCommitRequestV1,
+) -> HostedDeathTraceEvidence {
+    let danger = LiveDamageTraceDangerAuthorityV1 {
+        lineage_id: LINEAGE_ID,
+        restore_point_id: RESTORE_POINT_ID,
+        checkpoint_tick: 19_990,
+    };
+    let content = LiveDamageTraceContentAuthorityV1::core();
+    let nonlethal_entry = live_trace_entry(&death.plan.trace[0]);
+    let nonlethal_request = LiveDamageTraceTickRequestV1::seal(LiveDamageTraceTickCommandV1 {
+        account_id: ACCOUNT_ID,
+        character_id: CHARACTER_ID,
+        trace_tick_id: NONLETHAL_TRACE_TICK_ID,
+        expected_character_version: death.plan.event.versions.character.pre,
+        expected_previous: None,
+        event_tick: death.plan.trace[0].event_tick,
+        danger: danger.clone(),
+        content: content.clone(),
+        entries: vec![nonlethal_entry],
+        issued_at_unix_ms: ISSUED_AT_UNIX_MS,
+    })
+    .unwrap();
+    let stored = persistence
+        .transact_live_damage_trace_tick_v1(&nonlethal_request)
+        .await
+        .unwrap();
+    let head = match stored {
+        LiveDamageTraceTickTransactionV1::Committed(stored) => stored.head(),
+        LiveDamageTraceTickTransactionV1::Replayed(_) => {
+            panic!("fixture reset must produce one fresh retained nonlethal receipt")
+        }
+    };
+
+    let snapshot = persistence
+        .load_live_damage_trace_snapshot_v1(ACCOUNT_ID, CHARACTER_ID)
+        .await
+        .unwrap();
+    assert_eq!(
+        snapshot.character_version,
+        death.plan.event.versions.character.pre
+    );
+    assert_eq!(snapshot.danger, danger);
+    assert_eq!(snapshot.content, content.clone());
+    assert_eq!(snapshot.head.as_ref(), Some(&head));
+    assert_eq!(snapshot.entries.len(), 1);
+
+    let lethal_entry = live_trace_entry(death.plan.trace.last().unwrap());
+    let lethal_request = LiveDamageTraceTickRequestV1::seal(LiveDamageTraceTickCommandV1 {
+        account_id: ACCOUNT_ID,
+        character_id: CHARACTER_ID,
+        trace_tick_id: LETHAL_TRACE_TICK_ID,
+        expected_character_version: death.plan.event.versions.character.pre,
+        expected_previous: Some(head),
+        event_tick: death.plan.event.death_tick,
+        danger,
+        content,
+        entries: vec![lethal_entry.clone()],
+        issued_at_unix_ms: ISSUED_AT_UNIX_MS,
+    })
+    .unwrap();
+    let mut full_window = snapshot.entries;
+    full_window.push(StoredLiveDamageTraceSnapshotEntryV1 {
+        trace_tick_id: LETHAL_TRACE_TICK_ID,
+        event_tick: death.plan.event.death_tick,
+        entry: lethal_entry,
+    });
+    let evidence = HostedDeathTraceEvidence {
+        lethal_request,
+        full_window,
+    };
+    evidence
+        .promotion_for(death)
+        .validate_against(death, &evidence.full_window)
+        .unwrap();
+    evidence
+}
+
+fn live_trace_entry(entry: &DurableCombatTraceEntryV1) -> LiveDamageTraceEntryV1 {
+    LiveDamageTraceEntryV1 {
+        event_ordinal: entry.event_ordinal,
+        cause: LiveDamageTraceCauseV1::DirectHit,
+        source_content_id: entry.source_content_id.clone(),
+        source_entity_id: entry.source_entity_id,
+        source_sim_entity_id: entry.source_entity_id.map(|_| SOURCE_SIM_ENTITY_ID),
+        pattern_id: entry.pattern_id.clone(),
+        attack_id: entry.attack_id.clone(),
+        raw_damage: entry.raw_damage,
+        final_damage: entry.final_damage,
+        damage_type: match entry.damage_type {
+            DurableDamageTypeV1::Physical => LiveDamageTraceDamageTypeV1::Physical,
+            DurableDamageTypeV1::Veil => LiveDamageTraceDamageTypeV1::Veil,
+        },
+        pre_health: entry.pre_health,
+        post_health: entry.post_health,
+        source_x_milli_tiles: entry.source_x_milli_tiles,
+        source_y_milli_tiles: entry.source_y_milli_tiles,
+        network_state: match entry.network_state {
+            DurableNetworkStateV1::Connected => LiveDamageTraceNetworkStateV1::Connected,
+            DurableNetworkStateV1::Degraded => LiveDamageTraceNetworkStateV1::Degraded,
+            DurableNetworkStateV1::LinkLost => LiveDamageTraceNetworkStateV1::LinkLost,
+            DurableNetworkStateV1::Reattached => LiveDamageTraceNetworkStateV1::Reattached,
+        },
+        recall_state: match entry.recall_state {
+            DurableRecallStateV1::Inactive => LiveDamageTraceRecallStateV1::Inactive,
+            DurableRecallStateV1::Channeling => LiveDamageTraceRecallStateV1::Channeling,
+            DurableRecallStateV1::CompletionPending => {
+                LiveDamageTraceRecallStateV1::CompletionPending
+            }
+        },
+        lethal: entry.lethal,
+        statuses: entry
+            .statuses
+            .iter()
+            .map(|status| LiveDamageTraceStatusV1 {
+                status_ordinal: status.ordinal,
+                status_id: status.status_id.clone(),
+                remaining_ticks: status.remaining_ticks,
+                stack_count: status.stack_count,
+            })
+            .collect(),
+    }
+}
+
 fn projection(
     ordinal: u16,
     kind: DurableSummaryProjectionKindV1,
@@ -791,6 +950,28 @@ async fn count(persistence: &PostgresPersistence, table: &str) -> i64 {
             "SELECT count(*) FROM death_outbox_events AS outbox \
              JOIN death_events AS death USING (namespace_id,death_id) \
              WHERE outbox.namespace_id=$1 AND death.account_id=$2"
+        }
+        "character_live_damage_trace_ingest_receipts_v1" => {
+            "SELECT count(*) FROM character_live_damage_trace_ingest_receipts_v1 \
+             WHERE namespace_id=$1 AND account_id=$2"
+        }
+        "death_live_trace_sets_v1" => {
+            "SELECT count(*) FROM death_live_trace_sets_v1 \
+             WHERE namespace_id=$1 AND account_id=$2"
+        }
+        "death_live_trace_receipt_links_v1" => {
+            "SELECT count(*) FROM death_live_trace_receipt_links_v1 AS link \
+             JOIN death_events AS death USING (namespace_id,death_id) \
+             WHERE link.namespace_id=$1 AND death.account_id=$2"
+        }
+        "death_live_trace_entry_provenance_v1" => {
+            "SELECT count(*) FROM death_live_trace_entry_provenance_v1 AS provenance \
+             JOIN death_events AS death USING (namespace_id,death_id) \
+             WHERE provenance.namespace_id=$1 AND death.account_id=$2"
+        }
+        "death_live_trace_promotion_conflict_audits_v1" => {
+            "SELECT count(*) FROM death_live_trace_promotion_conflict_audits_v1 \
+             WHERE namespace_id=$1 AND account_id=$2"
         }
         _ => panic!("unsupported fixture table {table}"),
     };
@@ -898,6 +1079,11 @@ async fn assert_complete_graph(persistence: &PostgresPersistence, ids: RequestId
         ("echo_records", 1),
         ("echo_state_transitions", 2),
         ("death_outbox_events", 3),
+        ("character_live_damage_trace_ingest_receipts_v1", 2),
+        ("death_live_trace_sets_v1", 1),
+        ("death_live_trace_receipt_links_v1", 2),
+        ("death_live_trace_entry_provenance_v1", 2),
+        ("death_live_trace_promotion_conflict_audits_v1", 0),
     ] {
         assert_eq!(count(persistence, table).await, expected, "{table}");
     }
@@ -909,6 +1095,15 @@ async fn assert_rollback_pristine(persistence: &PostgresPersistence) {
     assert_eq!(count(persistence, "death_mutation_results").await, 0);
     assert_eq!(count(persistence, "echo_records").await, 0);
     assert_eq!(count(persistence, "character_life_outbox").await, 0);
+    assert_eq!(
+        count(
+            persistence,
+            "character_live_damage_trace_ingest_receipts_v1"
+        )
+        .await,
+        1
+    );
+    assert_eq!(count(persistence, "death_live_trace_sets_v1").await, 0);
     let mut transaction = persistence.begin_transaction().await.unwrap();
     let row = sqlx::query(
         "SELECT account.state_version,account.selected_character_id,character.life_state, \
@@ -969,6 +1164,145 @@ async fn corrupt_result_hash(persistence: &PostgresPersistence, hash: [u8; 32]) 
     transaction.commit().await.unwrap();
 }
 
+async fn stored_receipt_window_digest(persistence: &PostgresPersistence) -> [u8; 32] {
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let value: Vec<u8> = sqlx::query_scalar(
+        "SELECT receipt_window_digest FROM death_live_trace_sets_v1 \
+         WHERE namespace_id=$1 AND death_id=$2",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(RequestIds::primary().death_id.as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    transaction.rollback().await.unwrap();
+    value.try_into().unwrap()
+}
+
+async fn set_promotion_root_hashes(
+    persistence: &PostgresPersistence,
+    receipt_window_digest: [u8; 32],
+    promotion_digest: [u8; 32],
+    terminal_payload_hash: [u8; 32],
+) {
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    sqlx::query(
+        "ALTER TABLE death_live_trace_sets_v1 \
+         DISABLE TRIGGER death_live_trace_root_immutable_v1",
+    )
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    let changed = sqlx::query(
+        "UPDATE death_live_trace_sets_v1 SET receipt_window_digest=$1,promotion_digest=$2,\
+            terminal_payload_hash=$3 WHERE namespace_id=$4 AND death_id=$5",
+    )
+    .bind(receipt_window_digest.as_slice())
+    .bind(promotion_digest.as_slice())
+    .bind(terminal_payload_hash.as_slice())
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(RequestIds::primary().death_id.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap()
+    .rows_affected();
+    assert_eq!(changed, 1);
+    sqlx::query(
+        "ALTER TABLE death_live_trace_sets_v1 \
+         ENABLE TRIGGER death_live_trace_root_immutable_v1",
+    )
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    transaction.commit().await.unwrap();
+}
+
+async fn rewrite_durable_trace_attack_id(
+    persistence: &PostgresPersistence,
+    replacement: &str,
+) -> String {
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let original: String = sqlx::query_scalar(
+        "SELECT attack_id FROM death_combat_trace_entries \
+         WHERE namespace_id=$1 AND death_id=$2 AND trace_ordinal=0 FOR UPDATE",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(RequestIds::primary().death_id.as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query("ALTER TABLE death_combat_trace_entries DISABLE TRIGGER death_trace_immutable")
+        .execute(transaction.connection())
+        .await
+        .unwrap();
+    let changed = sqlx::query(
+        "UPDATE death_combat_trace_entries SET attack_id=$1 \
+         WHERE namespace_id=$2 AND death_id=$3 AND trace_ordinal=0",
+    )
+    .bind(replacement)
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(RequestIds::primary().death_id.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap()
+    .rows_affected();
+    assert_eq!(changed, 1);
+    sqlx::query("ALTER TABLE death_combat_trace_entries ENABLE TRIGGER death_trace_immutable")
+        .execute(transaction.connection())
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+    original
+}
+
+async fn rewrite_first_durable_trace_status_remaining_ticks(
+    persistence: &PostgresPersistence,
+    replacement: u32,
+) -> u32 {
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let row = sqlx::query(
+        "SELECT trace_ordinal,status_ordinal,remaining_ticks \
+         FROM death_combat_trace_statuses WHERE namespace_id=$1 AND death_id=$2 \
+         ORDER BY trace_ordinal,status_ordinal LIMIT 1 FOR UPDATE",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(RequestIds::primary().death_id.as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    let trace_ordinal: i16 = row.get("trace_ordinal");
+    let status_ordinal: i16 = row.get("status_ordinal");
+    let original = u32::try_from(row.get::<i32, _>("remaining_ticks")).unwrap();
+    sqlx::query(
+        "ALTER TABLE death_combat_trace_statuses DISABLE TRIGGER death_trace_status_immutable",
+    )
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    let changed = sqlx::query(
+        "UPDATE death_combat_trace_statuses SET remaining_ticks=$1 \
+         WHERE namespace_id=$2 AND death_id=$3 AND trace_ordinal=$4 AND status_ordinal=$5",
+    )
+    .bind(i32::try_from(replacement).unwrap())
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(RequestIds::primary().death_id.as_slice())
+    .bind(trace_ordinal)
+    .bind(status_ordinal)
+    .execute(transaction.connection())
+    .await
+    .unwrap()
+    .rows_affected();
+    assert_eq!(changed, 1);
+    sqlx::query(
+        "ALTER TABLE death_combat_trace_statuses ENABLE TRIGGER death_trace_status_immutable",
+    )
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    transaction.commit().await.unwrap();
+    original
+}
+
 async fn set_summary_insert_rejection(persistence: &PostgresPersistence, enabled: bool) {
     let mut transaction = persistence.begin_transaction().await.unwrap();
     sqlx::query(
@@ -1016,6 +1350,97 @@ async fn assert_post_death_rejection(persistence: &PostgresPersistence) {
     .execute(transaction.connection())
     .await;
     assert!(rejected.is_err());
+    transaction.rollback().await.unwrap();
+}
+
+async fn assert_trace_promotion_conflict_audit(
+    persistence: &PostgresPersistence,
+    stored: &DurableDeathTracePromotionV1,
+    attempted: &DurableDeathTracePromotionV1,
+) {
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let row = sqlx::query(
+        "SELECT conflict_code,stored_promotion_digest,attempted_promotion_digest, \
+                stored_terminal_payload_hash,attempted_terminal_payload_hash \
+         FROM death_live_trace_promotion_conflict_audits_v1 \
+         WHERE namespace_id=$1 AND account_id=$2 AND death_id=$3",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(RequestIds::primary().death_id.as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    assert_eq!(row.get::<i16, _>("conflict_code"), 0);
+    assert_eq!(
+        row.get::<Vec<u8>, _>("stored_promotion_digest"),
+        stored.promotion_digest()
+    );
+    assert_eq!(
+        row.get::<Vec<u8>, _>("attempted_promotion_digest"),
+        attempted.promotion_digest()
+    );
+    assert_eq!(
+        row.get::<Vec<u8>, _>("stored_terminal_payload_hash"),
+        stored.terminal_payload_hash()
+    );
+    assert_eq!(
+        row.get::<Vec<u8>, _>("attempted_terminal_payload_hash"),
+        attempted.terminal_payload_hash()
+    );
+    transaction.rollback().await.unwrap();
+    assert_eq!(
+        count(persistence, "death_live_trace_promotion_conflict_audits_v1").await,
+        1
+    );
+}
+
+async fn assert_trace_promotion_history_is_sealed(persistence: &PostgresPersistence) {
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    assert!(
+        sqlx::query(
+            "UPDATE death_live_trace_sets_v1 SET promotion_digest=promotion_digest \
+             WHERE namespace_id=$1 AND death_id=$2",
+        )
+        .bind(WIPEABLE_CORE_NAMESPACE)
+        .bind(RequestIds::primary().death_id.as_slice())
+        .execute(transaction.connection())
+        .await
+        .is_err()
+    );
+    transaction.rollback().await.unwrap();
+
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    assert!(
+        sqlx::query(
+            "DELETE FROM death_live_trace_receipt_links_v1 \
+             WHERE namespace_id=$1 AND death_id=$2 AND receipt_ordinal=0",
+        )
+        .bind(WIPEABLE_CORE_NAMESPACE)
+        .bind(RequestIds::primary().death_id.as_slice())
+        .execute(transaction.connection())
+        .await
+        .is_err()
+    );
+    transaction.rollback().await.unwrap();
+
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    assert!(
+        sqlx::query(
+            "INSERT INTO death_live_trace_entry_provenance_v1 (namespace_id,death_id,\
+                trace_ordinal,receipt_ordinal,trace_tick_id,event_tick,event_ordinal,cause_kind,\
+                source_entity_id,source_sim_entity_id,status_count,live_entry_digest) \
+             SELECT namespace_id,death_id,3000,receipt_ordinal,trace_tick_id,event_tick,\
+                event_ordinal+1000,cause_kind,source_entity_id,source_sim_entity_id,status_count,\
+                live_entry_digest FROM death_live_trace_entry_provenance_v1 \
+             WHERE namespace_id=$1 AND death_id=$2 AND trace_ordinal=0",
+        )
+        .bind(WIPEABLE_CORE_NAMESPACE)
+        .bind(RequestIds::primary().death_id.as_slice())
+        .execute(transaction.connection())
+        .await
+        .is_err()
+    );
     transaction.rollback().await.unwrap();
 }
 
@@ -1191,6 +1616,7 @@ async fn assert_committed_death_views(persistence: &PostgresPersistence, ids: Re
 async fn assert_committed_terminal_recovery(
     persistence: &PostgresPersistence,
     expected: &persistence::StoredCommittedDeathResultV1,
+    promotion: &DurableDeathTracePromotionV1,
 ) {
     let terminal = persistence
         .load_committed_death_terminal_v1(ACCOUNT_ID, CHARACTER_ID)
@@ -1203,6 +1629,11 @@ async fn assert_committed_terminal_recovery(
     assert_eq!(terminal.lineage_id, LINEAGE_ID);
     assert_eq!(terminal.restore_point_id, RESTORE_POINT_ID);
     assert_eq!(terminal.death_tick, 20_000);
+    assert_eq!(terminal.promotion_digest, promotion.promotion_digest());
+    assert_eq!(
+        terminal.terminal_payload_hash,
+        promotion.terminal_payload_hash()
+    );
     assert_eq!(
         persistence
             .load_committed_death_terminal_v1([229; 16], CHARACTER_ID)
@@ -1238,34 +1669,49 @@ async fn complete_durable_death_graph_is_atomic_replayable_terminal_and_wipeable
     let content = content_authority();
     reset_fixture(&persistence).await;
     let primary = request(RequestIds::primary());
+    let evidence = seed_hosted_death_trace(&persistence, &primary).await;
+    let primary_promotion = evidence.promotion_for(&primary);
     let fresh = persistence
-        .transact_durable_death(&primary, &content)
+        .transact_durable_death(&primary, &content, &primary_promotion)
         .await
         .unwrap();
     assert!(matches!(fresh, DurableDeathTransactionV1::Fresh(_)));
     assert_complete_graph(&persistence, RequestIds::primary()).await;
-    assert_committed_terminal_recovery(&persistence, fresh.result()).await;
+    assert_committed_terminal_recovery(&persistence, fresh.result(), &primary_promotion).await;
+    assert_trace_promotion_history_is_sealed(&persistence).await;
     assert_cross_account_promotion_guards(&persistence).await;
     persistence.close().await;
 
     let restarted = reconnect_database().await;
     let replay = restarted
-        .transact_durable_death(&primary, &content)
+        .transact_durable_death(&primary, &content, &primary_promotion)
         .await
         .unwrap();
     assert!(replay.is_replay());
     assert_eq!(replay.result(), fresh.result());
-    assert_committed_terminal_recovery(&restarted, fresh.result()).await;
+    assert_committed_terminal_recovery(&restarted, fresh.result(), &primary_promotion).await;
     assert_committed_death_views(&restarted, RequestIds::primary()).await;
+    let altered_promotion = evidence.altered_predecessor_promotion_for(&primary);
     assert!(matches!(
         restarted
-            .transact_durable_death(&request(RequestIds::changed_payload()), &content)
+            .transact_durable_death(&primary, &content, &altered_promotion)
+            .await,
+        Err(PersistenceError::DurableDeathTracePromotionConflict)
+    ));
+    assert_trace_promotion_conflict_audit(&restarted, &primary_promotion, &altered_promotion).await;
+    let changed_payload = request(RequestIds::changed_payload());
+    let changed_payload_promotion = evidence.promotion_for(&changed_payload);
+    assert!(matches!(
+        restarted
+            .transact_durable_death(&changed_payload, &content, &changed_payload_promotion,)
             .await,
         Err(PersistenceError::DurableDeathIdempotencyConflict)
     ));
+    let changed_final_identity = request(RequestIds::changed_final_identity());
+    let changed_final_promotion = evidence.promotion_for(&changed_final_identity);
     assert!(matches!(
         restarted
-            .transact_durable_death(&request(RequestIds::changed_final_identity()), &content)
+            .transact_durable_death(&changed_final_identity, &content, &changed_final_promotion,)
             .await,
         Err(PersistenceError::DurableDeathIdempotencyConflict)
     ));
@@ -1273,11 +1719,21 @@ async fn complete_durable_death_graph_is_atomic_replayable_terminal_and_wipeable
 
     reset_fixture(&restarted).await;
     let concurrent_request = request(RequestIds::primary());
+    let concurrent_evidence = seed_hosted_death_trace(&restarted, &concurrent_request).await;
+    let concurrent_promotion = concurrent_evidence.promotion_for(&concurrent_request);
     let left_persistence = restarted.clone();
     let right_persistence = restarted.clone();
     let (left, right) = tokio::join!(
-        left_persistence.transact_durable_death(&concurrent_request, &content),
-        right_persistence.transact_durable_death(&concurrent_request, &content),
+        left_persistence.transact_durable_death(
+            &concurrent_request,
+            &content,
+            &concurrent_promotion,
+        ),
+        right_persistence.transact_durable_death(
+            &concurrent_request,
+            &content,
+            &concurrent_promotion,
+        ),
     );
     let left = left.unwrap();
     let right = right.unwrap();
@@ -1287,10 +1743,12 @@ async fn complete_durable_death_graph_is_atomic_replayable_terminal_and_wipeable
 
     reset_fixture(&restarted).await;
     let rejected_request = request(RequestIds::primary());
+    let rejected_evidence = seed_hosted_death_trace(&restarted, &rejected_request).await;
+    let rejected_promotion = rejected_evidence.promotion_for(&rejected_request);
     set_summary_insert_rejection(&restarted, true).await;
     assert!(matches!(
         restarted
-            .transact_durable_death(&rejected_request, &content)
+            .transact_durable_death(&rejected_request, &content, &rejected_promotion)
             .await,
         Err(PersistenceError::Database(_))
     ));
@@ -1298,14 +1756,104 @@ async fn complete_durable_death_graph_is_atomic_replayable_terminal_and_wipeable
     assert_rollback_pristine(&restarted).await;
 
     reset_fixture(&restarted).await;
+    let final_evidence = seed_hosted_death_trace(&restarted, &primary).await;
+    let final_promotion = final_evidence.promotion_for(&primary);
     let committed = restarted
-        .transact_durable_death(&primary, &content)
+        .transact_durable_death(&primary, &content, &final_promotion)
         .await
         .unwrap();
     assert!(matches!(committed, DurableDeathTransactionV1::Fresh(_)));
+
+    // The canonical GDD, content spec, and roadmap jointly require restart-safe exact trace
+    // authority. Simulate storage corruption beneath the immutable triggers: root hashes remain
+    // coherent, so only semantic durable/provenance revalidation can reject these alterations.
+    let original_attack_id =
+        rewrite_durable_trace_attack_id(&restarted, "attack.core.corrupt_trace").await;
+    assert!(matches!(
+        restarted
+            .transact_durable_death(&primary, &content, &final_promotion)
+            .await,
+        Err(PersistenceError::CorruptStoredDurableDeath)
+    ));
+    assert!(matches!(
+        restarted
+            .load_committed_death_terminal_v1(ACCOUNT_ID, CHARACTER_ID)
+            .await,
+        Err(PersistenceError::CorruptStoredDurableDeath)
+    ));
+    rewrite_durable_trace_attack_id(&restarted, &original_attack_id).await;
+
+    let original_status_ticks =
+        rewrite_first_durable_trace_status_remaining_ticks(&restarted, 31).await;
+    assert_ne!(original_status_ticks, 31);
+    assert!(matches!(
+        restarted
+            .transact_durable_death(&primary, &content, &final_promotion)
+            .await,
+        Err(PersistenceError::CorruptStoredDurableDeath)
+    ));
+    assert!(matches!(
+        restarted
+            .load_committed_death_terminal_v1(ACCOUNT_ID, CHARACTER_ID)
+            .await,
+        Err(PersistenceError::CorruptStoredDurableDeath)
+    ));
+    rewrite_first_durable_trace_status_remaining_ticks(&restarted, original_status_ticks).await;
+    assert!(
+        restarted
+            .transact_durable_death(&primary, &content, &final_promotion)
+            .await
+            .unwrap()
+            .is_replay()
+    );
+    assert_committed_terminal_recovery(&restarted, committed.result(), &final_promotion).await;
+
+    let canonical_receipt_window_digest = stored_receipt_window_digest(&restarted).await;
+    let corrupt_promotion_digest = [221; 32];
+    let corrupt_terminal_payload_hash = canonical_death_terminal_payload_hash_v1(
+        primary.canonical_request_hash,
+        corrupt_promotion_digest,
+    )
+    .unwrap();
+    set_promotion_root_hashes(
+        &restarted,
+        [220; 32],
+        corrupt_promotion_digest,
+        corrupt_terminal_payload_hash,
+    )
+    .await;
+    assert!(matches!(
+        restarted
+            .transact_durable_death(&primary, &content, &final_promotion)
+            .await,
+        Err(PersistenceError::CorruptStoredDurableDeath)
+    ));
+    assert!(matches!(
+        restarted
+            .load_committed_death_terminal_v1(ACCOUNT_ID, CHARACTER_ID)
+            .await,
+        Err(PersistenceError::CorruptStoredDurableDeath)
+    ));
+    set_promotion_root_hashes(
+        &restarted,
+        canonical_receipt_window_digest,
+        final_promotion.promotion_digest(),
+        final_promotion.terminal_payload_hash(),
+    )
+    .await;
+    assert!(
+        restarted
+            .transact_durable_death(&primary, &content, &final_promotion)
+            .await
+            .unwrap()
+            .is_replay()
+    );
+    assert_committed_terminal_recovery(&restarted, committed.result(), &final_promotion).await;
     corrupt_result_hash(&restarted, [222; 32]).await;
     assert!(matches!(
-        restarted.transact_durable_death(&primary, &content).await,
+        restarted
+            .transact_durable_death(&primary, &content, &final_promotion)
+            .await,
         Err(PersistenceError::CorruptStoredDurableDeath)
     ));
     assert_complete_graph(&restarted, RequestIds::primary()).await;
