@@ -62,12 +62,11 @@ async fn disposable_database() -> PostgresPersistence {
 async fn seed_character(persistence: &PostgresPersistence) {
     let mut transaction = persistence.begin_transaction().await.unwrap();
     sqlx::query(
-        "INSERT INTO accounts (namespace_id,account_id,state_version,slot_capacity,
-         selected_character_id) VALUES ($1,$2,1,2,$3)",
+        "INSERT INTO accounts (namespace_id,account_id,state_version,slot_capacity)
+         VALUES ($1,$2,1,2)",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(ACCOUNT_ID.as_slice())
-    .bind(CHARACTER_ID.as_slice())
     .execute(transaction.connection())
     .await
     .unwrap();
@@ -79,6 +78,16 @@ async fn seed_character(persistence: &PostgresPersistence) {
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(ACCOUNT_ID.as_slice())
     .bind(CHARACTER_ID.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE accounts SET selected_character_id=$1
+         WHERE namespace_id=$2 AND account_id=$3",
+    )
+    .bind(CHARACTER_ID.as_slice())
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
     .execute(transaction.connection())
     .await
     .unwrap();
