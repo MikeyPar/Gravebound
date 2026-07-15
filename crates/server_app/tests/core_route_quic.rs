@@ -4,12 +4,16 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "support/durable_death.rs"]
+mod durable_death_fixture;
+
 use persistence::{
     CaldusExtractionCommit, CaldusExtractionRequest, PersistenceConfig, PostgresPersistence,
     StoredExtractionAuthority, StoredWorldFlowRevisionV1, WIPEABLE_CORE_NAMESPACE,
 };
 use protocol::{
-    AuthTicket, CharacterLocation, ClientHello, Compression, DeathViewContentRevisionV1,
+    AuthTicket, CharacterLocation, ClientHello, Compression, DEATH_VIEW_SCHEMA_VERSION,
+    DeathViewContentRevisionV1, DeathViewFrameV1, DeathViewRequestV1, DeathViewResultV1,
     HandshakeResponse, ManifestHash, Platform, ProtocolVersion, SafeArrival, WireText,
     WorldFlowContentRevisionV1, WorldFlowFrame, WorldFlowRequest, WorldFlowResult,
     WorldTransferCommand, WorldTransferMutation, WorldTransferPayload, WorldTransferResultCode,
@@ -21,14 +25,16 @@ use server_app::{
     AuthenticationDecision, CaldusVictoryOwnerCommand, CharacterIdGenerator, CoreBargainAuthority,
     CoreOathSelectionAuthority, CoreSafeInventoryAuthority, DeathViewService,
     DisabledDeathViewRepository, DisabledProgressionQueryRepository,
-    DisposableCoreJourneyWorldFlow, HandshakePolicy, IdentityClock, IdentityService,
-    InMemoryAccountRepository, NoopIdentityEventSink, PostgresCaldusHallTransferCoordinator,
-    PostgresCaldusVictoryCoordinator, PostgresDangerEntryAshWalletProviderV3,
-    PostgresDangerEntryInventoryProviderV3, PostgresDangerEntryLifeMetricsProviderV3,
-    PostgresDangerEntryOathBargainProviderV3, PostgresDormantWorldFlowCoordinator,
+    DisposableCoreJourneyWorldFlow, DurableDeathExecutionService, HandshakePolicy, IdentityClock,
+    IdentityService, InMemoryAccountRepository, NoopIdentityEventSink,
+    PostgresCaldusHallTransferCoordinator, PostgresCaldusVictoryCoordinator,
+    PostgresDangerEntryAshWalletProviderV3, PostgresDangerEntryInventoryProviderV3,
+    PostgresDangerEntryLifeMetricsProviderV3, PostgresDangerEntryOathBargainProviderV3,
+    PostgresDeathViewRepository, PostgresDormantWorldFlowCoordinator,
     PostgresProgressionAwardService, PostgresProgressionRestoreProvider, PostgresRewardService,
-    ProgressionQueryService, SecretRewardEpoch, WorldFlowIdGenerator, serve_core_reliable,
-    serve_handshake,
+    ProgressionQueryService, SecretRewardEpoch, SubmitResult, TerminalArbiter,
+    WorldFlowIdGenerator, durable_death_terminal_candidate, recover_committed_death_arbiter,
+    serve_core_reliable, serve_handshake,
 };
 use sim_core::{
     CoreBossParticipant, CoreBossParticipantLock, CoreCaldusAntiCheatState,
@@ -164,6 +170,41 @@ fn revision() -> WorldFlowContentRevisionV1 {
         assets_blake3: ManifestHash::new(world.hashes().assets_blake3.clone()).unwrap(),
         localization_blake3: ManifestHash::new(world.hashes().localization_blake3.clone()).unwrap(),
     }
+}
+
+fn death_view_frame(sequence: u32, request: DeathViewRequestV1) -> DeathViewFrameV1 {
+    DeathViewFrameV1 {
+        schema_version: DEATH_VIEW_SCHEMA_VERSION,
+        sequence,
+        content_revision: durable_death_fixture::death_view_revision(),
+        request,
+    }
+}
+
+fn disposable_world_flow(
+    persistence: PostgresPersistence,
+) -> impl server_app::CoreWorldFlowAuthority {
+    let progression_content =
+        sim_content::load_core_development_progression(&content_root()).unwrap();
+    let route = PostgresDormantWorldFlowCoordinator::new(
+        persistence.clone(),
+        FixedAuthority,
+        FixedAuthority,
+        revision(),
+        PostgresProgressionRestoreProvider::new(&progression_content).unwrap(),
+        PostgresDangerEntryInventoryProviderV3,
+        PostgresDangerEntryOathBargainProviderV3,
+        PostgresDangerEntryLifeMetricsProviderV3,
+        PostgresDangerEntryAshWalletProviderV3,
+    );
+    let extraction =
+        PostgresCaldusHallTransferCoordinator::new(persistence, FixedAuthority, revision());
+    DisposableCoreJourneyWorldFlow::new(route, extraction)
+}
+
+fn disabled_progression() -> ProgressionQueryService<DisabledProgressionQueryRepository> {
+    let content = sim_content::load_core_development_progression(&content_root()).unwrap();
+    ProgressionQueryService::new(DisabledProgressionQueryRepository, &content).unwrap()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -344,6 +385,14 @@ fn policy() -> HandshakePolicy {
     }
 }
 
+fn death_view_policy() -> HandshakePolicy {
+    let mut policy = policy();
+    policy
+        .feature_flags
+        .push(WireText::new(protocol::CORE_DEATH_VIEW_FEATURE_FLAG).unwrap());
+    policy
+}
+
 fn hello() -> ClientHello {
     ClientHello {
         protocol_major: ProtocolVersion::current().major,
@@ -371,6 +420,249 @@ fn assert_accepted(result: &WorldFlowResult, version: u64, location: &str) {
             CharacterLocation::Safe { .. } | CharacterLocation::CharacterSelect { .. } => false,
         }
     ));
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the first authenticated QUIC session and deliberate response loss stay contiguous"
+)]
+async fn run_lost_death_summary_session(persistence: &PostgresPersistence) -> DeathViewResultV1 {
+    let identity = IdentityService::new(
+        InMemoryAccountRepository::default(),
+        FixedAuthority,
+        FixedAuthority,
+        NoopIdentityEventSink,
+        ManifestHash::new("a".repeat(64)).unwrap(),
+    );
+    let world_flow = disposable_world_flow(persistence.clone());
+    let progression = disabled_progression();
+    let death_views = DeathViewService::new(
+        PostgresDeathViewRepository::new(
+            persistence.clone(),
+            durable_death_fixture::death_view_revision(),
+        ),
+        durable_death_fixture::death_view_revision(),
+    );
+    let oath = CoreOathSelectionAuthority::<FixedAuthority>::disabled();
+    let bargain = CoreBargainAuthority::<FixedAuthority>::disabled();
+    let safe_inventory = CoreSafeInventoryAuthority::disabled();
+    let authenticated = durable_death_fixture::authenticated_account();
+    let (server_endpoint, client_endpoint, address) = endpoints();
+    let connecting = client_endpoint.connect(address, "localhost").unwrap();
+    let incoming = server_endpoint.accept().await.unwrap();
+    let (client, server) = tokio::join!(connecting, incoming);
+    let client = client.unwrap();
+    let server = server.unwrap();
+
+    let server_session = async {
+        serve_handshake(
+            &server,
+            &death_view_policy(),
+            AuthenticationDecision::Accepted,
+            WireText::new("committed-death-loss-session").unwrap(),
+        )
+        .await
+        .unwrap();
+        serve_core_reliable(
+            &server,
+            &identity,
+            &world_flow,
+            &progression,
+            &death_views,
+            &oath,
+            &bargain,
+            &safe_inventory,
+            authenticated,
+            1,
+            20_000,
+        )
+        .await
+        .unwrap();
+        // The client deliberately sends STOP_SENDING for this response. The read has already
+        // resolved from committed PostgreSQL state, so either a completed write or transport loss
+        // is acceptable and neither can change domain state.
+        let _lost = serve_core_reliable(
+            &server,
+            &identity,
+            &world_flow,
+            &progression,
+            &death_views,
+            &oath,
+            &bargain,
+            &safe_inventory,
+            authenticated,
+            2,
+            20_000,
+        )
+        .await;
+    };
+    let client_session = async {
+        assert!(matches!(
+            bot_client::perform_handshake(&client, hello())
+                .await
+                .unwrap(),
+            HandshakeResponse::Accepted(server)
+                if server.feature_flags.iter().any(
+                    |flag| flag.as_str() == protocol::CORE_DEATH_VIEW_FEATURE_FLAG
+                )
+        ));
+        let (_, latest) = bot_client::perform_death_view(
+            &client,
+            death_view_frame(1, DeathViewRequestV1::LatestCommitted),
+        )
+        .await
+        .unwrap();
+        bot_client::submit_death_view_without_response(
+            &client,
+            death_view_frame(
+                2,
+                DeathViewRequestV1::Summary {
+                    death_id: durable_death_fixture::DEATH_ID,
+                    lost_start_ordinal: 0,
+                    lost_limit: 8,
+                },
+            ),
+        )
+        .await
+        .unwrap();
+        latest
+    };
+    let ((), latest) = tokio::join!(server_session, client_session);
+    drop(client);
+    client_endpoint.wait_idle().await;
+    server_endpoint.close(0_u32.into(), b"lost death response");
+    server_endpoint.wait_idle().await;
+    latest
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the restarted authenticated QUIC projection sequence stays contiguous for audit"
+)]
+async fn run_restarted_death_read_session(
+    persistence: &PostgresPersistence,
+) -> (
+    DeathViewResultV1,
+    DeathViewResultV1,
+    DeathViewResultV1,
+    DeathViewResultV1,
+) {
+    let identity = IdentityService::new(
+        InMemoryAccountRepository::default(),
+        FixedAuthority,
+        FixedAuthority,
+        NoopIdentityEventSink,
+        ManifestHash::new("a".repeat(64)).unwrap(),
+    );
+    let world_flow = disposable_world_flow(persistence.clone());
+    let progression = disabled_progression();
+    let death_views = DeathViewService::new(
+        PostgresDeathViewRepository::new(
+            persistence.clone(),
+            durable_death_fixture::death_view_revision(),
+        ),
+        durable_death_fixture::death_view_revision(),
+    );
+    let oath = CoreOathSelectionAuthority::<FixedAuthority>::disabled();
+    let bargain = CoreBargainAuthority::<FixedAuthority>::disabled();
+    let safe_inventory = CoreSafeInventoryAuthority::disabled();
+    let authenticated = durable_death_fixture::authenticated_account();
+    let (server_endpoint, client_endpoint, address) = endpoints();
+    let connecting = client_endpoint.connect(address, "localhost").unwrap();
+    let incoming = server_endpoint.accept().await.unwrap();
+    let (client, server) = tokio::join!(connecting, incoming);
+    let client = client.unwrap();
+    let server = server.unwrap();
+
+    let server_session = async {
+        serve_handshake(
+            &server,
+            &death_view_policy(),
+            AuthenticationDecision::Accepted,
+            WireText::new("committed-death-restart-session").unwrap(),
+        )
+        .await
+        .unwrap();
+        for response_sequence in 1..=4 {
+            serve_core_reliable(
+                &server,
+                &identity,
+                &world_flow,
+                &progression,
+                &death_views,
+                &oath,
+                &bargain,
+                &safe_inventory,
+                authenticated,
+                response_sequence,
+                20_000,
+            )
+            .await
+            .unwrap();
+        }
+    };
+    let client_session = async {
+        assert!(matches!(
+            bot_client::perform_handshake(&client, hello())
+                .await
+                .unwrap(),
+            HandshakeResponse::Accepted(server)
+                if server.feature_flags.iter().any(
+                    |flag| flag.as_str() == protocol::CORE_DEATH_VIEW_FEATURE_FLAG
+                )
+        ));
+        let (_, latest) = bot_client::perform_death_view(
+            &client,
+            death_view_frame(1, DeathViewRequestV1::LatestCommitted),
+        )
+        .await
+        .unwrap();
+        let (_, summary) = bot_client::perform_death_view(
+            &client,
+            death_view_frame(
+                2,
+                DeathViewRequestV1::Summary {
+                    death_id: durable_death_fixture::DEATH_ID,
+                    lost_start_ordinal: 0,
+                    lost_limit: 8,
+                },
+            ),
+        )
+        .await
+        .unwrap();
+        let (_, memorial) = bot_client::perform_death_view(
+            &client,
+            death_view_frame(
+                3,
+                DeathViewRequestV1::MemorialPage {
+                    after: None,
+                    limit: 8,
+                },
+            ),
+        )
+        .await
+        .unwrap();
+        let (_, trace) = bot_client::perform_death_view(
+            &client,
+            death_view_frame(
+                4,
+                DeathViewRequestV1::TracePage {
+                    death_id: durable_death_fixture::DEATH_ID,
+                    start_ordinal: 0,
+                    limit: 8,
+                },
+            ),
+        )
+        .await
+        .unwrap();
+        (latest, summary, memorial, trace)
+    };
+    let ((), views) = tokio::join!(server_session, client_session);
+    drop(client);
+    client_endpoint.wait_idle().await;
+    server_endpoint.close(0_u32.into(), b"restart death reads complete");
+    server_endpoint.wait_idle().await;
+    views
 }
 
 #[allow(
@@ -599,4 +891,111 @@ async fn reliable_quic_completes_25_scripted_core_journeys_below_login_budget() 
         login_to_control[24].as_micros()
     );
     persistence.close().await;
+}
+
+/// GDD `DTH-001`/`DTH-020` and `TECH-020`-`023`, Content Spec `CONT-ECHO-009` and
+/// `CONT-HUB-002`, and Roadmap `GB-M03-02`/`06`/`13` jointly require a committed lethal result to
+/// survive lost delivery and process restart without duplicate domain records. The lethal input in
+/// this proof is exclusively server-authored; real QUIC carries only authenticated historical
+/// reads, so normal player death admission remains disabled.
+#[tokio::test]
+#[ignore = "requires explicitly authorized disposable PostgreSQL"]
+async fn committed_death_survives_response_loss_and_full_process_restart_over_real_quic() {
+    let persistence = disposable_database().await;
+    durable_death_fixture::seed_danger_root(&persistence).await;
+    let death = durable_death_fixture::prepare_death(persistence.clone()).await;
+    let candidate = durable_death_terminal_candidate(&death).unwrap();
+    let mut arbiter = TerminalArbiter::new(candidate.binding());
+    assert!(matches!(
+        arbiter.submit(candidate.clone()),
+        SubmitResult::Accepted { .. }
+    ));
+    let prepared = arbiter
+        .prepare(death.request().plan.event.death_tick)
+        .unwrap();
+    let committed = DurableDeathExecutionService::new(persistence.clone())
+        .execute_prepared(&mut arbiter, &prepared, &death)
+        .await
+        .unwrap();
+    assert!(!committed.transaction.is_replay());
+    let expected_result = committed.transaction.result().clone();
+    let expected_receipt = arbiter.committed_receipt().unwrap().clone();
+    durable_death_fixture::assert_committed_graph(&persistence).await;
+
+    // Capture one projection, abandon the following summary response, and then discard every
+    // process-local authority that knew the commit acknowledgement.
+    let latest_before_restart = run_lost_death_summary_session(&persistence).await;
+    drop(committed);
+    drop(arbiter);
+    persistence.close().await;
+
+    let config = PersistenceConfig::from_test_environment()
+        .expect("TEST_DATABASE_URL must identify dedicated disposable PostgreSQL");
+    let restarted = PostgresPersistence::connect(&config).await.unwrap();
+    restarted.verify_disposable_test_database().await.unwrap();
+    restarted.migrate().await.unwrap();
+
+    let mut recovered = recover_committed_death_arbiter(
+        &restarted,
+        durable_death_fixture::ACCOUNT_ID,
+        durable_death_fixture::CHARACTER_ID,
+    )
+    .await
+    .unwrap()
+    .expect("the committed terminal must reconstruct after process restart");
+    assert_eq!(recovered.committed_receipt(), Some(&expected_receipt));
+    assert!(matches!(
+        recovered.submit(candidate.clone()),
+        SubmitResult::ReplayedCommitted { receipt } if receipt == expected_receipt
+    ));
+
+    // A server that lost all in-memory acknowledgement may retry the exact sealed winner. The
+    // durable writer returns its original result and the rebuilt arbiter publishes identical bytes.
+    let mut replay_arbiter = TerminalArbiter::new(candidate.binding());
+    assert!(matches!(
+        replay_arbiter.submit(candidate),
+        SubmitResult::Accepted { .. }
+    ));
+    let replay_prepared = replay_arbiter
+        .prepare(death.request().plan.event.death_tick)
+        .unwrap();
+    let replay = DurableDeathExecutionService::new(restarted.clone())
+        .execute_prepared(&mut replay_arbiter, &replay_prepared, &death)
+        .await
+        .unwrap();
+    assert!(replay.transaction.is_replay());
+    assert_eq!(replay.transaction.result(), &expected_result);
+    assert_eq!(replay_arbiter.committed_receipt(), Some(&expected_receipt));
+
+    let (latest, summary, memorial, trace) = run_restarted_death_read_session(&restarted).await;
+    assert_eq!(latest, latest_before_restart);
+    assert!(matches!(
+        latest,
+        DeathViewResultV1::Latest {
+            death: Some(ref latest),
+            ..
+        } if latest.death_id == durable_death_fixture::DEATH_ID
+    ));
+    assert!(matches!(
+        summary,
+        DeathViewResultV1::Summary { ref summary, .. }
+            if summary.death_id == durable_death_fixture::DEATH_ID
+                && summary.echo_outcome == protocol::DeathEchoOutcomeV1::Available
+                && summary.lost.len() == 2
+    ));
+    assert!(matches!(
+        memorial,
+        DeathViewResultV1::MemorialPage { ref entries, next_cursor: None, .. }
+            if entries.len() == 1
+                && entries[0].cursor.death_id == durable_death_fixture::DEATH_ID
+    ));
+    assert!(matches!(
+        trace,
+        DeathViewResultV1::TracePage { ref page, .. }
+            if page.death_id == durable_death_fixture::DEATH_ID
+                && page.entries.len() == 2
+                && page.entries.last().is_some_and(|entry| entry.lethal)
+    ));
+    durable_death_fixture::assert_committed_graph(&restarted).await;
+    restarted.close().await;
 }

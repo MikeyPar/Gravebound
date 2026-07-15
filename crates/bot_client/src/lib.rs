@@ -292,6 +292,28 @@ pub async fn perform_death_view(
     Ok((event.clone(), result.as_ref().clone()))
 }
 
+/// Submits one authenticated death-view query and intentionally abandons its response stream.
+///
+/// This models transport loss after the server has accepted a reliable request. The query remains
+/// read-only; authoritative lethal state is never accepted from a client frame.
+pub async fn submit_death_view_without_response(
+    connection: &quinn::Connection,
+    frame: DeathViewFrameV1,
+) -> Result<(), BotTransportError> {
+    let request = encode_frame(&WireMessage::DeathViewFrame(frame))?;
+    let (mut send, receive) = connection
+        .open_bi()
+        .await
+        .map_err(|error| BotTransportError::Quic(error.to_string()))?;
+    send.write_all(&request)
+        .await
+        .map_err(|error| BotTransportError::Quic(error.to_string()))?;
+    send.finish()
+        .map_err(|error| BotTransportError::Quic(error.to_string()))?;
+    drop(receive);
+    Ok(())
+}
+
 /// Submits one reliable safe-inventory mutation and intentionally abandons its response stream.
 /// Integration policy uses this to prove that a committed response loss converges through the
 /// ordinary mutation retry path; callers must retain and retry the exact mutation identity.
