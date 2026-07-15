@@ -7,10 +7,14 @@ use std::path::PathBuf;
 
 use persistence::{
     AshMutationKind, AshMutationRequest, AshWalletTransaction, CORE_ITEM_CONTENT_REVISION,
-    CORE_PROGRESSION_RECORDS_BLAKE3, DangerCrashItemChangeKind, DangerCrashRestoreCode,
-    DangerCrashRestoreRequest, DangerCrashRestoreTransaction, LifeDeedCompletionCommandV2,
+    CORE_PROGRESSION_RECORDS_BLAKE3, CORE_WORLD_ASSETS_BLAKE3, CORE_WORLD_LOCALIZATION_BLAKE3,
+    CORE_WORLD_RECORDS_BLAKE3, DangerCrashItemChangeKind, DangerCrashRestoreCode,
+    DangerCrashRestoreRequest, DangerCrashRestoreTransaction, LifeClockCheckpointCommandV1,
+    LifeClockCheckpointRequestV1, LifeClockCheckpointTransactionV1, LifeClockContentAuthorityV1,
+    LifeClockDangerAuthorityV1, LifeClockStateV1, LifeDeedCompletionCommandV2,
     LifeDeedCompletionRequestV2, LifeDeedCompletionTransactionV2, LifeDeedContentAuthorityV2,
-    PersistenceConfig, PersistenceError, PostgresPersistence, WIPEABLE_CORE_NAMESPACE,
+    PersistenceConfig, PersistenceError, PostgresPersistence, StoredDangerCheckpoint,
+    StoredWorldFlowRevisionV1, WIPEABLE_CORE_NAMESPACE,
 };
 use protocol::{
     ManifestHash, WireText, WorldFlowContentRevisionV1, WorldFlowFrame, WorldFlowRequest,
@@ -366,6 +370,58 @@ async fn enter_danger(
     assert_eq!(transfer_code(&result), WorldTransferResultCode::Accepted);
 }
 
+async fn checkpoint_and_advance_first_danger_clock(persistence: &PostgresPersistence) {
+    let checkpoint = StoredDangerCheckpoint {
+        account_id: ACCOUNT_ID,
+        character_id: CHARACTER_ID,
+        lineage_id: FIRST_LINEAGE_ID,
+        checkpoint_tick: 1,
+        content_revision: StoredWorldFlowRevisionV1 {
+            records_blake3: CORE_WORLD_RECORDS_BLAKE3.to_owned(),
+            assets_blake3: CORE_WORLD_ASSETS_BLAKE3.to_owned(),
+            localization_blake3: CORE_WORLD_LOCALIZATION_BLAKE3.to_owned(),
+        },
+        composite_digest: hash(21),
+        character_version: 2,
+        progression_version: 1,
+        inventory_version: 1,
+        oath_bargain_version: 1,
+        checkpoint_schema_version: 1,
+        checkpoint_payload: vec![1],
+        checkpoint_payload_digest: hash(22),
+    };
+    persistence
+        .write_danger_checkpoint(&checkpoint)
+        .await
+        .unwrap();
+    let request = LifeClockCheckpointRequestV1::seal(LifeClockCheckpointCommandV1 {
+        account_id: ACCOUNT_ID,
+        character_id: CHARACTER_ID,
+        checkpoint_id: [149; 16],
+        expected_character_version: 2,
+        expected_life_metrics_version: 1,
+        authoritative_tick: 50,
+        state: LifeClockStateV1::DangerControllable,
+        advanced_ticks: 50,
+        danger: Some(LifeClockDangerAuthorityV1 {
+            lineage_id: FIRST_LINEAGE_ID,
+            restore_point_id: FIRST_RESTORE_ID,
+            entry_life_metrics_version: 1,
+            entry_permadeath_combat_ticks: 40,
+        }),
+        content: LifeClockContentAuthorityV1::core(),
+        issued_at_unix_ms: 10_000,
+    })
+    .unwrap();
+    assert!(matches!(
+        persistence
+            .transact_life_clock_checkpoint_v1(&request)
+            .await
+            .unwrap(),
+        LifeClockCheckpointTransactionV1::Committed(_)
+    ));
+}
+
 async fn commit_sepulcher_deed(
     persistence: &PostgresPersistence,
     lineage_id: [u8; 16],
@@ -482,7 +538,7 @@ async fn stage_danger_mutations(persistence: &PostgresPersistence) {
     .await
     .unwrap();
     sqlx::query(
-        "UPDATE character_life_metrics SET lifetime_ticks=180,permadeath_combat_ticks=90, \
+        "UPDATE character_life_metrics SET lifetime_ticks=150,permadeath_combat_ticks=90, \
          life_metrics_version=2 WHERE namespace_id=$1 AND account_id=$2 AND character_id=$3",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
@@ -713,7 +769,7 @@ async fn assert_fresh_projection(persistence: &PostgresPersistence) {
     .fetch_one(transaction.connection())
     .await
     .unwrap();
-    assert_eq!(lifetime, 180);
+    assert_eq!(lifetime, 150);
     let items: Vec<StoredItemProjection> = sqlx::query_as(
         "SELECT item_uid,security_state,location_kind,slot_index,destruction_reason \
          FROM item_instances WHERE namespace_id=$1 AND account_id=$2 ORDER BY item_uid",
@@ -877,6 +933,7 @@ async fn danger_crash_restore_is_exact_atomic_replay_safe_and_terminal_authorita
         1,
     )
     .await;
+    checkpoint_and_advance_first_danger_clock(&persistence).await;
     stage_danger_mutations(&persistence).await;
     earn_ash(&persistence, [165; 16], Some(FIRST_RESTORE_ID)).await;
 
@@ -927,6 +984,15 @@ async fn danger_crash_restore_is_exact_atomic_replay_safe_and_terminal_authorita
         restarted.transact_danger_crash_restore(&request).await.unwrap(),
         DangerCrashRestoreTransaction::Replayed(replay) if replay == receipt
     ));
+    let restored_clock = restarted
+        .load_life_clock_head_v1(ACCOUNT_ID, CHARACTER_ID)
+        .await
+        .unwrap();
+    assert_eq!(restored_clock.lifetime_ticks, 150);
+    assert_eq!(restored_clock.permadeath_combat_ticks, 40);
+    assert_eq!(restored_clock.life_metrics_version, 3);
+    assert_eq!(restored_clock.authoritative_tick, 50);
+    assert!(restored_clock.danger.is_none());
     let counts: (i64, i64, i64) = {
         let mut transaction = restarted.begin_transaction().await.unwrap();
         let counts = sqlx::query_as(

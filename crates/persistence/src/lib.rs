@@ -31,6 +31,7 @@ mod field_equipment;
 mod ground_expiry;
 mod identity;
 mod items;
+mod life_clock_repository;
 mod life_deed_repository;
 mod lifecycle_signature;
 mod oath;
@@ -128,6 +129,11 @@ pub use items::{
     CORE_ITEM_CONTENT_REVISION, STARTER_INITIALIZER_REVISION, STARTER_ITEM_COUNT,
     StoredStarterInitialization, StoredStarterItem,
 };
+pub use life_clock_repository::{
+    LifeClockCheckpointCommandV1, LifeClockCheckpointRequestV1, LifeClockCheckpointTransactionV1,
+    LifeClockContentAuthorityV1, LifeClockDangerAuthorityV1, LifeClockStateV1,
+    StoredLifeClockCheckpointV1, StoredLifeClockHeadV1,
+};
 pub use life_deed_repository::{
     CORE_PROGRESSION_RECORDS_BLAKE3, CORE_WORLD_ASSETS_BLAKE3, CORE_WORLD_LOCALIZATION_BLAKE3,
     CORE_WORLD_RECORDS_BLAKE3, LifeDeedCompletionCommandV2, LifeDeedCompletionRequestV2,
@@ -177,7 +183,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 46;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 47;
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -456,6 +462,26 @@ pub enum PersistenceError {
         actual: u64,
         projection_digest: [u8; 32],
     },
+    #[error("stored life-clock evidence violates the approved contract-1 authority")]
+    CorruptStoredLifeClock,
+    #[error("life-clock account, character, or aggregate authority does not exist")]
+    LifeClockOwnerNotFound,
+    #[error("life-clock checkpoint identity was replayed with changed canonical material")]
+    LifeClockIdempotencyConflict,
+    #[error("life-clock checkpoint requires the selected living normal-security character")]
+    LifeClockBindingMismatch,
+    #[error("life-clock checkpoint does not match the promoted Core content authority")]
+    LifeClockContentMismatch,
+    #[error("life-clock character version mismatch: expected {expected}, durable {actual}")]
+    LifeClockCharacterVersionMismatch { expected: u64, actual: u64 },
+    #[error("life-clock metrics version mismatch: expected {expected}, durable {actual}")]
+    LifeClockMetricsVersionMismatch { expected: u64, actual: u64 },
+    #[error("life-clock interval is discontinuous: expected end tick {expected}, got {actual}")]
+    LifeClockTickDiscontinuity { expected: u64, actual: u64 },
+    #[error("life-clock LinkLost interval exceeds the exact 90-tick vulnerable window")]
+    LifeClockLinkLostWindowExpired,
+    #[error("life-clock reached the exact LinkLost deadline and requires terminal resolution")]
+    LifeClockTerminalResolutionRequired,
 }
 
 /// Returns whether `PostgreSQL` explicitly permits the complete transaction to be retried.
@@ -1173,6 +1199,46 @@ mod tests {
             assert!(
                 !migration.contains(prohibited),
                 "crash deed revocation closure leaked {prohibited}"
+            );
+        }
+    }
+
+    #[test]
+    fn authoritative_life_clock_receipts_are_versioned_replay_safe_and_forward_only() {
+        let migration =
+            include_str!("../../../migrations/0047_authoritative_life_clock_receipts.sql");
+        for required in [
+            "Gravebound_Production_GDD_v1_Canonical.md",
+            "Gravebound_Content_Production_Spec_v1.md",
+            "Gravebound_Development_Roadmap_v1.md",
+            "SPEC-CONFLICT-009-m03-death-memorial.md",
+            "0047 requires the dormant life-clock receipt table",
+            "ADD COLUMN contract_version SMALLINT NOT NULL DEFAULT 1",
+            "ADD COLUMN expected_character_version BIGINT NOT NULL",
+            "advanced_ticks BETWEEN 1 AND 1800",
+            "authoritative_tick >= advanced_ticks",
+            "character_life_clock_conflict_audits_v1",
+            "observed_character_version BIGINT NOT NULL",
+            "observed_life_metrics_version BIGINT NOT NULL",
+            "attempted_request_hash <> stored_request_hash",
+            "life_clock_conflict_audit_append_only_v1",
+            "stores hashes and observed versions, never raw payloads or network secrets",
+            "Do not drop the expected-version/conflict evidence",
+        ] {
+            assert!(migration.contains(required), "migration omitted {required}");
+        }
+        for prohibited in [
+            "DROP TABLE",
+            "TRUNCATE",
+            "DELETE FROM",
+            "JSON",
+            "JSONB",
+            "FLOAT",
+            "DOUBLE PRECISION",
+        ] {
+            assert!(
+                !migration.contains(prohibited),
+                "authoritative life-clock migration leaked {prohibited}"
             );
         }
     }

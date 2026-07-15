@@ -1,6 +1,9 @@
 use persistence::{
-    CORE_ITEM_CONTENT_REVISION, DangerCheckpointDelete, DangerCheckpointWrite,
-    EXPECTED_SCHEMA_VERSION, PersistenceConfig, PersistenceError, PersistenceTransaction,
+    CORE_ITEM_CONTENT_REVISION, CORE_WORLD_ASSETS_BLAKE3, CORE_WORLD_LOCALIZATION_BLAKE3,
+    CORE_WORLD_RECORDS_BLAKE3, DangerCheckpointDelete, DangerCheckpointWrite,
+    EXPECTED_SCHEMA_VERSION, LifeClockCheckpointCommandV1, LifeClockCheckpointRequestV1,
+    LifeClockCheckpointTransactionV1, LifeClockContentAuthorityV1, LifeClockDangerAuthorityV1,
+    LifeClockStateV1, PersistenceConfig, PersistenceError, PersistenceTransaction,
     PostgresPersistence, StoredCharacter, StoredDangerCheckpoint, StoredMutation,
     StoredSafeInventoryCommand, StoredSafeInventoryCommandKind, StoredSafeInventoryLocation,
     StoredSafeInventoryPlacement, StoredWorldFlowRevisionV1, WIPEABLE_CORE_NAMESPACE,
@@ -33,6 +36,7 @@ const EXPECTED_PUBLIC_TABLES: &[&str] = &[
     "character_instance_lineages",
     "character_inventories",
     "character_life_clock_checkpoint_receipts_v1",
+    "character_life_clock_conflict_audits_v1",
     "character_life_deed_completion_receipts_v1",
     "character_life_deed_completion_receipts_v2",
     "character_life_deed_conflict_audits_v2",
@@ -717,6 +721,477 @@ async fn danger_checkpoints_are_version_bound_replay_safe_and_monotonic() {
     persistence.close().await;
 }
 
+#[tokio::test]
+#[ignore = "requires explicitly authorized disposable PostgreSQL"]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one linear hosted fixture proves all clock states, replay, restart, races, and bounds"
+)]
+async fn authoritative_life_clocks_are_exact_replayable_and_restart_safe() {
+    const SAFE_ACCOUNT: [u8; 16] = [81; 16];
+    const SAFE_CHARACTER: [u8; 16] = [82; 16];
+
+    let persistence = disposable_database().await;
+    clear_accounts(&persistence).await;
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    insert_account(&mut transaction, &SAFE_ACCOUNT)
+        .await
+        .unwrap();
+    insert_character(&mut transaction, &SAFE_ACCOUNT, &SAFE_CHARACTER, 1)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE accounts SET selected_character_id=$1 WHERE namespace_id=$2 AND account_id=$3",
+    )
+    .bind(SAFE_CHARACTER.as_slice())
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(SAFE_ACCOUNT.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    transaction.commit().await.unwrap();
+
+    let select = clock_request(
+        SAFE_ACCOUNT,
+        SAFE_CHARACTER,
+        [83; 16],
+        1,
+        1,
+        30,
+        30,
+        LifeClockStateV1::CharacterSelect,
+        None,
+    );
+    let loading = clock_request(
+        SAFE_ACCOUNT,
+        SAFE_CHARACTER,
+        [84; 16],
+        1,
+        2,
+        60,
+        30,
+        LifeClockStateV1::Loading,
+        None,
+    );
+    let offline = clock_request(
+        SAFE_ACCOUNT,
+        SAFE_CHARACTER,
+        [85; 16],
+        1,
+        3,
+        90,
+        30,
+        LifeClockStateV1::Offline,
+        None,
+    );
+    for request in [&select, &loading, &offline] {
+        assert!(matches!(
+            persistence
+                .transact_life_clock_checkpoint_v1(request)
+                .await
+                .unwrap(),
+            LifeClockCheckpointTransactionV1::Committed(_)
+        ));
+    }
+    let excluded_head = persistence
+        .load_life_clock_head_v1(SAFE_ACCOUNT, SAFE_CHARACTER)
+        .await
+        .unwrap();
+    assert_eq!(excluded_head.lifetime_ticks, 0);
+    assert_eq!(excluded_head.permadeath_combat_ticks, 0);
+    assert_eq!(excluded_head.life_metrics_version, 4);
+    assert_eq!(excluded_head.authoritative_tick, 90);
+
+    assert!(matches!(
+        persistence
+            .transact_life_clock_checkpoint_v1(&offline)
+            .await
+            .unwrap(),
+        LifeClockCheckpointTransactionV1::Replayed(_)
+    ));
+    let mut changed_offline = offline.command.clone();
+    changed_offline.issued_at_unix_ms += 1;
+    let changed_offline = LifeClockCheckpointRequestV1::seal(changed_offline).unwrap();
+    assert!(matches!(
+        persistence
+            .transact_life_clock_checkpoint_v1(&changed_offline)
+            .await,
+        Err(PersistenceError::LifeClockIdempotencyConflict)
+    ));
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let conflict_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM character_life_clock_conflict_audits_v1 \
+         WHERE namespace_id=$1 AND account_id=$2 AND checkpoint_id=$3",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(SAFE_ACCOUNT.as_slice())
+    .bind([85_u8; 16].as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    transaction.rollback().await.unwrap();
+    assert_eq!(conflict_count, 1);
+
+    let stale_character = clock_request(
+        SAFE_ACCOUNT,
+        SAFE_CHARACTER,
+        [86; 16],
+        2,
+        4,
+        120,
+        30,
+        LifeClockStateV1::Loading,
+        None,
+    );
+    assert!(matches!(
+        persistence
+            .transact_life_clock_checkpoint_v1(&stale_character)
+            .await,
+        Err(PersistenceError::LifeClockCharacterVersionMismatch {
+            expected: 2,
+            actual: 1
+        })
+    ));
+
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    sqlx::query(
+        "UPDATE character_world_locations SET location_kind=1, \
+         location_content_id='hub.lantern_halls_01',safe_arrival_kind=0 \
+         WHERE namespace_id=$1 AND account_id=$2 AND character_id=$3",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(SAFE_ACCOUNT.as_slice())
+    .bind(SAFE_CHARACTER.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    transaction.commit().await.unwrap();
+    let hall = clock_request(
+        SAFE_ACCOUNT,
+        SAFE_CHARACTER,
+        [87; 16],
+        1,
+        4,
+        120,
+        30,
+        LifeClockStateV1::HallControllable,
+        None,
+    );
+    persistence
+        .transact_life_clock_checkpoint_v1(&hall)
+        .await
+        .unwrap();
+    let concurrent_a = clock_request(
+        SAFE_ACCOUNT,
+        SAFE_CHARACTER,
+        [88; 16],
+        1,
+        5,
+        150,
+        30,
+        LifeClockStateV1::HallControllable,
+        None,
+    );
+    let concurrent_b = clock_request(
+        SAFE_ACCOUNT,
+        SAFE_CHARACTER,
+        [89; 16],
+        1,
+        5,
+        150,
+        30,
+        LifeClockStateV1::HallControllable,
+        None,
+    );
+    let (result_a, result_b) = tokio::join!(
+        persistence.transact_life_clock_checkpoint_v1(&concurrent_a),
+        persistence.transact_life_clock_checkpoint_v1(&concurrent_b)
+    );
+    assert_eq!(
+        usize::from(result_a.is_ok()) + usize::from(result_b.is_ok()),
+        1
+    );
+    for result in [result_a, result_b] {
+        assert!(
+            result.is_ok()
+                || matches!(
+                    result,
+                    Err(PersistenceError::LifeClockMetricsVersionMismatch {
+                        expected: 5,
+                        actual: 6
+                    })
+                )
+        );
+    }
+    let safe_head = persistence
+        .load_life_clock_head_v1(SAFE_ACCOUNT, SAFE_CHARACTER)
+        .await
+        .unwrap();
+    assert_eq!(safe_head.lifetime_ticks, 60);
+    assert_eq!(safe_head.permadeath_combat_ticks, 0);
+    assert_eq!(safe_head.life_metrics_version, 6);
+    assert_eq!(safe_head.authoritative_tick, 150);
+    assert_eq!(safe_head.link_lost_ticks, 0);
+    assert!(safe_head.danger.is_none());
+
+    persistence.close().await;
+    let persistence = disposable_database().await;
+    assert_eq!(
+        persistence
+            .load_life_clock_head_v1(SAFE_ACCOUNT, SAFE_CHARACTER)
+            .await
+            .unwrap(),
+        safe_head
+    );
+
+    clear_accounts(&persistence).await;
+    insert_danger_checkpoint_fixture(&persistence).await;
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    sqlx::query(
+        "UPDATE accounts SET selected_character_id=$1 WHERE namespace_id=$2 AND account_id=$3",
+    )
+    .bind(CHARACTER_A.as_slice())
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_A.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    transaction.commit().await.unwrap();
+    persistence
+        .write_danger_checkpoint(&danger_checkpoint(1, vec![1]))
+        .await
+        .unwrap();
+    let danger = LifeClockDangerAuthorityV1 {
+        lineage_id: CHECKPOINT_LINEAGE,
+        restore_point_id: CHECKPOINT_RESTORE,
+        entry_life_metrics_version: 1,
+        entry_permadeath_combat_ticks: 0,
+    };
+    let danger_requests = [
+        clock_request(
+            ACCOUNT_A,
+            CHARACTER_A,
+            [90; 16],
+            2,
+            1,
+            30,
+            30,
+            LifeClockStateV1::DangerLoading,
+            Some(danger.clone()),
+        ),
+        clock_request(
+            ACCOUNT_A,
+            CHARACTER_A,
+            [91; 16],
+            2,
+            2,
+            60,
+            30,
+            LifeClockStateV1::DangerStaging,
+            Some(danger.clone()),
+        ),
+        clock_request(
+            ACCOUNT_A,
+            CHARACTER_A,
+            [92; 16],
+            2,
+            3,
+            90,
+            30,
+            LifeClockStateV1::DangerControllable,
+            Some(danger.clone()),
+        ),
+        clock_request(
+            ACCOUNT_A,
+            CHARACTER_A,
+            [93; 16],
+            2,
+            4,
+            179,
+            89,
+            LifeClockStateV1::DangerLinkLost,
+            Some(danger.clone()),
+        ),
+        clock_request(
+            ACCOUNT_A,
+            CHARACTER_A,
+            [94; 16],
+            2,
+            5,
+            180,
+            1,
+            LifeClockStateV1::DangerControllable,
+            Some(danger.clone()),
+        ),
+        clock_request(
+            ACCOUNT_A,
+            CHARACTER_A,
+            [95; 16],
+            2,
+            6,
+            270,
+            90,
+            LifeClockStateV1::DangerLinkLost,
+            Some(danger.clone()),
+        ),
+    ];
+    for request in &danger_requests {
+        persistence
+            .transact_life_clock_checkpoint_v1(request)
+            .await
+            .unwrap();
+    }
+    assert!(matches!(
+        persistence
+            .transact_life_clock_checkpoint_v1(&clock_request(
+                ACCOUNT_A,
+                CHARACTER_A,
+                [96; 16],
+                2,
+                7,
+                271,
+                1,
+                LifeClockStateV1::DangerLinkLost,
+                Some(danger.clone()),
+            ))
+            .await,
+        Err(PersistenceError::LifeClockTerminalResolutionRequired)
+    ));
+    assert!(matches!(
+        persistence
+            .transact_life_clock_checkpoint_v1(&clock_request(
+                ACCOUNT_A,
+                CHARACTER_A,
+                [97; 16],
+                2,
+                7,
+                271,
+                1,
+                LifeClockStateV1::DangerControllable,
+                Some(danger.clone()),
+            ))
+            .await,
+        Err(PersistenceError::LifeClockTerminalResolutionRequired)
+    ));
+    assert!(matches!(
+        persistence
+            .transact_life_clock_checkpoint_v1(&danger_requests[0])
+            .await
+            .unwrap(),
+        LifeClockCheckpointTransactionV1::Replayed(_)
+    ));
+    let danger_head = persistence
+        .load_life_clock_head_v1(ACCOUNT_A, CHARACTER_A)
+        .await
+        .unwrap();
+    assert_eq!(danger_head.lifetime_ticks, 210);
+    assert_eq!(danger_head.permadeath_combat_ticks, 270);
+    assert_eq!(danger_head.life_metrics_version, 7);
+    assert_eq!(danger_head.authoritative_tick, 270);
+    assert_eq!(danger_head.link_lost_ticks, 90);
+    assert_eq!(danger_head.danger, Some(danger));
+
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    sqlx::query(
+        "UPDATE character_life_metrics SET lifetime_ticks=211 WHERE namespace_id=$1 \
+         AND account_id=$2 AND character_id=$3",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_A.as_slice())
+    .bind(CHARACTER_A.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    transaction.commit().await.unwrap();
+    assert!(matches!(
+        persistence
+            .load_life_clock_head_v1(ACCOUNT_A, CHARACTER_A)
+            .await,
+        Err(PersistenceError::CorruptStoredLifeClock)
+    ));
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    sqlx::query(
+        "UPDATE character_life_metrics SET lifetime_ticks=210 WHERE namespace_id=$1 \
+         AND account_id=$2 AND character_id=$3",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_A.as_slice())
+    .bind(CHARACTER_A.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    transaction.commit().await.unwrap();
+
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    sqlx::query(
+        "DELETE FROM character_danger_checkpoints WHERE namespace_id=$1 AND account_id=$2 \
+         AND character_id=$3",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_A.as_slice())
+    .bind(CHARACTER_A.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    transaction.commit().await.unwrap();
+    assert!(matches!(
+        persistence
+            .load_life_clock_head_v1(ACCOUNT_A, CHARACTER_A)
+            .await,
+        Err(PersistenceError::CorruptStoredLifeClock)
+    ));
+    persistence
+        .write_danger_checkpoint(&danger_checkpoint(1, vec![1]))
+        .await
+        .unwrap();
+    assert_eq!(
+        persistence
+            .load_life_clock_head_v1(ACCOUNT_A, CHARACTER_A)
+            .await
+            .unwrap(),
+        danger_head
+    );
+
+    persistence.close().await;
+    let persistence = disposable_database().await;
+    assert_eq!(
+        persistence
+            .load_life_clock_head_v1(ACCOUNT_A, CHARACTER_A)
+            .await
+            .unwrap(),
+        danger_head
+    );
+    persistence.close().await;
+}
+
+#[allow(clippy::too_many_arguments)]
+fn clock_request(
+    account_id: [u8; 16],
+    character_id: [u8; 16],
+    checkpoint_id: [u8; 16],
+    expected_character_version: u64,
+    expected_life_metrics_version: u64,
+    authoritative_tick: u64,
+    advanced_ticks: u32,
+    state: LifeClockStateV1,
+    danger: Option<LifeClockDangerAuthorityV1>,
+) -> LifeClockCheckpointRequestV1 {
+    LifeClockCheckpointRequestV1::seal(LifeClockCheckpointCommandV1 {
+        account_id,
+        character_id,
+        checkpoint_id,
+        expected_character_version,
+        expected_life_metrics_version,
+        authoritative_tick,
+        state,
+        advanced_ticks,
+        danger,
+        content: LifeClockContentAuthorityV1::core(),
+        issued_at_unix_ms: 1,
+    })
+    .unwrap()
+}
+
 fn danger_checkpoint(tick: i64, payload: Vec<u8>) -> StoredDangerCheckpoint {
     StoredDangerCheckpoint {
         account_id: ACCOUNT_A,
@@ -724,9 +1199,9 @@ fn danger_checkpoint(tick: i64, payload: Vec<u8>) -> StoredDangerCheckpoint {
         lineage_id: CHECKPOINT_LINEAGE,
         checkpoint_tick: tick,
         content_revision: StoredWorldFlowRevisionV1 {
-            records_blake3: "1".repeat(64),
-            assets_blake3: "2".repeat(64),
-            localization_blake3: "3".repeat(64),
+            records_blake3: CORE_WORLD_RECORDS_BLAKE3.to_owned(),
+            assets_blake3: CORE_WORLD_ASSETS_BLAKE3.to_owned(),
+            localization_blake3: CORE_WORLD_LOCALIZATION_BLAKE3.to_owned(),
         },
         composite_digest: [81; 32],
         character_version: 2,
@@ -784,9 +1259,9 @@ async fn insert_danger_checkpoint_fixture(persistence: &PostgresPersistence) {
     .bind(ACCOUNT_A.as_slice())
     .bind(CHARACTER_A.as_slice())
     .bind(CHECKPOINT_LINEAGE.as_slice())
-    .bind("1".repeat(64))
-    .bind("2".repeat(64))
-    .bind("3".repeat(64))
+    .bind(CORE_WORLD_RECORDS_BLAKE3)
+    .bind(CORE_WORLD_ASSETS_BLAKE3)
+    .bind(CORE_WORLD_LOCALIZATION_BLAKE3)
     .execute(transaction.connection())
     .await
     .unwrap();
@@ -806,9 +1281,9 @@ async fn insert_danger_checkpoint_fixture(persistence: &PostgresPersistence) {
     .bind(CHECKPOINT_RESTORE.as_slice())
     .bind(CHECKPOINT_LINEAGE.as_slice())
     .bind([91_u8; 32].as_slice())
-    .bind("1".repeat(64))
-    .bind("2".repeat(64))
-    .bind("3".repeat(64))
+    .bind(CORE_WORLD_RECORDS_BLAKE3)
+    .bind(CORE_WORLD_ASSETS_BLAKE3)
+    .bind(CORE_WORLD_LOCALIZATION_BLAKE3)
     .execute(transaction.connection())
     .await
     .unwrap();
