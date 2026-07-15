@@ -19,6 +19,7 @@ mod bargain_milestone;
 mod caldus_victory;
 mod combat_loadout;
 mod danger_checkpoint;
+mod danger_crash_restore;
 mod danger_entry_restore;
 mod extraction;
 mod field_equipment;
@@ -64,6 +65,13 @@ pub use combat_loadout::{
 pub use danger_checkpoint::{
     DangerCheckpointDelete, DangerCheckpointWrite, StoredDangerCheckpoint,
     stage_danger_checkpoint_cleanup,
+};
+pub use danger_crash_restore::{
+    DANGER_CRASH_RESTORE_CONTRACT, DangerCrashAshChange, DangerCrashBargainChange,
+    DangerCrashBargainRecordKind, DangerCrashItemChange, DangerCrashItemChangeKind,
+    DangerCrashMaterialChange, DangerCrashRestoreCode, DangerCrashRestoreReceipt,
+    DangerCrashRestoreRequest, DangerCrashRestoreTransaction, DangerCrashRestoreVersions,
+    MAX_CRASH_COMPONENT_CHANGES, MAX_CRASH_ITEM_CHANGES,
 };
 pub use danger_entry_restore::{
     StoredDangerEntryActiveBargainV3, StoredDangerEntryAshWalletV3,
@@ -330,6 +338,8 @@ pub enum PersistenceError {
     DangerCheckpointReplayConflict,
     #[error("danger checkpoint cleanup requires a committed safe location")]
     DangerCheckpointFinalizationNotCommitted,
+    #[error("stored danger crash restoration violates the approved terminal contract")]
+    CorruptStoredDangerCrashRestore,
     #[error("Bargain life-end cleanup input or stored state is corrupt")]
     CorruptBargainCleanup,
     #[error("Bargain life-end cleanup expected a different aggregate version")]
