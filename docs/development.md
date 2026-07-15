@@ -46,6 +46,7 @@ Set-Location Gravebound
 | Unit and integration tests | `.\tools\dev.cmd test` |
 | Content schema and semantic validation | `.\tools\dev.cmd validate` |
 | Unpromoted Core world-flow validation | `cargo run --locked -p tools_content -- validate-core-world-flow` |
+| Unpromoted Core death-presentation validation | `cargo run --locked -p tools_content -- validate-core-death-view` |
 | Regenerate checked-in JSON schemas | `cargo run --locked -p tools_content -- generate-schemas` |
 | Deterministic headless trace | `.\tools\dev.cmd headless` |
 | LocalLab client | `.\tools\dev.cmd local-lab` |
