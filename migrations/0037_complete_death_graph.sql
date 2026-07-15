@@ -980,7 +980,7 @@ BEGIN
         SELECT count(*) INTO transition_count
         FROM echo_state_transitions
         WHERE namespace_id = death.namespace_id AND echo_id = target_echo_id;
-        IF transition_count <> CASE WHEN target_echo_state = 0 THEN 1 ELSE 2 END
+        IF transition_count <> (CASE WHEN target_echo_state = 0 THEN 1 ELSE 2 END)
             OR EXISTS (
                 SELECT 1
                 FROM (
@@ -1071,8 +1071,8 @@ BEGIN
         WHERE echo.namespace_id = death.namespace_id
           AND echo.account_id = death.account_id
           AND transition.trigger_death_id = death.death_id;
-        IF transition_count <> CASE
-            WHEN death.preexisting_available_echo_id IS NOT NULL THEN 1 ELSE 2 END
+        IF transition_count <> (CASE
+            WHEN death.preexisting_available_echo_id IS NOT NULL THEN 1 ELSE 2 END)
         THEN
             RAISE EXCEPTION 'death Echo projector transition set is not exact';
         END IF;
