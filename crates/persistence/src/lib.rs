@@ -215,6 +215,7 @@ pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
 pub const EXPECTED_SCHEMA_VERSION: i64 = 54;
+const DISPOSABLE_DATABASE_RESET_SQL: &str = "TRUNCATE TABLE accounts, caldus_victory_exits CASCADE";
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -671,31 +672,15 @@ impl PostgresPersistence {
         Ok(())
     }
 
-    /// Clears the approved identity tables only after the destructive-test guard passes.
+    /// Clears every gameplay row from an explicitly opted-in disposable integration database.
     pub async fn reset_disposable_identity_data(&self) -> Result<(), PersistenceError> {
         self.verify_disposable_test_database().await?;
         let mut transaction = self.begin_transaction().await?;
-        // These rows bind both the character and its danger lineage. Delete the cross-linked
-        // children explicitly before the account cascade reaches either side of that binding.
-        for statement in [
-            "DELETE FROM field_equipment_mutations WHERE namespace_id = $1",
-            "DELETE FROM character_extraction_results WHERE namespace_id = $1",
-            "DELETE FROM caldus_victory_exit_owners WHERE namespace_id = $1",
-            "DELETE FROM caldus_victory_exits WHERE namespace_id = $1",
-            "DELETE FROM bargain_decision_results WHERE namespace_id = $1",
-            "DELETE FROM character_active_bargains WHERE namespace_id = $1",
-            "DELETE FROM bargain_milestone_results WHERE namespace_id = $1",
-            "DELETE FROM bargain_offer_candidates WHERE namespace_id = $1",
-            "DELETE FROM bargain_offers WHERE namespace_id = $1",
-        ] {
-            sqlx::query(statement)
-                .bind(WIPEABLE_CORE_NAMESPACE)
-                .execute(transaction.connection())
-                .await
-                .map_err(PersistenceError::Database)?;
-        }
-        sqlx::query("DELETE FROM accounts WHERE namespace_id = $1")
-            .bind(WIPEABLE_CORE_NAMESPACE)
+        // Final-death history is intentionally DELETE-immutable. The dedicated gravebound_test*
+        // database and explicit environment opt-in are the authority to truncate the entire
+        // gameplay graph between integration journeys; no production namespace can reach here.
+        // Caldus exits are the only gameplay root outside the account-owned cascade.
+        sqlx::query(DISPOSABLE_DATABASE_RESET_SQL)
             .execute(transaction.connection())
             .await
             .map_err(PersistenceError::Database)?;
@@ -789,6 +774,25 @@ mod tests {
             config.validate().unwrap_err(),
             PersistenceConfigError::ZeroConnections
         );
+    }
+
+    #[test]
+    fn disposable_reset_is_whole_graph_and_never_disables_production_triggers() {
+        assert_eq!(
+            DISPOSABLE_DATABASE_RESET_SQL,
+            "TRUNCATE TABLE accounts, caldus_victory_exits CASCADE"
+        );
+        for prohibited in [
+            "DELETE FROM",
+            "session_replication_role",
+            "DISABLE TRIGGER",
+            "gravebound_namespaces",
+        ] {
+            assert!(
+                !DISPOSABLE_DATABASE_RESET_SQL.contains(prohibited),
+                "disposable reset leaked {prohibited}"
+            );
+        }
     }
 
     #[test]
