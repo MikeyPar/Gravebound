@@ -295,6 +295,29 @@ fn local_health_zero_exposes_no_durable_data_or_actions() {
 }
 
 #[test]
+fn ui_copy_is_complete_and_uses_only_compiled_death_authority() {
+    let model = model();
+    let copy = model.ui_copy();
+
+    assert_eq!(copy.fields.attack, "Attack");
+    assert_eq!(copy.fields.cause, "Cause");
+    assert_eq!(copy.fields.class, "Class");
+    assert_eq!(copy.fields.damage, "Final damage");
+    assert_eq!(copy.fields.damage_type, "Damage type");
+    assert_eq!(copy.fields.final_deed, "Final deed");
+    assert_eq!(copy.fields.killer, "Killer");
+    assert_eq!(copy.fields.level, "Level");
+    assert_eq!(copy.fields.lifetime, "Lifetime");
+    assert_eq!(copy.fields.network, "Network");
+    assert_eq!(copy.fields.recall, "Recall");
+    assert_eq!(copy.fields.source_position, "Source position");
+    assert_eq!(copy.memorial_title, "Memorial Wall");
+    assert_eq!(copy.back_action, "Back");
+    assert_eq!(copy.load_more_action, "Load More");
+    assert_eq!(copy.retry_action, "Retry");
+}
+
+#[test]
 fn late_local_health_zero_cannot_erase_acknowledged_or_fatal_state() {
     let mut ready = model();
     complete_one_loss_summary(&mut ready);

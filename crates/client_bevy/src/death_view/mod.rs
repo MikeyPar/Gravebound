@@ -23,8 +23,9 @@ pub use projection::{
     DeathLossPresentation, DeathNetworkPresentation, DeathSourcePortraitPresentation,
     DeathSourcePresentation, DeathStatusPresentation, DeathSummaryAction,
     DeathSummaryActionPresentation, DeathSummaryActionState, DeathSummaryActionsPresentation,
-    DeathSummaryContext, DeathSummaryPresentation, DeathSummarySection, DeathTimelinePresentation,
-    DeathViewProjectionError, MemorialEntryPresentation,
+    DeathSummaryContext, DeathSummaryFieldCopy, DeathSummaryPresentation, DeathSummarySection,
+    DeathTimelinePresentation, DeathViewProjectionError, DeathViewUiCopy,
+    MemorialEntryPresentation,
 };
 pub use summary::{TerminalDeathModel, TerminalDeathPhase};
 
@@ -39,7 +40,7 @@ use thiserror::Error;
 
 use self::projection::{
     project_memorial_summary, project_memorial_summary_continuation, project_summary,
-    project_summary_continuation, validate_latest,
+    project_summary_continuation, project_ui_copy, validate_latest,
 };
 use crate::core_world_transition::{
     CoreWorldTransitionModel, CoreWorldTransitionPhase, CoreWorldTransitionResolution,
@@ -222,6 +223,7 @@ pub enum DeathViewClientError {
 #[derive(Debug)]
 pub struct DeathViewClientModel {
     presentation: CoreDevelopmentDeathView,
+    ui_copy: DeathViewUiCopy,
     presentation_revision: DeathViewContentRevisionV1,
     next_sequence: u32,
     pending: Option<PendingDeathViewRequest>,
@@ -241,8 +243,10 @@ impl DeathViewClientModel {
             localization_blake3: ManifestHash::new(hashes.localization_blake3.clone())
                 .map_err(|_| DeathViewClientError::InvalidPresentationAuthority)?,
         };
+        let ui_copy = project_ui_copy(&presentation)?;
         Ok(Self {
             presentation,
+            ui_copy,
             presentation_revision,
             next_sequence: 1,
             pending: None,
@@ -273,17 +277,22 @@ impl DeathViewClientModel {
     }
 
     #[must_use]
+    pub const fn ui_copy(&self) -> &DeathViewUiCopy {
+        &self.ui_copy
+    }
+
+    #[must_use]
     pub fn phase_copy(&self) -> Option<&str> {
-        let id = match self.terminal.phase() {
+        match self.terminal.phase() {
             TerminalDeathPhase::PossibleDeathObserved
-            | TerminalDeathPhase::AwaitingDurableAcknowledgement => "death.state.awaiting_commit",
-            TerminalDeathPhase::LoadingLatest | TerminalDeathPhase::LoadingSummary => {
-                "death.state.loading_summary"
+            | TerminalDeathPhase::AwaitingDurableAcknowledgement => {
+                Some(self.ui_copy.awaiting_commit.as_str())
             }
-            _ => return None,
-        };
-        self.presentation
-            .resolve_copy(CoreDeathViewCopyKind::State, id)
+            TerminalDeathPhase::LoadingLatest | TerminalDeathPhase::LoadingSummary => {
+                Some(self.ui_copy.loading_summary.as_str())
+            }
+            _ => None,
+        }
     }
 
     #[must_use]
@@ -293,13 +302,7 @@ impl DeathViewClientModel {
             TerminalDeathPhase::PossibleDeathObserved
                 | TerminalDeathPhase::AwaitingDurableAcknowledgement
         )
-        .then(|| {
-            self.presentation.resolve_copy(
-                CoreDeathViewCopyKind::State,
-                "death.state.awaiting_commit_detail",
-            )
-        })
-        .flatten()
+        .then_some(self.ui_copy.awaiting_commit_detail.as_str())
     }
 
     /// Records local health zero without fabricating a durable death, loss list, or action.

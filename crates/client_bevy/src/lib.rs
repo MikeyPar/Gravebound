@@ -92,14 +92,14 @@ pub use death_view::{
     DeathLossPresentation, DeathNetworkPresentation, DeathSourcePortraitPresentation,
     DeathSourcePresentation, DeathStatusPresentation, DeathSummaryAction,
     DeathSummaryActionPresentation, DeathSummaryActionState, DeathSummaryActionsPresentation,
-    DeathSummaryContext, DeathSummaryPresentation, DeathSummarySection, DeathTimelinePresentation,
-    DeathViewApplyDisposition, DeathViewApplyOutcome, DeathViewClientError, DeathViewClientModel,
-    DeathViewFailure, DeathViewProjectionError, DeathViewRetryDirective,
-    MEMORIAL_IDENTITY_FILTER_BYTES, MEMORIAL_MAX_CACHED_ENTRIES, MEMORIAL_MAX_CACHED_PAGES,
-    MEMORIAL_PAGE_LIMIT, MemorialDetailPhase, MemorialDetailQueryIntent, MemorialEntryPresentation,
-    MemorialListPhase, MemorialPageQueryIntent, MemorialWallModel, PendingDeathViewQuery,
-    PendingDeathViewRequest, TERMINAL_SUMMARY_LOSS_PAGE_LIMIT, TerminalDeathModel,
-    TerminalDeathPhase, TerminalQueryIntent,
+    DeathSummaryContext, DeathSummaryFieldCopy, DeathSummaryPresentation, DeathSummarySection,
+    DeathTimelinePresentation, DeathViewApplyDisposition, DeathViewApplyOutcome,
+    DeathViewClientError, DeathViewClientModel, DeathViewFailure, DeathViewProjectionError,
+    DeathViewRetryDirective, DeathViewUiCopy, MEMORIAL_IDENTITY_FILTER_BYTES,
+    MEMORIAL_MAX_CACHED_ENTRIES, MEMORIAL_MAX_CACHED_PAGES, MEMORIAL_PAGE_LIMIT,
+    MemorialDetailPhase, MemorialDetailQueryIntent, MemorialEntryPresentation, MemorialListPhase,
+    MemorialPageQueryIntent, MemorialWallModel, PendingDeathViewQuery, PendingDeathViewRequest,
+    TERMINAL_SUMMARY_LOSS_PAGE_LIMIT, TerminalDeathModel, TerminalDeathPhase, TerminalQueryIntent,
 };
 pub use network_play::{NetworkPlayConfig, run_network_playtest};
 pub use network_prediction::{

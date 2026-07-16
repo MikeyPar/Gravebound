@@ -45,6 +45,42 @@ pub struct DeathLocalizedValue {
     pub label: String,
 }
 
+/// Canonical labels shared by terminal and Memorial renderers.
+///
+/// Keeping these labels in the presentation boundary prevents a native widget from inventing
+/// field headings or reaching back into the content catalog at render time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeathSummaryFieldCopy {
+    pub attack: String,
+    pub cause: String,
+    pub class: String,
+    pub damage: String,
+    pub damage_type: String,
+    pub final_deed: String,
+    pub killer: String,
+    pub level: String,
+    pub lifetime: String,
+    pub network: String,
+    pub recall: String,
+    pub source_position: String,
+}
+
+/// Static, strictly compiled copy required by native death and Memorial surfaces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeathViewUiCopy {
+    pub fields: DeathSummaryFieldCopy,
+    pub memorial_title: String,
+    pub memorial_empty: String,
+    pub awaiting_commit: String,
+    pub awaiting_commit_detail: String,
+    pub loading_memorial: String,
+    pub loading_summary: String,
+    pub loading_trace: String,
+    pub back_action: String,
+    pub load_more_action: String,
+    pub retry_action: String,
+}
+
 /// Closed portrait policy. Explicit absence is valid only for the catalog's environment and
 /// connection-loss sources; an unknown policy is rejected during projection.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -278,6 +314,41 @@ pub enum DeathViewProjectionError {
     InvalidLossContinuation(&'static str),
     #[error("Memorial page is invalid: {0}")]
     InvalidMemorialPage(&'static str),
+}
+
+pub(crate) fn project_ui_copy(
+    catalog: &CoreDevelopmentDeathView,
+) -> Result<DeathViewUiCopy, DeathViewProjectionError> {
+    let field = |content_id| copy(catalog, CoreDeathViewCopyKind::Field, content_id);
+    let state = |content_id| copy(catalog, CoreDeathViewCopyKind::State, content_id);
+    let action = |content_id| copy(catalog, CoreDeathViewCopyKind::Action, content_id);
+    let surface = |content_id| copy(catalog, CoreDeathViewCopyKind::Surface, content_id);
+    Ok(DeathViewUiCopy {
+        fields: DeathSummaryFieldCopy {
+            attack: field("death.field.attack")?,
+            cause: field("death.field.cause")?,
+            class: field("death.field.class")?,
+            damage: field("death.field.damage")?,
+            damage_type: field("death.field.damage_type")?,
+            final_deed: field("death.field.final_deed")?,
+            killer: field("death.field.killer")?,
+            level: field("death.field.level")?,
+            lifetime: field("death.field.lifetime")?,
+            network: field("death.field.network")?,
+            recall: field("death.field.recall")?,
+            source_position: field("death.field.source_position")?,
+        },
+        memorial_title: surface("death.memorial.title")?,
+        memorial_empty: surface("death.memorial.empty")?,
+        awaiting_commit: state("death.state.awaiting_commit")?,
+        awaiting_commit_detail: state("death.state.awaiting_commit_detail")?,
+        loading_memorial: state("death.state.loading_memorial")?,
+        loading_summary: state("death.state.loading_summary")?,
+        loading_trace: state("death.state.loading_trace")?,
+        back_action: action("death.action.back")?,
+        load_more_action: action("death.action.load_more")?,
+        retry_action: action("death.action.retry")?,
+    })
 }
 
 pub(crate) fn validate_latest(
