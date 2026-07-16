@@ -181,13 +181,11 @@ async fn disposable_database() -> PostgresPersistence {
     reason = "fixture builds one complete restore aggregate"
 )]
 async fn reset_fixture(persistence: &PostgresPersistence) {
+    // Recall, extraction, and final-death histories are deliberately row-immutable. Integration
+    // isolation must therefore use the opt-in disposable-database reset rather than cascading an
+    // account DELETE through those production guards.
+    persistence.reset_disposable_identity_data().await.unwrap();
     let mut transaction = persistence.begin_transaction().await.unwrap();
-    sqlx::query("DELETE FROM accounts WHERE namespace_id=$1 AND account_id=$2")
-        .bind(WIPEABLE_CORE_NAMESPACE)
-        .bind(ACCOUNT_ID.as_slice())
-        .execute(transaction.connection())
-        .await
-        .unwrap();
     sqlx::query(
         "INSERT INTO accounts (namespace_id,account_id,state_version,slot_capacity) \
          VALUES ($1,$2,1,2)",
