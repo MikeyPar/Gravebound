@@ -45,6 +45,7 @@ mod oath;
 mod progression;
 mod progression_restore;
 mod recall_terminal;
+mod recall_terminal_repository;
 mod reward;
 mod safe_inventory;
 mod world_flow;
@@ -537,6 +538,35 @@ pub enum PersistenceError {
     ProductionExtractionPlanChanged,
     #[error("stored Recall request, plan, or result violates the approved terminal contract")]
     CorruptStoredRecall,
+    #[error("Recall identity was replayed with different canonical material")]
+    RecallIdempotencyConflict,
+    #[error("production Recall account or character does not exist")]
+    ProductionRecallOwnerNotFound,
+    #[error(
+        "production Recall expected different aggregate versions (account {account}, character {character}, world {world}, inventory {inventory}, life metrics {life_metrics}, progression {progression}, oath/bargain {oath_bargain}, Ash {ash_wallet})"
+    )]
+    ProductionRecallVersionMismatch {
+        account: u64,
+        character: u64,
+        world: u64,
+        inventory: u64,
+        life_metrics: u64,
+        progression: u64,
+        oath_bargain: u64,
+        ash_wallet: u64,
+    },
+    #[error("production Recall does not match selected living danger authority")]
+    ProductionRecallBindingMismatch,
+    #[error("production Recall content does not match the bound Core authority")]
+    ProductionRecallContentMismatch,
+    #[error("production Recall lost terminal authority to an already committed outcome")]
+    ProductionRecallTerminalSuperseded,
+    #[error("production Recall is blocked by an unresolved reward or item mutation")]
+    ProductionRecallUnresolvedMutation,
+    #[error("production Recall deterministic custody planning failed")]
+    ProductionRecallPlanningFailed,
+    #[error("production Recall plan changed after terminal preparation")]
+    ProductionRecallPlanChanged,
     #[error("stored live-deed evidence violates the approved v2 contract")]
     CorruptStoredLifeDeed,
     #[error("live-deed account, character, or aggregate authority does not exist")]
