@@ -1,0 +1,50 @@
+{
+  "report_schema": "gravebound.performance.gb-m03-06e.latency.v1",
+  "feature_id": "GB-M03-06E",
+  "sample_scope": "death-performance-not-final-25-full-loop-journeys",
+  "build_id": "m03-core-dev-identity-1",
+  "death_view_records_blake3": "349730a1246857978d1412510ee23af46624ec80dbb3333be42aad2e47f1f8e0",
+  "death_view_assets_blake3": "0160f06954c88aba61392f72af66031d6f7ff4a592beb24f7ebe9f1981cc7a68",
+  "death_view_localization_blake3": "c10bcc96887aac7db8c855f19d991e6185f46d1df39f7a37d3a31cb4b9ca1b92",
+  "sample_count": 10,
+  "terminal_commit_latency": {
+    "sample_count": 10,
+    "median_micros": 87065,
+    "p95_micros": 133060,
+    "maximum_micros": 133060
+  },
+  "exact_replay_latency": {
+    "sample_count": 10,
+    "median_micros": 3061,
+    "p95_micros": 7704,
+    "maximum_micros": 7704
+  },
+  "canonical_signature_query_latency": {
+    "sample_count": 10,
+    "median_micros": 26091,
+    "p95_micros": 29574,
+    "maximum_micros": 29574
+  },
+  "latest_round_trip_latency": {
+    "sample_count": 10,
+    "median_micros": 1641,
+    "p95_micros": 4943,
+    "maximum_micros": 4943
+  },
+  "summary_round_trip_latency": {
+    "sample_count": 10,
+    "median_micros": 5739,
+    "p95_micros": 7728,
+    "maximum_micros": 7728
+  },
+  "acknowledgement_to_interactive_latency": {
+    "sample_count": 10,
+    "median_micros": 7454,
+    "p95_micros": 12868,
+    "maximum_micros": 12868
+  },
+  "every_summary_interactive_under_two_seconds": true,
+  "zero_transport_task_session_transaction_and_lock_residue": true,
+  "accepted": true,
+  "raw_report_hash_blake3": "85ac4d3735ae7e862de028cf68067936dbf51c2d2a36dd5405f4bfb9fcd58395"
+}
