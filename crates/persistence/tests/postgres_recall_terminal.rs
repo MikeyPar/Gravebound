@@ -78,6 +78,10 @@ fn request(trigger: ProductionRecallTriggerV1) -> ProductionRecallCommitRequestV
             ProductionRecallTriggerV1::Explicit => Some(77),
             ProductionRecallTriggerV1::LinkLost => None,
         },
+        explicit_client_tick: match trigger {
+            ProductionRecallTriggerV1::Explicit => Some(78),
+            ProductionRecallTriggerV1::LinkLost => None,
+        },
         instance_lineage_id: LINEAGE_ID,
         entry_restore_point_id: RESTORE_POINT_ID,
         expected_versions: ProductionRecallExpectedVersionsV1 {
@@ -465,6 +469,7 @@ async fn explicit_recall_is_atomic_replay_safe_and_restart_durable() {
     assert_eq!(result.versions.account.pre, result.versions.account.post);
     assert_eq!(result.post_lifetime_ticks, 12_012);
     assert_eq!(result.post_permadeath_combat_ticks, 10_012);
+    assert_eq!(result.explicit_client_tick, Some(78));
     assert!(matches!(
         result.destroyed_items[0].source,
         StoredRecallLocationV1::RunBackpack(0)
@@ -493,6 +498,14 @@ async fn explicit_recall_is_atomic_replay_safe_and_restart_durable() {
         replayed,
         ProductionRecallTransactionV1::Replayed(result.clone())
     );
+    let mut altered_client_tick = request.clone();
+    altered_client_tick.explicit_client_tick = Some(79);
+    assert!(matches!(
+        reconnected
+            .prepare_production_recall_v1(&altered_client_tick)
+            .await,
+        Err(PersistenceError::RecallIdempotencyConflict)
+    ));
     let recovered = reconnected
         .load_committed_recall_terminal_v1(ACCOUNT_ID, CHARACTER_ID)
         .await
@@ -676,6 +689,7 @@ async fn link_lost_uses_ninety_ticks_and_altered_replay_is_audited_once() {
     assert_eq!(result.post_lifetime_ticks, 12_090);
     assert_eq!(result.post_permadeath_combat_ticks, 10_090);
     assert!(result.request_sequence.is_none());
+    assert!(result.explicit_client_tick.is_none());
 
     let mut altered = request.clone();
     altered.final_permadeath_combat_ticks += 1;

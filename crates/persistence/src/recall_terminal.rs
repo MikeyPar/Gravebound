@@ -30,6 +30,7 @@ pub const MAX_PRODUCTION_RECALL_DESTROYED_MATERIALS: usize = 4;
 const ID_BYTES: usize = 16;
 const HASH_BYTES: usize = 32;
 const MAX_RESULT_BYTES: usize = 1_048_576;
+const MAX_POSTGRES_BIGINT_U64: u64 = 9_223_372_036_854_775_807;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProductionRecallTriggerV1 {
@@ -98,6 +99,7 @@ pub struct ProductionRecallCommitRequestV1 {
     pub terminal_id: [u8; ID_BYTES],
     pub trigger: ProductionRecallTriggerV1,
     pub request_sequence: Option<u32>,
+    pub explicit_client_tick: Option<u64>,
     pub instance_lineage_id: [u8; ID_BYTES],
     pub entry_restore_point_id: [u8; ID_BYTES],
     pub expected_versions: ProductionRecallExpectedVersionsV1,
@@ -114,8 +116,13 @@ impl ProductionRecallCommitRequestV1 {
         let request_binding_valid = match self.trigger {
             ProductionRecallTriggerV1::Explicit => {
                 self.request_sequence.is_some_and(|sequence| sequence != 0)
+                    && self
+                        .explicit_client_tick
+                        .is_some_and(|tick| (1..=MAX_POSTGRES_BIGINT_U64).contains(&tick))
             }
-            ProductionRecallTriggerV1::LinkLost => self.request_sequence.is_none(),
+            ProductionRecallTriggerV1::LinkLost => {
+                self.request_sequence.is_none() && self.explicit_client_tick.is_none()
+            }
         };
         if self.contract_version != PRODUCTION_RECALL_CONTRACT_VERSION_V1
             || self.namespace_id != WIPEABLE_CORE_NAMESPACE
@@ -433,6 +440,7 @@ pub struct StoredProductionRecallResultV1 {
     pub result_code: u8,
     pub trigger: ProductionRecallTriggerV1,
     pub request_sequence: Option<u32>,
+    pub explicit_client_tick: Option<u64>,
     pub issued_at_unix_ms: u64,
     pub trigger_started_tick: u64,
     pub completion_tick: u64,
@@ -454,8 +462,13 @@ impl StoredProductionRecallResultV1 {
         let request_binding_valid = match self.trigger {
             ProductionRecallTriggerV1::Explicit => {
                 self.request_sequence.is_some_and(|sequence| sequence != 0)
+                    && self
+                        .explicit_client_tick
+                        .is_some_and(|tick| (1..=MAX_POSTGRES_BIGINT_U64).contains(&tick))
             }
-            ProductionRecallTriggerV1::LinkLost => self.request_sequence.is_none(),
+            ProductionRecallTriggerV1::LinkLost => {
+                self.request_sequence.is_none() && self.explicit_client_tick.is_none()
+            }
         };
         if self.contract_version != PRODUCTION_RECALL_CONTRACT_VERSION_V1
             || self.namespace_id != WIPEABLE_CORE_NAMESPACE
@@ -694,6 +707,10 @@ mod tests {
                 ProductionRecallTriggerV1::Explicit => Some(5),
                 ProductionRecallTriggerV1::LinkLost => None,
             },
+            explicit_client_tick: match trigger {
+                ProductionRecallTriggerV1::Explicit => Some(6),
+                ProductionRecallTriggerV1::LinkLost => None,
+            },
             instance_lineage_id: [6; 16],
             entry_restore_point_id: [7; 16],
             expected_versions: ProductionRecallExpectedVersionsV1 {
@@ -769,6 +786,7 @@ mod tests {
             result_code: 1,
             trigger,
             request_sequence: request.request_sequence,
+            explicit_client_tick: request.explicit_client_tick,
             issued_at_unix_ms: request.issued_at_unix_ms,
             trigger_started_tick: request.trigger_started_tick,
             completion_tick: request.completion_tick,
@@ -800,9 +818,15 @@ mod tests {
         let explicit = request(ProductionRecallTriggerV1::Explicit);
         explicit.validate().unwrap();
         let explicit_hash = explicit.canonical_hash().unwrap();
+        assert_eq!(explicit.explicit_client_tick, Some(6));
         let link_lost = request(ProductionRecallTriggerV1::LinkLost);
         link_lost.validate().unwrap();
+        assert_eq!(link_lost.explicit_client_tick, None);
         assert_ne!(link_lost.canonical_hash().unwrap(), explicit_hash);
+
+        let mut altered_tick = explicit.clone();
+        altered_tick.explicit_client_tick = Some(7);
+        assert_ne!(altered_tick.canonical_hash().unwrap(), explicit_hash);
 
         let mut invalid = explicit;
         invalid.completion_tick -= 1;
@@ -811,8 +835,15 @@ mod tests {
             Err(PersistenceError::CorruptStoredRecall)
         ));
 
-        let mut invalid = link_lost;
+        let mut invalid = link_lost.clone();
         invalid.request_sequence = Some(1);
+        assert!(matches!(
+            invalid.validate(),
+            Err(PersistenceError::CorruptStoredRecall)
+        ));
+
+        let mut invalid = link_lost;
+        invalid.explicit_client_tick = Some(1);
         assert!(matches!(
             invalid.validate(),
             Err(PersistenceError::CorruptStoredRecall)

@@ -36,6 +36,7 @@ pub const PRODUCTION_RECALL_MOVEMENT_BASIS_POINTS: u16 =
 
 const MUTATION_ID_CONTEXT: &str = "gravebound.production-recall-channel-mutation.v1";
 const TERMINAL_ID_CONTEXT: &str = "gravebound.production-recall-channel-terminal.v1";
+const MAX_DURABLE_CLIENT_TICK: u64 = 9_223_372_036_854_775_807;
 
 pub trait ProductionRecallClock: Send + Sync {
     fn unix_millis(&self) -> u64;
@@ -423,7 +424,10 @@ where
             character_id: frame.character_id,
             code,
         };
-        if frame.validate().is_err() || authority.validate().is_err() {
+        if frame.validate().is_err()
+            || frame.client_tick > MAX_DURABLE_CLIENT_TICK
+            || authority.validate().is_err()
+        {
             return rejection(TerminalInventoryRejectionCodeV1::InvalidRequest);
         }
         if authenticated.namespace != AuthenticatedNamespace::WipeableTest
@@ -533,6 +537,7 @@ where
                     authority,
                     ProductionRecallTriggerV1::Explicit,
                     Some(channel.request_sequence),
+                    Some(channel.client_tick),
                     channel.issued_at_unix_ms,
                     channel.started_tick,
                     channel.completion_tick,
@@ -585,6 +590,7 @@ where
         authority.completion.character_id,
         &authority.completion,
         ProductionRecallTriggerV1::LinkLost,
+        None,
         None,
         authority.issued_at_unix_ms,
         authority.lost_tick,
@@ -643,6 +649,7 @@ fn recall_request(
     authority: &ProductionRecallCompletionAuthorityV1,
     trigger: ProductionRecallTriggerV1,
     request_sequence: Option<u32>,
+    explicit_client_tick: Option<u64>,
     issued_at_unix_ms: u64,
     trigger_started_tick: u64,
     completion_tick: u64,
@@ -687,6 +694,7 @@ fn recall_request(
         terminal_id,
         trigger,
         request_sequence,
+        explicit_client_tick,
         instance_lineage_id: authority.instance_lineage_id,
         entry_restore_point_id: authority.entry_restore_point_id,
         expected_versions: authority.expected_versions,
@@ -1052,6 +1060,7 @@ mod tests {
         assert_eq!(prepared.request().trigger_started_tick, 100);
         assert_eq!(prepared.request().completion_tick, 112);
         assert_eq!(prepared.request().request_sequence, Some(7));
+        assert_eq!(prepared.request().explicit_client_tick, Some(9_999));
         assert_eq!(prepared.request().issued_at_unix_ms, 50);
         assert_ne!(
             prepared.request().mutation_id,
@@ -1251,6 +1260,7 @@ mod tests {
         assert_eq!(prepared.request().trigger_started_tick, 200);
         assert_eq!(prepared.request().completion_tick, 290);
         assert_eq!(prepared.request().request_sequence, None);
+        assert_eq!(prepared.request().explicit_client_tick, None);
     }
 
     #[tokio::test]
@@ -1361,6 +1371,11 @@ mod tests {
         let repeated = repeated.last_request();
         assert_eq!(explicit.mutation_id, repeated.mutation_id);
         assert_eq!(explicit.terminal_id, repeated.terminal_id);
+        assert_ne!(
+            explicit.canonical_hash().unwrap(),
+            repeated.canonical_hash().unwrap(),
+            "client tick is diagnostic identity material even though the server terminal IDs remain stable"
+        );
     }
 
     #[test]
@@ -1370,6 +1385,15 @@ mod tests {
         malformed.client_tick = 0;
         assert!(matches!(
             channel.handle(authenticated(), start_authority(100), &malformed),
+            RecallResultV1::Rejected {
+                code: TerminalInventoryRejectionCodeV1::InvalidRequest,
+                ..
+            }
+        ));
+
+        let oversized_tick = frame(7, MAX_DURABLE_CLIENT_TICK + 1, RecallIntentV1::Start);
+        assert!(matches!(
+            channel.handle(authenticated(), start_authority(100), &oversized_tick),
             RecallResultV1::Rejected {
                 code: TerminalInventoryRejectionCodeV1::InvalidRequest,
                 ..

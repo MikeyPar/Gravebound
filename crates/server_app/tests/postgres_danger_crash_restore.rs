@@ -887,6 +887,7 @@ async fn commit_recall_terminal(persistence: &PostgresPersistence, ids: FixedIds
         terminal_id: [199; 16],
         trigger: ProductionRecallTriggerV1::Explicit,
         request_sequence: Some(1),
+        explicit_client_tick: Some(1),
         instance_lineage_id: ids.lineage,
         entry_restore_point_id: ids.restore,
         expected_versions: ProductionRecallExpectedVersionsV1 {

@@ -629,6 +629,10 @@ mod tests {
                 ProductionRecallTriggerV1::Explicit => Some(7),
                 ProductionRecallTriggerV1::LinkLost => None,
             },
+            explicit_client_tick: match trigger {
+                ProductionRecallTriggerV1::Explicit => Some(8),
+                ProductionRecallTriggerV1::LinkLost => None,
+            },
             instance_lineage_id: [5; 16],
             entry_restore_point_id: [6; 16],
             expected_versions: ProductionRecallExpectedVersionsV1 {
@@ -726,6 +730,7 @@ mod tests {
             result_code: 1,
             trigger: request.trigger,
             request_sequence: request.request_sequence,
+            explicit_client_tick: request.explicit_client_tick,
             issued_at_unix_ms: request.issued_at_unix_ms,
             trigger_started_tick: request.trigger_started_tick,
             completion_tick: request.completion_tick,

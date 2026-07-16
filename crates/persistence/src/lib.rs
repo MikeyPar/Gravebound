@@ -248,7 +248,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 57;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 58;
 const DISPOSABLE_DATABASE_RESET_SQL: &str = "TRUNCATE TABLE accounts, caldus_victory_exits CASCADE";
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -1684,7 +1684,7 @@ mod tests {
     #[test]
     fn deferred_death_graph_consumes_provenance_without_forking_its_closure() {
         assert_eq!(
-            EXPECTED_SCHEMA_VERSION, 57,
+            EXPECTED_SCHEMA_VERSION, 58,
             "readiness must advance with the latest published migration"
         );
         let migration = include_str!("../../../migrations/0054_death_provenance_echo_closure.sql");
@@ -1767,7 +1767,7 @@ mod tests {
     #[test]
     fn atomic_extraction_terminal_is_normalized_replay_first_and_fail_closed() {
         assert_eq!(
-            EXPECTED_SCHEMA_VERSION, 57,
+            EXPECTED_SCHEMA_VERSION, 58,
             "readiness must advance with the latest published terminal migration"
         );
         let migration = include_str!("../../../migrations/0056_atomic_extraction_terminal_v1.sql");
@@ -1820,7 +1820,7 @@ mod tests {
     #[test]
     fn atomic_recall_terminal_is_normalized_clock_complete_and_fail_closed() {
         assert_eq!(
-            EXPECTED_SCHEMA_VERSION, 57,
+            EXPECTED_SCHEMA_VERSION, 58,
             "readiness must advance with the atomic Recall terminal migration"
         );
         let migration = include_str!("../../../migrations/0057_atomic_recall_terminal_v1.sql");
@@ -1868,6 +1868,43 @@ mod tests {
             assert!(
                 !migration.contains(prohibited),
                 "atomic Recall terminal migration leaked {prohibited}"
+            );
+        }
+    }
+
+    #[test]
+    fn recall_explicit_replay_identity_is_additive_exact_and_wipeable() {
+        let migration =
+            include_str!("../../../migrations/0058_recall_explicit_replay_identity.sql");
+        for required in [
+            "Gravebound_Production_GDD_v1_Canonical.md",
+            "Gravebound_Content_Production_Spec_v1.md",
+            "Gravebound_Development_Roadmap_v1.md",
+            "SPEC-CONFLICT-029-m03-extraction-recall-terminal-authority.md",
+            "0058 requires an empty pre-gate Recall terminal graph",
+            "ADD COLUMN explicit_client_tick BIGINT",
+            "explicit_client_tick BETWEEN 1 AND 9223372036854775807",
+            "explicit_client_tick IS NULL",
+            "completion_tick = trigger_started_tick + 12",
+            "completion_tick = trigger_started_tick + 90",
+            "mandatory altered-replay material",
+            "Published migration history must never",
+        ] {
+            assert!(migration.contains(required), "migration omitted {required}");
+        }
+        for prohibited in [
+            "DROP TABLE",
+            "TRUNCATE",
+            "DELETE FROM",
+            "UPDATE character_recall_terminal_results_v1",
+            "JSON",
+            "JSONB",
+            "FLOAT",
+            "DOUBLE PRECISION",
+        ] {
+            assert!(
+                !migration.contains(prohibited),
+                "Recall replay-identity migration leaked {prohibited}"
             );
         }
     }

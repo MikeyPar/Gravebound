@@ -126,6 +126,7 @@ impl LockedProductionRecallPlan {
             result_code: 1,
             trigger: request.trigger,
             request_sequence: request.request_sequence,
+            explicit_client_tick: request.explicit_client_tick,
             issued_at_unix_ms: request.issued_at_unix_ms,
             trigger_started_tick: request.trigger_started_tick,
             completion_tick: request.completion_tick,
@@ -335,6 +336,7 @@ fn exact_recall_request_replay(
         && stored.terminal_id == request.terminal_id
         && stored.trigger == request.trigger
         && stored.request_sequence == request.request_sequence
+        && stored.explicit_client_tick == request.explicit_client_tick
         && stored.trigger_started_tick == request.trigger_started_tick
         && stored.completion_tick == request.completion_tick
         && stored.post_lifetime_ticks == request.final_lifetime_ticks
@@ -1033,6 +1035,7 @@ async fn insert_recall_terminal_root(
     result_payload: &[u8],
 ) -> Result<(), PersistenceError> {
     let sequence = request.request_sequence.map(i64::from);
+    let explicit_client_tick = request.explicit_client_tick.map(i64_value).transpose()?;
     let inserted = sqlx::query(
         "INSERT INTO character_recall_terminal_results_v1
          (namespace_id,account_id,character_id,mutation_id,terminal_id,
@@ -1049,11 +1052,11 @@ async fn insert_recall_terminal_root(
           pre_permadeath_combat_ticks,post_permadeath_combat_ticks,
           preserved_progression_version,preserved_oath_bargain_version,
           preserved_ash_wallet_version,stabilized_item_count,destroyed_item_count,
-          destroyed_material_stack_count,result_code)
+          destroyed_material_stack_count,explicit_client_tick,result_code)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
                  $18,$19,$20,to_timestamp($21::double precision/1000.0),$22,$23,
                  0,0,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,
-                 $38,$39,$40,$41,$42,$43,1)",
+                 $38,$39,$40,$41,$42,$43,$44,1)",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(request.account_id.as_slice())
@@ -1098,6 +1101,7 @@ async fn insert_recall_terminal_root(
     .bind(i16::try_from(result.stabilized_items.len()).map_err(|_| corrupt())?)
     .bind(i32::try_from(result.destroyed_items.len()).map_err(|_| corrupt())?)
     .bind(i16::try_from(result.destroyed_materials.len()).map_err(|_| corrupt())?)
+    .bind(explicit_client_tick)
     .execute(connection)
     .await?
     .rows_affected();

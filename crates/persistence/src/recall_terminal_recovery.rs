@@ -27,7 +27,7 @@ const LINEAGE_CLOSED_SUCCESS: i16 = 2;
 
 const TERMINAL_ROOT_SQL: &str =
     "SELECT account_id,character_id,mutation_id,terminal_id,contract_version,
-            terminal_kind,trigger_kind,explicit_request_sequence,
+            terminal_kind,trigger_kind,explicit_request_sequence,explicit_client_tick,
             canonical_request_hash,canonical_plan_hash,result_hash,result_payload,
             instance_lineage_id,entry_restore_point_id,source_content_id,
             destination_content_id,records_blake3,assets_blake3,localization_blake3,
@@ -420,6 +420,7 @@ fn terminal_from_root(
     let result = StoredProductionRecallResultV1::decode(&required_bytes(row, "result_payload")?)?;
     let result_hash = required_hash(row, "result_hash")?;
     let request_sequence = optional_positive_u32(row, "explicit_request_sequence")?;
+    let explicit_client_tick = optional_positive_u64(row, "explicit_client_tick")?;
     let trigger = trigger_from_code(
         required_i16(row, "terminal_kind")?,
         required_i16(row, "trigger_kind")?,
@@ -433,6 +434,7 @@ fn terminal_from_root(
         || result.contract_version != positive_u16(required_i16(row, "contract_version")?)?
         || result.trigger != trigger
         || result.request_sequence != request_sequence
+        || result.explicit_client_tick != explicit_client_tick
         || result.canonical_request_hash != required_hash(row, "canonical_request_hash")?
         || result.canonical_plan_hash != required_hash(row, "canonical_plan_hash")?
         || result.digest()? != result_hash
@@ -845,6 +847,13 @@ fn optional_positive_u32(
         .transpose()
 }
 
+fn optional_positive_u64(
+    row: &sqlx::postgres::PgRow,
+    column: &str,
+) -> Result<Option<u64>, PersistenceError> {
+    optional_i64(row, column)?.map(positive_u64).transpose()
+}
+
 fn positive_u64(value: i64) -> Result<u64, PersistenceError> {
     u64::try_from(value)
         .ok()
@@ -960,6 +969,7 @@ mod tests {
             result_code: 1,
             trigger: ProductionRecallTriggerV1::Explicit,
             request_sequence: Some(1),
+            explicit_client_tick: Some(2),
             issued_at_unix_ms: 10,
             trigger_started_tick: 20,
             completion_tick: 32,
@@ -1034,6 +1044,7 @@ mod tests {
     fn recovery_queries_cover_immutable_and_current_authorities() {
         for required in [
             "FROM character_recall_terminal_results_v1",
+            "explicit_client_tick",
             "JOIN character_entry_restore_points AS root",
             "JOIN character_instance_lineages AS lineage",
             "recall_terminal_audit_events_v1",
