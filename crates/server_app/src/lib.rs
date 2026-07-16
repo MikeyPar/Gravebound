@@ -24,6 +24,7 @@ mod instance;
 mod lifecycle;
 mod live_damage_trace_service;
 mod oath_selection;
+mod production_extraction;
 mod progression_award;
 mod progression_query;
 mod progression_restore_provider;
@@ -120,6 +121,12 @@ pub use live_damage_trace_service::{
     PreparedTerminalLiveDamageTrace,
 };
 pub use oath_selection::{CoreOathSelectionAuthority, PostgresOathSelectionService};
+pub use production_extraction::{
+    PostgresProductionExtractionExecutionService, ProductionExtractionExecutionError,
+    ProductionExtractionExecutionOutcome, ProductionExtractionExecutionService,
+    ProductionExtractionReplayOutcome, ProductionExtractionWriter,
+    committed_extraction_terminal_receipt, production_extraction_terminal_candidate,
+};
 pub use progression_award::{
     CoreProgressionRules, ProgressionAwardCode, ProgressionAwardCommand, ProgressionAwardContext,
     ProgressionAwardError, ProgressionAwardEvidence, ProgressionAwardOutcome,
