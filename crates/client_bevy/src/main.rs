@@ -45,6 +45,17 @@ enum CoreEquipmentEvidenceStateArg {
     IconMatrix,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CoreDeathViewEvidenceStateArg {
+    Summary,
+    SummaryActions,
+    SummaryTrace,
+    MemorialList,
+    MemorialDetail,
+    AwaitingCommit,
+    RecoverableError,
+}
+
 impl From<CoreTransitionEvidenceStateArg> for client_bevy::CoreTransitionShowcaseState {
     fn from(value: CoreTransitionEvidenceStateArg) -> Self {
         match value {
@@ -56,6 +67,35 @@ impl From<CoreTransitionEvidenceStateArg> for client_bevy::CoreTransitionShowcas
             CoreTransitionEvidenceStateArg::Reconnecting => Self::Reconnecting,
             CoreTransitionEvidenceStateArg::SameStateRecovery => Self::SameStateRecovery,
             CoreTransitionEvidenceStateArg::HallResolution => Self::HallResolution,
+        }
+    }
+}
+
+impl From<CoreDeathViewEvidenceStateArg> for client_bevy::CoreDeathViewShowcaseState {
+    fn from(value: CoreDeathViewEvidenceStateArg) -> Self {
+        match value {
+            CoreDeathViewEvidenceStateArg::Summary => Self::Summary,
+            CoreDeathViewEvidenceStateArg::SummaryActions => Self::SummaryActions,
+            CoreDeathViewEvidenceStateArg::SummaryTrace => Self::SummaryTrace,
+            CoreDeathViewEvidenceStateArg::MemorialList => Self::MemorialList,
+            CoreDeathViewEvidenceStateArg::MemorialDetail => Self::MemorialDetail,
+            CoreDeathViewEvidenceStateArg::AwaitingCommit => Self::AwaitingCommit,
+            CoreDeathViewEvidenceStateArg::RecoverableError => Self::RecoverableError,
+        }
+    }
+}
+
+impl From<CoreCaldusEvidenceStateArg> for client_bevy::CoreCaldusShowcaseState {
+    fn from(value: CoreCaldusEvidenceStateArg) -> Self {
+        match value {
+            CoreCaldusEvidenceStateArg::Staging => Self::Staging,
+            CoreCaldusEvidenceStateArg::Introduction => Self::Introduction,
+            CoreCaldusEvidenceStateArg::PhaseOne => Self::PhaseOne,
+            CoreCaldusEvidenceStateArg::ChargePressure => Self::ChargePressure,
+            CoreCaldusEvidenceStateArg::FinalRings => Self::FinalRings,
+            CoreCaldusEvidenceStateArg::VictoryExit => Self::VictoryExit,
+            CoreCaldusEvidenceStateArg::ExtractionCommitted => Self::ExtractionCommitted,
+            CoreCaldusEvidenceStateArg::HallArrival => Self::HallArrival,
         }
     }
 }
@@ -148,6 +188,17 @@ enum Command {
         #[arg(long)]
         reduced_effects: bool,
     },
+    /// Open the disposable GB-M03-06D native death-summary and Memorial evidence surface.
+    CoreDeathViewShowcase {
+        #[arg(long, default_value = "content")]
+        content_root: PathBuf,
+        #[arg(long)]
+        reduced_effects: bool,
+        #[arg(long, default_value_t = 100)]
+        ui_scale: u16,
+        #[arg(long, value_enum, default_value_t = CoreDeathViewEvidenceStateArg::Summary)]
+        state: CoreDeathViewEvidenceStateArg,
+    },
 }
 
 fn main() {
@@ -212,32 +263,7 @@ fn run() -> anyhow::Result<()> {
         } => client_bevy::run_core_caldus_showcase(client_bevy::CoreCaldusShowcaseConfig {
             content_root,
             reduced_effects,
-            state: match state {
-                CoreCaldusEvidenceStateArg::Staging => {
-                    client_bevy::CoreCaldusShowcaseState::Staging
-                }
-                CoreCaldusEvidenceStateArg::Introduction => {
-                    client_bevy::CoreCaldusShowcaseState::Introduction
-                }
-                CoreCaldusEvidenceStateArg::PhaseOne => {
-                    client_bevy::CoreCaldusShowcaseState::PhaseOne
-                }
-                CoreCaldusEvidenceStateArg::ChargePressure => {
-                    client_bevy::CoreCaldusShowcaseState::ChargePressure
-                }
-                CoreCaldusEvidenceStateArg::FinalRings => {
-                    client_bevy::CoreCaldusShowcaseState::FinalRings
-                }
-                CoreCaldusEvidenceStateArg::VictoryExit => {
-                    client_bevy::CoreCaldusShowcaseState::VictoryExit
-                }
-                CoreCaldusEvidenceStateArg::ExtractionCommitted => {
-                    client_bevy::CoreCaldusShowcaseState::ExtractionCommitted
-                }
-                CoreCaldusEvidenceStateArg::HallArrival => {
-                    client_bevy::CoreCaldusShowcaseState::HallArrival
-                }
-            },
+            state: state.into(),
         }),
         Command::CoreTransitionShowcase {
             content_root,
@@ -253,6 +279,12 @@ fn run() -> anyhow::Result<()> {
             content_root,
             reduced_effects,
         } => run_item_lifecycle_showcase(content_root, reduced_effects),
+        Command::CoreDeathViewShowcase {
+            content_root,
+            reduced_effects,
+            ui_scale,
+            state,
+        } => run_death_view_showcase(content_root, reduced_effects, ui_scale, state),
     }
 }
 
@@ -281,6 +313,20 @@ fn run_item_lifecycle_showcase(content_root: PathBuf, reduced_effects: bool) -> 
     client_bevy::run_core_item_lifecycle_showcase(&client_bevy::CoreItemLifecycleShowcaseConfig {
         content_root,
         reduced_effects,
+    })
+}
+
+fn run_death_view_showcase(
+    content_root: PathBuf,
+    reduced_effects: bool,
+    ui_scale_percent: u16,
+    state: CoreDeathViewEvidenceStateArg,
+) -> anyhow::Result<()> {
+    client_bevy::run_core_death_view_showcase(&client_bevy::CoreDeathViewShowcaseConfig {
+        content_root,
+        reduced_effects,
+        ui_scale_percent,
+        state: state.into(),
     })
 }
 

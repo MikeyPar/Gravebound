@@ -7,6 +7,7 @@ mod bargain_ui;
 mod combat;
 mod consumable;
 mod core_caldus_showcase;
+mod core_death_view_showcase;
 mod core_encounter_showcase;
 mod core_equipment_showcase;
 mod core_identity;
@@ -16,6 +17,7 @@ mod core_world_showcase;
 mod core_world_transition;
 mod death;
 mod death_view;
+mod death_view_ui;
 mod debug_overlay;
 mod developer_tools;
 mod encounter;
@@ -64,6 +66,9 @@ pub use combat::{AbilityOneBindings, CombatInputGate, PrimaryFireBindings};
 pub use core_caldus_showcase::{
     CoreCaldusShowcaseConfig, CoreCaldusShowcaseState, run_core_caldus_showcase,
 };
+pub use core_death_view_showcase::{
+    CoreDeathViewShowcaseConfig, CoreDeathViewShowcaseState, run_core_death_view_showcase,
+};
 pub use core_encounter_showcase::{CoreEncounterShowcaseConfig, run_core_encounter_showcase};
 pub use core_equipment_showcase::{
     CoreEquipmentShowcaseConfig, CoreEquipmentShowcaseState, run_core_equipment_showcase,
@@ -100,6 +105,17 @@ pub use death_view::{
     MemorialDetailPhase, MemorialDetailQueryIntent, MemorialEntryPresentation, MemorialListPhase,
     MemorialPageQueryIntent, MemorialWallModel, PendingDeathViewQuery, PendingDeathViewRequest,
     TERMINAL_SUMMARY_LOSS_PAGE_LIMIT, TerminalDeathModel, TerminalDeathPhase, TerminalQueryIntent,
+};
+pub use death_view_ui::{
+    DEATH_FONT_BOLD_BLAKE3, DEATH_FONT_BOLD_PATH, DEATH_FONT_REGULAR_BLAKE3,
+    DEATH_FONT_REGULAR_PATH, DEATH_PORTRAIT_CELL_PIXELS, DEATH_PORTRAIT_COLUMNS,
+    DEATH_PORTRAIT_ROWS, DEATH_PORTRAIT_RUNTIME_BLAKE3, DEATH_PORTRAIT_RUNTIME_PATH, DeathUiAction,
+    DeathUiActionEmphasis, DeathUiActionSpec, DeathUiActivity, DeathUiAvailability, DeathUiCommand,
+    DeathUiConfig, DeathUiFocusOrder, DeathUiFocusRequest, DeathUiLayoutMode, DeathUiMetrics,
+    DeathUiRenderReadiness, DeathUiScrollRequest, DeathUiScrollState, DeathUiSnapshot,
+    DeathUiSnapshotError, DeathUiStatus, DeathUiSurface, DeathUiTraceMode, NativeDeathView,
+    NativeDeathViewPlugin, portrait_atlas_index, validate_death_portrait_atlas,
+    validate_death_ui_assets,
 };
 pub use network_play::{NetworkPlayConfig, run_network_playtest};
 pub use network_prediction::{

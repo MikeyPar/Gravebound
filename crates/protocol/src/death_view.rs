@@ -29,7 +29,7 @@ pub const DEATH_VIEW_MAX_TRACE_ENTRIES_PER_PAGE: u8 = 8;
 pub const DEATH_VIEW_MAX_TRACE_ENTRIES: u16 = 4_096;
 pub const DEATH_VIEW_TRACE_WINDOW_TICKS: u64 = 300;
 
-const DEATH_SUMMARY_REVISION: u16 = 1;
+pub const DEATH_SUMMARY_REVISION: u16 = 1;
 const PRESERVED_CONTENT_IDS: [&str; 5] = [
     "projection.preserved.account_records",
     "projection.preserved.currency",
