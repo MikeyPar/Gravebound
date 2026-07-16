@@ -200,7 +200,7 @@ async fn reset_fixture(persistence: &PostgresPersistence) {
          ($1,$2,$3,$4,'item.weapon.crossbow.pine_crossbow',$5,
           0,10,0,0,$2,0,0,1,0,0,0,0,0,0),
          ($1,$6,$3,$4,'consumable.red_tonic',$5,
-          1,NULL,NULL,0,$6,1,0,1,0,1,0,1,0,0)",
+          1,NULL,NULL,0,$6,1,0,1,0,1,0,4,0,0)",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(EQUIPPED_ITEM_UID.as_slice())
