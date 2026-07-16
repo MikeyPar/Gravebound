@@ -149,7 +149,7 @@ jobs:
       - name: Install optimized native rendering dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends --yes clang lld libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev mesa-vulkan-drivers vulkan-tools xvfb xauth
+          sudo apt-get install --no-install-recommends --yes clang lld libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev libxkbcommon-x11-0 mesa-vulkan-drivers vulkan-tools xvfb xauth
       - name: Install pinned Rust toolchain
         run: rustup show active-toolchain
       - name: Download authenticated death evidence source
