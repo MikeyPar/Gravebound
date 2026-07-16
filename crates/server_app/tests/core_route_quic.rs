@@ -7,6 +7,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "support/death_measurement.rs"]
+mod death_measurement;
 #[path = "support/durable_death.rs"]
 mod durable_death_fixture;
 
@@ -199,6 +201,21 @@ async fn canonical_death_terminal_signature(
     signature.canonical_bytes().unwrap();
     assert_ne!(signature.digest().unwrap(), [0; 32]);
     signature
+}
+
+async fn assert_zero_death_database_residue(persistence: &PostgresPersistence) {
+    let residue = death_measurement::PostgresResidueSnapshotV1::capture(persistence)
+        .await
+        .unwrap();
+    assert!(
+        residue.is_zero(),
+        "death journey retained PostgreSQL work: {residue:?}"
+    );
+}
+
+async fn assert_complete_death_evidence(persistence: &PostgresPersistence) {
+    durable_death_fixture::assert_committed_graph(persistence).await;
+    assert_zero_death_database_residue(persistence).await;
 }
 
 fn disposable_world_flow(
@@ -1256,7 +1273,7 @@ async fn committed_death_survives_response_loss_and_full_process_restart_over_re
         canonical_death_terminal_signature(&restarted).await,
         before_response_loss_signature
     );
-    durable_death_fixture::assert_committed_graph(&restarted).await;
+    assert_complete_death_evidence(&restarted).await;
     restarted.close().await;
 }
 
