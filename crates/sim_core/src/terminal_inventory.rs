@@ -136,7 +136,6 @@ pub fn plan_successful_extraction(
         .ok_or(TerminalInventoryError::ArithmeticOverflow)?;
     let items = plan_extraction_items(snapshot)?;
     let material_credits = plan_material_credits(&snapshot.materials)?;
-    let inventory_changed = !items.placements.is_empty();
     let account_changed = !material_credits.is_empty()
         || items.placements.iter().any(|placement| {
             matches!(
@@ -144,14 +143,14 @@ pub fn plan_successful_extraction(
                 TerminalInventoryLocation::Vault(_) | TerminalInventoryLocation::Overflow(_)
             ) && placement.source != placement.destination
         });
-    let post_inventory_version = if inventory_changed {
-        snapshot
-            .inventory_version
-            .checked_add(1)
-            .ok_or(TerminalInventoryError::ArithmeticOverflow)?
-    } else {
-        snapshot.inventory_version
-    };
+    // The terminal transaction itself is an authoritative inventory boundary even when an
+    // adverse/corruptible test fixture owns no item rows. Protocol 1.15 and SPEC-CONFLICT-029
+    // require the accepted inventory aggregate to advance exactly once, which also prevents an
+    // empty extraction from sharing a version with a later competing mutation.
+    let post_inventory_version = snapshot
+        .inventory_version
+        .checked_add(1)
+        .ok_or(TerminalInventoryError::ArithmeticOverflow)?;
     let post_account_version = if account_changed {
         snapshot
             .account_version
@@ -699,13 +698,13 @@ mod tests {
     }
 
     #[test]
-    fn empty_extraction_is_a_true_inventory_noop_with_exact_deadline() {
+    fn empty_extraction_still_advances_the_terminal_inventory_boundary() {
         let snapshot = empty_snapshot();
         let plan = plan_successful_extraction(&snapshot).unwrap();
         assert!(plan.placements.is_empty());
         assert!(plan.material_credits.is_empty());
         assert_eq!(plan.post_account_version, 4);
-        assert_eq!(plan.post_inventory_version, 7);
+        assert_eq!(plan.post_inventory_version, 8);
         assert_eq!(
             plan.overflow_expires_at_unix_micros,
             1_000_000 + OVERFLOW_LIFETIME_MICROS
@@ -898,7 +897,7 @@ mod tests {
             (10, 5, 15, 2, 3, 7, 8)
         );
         assert_eq!(plan.post_account_version, 5);
-        assert_eq!(plan.post_inventory_version, 7);
+        assert_eq!(plan.post_inventory_version, 8);
     }
 
     #[test]
