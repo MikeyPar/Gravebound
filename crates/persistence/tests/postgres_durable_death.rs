@@ -1698,6 +1698,140 @@ async fn rewrite_death_committed_outbox_payload(
     original
 }
 
+struct RemovedDeathCommittedOutboxRow {
+    event_id: Vec<u8>,
+    event_type: String,
+    echo_id: Option<Vec<u8>>,
+    echo_transition_ordinal: Option<i16>,
+    trigger_death_id: Option<Vec<u8>>,
+    event_payload: Vec<u8>,
+    created_at: String,
+    published_at: Option<String>,
+}
+
+async fn remove_death_committed_outbox_row(
+    persistence: &PostgresPersistence,
+) -> RemovedDeathCommittedOutboxRow {
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    sqlx::query("ALTER TABLE death_outbox_events DISABLE TRIGGER death_outbox_publish_only")
+        .execute(transaction.connection())
+        .await
+        .unwrap();
+    let removed = sqlx::query(
+        "DELETE FROM death_outbox_events \
+         WHERE namespace_id=$1 AND death_id=$2 AND event_type='death_committed' \
+         RETURNING event_id,event_type,echo_id,echo_transition_ordinal,trigger_death_id,\
+           event_payload,created_at::text AS created_at,published_at::text AS published_at",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(RequestIds::primary().death_id.as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query("ALTER TABLE death_outbox_events ENABLE TRIGGER death_outbox_publish_only")
+        .execute(transaction.connection())
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+    RemovedDeathCommittedOutboxRow {
+        event_id: removed.get("event_id"),
+        event_type: removed.get("event_type"),
+        echo_id: removed.get("echo_id"),
+        echo_transition_ordinal: removed.get("echo_transition_ordinal"),
+        trigger_death_id: removed.get("trigger_death_id"),
+        event_payload: removed.get("event_payload"),
+        created_at: removed.get("created_at"),
+        published_at: removed.get("published_at"),
+    }
+}
+
+async fn restore_death_committed_outbox_row(
+    persistence: &PostgresPersistence,
+    row: &RemovedDeathCommittedOutboxRow,
+) {
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    sqlx::query("ALTER TABLE death_outbox_events DISABLE TRIGGER death_outbox_insert_window")
+        .execute(transaction.connection())
+        .await
+        .unwrap();
+    let inserted = sqlx::query(
+        "INSERT INTO death_outbox_events (namespace_id,death_id,event_id,event_type,echo_id,\
+           echo_transition_ordinal,trigger_death_id,event_payload,created_at,published_at) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::timestamptz,$10::timestamptz)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(RequestIds::primary().death_id.as_slice())
+    .bind(&row.event_id)
+    .bind(&row.event_type)
+    .bind(&row.echo_id)
+    .bind(row.echo_transition_ordinal)
+    .bind(&row.trigger_death_id)
+    .bind(&row.event_payload)
+    .bind(&row.created_at)
+    .bind(&row.published_at)
+    .execute(transaction.connection())
+    .await
+    .unwrap()
+    .rows_affected();
+    assert_eq!(inserted, 1);
+    sqlx::query("SET CONSTRAINTS ALL IMMEDIATE")
+        .execute(transaction.connection())
+        .await
+        .unwrap();
+    sqlx::query("ALTER TABLE death_outbox_events ENABLE TRIGGER death_outbox_insert_window")
+        .execute(transaction.connection())
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+}
+
+async fn assert_death_committed_outbox_cardinality(
+    persistence: &PostgresPersistence,
+    baseline: &persistence::StoredCoreDeathTerminalSignatureV1,
+) {
+    let mut duplicate = persistence.begin_transaction().await.unwrap();
+    sqlx::query("ALTER TABLE death_outbox_events DISABLE TRIGGER death_outbox_insert_window")
+        .execute(duplicate.connection())
+        .await
+        .unwrap();
+    let duplicate_error = sqlx::query(
+        "INSERT INTO death_outbox_events (namespace_id,death_id,event_id,event_type,echo_id,\
+           echo_transition_ordinal,trigger_death_id,event_payload,created_at,published_at) \
+         SELECT namespace_id,death_id,$1,event_type,echo_id,echo_transition_ordinal,\
+           trigger_death_id,event_payload,created_at,published_at \
+         FROM death_outbox_events \
+         WHERE namespace_id=$2 AND death_id=$3 AND event_type='death_committed'",
+    )
+    .bind(uuid_v7(90).as_slice())
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(RequestIds::primary().death_id.as_slice())
+    .execute(duplicate.connection())
+    .await
+    .expect_err("duplicate death_committed outbox row was accepted");
+    match duplicate_error {
+        sqlx::Error::Database(database) => {
+            assert_eq!(database.code().as_deref(), Some("23505"));
+            assert_eq!(
+                database.constraint(),
+                Some("one_death_committed_outbox_event")
+            );
+        }
+        other => panic!("duplicate death outbox failed unexpectedly: {other:?}"),
+    }
+    duplicate.rollback().await.unwrap();
+    assert_eq!(canonical_terminal_signature(persistence).await, *baseline);
+
+    let removed = remove_death_committed_outbox_row(persistence).await;
+    assert!(matches!(
+        persistence
+            .load_core_death_terminal_signature_v1(ACCOUNT_ID, CHARACTER_ID)
+            .await,
+        Err(PersistenceError::CorruptStoredDeathTerminalSignature)
+    ));
+    restore_death_committed_outbox_row(persistence, &removed).await;
+    assert_eq!(canonical_terminal_signature(persistence).await, *baseline);
+}
+
 async fn assert_altered_signature_rows_fail_closed(
     persistence: &PostgresPersistence,
     baseline: &persistence::StoredCoreDeathTerminalSignatureV1,
@@ -2612,6 +2746,7 @@ async fn complete_durable_death_graph_is_atomic_replayable_terminal_and_wipeable
     assert_committed_terminal_recovery(&restarted, committed.result(), &final_promotion).await;
     let restored_signature = canonical_terminal_signature(&restarted).await;
     assert_altered_signature_rows_fail_closed(&restarted, &restored_signature).await;
+    assert_death_committed_outbox_cardinality(&restarted, &restored_signature).await;
     corrupt_result_hash(&restarted, [222; 32]).await;
     assert!(matches!(
         restarted
