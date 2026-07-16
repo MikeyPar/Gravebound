@@ -45,6 +45,7 @@ mod oath;
 mod progression;
 mod progression_restore;
 mod recall_terminal;
+mod recall_terminal_recovery;
 mod recall_terminal_repository;
 mod reward;
 mod safe_inventory;
@@ -223,6 +224,9 @@ pub use recall_terminal::{
     ProductionRecallVersionAdvanceV1, ProductionRecallVersionsV1, StoredProductionRecallItemV1,
     StoredProductionRecallMaterialDestructionV1, StoredProductionRecallResultV1,
     StoredRecallLocationV1, canonical_production_recall_plan_hash_v1,
+};
+pub use recall_terminal_recovery::{
+    PRODUCTION_RECALL_RECOVERY_SCHEMA_VERSION, StoredCommittedRecallTerminalV1,
 };
 pub use reward::{
     RewardPlanningState, RewardTransaction, StoredPendingItem, StoredRewardCommit,

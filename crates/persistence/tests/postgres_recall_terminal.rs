@@ -493,6 +493,28 @@ async fn explicit_recall_is_atomic_replay_safe_and_restart_durable() {
         replayed,
         ProductionRecallTransactionV1::Replayed(result.clone())
     );
+    let recovered = reconnected
+        .load_committed_recall_terminal_v1(ACCOUNT_ID, CHARACTER_ID)
+        .await
+        .unwrap()
+        .expect("latest committed Recall recovery");
+    assert_eq!(recovered.result, result);
+    assert_eq!(recovered.lineage_id, LINEAGE_ID);
+    assert_eq!(recovered.restore_point_id, RESTORE_POINT_ID);
+    assert_eq!(recovered.content_revision, content_revision());
+    assert!(recovered.owns_current_hall);
+    assert_eq!(
+        reconnected
+            .load_committed_recall_terminal_by_identity_v1(
+                ACCOUNT_ID,
+                CHARACTER_ID,
+                MUTATION_ID,
+                TERMINAL_ID,
+            )
+            .await
+            .unwrap(),
+        Some(recovered)
+    );
 
     let mut verification = reconnected.begin_transaction().await.unwrap();
     let aggregate = sqlx::query(
@@ -594,6 +616,44 @@ async fn explicit_recall_is_atomic_replay_safe_and_restart_durable() {
     .unwrap();
     assert_eq!(material, (0, 2, 3, "recall".into(), TERMINAL_ID.to_vec()));
     verification.rollback().await.unwrap();
+
+    let mut later_hall_mutation = reconnected.begin_transaction().await.unwrap();
+    sqlx::query(
+        "UPDATE character_inventories
+         SET inventory_version=inventory_version+1,updated_at=transaction_timestamp()
+         WHERE namespace_id=$1 AND account_id=$2 AND character_id=$3
+           AND inventory_version=$4",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(CHARACTER_ID.as_slice())
+    .bind(i64::try_from(result.versions.inventory.post).unwrap())
+    .execute(later_hall_mutation.connection())
+    .await
+    .unwrap();
+    later_hall_mutation.commit().await.unwrap();
+
+    let historical = reconnected
+        .load_committed_recall_terminal_by_identity_v1(
+            ACCOUNT_ID,
+            CHARACTER_ID,
+            MUTATION_ID,
+            TERMINAL_ID,
+        )
+        .await
+        .unwrap()
+        .expect("immutable historical Recall recovery");
+    assert_eq!(historical.result, result);
+    assert!(
+        !historical.owns_current_hall,
+        "later Hall activity must not invalidate history or masquerade as the current terminal"
+    );
+    assert!(matches!(
+        reconnected
+            .load_committed_recall_terminal_v1([0; 16], CHARACTER_ID)
+            .await,
+        Err(PersistenceError::CorruptStoredRecall)
+    ));
     reconnected.close().await;
 }
 
