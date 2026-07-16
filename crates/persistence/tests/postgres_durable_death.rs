@@ -1544,6 +1544,13 @@ async fn rewrite_bargain_cleanup_payload(
     .fetch_one(transaction.connection())
     .await
     .unwrap();
+    sqlx::query(
+        "ALTER TABLE character_life_outbox \
+         DISABLE TRIGGER character_life_outbox_publish_only",
+    )
+    .execute(transaction.connection())
+    .await
+    .unwrap();
     let changed = sqlx::query(
         "UPDATE character_life_outbox SET event_payload=$1 \
          WHERE namespace_id=$2 AND account_id=$3 AND character_id=$4 \
@@ -1560,8 +1567,90 @@ async fn rewrite_bargain_cleanup_payload(
     .unwrap()
     .rows_affected();
     assert_eq!(changed, 1);
+    sqlx::query(
+        "ALTER TABLE character_life_outbox \
+         ENABLE TRIGGER character_life_outbox_publish_only",
+    )
+    .execute(transaction.connection())
+    .await
+    .unwrap();
     transaction.commit().await.unwrap();
     original
+}
+
+async fn assert_character_life_outbox_publish_contract(persistence: &PostgresPersistence) {
+    let cleanup_predicate = "namespace_id=$1 AND account_id=$2 AND character_id=$3 \
+        AND event_id=(SELECT bargain_cleanup_event_id FROM death_events \
+          WHERE namespace_id=$1 AND death_id=$4)";
+
+    let mut altered = persistence.begin_transaction().await.unwrap();
+    let update_payload = format!(
+        "UPDATE character_life_outbox SET event_payload=decode('ff','hex') \
+         WHERE {cleanup_predicate}"
+    );
+    assert!(
+        sqlx::query(sqlx::AssertSqlSafe(update_payload))
+            .bind(WIPEABLE_CORE_NAMESPACE)
+            .bind(ACCOUNT_ID.as_slice())
+            .bind(CHARACTER_ID.as_slice())
+            .bind(RequestIds::primary().death_id.as_slice())
+            .execute(altered.connection())
+            .await
+            .is_err(),
+        "character-life payload mutation bypassed the append-only trigger"
+    );
+    altered.rollback().await.unwrap();
+
+    let mut published = persistence.begin_transaction().await.unwrap();
+    let publish = format!(
+        "UPDATE character_life_outbox SET published_at=transaction_timestamp() \
+         WHERE {cleanup_predicate}"
+    );
+    let changed = sqlx::query(sqlx::AssertSqlSafe(publish))
+        .bind(WIPEABLE_CORE_NAMESPACE)
+        .bind(ACCOUNT_ID.as_slice())
+        .bind(CHARACTER_ID.as_slice())
+        .bind(RequestIds::primary().death_id.as_slice())
+        .execute(published.connection())
+        .await
+        .unwrap()
+        .rows_affected();
+    assert_eq!(changed, 1);
+    published.commit().await.unwrap();
+
+    let mut republished = persistence.begin_transaction().await.unwrap();
+    let republish = format!(
+        "UPDATE character_life_outbox \
+         SET published_at=transaction_timestamp()+interval '1 millisecond' \
+         WHERE {cleanup_predicate}"
+    );
+    assert!(
+        sqlx::query(sqlx::AssertSqlSafe(republish))
+            .bind(WIPEABLE_CORE_NAMESPACE)
+            .bind(ACCOUNT_ID.as_slice())
+            .bind(CHARACTER_ID.as_slice())
+            .bind(RequestIds::primary().death_id.as_slice())
+            .execute(republished.connection())
+            .await
+            .is_err(),
+        "character-life outbox accepted a second publication"
+    );
+    republished.rollback().await.unwrap();
+
+    let mut deleted = persistence.begin_transaction().await.unwrap();
+    let delete = format!("DELETE FROM character_life_outbox WHERE {cleanup_predicate}");
+    assert!(
+        sqlx::query(sqlx::AssertSqlSafe(delete))
+            .bind(WIPEABLE_CORE_NAMESPACE)
+            .bind(ACCOUNT_ID.as_slice())
+            .bind(CHARACTER_ID.as_slice())
+            .bind(RequestIds::primary().death_id.as_slice())
+            .execute(deleted.connection())
+            .await
+            .is_err(),
+        "character-life outbox accepted a direct delete"
+    );
+    deleted.rollback().await.unwrap();
 }
 
 async fn rewrite_death_committed_outbox_payload(
@@ -1606,6 +1695,9 @@ async fn assert_altered_signature_rows_fail_closed(
     persistence: &PostgresPersistence,
     baseline: &persistence::StoredCoreDeathTerminalSignatureV1,
 ) {
+    assert_character_life_outbox_publish_contract(persistence).await;
+    assert_eq!(canonical_terminal_signature(persistence).await, *baseline);
+
     for corruption in SIGNATURE_ROW_CORRUPTIONS {
         apply_signature_row_fixture_update(persistence, corruption, corruption.corrupt_sql).await;
         assert!(

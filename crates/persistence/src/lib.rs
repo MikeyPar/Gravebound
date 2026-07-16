@@ -212,7 +212,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 51;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 52;
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -1505,6 +1505,44 @@ mod tests {
             assert!(
                 !migration.contains(prohibited),
                 "death presentation migration leaked {prohibited}"
+            );
+        }
+    }
+
+    #[test]
+    fn character_life_outbox_is_append_only_with_one_publish_transition() {
+        let migration =
+            include_str!("../../../migrations/0052_character_life_outbox_immutability.sql");
+        for required in [
+            "Gravebound_Production_GDD_v1_Canonical.md",
+            "Gravebound_Content_Production_Spec_v1.md",
+            "Gravebound_Development_Roadmap_v1.md",
+            "SPEC-CONFLICT-009-m03-death-memorial.md",
+            "CREATE FUNCTION enforce_character_life_outbox_publish_only_v1()",
+            "CREATE TRIGGER character_life_outbox_publish_only",
+            "IF pg_trigger_depth() > 1 THEN RETURN OLD; END IF;",
+            "OLD.published_at IS NOT NULL",
+            "NEW.published_at IS NULL",
+            "NEW.event_payload IS DISTINCT FROM OLD.event_payload",
+            "character life outbox history is immutable",
+            "setting published_at exactly once",
+            "Never rewrite or delete accepted event authority in place",
+            "Recovery/downgrade:",
+            "published migration history must never be rewritten",
+        ] {
+            assert!(migration.contains(required), "migration omitted {required}");
+        }
+        for prohibited in [
+            "DROP TABLE",
+            "TRUNCATE",
+            "DELETE FROM",
+            "UPDATE character_life_outbox",
+            "JSON",
+            "JSONB",
+        ] {
+            assert!(
+                !migration.contains(prohibited),
+                "life outbox immutability migration leaked {prohibited}"
             );
         }
     }
