@@ -570,39 +570,131 @@ impl DeathBranchMatrixEvidenceV1 {
         if self.raw_report_hash_blake3 != branch_matrix_report_hash(self)? {
             return Err(DeathMeasurementError::ReportHashMismatch);
         }
-        if path.exists() {
-            return Err(DeathMeasurementError::EvidenceIo(format!(
-                "destination already exists: {}",
-                path.display()
-            )));
+        write_json_value_atomically(self, path)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConcurrentEligibleDeathsInputV1 {
+    pub account_count: u32,
+    pub distinct_accounts_characters_deaths_and_echoes: bool,
+    pub exact_per_account_graphs: bool,
+    pub fresh_commits: u32,
+    pub exact_replays: u32,
+    pub death_events: u32,
+    pub death_summaries: u32,
+    pub memorial_records: u32,
+    pub destruction_entries: u32,
+    pub death_mutation_results: u32,
+    pub echo_records: u32,
+    pub echo_transitions: u32,
+    pub available_echoes: u32,
+    pub dormant_echoes: u32,
+    pub death_outbox_events: u32,
+    pub cross_account_rows: u32,
+    pub canonical_signature_checks: u32,
+    pub canonical_signatures_unchanged: bool,
+    pub concurrent_commit_micros: u64,
+    pub concurrent_replay_micros: u64,
+    pub final_database_residue: PostgresResidueSnapshotV1,
+}
+
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "the evidence retains independent identity, graph, signature, and acceptance gates"
+)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ConcurrentEligibleDeathsEvidenceV1 {
+    pub report_schema: &'static str,
+    pub feature_id: &'static str,
+    pub sample_scope: &'static str,
+    pub account_count: u32,
+    pub distinct_accounts_characters_deaths_and_echoes: bool,
+    pub exact_per_account_graphs: bool,
+    pub fresh_commits: u32,
+    pub exact_replays: u32,
+    pub death_events: u32,
+    pub death_summaries: u32,
+    pub memorial_records: u32,
+    pub destruction_entries: u32,
+    pub death_mutation_results: u32,
+    pub echo_records: u32,
+    pub echo_transitions: u32,
+    pub available_echoes: u32,
+    pub dormant_echoes: u32,
+    pub death_outbox_events: u32,
+    pub cross_account_rows: u32,
+    pub canonical_signature_checks: u32,
+    pub canonical_signatures_unchanged: bool,
+    pub concurrent_commit_micros: u64,
+    pub concurrent_replay_micros: u64,
+    pub final_database_residue: PostgresResidueSnapshotV1,
+    pub accepted: bool,
+    pub raw_report_hash_blake3: String,
+}
+
+impl ConcurrentEligibleDeathsEvidenceV1 {
+    pub fn compile(input: ConcurrentEligibleDeathsInputV1) -> Result<Self, DeathMeasurementError> {
+        let exact_counts = input.account_count == 2
+            && input.fresh_commits == 2
+            && input.exact_replays == 2
+            && input.death_events == 2
+            && input.death_summaries == 2
+            && input.memorial_records == 2
+            && input.destruction_entries == 4
+            && input.death_mutation_results == 2
+            && input.echo_records == 2
+            && input.echo_transitions == 4
+            && input.available_echoes == 2
+            && input.dormant_echoes == 0
+            && input.death_outbox_events == 6
+            && input.cross_account_rows == 0
+            && input.canonical_signature_checks == 4;
+        let accepted = exact_counts
+            && input.distinct_accounts_characters_deaths_and_echoes
+            && input.exact_per_account_graphs
+            && input.canonical_signatures_unchanged
+            && input.concurrent_commit_micros > 0
+            && input.concurrent_replay_micros > 0
+            && input.final_database_residue.is_zero();
+        let mut report = Self {
+            report_schema: "gravebound.performance.gb-m03-13.concurrent-eligible-deaths.v1",
+            feature_id: "GB-M03-13",
+            sample_scope: "two-distinct-accounts-concurrent-eligible-death-commit-and-replay",
+            account_count: input.account_count,
+            distinct_accounts_characters_deaths_and_echoes: input
+                .distinct_accounts_characters_deaths_and_echoes,
+            exact_per_account_graphs: input.exact_per_account_graphs,
+            fresh_commits: input.fresh_commits,
+            exact_replays: input.exact_replays,
+            death_events: input.death_events,
+            death_summaries: input.death_summaries,
+            memorial_records: input.memorial_records,
+            destruction_entries: input.destruction_entries,
+            death_mutation_results: input.death_mutation_results,
+            echo_records: input.echo_records,
+            echo_transitions: input.echo_transitions,
+            available_echoes: input.available_echoes,
+            dormant_echoes: input.dormant_echoes,
+            death_outbox_events: input.death_outbox_events,
+            cross_account_rows: input.cross_account_rows,
+            canonical_signature_checks: input.canonical_signature_checks,
+            canonical_signatures_unchanged: input.canonical_signatures_unchanged,
+            concurrent_commit_micros: input.concurrent_commit_micros,
+            concurrent_replay_micros: input.concurrent_replay_micros,
+            final_database_residue: input.final_database_residue,
+            accepted,
+            raw_report_hash_blake3: String::new(),
+        };
+        report.raw_report_hash_blake3 = concurrent_eligible_deaths_report_hash(&report)?;
+        Ok(report)
+    }
+
+    pub fn write_json_atomically(&self, path: &Path) -> Result<(), DeathMeasurementError> {
+        if self.raw_report_hash_blake3 != concurrent_eligible_deaths_report_hash(self)? {
+            return Err(DeathMeasurementError::ReportHashMismatch);
         }
-        if let Some(parent) = path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-        {
-            fs::create_dir_all(parent)
-                .map_err(|error| DeathMeasurementError::EvidenceIo(error.to_string()))?;
-        }
-        let temporary = partial_path(path);
-        let result = (|| -> Result<(), DeathMeasurementError> {
-            let bytes = serde_json::to_vec_pretty(self)
-                .map_err(|error| DeathMeasurementError::Serialization(error.to_string()))?;
-            let mut file = fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temporary)
-                .map_err(|error| DeathMeasurementError::EvidenceIo(error.to_string()))?;
-            file.write_all(&bytes)
-                .map_err(|error| DeathMeasurementError::EvidenceIo(error.to_string()))?;
-            file.sync_all()
-                .map_err(|error| DeathMeasurementError::EvidenceIo(error.to_string()))?;
-            fs::rename(&temporary, path)
-                .map_err(|error| DeathMeasurementError::EvidenceIo(error.to_string()))
-        })();
-        if result.is_err() {
-            let _ = fs::remove_file(temporary);
-        }
-        result
+        write_json_value_atomically(self, path)
     }
 }
 
@@ -610,6 +702,45 @@ fn partial_path(path: &Path) -> PathBuf {
     let mut value = path.as_os_str().to_os_string();
     value.push(".partial");
     PathBuf::from(value)
+}
+
+fn write_json_value_atomically<T: Serialize>(
+    value: &T,
+    path: &Path,
+) -> Result<(), DeathMeasurementError> {
+    if path.exists() {
+        return Err(DeathMeasurementError::EvidenceIo(format!(
+            "destination already exists: {}",
+            path.display()
+        )));
+    }
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)
+            .map_err(|error| DeathMeasurementError::EvidenceIo(error.to_string()))?;
+    }
+    let temporary = partial_path(path);
+    let result = (|| -> Result<(), DeathMeasurementError> {
+        let bytes = serde_json::to_vec_pretty(value)
+            .map_err(|error| DeathMeasurementError::Serialization(error.to_string()))?;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(|error| DeathMeasurementError::EvidenceIo(error.to_string()))?;
+        file.write_all(&bytes)
+            .map_err(|error| DeathMeasurementError::EvidenceIo(error.to_string()))?;
+        file.sync_all()
+            .map_err(|error| DeathMeasurementError::EvidenceIo(error.to_string()))?;
+        fs::rename(&temporary, path)
+            .map_err(|error| DeathMeasurementError::EvidenceIo(error.to_string()))
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temporary);
+    }
+    result
 }
 
 const fn branch_runtime_residue_is_exact(residue: DeathRuntimeResidueV1) -> bool {
@@ -665,6 +796,16 @@ fn branch_sample_is_exact(sample: &DeathBranchSampleV1) -> bool {
 
 fn branch_matrix_report_hash(
     report: &DeathBranchMatrixEvidenceV1,
+) -> Result<String, DeathMeasurementError> {
+    let mut hashable = report.clone();
+    hashable.raw_report_hash_blake3.clear();
+    let bytes = serde_json::to_vec(&hashable)
+        .map_err(|error| DeathMeasurementError::Serialization(error.to_string()))?;
+    Ok(blake3::hash(&bytes).to_hex().to_string())
+}
+
+fn concurrent_eligible_deaths_report_hash(
+    report: &ConcurrentEligibleDeathsEvidenceV1,
 ) -> Result<String, DeathMeasurementError> {
     let mut hashable = report.clone();
     hashable.raw_report_hash_blake3.clear();
@@ -1021,6 +1162,38 @@ mod tests {
         ]
     }
 
+    fn accepted_concurrent_eligible_deaths_input() -> ConcurrentEligibleDeathsInputV1 {
+        ConcurrentEligibleDeathsInputV1 {
+            account_count: 2,
+            distinct_accounts_characters_deaths_and_echoes: true,
+            exact_per_account_graphs: true,
+            fresh_commits: 2,
+            exact_replays: 2,
+            death_events: 2,
+            death_summaries: 2,
+            memorial_records: 2,
+            destruction_entries: 4,
+            death_mutation_results: 2,
+            echo_records: 2,
+            echo_transitions: 4,
+            available_echoes: 2,
+            dormant_echoes: 0,
+            death_outbox_events: 6,
+            cross_account_rows: 0,
+            canonical_signature_checks: 4,
+            canonical_signatures_unchanged: true,
+            concurrent_commit_micros: 100,
+            concurrent_replay_micros: 50,
+            final_database_residue: PostgresResidueSnapshotV1 {
+                active_transactions: 0,
+                idle_transactions: 0,
+                aborted_transactions: 0,
+                waiting_locks: 0,
+                granted_locks: 0,
+            },
+        }
+    }
+
     #[test]
     fn branch_matrix_report_requires_every_exact_outcome_and_hashes_it() {
         let compile = |branches| {
@@ -1094,6 +1267,45 @@ mod tests {
             Err(DeathMeasurementError::ReportHashMismatch)
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn concurrent_eligible_deaths_report_requires_two_exact_isolated_graphs() {
+        let accepted = ConcurrentEligibleDeathsEvidenceV1::compile(
+            accepted_concurrent_eligible_deaths_input(),
+        )
+        .unwrap();
+        assert!(accepted.accepted);
+        assert_eq!(accepted.raw_report_hash_blake3.len(), 64);
+        assert_eq!(
+            accepted.raw_report_hash_blake3,
+            ConcurrentEligibleDeathsEvidenceV1::compile(
+                accepted_concurrent_eligible_deaths_input()
+            )
+            .unwrap()
+            .raw_report_hash_blake3
+        );
+
+        let mut cross_account = accepted_concurrent_eligible_deaths_input();
+        cross_account.cross_account_rows = 1;
+        let cross_account = ConcurrentEligibleDeathsEvidenceV1::compile(cross_account).unwrap();
+        assert!(!cross_account.accepted);
+        assert_ne!(
+            accepted.raw_report_hash_blake3,
+            cross_account.raw_report_hash_blake3
+        );
+
+        let mut tampered = accepted;
+        tampered.available_echoes = 1;
+        let path = std::env::temp_dir().join(format!(
+            "gravebound-concurrent-death-tampered-{}.json",
+            std::process::id()
+        ));
+        assert_eq!(
+            tampered.write_json_atomically(&path),
+            Err(DeathMeasurementError::ReportHashMismatch)
+        );
+        assert!(!path.exists());
     }
 
     #[test]

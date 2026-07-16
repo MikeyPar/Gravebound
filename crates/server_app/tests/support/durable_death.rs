@@ -38,7 +38,16 @@ use sim_core::{
 pub const ACCOUNT_ID: [u8; 16] = [
     165, 92, 48, 136, 62, 13, 73, 61, 120, 165, 179, 215, 25, 114, 58, 100,
 ];
+#[allow(
+    dead_code,
+    reason = "shared integration support is compiled by targets that do not open real QUIC"
+)]
 pub const AUTH_TICKET: &[u8] = b"disposable-core-route";
+#[allow(
+    dead_code,
+    reason = "the parallel account is consumed only by the dedicated concurrency target"
+)]
+pub const PARALLEL_ACCOUNT_ID: [u8; 16] = [180; 16];
 pub const MATERIAL_ID: &str = "material.bell_brass";
 pub const ITEM_TEMPLATE_ID: &str = "item.weapon.crossbow.pine_crossbow";
 pub const DEED_ID: &str = "deed.core.sir_caldus_defeated";
@@ -113,6 +122,27 @@ pub const SECONDARY_IDENTITY: DurableDeathFixtureIdentityV1 = DurableDeathFixtur
 
 #[allow(
     dead_code,
+    reason = "the parallel identity is consumed only by the dedicated concurrency target"
+)]
+pub const PARALLEL_IDENTITY: DurableDeathFixtureIdentityV1 = DurableDeathFixtureIdentityV1 {
+    character_id: [181; 16],
+    lineage_id: [182; 16],
+    restore_point_id: [183; 16],
+    instance_id: [184; 16],
+    item_uid: [185; 16],
+    item_ledger_id: [186; 16],
+    entry_mutation_id: [187; 16],
+    deed_reward_id: [188; 16],
+    nonlethal_trace_tick_id: [189; 16],
+    lethal_trace_tick_id: [190; 16],
+    death_id: uuid_v7(61),
+    echo_id: uuid_v7(62),
+    death_mutation_id: uuid_v7(63),
+    source_sim_entity_id: 83,
+};
+
+#[allow(
+    dead_code,
     reason = "legacy primary aliases are consumed by other independently compiled integration targets"
 )]
 pub const CHARACTER_ID: [u8; 16] = PRIMARY_IDENTITY.character_id;
@@ -135,6 +165,7 @@ pub enum FixtureEchoAvailabilityV1 {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DurableDeathScenarioV1 {
+    pub account_id: [u8; 16],
     pub identity: DurableDeathFixtureIdentityV1,
     pub reset_account: bool,
     pub account_pre_version: u64,
@@ -150,6 +181,7 @@ impl DurableDeathScenarioV1 {
     #[must_use]
     pub const fn primary_eligible() -> Self {
         Self {
+            account_id: ACCOUNT_ID,
             identity: PRIMARY_IDENTITY,
             reset_account: true,
             account_pre_version: 1,
@@ -169,6 +201,7 @@ impl DurableDeathScenarioV1 {
     )]
     pub const fn secondary_with_existing_available(echo_id: [u8; 16]) -> Self {
         Self {
+            account_id: ACCOUNT_ID,
             identity: SECONDARY_IDENTITY,
             reset_account: false,
             account_pre_version: 2,
@@ -181,6 +214,26 @@ impl DurableDeathScenarioV1 {
         }
     }
 
+    #[must_use]
+    #[allow(
+        dead_code,
+        reason = "the parallel scenario is consumed only by the dedicated concurrency target"
+    )]
+    pub const fn parallel_eligible() -> Self {
+        Self {
+            account_id: PARALLEL_ACCOUNT_ID,
+            identity: PARALLEL_IDENTITY,
+            reset_account: true,
+            account_pre_version: 1,
+            level: 10,
+            lifetime_ticks: TERMINAL_TICK,
+            permadeath_combat_ticks: 18_000,
+            boss_deed: true,
+            provenance: DeathProvenance::OrdinaryGameplay,
+            echo_availability: FixtureEchoAvailabilityV1::SelfPromote,
+        }
+    }
+
     fn echo_eligible(&self) -> bool {
         self.level >= 10
             && self.permadeath_combat_ticks >= 18_000
@@ -189,13 +242,25 @@ impl DurableDeathScenarioV1 {
     }
 }
 
+#[allow(
+    dead_code,
+    reason = "legacy callers use the canonical primary authenticated account"
+)]
 pub fn authenticated_account() -> AuthenticatedAccount {
+    authenticated_account_for(ACCOUNT_ID)
+}
+
+fn authenticated_account_for(account_id: [u8; 16]) -> AuthenticatedAccount {
     AuthenticatedAccount {
-        account_id: AccountId::new(ACCOUNT_ID).unwrap(),
+        account_id: AccountId::new(account_id).unwrap(),
         namespace: AuthenticatedNamespace::WipeableTest,
     }
 }
 
+#[allow(
+    dead_code,
+    reason = "shared integration support is compiled by targets that do not open death views"
+)]
 pub fn death_view_revision() -> DeathViewContentRevisionV1 {
     DeathViewContentRevisionV1 {
         records_blake3: ManifestHash::new(CORE_DEATH_VIEW_RECORDS_BLAKE3).unwrap(),
@@ -224,6 +289,7 @@ pub async fn seed_danger_root_for(
     scenario: &DurableDeathScenarioV1,
 ) {
     let identity = scenario.identity;
+    let account_id = scenario.account_id;
     assert!((1..=10).contains(&scenario.level));
     assert!(scenario.lifetime_ticks >= 10);
     assert!(scenario.permadeath_combat_ticks >= 10);
@@ -232,7 +298,7 @@ pub async fn seed_danger_root_for(
     if scenario.reset_account {
         sqlx::query("DELETE FROM accounts WHERE namespace_id=$1 AND account_id=$2")
             .bind(WIPEABLE_CORE_NAMESPACE)
-            .bind(ACCOUNT_ID.as_slice())
+            .bind(account_id.as_slice())
             .execute(transaction.connection())
             .await
             .unwrap();
@@ -241,7 +307,7 @@ pub async fn seed_danger_root_for(
              VALUES ($1,$2,$3,2)",
         )
         .bind(WIPEABLE_CORE_NAMESPACE)
-        .bind(ACCOUNT_ID.as_slice())
+        .bind(account_id.as_slice())
         .bind(i64::try_from(scenario.account_pre_version).unwrap())
         .execute(transaction.connection())
         .await
@@ -251,7 +317,7 @@ pub async fn seed_danger_root_for(
              VALUES ($1,$2,0,1)",
         )
         .bind(WIPEABLE_CORE_NAMESPACE)
-        .bind(ACCOUNT_ID.as_slice())
+        .bind(account_id.as_slice())
         .execute(transaction.connection())
         .await
         .unwrap();
@@ -261,7 +327,7 @@ pub async fn seed_danger_root_for(
              WHERE namespace_id=$1 AND account_id=$2 FOR UPDATE",
         )
         .bind(WIPEABLE_CORE_NAMESPACE)
-        .bind(ACCOUNT_ID.as_slice())
+        .bind(account_id.as_slice())
         .fetch_one(transaction.connection())
         .await
         .unwrap();
@@ -276,7 +342,7 @@ pub async fn seed_danger_root_for(
          VALUES ($1,$2,$3,1,'class.grave_arbalist',$4,NULL,0,0,1)",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
-    .bind(ACCOUNT_ID.as_slice())
+    .bind(account_id.as_slice())
     .bind(identity.character_id.as_slice())
     .bind(i16::from(scenario.level))
     .execute(transaction.connection())
@@ -287,7 +353,7 @@ pub async fn seed_danger_root_for(
     )
     .bind(identity.character_id.as_slice())
     .bind(WIPEABLE_CORE_NAMESPACE)
-    .bind(ACCOUNT_ID.as_slice())
+    .bind(account_id.as_slice())
     .execute(transaction.connection())
     .await
     .unwrap();
@@ -296,7 +362,7 @@ pub async fn seed_danger_root_for(
          current_health,progression_version) VALUES ($1,$2,$3,$4,$5,120,1)",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
-    .bind(ACCOUNT_ID.as_slice())
+    .bind(account_id.as_slice())
     .bind(identity.character_id.as_slice())
     .bind(i64::from(scenario.level) * 270)
     .bind(i16::from(scenario.level))
@@ -308,7 +374,7 @@ pub async fn seed_danger_root_for(
          VALUES ($1,$2,$3,1)",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
-    .bind(ACCOUNT_ID.as_slice())
+    .bind(account_id.as_slice())
     .bind(identity.character_id.as_slice())
     .execute(transaction.connection())
     .await
@@ -318,7 +384,7 @@ pub async fn seed_danger_root_for(
          earned_bargain_slots,oath_bargain_version) VALUES ($1,$2,$3,0,1)",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
-    .bind(ACCOUNT_ID.as_slice())
+    .bind(account_id.as_slice())
     .bind(identity.character_id.as_slice())
     .execute(transaction.connection())
     .await
@@ -332,7 +398,7 @@ pub async fn seed_danger_root_for(
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(identity.item_uid.as_slice())
-    .bind(ACCOUNT_ID.as_slice())
+    .bind(account_id.as_slice())
     .bind(identity.character_id.as_slice())
     .bind(ITEM_TEMPLATE_ID)
     .bind(CORE_ITEM_CONTENT_REVISION)
@@ -345,7 +411,7 @@ pub async fn seed_danger_root_for(
          VALUES ($1,$2,$3,$4,'world.core_microrealm_01','layout.core_private_life_01',0,$5,$6,$7)",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
-    .bind(ACCOUNT_ID.as_slice())
+    .bind(account_id.as_slice())
     .bind(identity.character_id.as_slice())
     .bind(identity.lineage_id.as_slice())
     .bind(CORE_WORLD_RECORDS_BLAKE3)
@@ -364,7 +430,7 @@ pub async fn seed_danger_root_for(
          'hub.lantern_halls_01',3,$6,1,1,2,1,1,1,31,$7,0,$8,$9,$10)",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
-    .bind(ACCOUNT_ID.as_slice())
+    .bind(account_id.as_slice())
     .bind(identity.character_id.as_slice())
     .bind(identity.restore_point_id.as_slice())
     .bind(identity.lineage_id.as_slice())
@@ -382,7 +448,7 @@ pub async fn seed_danger_root_for(
          VALUES ($1,$2,$3,$4,$5,$6,120,1,$7)",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
-    .bind(ACCOUNT_ID.as_slice())
+    .bind(account_id.as_slice())
     .bind(identity.character_id.as_slice())
     .bind(identity.restore_point_id.as_slice())
     .bind(i16::from(scenario.level))
@@ -397,7 +463,7 @@ pub async fn seed_danger_root_for(
          VALUES ($1,$2,$3,$4,$5,$6,120,1)",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
-    .bind(ACCOUNT_ID.as_slice())
+    .bind(account_id.as_slice())
     .bind(identity.character_id.as_slice())
     .bind(identity.restore_point_id.as_slice())
     .bind(i16::from(scenario.level))
@@ -407,7 +473,7 @@ pub async fn seed_danger_root_for(
     .unwrap();
     stage_danger_entry_inventory_restore_v3(
         &mut transaction,
-        ACCOUNT_ID,
+        account_id,
         identity.character_id,
         identity.restore_point_id,
         identity.entry_mutation_id,
@@ -417,7 +483,7 @@ pub async fn seed_danger_root_for(
     .unwrap();
     stage_danger_entry_oath_bargain_restore_v3(
         &mut transaction,
-        ACCOUNT_ID,
+        account_id,
         identity.character_id,
         identity.restore_point_id,
     )
@@ -425,7 +491,7 @@ pub async fn seed_danger_root_for(
     .unwrap();
     stage_danger_entry_life_metrics_restore_v3(
         &mut transaction,
-        ACCOUNT_ID,
+        account_id,
         identity.character_id,
         identity.restore_point_id,
     )
@@ -433,7 +499,7 @@ pub async fn seed_danger_root_for(
     .unwrap();
     stage_danger_entry_ash_wallet_restore_v3(
         &mut transaction,
-        ACCOUNT_ID,
+        account_id,
         identity.character_id,
         identity.restore_point_id,
     )
@@ -445,7 +511,7 @@ pub async fn seed_danger_root_for(
          entry_restore_point_id) VALUES ($1,$2,$3,2,2,'world.core_microrealm_01',$4,$5)",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
-    .bind(ACCOUNT_ID.as_slice())
+    .bind(account_id.as_slice())
     .bind(identity.character_id.as_slice())
     .bind(identity.lineage_id.as_slice())
     .bind(identity.restore_point_id.as_slice())
@@ -457,7 +523,7 @@ pub async fn seed_danger_root_for(
          AND account_id=$2 AND character_id=$3",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
-    .bind(ACCOUNT_ID.as_slice())
+    .bind(account_id.as_slice())
     .bind(identity.character_id.as_slice())
     .execute(transaction.connection())
     .await
@@ -467,7 +533,7 @@ pub async fn seed_danger_root_for(
          WHERE namespace_id=$1 AND account_id=$2 AND character_id=$3",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
-    .bind(ACCOUNT_ID.as_slice())
+    .bind(account_id.as_slice())
     .bind(identity.character_id.as_slice())
     .execute(transaction.connection())
     .await
@@ -479,7 +545,7 @@ pub async fn seed_danger_root_for(
     .bind(i64::try_from(scenario.lifetime_ticks - 10).unwrap())
     .bind(i64::try_from(scenario.permadeath_combat_ticks - 10).unwrap())
     .bind(WIPEABLE_CORE_NAMESPACE)
-    .bind(ACCOUNT_ID.as_slice())
+    .bind(account_id.as_slice())
     .bind(identity.character_id.as_slice())
     .execute(transaction.connection())
     .await
@@ -494,7 +560,7 @@ pub async fn seed_danger_root_for(
          checkpoint_payload_digest) VALUES ($1,$2,$3,$4,$5,15,$6,2,2,2,1,$7,$8,$9,1,$10,$11)",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
-    .bind(ACCOUNT_ID.as_slice())
+    .bind(account_id.as_slice())
     .bind(identity.character_id.as_slice())
     .bind(identity.lineage_id.as_slice())
     .bind(i64::try_from(CHECKPOINT_TICK).unwrap())
@@ -512,7 +578,7 @@ pub async fn seed_danger_root_for(
          material_id,quantity,material_version,security_state) VALUES ($1,$2,$3,$4,7,1,2)",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
-    .bind(ACCOUNT_ID.as_slice())
+    .bind(account_id.as_slice())
     .bind(identity.character_id.as_slice())
     .bind(MATERIAL_ID)
     .execute(transaction.connection())
@@ -525,7 +591,7 @@ pub async fn seed_danger_root_for(
              VALUES ($1,$2,$3,$4,$5,'boss.sir_caldus',0,$6,$7)",
         )
         .bind(WIPEABLE_CORE_NAMESPACE)
-        .bind(ACCOUNT_ID.as_slice())
+        .bind(account_id.as_slice())
         .bind(identity.character_id.as_slice())
         .bind(DEED_ID)
         .bind(identity.deed_reward_id.as_slice())
@@ -637,6 +703,7 @@ pub async fn prepare_death_for(
     scenario: &DurableDeathScenarioV1,
 ) -> PreparedDurableDeathCommit {
     let identity = scenario.identity;
+    let account_id = scenario.account_id;
     let presentation = Arc::new(
         sim_content::load_core_development_death_view(
             &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content"),
@@ -658,7 +725,7 @@ pub async fn prepare_death_for(
     let mut trace = LiveDamageTraceService::start_or_resume(
         persistence,
         LiveDamageTraceBinding::new(
-            ACCOUNT_ID,
+            account_id,
             identity.character_id,
             2,
             danger.clone(),
@@ -739,7 +806,7 @@ pub async fn prepare_death_for(
     };
     let server_context = ServerAuthoredDeathContext {
         mutation: DeathMutationAuthority {
-            authenticated_account: authenticated_account(),
+            authenticated_account: authenticated_account_for(account_id),
             selected_character_id: identity.character_id,
             former_roster_ordinal: 1,
             mutation_id: identity.death_mutation_id,

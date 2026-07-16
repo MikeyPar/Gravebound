@@ -118,9 +118,12 @@ jobs:
           cargo test --locked -p server_app --test postgres_identity -- --ignored --test-threads=1
       - name: Generate authenticated death branch and frame source evidence
         env:
+          GRAVEBOUND_DEATH_CONCURRENCY_REPORT_PATH: ${{ runner.temp }}/gb-m03-13-concurrent-eligible-deaths.json
           GRAVEBOUND_DEATH_BRANCH_MATRIX_REPORT_PATH: ${{ runner.temp }}/gb-m03-06e-death-branch-matrix.json
           GRAVEBOUND_NATIVE_DEATH_FRAME_FIXTURE_PATH: ${{ runner.temp }}/gb-m03-06e-native-death-frame-fixture.json
-        run: cargo test --locked -p server_app --test death_branch_matrix -- --ignored --test-threads=1 --nocapture
+        run: |
+          cargo test --locked -p server_app --test death_branch_matrix -- --ignored --test-threads=1 --nocapture
+          cargo test --locked -p server_app --test death_concurrency -- --ignored --test-threads=1 --nocapture
       - name: Upload authenticated death evidence source
         uses: actions/upload-artifact@v4
         with:
@@ -128,6 +131,7 @@ jobs:
           path: |
             ${{ runner.temp }}/gb-m03-06e-death-branch-matrix.json
             ${{ runner.temp }}/gb-m03-06e-native-death-frame-fixture.json
+            ${{ runner.temp }}/gb-m03-13-concurrent-eligible-deaths.json
           if-no-files-found: error
           retention-days: 14
 
