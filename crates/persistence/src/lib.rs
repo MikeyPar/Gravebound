@@ -30,6 +30,7 @@ mod durable_death;
 mod durable_death_repository;
 mod durable_terminal_recovery;
 mod extraction;
+mod extraction_terminal;
 mod field_equipment;
 mod ground_expiry;
 mod identity;
@@ -140,6 +141,16 @@ pub use extraction::{
     CaldusExtractionCommit, CaldusExtractionRequest, CaldusExtractionTransaction,
     CaldusExtractionTransfer, StoredExtractionAuthority, StoredExtractionResult,
     StoredExtractionState, stage_caldus_extraction_transfer,
+};
+pub use extraction_terminal::{
+    MAX_PRODUCTION_EXTRACTION_MATERIAL_CREDITS, MAX_PRODUCTION_EXTRACTION_PLACEMENTS,
+    PRODUCTION_EXTRACTION_CONTRACT_VERSION_V1, PRODUCTION_EXTRACTION_EXIT_ID,
+    PRODUCTION_EXTRACTION_HALL_ID, PRODUCTION_EXTRACTION_TERMINAL_KIND,
+    ProductionExtractionCommitRequestV1, ProductionExtractionExpectedVersionsV1,
+    ProductionExtractionTransactionV1, ProductionExtractionVersionAdvanceV1,
+    ProductionExtractionVersionsV1, StoredExtractionLocationV1,
+    StoredProductionExtractionMaterialCreditV1, StoredProductionExtractionPlacementV1,
+    StoredProductionExtractionResultV1,
 };
 pub use field_equipment::{
     StoredFieldEquipmentCommand, StoredFieldEquipmentItem, StoredFieldEquipmentResult,

@@ -32,7 +32,7 @@ pub enum StoredWorldLocation {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StoredWorldFlowRevisionV1 {
     pub records_blake3: String,
     pub assets_blake3: String,
