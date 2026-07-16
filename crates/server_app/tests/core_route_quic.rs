@@ -53,8 +53,10 @@ use server_app::{
     PostgresProgressionAwardService, PostgresProgressionRestoreProvider, PostgresRewardService,
     PreparedTerminal, ProductionRecallClock, ProductionRecallIntentActor,
     ProductionRecallPendingAuthorityV1, ProductionRecallPublishedV1, ProgressionQueryService,
-    SecretRewardEpoch, SubmitResult, TerminalArbiter, TerminalCandidate, WorldFlowGateService,
-    WorldFlowIdGenerator, core_recall_completion_outbox, durable_death_terminal_candidate,
+    RecoveredProductionRecallActorV1, STORED_TERMINAL_RECEIPT_SCHEMA_V1, SecretRewardEpoch,
+    StoredTerminalReceipt, StoredTerminalReceiptV1, SubmitResult, TerminalArbiter,
+    TerminalCandidate, TerminalKind, WorldFlowGateService, WorldFlowIdGenerator,
+    core_recall_completion_outbox, durable_death_terminal_candidate,
     production_recall_actor_mailbox, recover_committed_death_arbiter, serve_core_reliable,
     serve_handshake,
 };
@@ -499,6 +501,37 @@ fn recall_completion_publication() -> ProductionRecallPublishedV1 {
             },
         },
         explicit_client_tick: Some(8_000),
+    }
+}
+
+fn recovered_recall_fixture(
+    authenticated: AuthenticatedAccount,
+) -> RecoveredProductionRecallActorV1 {
+    let published = recall_completion_publication();
+    let RecallResultV1::Stored { result, .. } = &published.result else {
+        unreachable!("fixture publication is stored");
+    };
+    let receipt = StoredTerminalReceipt::from_storage(&StoredTerminalReceiptV1 {
+        schema_version: STORED_TERMINAL_RECEIPT_SCHEMA_V1,
+        account_id: authenticated.account_id.as_bytes(),
+        character_id: result.character_id,
+        lineage_id: [86; 16],
+        restore_point_id: [87; 16],
+        terminal_id: result.terminal_id,
+        mutation_id: [88; 16],
+        payload_hash: [89; 32],
+        server_plan_hash: [90; 32],
+        result_hash: result.result_hash,
+        expected_state_version: result.versions.character.before,
+        post_state_version: result.versions.character.after,
+        observed_tick: result.completion_tick,
+        committed_tick: result.completion_tick,
+        terminal_kind_code: TerminalKind::EmergencyRecall.stable_code(),
+    })
+    .unwrap();
+    RecoveredProductionRecallActorV1 {
+        coordinator: CoreTerminalCoordinator::from_stored_receipt(authenticated, receipt).unwrap(),
+        published,
     }
 }
 
@@ -1719,6 +1752,176 @@ async fn reliable_quic_pushes_committed_recall_without_a_second_client_request()
     drop(client);
     client_endpoint.wait_idle().await;
     server_endpoint.close(0_u32.into(), b"pushed Recall complete");
+    server_endpoint.wait_idle().await;
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the abandoned-push and reconnect replay remain one contiguous transport contract"
+)]
+async fn reliable_quic_abandoned_recall_push_replays_on_exact_reconnect() {
+    let authenticated = durable_death_fixture::authenticated_account();
+    let recovered = recovered_recall_fixture(authenticated);
+    let expected = recovered.published.clone();
+    let recall_actor = ProductionRecallIntentActor::new(
+        FixedAuthority,
+        authenticated.account_id.as_bytes(),
+        durable_death_fixture::CHARACTER_ID,
+        ProductionRecallPendingAuthorityV1 {
+            pending_item_count: 0,
+            pending_material_stack_count: 0,
+        },
+    )
+    .unwrap();
+    recall_actor
+        .restore_committed_recall(&recovered)
+        .await
+        .unwrap();
+
+    let (completion_outbox, mut completion_inbox) = core_recall_completion_outbox();
+    completion_outbox.try_publish(expected.clone()).unwrap();
+    let (server_endpoint, client_endpoint, address) = endpoints();
+    let connecting = client_endpoint.connect(address, "localhost").unwrap();
+    let incoming = server_endpoint.accept().await.unwrap();
+    let (client, server) = tokio::join!(connecting, incoming);
+    let client = client.unwrap();
+    let server = server.unwrap();
+    let abandoned_server = async {
+        serve_handshake(
+            &server,
+            &recall_policy(),
+            AuthenticationDecision::Accepted,
+            WireText::new("abandoned-recall-push").unwrap(),
+        )
+        .await
+        .unwrap();
+        let mut sequence = CoreReliableSequence::new();
+        let _delivery = completion_inbox.send_next(&server, &mut sequence).await;
+    };
+    let abandoning_client = async {
+        let HandshakeResponse::Accepted(_) = bot_client::perform_handshake(&client, hello())
+            .await
+            .unwrap()
+        else {
+            panic!("Core handshake must succeed");
+        };
+        let receive = client.accept_uni().await.unwrap();
+        drop(receive);
+    };
+    tokio::join!(abandoned_server, abandoning_client);
+    drop(client);
+    client_endpoint.wait_idle().await;
+    server_endpoint.close(0_u32.into(), b"abandoned Recall push");
+    server_endpoint.wait_idle().await;
+
+    let identity = IdentityService::new(
+        InMemoryAccountRepository::default(),
+        FixedAuthority,
+        FixedAuthority,
+        NoopIdentityEventSink,
+        ManifestHash::new("a".repeat(64)).unwrap(),
+    );
+    let world_flow = WorldFlowGateService::new(
+        InMemoryAccountRepository::default(),
+        FixedAuthority,
+        revision(),
+    );
+    let progression = disabled_progression();
+    let death_views = DeathViewService::new(
+        DisabledDeathViewRepository,
+        durable_death_fixture::death_view_revision(),
+    );
+    let oath = CoreOathSelectionAuthority::<FixedAuthority>::disabled();
+    let bargain = CoreBargainAuthority::<FixedAuthority>::disabled();
+    let safe_inventory = CoreSafeInventoryAuthority::disabled();
+    let extraction_terminal = CoreExtractionTerminalAuthority::disabled();
+    let (recall_handle, mut recall_inbox) = production_recall_actor_mailbox();
+    let exact_start = RecallFrameV1 {
+        schema_version: TERMINAL_INVENTORY_SCHEMA_VERSION,
+        sequence: 1,
+        character_id: durable_death_fixture::CHARACTER_ID,
+        client_tick: 8_000,
+        intent: RecallIntentV1::Start,
+    };
+    let (server_endpoint, client_endpoint, address) = endpoints();
+    let connecting = client_endpoint.connect(address, "localhost").unwrap();
+    let incoming = server_endpoint.accept().await.unwrap();
+    let (client, server) = tokio::join!(connecting, incoming);
+    let client = client.unwrap();
+    let server = server.unwrap();
+    let replay_server = async {
+        serve_handshake(
+            &server,
+            &recall_policy(),
+            AuthenticationDecision::Accepted,
+            WireText::new("reconnected-recall-session").unwrap(),
+        )
+        .await
+        .unwrap();
+        serve_core_reliable(
+            &server,
+            &identity,
+            &world_flow,
+            &progression,
+            &death_views,
+            &oath,
+            &bargain,
+            &safe_inventory,
+            &extraction_terminal,
+            &recall_handle,
+            authenticated,
+            1,
+            9_000,
+        )
+        .await
+        .unwrap();
+    };
+    let replay_client = async {
+        let HandshakeResponse::Accepted(_) = bot_client::perform_handshake(&client, hello())
+            .await
+            .unwrap()
+        else {
+            panic!("Core handshake must succeed");
+        };
+        let replay = bot_client::perform_reliable_gameplay(
+            &client,
+            protocol::WireMessage::RecallFrame(exact_start),
+        )
+        .await
+        .unwrap();
+        assert_eq!(replay.sequence, 1);
+        assert_eq!(replay.server_tick, 200);
+        let ReliableEvent::RecallResult(result) = replay.event else {
+            panic!("exact reconnect must return Recall");
+        };
+        let RecallResultV1::Stored {
+            request_sequence: Some(1),
+            replayed: true,
+            result,
+            ..
+        } = result.as_ref()
+        else {
+            panic!("exact reconnect must return stored replay");
+        };
+        let RecallResultV1::Stored {
+            result: expected_result,
+            ..
+        } = &expected.result
+        else {
+            unreachable!("fixture is stored");
+        };
+        assert_eq!(result.terminal_id, expected_result.terminal_id);
+        assert_eq!(result.result_hash, expected_result.result_hash);
+        assert_eq!(result.completion_tick, 112);
+    };
+    let replay_actor = async {
+        assert!(recall_inbox.serve_next(&recall_actor, 200).await);
+    };
+    tokio::join!(replay_actor, replay_server, replay_client);
+    drop(client);
+    client_endpoint.wait_idle().await;
+    server_endpoint.close(0_u32.into(), b"Recall replay complete");
     server_endpoint.wait_idle().await;
 }
 
