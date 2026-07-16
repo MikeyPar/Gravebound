@@ -16,6 +16,10 @@ function Invoke-PersistenceTests {
     if ($LASTEXITCODE -ne 0) {
         throw "PostgreSQL persistence tests failed with exit code $LASTEXITCODE"
     }
+    & cargo test --locked -p persistence --test postgres_extraction_terminal -- --ignored --test-threads=1 --nocapture
+    if ($LASTEXITCODE -ne 0) {
+        throw "PostgreSQL extraction terminal tests failed with exit code $LASTEXITCODE"
+    }
     & cargo test --locked -p server_app --test postgres_progression_restore -- --ignored --test-threads=1
     if ($LASTEXITCODE -ne 0) {
         throw "PostgreSQL progression restore tests failed with exit code $LASTEXITCODE"
