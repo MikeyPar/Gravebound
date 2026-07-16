@@ -162,6 +162,59 @@ pub struct ExtractionInventoryPlan {
     pub post_resolution_hold: Vec<DurableStorageSlot>,
 }
 
+/// Minimum M03 action for one server-published `ResolutionHold` logical stack.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolutionHoldRecoveryAction {
+    Move,
+    DestroyConfirmed,
+}
+
+/// Server-planned destination. Belt and another Hold stack are deliberately absent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolutionHoldRecoveryDestination {
+    CharacterSafe(u8),
+    Vault(u16),
+    Overflow {
+        slot_index: u8,
+        expires_at_unix_micros: u64,
+    },
+}
+
+impl ResolutionHoldRecoveryDestination {
+    #[must_use]
+    pub const fn account_owned(self) -> bool {
+        matches!(self, Self::Vault(_) | Self::Overflow { .. })
+    }
+}
+
+/// Locked storage authority for resolving exactly one current Hold stack.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolutionHoldRecoverySnapshot {
+    pub account_version: u64,
+    pub inventory_version: u64,
+    pub authoritative_time_unix_micros: u64,
+    pub extracted_at_unix_micros: u64,
+    pub held_stack: DurableStorageSlot,
+    pub character_safe: Vec<DurableStorageSlot>,
+    pub vault: Vec<DurableStorageSlot>,
+    pub overflow: Vec<DurableStorageSlot>,
+}
+
+/// Complete deterministic resolution plan. A Move always places every held UID in one slot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolutionHoldRecoveryPlan {
+    pub action: ResolutionHoldRecoveryAction,
+    pub destination: Option<ResolutionHoldRecoveryDestination>,
+    pub item_uids: Vec<ItemUid>,
+    pub pre_account_version: u64,
+    pub post_account_version: u64,
+    pub pre_inventory_version: u64,
+    pub post_inventory_version: u64,
+    pub post_character_safe: Vec<DurableStorageSlot>,
+    pub post_vault: Vec<DurableStorageSlot>,
+    pub post_overflow: Vec<DurableStorageSlot>,
+}
+
 impl ExtractionInventoryPlan {
     #[must_use]
     pub fn resolution_required(&self) -> bool {
@@ -197,6 +250,10 @@ pub enum TerminalInventoryError {
     UnresolvedResolutionHold,
     #[error("ResolutionHold lacks capacity for the complete accepted extraction")]
     ResolutionHoldFull,
+    #[error("ResolutionHold recovery requires one nonempty bounded logical stack")]
+    InvalidResolutionHoldStack,
+    #[error("no legal storage slot can accept the complete ResolutionHold stack")]
+    ResolutionHoldStorageFull,
     #[error("terminal material snapshot is invalid")]
     InvalidMaterial,
     #[error("terminal material identity occurs more than once")]
@@ -315,6 +372,287 @@ pub fn plan_successful_extraction(
     };
     validate_plan_conservation(snapshot, &plan)?;
     Ok(plan)
+}
+
+/// Plans one whole-stack Hold Move or confirmed destruction without accepting a client-authored
+/// destination. Consumable recovery never splits: one existing `CharacterSafe` stack, then one
+/// existing Vault stack, must accept every held unit or the complete stack uses one empty slot.
+pub fn plan_resolution_hold_recovery(
+    snapshot: &ResolutionHoldRecoverySnapshot,
+    action: ResolutionHoldRecoveryAction,
+) -> Result<ResolutionHoldRecoveryPlan, TerminalInventoryError> {
+    validate_resolution_hold_recovery_snapshot(snapshot)?;
+    let overflow_expires_at_unix_micros = snapshot
+        .extracted_at_unix_micros
+        .checked_add(OVERFLOW_LIFETIME_MICROS)
+        .ok_or(TerminalInventoryError::ArithmeticOverflow)?;
+    let item_uids = slot_uids(&snapshot.held_stack);
+    let mut post_character_safe = snapshot.character_safe.clone();
+    let mut post_vault = snapshot.vault.clone();
+    let mut post_overflow = snapshot.overflow.clone();
+
+    let destination = match action {
+        ResolutionHoldRecoveryAction::DestroyConfirmed => None,
+        ResolutionHoldRecoveryAction::Move => Some(place_complete_resolution_hold_stack(
+            &snapshot.held_stack,
+            &mut post_character_safe,
+            &mut post_vault,
+            &mut post_overflow,
+            snapshot.authoritative_time_unix_micros,
+            overflow_expires_at_unix_micros,
+        )?),
+    };
+    let post_account_version =
+        if destination.is_some_and(ResolutionHoldRecoveryDestination::account_owned) {
+            snapshot
+                .account_version
+                .checked_add(1)
+                .ok_or(TerminalInventoryError::ArithmeticOverflow)?
+        } else {
+            snapshot.account_version
+        };
+    let plan = ResolutionHoldRecoveryPlan {
+        action,
+        destination,
+        item_uids,
+        pre_account_version: snapshot.account_version,
+        post_account_version,
+        pre_inventory_version: snapshot.inventory_version,
+        post_inventory_version: snapshot
+            .inventory_version
+            .checked_add(1)
+            .ok_or(TerminalInventoryError::ArithmeticOverflow)?,
+        post_character_safe,
+        post_vault,
+        post_overflow,
+    };
+    validate_resolution_hold_recovery_plan(snapshot, &plan)?;
+    Ok(plan)
+}
+
+fn place_complete_resolution_hold_stack(
+    held_stack: &DurableStorageSlot,
+    character_safe: &mut [DurableStorageSlot],
+    vault: &mut [DurableStorageSlot],
+    overflow: &mut [DurableStorageSlot],
+    authoritative_time_unix_micros: u64,
+    overflow_expires_at_unix_micros: u64,
+) -> Result<ResolutionHoldRecoveryDestination, TerminalInventoryError> {
+    match held_stack {
+        DurableStorageSlot::Empty => Err(TerminalInventoryError::InvalidResolutionHoldStack),
+        DurableStorageSlot::Equipment { item_uid } => {
+            if let Some(index) = lowest_empty(character_safe) {
+                character_safe[index] = DurableStorageSlot::Equipment {
+                    item_uid: *item_uid,
+                };
+                return Ok(ResolutionHoldRecoveryDestination::CharacterSafe(
+                    u8::try_from(index).map_err(|_| TerminalInventoryError::InvalidCapacity)?,
+                ));
+            }
+            if let Some(index) = lowest_empty(vault) {
+                vault[index] = DurableStorageSlot::Equipment {
+                    item_uid: *item_uid,
+                };
+                return Ok(ResolutionHoldRecoveryDestination::Vault(
+                    u16::try_from(index).map_err(|_| TerminalInventoryError::InvalidCapacity)?,
+                ));
+            }
+            place_complete_stack_in_overflow(
+                held_stack,
+                overflow,
+                authoritative_time_unix_micros,
+                overflow_expires_at_unix_micros,
+            )
+        }
+        DurableStorageSlot::Consumable {
+            template_id,
+            item_uids,
+        } => {
+            if let Some(index) = complete_merge_index(character_safe, template_id, item_uids.len())
+            {
+                merge_complete_stack(&mut character_safe[index], item_uids)?;
+                return Ok(ResolutionHoldRecoveryDestination::CharacterSafe(
+                    u8::try_from(index).map_err(|_| TerminalInventoryError::InvalidCapacity)?,
+                ));
+            }
+            if let Some(index) = complete_merge_index(vault, template_id, item_uids.len()) {
+                merge_complete_stack(&mut vault[index], item_uids)?;
+                return Ok(ResolutionHoldRecoveryDestination::Vault(
+                    u16::try_from(index).map_err(|_| TerminalInventoryError::InvalidCapacity)?,
+                ));
+            }
+            if let Some(index) = lowest_empty(character_safe) {
+                character_safe[index] = held_stack.clone();
+                return Ok(ResolutionHoldRecoveryDestination::CharacterSafe(
+                    u8::try_from(index).map_err(|_| TerminalInventoryError::InvalidCapacity)?,
+                ));
+            }
+            if let Some(index) = lowest_empty(vault) {
+                vault[index] = held_stack.clone();
+                return Ok(ResolutionHoldRecoveryDestination::Vault(
+                    u16::try_from(index).map_err(|_| TerminalInventoryError::InvalidCapacity)?,
+                ));
+            }
+            place_complete_stack_in_overflow(
+                held_stack,
+                overflow,
+                authoritative_time_unix_micros,
+                overflow_expires_at_unix_micros,
+            )
+        }
+    }
+}
+
+fn lowest_empty(slots: &[DurableStorageSlot]) -> Option<usize> {
+    slots
+        .iter()
+        .position(|slot| matches!(slot, DurableStorageSlot::Empty))
+}
+
+fn complete_merge_index(
+    slots: &[DurableStorageSlot],
+    template_id: &str,
+    held_count: usize,
+) -> Option<usize> {
+    slots.iter().position(|slot| {
+        let DurableStorageSlot::Consumable {
+            template_id: stored_template,
+            item_uids,
+        } = slot
+        else {
+            return false;
+        };
+        stored_template == template_id
+            && item_uids
+                .len()
+                .checked_add(held_count)
+                .is_some_and(|count| count <= usize::from(DURABLE_CONSUMABLE_STACK_CAP))
+    })
+}
+
+fn merge_complete_stack(
+    destination: &mut DurableStorageSlot,
+    held_uids: &[ItemUid],
+) -> Result<(), TerminalInventoryError> {
+    let DurableStorageSlot::Consumable { item_uids, .. } = destination else {
+        return Err(TerminalInventoryError::InvalidConsumableStack);
+    };
+    item_uids.extend_from_slice(held_uids);
+    item_uids.sort_unstable();
+    Ok(())
+}
+
+fn place_complete_stack_in_overflow(
+    held_stack: &DurableStorageSlot,
+    overflow: &mut [DurableStorageSlot],
+    authoritative_time_unix_micros: u64,
+    overflow_expires_at_unix_micros: u64,
+) -> Result<ResolutionHoldRecoveryDestination, TerminalInventoryError> {
+    if overflow_expires_at_unix_micros <= authoritative_time_unix_micros {
+        return Err(TerminalInventoryError::ResolutionHoldStorageFull);
+    }
+    let index = lowest_empty(overflow).ok_or(TerminalInventoryError::ResolutionHoldStorageFull)?;
+    overflow[index] = held_stack.clone();
+    Ok(ResolutionHoldRecoveryDestination::Overflow {
+        slot_index: u8::try_from(index).map_err(|_| TerminalInventoryError::InvalidCapacity)?,
+        expires_at_unix_micros: overflow_expires_at_unix_micros,
+    })
+}
+
+fn validate_resolution_hold_recovery_snapshot(
+    snapshot: &ResolutionHoldRecoverySnapshot,
+) -> Result<(), TerminalInventoryError> {
+    if snapshot.account_version == 0
+        || snapshot.inventory_version == 0
+        || snapshot.authoritative_time_unix_micros == 0
+        || snapshot.extracted_at_unix_micros == 0
+        || matches!(snapshot.held_stack, DurableStorageSlot::Empty)
+    {
+        return Err(TerminalInventoryError::InvalidResolutionHoldStack);
+    }
+    snapshot
+        .extracted_at_unix_micros
+        .checked_add(OVERFLOW_LIFETIME_MICROS)
+        .ok_or(TerminalInventoryError::ArithmeticOverflow)?;
+    if snapshot.character_safe.len() != CHARACTER_SAFE_CAPACITY
+        || snapshot.vault.len() != VAULT_CAPACITY
+        || snapshot.overflow.len() != TERMINAL_OVERFLOW_CAPACITY
+    {
+        return Err(TerminalInventoryError::InvalidCapacity);
+    }
+    let mut identities = BTreeSet::new();
+    validate_recall_slot_and_uids(&snapshot.held_stack, &mut identities)?;
+    for slot in snapshot
+        .character_safe
+        .iter()
+        .chain(&snapshot.vault)
+        .chain(&snapshot.overflow)
+    {
+        validate_recall_slot_and_uids(slot, &mut identities)?;
+    }
+    Ok(())
+}
+
+fn validate_resolution_hold_recovery_plan(
+    snapshot: &ResolutionHoldRecoverySnapshot,
+    plan: &ResolutionHoldRecoveryPlan,
+) -> Result<(), TerminalInventoryError> {
+    if plan.item_uids != slot_uids(&snapshot.held_stack)
+        || plan.item_uids.is_empty()
+        || plan.pre_account_version != snapshot.account_version
+        || plan.pre_inventory_version != snapshot.inventory_version
+        || plan.post_inventory_version
+            != snapshot
+                .inventory_version
+                .checked_add(1)
+                .ok_or(TerminalInventoryError::ArithmeticOverflow)?
+    {
+        return Err(TerminalInventoryError::InvalidResolutionHoldStack);
+    }
+    match (plan.action, plan.destination) {
+        (ResolutionHoldRecoveryAction::DestroyConfirmed, None) => {
+            if plan.post_character_safe != snapshot.character_safe
+                || plan.post_vault != snapshot.vault
+                || plan.post_overflow != snapshot.overflow
+                || plan.post_account_version != snapshot.account_version
+            {
+                return Err(TerminalInventoryError::InvalidResolutionHoldStack);
+            }
+        }
+        (ResolutionHoldRecoveryAction::Move, Some(destination)) => {
+            let destination_slot = match destination {
+                ResolutionHoldRecoveryDestination::CharacterSafe(index) => {
+                    plan.post_character_safe.get(usize::from(index))
+                }
+                ResolutionHoldRecoveryDestination::Vault(index) => {
+                    plan.post_vault.get(usize::from(index))
+                }
+                ResolutionHoldRecoveryDestination::Overflow { slot_index, .. } => {
+                    plan.post_overflow.get(usize::from(slot_index))
+                }
+            }
+            .ok_or(TerminalInventoryError::InvalidCapacity)?;
+            let destination_uids: BTreeSet<_> = slot_uids(destination_slot).into_iter().collect();
+            if !plan
+                .item_uids
+                .iter()
+                .all(|item_uid| destination_uids.contains(item_uid))
+                || plan.post_account_version
+                    != if destination.account_owned() {
+                        snapshot
+                            .account_version
+                            .checked_add(1)
+                            .ok_or(TerminalInventoryError::ArithmeticOverflow)?
+                    } else {
+                        snapshot.account_version
+                    }
+            {
+                return Err(TerminalInventoryError::InvalidResolutionHoldStack);
+            }
+        }
+        _ => return Err(TerminalInventoryError::InvalidResolutionHoldStack),
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1075,6 +1413,19 @@ mod tests {
         }
     }
 
+    fn empty_hold_snapshot(held_stack: DurableStorageSlot) -> ResolutionHoldRecoverySnapshot {
+        ResolutionHoldRecoverySnapshot {
+            account_version: 4,
+            inventory_version: 7,
+            authoritative_time_unix_micros: 2_000,
+            extracted_at_unix_micros: 1_000,
+            held_stack,
+            character_safe: vec![DurableStorageSlot::Empty; CHARACTER_SAFE_CAPACITY],
+            vault: vec![DurableStorageSlot::Empty; VAULT_CAPACITY],
+            overflow: vec![DurableStorageSlot::Empty; TERMINAL_OVERFLOW_CAPACITY],
+        }
+    }
+
     #[test]
     fn empty_recall_preserves_account_and_advances_inventory_terminal_boundary() {
         let snapshot = empty_recall_snapshot();
@@ -1257,6 +1608,205 @@ mod tests {
         snapshot.inventory_version = u64::MAX;
         assert_eq!(
             plan_emergency_recall(&snapshot),
+            Err(TerminalInventoryError::ArithmeticOverflow)
+        );
+    }
+
+    #[test]
+    fn hold_equipment_move_uses_lowest_character_safe_slot_without_account_change() {
+        let mut snapshot = empty_hold_snapshot(equipment(1));
+        snapshot.character_safe[0] = equipment(10);
+
+        let plan =
+            plan_resolution_hold_recovery(&snapshot, ResolutionHoldRecoveryAction::Move).unwrap();
+
+        assert_eq!(
+            plan.destination,
+            Some(ResolutionHoldRecoveryDestination::CharacterSafe(1))
+        );
+        assert_eq!(plan.item_uids, [uid(1)]);
+        assert_eq!(plan.post_character_safe[1], equipment(1));
+        assert_eq!(plan.pre_account_version, 4);
+        assert_eq!(plan.post_account_version, 4);
+        assert_eq!(plan.pre_inventory_version, 7);
+        assert_eq!(plan.post_inventory_version, 8);
+    }
+
+    #[test]
+    fn hold_complete_vault_merge_precedes_empty_character_safe_slot() {
+        let mut snapshot = empty_hold_snapshot(tonic(&[20, 21]));
+        snapshot.character_safe[0] = tonic(&[1, 2, 3, 4, 5]);
+        snapshot.vault[0] = tonic(&[10, 11, 12, 13]);
+
+        let plan =
+            plan_resolution_hold_recovery(&snapshot, ResolutionHoldRecoveryAction::Move).unwrap();
+
+        assert_eq!(
+            plan.destination,
+            Some(ResolutionHoldRecoveryDestination::Vault(0))
+        );
+        assert_eq!(plan.post_character_safe, snapshot.character_safe);
+        assert_eq!(plan.post_vault[0], tonic(&[10, 11, 12, 13, 20, 21]));
+        assert_eq!(plan.post_account_version, 5);
+        assert_eq!(plan.post_inventory_version, 8);
+    }
+
+    #[test]
+    fn hold_move_never_splits_across_partial_stacks() {
+        let mut snapshot = empty_hold_snapshot(tonic(&[20, 21]));
+        snapshot.character_safe[0] = tonic(&[1, 2, 3, 4, 5]);
+        snapshot.vault[0] = tonic(&[10, 11, 12, 13, 14]);
+
+        let plan =
+            plan_resolution_hold_recovery(&snapshot, ResolutionHoldRecoveryAction::Move).unwrap();
+
+        assert_eq!(
+            plan.destination,
+            Some(ResolutionHoldRecoveryDestination::CharacterSafe(1))
+        );
+        assert_eq!(plan.post_character_safe[0], snapshot.character_safe[0]);
+        assert_eq!(plan.post_vault[0], snapshot.vault[0]);
+        assert_eq!(plan.post_character_safe[1], tonic(&[20, 21]));
+    }
+
+    #[test]
+    fn hold_overflow_move_retains_original_deadline_and_advances_account() {
+        let mut snapshot = empty_hold_snapshot(equipment(9_000));
+        for (index, slot) in snapshot.character_safe.iter_mut().enumerate() {
+            *slot = equipment(100 + index as u128);
+        }
+        for (index, slot) in snapshot.vault.iter_mut().enumerate() {
+            *slot = equipment(1_000 + index as u128);
+        }
+        snapshot.overflow[0] = equipment(8_000);
+
+        let plan =
+            plan_resolution_hold_recovery(&snapshot, ResolutionHoldRecoveryAction::Move).unwrap();
+        let retained_deadline = 1_000 + OVERFLOW_LIFETIME_MICROS;
+
+        assert_eq!(
+            plan.destination,
+            Some(ResolutionHoldRecoveryDestination::Overflow {
+                slot_index: 1,
+                expires_at_unix_micros: retained_deadline,
+            })
+        );
+        assert_eq!(plan.post_overflow[1], equipment(9_000));
+        assert_eq!(plan.post_account_version, 5);
+        assert_eq!(plan.post_inventory_version, 8);
+    }
+
+    #[test]
+    fn hold_expired_overflow_is_ineligible_and_move_is_atomic() {
+        let mut snapshot = empty_hold_snapshot(equipment(9_000));
+        for (index, slot) in snapshot.character_safe.iter_mut().enumerate() {
+            *slot = equipment(100 + index as u128);
+        }
+        for (index, slot) in snapshot.vault.iter_mut().enumerate() {
+            *slot = equipment(1_000 + index as u128);
+        }
+        snapshot.authoritative_time_unix_micros =
+            snapshot.extracted_at_unix_micros + OVERFLOW_LIFETIME_MICROS;
+        let original = snapshot.clone();
+
+        assert_eq!(
+            plan_resolution_hold_recovery(&snapshot, ResolutionHoldRecoveryAction::Move),
+            Err(TerminalInventoryError::ResolutionHoldStorageFull)
+        );
+        assert_eq!(snapshot, original);
+    }
+
+    #[test]
+    fn hold_full_storage_rejects_without_a_partial_move() {
+        let mut snapshot = empty_hold_snapshot(tonic(&[20, 21]));
+        for (index, slot) in snapshot.character_safe.iter_mut().enumerate() {
+            *slot = equipment(100 + index as u128);
+        }
+        for (index, slot) in snapshot.vault.iter_mut().enumerate() {
+            *slot = equipment(1_000 + index as u128);
+        }
+        for (index, slot) in snapshot.overflow.iter_mut().enumerate() {
+            *slot = equipment(2_000 + index as u128);
+        }
+        let original = snapshot.clone();
+
+        assert_eq!(
+            plan_resolution_hold_recovery(&snapshot, ResolutionHoldRecoveryAction::Move),
+            Err(TerminalInventoryError::ResolutionHoldStorageFull)
+        );
+        assert_eq!(snapshot, original);
+    }
+
+    #[test]
+    fn hold_confirmed_destruction_requires_no_capacity_and_grants_no_account_change() {
+        let mut snapshot = empty_hold_snapshot(tonic(&[20, 21]));
+        for (index, slot) in snapshot.character_safe.iter_mut().enumerate() {
+            *slot = equipment(100 + index as u128);
+        }
+        for (index, slot) in snapshot.vault.iter_mut().enumerate() {
+            *slot = equipment(1_000 + index as u128);
+        }
+        for (index, slot) in snapshot.overflow.iter_mut().enumerate() {
+            *slot = equipment(2_000 + index as u128);
+        }
+
+        let plan = plan_resolution_hold_recovery(
+            &snapshot,
+            ResolutionHoldRecoveryAction::DestroyConfirmed,
+        )
+        .unwrap();
+
+        assert_eq!(plan.destination, None);
+        assert_eq!(plan.item_uids, [uid(20), uid(21)]);
+        assert_eq!(plan.post_character_safe, snapshot.character_safe);
+        assert_eq!(plan.post_vault, snapshot.vault);
+        assert_eq!(plan.post_overflow, snapshot.overflow);
+        assert_eq!(plan.post_account_version, 4);
+        assert_eq!(plan.post_inventory_version, 8);
+    }
+
+    #[test]
+    fn hold_recovery_rejects_malformed_or_overflowing_authority() {
+        let snapshot = empty_hold_snapshot(DurableStorageSlot::Empty);
+        assert_eq!(
+            plan_resolution_hold_recovery(&snapshot, ResolutionHoldRecoveryAction::Move),
+            Err(TerminalInventoryError::InvalidResolutionHoldStack)
+        );
+
+        let snapshot = empty_hold_snapshot(tonic(&[2, 1]));
+        assert_eq!(
+            plan_resolution_hold_recovery(&snapshot, ResolutionHoldRecoveryAction::Move),
+            Err(TerminalInventoryError::InvalidConsumableStack)
+        );
+
+        let mut snapshot = empty_hold_snapshot(equipment(1));
+        snapshot.character_safe[0] = equipment(1);
+        assert_eq!(
+            plan_resolution_hold_recovery(&snapshot, ResolutionHoldRecoveryAction::Move),
+            Err(TerminalInventoryError::DuplicateItemUid)
+        );
+
+        let mut snapshot = empty_hold_snapshot(equipment(1));
+        snapshot.inventory_version = u64::MAX;
+        assert_eq!(
+            plan_resolution_hold_recovery(&snapshot, ResolutionHoldRecoveryAction::Move),
+            Err(TerminalInventoryError::ArithmeticOverflow)
+        );
+
+        let mut snapshot = empty_hold_snapshot(equipment(1));
+        for (index, slot) in snapshot.character_safe.iter_mut().enumerate() {
+            *slot = equipment(100 + index as u128);
+        }
+        snapshot.account_version = u64::MAX;
+        assert_eq!(
+            plan_resolution_hold_recovery(&snapshot, ResolutionHoldRecoveryAction::Move),
+            Err(TerminalInventoryError::ArithmeticOverflow)
+        );
+
+        let mut snapshot = empty_hold_snapshot(equipment(1));
+        snapshot.extracted_at_unix_micros = u64::MAX;
+        assert_eq!(
+            plan_resolution_hold_recovery(&snapshot, ResolutionHoldRecoveryAction::Move),
             Err(TerminalInventoryError::ArithmeticOverflow)
         );
     }
