@@ -1,0 +1,291 @@
+{
+  "report_schema": "gravebound.performance.gb-m03-06e.death-memory-soak.v1",
+  "feature_id": "GB-M03-06E",
+  "sample_scope": "death-read-reconnect-replay-stability-not-final-private-loop-cohort",
+  "build_id": "m03-core-dev-identity-1",
+  "death_view_records_blake3": "349730a1246857978d1412510ee23af46624ec80dbb3333be42aad2e47f1f8e0",
+  "death_view_assets_blake3": "0160f06954c88aba61392f72af66031d6f7ff4a592beb24f7ebe9f1981cc7a68",
+  "death_view_localization_blake3": "c10bcc96887aac7db8c855f19d991e6185f46d1df39f7a37d3a31cb4b9ca1b92",
+  "required_duration_ms": 1800000,
+  "measured_duration_ms": 1800029,
+  "query_journeys": 8509,
+  "death_view_queries": 34036,
+  "connection_generations": 426,
+  "completed_reconnects": 425,
+  "exact_replays": 425,
+  "canonical_signature_checks": 425,
+  "resident_memory_samples": [
+    {
+      "elapsed_ms": 0,
+      "resident_bytes": 13701120
+    },
+    {
+      "elapsed_ms": 30193,
+      "resident_bytes": 17772544
+    },
+    {
+      "elapsed_ms": 60065,
+      "resident_bytes": 17842176
+    },
+    {
+      "elapsed_ms": 90116,
+      "resident_bytes": 17874944
+    },
+    {
+      "elapsed_ms": 120141,
+      "resident_bytes": 17920000
+    },
+    {
+      "elapsed_ms": 150155,
+      "resident_bytes": 17940480
+    },
+    {
+      "elapsed_ms": 180159,
+      "resident_bytes": 17977344
+    },
+    {
+      "elapsed_ms": 210020,
+      "resident_bytes": 18038784
+    },
+    {
+      "elapsed_ms": 240032,
+      "resident_bytes": 18071552
+    },
+    {
+      "elapsed_ms": 270056,
+      "resident_bytes": 18120704
+    },
+    {
+      "elapsed_ms": 300102,
+      "resident_bytes": 18124800
+    },
+    {
+      "elapsed_ms": 330030,
+      "resident_bytes": 18149376
+    },
+    {
+      "elapsed_ms": 360075,
+      "resident_bytes": 18153472
+    },
+    {
+      "elapsed_ms": 390128,
+      "resident_bytes": 18157568
+    },
+    {
+      "elapsed_ms": 420172,
+      "resident_bytes": 18161664
+    },
+    {
+      "elapsed_ms": 450008,
+      "resident_bytes": 18186240
+    },
+    {
+      "elapsed_ms": 480038,
+      "resident_bytes": 18186240
+    },
+    {
+      "elapsed_ms": 510078,
+      "resident_bytes": 18198528
+    },
+    {
+      "elapsed_ms": 540115,
+      "resident_bytes": 18198528
+    },
+    {
+      "elapsed_ms": 570156,
+      "resident_bytes": 18206720
+    },
+    {
+      "elapsed_ms": 600179,
+      "resident_bytes": 18231296
+    },
+    {
+      "elapsed_ms": 630004,
+      "resident_bytes": 18243584
+    },
+    {
+      "elapsed_ms": 660106,
+      "resident_bytes": 18243584
+    },
+    {
+      "elapsed_ms": 690134,
+      "resident_bytes": 18255872
+    },
+    {
+      "elapsed_ms": 720160,
+      "resident_bytes": 18264064
+    },
+    {
+      "elapsed_ms": 750195,
+      "resident_bytes": 18272256
+    },
+    {
+      "elapsed_ms": 780014,
+      "resident_bytes": 18284544
+    },
+    {
+      "elapsed_ms": 810024,
+      "resident_bytes": 18300928
+    },
+    {
+      "elapsed_ms": 840041,
+      "resident_bytes": 18300928
+    },
+    {
+      "elapsed_ms": 870069,
+      "resident_bytes": 18317312
+    },
+    {
+      "elapsed_ms": 900073,
+      "resident_bytes": 18317312
+    },
+    {
+      "elapsed_ms": 930088,
+      "resident_bytes": 18325504
+    },
+    {
+      "elapsed_ms": 960126,
+      "resident_bytes": 18325504
+    },
+    {
+      "elapsed_ms": 990029,
+      "resident_bytes": 18325504
+    },
+    {
+      "elapsed_ms": 1020070,
+      "resident_bytes": 18325504
+    },
+    {
+      "elapsed_ms": 1050106,
+      "resident_bytes": 18333696
+    },
+    {
+      "elapsed_ms": 1080124,
+      "resident_bytes": 18345984
+    },
+    {
+      "elapsed_ms": 1110147,
+      "resident_bytes": 18345984
+    },
+    {
+      "elapsed_ms": 1140156,
+      "resident_bytes": 18345984
+    },
+    {
+      "elapsed_ms": 1170180,
+      "resident_bytes": 18345984
+    },
+    {
+      "elapsed_ms": 1200205,
+      "resident_bytes": 18350080
+    },
+    {
+      "elapsed_ms": 1230014,
+      "resident_bytes": 18362368
+    },
+    {
+      "elapsed_ms": 1260039,
+      "resident_bytes": 18362368
+    },
+    {
+      "elapsed_ms": 1290078,
+      "resident_bytes": 18362368
+    },
+    {
+      "elapsed_ms": 1320011,
+      "resident_bytes": 18374656
+    },
+    {
+      "elapsed_ms": 1350055,
+      "resident_bytes": 18374656
+    },
+    {
+      "elapsed_ms": 1380083,
+      "resident_bytes": 18378752
+    },
+    {
+      "elapsed_ms": 1410108,
+      "resident_bytes": 18386944
+    },
+    {
+      "elapsed_ms": 1440127,
+      "resident_bytes": 18391040
+    },
+    {
+      "elapsed_ms": 1470158,
+      "resident_bytes": 18391040
+    },
+    {
+      "elapsed_ms": 1500187,
+      "resident_bytes": 18391040
+    },
+    {
+      "elapsed_ms": 1530007,
+      "resident_bytes": 18391040
+    },
+    {
+      "elapsed_ms": 1560042,
+      "resident_bytes": 18395136
+    },
+    {
+      "elapsed_ms": 1590070,
+      "resident_bytes": 18395136
+    },
+    {
+      "elapsed_ms": 1620095,
+      "resident_bytes": 18399232
+    },
+    {
+      "elapsed_ms": 1650194,
+      "resident_bytes": 18399232
+    },
+    {
+      "elapsed_ms": 1680001,
+      "resident_bytes": 18399232
+    },
+    {
+      "elapsed_ms": 1710002,
+      "resident_bytes": 18399232
+    },
+    {
+      "elapsed_ms": 1740010,
+      "resident_bytes": 18415616
+    },
+    {
+      "elapsed_ms": 1770028,
+      "resident_bytes": 18415616
+    },
+    {
+      "elapsed_ms": 1800029,
+      "resident_bytes": 18333696
+    }
+  ],
+  "resident_memory_assessment": {
+    "kind": "stable",
+    "peak_resident_bytes": 18415616,
+    "post_warmup_growth_bytes": 561152
+  },
+  "supplemental_combined_process_memory_ceiling_bytes": 1500000000,
+  "combined_process_peak_within_supplemental_ceiling": true,
+  "canonical_signature_unchanged": true,
+  "final_database_residue": {
+    "active_transactions": 0,
+    "idle_transactions": 0,
+    "aborted_transactions": 0,
+    "waiting_locks": 0,
+    "granted_locks": 0
+  },
+  "runtime_residue": {
+    "accepted_connections": 426,
+    "rejected_connections": 0,
+    "combat_sessions_admitted": 0,
+    "completed_connection_tasks": 426,
+    "failed_connection_tasks": 0,
+    "remaining_connection_tasks": 0,
+    "remaining_open_connections": 0,
+    "zero_residue": true,
+    "persistence_enabled": true
+  },
+  "accepted": true,
+  "raw_report_hash_blake3": "6bc4fe98ab9b0b1a26be8bedf251a752e7e68e053b9dcc06644efb42577cbcd1"
+}
