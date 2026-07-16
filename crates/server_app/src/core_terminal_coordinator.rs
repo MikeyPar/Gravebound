@@ -120,6 +120,55 @@ impl CoreTerminalEvaluation {
     pub const fn has_candidate(&self) -> bool {
         self.candidate.is_some()
     }
+
+    /// Canonical in-process fingerprint used to freeze one actor tick across asynchronous
+    /// preparation/commit retries. It binds the complete producer evaluation, including an absent
+    /// marker or every opaque server-planned candidate axis.
+    pub(crate) fn snapshot_hash(&self) -> [u8; 32] {
+        let mut hasher =
+            blake3::Hasher::new_derive_key("gravebound.core-terminal-evaluation-snapshot.v1");
+        hash_snapshot_part(&mut hasher, &[self.producer.terminal_kind().stable_code()]);
+        for identity in [
+            self.binding.account_id(),
+            self.binding.character_id(),
+            self.binding.lineage_id(),
+            self.binding.restore_point_id(),
+        ] {
+            hash_snapshot_part(&mut hasher, identity);
+        }
+        hash_snapshot_part(&mut hasher, &self.observed_tick.to_be_bytes());
+        hash_snapshot_part(&mut hasher, &self.expected_state_version.to_be_bytes());
+        match self.candidate.as_ref() {
+            None => hash_snapshot_part(&mut hasher, &[0]),
+            Some(candidate) => {
+                hash_snapshot_part(&mut hasher, &[1]);
+                for identity in [
+                    candidate.binding().account_id(),
+                    candidate.binding().character_id(),
+                    candidate.binding().lineage_id(),
+                    candidate.binding().restore_point_id(),
+                ] {
+                    hash_snapshot_part(&mut hasher, identity);
+                }
+                hash_snapshot_part(&mut hasher, candidate.terminal_id());
+                hash_snapshot_part(&mut hasher, candidate.mutation_id());
+                hash_snapshot_part(&mut hasher, candidate.payload_hash());
+                hash_snapshot_part(&mut hasher, candidate.server_plan_hash());
+                hash_snapshot_part(
+                    &mut hasher,
+                    &candidate.expected_state_version().to_be_bytes(),
+                );
+                hash_snapshot_part(&mut hasher, &candidate.observed_tick().to_be_bytes());
+                hash_snapshot_part(&mut hasher, &[candidate.kind().stable_code()]);
+            }
+        }
+        *hasher.finalize().as_bytes()
+    }
+}
+
+fn hash_snapshot_part(hasher: &mut blake3::Hasher, bytes: &[u8]) {
+    hasher.update(&(bytes.len() as u64).to_be_bytes());
+    hasher.update(bytes);
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

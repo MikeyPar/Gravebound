@@ -168,6 +168,35 @@ pub struct ProductionRecallReplayOutcome {
     pub receipt: StoredTerminalReceipt,
 }
 
+/// Complete player-visible publication of one already committed Recall. Both projections are
+/// derived from the same immutable persistence result; neither performs another domain mutation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProductionRecallPublishedV1 {
+    pub result: RecallResultV1,
+    pub hall: CharacterLocationSnapshot,
+    pub explicit_client_tick: Option<u64>,
+}
+
+impl ProductionRecallPublishedV1 {
+    #[must_use]
+    pub fn as_replayed(&self) -> Self {
+        let mut replayed = self.clone();
+        if let RecallResultV1::Stored {
+            replayed: marker, ..
+        } = &mut replayed.result
+        {
+            *marker = true;
+        }
+        replayed
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RecoveredProductionRecallActorV1 {
+    pub coordinator: CoreTerminalCoordinator,
+    pub published: ProductionRecallPublishedV1,
+}
+
 #[derive(Debug, Error)]
 pub enum ProductionRecallExecutionError {
     #[error("sealed Recall could not form terminal authority: {0:?}")]
@@ -188,6 +217,8 @@ pub enum ProductionRecallExecutionError {
     StoredResultMismatch,
     #[error("stored committed-Recall terminal authority is corrupt")]
     StoredTerminalRecoveryMismatch,
+    #[error("Recall publication does not match its committed terminal receipt")]
+    PublishedReceiptMismatch,
     #[error("terminal receipt could not be published: {0:?}")]
     TerminalCommit(CommitError),
 }
@@ -217,6 +248,43 @@ where
     TerminalArbiter::from_stored_receipt(receipt)
         .map(Some)
         .map_err(|_| ProductionRecallExecutionError::StoredTerminalRecoveryMismatch)
+}
+
+/// Rebuilds the current Hall actor plus its exact reliable completion payload after process
+/// restart. Historical Recall results remain available through request replay but cannot reclaim
+/// a character whose Hall aggregate has advanced.
+pub async fn recover_committed_recall_actor<Reader>(
+    reader: &Reader,
+    authenticated: AuthenticatedAccount,
+    character_id: [u8; 16],
+) -> Result<Option<RecoveredProductionRecallActorV1>, ProductionRecallExecutionError>
+where
+    Reader: ProductionRecallTerminalReader,
+{
+    let Some(stored) = reader
+        .load_committed_terminal(authenticated.account_id.as_bytes(), character_id)
+        .await
+        .map_err(ProductionRecallExecutionError::Persistence)?
+    else {
+        return Ok(None);
+    };
+    if !stored.owns_current_hall {
+        return Ok(None);
+    }
+    let receipt = committed_recall_terminal_receipt_from_stored(&stored)?;
+    let coordinator = CoreTerminalCoordinator::from_stored_receipt(authenticated, receipt)
+        .map_err(|_| ProductionRecallExecutionError::StoredTerminalRecoveryMismatch)?;
+    let published = published_recall_from_stored_result(&stored.result, true)?;
+    validate_published_recall_receipt(
+        &published,
+        coordinator
+            .committed_receipt()
+            .ok_or(ProductionRecallExecutionError::StoredTerminalRecoveryMismatch)?,
+    )?;
+    Ok(Some(RecoveredProductionRecallActorV1 {
+        coordinator,
+        published,
+    }))
 }
 
 impl<Writer> ProductionRecallExecutionService<Writer>
@@ -436,6 +504,74 @@ pub fn protocol_recall_terminal_result(
     Ok(projected)
 }
 
+/// Builds the append-only protocol result and Hall projection from one committed repository
+/// transaction. A conflict transaction has no publishable result.
+pub fn published_recall_from_transaction(
+    transaction: &ProductionRecallTransactionV1,
+) -> Result<ProductionRecallPublishedV1, ProductionRecallExecutionError> {
+    let result = transaction
+        .result()
+        .ok_or(ProductionRecallExecutionError::RepositoryConflict)?;
+    published_recall_from_stored_result(result, transaction.is_replay())
+}
+
+pub fn validate_published_recall_receipt(
+    published: &ProductionRecallPublishedV1,
+    receipt: &StoredTerminalReceipt,
+) -> Result<(), ProductionRecallExecutionError> {
+    published
+        .result
+        .validate()
+        .map_err(|_| ProductionRecallExecutionError::PublishedReceiptMismatch)?;
+    let RecallResultV1::Stored { result, .. } = &published.result else {
+        return Err(ProductionRecallExecutionError::PublishedReceiptMismatch);
+    };
+    let kind = match result.trigger {
+        RecallTerminalTriggerV1::Explicit => TerminalKind::EmergencyRecall,
+        RecallTerminalTriggerV1::LinkLost => TerminalKind::DisconnectRecovery,
+    };
+    if receipt.kind() != kind
+        || receipt.binding().character_id() != &result.character_id
+        || receipt.terminal_id() != &result.terminal_id
+        || receipt.result_hash() != &result.result_hash
+        || receipt.observed_tick() != result.completion_tick
+        || receipt.committed_tick() != result.completion_tick
+        || receipt.post_state_version() != result.versions.character.after
+        || published.hall.character_id != result.character_id
+        || published.hall.character_version != result.versions.world.after
+        || !matches!(
+            &published.hall.location,
+            CharacterLocation::Safe {
+                location_id,
+                arrival: SafeArrival::HallDefault,
+            } if location_id.as_str() == persistence::PRODUCTION_RECALL_HALL_ID
+        )
+    {
+        return Err(ProductionRecallExecutionError::PublishedReceiptMismatch);
+    }
+    Ok(())
+}
+
+fn published_recall_from_stored_result(
+    result: &StoredProductionRecallResultV1,
+    replayed: bool,
+) -> Result<ProductionRecallPublishedV1, ProductionRecallExecutionError> {
+    let protocol = RecallResultV1::Stored {
+        schema_version: TERMINAL_INVENTORY_SCHEMA_VERSION,
+        request_sequence: result.request_sequence,
+        replayed,
+        result: Box::new(protocol_recall_terminal_result(result)?),
+    };
+    protocol
+        .validate()
+        .map_err(|_| ProductionRecallExecutionError::StoredResultMismatch)?;
+    Ok(ProductionRecallPublishedV1 {
+        result: protocol,
+        hall: hall_snapshot_from_stored_recall(result)?,
+        explicit_client_tick: result.explicit_client_tick,
+    })
+}
+
 const fn protocol_version(
     version: persistence::ProductionRecallVersionAdvanceV1,
 ) -> TerminalVersionAdvanceV1 {
@@ -536,9 +672,21 @@ mod tests {
     };
     use protocol::{RecallIntentV1, TERMINAL_HALL_CONTENT_ID};
 
-    use crate::{AccountId, NonTerminalAdmission, SubmitResult};
+    use crate::{
+        AccountId, NonTerminalAdmission, ProductionRecallClock, ProductionRecallIntentActor,
+        ProductionRecallPendingAuthorityV1, SubmitResult, production_recall_actor_mailbox,
+    };
 
     use super::*;
+
+    #[derive(Debug, Clone, Copy)]
+    struct RecoveryClock(u64);
+
+    impl ProductionRecallClock for RecoveryClock {
+        fn unix_millis(&self) -> u64 {
+            self.0
+        }
+    }
 
     #[derive(Clone, Copy)]
     enum FakeMode {
@@ -983,6 +1131,41 @@ mod tests {
         assert_eq!(recovered.committed_receipt(), Some(&expected));
         assert_eq!(expected.kind(), TerminalKind::EmergencyRecall);
 
+        let actor_reader = FakeReader {
+            mode: FakeReaderMode::Stored(Box::new(stored.clone())),
+        };
+        let recovered_actor = recover_committed_recall_actor(
+            &actor_reader,
+            AuthenticatedAccount {
+                account_id: AccountId::new(stored.result.account_id).unwrap(),
+                namespace: AuthenticatedNamespace::WipeableTest,
+            },
+            stored.result.character_id,
+        )
+        .await
+        .expect("actor recovery")
+        .expect("current Hall actor");
+        assert_eq!(
+            recovered_actor.coordinator.committed_receipt(),
+            Some(&expected)
+        );
+        assert_eq!(recovered_actor.published.explicit_client_tick, Some(8));
+        assert!(matches!(
+            recovered_actor.published.result,
+            RecallResultV1::Stored {
+                request_sequence: Some(7),
+                replayed: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            recovered_actor.published.hall.location,
+            CharacterLocation::Safe {
+                arrival: SafeArrival::HallDefault,
+                ..
+            }
+        ));
+
         let historical = FakeReader {
             mode: FakeReaderMode::Stored(Box::new(committed_terminal(false))),
         };
@@ -992,6 +1175,84 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn restart_recovery_installs_only_a_receipt_matched_mailbox_publication() {
+        let stored = committed_terminal(true);
+        let authenticated = AuthenticatedAccount {
+            account_id: AccountId::new(stored.result.account_id).unwrap(),
+            namespace: AuthenticatedNamespace::WipeableTest,
+        };
+        let reader = FakeReader {
+            mode: FakeReaderMode::Stored(Box::new(stored.clone())),
+        };
+        let recovered_actor =
+            recover_committed_recall_actor(&reader, authenticated, stored.result.character_id)
+                .await
+                .unwrap()
+                .unwrap();
+        let restored_live_actor = ProductionRecallIntentActor::new(
+            RecoveryClock(99),
+            stored.result.account_id,
+            stored.result.character_id,
+            ProductionRecallPendingAuthorityV1 {
+                pending_item_count: 0,
+                pending_material_stack_count: 0,
+            },
+        )
+        .unwrap();
+        restored_live_actor
+            .restore_committed_recall(&recovered_actor)
+            .await
+            .unwrap();
+        let (handle, mut inbox) = production_recall_actor_mailbox();
+        let replay_frame = RecallFrameV1 {
+            schema_version: TERMINAL_INVENTORY_SCHEMA_VERSION,
+            sequence: 7,
+            character_id: stored.result.character_id,
+            client_tick: 8,
+            intent: RecallIntentV1::Start,
+        };
+        let (reply, served) = tokio::join!(
+            handle.handle_recall(authenticated, &replay_frame, 999),
+            inbox.serve_next(&restored_live_actor, 999)
+        );
+        assert!(served);
+        assert_eq!(reply.server_tick, 999);
+        assert!(matches!(
+            reply.result,
+            RecallResultV1::Stored {
+                request_sequence: Some(7),
+                replayed: true,
+                ..
+            }
+        ));
+
+        let wrong_recall = prepared_recall(ProductionRecallTriggerV1::LinkLost);
+        let wrong_result = stored_result(&wrong_recall);
+        let wrong_receipt =
+            committed_recall_terminal_receipt(&wrong_recall, &wrong_result).unwrap();
+        let mispaired = RecoveredProductionRecallActorV1 {
+            coordinator: CoreTerminalCoordinator::from_stored_receipt(authenticated, wrong_receipt)
+                .unwrap(),
+            published: recovered_actor.published.clone(),
+        };
+        let rejected_actor = ProductionRecallIntentActor::new(
+            RecoveryClock(100),
+            stored.result.account_id,
+            stored.result.character_id,
+            ProductionRecallPendingAuthorityV1 {
+                pending_item_count: 0,
+                pending_material_stack_count: 0,
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            rejected_actor.restore_committed_recall(&mispaired).await,
+            Err(crate::ProductionRecallChannelError::InvalidPublishedAuthority)
+        ));
+        assert!(rejected_actor.published_recall().await.is_none());
     }
 
     #[tokio::test]
