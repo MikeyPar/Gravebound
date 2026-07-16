@@ -148,24 +148,6 @@ async fn reset_fixture(persistence: &PostgresPersistence) {
     .await
     .unwrap();
     sqlx::query(
-        "INSERT INTO item_instances (namespace_id,item_uid,account_id,character_id,template_id, \
-         content_revision,item_kind,item_level,rarity,creation_kind,creation_request_id,roll_index, \
-         unit_ordinal,item_version,security_state,location_kind,slot_index,provenance_kind, \
-         salvage_band,salvage_value) \
-         VALUES ($1,$2,$3,$4,$5,$6,0,10,0,0,$2,1,0,1,0,5,0,0,0,0), \
-                ($1,$7,$3,NULL,$5,$6,0,10,0,0,$7,2,0,1,0,6,0,0,0,0)",
-    )
-    .bind(WIPEABLE_CORE_NAMESPACE)
-    .bind(CHARACTER_SAFE_ITEM_UID.as_slice())
-    .bind(ACCOUNT_ID.as_slice())
-    .bind(CHARACTER_ID.as_slice())
-    .bind(ITEM_TEMPLATE_ID)
-    .bind(CORE_ITEM_CONTENT_REVISION)
-    .bind(VAULT_ITEM_UID.as_slice())
-    .execute(transaction.connection())
-    .await
-    .unwrap();
-    sqlx::query(
         "INSERT INTO ash_wallets (namespace_id,account_id,balance,wallet_version) \
          VALUES ($1,$2,0,1)",
     )
@@ -211,6 +193,24 @@ async fn reset_fixture(persistence: &PostgresPersistence) {
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(ACCOUNT_ID.as_slice())
     .bind(CHARACTER_ID.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO item_instances (namespace_id,item_uid,account_id,character_id,template_id, \
+         content_revision,item_kind,item_level,rarity,creation_kind,creation_request_id,roll_index, \
+         unit_ordinal,item_version,security_state,location_kind,slot_index,provenance_kind, \
+         salvage_band,salvage_value) \
+         VALUES ($1,$2,$3,$4,$5,$6,0,10,0,0,$2,1,0,1,0,5,0,0,0,0), \
+                ($1,$7,$3,NULL,$5,$6,0,10,0,0,$7,2,0,1,0,6,0,0,0,0)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(CHARACTER_SAFE_ITEM_UID.as_slice())
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(CHARACTER_ID.as_slice())
+    .bind(ITEM_TEMPLATE_ID)
+    .bind(CORE_ITEM_CONTENT_REVISION)
+    .bind(VAULT_ITEM_UID.as_slice())
     .execute(transaction.connection())
     .await
     .unwrap();
@@ -2153,6 +2153,168 @@ async fn remove_serialization_retry_fault(persistence: &PostgresPersistence) -> 
     attempts
 }
 
+#[derive(Clone, Copy)]
+struct ImmutableDeathHistoryRow {
+    label: &'static str,
+    update_sql: &'static str,
+    delete_sql: &'static str,
+}
+
+const IMMUTABLE_DEATH_HISTORY_ROWS: [ImmutableDeathHistoryRow; 17] = [
+    ImmutableDeathHistoryRow {
+        label: "death root",
+        update_sql: "UPDATE death_events SET lifetime_ticks=lifetime_ticks \
+            WHERE namespace_id=$1 AND death_id=$2",
+        delete_sql: "DELETE FROM death_events WHERE namespace_id=$1 AND death_id=$2",
+    },
+    ImmutableDeathHistoryRow {
+        label: "combat trace entry",
+        update_sql: "UPDATE death_combat_trace_entries SET attack_id=attack_id \
+            WHERE namespace_id=$1 AND death_id=$2 AND trace_ordinal=0",
+        delete_sql: "DELETE FROM death_combat_trace_entries \
+            WHERE namespace_id=$1 AND death_id=$2 AND trace_ordinal=0",
+    },
+    ImmutableDeathHistoryRow {
+        label: "combat trace status",
+        update_sql: "UPDATE death_combat_trace_statuses SET remaining_ticks=remaining_ticks \
+            WHERE namespace_id=$1 AND death_id=$2 AND trace_ordinal=0 AND status_ordinal=0",
+        delete_sql: "DELETE FROM death_combat_trace_statuses \
+            WHERE namespace_id=$1 AND death_id=$2 AND trace_ordinal=0 AND status_ordinal=0",
+    },
+    ImmutableDeathHistoryRow {
+        label: "death summary",
+        update_sql: "UPDATE death_summary_snapshots SET lifetime_ms=lifetime_ms \
+            WHERE namespace_id=$1 AND death_id=$2",
+        delete_sql: "DELETE FROM death_summary_snapshots \
+            WHERE namespace_id=$1 AND death_id=$2",
+    },
+    ImmutableDeathHistoryRow {
+        label: "summary damage reference",
+        update_sql: "UPDATE death_summary_damage_entries SET trace_ordinal=trace_ordinal \
+            WHERE namespace_id=$1 AND death_id=$2 AND damage_ordinal=0",
+        delete_sql: "DELETE FROM death_summary_damage_entries \
+            WHERE namespace_id=$1 AND death_id=$2 AND damage_ordinal=0",
+    },
+    ImmutableDeathHistoryRow {
+        label: "summary projection",
+        update_sql: "UPDATE death_summary_projection_entries SET quantity=quantity \
+            WHERE namespace_id=$1 AND death_id=$2 AND section_kind=0 AND entry_ordinal=0",
+        delete_sql: "DELETE FROM death_summary_projection_entries \
+            WHERE namespace_id=$1 AND death_id=$2 AND section_kind=0 AND entry_ordinal=0",
+    },
+    ImmutableDeathHistoryRow {
+        label: "Memorial",
+        update_sql: "UPDATE memorial_records SET presentation_key=presentation_key \
+            WHERE namespace_id=$1 AND death_id=$2",
+        delete_sql: "DELETE FROM memorial_records WHERE namespace_id=$1 AND death_id=$2",
+    },
+    ImmutableDeathHistoryRow {
+        label: "destruction ledger",
+        update_sql: "UPDATE death_destruction_entries SET quantity=quantity \
+            WHERE namespace_id=$1 AND death_id=$2 AND destruction_ordinal=0",
+        delete_sql: "DELETE FROM death_destruction_entries \
+            WHERE namespace_id=$1 AND death_id=$2 AND destruction_ordinal=0",
+    },
+    ImmutableDeathHistoryRow {
+        label: "terminal receipt",
+        update_sql: "UPDATE death_mutation_results SET result_code=result_code \
+            WHERE namespace_id=$1 AND death_id=$2",
+        delete_sql: "DELETE FROM death_mutation_results \
+            WHERE namespace_id=$1 AND death_id=$2",
+    },
+    ImmutableDeathHistoryRow {
+        label: "death audit",
+        update_sql: "UPDATE death_audit_events SET event_kind=event_kind \
+            WHERE namespace_id=$1 AND death_id=$2",
+        delete_sql: "DELETE FROM death_audit_events WHERE namespace_id=$1 AND death_id=$2",
+    },
+    ImmutableDeathHistoryRow {
+        label: "death outbox payload",
+        update_sql: "UPDATE death_outbox_events SET event_payload=event_payload \
+            WHERE namespace_id=$1 AND death_id=$2 AND event_type='death_committed'",
+        delete_sql: "DELETE FROM death_outbox_events \
+            WHERE namespace_id=$1 AND death_id=$2 AND event_type='death_committed'",
+    },
+    ImmutableDeathHistoryRow {
+        label: "Echo snapshot",
+        update_sql: "UPDATE echo_records SET snapshot_digest=snapshot_digest \
+            WHERE namespace_id=$1 AND death_id=$2",
+        delete_sql: "DELETE FROM echo_records WHERE namespace_id=$1 AND death_id=$2",
+    },
+    ImmutableDeathHistoryRow {
+        label: "Echo deed",
+        update_sql: "UPDATE echo_deed_tags SET deed_tag=deed_tag \
+            WHERE namespace_id=$1 AND echo_id=(SELECT echo_id FROM echo_records \
+                WHERE namespace_id=$1 AND death_id=$2) AND deed_ordinal=0",
+        delete_sql: "DELETE FROM echo_deed_tags \
+            WHERE namespace_id=$1 AND echo_id=(SELECT echo_id FROM echo_records \
+                WHERE namespace_id=$1 AND death_id=$2) AND deed_ordinal=0",
+    },
+    ImmutableDeathHistoryRow {
+        label: "Echo transition",
+        update_sql: "UPDATE echo_state_transitions SET reason_kind=reason_kind \
+            WHERE namespace_id=$1 AND echo_id=(SELECT echo_id FROM echo_records \
+                WHERE namespace_id=$1 AND death_id=$2) AND transition_ordinal=0",
+        delete_sql: "DELETE FROM echo_state_transitions \
+            WHERE namespace_id=$1 AND echo_id=(SELECT echo_id FROM echo_records \
+                WHERE namespace_id=$1 AND death_id=$2) AND transition_ordinal=0",
+    },
+    ImmutableDeathHistoryRow {
+        label: "destroyed item",
+        update_sql: "UPDATE item_instances SET item_version=item_version \
+            WHERE namespace_id=$1 AND terminal_death_id=$2",
+        delete_sql: "DELETE FROM item_instances \
+            WHERE namespace_id=$1 AND terminal_death_id=$2",
+    },
+    ImmutableDeathHistoryRow {
+        label: "permadeath item ledger",
+        update_sql: "UPDATE item_ledger_events SET event_kind=event_kind \
+            WHERE namespace_id=$1 AND terminal_death_id=$2",
+        delete_sql: "DELETE FROM item_ledger_events \
+            WHERE namespace_id=$1 AND terminal_death_id=$2",
+    },
+    ImmutableDeathHistoryRow {
+        label: "destroyed run material",
+        update_sql: "UPDATE character_run_material_stacks SET quantity=quantity \
+            WHERE namespace_id=$1 AND terminal_death_id=$2",
+        delete_sql: "DELETE FROM character_run_material_stacks \
+            WHERE namespace_id=$1 AND terminal_death_id=$2",
+    },
+];
+
+async fn assert_immutable_death_history_rejects_direct_mutation(
+    persistence: &PostgresPersistence,
+    baseline: &persistence::StoredCoreDeathTerminalSignatureV1,
+) {
+    // GDD DTH-001/TECH-021, Content CONT-ECHO-009, and Roadmap GB-M03-02D/06/13 require
+    // the committed terminal graph to remain an immutable historical authority. Each operation
+    // uses a fresh transaction because PostgreSQL correctly aborts the transaction on rejection.
+    for row in IMMUTABLE_DEATH_HISTORY_ROWS {
+        for (operation, sql) in [("UPDATE", row.update_sql), ("DELETE", row.delete_sql)] {
+            let mut transaction = persistence.begin_transaction().await.unwrap();
+            let rejected = sqlx::query(sql)
+                .bind(WIPEABLE_CORE_NAMESPACE)
+                .bind(RequestIds::primary().death_id.as_slice())
+                .execute(transaction.connection())
+                .await;
+            assert!(
+                rejected.is_err(),
+                "{} {} must reject without disabling production triggers",
+                row.label,
+                operation
+            );
+            transaction.rollback().await.unwrap();
+            assert_eq!(
+                canonical_terminal_signature(persistence).await,
+                *baseline,
+                "{} {} changed the canonical terminal signature",
+                row.label,
+                operation
+            );
+        }
+    }
+}
+
 async fn assert_post_death_rejection(persistence: &PostgresPersistence) {
     let mut transaction = persistence.begin_transaction().await.unwrap();
     let rejected = sqlx::query(
@@ -2645,6 +2807,18 @@ async fn complete_durable_death_graph_is_atomic_replayable_terminal_and_wipeable
     assert_normalized_live_trace_absent(&restarted).await;
     assert_committed_terminal_recovery(&restarted, fresh.result(), &primary_promotion).await;
     assert_committed_death_views(&restarted, RequestIds::primary()).await;
+    assert_immutable_death_history_rejects_direct_mutation(&restarted, &before_restart_signature)
+        .await;
+    let replay_after_immutability_matrix = restarted
+        .transact_durable_death(&primary, &content, &primary_promotion)
+        .await
+        .unwrap();
+    assert!(replay_after_immutability_matrix.is_replay());
+    assert_eq!(replay_after_immutability_matrix.result(), fresh.result());
+    assert_eq!(
+        canonical_terminal_signature(&restarted).await,
+        before_restart_signature
+    );
     let altered_promotion = evidence.altered_predecessor_promotion_for(&primary);
     assert!(matches!(
         restarted
