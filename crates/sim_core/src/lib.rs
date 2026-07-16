@@ -58,6 +58,7 @@ mod safe_storage;
 mod scene_interaction;
 mod shared_authority;
 mod telemetry;
+mod terminal_inventory;
 mod trace;
 mod weapon;
 mod world_scene;
@@ -384,6 +385,13 @@ pub use telemetry::{
     ObservationTelemetry, OpenQuestion, OpenSurveyAnswer, PrivacySafeSurveySummary, Rating,
     RestartReasonTelemetry, RestartTelemetry, SurveyTelemetry, TELEMETRY_SCHEMA_VERSION,
     TelemetryEnvelope, TelemetryEvent, TelemetryEventKind, TelemetryRecord,
+};
+pub use terminal_inventory::{
+    ExtractionInventoryPlan, ExtractionInventorySnapshot, OVERFLOW_LIFETIME_MICROS,
+    TERMINAL_BELT_CAPACITY, TERMINAL_MATERIAL_CAPACITY, TERMINAL_OVERFLOW_CAPACITY,
+    TERMINAL_RESOLUTION_HOLD_CAPACITY, TerminalInventoryError, TerminalInventoryLocation,
+    TerminalItemPlacement, TerminalMaterialCredit, TerminalMaterialSnapshot,
+    plan_successful_extraction,
 };
 pub use trace::{
     FoundationEntity, FoundationSimulation, InputFrame, TickHash, TraceError, TraceFixture,
