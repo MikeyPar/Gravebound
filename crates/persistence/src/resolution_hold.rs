@@ -91,6 +91,21 @@ impl StoredResolutionHoldDestinationV1 {
         matches!(self, Self::Vault(_) | Self::Overflow(_))
     }
 
+    pub fn try_from_durable(kind: i16, slot_index: u16) -> Result<Self, PersistenceError> {
+        match kind {
+            5 => match u8::try_from(slot_index) {
+                Ok(index) => Ok(Self::CharacterSafe(index)),
+                Err(_) => Err(corrupt()),
+            },
+            6 => Ok(Self::Vault(slot_index)),
+            8 => match u8::try_from(slot_index) {
+                Ok(index) => Ok(Self::Overflow(index)),
+                Err(_) => Err(corrupt()),
+            },
+            _ => Err(corrupt()),
+        }
+    }
+
     fn validate(self) -> Result<(), PersistenceError> {
         let valid = match self {
             Self::CharacterSafe(index) => usize::from(index) < CHARACTER_SAFE_CAPACITY,
@@ -113,6 +128,14 @@ impl StoredResolutionHoldActionV1 {
         match self {
             Self::Move => 0,
             Self::DestroyConfirmed => 1,
+        }
+    }
+
+    pub const fn try_from_durable_kind(value: i16) -> Result<Self, PersistenceError> {
+        match value {
+            0 => Ok(Self::Move),
+            1 => Ok(Self::DestroyConfirmed),
+            _ => Err(corrupt()),
         }
     }
 }

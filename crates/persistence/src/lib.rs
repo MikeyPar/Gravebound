@@ -610,6 +610,8 @@ pub enum PersistenceError {
     },
     #[error("ResolutionHold recovery does not match the promoted Core item content")]
     ResolutionHoldContentMismatch,
+    #[error("ResolutionHold mutation issue time is later than PostgreSQL commit authority")]
+    ResolutionHoldIssuedAtInvalid,
     #[error("the selected ResolutionHold logical stack no longer exists")]
     ResolutionHoldStackNotFound,
     #[error("the selected ResolutionHold logical stack digest is stale")]

@@ -13,10 +13,12 @@ use persistence::{
     CORE_WORLD_LOCALIZATION_BLAKE3, CORE_WORLD_RECORDS_BLAKE3,
     PRODUCTION_EXTRACTION_CONTRACT_VERSION_V1, PersistenceConfig, PostgresPersistence,
     ProductionExtractionCommitRequestV1, ProductionExtractionExpectedVersionsV1,
-    ProductionExtractionTransactionV1, StoredExtractionLocationV1, StoredWorldFlowRevisionV1,
-    WIPEABLE_CORE_NAMESPACE, stage_danger_entry_ash_wallet_restore_v3,
-    stage_danger_entry_inventory_restore_v3, stage_danger_entry_life_metrics_restore_v3,
-    stage_danger_entry_oath_bargain_restore_v3,
+    ProductionExtractionTransactionV1, RESOLUTION_HOLD_CONTRACT_VERSION_V1,
+    ResolutionHoldMutationRequestV1, ResolutionHoldMutationTransactionV1,
+    StoredExtractionLocationV1, StoredResolutionHoldActionV1, StoredResolutionHoldDestinationV1,
+    StoredResolutionHoldDispositionV1, StoredWorldFlowRevisionV1, WIPEABLE_CORE_NAMESPACE,
+    stage_danger_entry_ash_wallet_restore_v3, stage_danger_entry_inventory_restore_v3,
+    stage_danger_entry_life_metrics_restore_v3, stage_danger_entry_oath_bargain_restore_v3,
 };
 use sqlx::Row;
 
@@ -38,6 +40,9 @@ const REWARD_REQUEST_ID: [u8; 16] = [220; 16];
 const REWARD_RESULT_HASH: [u8; 32] = [221; 32];
 const PROGRESSION_PAYLOAD_HASH: [u8; 32] = [222; 32];
 const MATERIAL_ID: &str = "material.bell_brass";
+const HOLD_MOVE_MUTATION_ID: [u8; 16] = [223; 16];
+const HOLD_DESTROY_MUTATION_ID: [u8; 16] = [224; 16];
+const FILLER_EXTRACTION_ID: [u8; 16] = [230; 16];
 
 fn persistence_config() -> PersistenceConfig {
     PersistenceConfig::from_test_environment()
@@ -532,6 +537,387 @@ async fn reset_fixture(persistence: &PostgresPersistence) {
     .await
     .unwrap();
     transaction.commit().await.unwrap();
+}
+
+fn storage_filler_uid(location_kind: i16, slot_index: u16) -> [u8; 16] {
+    let mut uid = [0_u8; 16];
+    uid[0] = 240;
+    uid[1] = u8::try_from(location_kind).unwrap();
+    uid[14..].copy_from_slice(&slot_index.to_be_bytes());
+    uid
+}
+
+async fn fill_all_terminal_storage(persistence: &PostgresPersistence) {
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    for (location_kind, capacity) in [(5_i16, 8_u16), (6_i16, 160_u16), (8_i16, 20_u16)] {
+        for slot_index in 0..capacity {
+            let uid = storage_filler_uid(location_kind, slot_index);
+            let character_id = (location_kind == 5).then_some(CHARACTER_ID.as_slice());
+            let terminal_id = (location_kind == 8).then_some(FILLER_EXTRACTION_ID.as_slice());
+            sqlx::query(
+                "INSERT INTO item_instances
+                 (namespace_id,item_uid,account_id,character_id,template_id,content_revision,
+                  item_kind,item_level,rarity,creation_kind,creation_request_id,roll_index,
+                  unit_ordinal,item_version,security_state,location_kind,slot_index,
+                  provenance_kind,salvage_band,salvage_value,terminal_extraction_id,
+                  extracted_at,overflow_expires_at)
+                 VALUES ($1,$2,$3,$4,'item.weapon.crossbow.pine_crossbow',$5,
+                  0,10,0,0,$2,0,0,1,0,$6,$7,0,0,0,$8,
+                  CASE WHEN $6=8 THEN transaction_timestamp() ELSE NULL END,
+                  CASE WHEN $6=8 THEN transaction_timestamp()+INTERVAL '72 hours' ELSE NULL END)",
+            )
+            .bind(WIPEABLE_CORE_NAMESPACE)
+            .bind(uid.as_slice())
+            .bind(ACCOUNT_ID.as_slice())
+            .bind(character_id)
+            .bind(CORE_ITEM_CONTENT_REVISION)
+            .bind(location_kind)
+            .bind(i16::try_from(slot_index).unwrap())
+            .bind(terminal_id)
+            .execute(transaction.connection())
+            .await
+            .unwrap();
+        }
+    }
+    transaction.commit().await.unwrap();
+}
+
+async fn commit_fixture_extraction_to_hold(
+    persistence: &PostgresPersistence,
+) -> persistence::StoredProductionExtractionResultV1 {
+    let extraction_request = request();
+    let prepared = persistence
+        .prepare_production_extraction_v1(&extraction_request)
+        .await
+        .unwrap();
+    let ProductionExtractionTransactionV1::Fresh(result) = persistence
+        .commit_production_extraction_v1(&extraction_request, prepared.canonical_plan_hash())
+        .await
+        .unwrap()
+    else {
+        panic!("fixture extraction must commit fresh");
+    };
+    assert!(result.storage_resolution_required);
+    assert!(result.placements.iter().any(|placement| {
+        placement.item_uid == BACKPACK_ITEM_UID
+            && placement.destination == StoredExtractionLocationV1::ResolutionHold(0)
+    }));
+    result
+}
+
+fn hold_request(
+    snapshot: &persistence::StoredResolutionHoldSnapshotV1,
+    mutation_id: [u8; 16],
+    action: StoredResolutionHoldActionV1,
+) -> ResolutionHoldMutationRequestV1 {
+    ResolutionHoldMutationRequestV1 {
+        contract_version: RESOLUTION_HOLD_CONTRACT_VERSION_V1,
+        namespace_id: WIPEABLE_CORE_NAMESPACE.into(),
+        account_id: ACCOUNT_ID,
+        character_id: CHARACTER_ID,
+        mutation_id,
+        extraction_id: snapshot.stacks[0].extraction_id,
+        stack_index: snapshot.stacks[0].stack_index,
+        action,
+        expected_versions: snapshot.versions,
+        content_revision: CORE_ITEM_CONTENT_REVISION.into(),
+        expected_stack_digest: snapshot.stacks[0].stack_digest,
+        issued_at_unix_millis: 1,
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires explicitly authorized disposable PostgreSQL"]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one hosted journey proves real extraction-to-Hold move, restart replay, and altered conflict"
+)]
+async fn resolution_hold_move_restart_replay_and_conflict_are_atomic() {
+    let persistence = disposable_database().await;
+    reset_fixture(&persistence).await;
+    fill_all_terminal_storage(&persistence).await;
+    let extraction = commit_fixture_extraction_to_hold(&persistence).await;
+
+    let full_snapshot = persistence
+        .load_resolution_hold_snapshot_v1(ACCOUNT_ID, CHARACTER_ID)
+        .await
+        .unwrap();
+    assert_eq!(full_snapshot.stacks.len(), 1);
+    assert_eq!(full_snapshot.stacks[0].planned_destination, None);
+    let full_request = hold_request(
+        &full_snapshot,
+        HOLD_MOVE_MUTATION_ID,
+        StoredResolutionHoldActionV1::Move,
+    );
+    assert!(matches!(
+        persistence
+            .commit_resolution_hold_mutation_v1(&full_request)
+            .await,
+        Err(persistence::PersistenceError::ResolutionHoldStorageFull)
+    ));
+
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let deleted = sqlx::query(
+        "DELETE FROM item_instances
+         WHERE namespace_id=$1 AND item_uid=$2 AND account_id=$3 AND character_id=$4
+           AND location_kind=5 AND slot_index=0",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(storage_filler_uid(5, 0).as_slice())
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(CHARACTER_ID.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap()
+    .rows_affected();
+    assert_eq!(deleted, 1);
+    transaction.commit().await.unwrap();
+
+    let snapshot = persistence
+        .load_resolution_hold_snapshot_v1(ACCOUNT_ID, CHARACTER_ID)
+        .await
+        .unwrap();
+    assert_eq!(
+        snapshot.stacks[0].planned_destination,
+        Some(StoredResolutionHoldDestinationV1::CharacterSafe(0))
+    );
+    let commit_request = hold_request(
+        &snapshot,
+        HOLD_MOVE_MUTATION_ID,
+        StoredResolutionHoldActionV1::Move,
+    );
+    let ResolutionHoldMutationTransactionV1::Fresh(fresh) = persistence
+        .commit_resolution_hold_mutation_v1(&commit_request)
+        .await
+        .unwrap()
+    else {
+        panic!("first ResolutionHold move must commit fresh");
+    };
+    assert_eq!(
+        fresh.destination,
+        Some(StoredResolutionHoldDestinationV1::CharacterSafe(0))
+    );
+    assert_eq!(fresh.transitions.len(), 1);
+    assert_eq!(fresh.transitions[0].item_uid, BACKPACK_ITEM_UID);
+    assert!(matches!(
+        fresh.transitions[0].disposition,
+        StoredResolutionHoldDispositionV1::Moved(StoredResolutionHoldDestinationV1::CharacterSafe(
+            0
+        ))
+    ));
+    assert_eq!(fresh.versions.account.pre, extraction.versions.account.post);
+    assert_eq!(
+        fresh.versions.account.post,
+        extraction.versions.account.post
+    );
+    assert_eq!(
+        fresh.versions.character.post,
+        extraction.versions.character.post + 1
+    );
+    assert_eq!(
+        fresh.versions.world.post,
+        extraction.versions.world.post + 1
+    );
+    assert_eq!(
+        fresh.versions.inventory.post,
+        extraction.versions.inventory.post + 1
+    );
+    assert!(!fresh.storage_resolution_required);
+
+    persistence.close().await;
+    let persistence = reconnect_database().await;
+    let ResolutionHoldMutationTransactionV1::Replayed(replayed) = persistence
+        .commit_resolution_hold_mutation_v1(&commit_request)
+        .await
+        .unwrap()
+    else {
+        panic!("response-loss retry after reconnect must return stored Hold result");
+    };
+    assert_eq!(replayed, fresh);
+
+    let mut altered = commit_request.clone();
+    altered.issued_at_unix_millis += 1;
+    let ResolutionHoldMutationTransactionV1::Conflict {
+        mutation_id,
+        character_id,
+    } = persistence
+        .commit_resolution_hold_mutation_v1(&altered)
+        .await
+        .unwrap()
+    else {
+        panic!("changed payload under the same Hold mutation must conflict");
+    };
+    assert_eq!(mutation_id, HOLD_MOVE_MUTATION_ID);
+    assert_eq!(character_id, CHARACTER_ID);
+
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let state = sqlx::query(
+        "SELECT account.state_version,character.character_state_version,
+                character.security_state,world.character_version,
+                inventory.inventory_version,item.location_kind,item.slot_index,
+                item.security_state AS item_security,item.item_version,
+                (SELECT count(*) FROM resolution_hold_mutation_results_v1
+                 WHERE namespace_id=$1 AND account_id=$2 AND mutation_id=$4) AS results,
+                (SELECT count(*) FROM resolution_hold_item_transitions_v1
+                 WHERE namespace_id=$1 AND account_id=$2 AND mutation_id=$4) AS transitions,
+                (SELECT count(*) FROM resolution_hold_mutation_conflict_audits_v1
+                 WHERE namespace_id=$1 AND account_id=$2 AND mutation_id=$4) AS conflicts
+         FROM accounts AS account
+         JOIN characters AS character
+           ON character.namespace_id=account.namespace_id
+          AND character.account_id=account.account_id
+         JOIN character_world_locations AS world
+           ON world.namespace_id=character.namespace_id
+          AND world.account_id=character.account_id
+          AND world.character_id=character.character_id
+         JOIN character_inventories AS inventory
+           ON inventory.namespace_id=character.namespace_id
+          AND inventory.account_id=character.account_id
+          AND inventory.character_id=character.character_id
+         JOIN item_instances AS item
+           ON item.namespace_id=character.namespace_id
+          AND item.account_id=character.account_id
+          AND item.character_id=character.character_id
+         WHERE account.namespace_id=$1 AND account.account_id=$2
+           AND character.character_id=$3 AND item.item_uid=$5",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(CHARACTER_ID.as_slice())
+    .bind(HOLD_MOVE_MUTATION_ID.as_slice())
+    .bind(BACKPACK_ITEM_UID.as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    assert_eq!(
+        state.get::<i64, _>("state_version"),
+        i64::try_from(fresh.versions.account.post).unwrap()
+    );
+    assert_eq!(
+        state.get::<i64, _>("character_state_version"),
+        i64::try_from(fresh.versions.character.post).unwrap()
+    );
+    assert_eq!(state.get::<i16, _>("security_state"), 0);
+    assert_eq!(
+        state.get::<i64, _>("character_version"),
+        i64::try_from(fresh.versions.world.post).unwrap()
+    );
+    assert_eq!(
+        state.get::<i64, _>("inventory_version"),
+        i64::try_from(fresh.versions.inventory.post).unwrap()
+    );
+    assert_eq!(state.get::<i16, _>("location_kind"), 5);
+    assert_eq!(state.get::<i16, _>("slot_index"), 0);
+    assert_eq!(state.get::<i16, _>("item_security"), 0);
+    assert_eq!(
+        state.get::<i64, _>("item_version"),
+        i64::try_from(fresh.transitions[0].post_item_version).unwrap()
+    );
+    assert_eq!(state.get::<i64, _>("results"), 1);
+    assert_eq!(state.get::<i64, _>("transitions"), 1);
+    assert_eq!(state.get::<i64, _>("conflicts"), 1);
+    transaction.rollback().await.unwrap();
+    persistence.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires explicitly authorized disposable PostgreSQL"]
+async fn resolution_hold_confirmed_destruction_is_atomic_and_reward_free() {
+    let persistence = disposable_database().await;
+    reset_fixture(&persistence).await;
+    fill_all_terminal_storage(&persistence).await;
+    let extraction = commit_fixture_extraction_to_hold(&persistence).await;
+    let snapshot = persistence
+        .load_resolution_hold_snapshot_v1(ACCOUNT_ID, CHARACTER_ID)
+        .await
+        .unwrap();
+    let commit_request = hold_request(
+        &snapshot,
+        HOLD_DESTROY_MUTATION_ID,
+        StoredResolutionHoldActionV1::DestroyConfirmed,
+    );
+    let ResolutionHoldMutationTransactionV1::Fresh(fresh) = persistence
+        .commit_resolution_hold_mutation_v1(&commit_request)
+        .await
+        .unwrap()
+    else {
+        panic!("confirmed ResolutionHold destruction must commit fresh");
+    };
+    assert_eq!(fresh.destination, None);
+    assert_eq!(
+        fresh.versions.account.post,
+        extraction.versions.account.post
+    );
+    assert_eq!(fresh.transitions.len(), 1);
+    assert_eq!(
+        fresh.transitions[0].disposition,
+        StoredResolutionHoldDispositionV1::Destroyed
+    );
+    assert!(!fresh.storage_resolution_required);
+
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let state = sqlx::query(
+        "SELECT item.location_kind,item.slot_index,item.security_state,item.item_version,
+                item.destruction_reason,item.terminal_extraction_id,
+                account.state_version,character.character_state_version,
+                character.security_state AS character_security,world.character_version,
+                inventory.inventory_version,wallet.balance,
+                material.quantity AS material_quantity,
+                (SELECT count(*) FROM item_ledger_events
+                 WHERE namespace_id=$1 AND account_id=$2 AND character_id=$3
+                   AND mutation_id=$4 AND source_kind=7) AS ledgers
+         FROM item_instances AS item
+         JOIN accounts AS account
+           ON account.namespace_id=item.namespace_id AND account.account_id=item.account_id
+         JOIN characters AS character
+           ON character.namespace_id=item.namespace_id
+          AND character.account_id=item.account_id AND character.character_id=item.character_id
+         JOIN character_world_locations AS world
+           ON world.namespace_id=character.namespace_id
+          AND world.account_id=character.account_id
+          AND world.character_id=character.character_id
+         JOIN character_inventories AS inventory
+           ON inventory.namespace_id=character.namespace_id
+          AND inventory.account_id=character.account_id
+          AND inventory.character_id=character.character_id
+         JOIN ash_wallets AS wallet
+           ON wallet.namespace_id=account.namespace_id AND wallet.account_id=account.account_id
+         JOIN account_material_wallet_balances_v1 AS material
+           ON material.namespace_id=account.namespace_id
+          AND material.account_id=account.account_id AND material.material_id=$5
+         WHERE item.namespace_id=$1 AND item.account_id=$2 AND item.character_id=$3
+           AND item.item_uid=$6",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(CHARACTER_ID.as_slice())
+    .bind(HOLD_DESTROY_MUTATION_ID.as_slice())
+    .bind(MATERIAL_ID)
+    .bind(BACKPACK_ITEM_UID.as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    assert_eq!(state.get::<i16, _>("location_kind"), 4);
+    assert_eq!(state.get::<Option<i16>, _>("slot_index"), None);
+    assert_eq!(state.get::<i16, _>("security_state"), 3);
+    assert_eq!(
+        state.get::<String, _>("destruction_reason"),
+        "resolution_hold_destroyed"
+    );
+    assert_eq!(
+        state.get::<Vec<u8>, _>("terminal_extraction_id"),
+        TERMINAL_ID.to_vec()
+    );
+    assert_eq!(
+        state.get::<i64, _>("state_version"),
+        i64::try_from(fresh.versions.account.post).unwrap()
+    );
+    assert_eq!(state.get::<i16, _>("character_security"), 0);
+    assert_eq!(state.get::<i32, _>("balance"), 0);
+    assert_eq!(state.get::<i32, _>("material_quantity"), 13);
+    assert_eq!(state.get::<i64, _>("ledgers"), 1);
+    transaction.rollback().await.unwrap();
+    persistence.close().await;
 }
 
 #[tokio::test]
