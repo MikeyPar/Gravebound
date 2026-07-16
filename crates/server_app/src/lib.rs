@@ -122,13 +122,13 @@ pub use live_damage_trace_service::{
 };
 pub use oath_selection::{CoreOathSelectionAuthority, PostgresOathSelectionService};
 pub use production_extraction::{
-    PostgresProductionExtractionExecutionService, ProductionExtractionExecutionError,
-    ProductionExtractionExecutionOutcome, ProductionExtractionExecutionService,
-    ProductionExtractionReplayOutcome, ProductionExtractionTerminalReader,
-    ProductionExtractionWriter, committed_extraction_terminal_receipt,
-    committed_extraction_terminal_receipt_from_stored, hall_snapshot_from_stored_extraction,
-    production_extraction_terminal_candidate, protocol_extraction_terminal_result,
-    recover_committed_extraction_arbiter,
+    CoreExtractionTerminalAuthority, PostgresProductionExtractionExecutionService,
+    ProductionExtractionExecutionError, ProductionExtractionExecutionOutcome,
+    ProductionExtractionExecutionService, ProductionExtractionReplayOutcome,
+    ProductionExtractionTerminalReader, ProductionExtractionWriter,
+    committed_extraction_terminal_receipt, committed_extraction_terminal_receipt_from_stored,
+    hall_snapshot_from_stored_extraction, production_extraction_terminal_candidate,
+    protocol_extraction_terminal_result, recover_committed_extraction_arbiter,
 };
 pub use progression_award::{
     CoreProgressionRules, ProgressionAwardCode, ProgressionAwardCommand, ProgressionAwardContext,
@@ -562,6 +562,7 @@ pub async fn serve_core_reliable<R, C, G, E, W, P, D, OC, BC>(
     oath: &CoreOathSelectionAuthority<OC>,
     bargain: &CoreBargainAuthority<BC>,
     safe_inventory: &CoreSafeInventoryAuthority,
+    extraction: &CoreExtractionTerminalAuthority,
     authenticated: AuthenticatedAccount,
     response_sequence: u32,
     server_tick: u64,
@@ -626,6 +627,11 @@ where
             protocol::ReliableEvent::SafeInventoryTransferResult(
                 safe_inventory.transfer(authenticated, &frame).await,
             )
+        }
+        WireMessage::ExtractionCommitFrame(frame) => {
+            protocol::ReliableEvent::ExtractionCommitResult(Box::new(
+                extraction.handle(authenticated, &frame),
+            ))
         }
         _ => return Err(ServerTransportError::UnexpectedMessage),
     };

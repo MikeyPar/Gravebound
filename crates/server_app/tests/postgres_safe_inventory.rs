@@ -21,16 +21,17 @@ use rcgen::{CertifiedKey, generate_simple_self_signed};
 use rustls::pki_types::PrivatePkcs8KeyDer;
 use server_app::{
     AccountId, AdmissionState, AuthenticatedAccount, AuthenticatedNamespace,
-    AuthenticationDecision, CharacterIdGenerator, CoreBargainAuthority, CoreOathSelectionAuthority,
-    CoreSafeInventoryAuthority, DeathViewService, DisabledDeathViewRepository,
-    FieldEquipmentConfirmCommand, FieldEquipmentPreviewSource, HandshakePolicy, IdentityClock,
-    IdentityService, NoopIdentityEventSink, PostgresAccountRepository,
-    PostgresFieldEquipmentService, PostgresProgressionAwardService,
-    PostgresProgressionQueryRepository, PostgresRewardService, PostgresSafeInventoryService,
-    PostgresWorldFlowLocationRepository, ProgressionAwardCode, ProgressionAwardCommand,
-    ProgressionAwardEvidence, ProgressionAwardPayload, ProgressionQueryService, RewardGrantContext,
-    RewardGrantTransaction, RewardPlacement, SafeInventoryServiceError, SecretRewardEpoch,
-    WorldFlowGateService, initialize_postgres_starter, serve_core_reliable, serve_handshake,
+    AuthenticationDecision, CharacterIdGenerator, CoreBargainAuthority,
+    CoreExtractionTerminalAuthority, CoreOathSelectionAuthority, CoreSafeInventoryAuthority,
+    DeathViewService, DisabledDeathViewRepository, FieldEquipmentConfirmCommand,
+    FieldEquipmentPreviewSource, HandshakePolicy, IdentityClock, IdentityService,
+    NoopIdentityEventSink, PostgresAccountRepository, PostgresFieldEquipmentService,
+    PostgresProgressionAwardService, PostgresProgressionQueryRepository, PostgresRewardService,
+    PostgresSafeInventoryService, PostgresWorldFlowLocationRepository, ProgressionAwardCode,
+    ProgressionAwardCommand, ProgressionAwardEvidence, ProgressionAwardPayload,
+    ProgressionQueryService, RewardGrantContext, RewardGrantTransaction, RewardPlacement,
+    SafeInventoryServiceError, SecretRewardEpoch, WorldFlowGateService,
+    initialize_postgres_starter, serve_core_reliable, serve_handshake,
 };
 use sim_core::{EncounterXpEvidence, RewardLifeState, RewardRecallState, RewardTrustState};
 
@@ -483,6 +484,7 @@ async fn run_quic_transfer_journey(
     let safe_inventory = CoreSafeInventoryAuthority::persistent(PostgresSafeInventoryService::new(
         persistence.clone(),
     ));
+    let extraction_terminal = CoreExtractionTerminalAuthority::disabled();
     let authenticated = AuthenticatedAccount {
         account_id: AccountId::new(ACCOUNT_ID).unwrap(),
         namespace: AuthenticatedNamespace::WipeableTest,
@@ -513,6 +515,7 @@ async fn run_quic_transfer_journey(
                 &oath,
                 &bargain,
                 &safe_inventory,
+                &extraction_terminal,
                 authenticated,
                 u32::try_from(response_sequence).unwrap(),
                 0,

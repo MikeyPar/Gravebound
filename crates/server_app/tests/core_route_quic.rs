@@ -23,20 +23,23 @@ use persistence::{
 };
 use protocol::{
     AuthTicket, CharacterLocation, ClientHello, Compression, DEATH_VIEW_SCHEMA_VERSION,
-    DeathViewFrameV1, DeathViewRequestV1, DeathViewResultV1, HandshakeResponse, ManifestHash,
-    Platform, ProtocolVersion, SafeArrival, WireText, WorldFlowContentRevisionV1, WorldFlowFrame,
-    WorldFlowRequest, WorldFlowResult, WorldTransferCommand, WorldTransferMutation,
-    WorldTransferPayload, WorldTransferResultCode,
+    DeathViewFrameV1, DeathViewRequestV1, DeathViewResultV1, ExtractionCommitFrameV1,
+    ExtractionCommitPayloadV1, ExtractionCommitResultV1, HandshakeResponse, ManifestHash, Platform,
+    ProtocolVersion, ReliableEvent, SafeArrival, TERMINAL_INVENTORY_SCHEMA_VERSION,
+    TerminalExpectedVersionsV1, TerminalInventoryRejectionCodeV1, WireText,
+    WorldFlowContentRevisionV1, WorldFlowFrame, WorldFlowRequest, WorldFlowResult,
+    WorldTransferCommand, WorldTransferMutation, WorldTransferPayload, WorldTransferResultCode,
 };
 use rcgen::{CertifiedKey, generate_simple_self_signed};
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use server_app::{
     AccountId, AdmissionState, AuthenticatedAccount, AuthenticatedNamespace,
     AuthenticationDecision, BoundCoreIdentityServer, CaldusVictoryOwnerCommand,
-    CharacterIdGenerator, CoreBargainAuthority, CoreIdentityServerConfig, CoreIdentityServerReport,
-    CoreNonTerminalAdmission, CoreOathSelectionAuthority, CoreSafeInventoryAuthority,
-    CoreTerminalCoordinator, CoreTerminalEvaluation, CoreTerminalProducer, CoreTerminalTickSeal,
-    DeathViewService, DisabledDeathViewRepository, DisabledProgressionQueryRepository,
+    CharacterIdGenerator, CoreBargainAuthority, CoreExtractionTerminalAuthority,
+    CoreIdentityServerConfig, CoreIdentityServerReport, CoreNonTerminalAdmission,
+    CoreOathSelectionAuthority, CoreSafeInventoryAuthority, CoreTerminalCoordinator,
+    CoreTerminalEvaluation, CoreTerminalProducer, CoreTerminalTickSeal, DeathViewService,
+    DisabledDeathViewRepository, DisabledProgressionQueryRepository,
     DisposableCoreJourneyWorldFlow, DurableDeathExecutionError, DurableDeathExecutionService,
     HandshakePolicy, IdentityClock, IdentityService, InMemoryAccountRepository,
     NoopIdentityEventSink, PostgresAccountRepository, PostgresCaldusHallTransferCoordinator,
@@ -46,8 +49,8 @@ use server_app::{
     PostgresDormantWorldFlowCoordinator, PostgresProgressionAwardService,
     PostgresProgressionRestoreProvider, PostgresRewardService, PreparedTerminal,
     ProgressionQueryService, SecretRewardEpoch, SubmitResult, TerminalArbiter, TerminalCandidate,
-    WorldFlowIdGenerator, durable_death_terminal_candidate, recover_committed_death_arbiter,
-    serve_core_reliable, serve_handshake,
+    WorldFlowGateService, WorldFlowIdGenerator, durable_death_terminal_candidate,
+    recover_committed_death_arbiter, serve_core_reliable, serve_handshake,
 };
 use sim_core::{
     CoreBossParticipant, CoreBossParticipantLock, CoreCaldusAntiCheatState,
@@ -451,6 +454,29 @@ fn hello() -> ClientHello {
     }
 }
 
+fn disabled_extraction_frame() -> ExtractionCommitFrameV1 {
+    let payload = ExtractionCommitPayloadV1 {
+        extraction_request_id: [61; 16],
+        expected_versions: TerminalExpectedVersionsV1 {
+            account: 1,
+            character: 2,
+            world: 2,
+            inventory: 3,
+            life_clock: 4,
+        },
+        content_revision: revision(),
+    };
+    ExtractionCommitFrameV1 {
+        schema_version: TERMINAL_INVENTORY_SCHEMA_VERSION,
+        sequence: 1,
+        mutation_id: [62; 16],
+        character_id: [63; 16],
+        issued_at_unix_millis: 1,
+        payload_hash: payload.canonical_hash(),
+        payload,
+    }
+}
+
 fn production_death_view_hello() -> ClientHello {
     let (_, source_report) = sim_content::load_and_validate(&content_root()).unwrap();
     ClientHello {
@@ -582,6 +608,7 @@ async fn run_lost_death_summary_session(persistence: &PostgresPersistence) -> De
     let oath = CoreOathSelectionAuthority::<FixedAuthority>::disabled();
     let bargain = CoreBargainAuthority::<FixedAuthority>::disabled();
     let safe_inventory = CoreSafeInventoryAuthority::disabled();
+    let extraction_terminal = CoreExtractionTerminalAuthority::disabled();
     let authenticated = durable_death_fixture::authenticated_account();
     let (server_endpoint, client_endpoint, address) = endpoints();
     let connecting = client_endpoint.connect(address, "localhost").unwrap();
@@ -608,6 +635,7 @@ async fn run_lost_death_summary_session(persistence: &PostgresPersistence) -> De
             &oath,
             &bargain,
             &safe_inventory,
+            &extraction_terminal,
             authenticated,
             1,
             20_000,
@@ -626,6 +654,7 @@ async fn run_lost_death_summary_session(persistence: &PostgresPersistence) -> De
             &oath,
             &bargain,
             &safe_inventory,
+            &extraction_terminal,
             authenticated,
             2,
             20_000,
@@ -699,6 +728,7 @@ async fn run_restarted_death_read_session(
     let oath = CoreOathSelectionAuthority::<FixedAuthority>::disabled();
     let bargain = CoreBargainAuthority::<FixedAuthority>::disabled();
     let safe_inventory = CoreSafeInventoryAuthority::disabled();
+    let extraction_terminal = CoreExtractionTerminalAuthority::disabled();
     let authenticated = durable_death_fixture::authenticated_account();
     let (server_endpoint, client_endpoint, address) = endpoints();
     let connecting = client_endpoint.connect(address, "localhost").unwrap();
@@ -726,6 +756,7 @@ async fn run_restarted_death_read_session(
                 &oath,
                 &bargain,
                 &safe_inventory,
+                &extraction_terminal,
                 authenticated,
                 response_sequence,
                 20_000,
@@ -925,6 +956,7 @@ async fn run_reliable_core_journey(persistence: &PostgresPersistence) -> Duratio
     let oath = CoreOathSelectionAuthority::<FixedAuthority>::disabled();
     let bargain = CoreBargainAuthority::<FixedAuthority>::disabled();
     let safe_inventory = CoreSafeInventoryAuthority::disabled();
+    let extraction_terminal = CoreExtractionTerminalAuthority::disabled();
     let authenticated = AuthenticatedAccount {
         account_id: AccountId::new(ACCOUNT_ID).unwrap(),
         namespace: AuthenticatedNamespace::WipeableTest,
@@ -956,6 +988,7 @@ async fn run_reliable_core_journey(persistence: &PostgresPersistence) -> Duratio
                 &oath,
                 &bargain,
                 &safe_inventory,
+                &extraction_terminal,
                 authenticated,
                 response_sequence,
                 0,
@@ -1074,6 +1107,103 @@ async fn run_reliable_core_journey(persistence: &PostgresPersistence) -> Duratio
     server_endpoint.close(0_u32.into(), b"journey complete");
     server_endpoint.wait_idle().await;
     login_to_control
+}
+
+#[tokio::test]
+async fn reliable_quic_rejects_disabled_extraction_before_domain_access() {
+    let identity = IdentityService::new(
+        InMemoryAccountRepository::default(),
+        FixedAuthority,
+        FixedAuthority,
+        NoopIdentityEventSink,
+        ManifestHash::new("a".repeat(64)).unwrap(),
+    );
+    let world_flow = WorldFlowGateService::new(
+        InMemoryAccountRepository::default(),
+        FixedAuthority,
+        revision(),
+    );
+    let progression = disabled_progression();
+    let death_views = DeathViewService::new(
+        DisabledDeathViewRepository,
+        durable_death_fixture::death_view_revision(),
+    );
+    let oath = CoreOathSelectionAuthority::<FixedAuthority>::disabled();
+    let bargain = CoreBargainAuthority::<FixedAuthority>::disabled();
+    let safe_inventory = CoreSafeInventoryAuthority::disabled();
+    let extraction_terminal = CoreExtractionTerminalAuthority::disabled();
+    let authenticated = durable_death_fixture::authenticated_account();
+    let frame = disabled_extraction_frame();
+    let (server_endpoint, client_endpoint, address) = endpoints();
+    let connecting = client_endpoint.connect(address, "localhost").unwrap();
+    let incoming = server_endpoint.accept().await.unwrap();
+    let (client, server) = tokio::join!(connecting, incoming);
+    let client = client.unwrap();
+    let server = server.unwrap();
+
+    let server_session = async {
+        serve_handshake(
+            &server,
+            &policy(),
+            AuthenticationDecision::Accepted,
+            WireText::new("disabled-extraction-session").unwrap(),
+        )
+        .await
+        .unwrap();
+        serve_core_reliable(
+            &server,
+            &identity,
+            &world_flow,
+            &progression,
+            &death_views,
+            &oath,
+            &bargain,
+            &safe_inventory,
+            &extraction_terminal,
+            authenticated,
+            1,
+            100,
+        )
+        .await
+        .unwrap();
+    };
+    let client_session = async {
+        let HandshakeResponse::Accepted(server_hello) =
+            bot_client::perform_handshake(&client, hello())
+                .await
+                .unwrap()
+        else {
+            panic!("Core handshake must succeed");
+        };
+        assert!(
+            server_hello
+                .feature_flags
+                .iter()
+                .all(|flag| flag.as_str() != protocol::CORE_EXTRACTION_TERMINAL_FEATURE_FLAG)
+        );
+        let event = bot_client::perform_reliable_gameplay(
+            &client,
+            protocol::WireMessage::ExtractionCommitFrame(frame),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            event.event,
+            ReliableEvent::ExtractionCommitResult(result)
+                if matches!(
+                    *result,
+                    ExtractionCommitResultV1::Rejected {
+                        code: TerminalInventoryRejectionCodeV1::FeatureDisabled,
+                        ..
+                    }
+                )
+        ));
+    };
+    tokio::join!(server_session, client_session);
+    drop(client);
+    client_endpoint.wait_idle().await;
+    server_endpoint.close(0_u32.into(), b"disabled extraction complete");
+    server_endpoint.wait_idle().await;
 }
 
 #[tokio::test]

@@ -16,17 +16,60 @@ use persistence::{
     StoredCommittedExtractionTerminalV1, StoredProductionExtractionResultV1,
 };
 use protocol::{
-    CharacterLocation, CharacterLocationSnapshot, ExtractionDestinationV1,
-    ExtractionMaterialCreditV1, ExtractionPlacementV1, SafeArrival,
-    StoredExtractionTerminalResultV1, TerminalVersionAdvanceV1, TerminalVersionVectorV1, WireText,
+    CharacterLocation, CharacterLocationSnapshot, ExtractionCommitFrameV1,
+    ExtractionCommitResultV1, ExtractionDestinationV1, ExtractionMaterialCreditV1,
+    ExtractionPlacementV1, SafeArrival, StoredExtractionTerminalResultV1,
+    TERMINAL_INVENTORY_SCHEMA_VERSION, TerminalInventoryRejectionCodeV1,
+    TerminalInventoryValidationError, TerminalVersionAdvanceV1, TerminalVersionVectorV1, WireText,
 };
 use thiserror::Error;
 
 use crate::{
-    CommitError, CommitResult, CoreTerminalCoordinator, PreparedTerminal,
-    STORED_TERMINAL_RECEIPT_SCHEMA_V1, StoredTerminalReceipt, StoredTerminalReceiptV1,
-    TerminalArbiter, TerminalBinding, TerminalCandidate, TerminalKind, TerminalValidationError,
+    AuthenticatedAccount, AuthenticatedNamespace, CommitError, CommitResult,
+    CoreTerminalCoordinator, PreparedTerminal, STORED_TERMINAL_RECEIPT_SCHEMA_V1,
+    StoredTerminalReceipt, StoredTerminalReceiptV1, TerminalArbiter, TerminalBinding,
+    TerminalCandidate, TerminalKind, TerminalValidationError,
 };
+
+/// Reliable transport boundary. The ordinary Core endpoint keeps this disabled until the live
+/// character actor supplies server-owned exit and terminal-coordinator authority.
+#[derive(Debug, Clone, Copy, Default)]
+pub enum CoreExtractionTerminalAuthority {
+    #[default]
+    Disabled,
+}
+
+impl CoreExtractionTerminalAuthority {
+    #[must_use]
+    pub const fn disabled() -> Self {
+        Self::Disabled
+    }
+
+    pub fn handle(
+        &self,
+        authenticated: AuthenticatedAccount,
+        frame: &ExtractionCommitFrameV1,
+    ) -> ExtractionCommitResultV1 {
+        let code = match frame.validate() {
+            Err(TerminalInventoryValidationError::PayloadHashMismatch) => {
+                TerminalInventoryRejectionCodeV1::PayloadHashMismatch
+            }
+            Err(_) => TerminalInventoryRejectionCodeV1::InvalidRequest,
+            Ok(()) if authenticated.namespace != AuthenticatedNamespace::WipeableTest => {
+                TerminalInventoryRejectionCodeV1::ForeignAuthority
+            }
+            Ok(()) => TerminalInventoryRejectionCodeV1::FeatureDisabled,
+        };
+        ExtractionCommitResultV1::Rejected {
+            schema_version: TERMINAL_INVENTORY_SCHEMA_VERSION,
+            request_sequence: frame.sequence,
+            mutation_id: frame.mutation_id,
+            character_id: frame.character_id,
+            extraction_request_id: frame.payload.extraction_request_id,
+            code,
+        }
+    }
+}
 
 /// Narrow writer seam so terminal arbitration and result validation remain independently testable.
 pub trait ProductionExtractionWriter: Send + Sync {
@@ -488,7 +531,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::{NonTerminalAdmission, SubmitResult};
+    use crate::{AccountId, NonTerminalAdmission, SubmitResult};
 
     #[derive(Debug, Clone, Copy)]
     enum FakeMode {
@@ -612,6 +655,33 @@ mod tests {
         }
     }
 
+    fn extraction_frame() -> ExtractionCommitFrameV1 {
+        let payload = protocol::ExtractionCommitPayloadV1 {
+            extraction_request_id: [5; 16],
+            expected_versions: protocol::TerminalExpectedVersionsV1 {
+                account: 11,
+                character: 12,
+                world: 12,
+                inventory: 13,
+                life_clock: 14,
+            },
+            content_revision: protocol::WorldFlowContentRevisionV1 {
+                records_blake3: protocol::ManifestHash::new("a".repeat(64)).unwrap(),
+                assets_blake3: protocol::ManifestHash::new("b".repeat(64)).unwrap(),
+                localization_blake3: protocol::ManifestHash::new("c".repeat(64)).unwrap(),
+            },
+        };
+        ExtractionCommitFrameV1 {
+            schema_version: TERMINAL_INVENTORY_SCHEMA_VERSION,
+            sequence: 1,
+            mutation_id: [3; 16],
+            character_id: [2; 16],
+            issued_at_unix_millis: 15,
+            payload_hash: payload.canonical_hash(),
+            payload,
+        }
+    }
+
     fn placements() -> Vec<StoredProductionExtractionPlacementV1> {
         vec![StoredProductionExtractionPlacementV1 {
             ordinal: 0,
@@ -731,6 +801,34 @@ mod tests {
         );
         assert_eq!(candidate.observed_tick(), request.observed_tick);
         assert_eq!(candidate.kind(), TerminalKind::SuccessfulExtraction);
+    }
+
+    #[test]
+    fn disabled_transport_authority_rejects_before_repository_access() {
+        let authenticated = AuthenticatedAccount {
+            account_id: AccountId::new([1; 16]).unwrap(),
+            namespace: AuthenticatedNamespace::WipeableTest,
+        };
+        let frame = extraction_frame();
+        let result = CoreExtractionTerminalAuthority::disabled().handle(authenticated, &frame);
+        assert!(matches!(
+            result,
+            ExtractionCommitResultV1::Rejected {
+                code: TerminalInventoryRejectionCodeV1::FeatureDisabled,
+                ..
+            }
+        ));
+        result.validate().unwrap();
+
+        let mut changed = frame;
+        changed.payload.expected_versions.inventory += 1;
+        assert!(matches!(
+            CoreExtractionTerminalAuthority::disabled().handle(authenticated, &changed),
+            ExtractionCommitResultV1::Rejected {
+                code: TerminalInventoryRejectionCodeV1::PayloadHashMismatch,
+                ..
+            }
+        ));
     }
 
     #[test]
