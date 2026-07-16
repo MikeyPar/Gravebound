@@ -11,6 +11,7 @@ repository.workspace = true
 blake3.workspace = true
 postcard.workspace = true
 serde.workspace = true
+sim_core = { path = "../sim_core" }
 sqlx.workspace = true
 thiserror.workspace = true
 

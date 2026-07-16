@@ -4575,6 +4575,7 @@ dependencies = [
  "blake3",
  "postcard",
  "serde",
+ "sim_core",
  "sqlx",
  "thiserror 2.0.18",
  "tokio",

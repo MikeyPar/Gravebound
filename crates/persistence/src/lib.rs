@@ -31,6 +31,7 @@ mod durable_death_repository;
 mod durable_terminal_recovery;
 mod extraction;
 mod extraction_terminal;
+mod extraction_terminal_repository;
 mod field_equipment;
 mod ground_expiry;
 mod identity;
@@ -150,7 +151,7 @@ pub use extraction_terminal::{
     ProductionExtractionTransactionV1, ProductionExtractionVersionAdvanceV1,
     ProductionExtractionVersionsV1, StoredExtractionLocationV1,
     StoredProductionExtractionMaterialCreditV1, StoredProductionExtractionPlacementV1,
-    StoredProductionExtractionResultV1,
+    StoredProductionExtractionResultV1, canonical_production_extraction_plan_hash_v1,
 };
 pub use field_equipment::{
     StoredFieldEquipmentCommand, StoredFieldEquipmentItem, StoredFieldEquipmentResult,
@@ -493,6 +494,26 @@ pub enum PersistenceError {
     ExtractionReceiptRequired,
     #[error("committed extraction receipt was already consumed by another transfer")]
     ExtractionAlreadyTransferred,
+    #[error("production extraction account or character does not exist")]
+    ProductionExtractionOwnerNotFound,
+    #[error(
+        "production extraction expected different aggregate versions (account {account}, character {character}, world {world}, inventory {inventory}, life metrics {life_metrics})"
+    )]
+    ProductionExtractionVersionMismatch {
+        account: u64,
+        character: u64,
+        world: u64,
+        inventory: u64,
+        life_metrics: u64,
+    },
+    #[error("production extraction does not match selected living Caldus danger authority")]
+    ProductionExtractionBindingMismatch,
+    #[error("production extraction content does not match the bound Core authority")]
+    ProductionExtractionContentMismatch,
+    #[error("production extraction lost terminal authority to an already committed outcome")]
+    ProductionExtractionTerminalSuperseded,
+    #[error("production extraction deterministic inventory planning failed")]
+    ProductionExtractionPlanningFailed,
     #[error("stored live-deed evidence violates the approved v2 contract")]
     CorruptStoredLifeDeed,
     #[error("live-deed account, character, or aggregate authority does not exist")]

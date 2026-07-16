@@ -388,6 +388,14 @@ impl StoredProductionExtractionResultV1 {
         if self.storage_resolution_required != has_hold {
             return Err(corrupt());
         }
+        if self.canonical_plan_hash
+            != canonical_production_extraction_plan_hash_v1(
+                &self.placements,
+                &self.material_credits,
+            )?
+        {
+            return Err(corrupt());
+        }
         Ok(())
     }
 
@@ -412,6 +420,16 @@ impl StoredProductionExtractionResultV1 {
     pub fn digest(&self) -> Result<[u8; HASH_BYTES], PersistenceError> {
         canonical_hash("gravebound.production-extraction-result.v1", self)
     }
+}
+
+pub fn canonical_production_extraction_plan_hash_v1(
+    placements: &[StoredProductionExtractionPlacementV1],
+    material_credits: &[StoredProductionExtractionMaterialCreditV1],
+) -> Result<[u8; HASH_BYTES], PersistenceError> {
+    canonical_hash(
+        "gravebound.production-extraction-plan.v1",
+        &(placements, material_credits),
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -512,6 +530,32 @@ mod tests {
 
     fn result() -> StoredProductionExtractionResultV1 {
         let request = request();
+        let placements = vec![StoredProductionExtractionPlacementV1 {
+            ordinal: 0,
+            item_uid: [12; 16],
+            template_id: "equipment.test".into(),
+            item_kind: 0,
+            source: StoredExtractionLocationV1::Equipped(0),
+            destination: StoredExtractionLocationV1::Equipped(0),
+            pre_item_version: 1,
+            post_item_version: 2,
+            ledger_event_id: [13; 16],
+        }];
+        let material_credits = vec![StoredProductionExtractionMaterialCreditV1 {
+            ordinal: 0,
+            material_id: "material.bell_brass".into(),
+            credited_quantity: 2,
+            wallet_cap: 999,
+            pre_wallet_quantity: 3,
+            post_wallet_quantity: 5,
+            pre_wallet_version: 1,
+            post_wallet_version: 2,
+            pre_pouch_version: 7,
+            post_pouch_version: 8,
+            wallet_ledger_event_id: [14; 16],
+        }];
+        let canonical_plan_hash =
+            canonical_production_extraction_plan_hash_v1(&placements, &material_credits).unwrap();
         StoredProductionExtractionResultV1 {
             contract_version: PRODUCTION_EXTRACTION_CONTRACT_VERSION_V1,
             namespace_id: WIPEABLE_CORE_NAMESPACE.into(),
@@ -522,7 +566,7 @@ mod tests {
             extraction_request_id: request.extraction_request_id,
             extraction_receipt_id: request.extraction_receipt_id,
             canonical_request_hash: request.canonical_hash().unwrap(),
-            canonical_plan_hash: [11; 32],
+            canonical_plan_hash,
             result_code: 1,
             issued_at_unix_ms: request.issued_at_unix_ms,
             observed_tick: request.observed_tick,
@@ -535,30 +579,8 @@ mod tests {
                 inventory: ProductionExtractionVersionAdvanceV1 { pre: 3, post: 4 },
                 life_metrics: ProductionExtractionVersionAdvanceV1 { pre: 4, post: 5 },
             },
-            placements: vec![StoredProductionExtractionPlacementV1 {
-                ordinal: 0,
-                item_uid: [12; 16],
-                template_id: "equipment.test".into(),
-                item_kind: 0,
-                source: StoredExtractionLocationV1::Equipped(0),
-                destination: StoredExtractionLocationV1::Equipped(0),
-                pre_item_version: 1,
-                post_item_version: 2,
-                ledger_event_id: [13; 16],
-            }],
-            material_credits: vec![StoredProductionExtractionMaterialCreditV1 {
-                ordinal: 0,
-                material_id: "material.bell_brass".into(),
-                credited_quantity: 2,
-                wallet_cap: 999,
-                pre_wallet_quantity: 3,
-                post_wallet_quantity: 5,
-                pre_wallet_version: 1,
-                post_wallet_version: 2,
-                pre_pouch_version: 7,
-                post_pouch_version: 8,
-                wallet_ledger_event_id: [14; 16],
-            }],
+            placements,
+            material_credits,
             storage_resolution_required: false,
         }
     }
