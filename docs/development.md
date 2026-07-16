@@ -78,6 +78,21 @@ Direct Cargo aliases are also available: `cargo gb-format`, `cargo gb-lint`, `ca
 - **Server foundation:** `.\tools\dev.cmd server-doctor` validates the M02 crate boundary, shared 30 Hz simulation contract, canonical protocol rates, real transport, and scheduler.
 - **Bot foundation:** `.\tools\dev.cmd bot-doctor` validates the headless client boundary, shared cadence, real transport, and protocol-visible journey execution.
 
+## GB-M03-06D native death evidence
+
+The disposable Core death/Memorial driver renders real `DeathViewClientModel` projections through the production Bevy widgets without enabling the normal route. Build the optimized client first, then select a deterministic state:
+
+```powershell
+.\tools\dev.cmd release
+$env:GRAVEBOUND_WINDOW_SIZE = '1920x1080'
+$env:GRAVEBOUND_SCREENSHOT_PATH = (Join-Path $PWD 'tmp\death-summary.png')
+.\target\release\client_bevy.exe core-death-view-showcase --content-root content --state summary
+```
+
+Supported states are `summary`, `summary-actions`, `summary-trace`, `memorial-list`, `memorial-detail`, `awaiting-commit`, and `recoverable-error`. Add `--reduced-effects` for the reduced-effects tree or `--ui-scale 80` through `--ui-scale 150` for accessibility checks. `summary-actions` issues one semantic focus-next request after fonts/text layout settle, proving focus visibility whether or not the viewport overflows. Screenshot publication waits 90 settled frames and uses the shared atomic PNG writer.
+
+The driver is mapped to all three authorities: the canonical GDD owns `DTH-020`/accessibility/order; the Content Production Spec owns Core Memorial/copy/asset identity; and the Development Roadmap owns parent `GB-M03-06` plus later successor/route gates. Repository task `GB-M03-06D` is the internal presentation slice of that Roadmap parent. `Create Successor` remains disabled, every Memorial row opens its own stored cursor-bound snapshot, Escape resolves only to the enabled read-only Back action, and unknown portrait mappings reject the snapshot before it can replace the last safe view.
+
 Gameplay rules must live in `sim_core` or validated content. `client_bevy` owns presentation only.
 Generated files in `schemas/` are committed contracts; regenerate and review them whenever a Rust content type changes.
 
