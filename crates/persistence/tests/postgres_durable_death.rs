@@ -1513,6 +1513,13 @@ async fn apply_signature_row_fixture_update(
         .unwrap()
         .rows_affected();
     assert_eq!(changed, 1, "{}", corruption.label);
+    // Some row families retain independent deferred history/ownership checks while only their
+    // immutability guard is bypassed. Flush those valid checks before changing trigger state;
+    // PostgreSQL otherwise refuses ALTER TABLE while deferred events remain queued.
+    sqlx::query("SET CONSTRAINTS ALL IMMEDIATE")
+        .execute(transaction.connection())
+        .await
+        .unwrap();
     for trigger in corruption.triggers.iter().rev() {
         let statement = format!(
             "ALTER TABLE {} ENABLE TRIGGER {}",
