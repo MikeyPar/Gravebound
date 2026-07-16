@@ -512,6 +512,8 @@ pub enum PersistenceError {
     ProductionExtractionContentMismatch,
     #[error("production extraction lost terminal authority to an already committed outcome")]
     ProductionExtractionTerminalSuperseded,
+    #[error("production extraction is blocked by an unresolved reward or item mutation")]
+    ProductionExtractionUnresolvedMutation,
     #[error("production extraction deterministic inventory planning failed")]
     ProductionExtractionPlanningFailed,
     #[error("stored live-deed evidence violates the approved v2 contract")]

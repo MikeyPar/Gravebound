@@ -179,10 +179,10 @@ async fn reset_fixture(persistence: &PostgresPersistence) {
     .await
     .unwrap();
     sqlx::query(
-        "INSERT INTO character_life_metrics
-         (namespace_id,account_id,character_id,lifetime_ticks,
-          permadeath_combat_ticks,life_metrics_version)
-         VALUES ($1,$2,$3,10_000,8_000,1)",
+        "UPDATE character_life_metrics
+         SET lifetime_ticks=10000,permadeath_combat_ticks=8000
+         WHERE namespace_id=$1 AND account_id=$2 AND character_id=$3
+           AND life_metrics_version=1",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(ACCOUNT_ID.as_slice())
@@ -535,6 +535,24 @@ async fn extraction_commit_restart_replay_and_conflict_are_atomic() {
     assert_eq!(extraction_request_id, EXTRACTION_REQUEST_ID);
     assert_eq!(terminal_id, TERMINAL_ID);
 
+    let mut reused_terminal = commit_request.clone();
+    reused_terminal.mutation_id = [215; 16];
+    reused_terminal.extraction_request_id = [216; 16];
+    reused_terminal.extraction_receipt_id = [217; 16];
+    reused_terminal.issued_at_unix_ms += 2;
+    let ProductionExtractionTransactionV1::Conflict {
+        extraction_request_id,
+        terminal_id,
+    } = persistence
+        .commit_production_extraction_v1(&reused_terminal)
+        .await
+        .unwrap()
+    else {
+        panic!("reusing a stored terminal identity must return an audited conflict");
+    };
+    assert_eq!(extraction_request_id, EXTRACTION_REQUEST_ID);
+    assert_eq!(terminal_id, TERMINAL_ID);
+
     let mut transaction = persistence.begin_transaction().await.unwrap();
     let aggregate = sqlx::query(
         "SELECT account.state_version,character.character_state_version,
@@ -655,8 +673,105 @@ async fn extraction_commit_restart_replay_and_conflict_are_atomic() {
     assert_eq!(counts.get::<i64, _>("material_ledgers"), 1);
     assert_eq!(counts.get::<i64, _>("audits"), 1);
     assert_eq!(counts.get::<i64, _>("outbox"), 1);
-    assert_eq!(counts.get::<i64, _>("conflicts"), 1);
+    assert_eq!(counts.get::<i64, _>("conflicts"), 2);
     assert_eq!(counts.get::<i64, _>("checkpoints"), 0);
     transaction.rollback().await.unwrap();
+    persistence.close().await;
+}
+
+async fn terminal_count(persistence: &PostgresPersistence) -> i64 {
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let count = sqlx::query_scalar(
+        "SELECT count(*) FROM character_extraction_terminal_results_v1
+         WHERE namespace_id=$1 AND account_id=$2",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    transaction.rollback().await.unwrap();
+    count
+}
+
+#[tokio::test]
+#[ignore = "requires explicitly authorized disposable PostgreSQL"]
+async fn extraction_rejects_unresolved_reward_stale_item_and_attempt_drift() {
+    let persistence = disposable_database().await;
+
+    reset_fixture(&persistence).await;
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    sqlx::query(
+        "INSERT INTO reward_requests
+         (namespace_id,reward_request_id,account_id,character_id,source_instance_id,
+          reward_table_id,content_revision,epoch_id,canonical_request_hash,
+          pre_inventory_version,request_state)
+         VALUES ($1,$2,$3,$4,$5,'reward.boss_caldus',$6,'terminal-race-v1',$7,3,0)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind([218_u8; 16].as_slice())
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(CHARACTER_ID.as_slice())
+    .bind(ENCOUNTER_ID.as_slice())
+    .bind(CORE_ITEM_CONTENT_REVISION)
+    .bind([96_u8; 32].as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    transaction.commit().await.unwrap();
+    assert!(matches!(
+        persistence
+            .commit_production_extraction_v1(&request())
+            .await,
+        Err(persistence::PersistenceError::ProductionExtractionUnresolvedMutation)
+    ));
+    assert_eq!(terminal_count(&persistence).await, 0);
+
+    reset_fixture(&persistence).await;
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let changed = sqlx::query(
+        "UPDATE item_instances
+         SET content_revision=$1
+         WHERE namespace_id=$2 AND item_uid=$3",
+    )
+    .bind(format!("core-dev.blake3.{}", "b".repeat(64)))
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(BACKPACK_ITEM_UID.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap()
+    .rows_affected();
+    assert_eq!(changed, 1);
+    transaction.commit().await.unwrap();
+    assert!(matches!(
+        persistence
+            .commit_production_extraction_v1(&request())
+            .await,
+        Err(persistence::PersistenceError::ProductionExtractionContentMismatch)
+    ));
+    assert_eq!(terminal_count(&persistence).await, 0);
+
+    reset_fixture(&persistence).await;
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let changed = sqlx::query(
+        "UPDATE character_extraction_results
+         SET attempt_ordinal=2
+         WHERE namespace_id=$1 AND extraction_request_id=$2",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(EXTRACTION_REQUEST_ID.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap()
+    .rows_affected();
+    assert_eq!(changed, 1);
+    transaction.commit().await.unwrap();
+    assert!(matches!(
+        persistence
+            .commit_production_extraction_v1(&request())
+            .await,
+        Err(persistence::PersistenceError::ProductionExtractionBindingMismatch)
+    ));
+    assert_eq!(terminal_count(&persistence).await, 0);
     persistence.close().await;
 }

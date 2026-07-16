@@ -52,6 +52,7 @@ struct LockedRoot {
 struct LockedItem {
     item_uid: [u8; ID_BYTES],
     template_id: String,
+    content_revision: String,
     item_kind: i16,
     item_version: u64,
     security_state: i16,
@@ -110,6 +111,7 @@ impl PostgresPersistence {
     ) -> Result<ProductionExtractionTransactionV1, PersistenceError> {
         let request_hash = request.canonical_hash()?;
         let mut transaction = self.begin_transaction().await?;
+        lock_terminal_identities(transaction.connection(), request).await?;
         lock_account(transaction.connection(), request.account_id).await?;
 
         if let Some(stored) = load_existing_terminal(
@@ -117,6 +119,8 @@ impl PostgresPersistence {
             request.account_id,
             request.mutation_id,
             request.extraction_request_id,
+            request.terminal_id,
+            request.extraction_receipt_id,
         )
         .await?
         {
@@ -140,6 +144,7 @@ impl PostgresPersistence {
         }
 
         let authority = lock_and_validate_authority(transaction.connection(), request).await?;
+        reject_unresolved_reward_mutation(transaction.connection(), request).await?;
         let (items, inventory_snapshot) =
             load_inventory_snapshot(transaction.connection(), request, &authority).await?;
         let (wallets, pouches, material_snapshots) =
@@ -235,6 +240,25 @@ impl PostgresPersistence {
     }
 }
 
+async fn lock_terminal_identities(
+    connection: &mut PgConnection,
+    request: &ProductionExtractionCommitRequestV1,
+) -> Result<(), PersistenceError> {
+    let mut lock_keys = [
+        terminal_advisory_key(0, request.extraction_request_id),
+        terminal_advisory_key(1, request.terminal_id),
+        terminal_advisory_key(2, request.extraction_receipt_id),
+    ];
+    lock_keys.sort_unstable();
+    for lock_key in lock_keys {
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(lock_key)
+            .execute(&mut *connection)
+            .await?;
+    }
+    Ok(())
+}
+
 async fn lock_account(
     connection: &mut PgConnection,
     account_id: [u8; ID_BYTES],
@@ -257,19 +281,26 @@ async fn load_existing_terminal(
     account_id: [u8; ID_BYTES],
     mutation_id: [u8; ID_BYTES],
     extraction_request_id: [u8; ID_BYTES],
+    terminal_id: [u8; ID_BYTES],
+    extraction_receipt_id: [u8; ID_BYTES],
 ) -> Result<Option<StoredProductionExtractionResultV1>, PersistenceError> {
     let rows = sqlx::query(
         "SELECT account_id,character_id,mutation_id,terminal_id,extraction_request_id,
                 extraction_receipt_id,canonical_request_hash,result_hash,result_payload
          FROM character_extraction_terminal_results_v1
          WHERE namespace_id=$1
-           AND ((account_id=$2 AND mutation_id=$3) OR extraction_request_id=$4)
+           AND ((account_id=$2 AND mutation_id=$3)
+             OR extraction_request_id=$4
+             OR terminal_id=$5
+             OR extraction_receipt_id=$6)
          ORDER BY terminal_id FOR SHARE",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(account_id.as_slice())
     .bind(mutation_id.as_slice())
     .bind(extraction_request_id.as_slice())
+    .bind(terminal_id.as_slice())
+    .bind(extraction_receipt_id.as_slice())
     .fetch_all(connection)
     .await?;
     let [row] = rows.as_slice() else {
@@ -404,7 +435,7 @@ async fn lock_and_validate_authority(
     let seam = sqlx::query(
         "SELECT account_id,character_id,encounter_id,instance_lineage_id,
                 entry_restore_point_id,exit_instance_id,exit_content_id,
-                expected_character_version,records_blake3,assets_blake3,
+                attempt_ordinal,expected_character_version,records_blake3,assets_blake3,
                 localization_blake3,extraction_state,authority_kind
          FROM character_extraction_results
          WHERE namespace_id=$1 AND extraction_request_id=$2 FOR UPDATE",
@@ -415,7 +446,7 @@ async fn lock_and_validate_authority(
     .await?
     .ok_or(PersistenceError::ProductionExtractionBindingMismatch)?;
     let exit = sqlx::query(
-        "SELECT instance_lineage_id,exit_instance_id FROM caldus_victory_exits
+        "SELECT instance_lineage_id,exit_instance_id,attempt_ordinal FROM caldus_victory_exits
          WHERE namespace_id=$1 AND encounter_id=$2 FOR SHARE",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
@@ -498,6 +529,8 @@ async fn lock_and_validate_authority(
         || exact_id(seam.try_get("entry_restore_point_id")?)? != request.entry_restore_point_id
         || exact_id(seam.try_get("exit_instance_id")?)? != request.exit_instance_id
         || seam.try_get::<String, _>("exit_content_id")? != crate::PRODUCTION_EXTRACTION_EXIT_ID
+        || seam.try_get::<i32, _>("attempt_ordinal")?
+            != exit.try_get::<i32, _>("attempt_ordinal")?
         || positive(seam.try_get("expected_character_version")?)? != character_version
         || seam.try_get::<i16, _>("extraction_state")? != 0
         || seam.try_get::<Option<i16>, _>("authority_kind")?.is_some()
@@ -516,6 +549,29 @@ async fn lock_and_validate_authority(
     })
 }
 
+async fn reject_unresolved_reward_mutation(
+    connection: &mut PgConnection,
+    request: &ProductionExtractionCommitRequestV1,
+) -> Result<(), PersistenceError> {
+    let unresolved: Option<Vec<u8>> = sqlx::query_scalar(
+        "SELECT reward_request_id
+         FROM reward_requests
+         WHERE namespace_id=$1 AND account_id=$2 AND character_id=$3 AND request_state=0
+         ORDER BY reward_request_id
+         LIMIT 1
+         FOR UPDATE",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(request.account_id.as_slice())
+    .bind(request.character_id.as_slice())
+    .fetch_optional(connection)
+    .await?;
+    if unresolved.is_some() {
+        return Err(PersistenceError::ProductionExtractionUnresolvedMutation);
+    }
+    Ok(())
+}
+
 async fn load_inventory_snapshot(
     connection: &mut PgConnection,
     request: &ProductionExtractionCommitRequestV1,
@@ -528,7 +584,7 @@ async fn load_inventory_snapshot(
     PersistenceError,
 > {
     let rows = sqlx::query(
-        "SELECT item_uid,template_id,item_kind,item_version,security_state,
+        "SELECT item_uid,template_id,content_revision,item_kind,item_version,security_state,
                 location_kind,slot_index,character_id
          FROM item_instances
          WHERE namespace_id=$1 AND account_id=$2
@@ -553,6 +609,7 @@ async fn load_inventory_snapshot(
         let item = LockedItem {
             item_uid: exact_id(row.try_get("item_uid")?)?,
             template_id: row.try_get("template_id")?,
+            content_revision: row.try_get("content_revision")?,
             item_kind: row.try_get("item_kind")?,
             item_version: positive(row.try_get("item_version")?)?,
             security_state: row.try_get("security_state")?,
@@ -567,6 +624,9 @@ async fn load_inventory_snapshot(
         };
         if item.security_state != expected_security {
             return Err(PersistenceError::ProductionExtractionBindingMismatch);
+        }
+        if item.content_revision != crate::CORE_ITEM_CONTENT_REVISION {
+            return Err(PersistenceError::ProductionExtractionContentMismatch);
         }
         let target = match item.location_kind {
             0 => &mut equipped,
@@ -1378,6 +1438,16 @@ fn derived_id(context: &str, parts: &[&[u8]]) -> [u8; ID_BYTES] {
     value
 }
 
+fn terminal_advisory_key(axis: u8, identity: [u8; ID_BYTES]) -> i64 {
+    let mut hasher =
+        blake3::Hasher::new_derive_key("gravebound.production-extraction-advisory-lock.v1");
+    hasher.update(&[axis]);
+    hasher.update(&identity);
+    let mut bytes = [0_u8; 8];
+    bytes.copy_from_slice(&hasher.finalize().as_bytes()[..8]);
+    i64::from_be_bytes(bytes)
+}
+
 fn exact_id(value: Vec<u8>) -> Result<[u8; ID_BYTES], PersistenceError> {
     value.try_into().map_err(|_| corrupt())
 }
@@ -1436,6 +1506,19 @@ mod tests {
         let audit = derived_id(ACCEPTED_AUDIT_ID_CONTEXT, &parts);
         assert_ne!(item, [0; 16]);
         assert_ne!(item, audit);
+    }
+
+    #[test]
+    fn advisory_keys_are_axis_bound_and_stable() {
+        let identity = [7_u8; 16];
+        assert_eq!(
+            terminal_advisory_key(0, identity),
+            terminal_advisory_key(0, identity)
+        );
+        assert_ne!(
+            terminal_advisory_key(0, identity),
+            terminal_advisory_key(1, identity)
+        );
     }
 
     #[test]
