@@ -573,6 +573,7 @@ pub async fn serve_core_reliable<R, C, G, E, W, P, D, OC, BC>(
     bargain: &CoreBargainAuthority<BC>,
     safe_inventory: &CoreSafeInventoryAuthority,
     extraction: &CoreExtractionTerminalAuthority,
+    recall: &CoreRecallTerminalAuthority,
     authenticated: AuthenticatedAccount,
     response_sequence: u32,
     server_tick: u64,
@@ -642,6 +643,9 @@ where
             protocol::ReliableEvent::ExtractionCommitResult(Box::new(
                 extraction.handle(authenticated, &frame),
             ))
+        }
+        WireMessage::RecallFrame(frame) => {
+            protocol::ReliableEvent::RecallResult(Box::new(recall.handle(authenticated, &frame)))
         }
         _ => return Err(ServerTransportError::UnexpectedMessage),
     };

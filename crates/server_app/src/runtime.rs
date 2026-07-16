@@ -33,8 +33,8 @@ use tracing::{debug, info, warn};
 use crate::{
     AccountId, AccountRepository, AdmissionState, AuthenticatedAccount, AuthenticatedNamespace,
     AuthenticationDecision, CharacterIdGenerator, CoreBargainAuthority,
-    CoreExtractionTerminalAuthority, CoreOathSelectionAuthority, CoreSafeInventoryAuthority,
-    DeathViewRepository, DeathViewService, DisabledDeathViewRepository,
+    CoreExtractionTerminalAuthority, CoreOathSelectionAuthority, CoreRecallTerminalAuthority,
+    CoreSafeInventoryAuthority, DeathViewRepository, DeathViewService, DisabledDeathViewRepository,
     DisabledProgressionQueryRepository, HandshakePolicy, IdentityClock, IdentityService,
     InMemoryAccountRepository, InstanceError, InstanceScheduler, NoopIdentityEventSink,
     PostgresAccountRepository, PostgresBargainService, PostgresDeathViewRepository,
@@ -543,6 +543,7 @@ pub struct BoundCoreIdentityServer<
     bargain: Arc<CoreBargainAuthority<SystemIdentityClock>>,
     safe_inventory: Arc<CoreSafeInventoryAuthority>,
     extraction: Arc<CoreExtractionTerminalAuthority>,
+    recall: Arc<CoreRecallTerminalAuthority>,
     persistence_enabled: bool,
 }
 
@@ -705,6 +706,7 @@ where
         let bargain = Arc::new(shrines.bargain);
         let safe_inventory = Arc::new(CoreSafeInventoryAuthority::disabled());
         let extraction = Arc::new(CoreExtractionTerminalAuthority::disabled());
+        let recall = Arc::new(CoreRecallTerminalAuthority::disabled());
         Ok(Self {
             endpoint,
             certificate,
@@ -718,6 +720,7 @@ where
             bargain,
             safe_inventory,
             extraction,
+            recall,
             persistence_enabled,
         })
     }
@@ -766,11 +769,12 @@ where
                     let bargain = Arc::clone(&self.bargain);
                     let safe_inventory = Arc::clone(&self.safe_inventory);
                     let extraction = Arc::clone(&self.extraction);
+                    let recall = Arc::clone(&self.recall);
                     let accepted = Arc::clone(&accepted);
                     let rejected = Arc::clone(&rejected);
                     let failed = Arc::clone(&failed);
                     workers.spawn(async move {
-                        match serve_core_identity_connection(incoming, policy, authority, world_flow, progression, death_views, oath, bargain, safe_inventory, extraction).await {
+                        match serve_core_identity_connection(incoming, policy, authority, world_flow, progression, death_views, oath, bargain, safe_inventory, extraction, recall).await {
                             Ok(true) => { accepted.fetch_add(1, Ordering::Relaxed); }
                             Ok(false) => { rejected.fetch_add(1, Ordering::Relaxed); }
                             Err(error) => {
@@ -859,6 +863,7 @@ async fn serve_core_identity_connection<R, W, P, D>(
     bargain: Arc<CoreBargainAuthority<SystemIdentityClock>>,
     safe_inventory: Arc<CoreSafeInventoryAuthority>,
     extraction: Arc<CoreExtractionTerminalAuthority>,
+    recall: Arc<CoreRecallTerminalAuthority>,
 ) -> Result<bool, LocalServerRuntimeError>
 where
     R: AccountRepository,
@@ -906,6 +911,7 @@ where
             bargain.as_ref(),
             safe_inventory.as_ref(),
             extraction.as_ref(),
+            recall.as_ref(),
             authenticated,
             response_sequence,
             0,
