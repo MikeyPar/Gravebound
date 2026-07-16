@@ -28,8 +28,10 @@ use persistence::{
     DurableEchoTransitionV1, DurableMemorialRecordV1, DurableNetworkStateV1,
     DurableOrderedContentIdV1, DurableRecallStateV1, DurableSummaryDamageReferenceV1,
     DurableSummaryProjectionEntryV1, DurableSummaryProjectionKindV1, DurableSummaryProjectionsV1,
-    DurableTraceStatusV1, PersistenceError, WIPEABLE_CORE_NAMESPACE,
-    derive_durable_death_bargain_cleanup_event_id,
+    DurableTraceStatusV1, MAX_DURABLE_DEATH_DESTRUCTION_ENTRIES, PersistenceError,
+    WIPEABLE_CORE_NAMESPACE, compare_canonical_durable_death_destruction_v1,
+    derive_durable_death_bargain_cleanup_event_id, derive_durable_death_item_ledger_event_id,
+    validate_durable_death_destruction_v1,
 };
 use sim_content::CoreDevelopmentDeathView;
 use sim_core::{
@@ -106,6 +108,33 @@ pub struct DeathEntityIdentityAuthority {
     pub by_sim_entity: BTreeMap<EntityId, [u8; 16]>,
 }
 
+/// One server-authoritative item currently owned by the dying character in at-risk custody.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeathAtRiskItem {
+    pub content_id: String,
+    pub item_uid: [u8; 16],
+    pub location: persistence::DurableDestructionLocationV1,
+    pub item_version: u64,
+}
+
+/// One server-authoritative run-material pouch stack currently owned by the dying character.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeathAtRiskRunMaterial {
+    pub material_id: String,
+    pub quantity: u32,
+    pub material_version: u64,
+}
+
+/// Complete raw custody authority consumed by the pure destruction planner.
+///
+/// Input order is deliberately irrelevant. The planner emits the exact canonical ledger order
+/// and derives every post-version and item-ledger identity itself.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DeathCustodySnapshot {
+    pub items: Vec<DeathAtRiskItem>,
+    pub run_materials: Vec<DeathAtRiskRunMaterial>,
+}
+
 /// Account-locked Echo availability decision consumed by the persistence projector.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EchoAvailabilityProjection {
@@ -139,8 +168,9 @@ pub struct ServerAuthoredDeathContext {
     pub world: DeathWorldAuthority,
     pub content: DurableDeathContentAuthorityV1,
     pub versions: DeathAggregateVersionsV1,
-    /// Output of the canonical at-risk custody planner, already carrying ledger identities.
-    pub destruction: Vec<DurableDestructionEntryV1>,
+    /// Raw server custody. The builder invokes the canonical planner; callers cannot author
+    /// ordinals, post-versions, or item-ledger identities.
+    pub custody: DeathCustodySnapshot,
     pub hero: DeathHeroSnapshot,
     pub entity_identities: DeathEntityIdentityAuthority,
     /// Lethal evidence prepared only by the server-owned live trace service. Its private fields
@@ -209,6 +239,8 @@ pub enum DurableDeathBuildError {
     EchoEligibilityMismatch,
     #[error("death presentation content is missing or incompatible: {0}")]
     PresentationContentMismatch(&'static str),
+    #[error("server death custody could not be planned: {0}")]
+    DestructionPlanning(#[from] DurableDeathPlanningError),
     #[error("durable death DTO validation failed")]
     Persistence(#[source] PersistenceError),
 }
@@ -217,6 +249,88 @@ impl From<PersistenceError> for DurableDeathBuildError {
     fn from(value: PersistenceError) -> Self {
         Self::Persistence(value)
     }
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum DurableDeathPlanningError {
+    #[error("death destruction authority is missing or malformed")]
+    InvalidAuthority,
+    #[error("death custody snapshot is malformed, duplicated, or exceeds durable bounds")]
+    InvalidCustodySnapshot,
+    #[error("an item or material version cannot advance")]
+    VersionExhausted,
+}
+
+/// Produces the exact deterministic destruction ledger for one accepted terminal death.
+///
+/// The primary order is Equipment, Belt, `RunBackpack`, `PersonalGround`, then run materials.
+/// Durable unit UID is the stable tie-break inside stacked Belt and `RunBackpack` slots; this
+/// keeps the GDD's slot-first order total without depending on query or insertion order.
+pub fn plan_durable_death_destruction(
+    death_id: [u8; 16],
+    mutation_id: [u8; 16],
+    custody: &DeathCustodySnapshot,
+) -> Result<Vec<DurableDestructionEntryV1>, DurableDeathPlanningError> {
+    if !is_uuid_v7(death_id) || !is_uuid_v7(mutation_id) {
+        return Err(DurableDeathPlanningError::InvalidAuthority);
+    }
+    let entry_count = custody
+        .items
+        .len()
+        .checked_add(custody.run_materials.len())
+        .ok_or(DurableDeathPlanningError::InvalidCustodySnapshot)?;
+    if entry_count > MAX_DURABLE_DEATH_DESTRUCTION_ENTRIES {
+        return Err(DurableDeathPlanningError::InvalidCustodySnapshot);
+    }
+
+    let mut destruction = Vec::with_capacity(entry_count);
+    for item in &custody.items {
+        destruction.push(DurableDestructionEntryV1::Item {
+            ordinal: 0,
+            content_id: item.content_id.clone(),
+            item_uid: item.item_uid,
+            location: item.location.clone(),
+            pre_item_version: item.item_version,
+            post_item_version: item
+                .item_version
+                .checked_add(1)
+                .ok_or(DurableDeathPlanningError::VersionExhausted)?,
+            ledger_event_id: derive_durable_death_item_ledger_event_id(
+                death_id,
+                mutation_id,
+                item.item_uid,
+            ),
+        });
+    }
+    for material in &custody.run_materials {
+        destruction.push(DurableDestructionEntryV1::RunMaterial {
+            ordinal: 0,
+            material_id: material.material_id.clone(),
+            destroyed_quantity: material.quantity,
+            pre_material_quantity: material.quantity,
+            pre_material_version: material.material_version,
+            post_material_version: material
+                .material_version
+                .checked_add(1)
+                .ok_or(DurableDeathPlanningError::VersionExhausted)?,
+        });
+    }
+    destruction.sort_by(compare_canonical_durable_death_destruction_v1);
+    for (index, entry) in destruction.iter_mut().enumerate() {
+        let ordinal =
+            u16::try_from(index).map_err(|_| DurableDeathPlanningError::InvalidCustodySnapshot)?;
+        match entry {
+            DurableDestructionEntryV1::Item {
+                ordinal: target, ..
+            }
+            | DurableDestructionEntryV1::RunMaterial {
+                ordinal: target, ..
+            } => *target = ordinal,
+        }
+    }
+    validate_durable_death_destruction_v1(&destruction)
+        .map_err(|_| DurableDeathPlanningError::InvalidCustodySnapshot)?;
+    Ok(destruction)
 }
 
 /// Binds simulation-authored death evidence to one complete, sealed persistence request.
@@ -236,10 +350,14 @@ pub fn build_durable_death_commit(
     validate_server_authority(context)?;
     validate_simulation_evidence(inputs)?;
     validate_terminal_evidence(inputs, &context.terminal_trace)?;
-    validate_presentation_content(inputs, context, presentation)?;
+    let destruction = plan_durable_death_destruction(
+        context.mutation.death_id,
+        context.mutation.mutation_id,
+        &context.custody,
+    )?;
+    validate_presentation_content(inputs, context, &destruction, presentation)?;
 
     let trace = map_trace(inputs, &context.entity_identities)?;
-    let destruction = context.destruction.clone();
     let trace_digest = canonical_digest(DURABLE_TRACE_DIGEST_CONTEXT, &trace)?;
     let destruction_digest = canonical_digest(DURABLE_DESTRUCTION_DIGEST_CONTEXT, &destruction)?;
     let lethal = trace
@@ -401,6 +519,7 @@ fn map_provenance(lineage: DeathLineageState) -> DurableDeathProvenanceV1 {
 fn validate_presentation_content(
     inputs: &AuthoritativeDeathInputs,
     context: &ServerAuthoredDeathContext,
+    destruction: &[DurableDestructionEntryV1],
     presentation: &CoreDevelopmentDeathView,
 ) -> Result<(), DurableDeathBuildError> {
     let hashes = presentation.hashes();
@@ -487,7 +606,7 @@ fn validate_presentation_content(
             ));
         }
     }
-    for entry in &context.destruction {
+    for entry in destruction {
         let resolved = match entry {
             DurableDestructionEntryV1::Item { content_id, .. } => {
                 presentation.resolve_item(content_id)
@@ -551,10 +670,8 @@ fn validate_server_authority(
         return Err(DurableDeathBuildError::WorldAuthorityMismatch);
     }
     context.content.validate()?;
-    for entry in &context.destruction {
-        if let DurableDestructionEntryV1::Item { content_id, .. } = entry
-            && context.content.item(content_id).is_none()
-        {
+    for item in &context.custody.items {
+        if context.content.item(&item.content_id).is_none() {
             return Err(PersistenceError::DurableDeathContentMismatch.into());
         }
     }
@@ -1016,6 +1133,19 @@ pub(crate) mod tests {
         build_durable_death_commit(inputs, context, &presentation())
     }
 
+    fn validate_test_presentation(
+        inputs: &AuthoritativeDeathInputs,
+        context: &ServerAuthoredDeathContext,
+        presentation: &CoreDevelopmentDeathView,
+    ) -> Result<(), DurableDeathBuildError> {
+        let destruction = plan_durable_death_destruction(
+            context.mutation.death_id,
+            context.mutation.mutation_id,
+            &context.custody,
+        )?;
+        validate_presentation_content(inputs, context, &destruction, presentation)
+    }
+
     fn trace_entry(
         tick: u64,
         event_ordinal: u32,
@@ -1219,17 +1349,17 @@ pub(crate) mod tests {
                 }],
             },
             versions: versions(),
-            destruction: vec![DurableDestructionEntryV1::Item {
-                ordinal: 0,
-                content_id: "item.weapon.crossbow.pine_crossbow".into(),
-                item_uid: [8; 16],
-                location: DurableDestructionLocationV1::Equipment {
-                    slot: DurableEquipmentSlotV1::Weapon,
-                },
-                pre_item_version: 7,
-                post_item_version: 8,
-                ledger_event_id: [9; 16],
-            }],
+            custody: DeathCustodySnapshot {
+                items: vec![DeathAtRiskItem {
+                    content_id: "item.weapon.crossbow.pine_crossbow".into(),
+                    item_uid: [8; 16],
+                    location: DurableDestructionLocationV1::Equipment {
+                        slot: DurableEquipmentSlotV1::Weapon,
+                    },
+                    item_version: 7,
+                }],
+                run_materials: vec![],
+            },
             hero: DeathHeroSnapshot {
                 hero_label_key: "hero.core.grave_arbalist".into(),
                 character_name: "Mara".into(),
@@ -1262,6 +1392,236 @@ pub(crate) mod tests {
 
     pub(crate) fn prepared_commit() -> PreparedDurableDeathCommit {
         build_test_commit(&inputs(), &context()).expect("canonical death fixture")
+    }
+
+    fn at_risk_item(
+        uid: u8,
+        location: DurableDestructionLocationV1,
+        version: u64,
+    ) -> DeathAtRiskItem {
+        DeathAtRiskItem {
+            content_id: if matches!(location, DurableDestructionLocationV1::Belt { .. }) {
+                "consumable.red_tonic".into()
+            } else {
+                "item.weapon.crossbow.pine_crossbow".into()
+            },
+            item_uid: [uid; 16],
+            location,
+            item_version: version,
+        }
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the exhaustive custody-family matrix remains contiguous for order review"
+    )]
+    fn destruction_planner_covers_every_custody_family_in_exact_order() {
+        let death_id = uuid_v7(21);
+        let mutation_id = uuid_v7(22);
+        let mut items = vec![
+            at_risk_item(
+                90,
+                DurableDestructionLocationV1::PersonalGround {
+                    instance_id: [4; 16],
+                    pickup_id: [9; 16],
+                },
+                3,
+            ),
+            at_risk_item(
+                91,
+                DurableDestructionLocationV1::RunBackpack { index: 7 },
+                2,
+            ),
+            at_risk_item(
+                10,
+                DurableDestructionLocationV1::Equipment {
+                    slot: DurableEquipmentSlotV1::Weapon,
+                },
+                4,
+            ),
+            at_risk_item(
+                13,
+                DurableDestructionLocationV1::Equipment {
+                    slot: DurableEquipmentSlotV1::Charm,
+                },
+                4,
+            ),
+            at_risk_item(
+                12,
+                DurableDestructionLocationV1::Equipment {
+                    slot: DurableEquipmentSlotV1::Armor,
+                },
+                4,
+            ),
+            at_risk_item(
+                11,
+                DurableDestructionLocationV1::Equipment {
+                    slot: DurableEquipmentSlotV1::Relic,
+                },
+                4,
+            ),
+        ];
+        for slot in 0_u8..=1 {
+            for unit in (0_u8..6).rev() {
+                items.push(at_risk_item(
+                    20 + slot * 10 + unit,
+                    DurableDestructionLocationV1::Belt { index: slot },
+                    5,
+                ));
+            }
+        }
+        for slot in (0_u8..8).rev() {
+            for unit in (0_u8..6).rev() {
+                items.push(at_risk_item(
+                    40 + slot * 6 + unit,
+                    DurableDestructionLocationV1::RunBackpack { index: slot },
+                    6,
+                ));
+            }
+        }
+        items.push(at_risk_item(
+            89,
+            DurableDestructionLocationV1::PersonalGround {
+                instance_id: [4; 16],
+                pickup_id: [9; 16],
+            },
+            3,
+        ));
+        items.push(at_risk_item(
+            88,
+            DurableDestructionLocationV1::PersonalGround {
+                instance_id: [3; 16],
+                pickup_id: [9; 16],
+            },
+            3,
+        ));
+        let custody = DeathCustodySnapshot {
+            items,
+            run_materials: vec![
+                DeathAtRiskRunMaterial {
+                    material_id: "material.saltglass_shard".into(),
+                    quantity: 9,
+                    material_version: 2,
+                },
+                DeathAtRiskRunMaterial {
+                    material_id: "material.bell_brass".into(),
+                    quantity: 7,
+                    material_version: 4,
+                },
+                DeathAtRiskRunMaterial {
+                    material_id: "material.funeral_root".into(),
+                    quantity: 5,
+                    material_version: 3,
+                },
+            ],
+        };
+
+        let planned = plan_durable_death_destruction(death_id, mutation_id, &custody).unwrap();
+        assert_eq!(
+            planned.len(),
+            custody.items.len() + custody.run_materials.len()
+        );
+        assert!(
+            planned
+                .iter()
+                .enumerate()
+                .all(|(index, entry)| { entry.ordinal() == u16::try_from(index).unwrap() })
+        );
+        assert!(planned.windows(2).all(|pair| {
+            compare_canonical_durable_death_destruction_v1(&pair[0], &pair[1])
+                == std::cmp::Ordering::Less
+        }));
+        assert_eq!(
+            planned
+                .iter()
+                .filter(|entry| matches!(entry, DurableDestructionEntryV1::Item { .. }))
+                .count(),
+            custody.items.len()
+        );
+        assert_eq!(
+            planned
+                .iter()
+                .filter_map(|entry| match entry {
+                    DurableDestructionEntryV1::RunMaterial {
+                        destroyed_quantity, ..
+                    } => Some(*destroyed_quantity),
+                    DurableDestructionEntryV1::Item { .. } => None,
+                })
+                .sum::<u32>(),
+            custody
+                .run_materials
+                .iter()
+                .map(|material| material.quantity)
+                .sum::<u32>()
+        );
+        for entry in &planned {
+            if let DurableDestructionEntryV1::Item {
+                item_uid,
+                pre_item_version,
+                post_item_version,
+                ledger_event_id,
+                ..
+            } = entry
+            {
+                assert_eq!(post_item_version, &(pre_item_version + 1));
+                assert_eq!(
+                    *ledger_event_id,
+                    derive_durable_death_item_ledger_event_id(death_id, mutation_id, *item_uid)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn destruction_planner_is_permutation_stable_and_fails_closed() {
+        let death_id = uuid_v7(31);
+        let mutation_id = uuid_v7(32);
+        let canonical = DeathCustodySnapshot {
+            items: vec![
+                at_risk_item(1, DurableDestructionLocationV1::Belt { index: 0 }, 1),
+                at_risk_item(2, DurableDestructionLocationV1::RunBackpack { index: 0 }, 2),
+            ],
+            run_materials: vec![DeathAtRiskRunMaterial {
+                material_id: "material.bell_brass".into(),
+                quantity: 2,
+                material_version: 3,
+            }],
+        };
+        let mut reversed = canonical.clone();
+        reversed.items.reverse();
+        reversed.run_materials.reverse();
+        assert_eq!(
+            plan_durable_death_destruction(death_id, mutation_id, &canonical).unwrap(),
+            plan_durable_death_destruction(death_id, mutation_id, &reversed).unwrap()
+        );
+
+        let mut duplicate_item = canonical.clone();
+        duplicate_item.items.push(duplicate_item.items[0].clone());
+        assert_eq!(
+            plan_durable_death_destruction(death_id, mutation_id, &duplicate_item),
+            Err(DurableDeathPlanningError::InvalidCustodySnapshot)
+        );
+
+        let mut duplicate_material = canonical.clone();
+        duplicate_material
+            .run_materials
+            .push(duplicate_material.run_materials[0].clone());
+        assert_eq!(
+            plan_durable_death_destruction(death_id, mutation_id, &duplicate_material),
+            Err(DurableDeathPlanningError::InvalidCustodySnapshot)
+        );
+
+        let mut exhausted = canonical.clone();
+        exhausted.items[0].item_version = u64::MAX;
+        assert_eq!(
+            plan_durable_death_destruction(death_id, mutation_id, &exhausted),
+            Err(DurableDeathPlanningError::VersionExhausted)
+        );
+        assert_eq!(
+            plan_durable_death_destruction([0; 16], mutation_id, &canonical),
+            Err(DurableDeathPlanningError::InvalidAuthority)
+        );
     }
 
     #[test]
@@ -1562,7 +1922,7 @@ pub(crate) mod tests {
         let mut ctx = context();
         ctx.hero.class_id = "status.bleed".into();
         assert!(matches!(
-            validate_presentation_content(&inputs(), &ctx, &presentation),
+            validate_test_presentation(&inputs(), &ctx, &presentation),
             Err(DurableDeathBuildError::PresentationContentMismatch(
                 "hero or Memorial snapshot"
             ))
@@ -1571,7 +1931,7 @@ pub(crate) mod tests {
         let mut ctx = context();
         ctx.echo.as_mut().unwrap().deed_tags = vec!["deed.core.unknown".into()];
         assert!(matches!(
-            validate_presentation_content(&inputs(), &ctx, &presentation),
+            validate_test_presentation(&inputs(), &ctx, &presentation),
             Err(DurableDeathBuildError::PresentationContentMismatch(
                 "deed snapshot"
             ))
@@ -1580,7 +1940,7 @@ pub(crate) mod tests {
         let mut ctx = context();
         ctx.content.enabled_items[0].template_id = "item.core.unknown".into();
         assert!(matches!(
-            validate_presentation_content(&inputs(), &ctx, &presentation),
+            validate_test_presentation(&inputs(), &ctx, &presentation),
             Err(DurableDeathBuildError::PresentationContentMismatch(
                 "enabled item"
             ))
@@ -1589,7 +1949,7 @@ pub(crate) mod tests {
         let mut death_inputs = inputs();
         death_inputs.trace[0].source_content_id = "source.core.unknown".into();
         assert!(matches!(
-            validate_presentation_content(&death_inputs, &context(), &presentation),
+            validate_test_presentation(&death_inputs, &context(), &presentation),
             Err(DurableDeathBuildError::PresentationContentMismatch(
                 "combat trace"
             ))
@@ -1598,7 +1958,7 @@ pub(crate) mod tests {
         let mut death_inputs = inputs();
         death_inputs.trace[0].attack_id = "attack.caldus.bell_ring".into();
         assert!(matches!(
-            validate_presentation_content(&death_inputs, &context(), &presentation),
+            validate_test_presentation(&death_inputs, &context(), &presentation),
             Err(DurableDeathBuildError::PresentationContentMismatch(
                 "combat trace"
             ))
@@ -1607,23 +1967,21 @@ pub(crate) mod tests {
         let mut death_inputs = inputs();
         death_inputs.trace[0].statuses[0].status_id = "class.grave_arbalist".into();
         assert!(matches!(
-            validate_presentation_content(&death_inputs, &context(), &presentation),
+            validate_test_presentation(&death_inputs, &context(), &presentation),
             Err(DurableDeathBuildError::PresentationContentMismatch(
                 "combat trace"
             ))
         ));
 
         let mut ctx = context();
-        ctx.destruction[0] = DurableDestructionEntryV1::RunMaterial {
-            ordinal: 0,
+        ctx.custody.items.clear();
+        ctx.custody.run_materials = vec![DeathAtRiskRunMaterial {
             material_id: "material.core.unknown".into(),
-            destroyed_quantity: 1,
-            pre_material_quantity: 1,
-            pre_material_version: 1,
-            post_material_version: 2,
-        };
+            quantity: 1,
+            material_version: 1,
+        }];
         assert!(matches!(
-            validate_presentation_content(&inputs(), &ctx, &presentation),
+            validate_test_presentation(&inputs(), &ctx, &presentation),
             Err(DurableDeathBuildError::PresentationContentMismatch(
                 "destruction projection"
             ))

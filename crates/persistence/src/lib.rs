@@ -129,7 +129,8 @@ pub use durable_death::{
     MAX_DURABLE_DEATH_DESTRUCTION_ENTRIES, MAX_DURABLE_DEATH_PLAN_PAYLOAD_BYTES,
     MAX_DURABLE_DEATH_RESULT_PAYLOAD_BYTES, MAX_DURABLE_DEATH_STATUSES_PER_ENTRY,
     MAX_DURABLE_DEATH_TRACE_ENTRIES, StoredCommittedDeathResultV1,
-    derive_durable_death_bargain_cleanup_event_id,
+    compare_canonical_durable_death_destruction_v1, derive_durable_death_bargain_cleanup_event_id,
+    derive_durable_death_item_ledger_event_id, validate_durable_death_destruction_v1,
 };
 pub use durable_death_repository::DurableDeathTransactionV1;
 pub use durable_terminal_recovery::{

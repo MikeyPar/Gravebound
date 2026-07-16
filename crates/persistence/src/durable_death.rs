@@ -38,6 +38,7 @@ const MEMORIAL_HASH_CONTEXT: &str = "gravebound.durable-death.memorial.v1";
 const ECHO_HASH_CONTEXT: &str = "gravebound.durable-death.echo.v1";
 const RESULT_HASH_CONTEXT: &str = "gravebound.durable-death.result.v1";
 const BARGAIN_CLEANUP_ID_CONTEXT: &str = "gravebound.death.bargain-cleanup-id.v1";
+const ITEM_DESTRUCTION_LEDGER_ID_CONTEXT: &str = "gravebound.death.item-destruction-ledger-id.v1";
 const PRESERVED_PROJECTIONS: [(DurableSummaryProjectionKindV1, &str); 5] = [
     (
         DurableSummaryProjectionKindV1::PreservedAccountRecords,
@@ -163,6 +164,33 @@ pub fn derive_durable_death_bargain_cleanup_event_id(
 ) -> [u8; 16] {
     let mut hasher = blake3::Hasher::new_derive_key(BARGAIN_CLEANUP_ID_CONTEXT);
     for part in [death_id.as_slice(), mutation_id.as_slice()] {
+        hasher.update(&(part.len() as u64).to_be_bytes());
+        hasher.update(part);
+    }
+    let mut value = [0_u8; 16];
+    value.copy_from_slice(&hasher.finalize().as_bytes()[..16]);
+    if value == [0; 16] {
+        value[15] = 1;
+    }
+    value
+}
+
+/// Derives the immutable item-ledger identity for one server-planned permadeath destruction.
+///
+/// The death and mutation identities bind the event to the terminal transaction, while the item
+/// identity makes every destroyed durable unit independently replay-safe.
+#[must_use]
+pub fn derive_durable_death_item_ledger_event_id(
+    death_id: [u8; 16],
+    mutation_id: [u8; 16],
+    item_uid: [u8; 16],
+) -> [u8; 16] {
+    let mut hasher = blake3::Hasher::new_derive_key(ITEM_DESTRUCTION_LEDGER_ID_CONTEXT);
+    for part in [
+        death_id.as_slice(),
+        mutation_id.as_slice(),
+        item_uid.as_slice(),
+    ] {
         hasher.update(&(part.len() as u64).to_be_bytes());
         hasher.update(part);
     }
@@ -524,6 +552,25 @@ impl DurableDestructionEntryV1 {
             ) => left.as_bytes().cmp(right.as_bytes()),
         }
     }
+}
+
+/// Validates one complete server-planned destruction list against the exact durable DTO contract.
+///
+/// This is intentionally exposed for the server-owned pure planner. The `PostgreSQL` repository
+/// repeats the same validation after locking current custody.
+pub fn validate_durable_death_destruction_v1(
+    entries: &[DurableDestructionEntryV1],
+) -> Result<(), PersistenceError> {
+    validate_destruction(entries)
+}
+
+/// Compares two destruction entries using the canonical ledger order from `SPEC-CONFLICT-009`.
+#[must_use]
+pub fn compare_canonical_durable_death_destruction_v1(
+    left: &DurableDestructionEntryV1,
+    right: &DurableDestructionEntryV1,
+) -> Ordering {
+    left.canonical_cmp(right)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1501,6 +1548,10 @@ fn contiguous_unique_content(values: &[DurableOrderedContentIdV1], max: usize) -
         })
 }
 
+#[allow(
+    clippy::match_same_arms,
+    reason = "Belt and RunBackpack share a UID tie-break but remain distinct ordered custody families"
+)]
 fn location_cmp(
     left: &DurableDestructionLocationV1,
     left_uid: [u8; 16],
@@ -1523,7 +1574,7 @@ fn location_cmp(
         (
             DurableDestructionLocationV1::RunBackpack { index: left },
             DurableDestructionLocationV1::RunBackpack { index: right },
-        ) => left.cmp(right),
+        ) => (*left, left_uid).cmp(&(*right, right_uid)),
         (DurableDestructionLocationV1::RunBackpack { .. }, _) => Ordering::Less,
         (_, DurableDestructionLocationV1::RunBackpack { .. }) => Ordering::Greater,
         (
@@ -2224,6 +2275,48 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert!(destruction_order.plan.validate().is_err());
+    }
+
+    #[test]
+    fn stacked_backpack_units_use_uid_tie_break_and_derived_ledgers_are_stable() {
+        let left = DurableDestructionEntryV1::Item {
+            ordinal: 0,
+            content_id: "consumable.red_tonic".into(),
+            item_uid: [1; 16],
+            location: DurableDestructionLocationV1::RunBackpack { index: 3 },
+            pre_item_version: 2,
+            post_item_version: 3,
+            ledger_event_id: [3; 16],
+        };
+        let right = DurableDestructionEntryV1::Item {
+            ordinal: 1,
+            content_id: "consumable.red_tonic".into(),
+            item_uid: [2; 16],
+            location: DurableDestructionLocationV1::RunBackpack { index: 3 },
+            pre_item_version: 4,
+            post_item_version: 5,
+            ledger_event_id: [4; 16],
+        };
+        assert_eq!(left.canonical_cmp(&right), Ordering::Less);
+        assert_eq!(right.canonical_cmp(&left), Ordering::Greater);
+        validate_destruction(&[left, right]).unwrap();
+
+        let death_id = uuid_v7(51);
+        let mutation_id = uuid_v7(52);
+        let first = derive_durable_death_item_ledger_event_id(death_id, mutation_id, [1; 16]);
+        assert_ne!(first, [0; 16]);
+        assert_eq!(
+            first,
+            derive_durable_death_item_ledger_event_id(death_id, mutation_id, [1; 16])
+        );
+        assert_ne!(
+            first,
+            derive_durable_death_item_ledger_event_id(death_id, mutation_id, [2; 16])
+        );
+        assert_ne!(
+            first,
+            derive_durable_death_item_ledger_event_id(death_id, uuid_v7(53), [1; 16])
+        );
     }
 
     #[test]

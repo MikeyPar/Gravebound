@@ -85,10 +85,11 @@ pub use durable_death_execution::{
     recover_committed_death_arbiter,
 };
 pub use durable_death_service::{
-    DeathEntityIdentityAuthority, DeathHeroSnapshot, DeathLineageState, DeathMutationAuthority,
-    DeathProvenance, DeathWorldAuthority, DurableDeathBuildError, EchoAvailabilityProjection,
-    EligibleEchoProjection, PreparedDurableDeathCommit, ServerAuthoredDeathContext,
-    build_durable_death_commit,
+    DeathAtRiskItem, DeathAtRiskRunMaterial, DeathCustodySnapshot, DeathEntityIdentityAuthority,
+    DeathHeroSnapshot, DeathLineageState, DeathMutationAuthority, DeathProvenance,
+    DeathWorldAuthority, DurableDeathBuildError, DurableDeathPlanningError,
+    EchoAvailabilityProjection, EligibleEchoProjection, PreparedDurableDeathCommit,
+    ServerAuthoredDeathContext, build_durable_death_commit, plan_durable_death_destruction,
 };
 pub use field_equipment::{
     AuthoritativeFieldEquipmentCommit, AuthoritativeFieldEquipmentPreview,
