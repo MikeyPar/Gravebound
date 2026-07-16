@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('bootstrap', 'format', 'lint', 'test', 'validate', 'headless', 'local-lab', 'server-doctor', 'bot-doctor', 'network-ci', 'm02-network-smoke', 'm02-soak', 'm02-server', 'm02-client', 'm02-package', 'm03-identity-smoke', 'm03-identity-server', 'm03-identity-server-ephemeral', 'm03-identity-client', 'm03-death-soak', 'persistence-ci', 'local-stack', 'ci', 'release')]
+    [ValidateSet('bootstrap', 'format', 'lint', 'test', 'validate', 'headless', 'local-lab', 'server-doctor', 'bot-doctor', 'network-ci', 'm02-network-smoke', 'm02-soak', 'm02-server', 'm02-client', 'm02-package', 'm03-package', 'm03-identity-smoke', 'm03-identity-server', 'm03-identity-server-ephemeral', 'm03-identity-client', 'm03-death-soak', 'persistence-ci', 'local-stack', 'ci', 'release')]
     [string]$Command = 'ci'
 )
 
@@ -56,6 +56,12 @@ try {
             & (Join-Path $PSScriptRoot 'package-m02.ps1')
             if ($LASTEXITCODE -ne 0) {
                 throw "M02 packaging failed with exit code $LASTEXITCODE"
+            }
+        }
+        'm03-package' {
+            & (Join-Path $PSScriptRoot 'package-m03-tester.ps1')
+            if ($LASTEXITCODE -ne 0) {
+                throw "M03 tester packaging failed with exit code $LASTEXITCODE"
             }
         }
         'm03-identity-smoke' {
