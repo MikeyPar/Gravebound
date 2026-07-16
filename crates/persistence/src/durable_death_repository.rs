@@ -198,12 +198,13 @@ struct MaterialLock {
     version: u64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 struct EchoLock {
     echo_id: [u8; 16],
     death_id: [u8; 16],
     state: i16,
     tail_ordinal: u16,
+    created_at_unix_micros: u64,
 }
 
 #[derive(Debug)]
@@ -1187,7 +1188,9 @@ async fn lock_echoes(
                            FROM echo_state_transitions AS transition \
                            WHERE transition.namespace_id=echo.namespace_id \
                              AND transition.echo_id=echo.echo_id), CAST(-1 AS SMALLINT)) \
-                    AS tail_ordinal \
+                    AS tail_ordinal, \
+                floor(extract(epoch FROM echo.created_at) * 1000000)::bigint \
+                    AS created_at_unix_micros \
          FROM echo_records AS echo WHERE echo.namespace_id=$1 AND echo.account_id=$2 \
          ORDER BY echo.created_at, echo.echo_id FOR UPDATE OF echo",
     )
@@ -1207,9 +1210,17 @@ async fn lock_echoes(
                 state: row.try_get("state")?,
                 tail_ordinal: u16::try_from(tail)
                     .map_err(|_| PersistenceError::CorruptStoredDurableDeath)?,
+                created_at_unix_micros: positive(row.try_get("created_at_unix_micros")?)?,
             })
         })
         .collect()
+}
+
+fn oldest_dormant_echo(echoes: &[EchoLock]) -> Option<&EchoLock> {
+    echoes
+        .iter()
+        .filter(|echo| echo.state == 0)
+        .min_by_key(|echo| (echo.created_at_unix_micros, echo.echo_id))
 }
 
 fn validate_echo_prestate(
@@ -1236,7 +1247,7 @@ fn validate_echo_prestate(
             if !available.is_empty() {
                 return Err(PersistenceError::DurableDeathBindingMismatch);
             }
-            let oldest_existing = echoes.iter().find(|echo| echo.state == 0);
+            let oldest_existing = oldest_dormant_echo(echoes);
             match oldest_existing {
                 Some(oldest)
                     if promotion.echo_id == oldest.echo_id
@@ -3241,6 +3252,49 @@ mod tests {
             accepted,
             derived_id(DEATH_ACCEPTED_AUDIT_ID_CONTEXT, &[&material])
         );
+    }
+
+    #[test]
+    fn dormant_echo_selection_is_oldest_first_with_equal_time_id_tie_break() {
+        let older_high_id = EchoLock {
+            echo_id: [9; 16],
+            death_id: [19; 16],
+            state: 0,
+            tail_ordinal: 0,
+            created_at_unix_micros: 99,
+        };
+        let equal_time_high_id = EchoLock {
+            echo_id: [8; 16],
+            death_id: [18; 16],
+            state: 0,
+            tail_ordinal: 0,
+            created_at_unix_micros: 100,
+        };
+        let equal_time_low_id = EchoLock {
+            echo_id: [7; 16],
+            death_id: [17; 16],
+            state: 0,
+            tail_ordinal: 1,
+            created_at_unix_micros: 100,
+        };
+        let available = EchoLock {
+            echo_id: [1; 16],
+            death_id: [11; 16],
+            state: 1,
+            tail_ordinal: 1,
+            created_at_unix_micros: 1,
+        };
+
+        let same_time_queue = [equal_time_high_id, available, equal_time_low_id];
+        let selected = oldest_dormant_echo(&same_time_queue).unwrap();
+        assert_eq!(selected.echo_id, [7; 16]);
+        assert_eq!(selected.death_id, [17; 16]);
+        assert_eq!(selected.tail_ordinal, 1);
+
+        let mixed_time_queue = [same_time_queue[0], older_high_id, same_time_queue[2]];
+        let selected = oldest_dormant_echo(&mixed_time_queue).unwrap();
+        assert_eq!(selected.echo_id, [9; 16]);
+        assert_eq!(selected.death_id, [19; 16]);
     }
 
     #[test]

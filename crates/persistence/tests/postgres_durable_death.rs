@@ -84,6 +84,21 @@ impl RequestIds {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FixtureCustody {
+    Full,
+    Empty,
+}
+
+impl FixtureCustody {
+    const fn entry_inventory_version(self) -> i64 {
+        match self {
+            Self::Full => 2,
+            Self::Empty => 1,
+        }
+    }
+}
+
 fn uuid_v7(seed: u8) -> [u8; 16] {
     let mut value = [seed; 16];
     value[6] = 0x70 | (seed & 0x0f);
@@ -126,11 +141,19 @@ async fn reconnect_database() -> PostgresPersistence {
     persistence
 }
 
+async fn reset_fixture(persistence: &PostgresPersistence) {
+    reset_fixture_with_custody(persistence, FixtureCustody::Full).await;
+}
+
+async fn reset_zero_custody_fixture(persistence: &PostgresPersistence) {
+    reset_fixture_with_custody(persistence, FixtureCustody::Empty).await;
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "the hosted fixture keeps the complete V3 danger root explicit and auditable"
 )]
-async fn reset_fixture(persistence: &PostgresPersistence) {
+async fn reset_fixture_with_custody(persistence: &PostgresPersistence, custody: FixtureCustody) {
     let mut transaction = persistence.begin_transaction().await.unwrap();
     sqlx::query("DELETE FROM accounts WHERE namespace_id=$1 AND account_id=$2")
         .bind(WIPEABLE_CORE_NAMESPACE)
@@ -196,24 +219,26 @@ async fn reset_fixture(persistence: &PostgresPersistence) {
     .execute(transaction.connection())
     .await
     .unwrap();
-    sqlx::query(
-        "INSERT INTO item_instances (namespace_id,item_uid,account_id,character_id,template_id, \
-         content_revision,item_kind,item_level,rarity,creation_kind,creation_request_id,roll_index, \
-         unit_ordinal,item_version,security_state,location_kind,slot_index,provenance_kind, \
-         salvage_band,salvage_value) \
-         VALUES ($1,$2,$3,$4,$5,$6,0,10,0,0,$2,1,0,1,0,5,0,0,0,0), \
-                ($1,$7,$3,NULL,$5,$6,0,10,0,0,$7,2,0,1,0,6,0,0,0,0)",
-    )
-    .bind(WIPEABLE_CORE_NAMESPACE)
-    .bind(CHARACTER_SAFE_ITEM_UID.as_slice())
-    .bind(ACCOUNT_ID.as_slice())
-    .bind(CHARACTER_ID.as_slice())
-    .bind(ITEM_TEMPLATE_ID)
-    .bind(CORE_ITEM_CONTENT_REVISION)
-    .bind(VAULT_ITEM_UID.as_slice())
-    .execute(transaction.connection())
-    .await
-    .unwrap();
+    if custody == FixtureCustody::Full {
+        sqlx::query(
+            "INSERT INTO item_instances (namespace_id,item_uid,account_id,character_id,template_id, \
+             content_revision,item_kind,item_level,rarity,creation_kind,creation_request_id,roll_index, \
+             unit_ordinal,item_version,security_state,location_kind,slot_index,provenance_kind, \
+             salvage_band,salvage_value) \
+             VALUES ($1,$2,$3,$4,$5,$6,0,10,0,0,$2,1,0,1,0,5,0,0,0,0), \
+                    ($1,$7,$3,NULL,$5,$6,0,10,0,0,$7,2,0,1,0,6,0,0,0,0)",
+        )
+        .bind(WIPEABLE_CORE_NAMESPACE)
+        .bind(CHARACTER_SAFE_ITEM_UID.as_slice())
+        .bind(ACCOUNT_ID.as_slice())
+        .bind(CHARACTER_ID.as_slice())
+        .bind(ITEM_TEMPLATE_ID)
+        .bind(CORE_ITEM_CONTENT_REVISION)
+        .bind(VAULT_ITEM_UID.as_slice())
+        .execute(transaction.connection())
+        .await
+        .unwrap();
+    }
     sqlx::query(
         "INSERT INTO character_oath_bargain_state (namespace_id,account_id,character_id, \
          earned_bargain_slots,oath_bargain_version) VALUES ($1,$2,$3,0,1)",
@@ -224,22 +249,24 @@ async fn reset_fixture(persistence: &PostgresPersistence) {
     .execute(transaction.connection())
     .await
     .unwrap();
-    sqlx::query(
-        "INSERT INTO item_instances (namespace_id,item_uid,account_id,character_id,template_id, \
-         content_revision,item_kind,item_level,rarity,creation_kind,creation_request_id,roll_index, \
-         unit_ordinal,item_version,security_state,location_kind,slot_index,provenance_kind, \
-         salvage_band,salvage_value) \
-         VALUES ($1,$2,$3,$4,$5,$6,0,10,0,0,$2,0,0,1,0,0,0,0,0,0)",
-    )
-    .bind(WIPEABLE_CORE_NAMESPACE)
-    .bind(ITEM_UID.as_slice())
-    .bind(ACCOUNT_ID.as_slice())
-    .bind(CHARACTER_ID.as_slice())
-    .bind(ITEM_TEMPLATE_ID)
-    .bind(CORE_ITEM_CONTENT_REVISION)
-    .execute(transaction.connection())
-    .await
-    .unwrap();
+    if custody == FixtureCustody::Full {
+        sqlx::query(
+            "INSERT INTO item_instances (namespace_id,item_uid,account_id,character_id,template_id, \
+             content_revision,item_kind,item_level,rarity,creation_kind,creation_request_id,roll_index, \
+             unit_ordinal,item_version,security_state,location_kind,slot_index,provenance_kind, \
+             salvage_band,salvage_value) \
+             VALUES ($1,$2,$3,$4,$5,$6,0,10,0,0,$2,0,0,1,0,0,0,0,0,0)",
+        )
+        .bind(WIPEABLE_CORE_NAMESPACE)
+        .bind(ITEM_UID.as_slice())
+        .bind(ACCOUNT_ID.as_slice())
+        .bind(CHARACTER_ID.as_slice())
+        .bind(ITEM_TEMPLATE_ID)
+        .bind(CORE_ITEM_CONTENT_REVISION)
+        .execute(transaction.connection())
+        .await
+        .unwrap();
+    }
     sqlx::query(
         "INSERT INTO character_instance_lineages (namespace_id,account_id,character_id,lineage_id, \
          content_id,layout_id,lineage_state,records_blake3,assets_blake3,localization_blake3) \
@@ -262,13 +289,14 @@ async fn reset_fixture(persistence: &PostgresPersistence) {
          inventory_version,oath_bargain_version,life_metrics_version,ash_wallet_version, \
          component_mask,composite_digest,restore_state,records_blake3,assets_blake3, \
          localization_blake3) VALUES ($1,$2,$3,$4,$5,'hub.lantern_halls_01', \
-         'hub.lantern_halls_01',3,1,1,1,2,1,1,1,31,$6,0,$7,$8,$9)",
+         'hub.lantern_halls_01',3,1,1,1,$6,1,1,1,31,$7,0,$8,$9,$10)",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(ACCOUNT_ID.as_slice())
     .bind(CHARACTER_ID.as_slice())
     .bind(RESTORE_POINT_ID.as_slice())
     .bind(LINEAGE_ID.as_slice())
+    .bind(custody.entry_inventory_version())
     .bind([91_u8; 32].as_slice())
     .bind(CORE_WORLD_RECORDS_BLAKE3)
     .bind(CORE_WORLD_ASSETS_BLAKE3)
@@ -301,7 +329,7 @@ async fn reset_fixture(persistence: &PostgresPersistence) {
     .execute(transaction.connection())
     .await
     .unwrap();
-    stage_danger_entry_inventory_restore_v3(
+    let staged_inventory = stage_danger_entry_inventory_restore_v3(
         &mut transaction,
         ACCOUNT_ID,
         CHARACTER_ID,
@@ -311,6 +339,14 @@ async fn reset_fixture(persistence: &PostgresPersistence) {
     )
     .await
     .unwrap();
+    assert_eq!(
+        staged_inventory.post_inventory_version,
+        u64::try_from(custody.entry_inventory_version()).unwrap()
+    );
+    assert_eq!(
+        staged_inventory.items.len(),
+        usize::from(custody == FixtureCustody::Full)
+    );
     stage_danger_entry_oath_bargain_restore_v3(
         &mut transaction,
         ACCOUNT_ID,
@@ -385,13 +421,14 @@ async fn reset_fixture(persistence: &PostgresPersistence) {
          lineage_id,checkpoint_tick,component_mask,composite_digest,character_version, \
          progression_version,inventory_version,oath_bargain_version,records_blake3, \
          assets_blake3,localization_blake3,checkpoint_schema_version,checkpoint_payload, \
-         checkpoint_payload_digest) VALUES ($1,$2,$3,$4,19990,15,$5,2,2,2,1,$6,$7,$8,1,$9,$10)",
+         checkpoint_payload_digest) VALUES ($1,$2,$3,$4,19990,15,$5,2,2,$6,1,$7,$8,$9,1,$10,$11)",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(ACCOUNT_ID.as_slice())
     .bind(CHARACTER_ID.as_slice())
     .bind(LINEAGE_ID.as_slice())
     .bind([94_u8; 32].as_slice())
+    .bind(custody.entry_inventory_version())
     .bind(CORE_WORLD_RECORDS_BLAKE3)
     .bind(CORE_WORLD_ASSETS_BLAKE3)
     .bind(CORE_WORLD_LOCALIZATION_BLAKE3)
@@ -400,17 +437,19 @@ async fn reset_fixture(persistence: &PostgresPersistence) {
     .execute(transaction.connection())
     .await
     .unwrap();
-    sqlx::query(
-        "INSERT INTO character_run_material_stacks (namespace_id,account_id,character_id, \
-         material_id,quantity,material_version,security_state) VALUES ($1,$2,$3,$4,7,1,2)",
-    )
-    .bind(WIPEABLE_CORE_NAMESPACE)
-    .bind(ACCOUNT_ID.as_slice())
-    .bind(CHARACTER_ID.as_slice())
-    .bind(MATERIAL_ID)
-    .execute(transaction.connection())
-    .await
-    .unwrap();
+    if custody == FixtureCustody::Full {
+        sqlx::query(
+            "INSERT INTO character_run_material_stacks (namespace_id,account_id,character_id, \
+             material_id,quantity,material_version,security_state) VALUES ($1,$2,$3,$4,7,1,2)",
+        )
+        .bind(WIPEABLE_CORE_NAMESPACE)
+        .bind(ACCOUNT_ID.as_slice())
+        .bind(CHARACTER_ID.as_slice())
+        .bind(MATERIAL_ID)
+        .execute(transaction.connection())
+        .await
+        .unwrap();
+    }
     sqlx::query(
         "INSERT INTO character_life_deeds (namespace_id,account_id,character_id,deed_id, \
          reward_event_id,source_content_id,deed_kind,achieved_tick,content_revision) \
@@ -750,6 +789,26 @@ fn request(ids: RequestIds) -> DurableDeathCommitRequestV1 {
     .unwrap()
 }
 
+fn zero_custody_request(ids: RequestIds) -> DurableDeathCommitRequestV1 {
+    let mut plan = request(ids).plan;
+    plan.destruction.clear();
+    plan.event.versions.inventory = DeathVersionAdvanceV1 { pre: 1, post: 2 };
+    plan.event.destruction_entry_count = 0;
+    plan.event.destruction_digest =
+        canonical_digest("gravebound.durable-death.destruction.v1", &plan.destruction);
+    plan.summary.projections.lost.clear();
+    plan.summary.snapshot_digest = plan.summary.expected_snapshot_digest().unwrap();
+    plan.memorial.summary_snapshot_digest = plan.summary.snapshot_digest;
+    plan.memorial.presentation_digest = plan.memorial.expected_presentation_digest().unwrap();
+    let echo = plan
+        .echo
+        .as_mut()
+        .expect("qualifying zero-custody death retains the mandatory Echo");
+    echo.created.power_band = 1;
+    echo.created.snapshot_digest = echo.created.expected_snapshot_digest().unwrap();
+    DurableDeathCommitRequestV1::seal(plan, ISSUED_AT_UNIX_MS).unwrap()
+}
+
 /// Hosted lethal evidence required jointly by canonical GDD `DTH-001`, Content Spec
 /// `CONT-ECHO-009`, and Roadmap `GB-M03-02`/`06`/`13`. The first tick is committed through the
 /// production live repository; the lethal suffix remains sealed for the atomic death writer.
@@ -957,6 +1016,10 @@ async fn count(persistence: &PostgresPersistence, table: &str) -> i64 {
             "SELECT count(*) FROM character_run_material_stacks \
              WHERE namespace_id=$1 AND account_id=$2"
         }
+        "entry_restore_inventory_items_v3" => {
+            "SELECT count(*) FROM entry_restore_inventory_items_v3 \
+             WHERE namespace_id=$1 AND account_id=$2"
+        }
         "character_life_outbox" => {
             "SELECT count(*) FROM character_life_outbox WHERE namespace_id=$1 AND account_id=$2"
         }
@@ -1057,7 +1120,7 @@ async fn assert_death_closed_lineage(connection: &mut sqlx::PgConnection) {
     );
 }
 
-fn assert_terminal_root(root: &sqlx::postgres::PgRow) {
+fn assert_terminal_root(root: &sqlx::postgres::PgRow, expected_inventory_version: i64) {
     assert_eq!(root.get::<i16, _>("life_state"), 1);
     assert_eq!(root.get::<Option<i16>, _>("roster_ordinal"), None);
     assert_eq!(root.get::<i64, _>("character_state_version"), 3);
@@ -1068,7 +1131,10 @@ fn assert_terminal_root(root: &sqlx::postgres::PgRow) {
     );
     assert_eq!(root.get::<i32, _>("current_health"), 0);
     assert_eq!(root.get::<i64, _>("progression_version"), 3);
-    assert_eq!(root.get::<i64, _>("inventory_version"), 3);
+    assert_eq!(
+        root.get::<i64, _>("inventory_version"),
+        expected_inventory_version
+    );
     assert_eq!(root.get::<i64, _>("oath_bargain_version"), 2);
     assert_eq!(root.get::<i64, _>("lifetime_ticks"), 20_000);
     assert_eq!(root.get::<i64, _>("permadeath_combat_ticks"), 18_000);
@@ -1167,7 +1233,7 @@ async fn assert_complete_graph(persistence: &PostgresPersistence, ids: RequestId
     .fetch_one(transaction.connection())
     .await
     .unwrap();
-    assert_terminal_root(&root);
+    assert_terminal_root(&root, 3);
     assert_death_closed_lineage(transaction.connection()).await;
 
     let item = sqlx::query(
@@ -1238,6 +1304,97 @@ async fn assert_complete_graph(persistence: &PostgresPersistence, ids: RequestId
     ] {
         assert_eq!(count(persistence, table).await, expected, "{table}");
     }
+}
+
+async fn assert_zero_custody_complete_graph(persistence: &PostgresPersistence, ids: RequestIds) {
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let root = sqlx::query(
+        "SELECT character.life_state,character.roster_ordinal,character.character_state_version, \
+                account.state_version,account.selected_character_id,progression.current_health, \
+                progression.progression_version,inventory.inventory_version, \
+                oath.oath_bargain_version,life.lifetime_ticks,life.permadeath_combat_ticks, \
+                life.life_metrics_version \
+         FROM characters AS character JOIN accounts AS account USING (namespace_id,account_id) \
+         JOIN character_progression AS progression USING (namespace_id,account_id,character_id) \
+         JOIN character_inventories AS inventory USING (namespace_id,account_id,character_id) \
+         JOIN character_oath_bargain_state AS oath USING (namespace_id,account_id,character_id) \
+         JOIN character_life_metrics AS life USING (namespace_id,account_id,character_id) \
+         WHERE character.namespace_id=$1 AND character.account_id=$2 AND character.character_id=$3",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(CHARACTER_ID.as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    assert_terminal_root(&root, 2);
+    assert_death_closed_lineage(transaction.connection()).await;
+    let echo = sqlx::query(
+        "SELECT state,power_band FROM echo_records WHERE namespace_id=$1 AND echo_id=$2",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ids.echo_id.as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    assert_eq!(echo.get::<i16, _>("state"), 1);
+    assert_eq!(echo.get::<i16, _>("power_band"), 1);
+    transaction.rollback().await.unwrap();
+
+    assert_normalized_live_trace_absent(persistence).await;
+    for (table, expected) in [
+        ("item_instances", 0),
+        ("item_ledger_events", 0),
+        ("character_run_material_stacks", 0),
+        ("entry_restore_inventory_items_v3", 0),
+        ("character_danger_checkpoints", 0),
+        ("character_life_outbox", 1),
+        ("death_events", 1),
+        ("death_combat_trace_entries", 2),
+        ("death_summary_snapshots", 1),
+        ("memorial_records", 1),
+        ("death_destruction_entries", 0),
+        ("death_mutation_results", 1),
+        ("death_audit_events", 1),
+        ("echo_records", 1),
+        ("echo_state_transitions", 2),
+        ("death_outbox_events", 3),
+        ("character_live_damage_trace_ingest_receipts_v1", 2),
+        ("death_live_trace_sets_v1", 1),
+        ("death_live_trace_receipt_links_v1", 2),
+        ("death_live_trace_entry_provenance_v1", 2),
+        ("death_live_trace_promotion_conflict_audits_v1", 0),
+    ] {
+        assert_eq!(count(persistence, table).await, expected, "{table}");
+    }
+
+    let latest = persistence
+        .load_latest_committed_death_view(ACCOUNT_ID)
+        .await
+        .unwrap()
+        .expect("zero-custody death remains the latest committed death");
+    assert_eq!(latest.death_id, ids.death_id);
+    assert_eq!(latest.destruction_entry_count, 0);
+    let summary = persistence
+        .load_owned_death_summary_view(ACCOUNT_ID, ids.death_id, 0, 32)
+        .await
+        .unwrap();
+    assert_eq!(summary.lost_total_count, 0);
+    assert!(summary.lost.is_empty());
+    assert!(summary.next_lost_ordinal.is_none());
+    assert_eq!(summary.preserved.len(), 5);
+    assert_eq!(summary.created.len(), 2);
+    assert_eq!(summary.echo_outcome, DurableEchoOutcomeV1::Available);
+    let memorial = persistence
+        .load_death_memorial_page(ACCOUNT_ID, None, 32)
+        .await
+        .unwrap();
+    assert_eq!(memorial.entries.len(), 1);
+    assert_eq!(memorial.entries[0].cursor.death_id, ids.death_id);
+    assert_eq!(
+        memorial.entries[0].echo_outcome,
+        DurableEchoOutcomeV1::Available
+    );
 }
 
 async fn assert_rollback_pristine(persistence: &PostgresPersistence) {
@@ -2750,6 +2907,59 @@ async fn safe_equipped_item_in_danger_fails_closed_without_terminal_writes() {
     assert_eq!(restored, 1);
     transaction.commit().await.unwrap();
     assert_rollback_pristine(&persistence).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires explicitly authorized disposable PostgreSQL"]
+async fn qualifying_zero_custody_death_commits_complete_graph_and_replays_exactly() {
+    // Authorities: Gravebound_Production_GDD_v1_Canonical.md DTH-001/TECH-021/022,
+    // Gravebound_Content_Production_Spec_v1.md CONT-ECHO-009, and
+    // Gravebound_Development_Roadmap_v1.md GB-M03-06/13 require the complete qualifying terminal
+    // graph even when the character owns no at-risk item or run-material custody.
+    let persistence = disposable_database().await;
+    let content = content_authority();
+    reset_zero_custody_fixture(&persistence).await;
+    let death = zero_custody_request(RequestIds::primary());
+    assert!(death.plan.echo.is_some());
+    assert!(death.plan.destruction.is_empty());
+    assert!(death.plan.summary.projections.lost.is_empty());
+    assert_eq!(death.plan.event.destruction_entry_count, 0);
+    assert_eq!(death.plan.event.versions.inventory.pre, 1);
+    assert_eq!(death.plan.event.versions.inventory.post, 2);
+    let evidence = seed_hosted_death_trace(&persistence, &death).await;
+    let promotion = evidence.promotion_for(&death);
+
+    let fresh = persistence
+        .transact_durable_death(&death, &content, &promotion)
+        .await
+        .unwrap();
+    assert!(matches!(fresh, DurableDeathTransactionV1::Fresh(_)));
+    assert_eq!(fresh.result().echo_outcome, DurableEchoOutcomeV1::Available);
+    assert_eq!(
+        fresh.result().created_echo_id,
+        Some(RequestIds::primary().echo_id)
+    );
+    assert_eq!(
+        fresh.result().promoted_echo_id,
+        Some(RequestIds::primary().echo_id)
+    );
+    assert_zero_custody_complete_graph(&persistence, RequestIds::primary()).await;
+    assert_committed_terminal_recovery(&persistence, fresh.result(), &promotion).await;
+    assert_stored_death_authorities(&persistence, RequestIds::primary().death_id).await;
+    let committed_signature = canonical_terminal_signature(&persistence).await;
+
+    let replay = persistence
+        .transact_durable_death(&death, &content, &promotion)
+        .await
+        .unwrap();
+    assert!(replay.is_replay());
+    assert_eq!(replay.result(), fresh.result());
+    assert_eq!(
+        canonical_terminal_signature(&persistence).await,
+        committed_signature
+    );
+    assert_zero_custody_complete_graph(&persistence, RequestIds::primary()).await;
+    persistence.close().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
