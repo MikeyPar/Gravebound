@@ -134,7 +134,7 @@ impl PostgresPersistence {
         if account_id == [0; 16] || character_id == [0; 16] {
             return Err(PersistenceError::DurableDeathBindingMismatch);
         }
-        let mut transaction = self.begin_transaction().await?;
+        let mut transaction = self.begin_read_transaction().await?;
         let terminal =
             load_committed_death_terminal_v1_on(transaction.connection(), account_id, character_id)
                 .await?;

@@ -1998,6 +1998,19 @@ async fn assert_committed_terminal_recovery(
     ));
 }
 
+async fn canonical_terminal_signature(
+    persistence: &PostgresPersistence,
+) -> persistence::StoredCoreDeathTerminalSignatureV1 {
+    let signature = persistence
+        .load_core_death_terminal_signature_v1(ACCOUNT_ID, CHARACTER_ID)
+        .await
+        .unwrap()
+        .expect("committed canonical terminal signature");
+    signature.canonical_bytes().unwrap();
+    assert_ne!(signature.digest().unwrap(), [0; 32]);
+    signature
+}
+
 #[test]
 fn hosted_fixture_request_and_content_authority_are_canonical() {
     let content = content_authority();
@@ -2027,17 +2040,38 @@ async fn complete_durable_death_graph_is_atomic_replayable_terminal_and_wipeable
     assert!(matches!(fresh, DurableDeathTransactionV1::Fresh(_)));
     assert_complete_graph(&persistence, RequestIds::primary()).await;
     assert_committed_terminal_recovery(&persistence, fresh.result(), &primary_promotion).await;
+    let before_restart_signature = canonical_terminal_signature(&persistence).await;
+    assert_eq!(
+        persistence
+            .load_core_death_terminal_signature_v1([229; 16], CHARACTER_ID)
+            .await
+            .unwrap(),
+        None
+    );
+    assert!(matches!(
+        persistence
+            .load_core_death_terminal_signature_v1([0; 16], CHARACTER_ID)
+            .await,
+        Err(PersistenceError::CorruptStoredDeathTerminalSignature)
+    ));
     assert_trace_promotion_history_is_sealed(&persistence).await;
     assert_cross_account_promotion_guards(&persistence).await;
     persistence.close().await;
 
     let restarted = reconnect_database().await;
+    let after_reconnect_signature = canonical_terminal_signature(&restarted).await;
+    assert_eq!(
+        after_reconnect_signature.canonical_bytes().unwrap(),
+        before_restart_signature.canonical_bytes().unwrap()
+    );
     let replay = restarted
         .transact_durable_death(&primary, &content, &primary_promotion)
         .await
         .unwrap();
     assert!(replay.is_replay());
     assert_eq!(replay.result(), fresh.result());
+    let after_replay_signature = canonical_terminal_signature(&restarted).await;
+    assert_eq!(after_replay_signature, before_restart_signature);
     assert_normalized_live_trace_absent(&restarted).await;
     assert_committed_terminal_recovery(&restarted, fresh.result(), &primary_promotion).await;
     assert_committed_death_views(&restarted, RequestIds::primary()).await;
@@ -2180,6 +2214,12 @@ async fn complete_durable_death_graph_is_atomic_replayable_terminal_and_wipeable
             .await,
         Err(PersistenceError::CorruptStoredDurableDeath)
     ));
+    assert!(matches!(
+        restarted
+            .load_core_death_terminal_signature_v1(ACCOUNT_ID, CHARACTER_ID)
+            .await,
+        Err(PersistenceError::CorruptStoredDurableDeath)
+    ));
     rewrite_durable_trace_attack_id(&restarted, &original_attack_id).await;
 
     let original_status_ticks =
@@ -2194,6 +2234,12 @@ async fn complete_durable_death_graph_is_atomic_replayable_terminal_and_wipeable
     assert!(matches!(
         restarted
             .load_committed_death_terminal_v1(ACCOUNT_ID, CHARACTER_ID)
+            .await,
+        Err(PersistenceError::CorruptStoredDurableDeath)
+    ));
+    assert!(matches!(
+        restarted
+            .load_core_death_terminal_signature_v1(ACCOUNT_ID, CHARACTER_ID)
             .await,
         Err(PersistenceError::CorruptStoredDurableDeath)
     ));
@@ -2233,6 +2279,12 @@ async fn complete_durable_death_graph_is_atomic_replayable_terminal_and_wipeable
             .await,
         Err(PersistenceError::CorruptStoredDurableDeath)
     ));
+    assert!(matches!(
+        restarted
+            .load_core_death_terminal_signature_v1(ACCOUNT_ID, CHARACTER_ID)
+            .await,
+        Err(PersistenceError::CorruptStoredDurableDeath)
+    ));
     set_promotion_root_hashes(
         &restarted,
         canonical_receipt_window_digest,
@@ -2248,10 +2300,17 @@ async fn complete_durable_death_graph_is_atomic_replayable_terminal_and_wipeable
             .is_replay()
     );
     assert_committed_terminal_recovery(&restarted, committed.result(), &final_promotion).await;
+    canonical_terminal_signature(&restarted).await;
     corrupt_result_hash(&restarted, [222; 32]).await;
     assert!(matches!(
         restarted
             .transact_durable_death(&primary, &content, &final_promotion)
+            .await,
+        Err(PersistenceError::CorruptStoredDurableDeath)
+    ));
+    assert!(matches!(
+        restarted
+            .load_core_death_terminal_signature_v1(ACCOUNT_ID, CHARACTER_ID)
             .await,
         Err(PersistenceError::CorruptStoredDurableDeath)
     ));

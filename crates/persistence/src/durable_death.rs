@@ -1556,6 +1556,12 @@ fn canonical_digest<T: Serialize>(context: &str, value: &T) -> Result<[u8; 32], 
     Ok(blake3::derive_key(context, &bytes))
 }
 
+pub(crate) fn canonical_durable_death_destruction_digest_v1(
+    destruction: &[DurableDestructionEntryV1],
+) -> Result<[u8; 32], PersistenceError> {
+    canonical_digest(DESTRUCTION_HASH_CONTEXT, &destruction)
+}
+
 fn valid_content_revision(value: &str) -> bool {
     const PREFIX: &str = "core-dev.blake3.";
     value.len() == PREFIX.len() + 64

@@ -393,7 +393,6 @@ fn validate_root(signature: &StoredCoreDeathTerminalSignatureV1) -> Result<(), P
         || root.restore_point_id != terminal.restore_point_id
         || root.death_tick != terminal.death_tick
         || root.death_tick == 0
-        || root.permadeath_combat_ticks > root.lifetime_ticks
         || root.trace_entry_count == 0
         || usize::from(root.destruction_entry_count) != terminal_destruction_count(signature)
         || root.former_roster_ordinal == 0
@@ -1967,6 +1966,19 @@ mod tests {
         plan.event.lifetime_ticks = 0;
         plan.event.permadeath_combat_ticks = 0;
         plan.summary.lifetime_ms = 0;
+        plan.summary.snapshot_digest = plan.summary.expected_snapshot_digest().unwrap();
+        plan.memorial.summary_snapshot_digest = plan.summary.snapshot_digest;
+        plan.memorial.presentation_digest = plan.memorial.expected_presentation_digest().unwrap();
+        let request = DurableDeathCommitRequestV1::seal(plan, 1_900).unwrap();
+        assert!(signature_from_request(&request).canonical_bytes().is_ok());
+    }
+
+    #[test]
+    fn combat_clock_may_exceed_the_independent_lifetime_clock() {
+        let mut plan = valid_request().plan;
+        plan.event.lifetime_ticks = 1;
+        plan.event.permadeath_combat_ticks = 2;
+        plan.summary.lifetime_ms = 33;
         plan.summary.snapshot_digest = plan.summary.expected_snapshot_digest().unwrap();
         plan.memorial.summary_snapshot_digest = plan.summary.snapshot_digest;
         plan.memorial.presentation_digest = plan.memorial.expected_presentation_digest().unwrap();

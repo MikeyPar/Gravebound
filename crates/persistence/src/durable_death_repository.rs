@@ -2466,7 +2466,7 @@ async fn load_stored_trace_promotion_root(
                 first_event_tick,death_tick,receipt_count,entry_count,status_count,\
                 lethal_trace_tick_id,records_blake3,assets_blake3,localization_blake3,\
                 receipt_window_digest,promotion_digest,terminal_payload_hash \
-         FROM death_live_trace_sets_v1 WHERE namespace_id=$1 AND death_id=$2 FOR UPDATE",
+         FROM death_live_trace_sets_v1 WHERE namespace_id=$1 AND death_id=$2",
     )
     .bind(namespace_id)
     .bind(death_id.as_slice())
@@ -2517,7 +2517,7 @@ async fn load_stored_trace_promotion_receipts(
                 floor(extract(epoch FROM issued_at)*1000)::bigint AS issued_at_ms,\
                 floor(extract(epoch FROM receipt_committed_at)*1000)::bigint AS committed_at_ms \
          FROM death_live_trace_receipt_links_v1 WHERE namespace_id=$1 AND death_id=$2 \
-         ORDER BY receipt_ordinal FOR UPDATE",
+         ORDER BY receipt_ordinal",
     )
     .bind(namespace_id)
     .bind(death_id.as_slice())
@@ -2597,7 +2597,7 @@ async fn load_stored_trace_promotion_provenance(
           AND trace.death_id=provenance.death_id \
          AND trace.trace_ordinal=provenance.trace_ordinal \
          WHERE provenance.namespace_id=$1 AND provenance.death_id=$2 \
-         ORDER BY provenance.trace_ordinal FOR UPDATE OF provenance,trace",
+         ORDER BY provenance.trace_ordinal",
     )
     .bind(namespace_id)
     .bind(death_id.as_slice())
@@ -2623,7 +2623,7 @@ async fn load_stored_durable_trace_statuses(
         "SELECT trace_ordinal,status_ordinal,status_id,remaining_ticks,stack_count \
          FROM death_combat_trace_statuses \
          WHERE namespace_id=$1 AND death_id=$2 \
-         ORDER BY trace_ordinal,status_ordinal FOR UPDATE",
+         ORDER BY trace_ordinal,status_ordinal",
     )
     .bind(namespace_id)
     .bind(death_id.as_slice())

@@ -24,6 +24,7 @@ mod danger_crash_restore_repository;
 mod danger_entry_restore;
 mod death_live_trace_promotion;
 mod death_terminal_signature;
+mod death_terminal_signature_repository;
 mod death_view_repository;
 mod durable_death;
 mod durable_death_repository;
@@ -701,6 +702,22 @@ impl PostgresPersistence {
             .await
             .map_err(PersistenceError::Database)?;
         sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+            .execute(&mut *inner)
+            .await
+            .map_err(PersistenceError::Database)?;
+        Ok(PersistenceTransaction { inner })
+    }
+
+    /// Begins a serializable snapshot that is structurally unable to write or acquire write locks.
+    pub(crate) async fn begin_read_transaction(
+        &self,
+    ) -> Result<PersistenceTransaction<'_>, PersistenceError> {
+        let mut inner = self
+            .pool
+            .begin()
+            .await
+            .map_err(PersistenceError::Database)?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE READ ONLY")
             .execute(&mut *inner)
             .await
             .map_err(PersistenceError::Database)?;
