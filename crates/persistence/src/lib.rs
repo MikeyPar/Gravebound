@@ -47,6 +47,7 @@ mod progression_restore;
 mod recall_terminal;
 mod recall_terminal_recovery;
 mod recall_terminal_repository;
+mod resolution_hold;
 mod reward;
 mod safe_inventory;
 mod world_flow;
@@ -227,6 +228,24 @@ pub use recall_terminal::{
 };
 pub use recall_terminal_recovery::{
     PRODUCTION_RECALL_RECOVERY_SCHEMA_VERSION, StoredCommittedRecallTerminalV1,
+};
+pub use resolution_hold::{
+    MAX_RESOLUTION_HOLD_ITEMS_V1, MAX_RESOLUTION_HOLD_STACKS_V1,
+    RESOLUTION_HOLD_ACCEPTED_AUDIT_ID_CONTEXT_V1, RESOLUTION_HOLD_CONFLICT_DIGEST_CONTEXT_V1,
+    RESOLUTION_HOLD_CONTRACT_VERSION_V1, RESOLUTION_HOLD_HASH_BYTES, RESOLUTION_HOLD_ID_BYTES,
+    RESOLUTION_HOLD_ITEM_LEDGER_ID_CONTEXT_V1, RESOLUTION_HOLD_OUTBOX_ID_CONTEXT_V1,
+    RESOLUTION_HOLD_OVERFLOW_LIFETIME_MILLIS, RESOLUTION_HOLD_REQUEST_HASH_CONTEXT_V1,
+    RESOLUTION_HOLD_RESULT_DIGEST_CONTEXT_V1, RESOLUTION_HOLD_STACK_DIGEST_CONTEXT_V1,
+    ResolutionHoldMutationRequestV1, ResolutionHoldMutationTransactionV1,
+    ResolutionHoldStorageSnapshotV1, ResolutionHoldStorageStackV1, StoredResolutionHoldActionV1,
+    StoredResolutionHoldDestinationV1, StoredResolutionHoldDispositionV1,
+    StoredResolutionHoldItemKindV1, StoredResolutionHoldItemTransitionV1,
+    StoredResolutionHoldItemV1, StoredResolutionHoldMutationResultV1,
+    StoredResolutionHoldSnapshotV1, StoredResolutionHoldStackV1,
+    StoredResolutionHoldVersionAdvanceV1, StoredResolutionHoldVersionVectorV1,
+    StoredResolutionHoldVersionsV1, canonical_resolution_hold_conflict_digest_v1,
+    canonical_resolution_hold_stack_digest_v1, derive_resolution_hold_id_v1,
+    plan_resolution_hold_destination_v1,
 };
 pub use reward::{
     RewardPlanningState, RewardTransaction, StoredPendingItem, StoredRewardCommit,
@@ -571,6 +590,33 @@ pub enum PersistenceError {
     ProductionRecallPlanningFailed,
     #[error("production Recall plan changed after terminal preparation")]
     ProductionRecallPlanChanged,
+    #[error("stored ResolutionHold state violates the approved bounded recovery contract")]
+    CorruptStoredResolutionHold,
+    #[error("ResolutionHold account or character does not exist")]
+    ResolutionHoldOwnerNotFound,
+    #[error("ResolutionHold recovery requires the selected living character in Lantern Halls")]
+    ResolutionHoldHallBindingMismatch,
+    #[error("ResolutionHold mutation identity was replayed with different canonical material")]
+    ResolutionHoldIdempotencyConflict,
+    #[error(
+        "ResolutionHold expected different aggregate versions (account {account}, character {character}, world {world}, inventory {inventory})"
+    )]
+    ResolutionHoldVersionMismatch {
+        account: u64,
+        character: u64,
+        world: u64,
+        inventory: u64,
+    },
+    #[error("ResolutionHold recovery does not match the promoted Core item content")]
+    ResolutionHoldContentMismatch,
+    #[error("the selected ResolutionHold logical stack no longer exists")]
+    ResolutionHoldStackNotFound,
+    #[error("the selected ResolutionHold logical stack digest is stale")]
+    ResolutionHoldStackDigestMismatch,
+    #[error("no single legal storage destination accepts the complete ResolutionHold stack")]
+    ResolutionHoldStorageFull,
+    #[error("ResolutionHold recovery is blocked by an unresolved item or terminal mutation")]
+    ResolutionHoldUnresolvedMutation,
     #[error("stored live-deed evidence violates the approved v2 contract")]
     CorruptStoredLifeDeed,
     #[error("live-deed account, character, or aggregate authority does not exist")]
