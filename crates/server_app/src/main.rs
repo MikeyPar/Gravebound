@@ -36,6 +36,9 @@ enum Command {
         content_root: PathBuf,
         #[arg(long, default_value = "target/gravebound-core-dev/server-cert.der")]
         certificate_out: PathBuf,
+        /// Atomically published bound address for launchers that cannot parse process logs.
+        #[arg(long)]
+        readiness_out: Option<PathBuf>,
     },
     /// Run the previous process-local Core identity endpoint for explicit regression testing.
     ServeCoreIdentityEphemeral {
@@ -85,8 +88,10 @@ async fn run_command(command: Command) -> Result<()> {
             bind,
             content_root,
             certificate_out,
+            readiness_out,
         } => {
-            serve_core_identity_persistent(bind, content_root, certificate_out).await?;
+            serve_core_identity_persistent(bind, content_root, certificate_out, readiness_out)
+                .await?;
         }
         Command::ServeCoreIdentityEphemeral {
             bind,
@@ -131,6 +136,7 @@ async fn serve_core_identity_persistent(
     bind: SocketAddr,
     content_root: PathBuf,
     certificate_out: PathBuf,
+    readiness_out: Option<PathBuf>,
 ) -> Result<()> {
     let persistence = persistence::PostgresPersistence::connect(
         &persistence::PersistenceConfig::from_runtime_environment()?,
@@ -146,6 +152,9 @@ async fn serve_core_identity_persistent(
         server_app::PostgresAccountRepository::new(persistence.clone()),
     )?;
     write_certificate(&certificate_out, server.certificate_der(), "Core identity")?;
+    if let Some(path) = readiness_out.as_ref() {
+        publish_readiness(path, server.local_address())?;
+    }
     info!(
         address = %server.local_address(),
         certificate = %certificate_out.display(),
@@ -156,7 +165,11 @@ async fn serve_core_identity_persistent(
         wipeable = readiness.wipeable,
         "GB-M03-02B durable Core identity server is ready"
     );
-    let report = server.serve_until(shutdown_signal()).await?;
+    let report = server.serve_until(shutdown_signal()).await;
+    if let Some(path) = readiness_out.as_ref() {
+        let _ = std::fs::remove_file(path);
+    }
+    let report = report?;
     info!(
         accepted_connections = report.accepted_connections,
         rejected_connections = report.rejected_connections,
@@ -208,6 +221,35 @@ fn write_certificate(path: &PathBuf, bytes: &[u8], label: &str) -> Result<()> {
     }
     std::fs::write(path, bytes)
         .with_context(|| format!("failed to write {label} certificate {}", path.display()))
+}
+
+fn publish_readiness(path: &PathBuf, address: SocketAddr) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!("failed to create readiness directory {}", parent.display())
+        })?;
+    }
+    let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
+    std::fs::write(&temporary, format!("{address}\n")).with_context(|| {
+        format!(
+            "failed to write Core identity readiness candidate {}",
+            temporary.display()
+        )
+    })?;
+    if path.exists() {
+        std::fs::remove_file(path).with_context(|| {
+            format!(
+                "failed to replace stale Core identity readiness file {}",
+                path.display()
+            )
+        })?;
+    }
+    std::fs::rename(&temporary, path).with_context(|| {
+        format!(
+            "failed to publish Core identity readiness file {}",
+            path.display()
+        )
+    })
 }
 
 async fn shutdown_signal() {

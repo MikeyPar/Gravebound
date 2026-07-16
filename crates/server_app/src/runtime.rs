@@ -494,6 +494,16 @@ pub struct CoreIdentityServerReport {
     pub persistence_enabled: bool,
 }
 
+/// Derives the wipeable Core account identity from the authenticated ticket without persisting or
+/// logging the ticket bytes. Runtime admission and process-boundary evidence use this single seam.
+#[must_use]
+pub fn core_account_id_from_auth_ticket(ticket: &protocol::AuthTicket) -> Option<AccountId> {
+    let hash = blake3::hash(ticket.expose_for_validation());
+    let mut account_bytes = [0; 16];
+    account_bytes.copy_from_slice(&hash.as_bytes()[..16]);
+    AccountId::new(account_bytes)
+}
+
 type CoreIdentityAuthority<R> =
     IdentityService<R, SystemIdentityClock, ProcessCharacterIds, NoopIdentityEventSink>;
 
@@ -840,11 +850,8 @@ where
     if !matches!(response, HandshakeResponse::Accepted(_)) {
         return Ok(false);
     }
-    let hash = blake3::hash(hello.auth_ticket.expose_for_validation());
-    let mut account_bytes = [0; 16];
-    account_bytes.copy_from_slice(&hash.as_bytes()[..16]);
-    let account_id =
-        AccountId::new(account_bytes).ok_or(LocalServerRuntimeError::IdentityExhausted)?;
+    let account_id = core_account_id_from_auth_ticket(&hello.auth_ticket)
+        .ok_or(LocalServerRuntimeError::IdentityExhausted)?;
     let authenticated = AuthenticatedAccount {
         account_id,
         namespace: AuthenticatedNamespace::WipeableTest,
@@ -1083,6 +1090,24 @@ mod tests {
             auth_ticket: AuthTicket::new(ticket.to_vec()).unwrap(),
             locale: WireText::new("en-US").unwrap(),
         }
+    }
+
+    #[test]
+    fn core_account_derivation_is_stable_ticket_bound_and_redaction_safe() {
+        let ticket = AuthTicket::new(b"disposable-core-route".to_vec()).unwrap();
+        let account = core_account_id_from_auth_ticket(&ticket).unwrap();
+        assert_eq!(
+            account.as_bytes(),
+            [
+                165, 92, 48, 136, 62, 13, 73, 61, 120, 165, 179, 215, 25, 114, 58, 100,
+            ]
+        );
+        let other = AuthTicket::new(b"disposable-core-route-other".to_vec()).unwrap();
+        assert_ne!(
+            core_account_id_from_auth_ticket(&other).unwrap().as_bytes(),
+            account.as_bytes()
+        );
+        assert_eq!(format!("{account:?}"), "AccountId(<redacted>)");
     }
 
     fn bootstrap(content_root: &Path, sequence: u32) -> AccountBootstrapFrame {

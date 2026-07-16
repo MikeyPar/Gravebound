@@ -34,7 +34,11 @@ use sim_core::{
     FinalDeed, SimulationVector, Tick, ticks_to_milliseconds,
 };
 
-pub const ACCOUNT_ID: [u8; 16] = [230; 16];
+/// The production Core identity runtime derives this account from `AUTH_TICKET` with BLAKE3.
+pub const ACCOUNT_ID: [u8; 16] = [
+    165, 92, 48, 136, 62, 13, 73, 61, 120, 165, 179, 215, 25, 114, 58, 100,
+];
+pub const AUTH_TICKET: &[u8] = b"disposable-core-route";
 pub const CHARACTER_ID: [u8; 16] = [231; 16];
 pub const LINEAGE_ID: [u8; 16] = [232; 16];
 pub const RESTORE_POINT_ID: [u8; 16] = [233; 16];

@@ -155,7 +155,7 @@ pub use runtime::{
     BoundCoreIdentityServer, BoundLocalServer, CORE_IDENTITY_BUILD_ID,
     CORE_IDENTITY_CONTENT_TARGET, CoreIdentityServerConfig, CoreIdentityServerReport,
     LOCAL_BUILD_ID, LOCAL_REGION_ID, LOCAL_SERVER_NAME, LocalServerConfig, LocalServerReport,
-    LocalServerRuntimeError,
+    LocalServerRuntimeError, core_account_id_from_auth_ticket,
 };
 pub use safe_inventory::{
     AuthoritativeSafeInventoryTransfer, CoreSafeInventoryAuthority, PostgresSafeInventoryService,

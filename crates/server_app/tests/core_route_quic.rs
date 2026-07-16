@@ -1,5 +1,8 @@
 use std::{
+    fs,
+    net::SocketAddr,
     path::PathBuf,
+    process::{Child, Command, Stdio},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -19,7 +22,7 @@ use protocol::{
     WorldTransferPayload, WorldTransferResultCode,
 };
 use rcgen::{CertifiedKey, generate_simple_self_signed};
-use rustls::pki_types::PrivatePkcs8KeyDer;
+use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use server_app::{
     AccountId, AdmissionState, AuthenticatedAccount, AuthenticatedNamespace,
     AuthenticationDecision, CaldusVictoryOwnerCommand, CharacterIdGenerator, CoreBargainAuthority,
@@ -418,8 +421,102 @@ fn hello() -> ClientHello {
         platform: Platform::WindowsNative,
         supported_compression: vec![Compression::None],
         content_manifest_hash: ManifestHash::new("a".repeat(64)).unwrap(),
-        auth_ticket: AuthTicket::new(b"disposable-core-route".to_vec()).unwrap(),
+        auth_ticket: AuthTicket::new(durable_death_fixture::AUTH_TICKET.to_vec()).unwrap(),
         locale: WireText::new("en-US").unwrap(),
+    }
+}
+
+fn production_death_view_hello() -> ClientHello {
+    let (_, source_report) = sim_content::load_and_validate(&content_root()).unwrap();
+    ClientHello {
+        protocol_major: ProtocolVersion::current().major,
+        protocol_minor: ProtocolVersion::current().minor,
+        client_build_id: WireText::new(server_app::CORE_IDENTITY_BUILD_ID).unwrap(),
+        platform: Platform::WindowsNative,
+        supported_compression: vec![Compression::None],
+        content_manifest_hash: ManifestHash::new(source_report.package_hash_blake3).unwrap(),
+        auth_ticket: AuthTicket::new(durable_death_fixture::AUTH_TICKET.to_vec()).unwrap(),
+        locale: WireText::new("en-US").unwrap(),
+    }
+}
+
+struct ChildCoreIdentityServer {
+    child: Child,
+    certificate_path: PathBuf,
+    readiness_path: PathBuf,
+}
+
+impl ChildCoreIdentityServer {
+    fn spawn() -> Self {
+        let nonce = format!("{}", std::process::id());
+        let certificate_path =
+            std::env::temp_dir().join(format!("gravebound-m03-death-process-{nonce}-server.der"));
+        let readiness_path = std::env::temp_dir().join(format!(
+            "gravebound-m03-death-process-{nonce}-readiness.txt"
+        ));
+        let _ = fs::remove_file(&certificate_path);
+        let _ = fs::remove_file(&readiness_path);
+        let test_database_url = std::env::var(persistence::TEST_DATABASE_URL_ENV)
+            .expect("hosted child process requires TEST_DATABASE_URL");
+        let child = Command::new(env!("CARGO_BIN_EXE_server_app"))
+            .arg("serve-core-identity")
+            .arg("--bind")
+            .arg("127.0.0.1:0")
+            .arg("--content-root")
+            .arg(content_root())
+            .arg("--certificate-out")
+            .arg(&certificate_path)
+            .arg("--readiness-out")
+            .arg(&readiness_path)
+            .env(persistence::RUNTIME_DATABASE_URL_ENV, test_database_url)
+            .stdin(Stdio::null())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("spawn persistent Core identity child process");
+        Self {
+            child,
+            certificate_path,
+            readiness_path,
+        }
+    }
+
+    async fn readiness(&mut self) -> (SocketAddr, Vec<u8>) {
+        for _ in 0..400 {
+            if let (Ok(address), Ok(certificate)) = (
+                fs::read_to_string(&self.readiness_path),
+                fs::read(&self.certificate_path),
+            ) && !certificate.is_empty()
+            {
+                return (
+                    address
+                        .trim()
+                        .parse()
+                        .expect("published child socket address"),
+                    certificate,
+                );
+            }
+            if let Some(status) = self.child.try_wait().expect("poll child server") {
+                panic!("Core identity child exited before readiness: {status}");
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("Core identity child did not publish its certificate before timeout");
+    }
+
+    fn stop(&mut self) {
+        if self.child.try_wait().ok().flatten().is_none() {
+            let _ = self.child.kill();
+        }
+        let _ = self.child.wait();
+        let _ = fs::remove_file(&self.certificate_path);
+        let _ = fs::remove_file(&self.readiness_path);
+    }
+}
+
+impl Drop for ChildCoreIdentityServer {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 
@@ -674,6 +771,95 @@ async fn run_restarted_death_read_session(
     server_endpoint.close(0_u32.into(), b"restart death reads complete");
     server_endpoint.wait_idle().await;
     views
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the child-process handshake and four authenticated projections form one restart proof"
+)]
+async fn run_child_process_death_read_session() -> (
+    DeathViewResultV1,
+    DeathViewResultV1,
+    DeathViewResultV1,
+    DeathViewResultV1,
+) {
+    let ticket = AuthTicket::new(durable_death_fixture::AUTH_TICKET.to_vec()).unwrap();
+    let expected_account = server_app::core_account_id_from_auth_ticket(&ticket).unwrap();
+    assert_eq!(
+        expected_account.as_bytes(),
+        durable_death_fixture::ACCOUNT_ID
+    );
+    let mut child = ChildCoreIdentityServer::spawn();
+    let (address, certificate) = child.readiness().await;
+    let mut roots = rustls::RootCertStore::empty();
+    roots
+        .add(CertificateDer::from(certificate))
+        .expect("trust child-process certificate");
+    let config = quinn::ClientConfig::with_root_certificates(Arc::new(roots)).unwrap();
+    let mut endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+    endpoint.set_default_client_config(config);
+    let connection = endpoint
+        .connect(address, "localhost")
+        .unwrap()
+        .await
+        .expect("connect to restarted Core identity process");
+    assert!(matches!(
+        bot_client::perform_handshake(&connection, production_death_view_hello())
+            .await
+            .unwrap(),
+        HandshakeResponse::Accepted(server)
+            if server.feature_flags.iter().any(
+                |flag| flag.as_str() == protocol::CORE_DEATH_VIEW_FEATURE_FLAG
+            )
+    ));
+    let (_, latest) = bot_client::perform_death_view(
+        &connection,
+        death_view_frame(1, DeathViewRequestV1::LatestCommitted),
+    )
+    .await
+    .unwrap();
+    let (_, summary) = bot_client::perform_death_view(
+        &connection,
+        death_view_frame(
+            2,
+            DeathViewRequestV1::Summary {
+                death_id: durable_death_fixture::DEATH_ID,
+                lost_start_ordinal: 0,
+                lost_limit: 8,
+            },
+        ),
+    )
+    .await
+    .unwrap();
+    let (_, memorial) = bot_client::perform_death_view(
+        &connection,
+        death_view_frame(
+            3,
+            DeathViewRequestV1::MemorialPage {
+                after: None,
+                limit: 8,
+            },
+        ),
+    )
+    .await
+    .unwrap();
+    let (_, trace) = bot_client::perform_death_view(
+        &connection,
+        death_view_frame(
+            4,
+            DeathViewRequestV1::TracePage {
+                death_id: durable_death_fixture::DEATH_ID,
+                start_ordinal: 0,
+                limit: 8,
+            },
+        ),
+    )
+    .await
+    .unwrap();
+    connection.close(0_u32.into(), b"child-process death reads complete");
+    endpoint.wait_idle().await;
+    child.stop();
+    (latest, summary, memorial, trace)
 }
 
 #[allow(
@@ -950,13 +1136,13 @@ fn seal_complete_same_tick_terminal_set(
 
 /// GDD `DTH-001`/`DTH-020` and `TECH-020`-`023`, Content Spec `CONT-ECHO-009` and
 /// `CONT-HUB-002`, and Roadmap `GB-M03-02`/`06`/`13` jointly require a committed lethal result to
-/// survive lost delivery and a complete process-local authority rebuild without duplicate domain
-/// records. The lethal input in this proof is exclusively server-authored; real QUIC carries only
-/// authenticated historical reads, so normal player death admission remains disabled. The later
-/// `06E` child-process harness owns proof across an operating-system process boundary.
+/// survive lost delivery, a complete process-local authority rebuild, and a newly launched server
+/// process without duplicate domain records. The lethal input in this proof is exclusively
+/// server-authored; real QUIC carries only authenticated historical reads, so normal player death
+/// admission remains disabled.
 #[tokio::test]
 #[ignore = "requires explicitly authorized disposable PostgreSQL"]
-async fn committed_death_survives_response_loss_and_fresh_server_authority_over_real_quic() {
+async fn committed_death_survives_response_loss_and_full_process_restart_over_real_quic() {
     let persistence = disposable_database().await;
     durable_death_fixture::seed_danger_root(&persistence).await;
     let death = durable_death_fixture::prepare_death(persistence.clone()).await;
@@ -1052,6 +1238,19 @@ async fn committed_death_survives_response_loss_and_fresh_server_authority_over_
         &summary,
         &memorial,
         &trace,
+    );
+    assert_eq!(
+        canonical_death_terminal_signature(&restarted).await,
+        before_response_loss_signature
+    );
+    let (child_latest, child_summary, child_memorial, child_trace) =
+        run_child_process_death_read_session().await;
+    assert_committed_death_view_results(
+        &latest_before_restart,
+        &child_latest,
+        &child_summary,
+        &child_memorial,
+        &child_trace,
     );
     assert_eq!(
         canonical_death_terminal_signature(&restarted).await,
