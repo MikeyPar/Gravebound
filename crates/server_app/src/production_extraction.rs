@@ -13,8 +13,9 @@ use std::future::Future;
 use persistence::{
     PersistenceError, PostgresPersistence, PreparedProductionExtractionV1,
     ProductionExtractionCommitRequestV1, ProductionExtractionTransactionV1,
-    StoredProductionExtractionResultV1,
+    StoredCommittedExtractionTerminalV1, StoredProductionExtractionResultV1,
 };
+use protocol::{CharacterLocation, CharacterLocationSnapshot, SafeArrival, WireText};
 use thiserror::Error;
 
 use crate::{
@@ -32,6 +33,16 @@ pub trait ProductionExtractionWriter: Send + Sync {
     ) -> impl Future<Output = Result<ProductionExtractionTransactionV1, PersistenceError>> + Send;
 }
 
+/// Read-only recovery seam for process loss after the database commits but before the actor
+/// publishes its in-memory terminal receipt.
+pub trait ProductionExtractionTerminalReader: Send + Sync {
+    fn load_committed_terminal(
+        &self,
+        account_id: [u8; 16],
+        character_id: [u8; 16],
+    ) -> impl Future<Output = Result<Option<StoredCommittedExtractionTerminalV1>, PersistenceError>> + Send;
+}
+
 impl ProductionExtractionWriter for PostgresPersistence {
     async fn commit(
         &self,
@@ -39,6 +50,17 @@ impl ProductionExtractionWriter for PostgresPersistence {
         expected_plan_hash: [u8; 32],
     ) -> Result<ProductionExtractionTransactionV1, PersistenceError> {
         self.commit_production_extraction_v1(request, expected_plan_hash)
+            .await
+    }
+}
+
+impl ProductionExtractionTerminalReader for PostgresPersistence {
+    async fn load_committed_terminal(
+        &self,
+        account_id: [u8; 16],
+        character_id: [u8; 16],
+    ) -> Result<Option<StoredCommittedExtractionTerminalV1>, PersistenceError> {
+        self.load_committed_extraction_terminal_v1(account_id, character_id)
             .await
     }
 }
@@ -88,8 +110,32 @@ pub enum ProductionExtractionExecutionError {
     RepositoryConflict,
     #[error("stored extraction result is corrupt or does not match the sealed request")]
     StoredResultMismatch,
+    #[error("stored committed-extraction terminal authority is corrupt")]
+    StoredTerminalRecoveryMismatch,
     #[error("terminal receipt could not be published: {0:?}")]
     TerminalCommit(CommitError),
+}
+
+/// Rebuilds a committed extraction arbiter from the strict `PostgreSQL` graph.
+pub async fn recover_committed_extraction_arbiter<Reader>(
+    reader: &Reader,
+    account_id: [u8; 16],
+    character_id: [u8; 16],
+) -> Result<Option<TerminalArbiter>, ProductionExtractionExecutionError>
+where
+    Reader: ProductionExtractionTerminalReader,
+{
+    let Some(stored) = reader
+        .load_committed_terminal(account_id, character_id)
+        .await
+        .map_err(ProductionExtractionExecutionError::Persistence)?
+    else {
+        return Ok(None);
+    };
+    let receipt = committed_extraction_terminal_receipt_from_stored(&stored)?;
+    TerminalArbiter::from_stored_receipt(receipt)
+        .map(Some)
+        .map_err(|_| ProductionExtractionExecutionError::StoredTerminalRecoveryMismatch)
 }
 
 impl<Writer> ProductionExtractionExecutionService<Writer>
@@ -222,12 +268,60 @@ pub fn committed_extraction_terminal_receipt(
     let result_hash = result
         .digest()
         .map_err(|_| ProductionExtractionExecutionError::StoredResultMismatch)?;
+    extraction_terminal_receipt(
+        request.instance_lineage_id,
+        request.entry_restore_point_id,
+        result,
+        result_hash,
+    )
+}
+
+/// Converts strict persistence recovery material into the shared terminal receipt.
+pub fn committed_extraction_terminal_receipt_from_stored(
+    stored: &StoredCommittedExtractionTerminalV1,
+) -> Result<StoredTerminalReceipt, ProductionExtractionExecutionError> {
+    stored
+        .validate()
+        .map_err(|_| ProductionExtractionExecutionError::StoredTerminalRecoveryMismatch)?;
+    extraction_terminal_receipt(
+        stored.lineage_id,
+        stored.restore_point_id,
+        &stored.result,
+        stored.result_hash,
+    )
+    .map_err(|_| ProductionExtractionExecutionError::StoredTerminalRecoveryMismatch)
+}
+
+/// Projects the already committed Hall arrival without advancing any aggregate again.
+pub fn hall_snapshot_from_stored_extraction(
+    result: &StoredProductionExtractionResultV1,
+) -> Result<CharacterLocationSnapshot, ProductionExtractionExecutionError> {
+    result
+        .validate()
+        .map_err(|_| ProductionExtractionExecutionError::StoredResultMismatch)?;
+    Ok(CharacterLocationSnapshot {
+        character_id: result.character_id,
+        character_version: result.versions.world.post,
+        location: CharacterLocation::Safe {
+            location_id: WireText::new(persistence::PRODUCTION_EXTRACTION_HALL_ID)
+                .map_err(|_| ProductionExtractionExecutionError::StoredResultMismatch)?,
+            arrival: SafeArrival::HallDefault,
+        },
+    })
+}
+
+fn extraction_terminal_receipt(
+    lineage_id: [u8; 16],
+    restore_point_id: [u8; 16],
+    result: &StoredProductionExtractionResultV1,
+    result_hash: [u8; 32],
+) -> Result<StoredTerminalReceipt, ProductionExtractionExecutionError> {
     StoredTerminalReceipt::from_storage(&StoredTerminalReceiptV1 {
         schema_version: STORED_TERMINAL_RECEIPT_SCHEMA_V1,
         account_id: result.account_id,
         character_id: result.character_id,
-        lineage_id: request.instance_lineage_id,
-        restore_point_id: request.entry_restore_point_id,
+        lineage_id,
+        restore_point_id,
         terminal_id: result.terminal_id,
         mutation_id: result.mutation_id,
         payload_hash: result.canonical_request_hash,
@@ -320,6 +414,34 @@ mod tests {
 
         fn calls(&self) -> usize {
             self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    enum FakeReaderMode {
+        Stored(Box<StoredCommittedExtractionTerminalV1>),
+        Absent,
+        Unavailable,
+    }
+
+    #[derive(Debug, Clone)]
+    struct FakeReader {
+        mode: FakeReaderMode,
+    }
+
+    impl ProductionExtractionTerminalReader for FakeReader {
+        async fn load_committed_terminal(
+            &self,
+            _account_id: [u8; 16],
+            _character_id: [u8; 16],
+        ) -> Result<Option<StoredCommittedExtractionTerminalV1>, PersistenceError> {
+            match &self.mode {
+                FakeReaderMode::Stored(stored) => Ok(Some(stored.as_ref().clone())),
+                FakeReaderMode::Absent => Ok(None),
+                FakeReaderMode::Unavailable => {
+                    Err(PersistenceError::ProductionExtractionTerminalSuperseded)
+                }
+            }
         }
     }
 
@@ -442,6 +564,20 @@ mod tests {
             placements: placements(),
             material_credits: Vec::new(),
             storage_resolution_required: false,
+        }
+    }
+
+    fn committed_terminal() -> StoredCommittedExtractionTerminalV1 {
+        let extraction = prepared_extraction();
+        let result = stored_result(&extraction);
+        StoredCommittedExtractionTerminalV1 {
+            schema_version: persistence::PRODUCTION_EXTRACTION_RECOVERY_SCHEMA_VERSION,
+            result_hash: result.digest().unwrap(),
+            result,
+            encounter_id: extraction.request().encounter_id,
+            lineage_id: extraction.request().instance_lineage_id,
+            restore_point_id: extraction.request().entry_restore_point_id,
+            exit_instance_id: extraction.request().exit_instance_id,
         }
     }
 
@@ -577,6 +713,60 @@ mod tests {
             recovered.non_terminal_admission(),
             NonTerminalAdmission::BlockedByCommittedTerminal
         );
+    }
+
+    #[tokio::test]
+    async fn strict_recovery_reconstructs_committed_extraction_authority() {
+        let stored = committed_terminal();
+        let expected =
+            committed_extraction_terminal_receipt_from_stored(&stored).expect("stored receipt");
+        let reader = FakeReader {
+            mode: FakeReaderMode::Stored(Box::new(stored.clone())),
+        };
+        let recovered = recover_committed_extraction_arbiter(
+            &reader,
+            stored.result.account_id,
+            stored.result.character_id,
+        )
+        .await
+        .expect("recovery")
+        .expect("committed extraction");
+
+        assert_eq!(recovered.committed_receipt(), Some(&expected));
+        assert_eq!(
+            recovered.non_terminal_admission(),
+            NonTerminalAdmission::BlockedByCommittedTerminal
+        );
+        assert_eq!(expected.terminal_id(), &stored.result.terminal_id);
+        assert_eq!(expected.result_hash(), &stored.result_hash);
+        assert_eq!(expected.binding().lineage_id(), &stored.lineage_id);
+        assert_eq!(
+            expected.binding().restore_point_id(),
+            &stored.restore_point_id
+        );
+    }
+
+    #[tokio::test]
+    async fn absent_and_unavailable_recovery_are_typed() {
+        let absent = FakeReader {
+            mode: FakeReaderMode::Absent,
+        };
+        assert!(
+            recover_committed_extraction_arbiter(&absent, [1; 16], [2; 16])
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let unavailable = FakeReader {
+            mode: FakeReaderMode::Unavailable,
+        };
+        assert!(matches!(
+            recover_committed_extraction_arbiter(&unavailable, [1; 16], [2; 16]).await,
+            Err(ProductionExtractionExecutionError::Persistence(
+                PersistenceError::ProductionExtractionTerminalSuperseded
+            ))
+        ));
     }
 
     #[tokio::test]

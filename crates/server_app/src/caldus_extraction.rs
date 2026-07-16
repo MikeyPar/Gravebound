@@ -20,7 +20,8 @@ use thiserror::Error;
 
 use crate::{
     AuthenticatedAccount, AuthenticatedNamespace, CaldusInstancePresentation, IdentityClock,
-    WorldFlowRepositoryError, world_flow_gate::stored_location_snapshot,
+    WorldFlowRepositoryError, hall_snapshot_from_stored_extraction,
+    world_flow_gate::stored_location_snapshot,
 };
 
 const CALDUS_EXIT_ID: &str = "portal.exit.dungeon.bell_sepulcher";
@@ -188,6 +189,36 @@ where
                 None,
             );
         };
+        match self
+            .persistence
+            .load_committed_extraction_terminal_by_identity_v1(
+                authenticated.account_id.as_bytes(),
+                mutation.character_id,
+                *extraction_request_id,
+                *extraction_receipt_id,
+            )
+            .await
+        {
+            Ok(Some(stored)) => {
+                return replay_production_transfer(
+                    request_sequence,
+                    mutation,
+                    *extraction_request_id,
+                    *extraction_receipt_id,
+                    &stored.result,
+                );
+            }
+            Ok(None) => {}
+            Err(_) => {
+                return transfer_result(
+                    request_sequence,
+                    mutation,
+                    WorldTransferResultCode::ServiceUnavailable,
+                    None,
+                    None,
+                );
+            }
+        }
         let begin = self
             .persistence
             .begin_world_flow(
@@ -331,6 +362,45 @@ where
                 None,
             ),
         }
+    }
+}
+
+fn replay_production_transfer(
+    request_sequence: u32,
+    mutation: &WorldTransferMutation,
+    extraction_request_id: [u8; 16],
+    extraction_receipt_id: [u8; 16],
+    result: &persistence::StoredProductionExtractionResultV1,
+) -> WorldFlowResult {
+    if result.extraction_request_id != extraction_request_id
+        || result.extraction_receipt_id != extraction_receipt_id
+        || result.character_id != mutation.character_id
+        || result.mutation_id != mutation.mutation_id
+        || result.versions.character.pre != mutation.expected_character_version
+    {
+        return transfer_result(
+            request_sequence,
+            mutation,
+            WorldTransferResultCode::IdempotencyConflict,
+            None,
+            None,
+        );
+    }
+    match hall_snapshot_from_stored_extraction(result) {
+        Ok(snapshot) => transfer_result(
+            request_sequence,
+            mutation,
+            WorldTransferResultCode::Accepted,
+            Some(snapshot),
+            Some(result.extraction_receipt_id),
+        ),
+        Err(_) => transfer_result(
+            request_sequence,
+            mutation,
+            WorldTransferResultCode::ServiceUnavailable,
+            None,
+            None,
+        ),
     }
 }
 
@@ -593,6 +663,11 @@ pub enum CaldusExtractionError {
 
 #[cfg(test)]
 mod tests {
+    use persistence::{
+        ProductionExtractionVersionAdvanceV1, ProductionExtractionVersionsV1,
+        StoredProductionExtractionResultV1, WIPEABLE_CORE_NAMESPACE,
+        canonical_production_extraction_plan_hash_v1,
+    };
     use protocol::ManifestHash;
     use sim_core::EntityId;
 
@@ -633,6 +708,36 @@ mod tests {
         }
     }
 
+    fn production_result() -> StoredProductionExtractionResultV1 {
+        StoredProductionExtractionResultV1 {
+            contract_version: persistence::PRODUCTION_EXTRACTION_CONTRACT_VERSION_V1,
+            namespace_id: WIPEABLE_CORE_NAMESPACE.into(),
+            account_id: [1; 16],
+            character_id: [7; 16],
+            mutation_id: [6; 16],
+            terminal_id: [8; 16],
+            extraction_request_id: [4; 16],
+            extraction_receipt_id: [5; 16],
+            canonical_request_hash: [9; 32],
+            canonical_plan_hash: canonical_production_extraction_plan_hash_v1(&[], &[]).unwrap(),
+            result_code: 1,
+            issued_at_unix_ms: 1,
+            observed_tick: 2,
+            committed_at_unix_ms: 3,
+            destination_content_id: HALL_ID.into(),
+            versions: ProductionExtractionVersionsV1 {
+                account: ProductionExtractionVersionAdvanceV1 { pre: 1, post: 1 },
+                character: ProductionExtractionVersionAdvanceV1 { pre: 2, post: 3 },
+                world: ProductionExtractionVersionAdvanceV1 { pre: 2, post: 3 },
+                inventory: ProductionExtractionVersionAdvanceV1 { pre: 3, post: 4 },
+                life_metrics: ProductionExtractionVersionAdvanceV1 { pre: 4, post: 5 },
+            },
+            placements: Vec::new(),
+            material_credits: Vec::new(),
+            storage_resolution_required: false,
+        }
+    }
+
     #[test]
     fn extraction_evidence_cannot_bypass_hidden_exit_or_wipeable_namespace() {
         let participant = CoreBossParticipant {
@@ -665,6 +770,37 @@ mod tests {
         assert!(matches!(
             build_request(&presentation, &lock, &command),
             Err(CaldusExtractionError::InvalidEvidenceBinding)
+        ));
+    }
+
+    #[test]
+    fn production_transfer_replays_the_committed_hall_projection_without_a_version_advance() {
+        let mutation = transfer_mutation();
+        let result = production_result();
+        assert!(matches!(
+            replay_production_transfer(1, &mutation, [4; 16], [5; 16], &result),
+            WorldFlowResult::Transfer {
+                accepted: true,
+                code: WorldTransferResultCode::Accepted,
+                snapshot: Some(CharacterLocationSnapshot {
+                    character_version: 3,
+                    ..
+                }),
+                transfer_id: Some(transfer_id),
+                ..
+            } if transfer_id == [5; 16]
+        ));
+
+        let mut changed = mutation;
+        changed.mutation_id = [99; 16];
+        assert!(matches!(
+            replay_production_transfer(2, &changed, [4; 16], [5; 16], &result),
+            WorldFlowResult::Transfer {
+                accepted: false,
+                code: WorldTransferResultCode::IdempotencyConflict,
+                snapshot: None,
+                ..
+            }
         ));
     }
 

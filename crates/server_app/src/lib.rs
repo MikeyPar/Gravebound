@@ -124,8 +124,10 @@ pub use oath_selection::{CoreOathSelectionAuthority, PostgresOathSelectionServic
 pub use production_extraction::{
     PostgresProductionExtractionExecutionService, ProductionExtractionExecutionError,
     ProductionExtractionExecutionOutcome, ProductionExtractionExecutionService,
-    ProductionExtractionReplayOutcome, ProductionExtractionWriter,
-    committed_extraction_terminal_receipt, production_extraction_terminal_candidate,
+    ProductionExtractionReplayOutcome, ProductionExtractionTerminalReader,
+    ProductionExtractionWriter, committed_extraction_terminal_receipt,
+    committed_extraction_terminal_receipt_from_stored, hall_snapshot_from_stored_extraction,
+    production_extraction_terminal_candidate, recover_committed_extraction_arbiter,
 };
 pub use progression_award::{
     CoreProgressionRules, ProgressionAwardCode, ProgressionAwardCommand, ProgressionAwardContext,
