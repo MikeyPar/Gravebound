@@ -10,6 +10,7 @@ use std::{
 use client_bevy::{
     DeathSummaryAction, DeathUiActivity, DeathUiSnapshot, DeathViewClientModel, TerminalDeathPhase,
 };
+use sqlx::Row;
 use tokio::sync::oneshot;
 
 #[path = "support/death_measurement.rs"]
@@ -19,7 +20,8 @@ mod durable_death_fixture;
 
 use persistence::{
     CaldusExtractionCommit, CaldusExtractionRequest, PersistenceConfig, PostgresPersistence,
-    StoredExtractionAuthority, StoredWorldFlowRevisionV1, WIPEABLE_CORE_NAMESPACE,
+    ProductionRecallExpectedVersionsV1, StoredExtractionAuthority, StoredWorldFlowRevisionV1,
+    WIPEABLE_CORE_NAMESPACE,
 };
 use protocol::{
     AuthTicket, CharacterLocation, CharacterLocationSnapshot, ClientHello, Compression,
@@ -40,9 +42,10 @@ use server_app::{
     AuthenticationDecision, BoundCoreIdentityServer, CaldusVictoryOwnerCommand,
     CharacterIdGenerator, CoreBargainAuthority, CoreExtractionTerminalAuthority,
     CoreIdentityServerConfig, CoreIdentityServerReport, CoreNonTerminalAdmission,
-    CoreOathSelectionAuthority, CoreRecallTerminalAuthority, CoreReliableSequence,
-    CoreSafeInventoryAuthority, CoreTerminalCoordinator, CoreTerminalEvaluation,
-    CoreTerminalProducer, CoreTerminalTickSeal, DeathViewService, DisabledDeathViewRepository,
+    CoreOathSelectionAuthority, CoreRecallTerminalAuthority, CoreRecallTerminalTickOutcome,
+    CoreReliableSequence, CoreSafeInventoryAuthority, CoreTerminalCoordinator,
+    CoreTerminalEvaluation, CoreTerminalOtherEvaluationsV1, CoreTerminalProducer,
+    CoreTerminalTickSeal, DeathViewService, DisabledDeathViewRepository,
     DisabledProgressionQueryRepository, DisposableCoreJourneyWorldFlow, DurableDeathExecutionError,
     DurableDeathExecutionService, HandshakePolicy, IdentityClock, IdentityService,
     InMemoryAccountRepository, NoopIdentityEventSink, PostgresAccountRepository,
@@ -51,14 +54,15 @@ use server_app::{
     PostgresDangerEntryLifeMetricsProviderV3, PostgresDangerEntryOathBargainProviderV3,
     PostgresDeathViewRepository, PostgresDormantWorldFlowCoordinator,
     PostgresProgressionAwardService, PostgresProgressionRestoreProvider, PostgresRewardService,
-    PreparedTerminal, ProductionRecallClock, ProductionRecallIntentActor,
+    PreparedTerminal, ProductionRecallClock, ProductionRecallCompletionAuthorityV1,
+    ProductionRecallExecutionService, ProductionRecallIntentActor,
     ProductionRecallPendingAuthorityV1, ProductionRecallPublishedV1, ProgressionQueryService,
     RecoveredProductionRecallActorV1, STORED_TERMINAL_RECEIPT_SCHEMA_V1, SecretRewardEpoch,
-    StoredTerminalReceipt, StoredTerminalReceiptV1, SubmitResult, TerminalArbiter,
+    StoredTerminalReceipt, StoredTerminalReceiptV1, SubmitResult, TerminalArbiter, TerminalBinding,
     TerminalCandidate, TerminalKind, WorldFlowGateService, WorldFlowIdGenerator,
-    core_recall_completion_outbox, durable_death_terminal_candidate,
-    production_recall_actor_mailbox, recover_committed_death_arbiter, serve_core_reliable,
-    serve_handshake,
+    core_recall_completion_outbox, drive_recall_terminal_tick, durable_death_terminal_candidate,
+    production_recall_actor_mailbox, recover_committed_death_arbiter,
+    recover_committed_recall_actor, serve_core_reliable, serve_handshake,
 };
 use sim_core::{
     CoreBossParticipant, CoreBossParticipantLock, CoreCaldusAntiCheatState,
@@ -87,6 +91,14 @@ async fn disposable_database() -> PostgresPersistence {
     persistence.verify_disposable_test_database().await.unwrap();
     persistence.migrate().await.unwrap();
     persistence.reset_disposable_identity_data().await.unwrap();
+    persistence
+}
+
+async fn reconnect_database() -> PostgresPersistence {
+    let config = PersistenceConfig::from_test_environment()
+        .expect("TEST_DATABASE_URL must identify dedicated disposable PostgreSQL");
+    let persistence = PostgresPersistence::connect(&config).await.unwrap();
+    persistence.verify_disposable_test_database().await.unwrap();
     persistence
 }
 
@@ -532,6 +544,135 @@ fn recovered_recall_fixture(
     RecoveredProductionRecallActorV1 {
         coordinator: CoreTerminalCoordinator::from_stored_receipt(authenticated, receipt).unwrap(),
         published,
+    }
+}
+
+async fn active_route_recall_completion(
+    persistence: &PostgresPersistence,
+    server_tick: u64,
+) -> ProductionRecallCompletionAuthorityV1 {
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let row = sqlx::query(
+        "SELECT account.state_version AS account_version,
+                character.character_state_version AS character_version,
+                world.character_version AS world_version,
+                world.location_kind,world.location_content_id,
+                world.instance_lineage_id,world.entry_restore_point_id,
+                inventory.inventory_version,
+                life.life_metrics_version,life.lifetime_ticks,
+                life.permadeath_combat_ticks,
+                progression.progression_version,
+                oath.oath_bargain_version,ash.wallet_version
+         FROM accounts AS account
+         JOIN characters AS character
+           ON character.namespace_id=account.namespace_id
+          AND character.account_id=account.account_id
+         JOIN character_world_locations AS world
+           ON world.namespace_id=character.namespace_id
+          AND world.account_id=character.account_id
+          AND world.character_id=character.character_id
+         JOIN character_inventories AS inventory
+           ON inventory.namespace_id=character.namespace_id
+          AND inventory.account_id=character.account_id
+          AND inventory.character_id=character.character_id
+         JOIN character_life_metrics AS life
+           ON life.namespace_id=character.namespace_id
+          AND life.account_id=character.account_id
+          AND life.character_id=character.character_id
+         JOIN character_progression AS progression
+           ON progression.namespace_id=character.namespace_id
+          AND progression.account_id=character.account_id
+          AND progression.character_id=character.character_id
+         JOIN character_oath_bargain_state AS oath
+           ON oath.namespace_id=character.namespace_id
+          AND oath.account_id=character.account_id
+          AND oath.character_id=character.character_id
+         JOIN ash_wallets AS ash
+           ON ash.namespace_id=account.namespace_id
+          AND ash.account_id=account.account_id
+         WHERE account.namespace_id=$1 AND account.account_id=$2
+           AND account.selected_character_id=$3
+           AND character.character_id=$3",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(CHARACTER_ID.as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    assert_eq!(row.try_get::<i16, _>("location_kind").unwrap(), 2);
+    assert_eq!(
+        row.try_get::<String, _>("location_content_id").unwrap(),
+        WORLD_ID
+    );
+    let lineage: [u8; 16] = row
+        .try_get::<Vec<u8>, _>("instance_lineage_id")
+        .unwrap()
+        .try_into()
+        .expect("active lineage ID is exactly 16 bytes");
+    let restore_point: [u8; 16] = row
+        .try_get::<Vec<u8>, _>("entry_restore_point_id")
+        .unwrap()
+        .try_into()
+        .expect("active restore-point ID is exactly 16 bytes");
+    let lifetime_ticks = u64::try_from(row.try_get::<i64, _>("lifetime_ticks").unwrap()).unwrap();
+    let combat_ticks =
+        u64::try_from(row.try_get::<i64, _>("permadeath_combat_ticks").unwrap()).unwrap();
+    let channel_ticks = persistence::PRODUCTION_RECALL_EXPLICIT_CHANNEL_TICKS;
+    let content = revision();
+    let completion = ProductionRecallCompletionAuthorityV1 {
+        account_id: ACCOUNT_ID,
+        character_id: CHARACTER_ID,
+        instance_lineage_id: lineage,
+        entry_restore_point_id: restore_point,
+        expected_versions: ProductionRecallExpectedVersionsV1 {
+            account: u64::try_from(row.try_get::<i64, _>("account_version").unwrap()).unwrap(),
+            character: u64::try_from(row.try_get::<i64, _>("character_version").unwrap()).unwrap(),
+            world: u64::try_from(row.try_get::<i64, _>("world_version").unwrap()).unwrap(),
+            inventory: u64::try_from(row.try_get::<i64, _>("inventory_version").unwrap()).unwrap(),
+            life_metrics: u64::try_from(row.try_get::<i64, _>("life_metrics_version").unwrap())
+                .unwrap(),
+            progression: u64::try_from(row.try_get::<i64, _>("progression_version").unwrap())
+                .unwrap(),
+            oath_bargain: u64::try_from(row.try_get::<i64, _>("oath_bargain_version").unwrap())
+                .unwrap(),
+            ash_wallet: u64::try_from(row.try_get::<i64, _>("wallet_version").unwrap()).unwrap(),
+        },
+        content_revision: StoredWorldFlowRevisionV1 {
+            records_blake3: content.records_blake3.as_str().to_owned(),
+            assets_blake3: content.assets_blake3.as_str().to_owned(),
+            localization_blake3: content.localization_blake3.as_str().to_owned(),
+        },
+        server_tick,
+        final_lifetime_ticks: lifetime_ticks.checked_add(channel_ticks).unwrap(),
+        final_permadeath_combat_ticks: combat_ticks.checked_add(channel_ticks).unwrap(),
+    };
+    transaction.rollback().await.unwrap();
+    completion
+}
+
+fn absent_recall_other_evaluations(
+    completion: &ProductionRecallCompletionAuthorityV1,
+) -> CoreTerminalOtherEvaluationsV1 {
+    let binding = TerminalBinding::new(
+        completion.account_id,
+        completion.character_id,
+        completion.instance_lineage_id,
+        completion.entry_restore_point_id,
+    )
+    .unwrap();
+    let absent = |producer| {
+        CoreTerminalEvaluation::absent(
+            producer,
+            binding,
+            completion.server_tick,
+            completion.expected_versions.character,
+        )
+    };
+    CoreTerminalOtherEvaluationsV1 {
+        lethal: absent(CoreTerminalProducer::LethalHealth),
+        extraction: absent(CoreTerminalProducer::SuccessfulExtraction),
+        fault_restore: absent(CoreTerminalProducer::VerifiedFaultRestoration),
     }
 }
 
@@ -1923,6 +2064,399 @@ async fn reliable_quic_abandoned_recall_push_replays_on_exact_reconnect() {
     client_endpoint.wait_idle().await;
     server_endpoint.close(0_u32.into(), b"Recall replay complete");
     server_endpoint.wait_idle().await;
+}
+
+#[tokio::test]
+#[ignore = "requires explicitly authorized disposable PostgreSQL"]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the real route, Recall commit, pool restart, actor reconstruction, and wire replay form one auditable journey"
+)]
+async fn reliable_quic_postgres_recall_replays_after_pool_and_actor_restart() {
+    const START_TICK: u64 = 100;
+    const COMPLETION_TICK: u64 = START_TICK + persistence::PRODUCTION_RECALL_EXPLICIT_CHANNEL_TICKS;
+    let persistence = disposable_database().await;
+    seed_character(&persistence).await;
+    let authenticated = AuthenticatedAccount {
+        account_id: AccountId::new(ACCOUNT_ID).unwrap(),
+        namespace: AuthenticatedNamespace::WipeableTest,
+    };
+    let identity = IdentityService::new(
+        InMemoryAccountRepository::default(),
+        FixedAuthority,
+        FixedAuthority,
+        NoopIdentityEventSink,
+        ManifestHash::new("a".repeat(64)).unwrap(),
+    );
+    let world_flow = disposable_world_flow(persistence.clone());
+    let progression = disabled_progression();
+    let death_views = DeathViewService::new(
+        DisabledDeathViewRepository,
+        durable_death_fixture::death_view_revision(),
+    );
+    let oath = CoreOathSelectionAuthority::<FixedAuthority>::disabled();
+    let bargain = CoreBargainAuthority::<FixedAuthority>::disabled();
+    let safe_inventory = CoreSafeInventoryAuthority::disabled();
+    let extraction_terminal = CoreExtractionTerminalAuthority::disabled();
+    let recall_actor = ProductionRecallIntentActor::new(
+        FixedAuthority,
+        ACCOUNT_ID,
+        CHARACTER_ID,
+        ProductionRecallPendingAuthorityV1 {
+            pending_item_count: 0,
+            pending_material_stack_count: 0,
+        },
+    )
+    .unwrap();
+    let executor = ProductionRecallExecutionService::new(persistence.clone());
+    let (recall_handle, mut recall_inbox) = production_recall_actor_mailbox();
+    let start = RecallFrameV1 {
+        schema_version: TERMINAL_INVENTORY_SCHEMA_VERSION,
+        sequence: 3,
+        character_id: CHARACTER_ID,
+        client_tick: 8_000,
+        intent: RecallIntentV1::Start,
+    };
+    let (server_endpoint, client_endpoint, address) = endpoints();
+    let connecting = client_endpoint.connect(address, "localhost").unwrap();
+    let incoming = server_endpoint.accept().await.unwrap();
+    let (client, server) = tokio::join!(connecting, incoming);
+    let client = client.unwrap();
+    let server = server.unwrap();
+
+    let fresh_server = async {
+        serve_handshake(
+            &server,
+            &recall_policy(),
+            AuthenticationDecision::Accepted,
+            WireText::new("postgres-recall-fresh-session").unwrap(),
+        )
+        .await
+        .unwrap();
+        let mut sequence = CoreReliableSequence::new();
+        for _ in 0..3 {
+            let response_sequence = sequence.next_sequence().unwrap();
+            serve_core_reliable(
+                &server,
+                &identity,
+                &world_flow,
+                &progression,
+                &death_views,
+                &oath,
+                &bargain,
+                &safe_inventory,
+                &extraction_terminal,
+                &recall_handle,
+                authenticated,
+                response_sequence,
+                9_000,
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(sequence.last_sequence(), 3);
+    };
+    let fresh_client = async {
+        let HandshakeResponse::Accepted(server_hello) =
+            bot_client::perform_handshake(&client, hello())
+                .await
+                .unwrap()
+        else {
+            panic!("active Recall handshake must succeed");
+        };
+        assert!(
+            server_hello
+                .feature_flags
+                .iter()
+                .any(|flag| flag.as_str() == protocol::CORE_RECALL_TERMINAL_FEATURE_FLAG)
+        );
+        let (_, hall) = bot_client::perform_world_flow(
+            &client,
+            route_frame(
+                1,
+                [224; 16],
+                1,
+                WorldTransferCommand::EnterHallFromCharacterSelect,
+            ),
+        )
+        .await
+        .unwrap();
+        assert_accepted(&hall, 2, HALL_ID);
+        let (_, danger) = bot_client::perform_world_flow(
+            &client,
+            route_frame(
+                2,
+                [225; 16],
+                2,
+                WorldTransferCommand::UsePortal {
+                    portal_id: WireText::new("station.realm_gate").unwrap(),
+                },
+            ),
+        )
+        .await
+        .unwrap();
+        assert_accepted(&danger, 3, WORLD_ID);
+        let pending = bot_client::perform_reliable_gameplay(
+            &client,
+            protocol::WireMessage::RecallFrame(start),
+        )
+        .await
+        .unwrap();
+        assert_eq!(pending.sequence, 3);
+        assert_eq!(pending.server_tick, START_TICK);
+        assert!(matches!(
+            pending.event,
+            ReliableEvent::RecallResult(result)
+                if matches!(
+                    *result,
+                    RecallResultV1::Pending {
+                        request_sequence: 3,
+                        started_tick: START_TICK,
+                        completion_tick: COMPLETION_TICK,
+                        pending_item_count: 0,
+                        pending_material_stack_count: 0,
+                        ..
+                    }
+                )
+        ));
+    };
+    let fresh_actor = async {
+        assert!(recall_inbox.serve_next(&recall_actor, START_TICK).await);
+        let completion = active_route_recall_completion(&persistence, COMPLETION_TICK).await;
+        let binding = TerminalBinding::new(
+            completion.account_id,
+            completion.character_id,
+            completion.instance_lineage_id,
+            completion.entry_restore_point_id,
+        )
+        .unwrap();
+        let mut coordinator = CoreTerminalCoordinator::new(authenticated, binding).unwrap();
+        let outcome = drive_recall_terminal_tick(
+            &recall_actor,
+            &mut coordinator,
+            &persistence,
+            &executor,
+            &completion,
+            absent_recall_other_evaluations(&completion),
+        )
+        .await
+        .unwrap();
+        (outcome, coordinator)
+    };
+    let ((), (), (fresh_outcome, fresh_coordinator)) =
+        tokio::join!(fresh_server, fresh_client, fresh_actor);
+    let CoreRecallTerminalTickOutcome::RecallStored(fresh_published) = fresh_outcome else {
+        panic!("first PostgreSQL Recall must commit exactly once");
+    };
+    let RecallResultV1::Stored {
+        request_sequence: Some(3),
+        replayed: false,
+        result: fresh_result,
+        ..
+    } = &fresh_published.result
+    else {
+        panic!("fresh driver publication must contain the committed Recall");
+    };
+    assert_eq!(fresh_result.completion_tick, COMPLETION_TICK);
+    assert_eq!(fresh_result.stabilized_item_count, 0);
+    assert_eq!(fresh_result.destroyed_item_count, 0);
+    assert_eq!(fresh_result.destroyed_material_stack_count, 0);
+    let stored_before_restart = persistence
+        .load_committed_recall_terminal_v1(ACCOUNT_ID, CHARACTER_ID)
+        .await
+        .unwrap()
+        .expect("fresh Recall is durable before delivery");
+    assert!(stored_before_restart.owns_current_hall);
+    assert_eq!(stored_before_restart.result_hash, fresh_result.result_hash);
+    assert_eq!(
+        fresh_coordinator.committed_receipt().unwrap().result_hash(),
+        &fresh_result.result_hash
+    );
+
+    drop(client);
+    client_endpoint.wait_idle().await;
+    server_endpoint.close(0_u32.into(), b"committed before Recall delivery");
+    server_endpoint.wait_idle().await;
+    drop(recall_handle);
+    drop(recall_inbox);
+    drop(executor);
+    drop(world_flow);
+    drop(fresh_coordinator);
+    drop(recall_actor);
+    persistence.close().await;
+
+    let restarted = reconnect_database().await;
+    let recovered = recover_committed_recall_actor(&restarted, authenticated, CHARACTER_ID)
+        .await
+        .unwrap()
+        .expect("pool restart reconstructs the current committed Recall actor");
+    assert_eq!(recovered.published.hall, fresh_published.hall);
+    let RecallResultV1::Stored {
+        replayed: true,
+        result: recovered_result,
+        ..
+    } = &recovered.published.result
+    else {
+        panic!("recovered publication must be marked as replayed");
+    };
+    assert_eq!(recovered_result.as_ref(), fresh_result.as_ref());
+    let restarted_actor = ProductionRecallIntentActor::new(
+        FixedAuthority,
+        ACCOUNT_ID,
+        CHARACTER_ID,
+        ProductionRecallPendingAuthorityV1 {
+            pending_item_count: 0,
+            pending_material_stack_count: 0,
+        },
+    )
+    .unwrap();
+    restarted_actor
+        .restore_committed_recall(&recovered)
+        .await
+        .unwrap();
+    let (restarted_handle, mut restarted_inbox) = production_recall_actor_mailbox();
+    let mut altered = start;
+    altered.client_tick += 1;
+    let identity = IdentityService::new(
+        InMemoryAccountRepository::default(),
+        FixedAuthority,
+        FixedAuthority,
+        NoopIdentityEventSink,
+        ManifestHash::new("a".repeat(64)).unwrap(),
+    );
+    let world_flow = WorldFlowGateService::new(
+        InMemoryAccountRepository::default(),
+        FixedAuthority,
+        revision(),
+    );
+    let progression = disabled_progression();
+    let death_views = DeathViewService::new(
+        DisabledDeathViewRepository,
+        durable_death_fixture::death_view_revision(),
+    );
+    let oath = CoreOathSelectionAuthority::<FixedAuthority>::disabled();
+    let bargain = CoreBargainAuthority::<FixedAuthority>::disabled();
+    let safe_inventory = CoreSafeInventoryAuthority::disabled();
+    let extraction_terminal = CoreExtractionTerminalAuthority::disabled();
+    let (server_endpoint, client_endpoint, address) = endpoints();
+    let connecting = client_endpoint.connect(address, "localhost").unwrap();
+    let incoming = server_endpoint.accept().await.unwrap();
+    let (client, server) = tokio::join!(connecting, incoming);
+    let client = client.unwrap();
+    let server = server.unwrap();
+    let replay_server = async {
+        serve_handshake(
+            &server,
+            &recall_policy(),
+            AuthenticationDecision::Accepted,
+            WireText::new("postgres-recall-restarted-session").unwrap(),
+        )
+        .await
+        .unwrap();
+        for response_sequence in 1..=2 {
+            serve_core_reliable(
+                &server,
+                &identity,
+                &world_flow,
+                &progression,
+                &death_views,
+                &oath,
+                &bargain,
+                &safe_inventory,
+                &extraction_terminal,
+                &restarted_handle,
+                authenticated,
+                response_sequence,
+                9_000,
+            )
+            .await
+            .unwrap();
+        }
+    };
+    let replay_client = async {
+        let HandshakeResponse::Accepted(_) = bot_client::perform_handshake(&client, hello())
+            .await
+            .unwrap()
+        else {
+            panic!("restarted Recall handshake must succeed");
+        };
+        let exact = bot_client::perform_reliable_gameplay(
+            &client,
+            protocol::WireMessage::RecallFrame(start),
+        )
+        .await
+        .unwrap();
+        assert_eq!(exact.sequence, 1);
+        assert_eq!(exact.server_tick, COMPLETION_TICK + 1);
+        let ReliableEvent::RecallResult(exact_result) = exact.event else {
+            panic!("exact restart request must return Recall");
+        };
+        let RecallResultV1::Stored {
+            request_sequence: Some(3),
+            replayed: true,
+            result,
+            ..
+        } = exact_result.as_ref()
+        else {
+            panic!("exact restart request must return stored replay");
+        };
+        assert_eq!(result.as_ref(), fresh_result.as_ref());
+
+        let conflict = bot_client::perform_reliable_gameplay(
+            &client,
+            protocol::WireMessage::RecallFrame(altered),
+        )
+        .await
+        .unwrap();
+        assert_eq!(conflict.sequence, 2);
+        assert_eq!(conflict.server_tick, COMPLETION_TICK + 2);
+        assert!(matches!(
+            conflict.event,
+            ReliableEvent::RecallResult(result)
+                if matches!(
+                    *result,
+                    RecallResultV1::Rejected {
+                        request_sequence: 3,
+                        code: TerminalInventoryRejectionCodeV1::IdempotencyConflict,
+                        ..
+                    }
+                )
+        ));
+    };
+    let replay_actor = async {
+        assert!(
+            restarted_inbox
+                .serve_next(&restarted_actor, COMPLETION_TICK + 1)
+                .await
+        );
+        assert!(
+            restarted_inbox
+                .serve_next(&restarted_actor, COMPLETION_TICK + 2)
+                .await
+        );
+    };
+    tokio::join!(replay_server, replay_client, replay_actor);
+    let mut verification = restarted.begin_transaction().await.unwrap();
+    let terminal_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM character_recall_terminal_results_v1
+         WHERE namespace_id=$1 AND account_id=$2 AND character_id=$3",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(CHARACTER_ID.as_slice())
+    .fetch_one(verification.connection())
+    .await
+    .unwrap();
+    assert_eq!(terminal_count, 1);
+    verification.rollback().await.unwrap();
+    drop(client);
+    client_endpoint.wait_idle().await;
+    server_endpoint.close(0_u32.into(), b"restarted Recall replay complete");
+    server_endpoint.wait_idle().await;
+    drop(restarted_handle);
+    drop(restarted_inbox);
+    drop(restarted_actor);
+    restarted.close().await;
 }
 
 #[tokio::test]
