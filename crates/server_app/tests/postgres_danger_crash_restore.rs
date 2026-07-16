@@ -13,7 +13,9 @@ use persistence::{
     LifeClockCheckpointRequestV1, LifeClockCheckpointTransactionV1, LifeClockContentAuthorityV1,
     LifeClockDangerAuthorityV1, LifeClockStateV1, LifeDeedCompletionCommandV2,
     LifeDeedCompletionRequestV2, LifeDeedCompletionTransactionV2, LifeDeedContentAuthorityV2,
-    PersistenceConfig, PersistenceError, PostgresPersistence, StoredDangerCheckpoint,
+    PRODUCTION_RECALL_CONTRACT_VERSION_V1, PersistenceConfig, PersistenceError,
+    PostgresPersistence, ProductionRecallCommitRequestV1, ProductionRecallExpectedVersionsV1,
+    ProductionRecallTransactionV1, ProductionRecallTriggerV1, StoredDangerCheckpoint,
     StoredWorldFlowRevisionV1, WIPEABLE_CORE_NAMESPACE,
 };
 use protocol::{
@@ -877,6 +879,53 @@ async fn assert_no_partial_restore(persistence: &PostgresPersistence, restore_id
     transaction.rollback().await.unwrap();
 }
 
+async fn commit_recall_terminal(persistence: &PostgresPersistence, ids: FixedIds) {
+    let request = ProductionRecallCommitRequestV1 {
+        contract_version: PRODUCTION_RECALL_CONTRACT_VERSION_V1,
+        namespace_id: WIPEABLE_CORE_NAMESPACE.into(),
+        account_id: ACCOUNT_ID,
+        character_id: CHARACTER_ID,
+        mutation_id: [198; 16],
+        terminal_id: [199; 16],
+        trigger: ProductionRecallTriggerV1::Explicit,
+        request_sequence: Some(1),
+        instance_lineage_id: ids.lineage,
+        entry_restore_point_id: ids.restore,
+        expected_versions: ProductionRecallExpectedVersionsV1 {
+            account: 1,
+            character: 2,
+            world: 2,
+            inventory: 2,
+            life_metrics: 1,
+            progression: 1,
+            oath_bargain: 1,
+            ash_wallet: 1,
+        },
+        content_revision: StoredWorldFlowRevisionV1 {
+            records_blake3: CORE_WORLD_RECORDS_BLAKE3.into(),
+            assets_blake3: CORE_WORLD_ASSETS_BLAKE3.into(),
+            localization_blake3: CORE_WORLD_LOCALIZATION_BLAKE3.into(),
+        },
+        issued_at_unix_ms: 1,
+        trigger_started_tick: 1_000,
+        completion_tick: 1_012,
+        final_lifetime_ticks: 100,
+        final_permadeath_combat_ticks: 40,
+    };
+    let prepared = persistence
+        .prepare_production_recall_v1(&request)
+        .await
+        .unwrap();
+    assert!(!prepared.replayed());
+    assert!(matches!(
+        persistence
+            .commit_production_recall_v1(&request, prepared.canonical_plan_hash())
+            .await
+            .unwrap(),
+        ProductionRecallTransactionV1::Fresh(_)
+    ));
+}
+
 async fn assert_terminal_precedence(persistence: &PostgresPersistence) {
     for (state, expected, ids, entry_mutation, crash_mutation) in [
         (
@@ -906,18 +955,23 @@ async fn assert_terminal_precedence(persistence: &PostgresPersistence) {
         seed_entry_loadout(persistence).await;
         enter_danger(persistence, ids, entry_mutation, 1).await;
         let restore_id = ids.restore;
-        let mut transaction = persistence.begin_transaction().await.unwrap();
-        sqlx::query(
-            "UPDATE character_entry_restore_points SET restore_state=$1, \
-             consumed_at=transaction_timestamp() WHERE namespace_id=$2 AND restore_point_id=$3",
-        )
-        .bind(state)
-        .bind(WIPEABLE_CORE_NAMESPACE)
-        .bind(restore_id.as_slice())
-        .execute(transaction.connection())
-        .await
-        .unwrap();
-        transaction.commit().await.unwrap();
+        if state == 3 {
+            commit_recall_terminal(persistence, ids).await;
+        } else {
+            let mut transaction = persistence.begin_transaction().await.unwrap();
+            sqlx::query(
+                "UPDATE character_entry_restore_points SET restore_state=$1, \
+                 consumed_at=transaction_timestamp() \
+                 WHERE namespace_id=$2 AND restore_point_id=$3",
+            )
+            .bind(state)
+            .bind(WIPEABLE_CORE_NAMESPACE)
+            .bind(restore_id.as_slice())
+            .execute(transaction.connection())
+            .await
+            .unwrap();
+            transaction.commit().await.unwrap();
+        }
         let request = crash_request(restore_id, crash_mutation);
         let first = persistence
             .transact_danger_crash_restore(&request)
