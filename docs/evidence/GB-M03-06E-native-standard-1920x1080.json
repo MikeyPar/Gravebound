@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "report_kind": "gravebound.gb-m03-06e.native-death-frame-report.v1",
+  "timing_scope": "native-model-ready-to-rendered-frame;durable-commit-excluded",
+  "accepted": true,
+  "fixture_build_id": "m03-core-dev-identity-1",
+  "client_executable_blake3": "8ec7e6b488edd116498f6a06caeb01853382179c2ff8802605cd666a43380b8f",
+  "character_id": [
+    231,
+    231,
+    231,
+    231,
+    231,
+    231,
+    231,
+    231,
+    231,
+    231,
+    231,
+    231,
+    231,
+    231,
+    231,
+    231
+  ],
+  "destination": "death_final",
+  "world_flow_revision": {
+    "records_blake3": "97b7188e26329b9430b7289d1e17d347c9b9472863b7db6bd48501fd3b773158",
+    "assets_blake3": "32ce9fce6f1d49d5cd6cb570fa0590a5ee5644388c2620b67846320d4b2a3759",
+    "localization_blake3": "895c38724abfdef4909751743d91b5cff90d7f073c553bc044601abff4763a26"
+  },
+  "death_view_revision": {
+    "records_blake3": "349730a1246857978d1412510ee23af46624ec80dbb3333be42aad2e47f1f8e0",
+    "assets_blake3": "0160f06954c88aba61392f72af66031d6f7ff4a592beb24f7ebe9f1981cc7a68",
+    "localization_blake3": "c10bcc96887aac7db8c855f19d991e6185f46d1df39f7a37d3a31cb4b9ca1b92"
+  },
+  "item_content_revision": "core-dev.blake3.27818db710b7553520a162f6f8337dcd0419c459d20c6513a7e12c78fed24ebb",
+  "content_authority_blake3": "ff4d06dddc74763ebfb5fc10e993204701a275cff1272eda853f833e6d85b59d",
+  "fixture_hash_blake3": "2f205db621b1b039d804d2b4ed6dfa2a000e2e09620c123f35c368c4a0043f73",
+  "screenshot_blake3": "f70a27a9d02c6d9460f3c3091dbe67b18e4bfd2fd1306584b07725d2eec069c4",
+  "viewport_width": 1920,
+  "viewport_height": 1080,
+  "reduced_effects": false,
+  "ui_scale_percent": 100,
+  "focused_order": 1,
+  "activated_action": "inspect_trace",
+  "model_ready_to_render_ready_micros": 140304,
+  "render_ready_to_focus_action_micros": 156256,
+  "focus_action_to_activation_micros": 94923,
+  "activation_to_screenshot_captured_micros": 508846,
+  "model_ready_to_screenshot_captured_micros": 900329,
+  "report_hash_blake3": "1f8714114aaa95a32569c12c41902f7d3cc1e418e24bc7cfb7767409c6521d0d"
+}
