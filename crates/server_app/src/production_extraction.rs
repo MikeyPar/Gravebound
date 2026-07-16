@@ -15,7 +15,11 @@ use persistence::{
     ProductionExtractionCommitRequestV1, ProductionExtractionTransactionV1,
     StoredCommittedExtractionTerminalV1, StoredProductionExtractionResultV1,
 };
-use protocol::{CharacterLocation, CharacterLocationSnapshot, SafeArrival, WireText};
+use protocol::{
+    CharacterLocation, CharacterLocationSnapshot, ExtractionDestinationV1,
+    ExtractionMaterialCreditV1, ExtractionPlacementV1, SafeArrival,
+    StoredExtractionTerminalResultV1, TerminalVersionAdvanceV1, TerminalVersionVectorV1, WireText,
+};
 use thiserror::Error;
 
 use crate::{
@@ -308,6 +312,105 @@ pub fn hall_snapshot_from_stored_extraction(
             arrival: SafeArrival::HallDefault,
         },
     })
+}
+
+/// Maps the complete committed persistence result into append-only protocol `1.15`.
+pub fn protocol_extraction_terminal_result(
+    result: &StoredProductionExtractionResultV1,
+) -> Result<StoredExtractionTerminalResultV1, ProductionExtractionExecutionError> {
+    result
+        .validate()
+        .map_err(|_| ProductionExtractionExecutionError::StoredResultMismatch)?;
+    let placements = result
+        .placements
+        .iter()
+        .map(|placement| {
+            Ok(ExtractionPlacementV1 {
+                ordinal: placement.ordinal,
+                item_uid: placement.item_uid,
+                destination: protocol_destination(placement.destination)?,
+                item_version: placement.post_item_version,
+            })
+        })
+        .collect::<Result<Vec<_>, ProductionExtractionExecutionError>>()?;
+    let material_credits = result
+        .material_credits
+        .iter()
+        .map(|credit| {
+            Ok(ExtractionMaterialCreditV1 {
+                ordinal: credit.ordinal,
+                material_id: WireText::new(credit.material_id.clone())
+                    .map_err(|_| ProductionExtractionExecutionError::StoredResultMismatch)?,
+                quantity: credit.credited_quantity,
+                wallet_balance: credit.post_wallet_quantity,
+                wallet_version: credit.post_wallet_version,
+            })
+        })
+        .collect::<Result<Vec<_>, ProductionExtractionExecutionError>>()?;
+    let projected = StoredExtractionTerminalResultV1 {
+        mutation_id: result.mutation_id,
+        character_id: result.character_id,
+        terminal_id: result.terminal_id,
+        extraction_request_id: result.extraction_request_id,
+        extraction_receipt_id: result.extraction_receipt_id,
+        result_hash: result
+            .digest()
+            .map_err(|_| ProductionExtractionExecutionError::StoredResultMismatch)?,
+        committed_at_unix_millis: result.committed_at_unix_ms,
+        destination_content_id: WireText::new(result.destination_content_id.clone())
+            .map_err(|_| ProductionExtractionExecutionError::StoredResultMismatch)?,
+        versions: TerminalVersionVectorV1 {
+            account: protocol_version(result.versions.account),
+            character: protocol_version(result.versions.character),
+            world: protocol_version(result.versions.world),
+            inventory: protocol_version(result.versions.inventory),
+            life_clock: protocol_version(result.versions.life_metrics),
+        },
+        placements,
+        material_credits,
+        storage_resolution_required: result.storage_resolution_required,
+    };
+    projected
+        .validate()
+        .map_err(|_| ProductionExtractionExecutionError::StoredResultMismatch)?;
+    Ok(projected)
+}
+
+fn protocol_destination(
+    location: persistence::StoredExtractionLocationV1,
+) -> Result<ExtractionDestinationV1, ProductionExtractionExecutionError> {
+    match location {
+        persistence::StoredExtractionLocationV1::Equipped(slot_index) => {
+            Ok(ExtractionDestinationV1::Equipped { slot_index })
+        }
+        persistence::StoredExtractionLocationV1::Belt(slot_index) => {
+            Ok(ExtractionDestinationV1::Belt { slot_index })
+        }
+        persistence::StoredExtractionLocationV1::CharacterSafe(slot_index) => {
+            Ok(ExtractionDestinationV1::CharacterSafe { slot_index })
+        }
+        persistence::StoredExtractionLocationV1::Vault(slot_index) => {
+            Ok(ExtractionDestinationV1::Vault { slot_index })
+        }
+        persistence::StoredExtractionLocationV1::Overflow(slot_index) => {
+            Ok(ExtractionDestinationV1::Overflow { slot_index })
+        }
+        persistence::StoredExtractionLocationV1::ResolutionHold(stack_index) => {
+            Ok(ExtractionDestinationV1::ResolutionHold { stack_index })
+        }
+        persistence::StoredExtractionLocationV1::RunBackpack(_) => {
+            Err(ProductionExtractionExecutionError::StoredResultMismatch)
+        }
+    }
+}
+
+const fn protocol_version(
+    version: persistence::ProductionExtractionVersionAdvanceV1,
+) -> TerminalVersionAdvanceV1 {
+    TerminalVersionAdvanceV1 {
+        before: version.pre,
+        after: version.post,
+    }
 }
 
 fn extraction_terminal_receipt(
@@ -628,6 +731,62 @@ mod tests {
         );
         assert_eq!(candidate.observed_tick(), request.observed_tick);
         assert_eq!(candidate.kind(), TerminalKind::SuccessfulExtraction);
+    }
+
+    #[test]
+    fn protocol_projection_maps_every_destination_and_version_axis() {
+        for (stored, expected) in [
+            (
+                StoredExtractionLocationV1::Equipped(1),
+                ExtractionDestinationV1::Equipped { slot_index: 1 },
+            ),
+            (
+                StoredExtractionLocationV1::Belt(1),
+                ExtractionDestinationV1::Belt { slot_index: 1 },
+            ),
+            (
+                StoredExtractionLocationV1::CharacterSafe(7),
+                ExtractionDestinationV1::CharacterSafe { slot_index: 7 },
+            ),
+            (
+                StoredExtractionLocationV1::Vault(159),
+                ExtractionDestinationV1::Vault { slot_index: 159 },
+            ),
+            (
+                StoredExtractionLocationV1::Overflow(19),
+                ExtractionDestinationV1::Overflow { slot_index: 19 },
+            ),
+            (
+                StoredExtractionLocationV1::ResolutionHold(7),
+                ExtractionDestinationV1::ResolutionHold { stack_index: 7 },
+            ),
+        ] {
+            assert_eq!(protocol_destination(stored).unwrap(), expected);
+        }
+        assert!(matches!(
+            protocol_destination(StoredExtractionLocationV1::RunBackpack(0)),
+            Err(ProductionExtractionExecutionError::StoredResultMismatch)
+        ));
+
+        let extraction = prepared_extraction();
+        let stored = stored_result(&extraction);
+        let projected = protocol_extraction_terminal_result(&stored).unwrap();
+        assert_eq!(projected.result_hash, stored.digest().unwrap());
+        assert_eq!(projected.placements[0].item_version, 2);
+        assert_eq!(
+            projected.versions.account,
+            TerminalVersionAdvanceV1 {
+                before: 11,
+                after: 11
+            }
+        );
+        assert_eq!(
+            projected.versions.life_clock,
+            TerminalVersionAdvanceV1 {
+                before: 14,
+                after: 15
+            }
+        );
     }
 
     #[test]

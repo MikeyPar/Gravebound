@@ -127,7 +127,8 @@ pub use production_extraction::{
     ProductionExtractionReplayOutcome, ProductionExtractionTerminalReader,
     ProductionExtractionWriter, committed_extraction_terminal_receipt,
     committed_extraction_terminal_receipt_from_stored, hall_snapshot_from_stored_extraction,
-    production_extraction_terminal_candidate, recover_committed_extraction_arbiter,
+    production_extraction_terminal_candidate, protocol_extraction_terminal_result,
+    recover_committed_extraction_arbiter,
 };
 pub use progression_award::{
     CoreProgressionRules, ProgressionAwardCode, ProgressionAwardCommand, ProgressionAwardContext,
