@@ -182,6 +182,22 @@ fn death_view_frame(sequence: u32, request: DeathViewRequestV1) -> DeathViewFram
     }
 }
 
+async fn canonical_death_terminal_signature(
+    persistence: &PostgresPersistence,
+) -> persistence::StoredCoreDeathTerminalSignatureV1 {
+    let signature = persistence
+        .load_core_death_terminal_signature_v1(
+            durable_death_fixture::ACCOUNT_ID,
+            durable_death_fixture::CHARACTER_ID,
+        )
+        .await
+        .unwrap()
+        .expect("committed death-terminal signature");
+    signature.canonical_bytes().unwrap();
+    assert_ne!(signature.digest().unwrap(), [0; 32]);
+    signature
+}
+
 fn disposable_world_flow(
     persistence: PostgresPersistence,
 ) -> impl server_app::CoreWorldFlowAuthority {
@@ -934,12 +950,13 @@ fn seal_complete_same_tick_terminal_set(
 
 /// GDD `DTH-001`/`DTH-020` and `TECH-020`-`023`, Content Spec `CONT-ECHO-009` and
 /// `CONT-HUB-002`, and Roadmap `GB-M03-02`/`06`/`13` jointly require a committed lethal result to
-/// survive lost delivery and process restart without duplicate domain records. The lethal input in
-/// this proof is exclusively server-authored; real QUIC carries only authenticated historical
-/// reads, so normal player death admission remains disabled.
+/// survive lost delivery and a complete process-local authority rebuild without duplicate domain
+/// records. The lethal input in this proof is exclusively server-authored; real QUIC carries only
+/// authenticated historical reads, so normal player death admission remains disabled. The later
+/// `06E` child-process harness owns proof across an operating-system process boundary.
 #[tokio::test]
 #[ignore = "requires explicitly authorized disposable PostgreSQL"]
-async fn committed_death_survives_response_loss_and_full_process_restart_over_real_quic() {
+async fn committed_death_survives_response_loss_and_fresh_server_authority_over_real_quic() {
     let persistence = disposable_database().await;
     durable_death_fixture::seed_danger_root(&persistence).await;
     let death = durable_death_fixture::prepare_death(persistence.clone()).await;
@@ -948,7 +965,7 @@ async fn committed_death_survives_response_loss_and_full_process_restart_over_re
 
     // GDD TECH-021/023, Content Spec CONT-ECHO-009, and Roadmap GB-M03-02D/06 require an
     // unresolved terminal to block departure during a real database outage and converge after a
-    // new process authority reconnects. Closing the pool exercises the production writer error,
+    // freshly bound server authority reconnects. Closing the pool exercises the production writer error,
     // not a fake repository mode.
     let unavailable_writer = persistence.clone();
     persistence.close().await;
@@ -976,6 +993,7 @@ async fn committed_death_survives_response_loss_and_full_process_restart_over_re
     let expected_result = committed.transaction.result().clone();
     let expected_receipt = coordinator.committed_receipt().unwrap().clone();
     durable_death_fixture::assert_committed_graph(&persistence).await;
+    let before_response_loss_signature = canonical_death_terminal_signature(&persistence).await;
 
     // Capture one projection, abandon the following summary response, and then discard every
     // process-local authority that knew the commit acknowledgement.
@@ -987,6 +1005,11 @@ async fn committed_death_survives_response_loss_and_full_process_restart_over_re
     let restarted = PostgresPersistence::connect(&config).await.unwrap();
     restarted.verify_disposable_test_database().await.unwrap();
     restarted.migrate().await.unwrap();
+    let after_rebind_signature = canonical_death_terminal_signature(&restarted).await;
+    assert_eq!(
+        after_rebind_signature.canonical_bytes().unwrap(),
+        before_response_loss_signature.canonical_bytes().unwrap()
+    );
 
     let mut recovered = recover_committed_death_arbiter(
         &restarted,
@@ -995,7 +1018,7 @@ async fn committed_death_survives_response_loss_and_full_process_restart_over_re
     )
     .await
     .unwrap()
-    .expect("the committed terminal must reconstruct after process restart");
+    .expect("the committed terminal must reconstruct after server-authority rebind");
     assert_eq!(recovered.committed_receipt(), Some(&expected_receipt));
     assert!(matches!(
         recovered.submit(candidate.clone()),
@@ -1019,6 +1042,8 @@ async fn committed_death_survives_response_loss_and_full_process_restart_over_re
     assert!(replay.transaction.is_replay());
     assert_eq!(replay.transaction.result(), &expected_result);
     assert_eq!(replay_arbiter.committed_receipt(), Some(&expected_receipt));
+    let after_replay_signature = canonical_death_terminal_signature(&restarted).await;
+    assert_eq!(after_replay_signature, before_response_loss_signature);
 
     let (latest, summary, memorial, trace) = run_restarted_death_read_session(&restarted).await;
     assert_committed_death_view_results(
@@ -1027,6 +1052,10 @@ async fn committed_death_survives_response_loss_and_full_process_restart_over_re
         &summary,
         &memorial,
         &trace,
+    );
+    assert_eq!(
+        canonical_death_terminal_signature(&restarted).await,
+        before_response_loss_signature
     );
     durable_death_fixture::assert_committed_graph(&restarted).await;
     restarted.close().await;
