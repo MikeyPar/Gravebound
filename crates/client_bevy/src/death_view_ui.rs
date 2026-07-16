@@ -2326,14 +2326,21 @@ fn handle_death_ui_focus_and_activation(
         commands.write(DeathUiCommand(button.action.clone()));
     }
 
-    let back = keyboard.just_pressed(KeyCode::Escape) || gamepad_pressed(GamepadButton::East);
-    if back
-        && let Some(button) = ordered
-            .iter()
-            .find(|button| button.enabled && button.action == DeathUiAction::Back)
-    {
-        commands.write(DeathUiCommand(button.action.clone()));
+    let back = keyboard_requests_back(&keyboard) || gamepad_pressed(GamepadButton::East);
+    if back && let Some(action) = enabled_back_action(&ordered) {
+        commands.write(DeathUiCommand(action));
     }
+}
+
+fn keyboard_requests_back(keyboard: &ButtonInput<KeyCode>) -> bool {
+    keyboard.just_pressed(KeyCode::Escape)
+}
+
+fn enabled_back_action(buttons: &[DeathUiButton]) -> Option<DeathUiAction> {
+    buttons
+        .iter()
+        .find(|button| button.enabled && button.action == DeathUiAction::Back)
+        .map(|button| button.action.clone())
 }
 
 #[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
@@ -2710,6 +2717,32 @@ mod tests {
         assert_eq!(next_focus_order(&buttons, Some(1), 1), Some(2));
         assert_eq!(next_focus_order(&buttons, Some(2), 1), Some(1));
         assert_eq!(next_focus_order(&buttons, Some(1), -1), Some(2));
+    }
+
+    #[test]
+    fn escape_resolves_only_to_the_enabled_read_only_back_action() {
+        let mut keyboard = ButtonInput::<KeyCode>::default();
+        keyboard.press(KeyCode::Escape);
+        assert!(keyboard_requests_back(&keyboard));
+
+        let mut buttons = vec![
+            DeathUiButton {
+                action: DeathUiAction::Summary(DeathSummaryAction::CreateSuccessor),
+                enabled: true,
+                emphasis: DeathUiActionEmphasis::Primary,
+                order: 0,
+            },
+            DeathUiButton {
+                action: DeathUiAction::Back,
+                enabled: true,
+                emphasis: DeathUiActionEmphasis::Utility,
+                order: 1,
+            },
+        ];
+        assert_eq!(enabled_back_action(&buttons), Some(DeathUiAction::Back));
+
+        buttons[1].enabled = false;
+        assert_eq!(enabled_back_action(&buttons), None);
     }
 
     #[test]
