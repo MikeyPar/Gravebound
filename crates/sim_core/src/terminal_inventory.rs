@@ -11,6 +11,9 @@ pub const TERMINAL_BELT_CAPACITY: usize = 2;
 pub const TERMINAL_OVERFLOW_CAPACITY: usize = 20;
 pub const TERMINAL_RESOLUTION_HOLD_CAPACITY: usize = RUN_BACKPACK_CAPACITY;
 pub const TERMINAL_MATERIAL_CAPACITY: usize = 4;
+pub const TERMINAL_PENDING_ITEM_CAPACITY: usize = 4_096;
+pub const TERMINAL_STABILIZED_ITEM_CAPACITY: usize =
+    EQUIPMENT_SLOT_COUNT + TERMINAL_BELT_CAPACITY * DURABLE_CONSUMABLE_STACK_CAP as usize;
 pub const OVERFLOW_LIFETIME_MICROS: u64 = 72 * 60 * 60 * 1_000_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -51,6 +54,80 @@ pub struct TerminalMaterialCredit {
     pub post_wallet_version: u64,
     pub pre_pouch_version: u64,
     pub post_pouch_version: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RecallItemLocation {
+    Equipped(u8),
+    Belt(u8),
+    RunBackpack(u8),
+    PersonalGround {
+        instance_id: [u8; 16],
+        pickup_id: [u8; 16],
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecallPersonalGroundStack {
+    pub instance_id: [u8; 16],
+    pub pickup_id: [u8; 16],
+    pub stack: DurableStorageSlot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecallMaterialSnapshot {
+    pub material_id: String,
+    pub pending_quantity: u16,
+    pub pouch_version: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecallItemMutation {
+    pub item_uid: ItemUid,
+    pub source: RecallItemLocation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecallMaterialDestruction {
+    pub material_id: String,
+    pub destroyed_quantity: u16,
+    pub pre_pouch_version: u64,
+    pub post_pouch_version: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecallInventorySnapshot {
+    pub account_version: u64,
+    pub inventory_version: u64,
+    pub equipped: Vec<DurableStorageSlot>,
+    pub belt: Vec<DurableStorageSlot>,
+    pub run_backpack: Vec<DurableStorageSlot>,
+    pub personal_ground: Vec<RecallPersonalGroundStack>,
+    pub materials: Vec<RecallMaterialSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecallInventoryPlan {
+    pub stabilized_items: Vec<RecallItemMutation>,
+    pub destroyed_items: Vec<RecallItemMutation>,
+    pub destroyed_materials: Vec<RecallMaterialDestruction>,
+    pub post_account_version: u64,
+    pub post_inventory_version: u64,
+    pub post_equipped: Vec<DurableStorageSlot>,
+    pub post_belt: Vec<DurableStorageSlot>,
+    pub post_run_backpack: Vec<DurableStorageSlot>,
+}
+
+impl RecallInventoryPlan {
+    #[must_use]
+    pub fn stabilized_item_count(&self) -> usize {
+        self.stabilized_items.len()
+    }
+
+    #[must_use]
+    pub fn destroyed_item_count(&self) -> usize {
+        self.destroyed_items.len()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -122,8 +199,68 @@ pub enum TerminalInventoryError {
     InvalidMaterial,
     #[error("terminal material identity occurs more than once")]
     DuplicateMaterial,
+    #[error("Recall PersonalGround custody is malformed or duplicated")]
+    InvalidPersonalGround,
+    #[error("Recall item projection exceeds its bounded capacity")]
+    RecallItemCapacity,
     #[error("terminal authority version or time overflow")]
     ArithmeticOverflow,
+}
+
+pub fn plan_emergency_recall(
+    snapshot: &RecallInventorySnapshot,
+) -> Result<RecallInventoryPlan, TerminalInventoryError> {
+    validate_recall_snapshot(snapshot)?;
+
+    let mut stabilized_items = Vec::new();
+    append_recall_slot_mutations(
+        &snapshot.equipped,
+        RecallSlotKind::Equipped,
+        &mut stabilized_items,
+    )?;
+    append_recall_slot_mutations(&snapshot.belt, RecallSlotKind::Belt, &mut stabilized_items)?;
+
+    let mut destroyed_items = Vec::new();
+    append_recall_slot_mutations(
+        &snapshot.run_backpack,
+        RecallSlotKind::RunBackpack,
+        &mut destroyed_items,
+    )?;
+    let mut personal_ground = snapshot.personal_ground.clone();
+    personal_ground.sort_by_key(|entry| (entry.instance_id, entry.pickup_id));
+    for entry in &personal_ground {
+        append_slot_item_uids(
+            &entry.stack,
+            RecallItemLocation::PersonalGround {
+                instance_id: entry.instance_id,
+                pickup_id: entry.pickup_id,
+            },
+            &mut destroyed_items,
+        );
+    }
+
+    if stabilized_items.len() > TERMINAL_STABILIZED_ITEM_CAPACITY
+        || destroyed_items.len() > TERMINAL_PENDING_ITEM_CAPACITY
+    {
+        return Err(TerminalInventoryError::RecallItemCapacity);
+    }
+
+    let destroyed_materials = plan_recall_material_destruction(&snapshot.materials)?;
+    let plan = RecallInventoryPlan {
+        stabilized_items,
+        destroyed_items,
+        destroyed_materials,
+        post_account_version: snapshot.account_version,
+        post_inventory_version: snapshot
+            .inventory_version
+            .checked_add(1)
+            .ok_or(TerminalInventoryError::ArithmeticOverflow)?,
+        post_equipped: snapshot.equipped.clone(),
+        post_belt: snapshot.belt.clone(),
+        post_run_backpack: vec![DurableStorageSlot::Empty; RUN_BACKPACK_CAPACITY],
+    };
+    validate_recall_plan_conservation(snapshot, &plan)?;
+    Ok(plan)
 }
 
 pub fn plan_successful_extraction(
@@ -175,6 +312,82 @@ pub fn plan_successful_extraction(
     };
     validate_plan_conservation(snapshot, &plan)?;
     Ok(plan)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecallSlotKind {
+    Equipped,
+    Belt,
+    RunBackpack,
+}
+
+impl RecallSlotKind {
+    fn location(self, index: usize) -> Result<RecallItemLocation, TerminalInventoryError> {
+        let index = u8::try_from(index).map_err(|_| TerminalInventoryError::InvalidCapacity)?;
+        Ok(match self {
+            Self::Equipped => RecallItemLocation::Equipped(index),
+            Self::Belt => RecallItemLocation::Belt(index),
+            Self::RunBackpack => RecallItemLocation::RunBackpack(index),
+        })
+    }
+}
+
+fn append_recall_slot_mutations(
+    slots: &[DurableStorageSlot],
+    kind: RecallSlotKind,
+    mutations: &mut Vec<RecallItemMutation>,
+) -> Result<(), TerminalInventoryError> {
+    for (index, slot) in slots.iter().enumerate() {
+        append_slot_item_uids(slot, kind.location(index)?, mutations);
+    }
+    Ok(())
+}
+
+fn append_slot_item_uids(
+    slot: &DurableStorageSlot,
+    source: RecallItemLocation,
+    mutations: &mut Vec<RecallItemMutation>,
+) {
+    match slot {
+        DurableStorageSlot::Empty => {}
+        DurableStorageSlot::Equipment { item_uid } => mutations.push(RecallItemMutation {
+            item_uid: *item_uid,
+            source,
+        }),
+        DurableStorageSlot::Consumable { item_uids, .. } => {
+            mutations.extend(
+                item_uids
+                    .iter()
+                    .copied()
+                    .map(|item_uid| RecallItemMutation { item_uid, source }),
+            );
+        }
+    }
+}
+
+fn plan_recall_material_destruction(
+    materials: &[RecallMaterialSnapshot],
+) -> Result<Vec<RecallMaterialDestruction>, TerminalInventoryError> {
+    let mut materials = materials.to_vec();
+    materials.sort_by(|left, right| {
+        left.material_id
+            .as_bytes()
+            .cmp(right.material_id.as_bytes())
+    });
+    materials
+        .into_iter()
+        .map(|material| {
+            Ok(RecallMaterialDestruction {
+                material_id: material.material_id,
+                destroyed_quantity: material.pending_quantity,
+                pre_pouch_version: material.pouch_version,
+                post_pouch_version: material
+                    .pouch_version
+                    .checked_add(1)
+                    .ok_or(TerminalInventoryError::ArithmeticOverflow)?,
+            })
+        })
+        .collect()
 }
 
 struct PlannedExtractionItems {
@@ -560,6 +773,106 @@ fn validate_snapshot(snapshot: &ExtractionInventorySnapshot) -> Result<(), Termi
     validate_materials(&snapshot.materials)
 }
 
+fn validate_recall_snapshot(
+    snapshot: &RecallInventorySnapshot,
+) -> Result<(), TerminalInventoryError> {
+    if snapshot.account_version == 0 || snapshot.inventory_version == 0 {
+        return Err(TerminalInventoryError::InvalidAuthorityVersion);
+    }
+    if snapshot.equipped.len() != EQUIPMENT_SLOT_COUNT
+        || snapshot.belt.len() != TERMINAL_BELT_CAPACITY
+        || snapshot.run_backpack.len() != RUN_BACKPACK_CAPACITY
+    {
+        return Err(TerminalInventoryError::InvalidCapacity);
+    }
+    validate_slot_kinds(&snapshot.equipped, SlotPolicy::EquipmentOnly)?;
+    validate_slot_kinds(&snapshot.belt, SlotPolicy::ConsumableOnly)?;
+    validate_slot_kinds(&snapshot.run_backpack, SlotPolicy::Any)?;
+
+    let mut identities = BTreeSet::new();
+    for slot in snapshot
+        .equipped
+        .iter()
+        .chain(&snapshot.belt)
+        .chain(&snapshot.run_backpack)
+    {
+        validate_recall_slot_and_uids(slot, &mut identities)?;
+    }
+
+    let mut ground_authorities = BTreeSet::new();
+    for entry in &snapshot.personal_ground {
+        if entry.instance_id == [0; 16]
+            || entry.pickup_id == [0; 16]
+            || matches!(entry.stack, DurableStorageSlot::Empty)
+            || !ground_authorities.insert((entry.instance_id, entry.pickup_id))
+        {
+            return Err(TerminalInventoryError::InvalidPersonalGround);
+        }
+        validate_recall_slot_and_uids(&entry.stack, &mut identities)?;
+    }
+    if identities.len() > TERMINAL_PENDING_ITEM_CAPACITY + TERMINAL_STABILIZED_ITEM_CAPACITY {
+        return Err(TerminalInventoryError::RecallItemCapacity);
+    }
+
+    validate_recall_materials(&snapshot.materials)
+}
+
+fn validate_recall_slot_and_uids(
+    slot: &DurableStorageSlot,
+    identities: &mut BTreeSet<ItemUid>,
+) -> Result<(), TerminalInventoryError> {
+    match slot {
+        DurableStorageSlot::Empty => Ok(()),
+        DurableStorageSlot::Equipment { item_uid } => {
+            if identities.insert(*item_uid) {
+                Ok(())
+            } else {
+                Err(TerminalInventoryError::DuplicateItemUid)
+            }
+        }
+        DurableStorageSlot::Consumable {
+            template_id,
+            item_uids,
+        } => {
+            if !valid_template_id(template_id)
+                || item_uids.is_empty()
+                || item_uids.len() > usize::from(DURABLE_CONSUMABLE_STACK_CAP)
+                || !item_uids.windows(2).all(|pair| pair[0] < pair[1])
+            {
+                return Err(TerminalInventoryError::InvalidConsumableStack);
+            }
+            for item_uid in item_uids {
+                if !identities.insert(*item_uid) {
+                    return Err(TerminalInventoryError::DuplicateItemUid);
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+fn validate_recall_materials(
+    materials: &[RecallMaterialSnapshot],
+) -> Result<(), TerminalInventoryError> {
+    if materials.len() > TERMINAL_MATERIAL_CAPACITY {
+        return Err(TerminalInventoryError::InvalidMaterial);
+    }
+    let mut identities = BTreeSet::new();
+    for material in materials {
+        if !valid_template_id(&material.material_id)
+            || material.pending_quantity == 0
+            || material.pending_quantity > 99
+            || material.pouch_version == 0
+        {
+            return Err(TerminalInventoryError::InvalidMaterial);
+        }
+        if !identities.insert(material.material_id.as_bytes()) {
+            return Err(TerminalInventoryError::DuplicateMaterial);
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SlotPolicy {
     EquipmentOnly,
@@ -652,6 +965,55 @@ fn validate_plan_conservation(
     Ok(())
 }
 
+fn validate_recall_plan_conservation(
+    snapshot: &RecallInventorySnapshot,
+    plan: &RecallInventoryPlan,
+) -> Result<(), TerminalInventoryError> {
+    let expected_stabilized: BTreeSet<_> = snapshot
+        .equipped
+        .iter()
+        .chain(&snapshot.belt)
+        .flat_map(slot_uids)
+        .collect();
+    let expected_destroyed: BTreeSet<_> = snapshot
+        .run_backpack
+        .iter()
+        .flat_map(slot_uids)
+        .chain(
+            snapshot
+                .personal_ground
+                .iter()
+                .flat_map(|entry| slot_uids(&entry.stack)),
+        )
+        .collect();
+    let stabilized: BTreeSet<_> = plan
+        .stabilized_items
+        .iter()
+        .map(|item| item.item_uid)
+        .collect();
+    let destroyed: BTreeSet<_> = plan
+        .destroyed_items
+        .iter()
+        .map(|item| item.item_uid)
+        .collect();
+    if stabilized.len() != plan.stabilized_items.len()
+        || destroyed.len() != plan.destroyed_items.len()
+        || stabilized != expected_stabilized
+        || destroyed != expected_destroyed
+        || !stabilized.is_disjoint(&destroyed)
+        || plan
+            .post_run_backpack
+            .iter()
+            .any(|slot| !matches!(slot, DurableStorageSlot::Empty))
+        || plan.post_equipped != snapshot.equipped
+        || plan.post_belt != snapshot.belt
+        || plan.post_account_version != snapshot.account_version
+    {
+        return Err(TerminalInventoryError::DuplicateItemUid);
+    }
+    Ok(())
+}
+
 fn slot_uids(slot: &DurableStorageSlot) -> Vec<ItemUid> {
     match slot {
         DurableStorageSlot::Empty => Vec::new(),
@@ -695,6 +1057,197 @@ mod tests {
             template_id: "consumable.red_tonic".to_owned(),
             item_uids: values.iter().copied().map(uid).collect(),
         }
+    }
+
+    fn empty_recall_snapshot() -> RecallInventorySnapshot {
+        RecallInventorySnapshot {
+            account_version: 4,
+            inventory_version: 7,
+            equipped: vec![DurableStorageSlot::Empty; EQUIPMENT_SLOT_COUNT],
+            belt: vec![DurableStorageSlot::Empty; TERMINAL_BELT_CAPACITY],
+            run_backpack: vec![DurableStorageSlot::Empty; RUN_BACKPACK_CAPACITY],
+            personal_ground: Vec::new(),
+            materials: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn empty_recall_preserves_account_and_advances_inventory_terminal_boundary() {
+        let snapshot = empty_recall_snapshot();
+        let plan = plan_emergency_recall(&snapshot).unwrap();
+        assert!(plan.stabilized_items.is_empty());
+        assert!(plan.destroyed_items.is_empty());
+        assert!(plan.destroyed_materials.is_empty());
+        assert_eq!(plan.post_account_version, 4);
+        assert_eq!(plan.post_inventory_version, 8);
+        assert_eq!(plan.post_equipped, snapshot.equipped);
+        assert_eq!(plan.post_belt, snapshot.belt);
+        assert!(
+            plan.post_run_backpack
+                .iter()
+                .all(|slot| matches!(slot, DurableStorageSlot::Empty))
+        );
+    }
+
+    #[test]
+    fn recall_stabilizes_equipped_and_belt_then_destroys_pending_in_canonical_order() {
+        let mut snapshot = empty_recall_snapshot();
+        snapshot.equipped[1] = equipment(10);
+        snapshot.belt[0] = tonic(&[20, 21]);
+        snapshot.run_backpack[0] = tonic(&[30, 31]);
+        snapshot.run_backpack[3] = equipment(40);
+        snapshot.personal_ground = vec![
+            RecallPersonalGroundStack {
+                instance_id: [9; 16],
+                pickup_id: [1; 16],
+                stack: tonic(&[60, 61]),
+            },
+            RecallPersonalGroundStack {
+                instance_id: [8; 16],
+                pickup_id: [2; 16],
+                stack: equipment(50),
+            },
+        ];
+
+        let plan = plan_emergency_recall(&snapshot).unwrap();
+        assert_eq!(
+            plan.stabilized_items,
+            [
+                RecallItemMutation {
+                    item_uid: uid(10),
+                    source: RecallItemLocation::Equipped(1),
+                },
+                RecallItemMutation {
+                    item_uid: uid(20),
+                    source: RecallItemLocation::Belt(0),
+                },
+                RecallItemMutation {
+                    item_uid: uid(21),
+                    source: RecallItemLocation::Belt(0),
+                },
+            ]
+        );
+        assert_eq!(
+            plan.destroyed_items,
+            [
+                RecallItemMutation {
+                    item_uid: uid(30),
+                    source: RecallItemLocation::RunBackpack(0),
+                },
+                RecallItemMutation {
+                    item_uid: uid(31),
+                    source: RecallItemLocation::RunBackpack(0),
+                },
+                RecallItemMutation {
+                    item_uid: uid(40),
+                    source: RecallItemLocation::RunBackpack(3),
+                },
+                RecallItemMutation {
+                    item_uid: uid(50),
+                    source: RecallItemLocation::PersonalGround {
+                        instance_id: [8; 16],
+                        pickup_id: [2; 16],
+                    },
+                },
+                RecallItemMutation {
+                    item_uid: uid(60),
+                    source: RecallItemLocation::PersonalGround {
+                        instance_id: [9; 16],
+                        pickup_id: [1; 16],
+                    },
+                },
+                RecallItemMutation {
+                    item_uid: uid(61),
+                    source: RecallItemLocation::PersonalGround {
+                        instance_id: [9; 16],
+                        pickup_id: [1; 16],
+                    },
+                },
+            ]
+        );
+        assert_eq!(plan.stabilized_item_count(), 3);
+        assert_eq!(plan.destroyed_item_count(), 6);
+    }
+
+    #[test]
+    fn recall_materials_are_byte_sorted_destroyed_and_versioned_without_account_change() {
+        let mut snapshot = empty_recall_snapshot();
+        snapshot.materials = vec![
+            RecallMaterialSnapshot {
+                material_id: "material.saltglass_shard".to_owned(),
+                pending_quantity: 2,
+                pouch_version: 8,
+            },
+            RecallMaterialSnapshot {
+                material_id: "material.bell_brass".to_owned(),
+                pending_quantity: 5,
+                pouch_version: 3,
+            },
+        ];
+
+        let plan = plan_emergency_recall(&snapshot).unwrap();
+        assert_eq!(
+            plan.destroyed_materials,
+            [
+                RecallMaterialDestruction {
+                    material_id: "material.bell_brass".to_owned(),
+                    destroyed_quantity: 5,
+                    pre_pouch_version: 3,
+                    post_pouch_version: 4,
+                },
+                RecallMaterialDestruction {
+                    material_id: "material.saltglass_shard".to_owned(),
+                    destroyed_quantity: 2,
+                    pre_pouch_version: 8,
+                    post_pouch_version: 9,
+                },
+            ]
+        );
+        assert_eq!(plan.post_account_version, snapshot.account_version);
+    }
+
+    #[test]
+    fn recall_rejects_invalid_ground_duplicate_uids_materials_and_version_overflow() {
+        let mut snapshot = empty_recall_snapshot();
+        snapshot.personal_ground.push(RecallPersonalGroundStack {
+            instance_id: [0; 16],
+            pickup_id: [1; 16],
+            stack: equipment(1),
+        });
+        assert_eq!(
+            plan_emergency_recall(&snapshot),
+            Err(TerminalInventoryError::InvalidPersonalGround)
+        );
+
+        let mut snapshot = empty_recall_snapshot();
+        snapshot.run_backpack[0] = equipment(1);
+        snapshot.personal_ground.push(RecallPersonalGroundStack {
+            instance_id: [2; 16],
+            pickup_id: [3; 16],
+            stack: equipment(1),
+        });
+        assert_eq!(
+            plan_emergency_recall(&snapshot),
+            Err(TerminalInventoryError::DuplicateItemUid)
+        );
+
+        let mut snapshot = empty_recall_snapshot();
+        snapshot.materials.push(RecallMaterialSnapshot {
+            material_id: "material.bell_brass".to_owned(),
+            pending_quantity: 100,
+            pouch_version: 1,
+        });
+        assert_eq!(
+            plan_emergency_recall(&snapshot),
+            Err(TerminalInventoryError::InvalidMaterial)
+        );
+
+        let mut snapshot = empty_recall_snapshot();
+        snapshot.inventory_version = u64::MAX;
+        assert_eq!(
+            plan_emergency_recall(&snapshot),
+            Err(TerminalInventoryError::ArithmeticOverflow)
+        );
     }
 
     #[test]

@@ -388,9 +388,12 @@ pub use telemetry::{
 };
 pub use terminal_inventory::{
     ExtractionInventoryPlan, ExtractionInventorySnapshot, OVERFLOW_LIFETIME_MICROS,
+    RecallInventoryPlan, RecallInventorySnapshot, RecallItemLocation, RecallItemMutation,
+    RecallMaterialDestruction, RecallMaterialSnapshot, RecallPersonalGroundStack,
     TERMINAL_BELT_CAPACITY, TERMINAL_MATERIAL_CAPACITY, TERMINAL_OVERFLOW_CAPACITY,
-    TERMINAL_RESOLUTION_HOLD_CAPACITY, TerminalInventoryError, TerminalInventoryLocation,
-    TerminalItemPlacement, TerminalMaterialCredit, TerminalMaterialSnapshot,
+    TERMINAL_PENDING_ITEM_CAPACITY, TERMINAL_RESOLUTION_HOLD_CAPACITY,
+    TERMINAL_STABILIZED_ITEM_CAPACITY, TerminalInventoryError, TerminalInventoryLocation,
+    TerminalItemPlacement, TerminalMaterialCredit, TerminalMaterialSnapshot, plan_emergency_recall,
     plan_successful_extraction,
 };
 pub use trace::{
