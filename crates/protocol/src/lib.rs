@@ -14,6 +14,7 @@ mod handshake;
 mod messages;
 mod oath;
 mod progression;
+mod resolution_hold;
 mod safe_inventory;
 mod terminal_inventory;
 mod world_flow;
@@ -38,7 +39,7 @@ pub use bounded::{AuthTicket, BoundedValueError, ManifestHash, WireText};
 pub use codec::{
     DATAGRAM_FRAME_LIMIT, FRAME_HEADER_BYTES, RELIABLE_FRAME_LIMIT, WireCodecError, decode_frame,
     encode_frame, encode_m02_compatibility_frame, encode_protocol_1_12_compatibility_frame,
-    encode_protocol_1_14_compatibility_frame,
+    encode_protocol_1_14_compatibility_frame, encode_protocol_1_15_compatibility_frame,
 };
 pub use death_view::{
     DEATH_SUMMARY_REVISION, DEATH_VIEW_CHARACTER_NAME_MAX_BYTES, DEATH_VIEW_DIGEST_BYTES,
@@ -86,6 +87,16 @@ pub use progression::{
     PROGRESSION_REWARD_EVENT_ID_BYTES, ProgressionCapState, ProgressionProjection,
     ProgressionQueryFrame, ProgressionResult, ProgressionResultCode, ProgressionValidationError,
 };
+pub use resolution_hold::{
+    RESOLUTION_HOLD_DIGEST_BYTES, RESOLUTION_HOLD_ID_BYTES, RESOLUTION_HOLD_ID_MAX_BYTES,
+    RESOLUTION_HOLD_MAX_ITEMS, RESOLUTION_HOLD_MAX_STACKS, RESOLUTION_HOLD_SCHEMA_VERSION,
+    ResolutionHoldActionV1, ResolutionHoldDestinationV1, ResolutionHoldDispositionV1,
+    ResolutionHoldItemKindV1, ResolutionHoldItemTransitionV1, ResolutionHoldItemV1,
+    ResolutionHoldMutationFrameV1, ResolutionHoldMutationPayloadV1, ResolutionHoldMutationResultV1,
+    ResolutionHoldQueryFrameV1, ResolutionHoldQueryResultV1, ResolutionHoldRejectionCodeV1,
+    ResolutionHoldStackV1, ResolutionHoldValidationError, ResolutionHoldVersionAdvanceV1,
+    ResolutionHoldVersionVectorV1, ResolutionHoldVersionsV1, StoredResolutionHoldMutationResultV1,
+};
 pub use safe_inventory::{
     SAFE_INVENTORY_ITEM_UID_BYTES, SAFE_INVENTORY_PLACEMENT_CAPACITY,
     SAFE_INVENTORY_RESULT_HASH_BYTES, SafeInventoryDestinationV1, SafeInventoryPlacementV1,
@@ -116,7 +127,9 @@ use thiserror::Error;
 /// First incompatible protocol generation.
 pub const PROTOCOL_MAJOR: u16 = 1;
 /// Backward-compatible feature generation within [`PROTOCOL_MAJOR`].
-pub const PROTOCOL_MINOR: u16 = TERMINAL_INVENTORY_PROTOCOL_MINOR;
+pub const PROTOCOL_MINOR: u16 = RESOLUTION_HOLD_PROTOCOL_MINOR;
+/// Exact minimum `ResolutionHold` recovery generation.
+pub const RESOLUTION_HOLD_PROTOCOL_MINOR: u16 = 16;
 /// Exact successful-extraction and Emergency Recall generation.
 pub const TERMINAL_INVENTORY_PROTOCOL_MINOR: u16 = 15;
 /// Exact authenticated durable-death view generation.
@@ -167,6 +180,8 @@ pub const CORE_DEATH_VIEW_FEATURE_FLAG: &str = "core_death_views";
 pub const CORE_EXTRACTION_TERMINAL_FEATURE_FLAG: &str = "core_extraction_terminal_v1";
 /// Advertises the authenticated Emergency Recall intent and stored-result surface.
 pub const CORE_RECALL_TERMINAL_FEATURE_FLAG: &str = "core_emergency_recall_v1";
+/// Advertises the authenticated minimum `ResolutionHold` query and mutation surface.
+pub const CORE_RESOLUTION_HOLD_FEATURE_FLAG: &str = "core_resolution_hold_v1";
 /// Build admitted by the explicit wipeable Core identity development endpoint.
 pub const M03_CORE_DEV_BUILD_ID: &str = "m03-core-dev-identity-1";
 /// Non-promotable content target label advertised by the Core identity endpoint.
@@ -367,8 +382,9 @@ mod tests {
     }
 
     #[test]
-    fn terminal_inventory_requires_protocol_1_15_and_explicit_feature_negotiation() {
-        assert_eq!(PROTOCOL_MINOR, 15);
+    fn resolution_hold_appends_protocol_1_16_and_explicit_feature_negotiation() {
+        assert_eq!(PROTOCOL_MINOR, 16);
+        assert_eq!(RESOLUTION_HOLD_PROTOCOL_MINOR, 16);
         assert_eq!(TERMINAL_INVENTORY_PROTOCOL_MINOR, 15);
         assert_eq!(DEATH_VIEW_PROTOCOL_MINOR, 14);
         assert_eq!(SAFE_INVENTORY_PROTOCOL_MINOR, 12);
@@ -376,6 +392,7 @@ mod tests {
             CORE_DEATH_VIEW_FEATURE_FLAG,
             CORE_EXTRACTION_TERMINAL_FEATURE_FLAG,
             CORE_RECALL_TERMINAL_FEATURE_FLAG,
+            CORE_RESOLUTION_HOLD_FEATURE_FLAG,
         ] {
             assert!(WireText::<{ crate::handshake::FEATURE_FLAG_MAX_BYTES }>::new(feature).is_ok());
         }

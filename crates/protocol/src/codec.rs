@@ -3,7 +3,7 @@ use thiserror::Error;
 
 use crate::{
     DEATH_VIEW_PROTOCOL_MINOR, M02_PROTOCOL_MINOR, MessageKind, PROTOCOL_MAJOR, ProtocolVersion,
-    SAFE_INVENTORY_PROTOCOL_MINOR, WireMessage,
+    SAFE_INVENTORY_PROTOCOL_MINOR, TERMINAL_INVENTORY_PROTOCOL_MINOR, WireMessage,
 };
 
 const MAGIC: [u8; 4] = *b"GBN1";
@@ -80,6 +80,23 @@ pub fn encode_protocol_1_14_compatibility_frame(
     )
 }
 
+/// Reproduces protocol 1.15 bytes for immutable extraction/Recall compatibility fixtures.
+/// `ResolutionHold` query and mutation frames were appended in 1.16.
+pub fn encode_protocol_1_15_compatibility_frame(
+    message: &WireMessage,
+) -> Result<Vec<u8>, WireCodecError> {
+    if message_uses_resolution_hold(message) {
+        return Err(WireCodecError::MessageUnavailableAtVersion);
+    }
+    encode_frame_for_version(
+        message,
+        ProtocolVersion {
+            major: PROTOCOL_MAJOR,
+            minor: TERMINAL_INVENTORY_PROTOCOL_MINOR,
+        },
+    )
+}
+
 const fn message_uses_death_view(message: &WireMessage) -> bool {
     matches!(
         message,
@@ -96,9 +113,26 @@ const fn message_uses_terminal_inventory(message: &WireMessage) -> bool {
         message,
         WireMessage::ExtractionCommitFrame(_)
             | WireMessage::RecallFrame(_)
+            | WireMessage::ResolutionHoldQueryFrame(_)
+            | WireMessage::ResolutionHoldMutationFrame(_)
             | WireMessage::ReliableEvent(crate::ReliableEventFrame {
                 event: crate::ReliableEvent::ExtractionCommitResult(_)
-                    | crate::ReliableEvent::RecallResult(_),
+                    | crate::ReliableEvent::RecallResult(_)
+                    | crate::ReliableEvent::ResolutionHoldQueryResult(_)
+                    | crate::ReliableEvent::ResolutionHoldMutationResult(_),
+                ..
+            })
+    )
+}
+
+const fn message_uses_resolution_hold(message: &WireMessage) -> bool {
+    matches!(
+        message,
+        WireMessage::ResolutionHoldQueryFrame(_)
+            | WireMessage::ResolutionHoldMutationFrame(_)
+            | WireMessage::ReliableEvent(crate::ReliableEventFrame {
+                event: crate::ReliableEvent::ResolutionHoldQueryResult(_)
+                    | crate::ReliableEvent::ResolutionHoldMutationResult(_),
                 ..
             })
     )
@@ -197,6 +231,8 @@ const fn message_kind_byte(kind: MessageKind) -> u8 {
         MessageKind::DeathViewFrame => 18,
         MessageKind::ExtractionCommitFrame => 19,
         MessageKind::RecallFrame => 20,
+        MessageKind::ResolutionHoldQueryFrame => 21,
+        MessageKind::ResolutionHoldMutationFrame => 22,
     }
 }
 
@@ -222,6 +258,8 @@ const fn message_kind_from_byte(value: u8) -> Result<MessageKind, WireCodecError
         18 => Ok(MessageKind::DeathViewFrame),
         19 => Ok(MessageKind::ExtractionCommitFrame),
         20 => Ok(MessageKind::RecallFrame),
+        21 => Ok(MessageKind::ResolutionHoldQueryFrame),
+        22 => Ok(MessageKind::ResolutionHoldMutationFrame),
         other => Err(WireCodecError::UnknownMessageKind(other)),
     }
 }
@@ -420,7 +458,7 @@ mod tests {
         let frame = encode_frame(&input_message()).unwrap();
         assert!(frame.len() <= DATAGRAM_FRAME_LIMIT);
         assert_eq!(decode_frame(&frame).unwrap(), input_message());
-        assert_eq!(u16::from_le_bytes([frame[6], frame[7]]), 15);
+        assert_eq!(u16::from_le_bytes([frame[6], frame[7]]), 16);
         let protocol_1_14 = encode_protocol_1_14_compatibility_frame(&input_message()).unwrap();
         assert_eq!(
             blake3::hash(&protocol_1_14).to_hex().to_string(),
@@ -642,7 +680,7 @@ mod tests {
         });
 
         let frame = encode_frame(&transfer).unwrap();
-        assert_eq!(u16::from_le_bytes([frame[6], frame[7]]), 15);
+        assert_eq!(u16::from_le_bytes([frame[6], frame[7]]), 16);
         assert_eq!(decode_frame(&frame), Ok(transfer.clone()));
 
         let compatibility = encode_protocol_1_12_compatibility_frame(&transfer).unwrap();
@@ -666,7 +704,7 @@ mod tests {
                 payload,
             });
         let frame = encode_frame(&transfer).unwrap();
-        assert_eq!(u16::from_le_bytes([frame[6], frame[7]]), 15);
+        assert_eq!(u16::from_le_bytes([frame[6], frame[7]]), 16);
         assert_eq!(frame[8], 17);
         assert_eq!(decode_frame(&frame), Ok(transfer.clone()));
         let compatibility = encode_protocol_1_12_compatibility_frame(&transfer).unwrap();
@@ -717,7 +755,7 @@ mod tests {
             },
         });
         let frame = encode_frame(&request).unwrap();
-        assert_eq!(u16::from_le_bytes([frame[6], frame[7]]), 15);
+        assert_eq!(u16::from_le_bytes([frame[6], frame[7]]), 16);
         assert_eq!(frame[8], 18);
         assert_eq!(decode_frame(&frame), Ok(request.clone()));
         let compatibility = encode_protocol_1_14_compatibility_frame(&request).unwrap();
@@ -765,7 +803,7 @@ mod tests {
     }
 
     #[test]
-    fn append_only_message_kind_bytes_one_through_eighteen_are_unchanged() {
+    fn append_only_message_kind_bytes_one_through_twenty_are_unchanged() {
         let legacy = [
             MessageKind::ClientHello,
             MessageKind::HandshakeResponse,
@@ -794,6 +832,11 @@ mod tests {
         );
         assert_eq!(message_kind_byte(MessageKind::ExtractionCommitFrame), 19);
         assert_eq!(message_kind_byte(MessageKind::RecallFrame), 20);
+        assert_eq!(message_kind_byte(MessageKind::ResolutionHoldQueryFrame), 21);
+        assert_eq!(
+            message_kind_byte(MessageKind::ResolutionHoldMutationFrame),
+            22
+        );
     }
 
     #[test]
@@ -811,7 +854,7 @@ mod tests {
         let extraction_frame = encode_frame(&extraction).unwrap();
         assert_eq!(
             u16::from_le_bytes([extraction_frame[6], extraction_frame[7]]),
-            15
+            16
         );
         assert_eq!(extraction_frame[8], 19);
         assert_eq!(decode_frame(&extraction_frame), Ok(extraction.clone()));
@@ -824,7 +867,12 @@ mod tests {
             encode_protocol_1_12_compatibility_frame(&extraction),
             Err(WireCodecError::MessageUnavailableAtVersion)
         );
-        let extraction_hash = blake3::hash(&extraction_frame).to_hex().to_string();
+        let extraction_1_15 = encode_protocol_1_15_compatibility_frame(&extraction).unwrap();
+        assert_eq!(
+            u16::from_le_bytes([extraction_1_15[6], extraction_1_15[7]]),
+            15
+        );
+        let extraction_hash = blake3::hash(&extraction_1_15).to_hex().to_string();
 
         let recall = WireMessage::RecallFrame(crate::RecallFrameV1 {
             schema_version: crate::TERMINAL_INVENTORY_SCHEMA_VERSION,
@@ -841,7 +889,8 @@ mod tests {
             encode_protocol_1_14_compatibility_frame(&recall),
             Err(WireCodecError::MessageUnavailableAtVersion)
         );
-        let recall_hash = blake3::hash(&recall_frame).to_hex().to_string();
+        let recall_1_15 = encode_protocol_1_15_compatibility_frame(&recall).unwrap();
+        let recall_hash = blake3::hash(&recall_1_15).to_hex().to_string();
 
         assert_eq!(
             [extraction_hash, recall_hash],
@@ -874,7 +923,9 @@ mod tests {
             encode_protocol_1_14_compatibility_frame(&extraction_result),
             Err(WireCodecError::MessageUnavailableAtVersion)
         );
-        let extraction_result_hash = blake3::hash(&frame).to_hex().to_string();
+        let extraction_result_1_15 =
+            encode_protocol_1_15_compatibility_frame(&extraction_result).unwrap();
+        let extraction_result_hash = blake3::hash(&extraction_result_1_15).to_hex().to_string();
 
         let recall_result = WireMessage::ReliableEvent(crate::ReliableEventFrame {
             sequence: 2,
@@ -896,13 +947,128 @@ mod tests {
             encode_protocol_1_14_compatibility_frame(&recall_result),
             Err(WireCodecError::MessageUnavailableAtVersion)
         );
-        let recall_result_hash = blake3::hash(&frame).to_hex().to_string();
+        let recall_result_1_15 = encode_protocol_1_15_compatibility_frame(&recall_result).unwrap();
+        let recall_result_hash = blake3::hash(&recall_result_1_15).to_hex().to_string();
 
         assert_eq!(
             [extraction_result_hash, recall_result_hash],
             [
                 "0c2d7228a4069c08772237bded8a330b1074325e9c72c56838b575829d85725b".to_owned(),
                 "416bfae83fcd1a407e746fe7785d733b09cfda326ee026407151f5686d220ef7".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the four append-only Hold request/result fixtures remain one byte-level contract"
+    )]
+    fn protocol_1_16_appends_bounded_resolution_hold_frames_and_results() {
+        let query = WireMessage::ResolutionHoldQueryFrame(crate::ResolutionHoldQueryFrameV1 {
+            schema_version: crate::RESOLUTION_HOLD_SCHEMA_VERSION,
+            sequence: 16,
+            character_id: [2; 16],
+        });
+        let query_frame = encode_frame(&query).unwrap();
+        assert_eq!(u16::from_le_bytes([query_frame[6], query_frame[7]]), 16);
+        assert_eq!(query_frame[8], 21);
+        assert_eq!(query.channel(), crate::NetworkChannel::Control);
+        assert_eq!(decode_frame(&query_frame), Ok(query.clone()));
+        assert_eq!(
+            encode_protocol_1_15_compatibility_frame(&query),
+            Err(WireCodecError::MessageUnavailableAtVersion)
+        );
+
+        let payload = crate::ResolutionHoldMutationPayloadV1 {
+            extraction_id: [3; 16],
+            stack_index: 0,
+            action: crate::ResolutionHoldActionV1::Move,
+            expected_versions: crate::ResolutionHoldVersionsV1 {
+                account: 4,
+                character: 5,
+                world: 5,
+                inventory: 6,
+            },
+            content_revision: WireText::new("core-items-v1").unwrap(),
+            expected_stack_digest: [7; 32],
+        };
+        let mutation =
+            WireMessage::ResolutionHoldMutationFrame(crate::ResolutionHoldMutationFrameV1 {
+                schema_version: crate::RESOLUTION_HOLD_SCHEMA_VERSION,
+                sequence: 17,
+                mutation_id: [1; 16],
+                character_id: [2; 16],
+                issued_at_unix_millis: 100,
+                payload_hash: payload.canonical_hash(),
+                payload,
+            });
+        let mutation_frame = encode_frame(&mutation).unwrap();
+        assert_eq!(mutation_frame[8], 22);
+        assert_eq!(mutation.channel(), crate::NetworkChannel::Mutation);
+        assert_eq!(decode_frame(&mutation_frame), Ok(mutation.clone()));
+        assert_eq!(
+            encode_protocol_1_15_compatibility_frame(&mutation),
+            Err(WireCodecError::MessageUnavailableAtVersion)
+        );
+
+        let query_result = WireMessage::ReliableEvent(crate::ReliableEventFrame {
+            sequence: 1,
+            server_tick: 200,
+            event: crate::ReliableEvent::ResolutionHoldQueryResult(Box::new(
+                crate::ResolutionHoldQueryResultV1::Stored {
+                    schema_version: crate::RESOLUTION_HOLD_SCHEMA_VERSION,
+                    request_sequence: 16,
+                    character_id: [2; 16],
+                    versions: crate::ResolutionHoldVersionsV1 {
+                        account: 4,
+                        character: 5,
+                        world: 5,
+                        inventory: 6,
+                    },
+                    storage_resolution_required: false,
+                    stacks: Vec::new(),
+                },
+            )),
+        });
+        let query_result_frame = encode_frame(&query_result).unwrap();
+        assert_eq!(decode_frame(&query_result_frame), Ok(query_result.clone()));
+        assert_eq!(query_result.channel(), crate::NetworkChannel::Control);
+
+        let mutation_result = WireMessage::ReliableEvent(crate::ReliableEventFrame {
+            sequence: 2,
+            server_tick: 200,
+            event: crate::ReliableEvent::ResolutionHoldMutationResult(Box::new(
+                crate::ResolutionHoldMutationResultV1::Rejected {
+                    schema_version: crate::RESOLUTION_HOLD_SCHEMA_VERSION,
+                    request_sequence: 17,
+                    mutation_id: [1; 16],
+                    character_id: [2; 16],
+                    extraction_id: [3; 16],
+                    stack_index: 0,
+                    code: crate::ResolutionHoldRejectionCodeV1::StorageFull,
+                },
+            )),
+        });
+        let mutation_result_frame = encode_frame(&mutation_result).unwrap();
+        assert_eq!(
+            decode_frame(&mutation_result_frame),
+            Ok(mutation_result.clone())
+        );
+        assert_eq!(mutation_result.channel(), crate::NetworkChannel::Mutation);
+
+        assert_eq!(
+            [
+                blake3::hash(&query_frame).to_hex().to_string(),
+                blake3::hash(&mutation_frame).to_hex().to_string(),
+                blake3::hash(&query_result_frame).to_hex().to_string(),
+                blake3::hash(&mutation_result_frame).to_hex().to_string(),
+            ],
+            [
+                "0e64fa2dc734acc95c218676849e1565fae6b3938aacc1dfa6b2befa7026e91d".to_owned(),
+                "f1a3a18576499596470d7d21320023133acc9a48debd773cdce5b6491c638049".to_owned(),
+                "b1a62ad64ec9629ab769cf808b41bd4d4660a29ba1a3325ffd672f776b310dfe".to_owned(),
+                "d44d322b359d0760cfc2b69e131e8932a693bd80414ffa14bad28482794f4e87".to_owned(),
             ]
         );
     }
@@ -935,10 +1101,10 @@ mod tests {
         );
 
         let mut unknown_kind = valid;
-        unknown_kind[8] = 21;
+        unknown_kind[8] = 23;
         assert_eq!(
             decode_frame(&unknown_kind),
-            Err(WireCodecError::UnknownMessageKind(21))
+            Err(WireCodecError::UnknownMessageKind(23))
         );
     }
 

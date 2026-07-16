@@ -10,8 +10,9 @@ use crate::{
     ExtractionCommitResultV1, HandshakeResponse, InitialOathSelectionFrame,
     InitialOathSelectionResult, NetworkChannel, OathViewFrame, OathViewResult,
     ProgressionQueryFrame, ProgressionResult, RecallFrameV1, RecallResultV1,
-    SafeInventoryTransferFrameV1, SafeInventoryTransferResultV1, WireText, WorldFlowFrame,
-    WorldFlowResult,
+    ResolutionHoldMutationFrameV1, ResolutionHoldMutationResultV1, ResolutionHoldQueryFrameV1,
+    ResolutionHoldQueryResultV1, SafeInventoryTransferFrameV1, SafeInventoryTransferResultV1,
+    WireText, WorldFlowFrame, WorldFlowResult,
 };
 
 pub const FIXED_VECTOR_SCALE: i16 = 1_000;
@@ -45,6 +46,8 @@ pub enum MessageKind {
     DeathViewFrame,
     ExtractionCommitFrame,
     RecallFrame,
+    ResolutionHoldQueryFrame,
+    ResolutionHoldMutationFrame,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -450,6 +453,8 @@ pub enum ReliableEvent {
     DeathViewResult(Box<DeathViewResultV1>),
     ExtractionCommitResult(Box<ExtractionCommitResultV1>),
     RecallResult(Box<RecallResultV1>),
+    ResolutionHoldQueryResult(Box<ResolutionHoldQueryResultV1>),
+    ResolutionHoldMutationResult(Box<ResolutionHoldMutationResultV1>),
 }
 
 impl ReliableEvent {
@@ -463,14 +468,16 @@ impl ReliableEvent {
             | Self::InitialOathSelectionResult(_)
             | Self::BargainDecisionResult(_)
             | Self::SafeInventoryTransferResult(_)
-            | Self::ExtractionCommitResult(_) => NetworkChannel::Mutation,
+            | Self::ExtractionCommitResult(_)
+            | Self::ResolutionHoldMutationResult(_) => NetworkChannel::Mutation,
             Self::Control(_)
             | Self::AccountBootstrapResult(_)
             | Self::WorldFlowResult(_)
             | Self::ProgressionResult(_)
             | Self::OathViewResult(_)
             | Self::BargainViewResult(_)
-            | Self::DeathViewResult(_) => NetworkChannel::Control,
+            | Self::DeathViewResult(_)
+            | Self::ResolutionHoldQueryResult(_) => NetworkChannel::Control,
             Self::SocialPing { .. } => NetworkChannel::Social,
         }
     }
@@ -521,6 +528,12 @@ impl ReliableEvent {
             Self::RecallResult(result) => result
                 .validate()
                 .map_err(|_| MessageValidationError::TerminalInventory),
+            Self::ResolutionHoldQueryResult(result) => result
+                .validate()
+                .map_err(|_| MessageValidationError::ResolutionHold),
+            Self::ResolutionHoldMutationResult(result) => result
+                .validate()
+                .map_err(|_| MessageValidationError::ResolutionHold),
             _ => Ok(()),
         }
     }
@@ -565,6 +578,8 @@ pub enum WireMessage {
     DeathViewFrame(DeathViewFrameV1),
     ExtractionCommitFrame(ExtractionCommitFrameV1),
     RecallFrame(RecallFrameV1),
+    ResolutionHoldQueryFrame(ResolutionHoldQueryFrameV1),
+    ResolutionHoldMutationFrame(ResolutionHoldMutationFrameV1),
 }
 
 impl WireMessage {
@@ -591,6 +606,8 @@ impl WireMessage {
             Self::DeathViewFrame(_) => MessageKind::DeathViewFrame,
             Self::ExtractionCommitFrame(_) => MessageKind::ExtractionCommitFrame,
             Self::RecallFrame(_) => MessageKind::RecallFrame,
+            Self::ResolutionHoldQueryFrame(_) => MessageKind::ResolutionHoldQueryFrame,
+            Self::ResolutionHoldMutationFrame(_) => MessageKind::ResolutionHoldMutationFrame,
         }
     }
 
@@ -605,7 +622,8 @@ impl WireMessage {
             | Self::ProgressionQueryFrame(_)
             | Self::OathViewFrame(_)
             | Self::BargainViewFrame(_)
-            | Self::DeathViewFrame(_) => NetworkChannel::Control,
+            | Self::DeathViewFrame(_)
+            | Self::ResolutionHoldQueryFrame(_) => NetworkChannel::Control,
             Self::InputFrame(_) => NetworkChannel::Input,
             Self::ActionFrame(_) | Self::RecallFrame(_) => NetworkChannel::Action,
             Self::SnapshotChunk(_) => NetworkChannel::Snapshot,
@@ -615,7 +633,8 @@ impl WireMessage {
             | Self::InitialOathSelectionFrame(_)
             | Self::BargainDecisionFrame(_)
             | Self::SafeInventoryTransferFrame(_)
-            | Self::ExtractionCommitFrame(_) => NetworkChannel::Mutation,
+            | Self::ExtractionCommitFrame(_)
+            | Self::ResolutionHoldMutationFrame(_) => NetworkChannel::Mutation,
         }
     }
 
@@ -674,6 +693,12 @@ impl WireMessage {
             Self::RecallFrame(value) => value
                 .validate()
                 .map_err(|_| MessageValidationError::TerminalInventory),
+            Self::ResolutionHoldQueryFrame(value) => value
+                .validate()
+                .map_err(|_| MessageValidationError::ResolutionHold),
+            Self::ResolutionHoldMutationFrame(value) => value
+                .validate()
+                .map_err(|_| MessageValidationError::ResolutionHold),
         }
     }
 }
@@ -696,6 +721,8 @@ pub enum MessageValidationError {
     DeathView,
     #[error("terminal-inventory message failed semantic validation")]
     TerminalInventory,
+    #[error("ResolutionHold message failed semantic validation")]
+    ResolutionHold,
     #[error("message sequence must be nonzero")]
     ZeroSequence,
     #[error("fixed-point vector component must remain within -1000..=1000")]
