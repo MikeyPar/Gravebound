@@ -65,6 +65,33 @@ impl CoreRecallTerminalAuthority {
     }
 }
 
+/// Transport-facing Recall intent seam. The Core identity endpoint injects the disabled
+/// implementation, while a live character actor can inject its own bounded authority without
+/// moving channel state, inventory authority, or terminal arbitration into QUIC dispatch.
+pub trait CoreRecallIntentAuthority: Send + Sync {
+    fn handle_recall<'a>(
+        &'a self,
+        authenticated: AuthenticatedAccount,
+        frame: &'a RecallFrameV1,
+        server_tick: u64,
+    ) -> impl Future<Output = RecallResultV1> + Send + 'a;
+}
+
+impl CoreRecallIntentAuthority for CoreRecallTerminalAuthority {
+    #[allow(
+        clippy::manual_async_fn,
+        reason = "the desugared public trait contract guarantees a Send future for spawned QUIC workers"
+    )]
+    fn handle_recall<'a>(
+        &'a self,
+        authenticated: AuthenticatedAccount,
+        frame: &'a RecallFrameV1,
+        _server_tick: u64,
+    ) -> impl Future<Output = RecallResultV1> + Send + 'a {
+        async move { self.handle(authenticated, frame) }
+    }
+}
+
 pub trait ProductionRecallWriter: Send + Sync {
     fn commit(
         &self,

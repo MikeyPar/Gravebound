@@ -133,19 +133,20 @@ pub use production_extraction::{
     protocol_extraction_terminal_result, recover_committed_extraction_arbiter,
 };
 pub use production_recall::{
-    CoreRecallTerminalAuthority, PostgresProductionRecallExecutionService,
-    ProductionRecallExecutionError, ProductionRecallExecutionOutcome,
-    ProductionRecallExecutionService, ProductionRecallReplayOutcome,
-    ProductionRecallTerminalReader, ProductionRecallWriter, committed_recall_terminal_receipt,
-    committed_recall_terminal_receipt_from_stored, hall_snapshot_from_stored_recall,
-    production_recall_terminal_candidate, protocol_recall_terminal_result,
-    recover_committed_recall_arbiter,
+    CoreRecallIntentAuthority, CoreRecallTerminalAuthority,
+    PostgresProductionRecallExecutionService, ProductionRecallExecutionError,
+    ProductionRecallExecutionOutcome, ProductionRecallExecutionService,
+    ProductionRecallReplayOutcome, ProductionRecallTerminalReader, ProductionRecallWriter,
+    committed_recall_terminal_receipt, committed_recall_terminal_receipt_from_stored,
+    hall_snapshot_from_stored_recall, production_recall_terminal_candidate,
+    protocol_recall_terminal_result, recover_committed_recall_arbiter,
 };
 pub use production_recall_channel::{
     PRODUCTION_RECALL_MOVEMENT_BASIS_POINTS, ProductionLinkLostRecallAuthorityV1,
     ProductionRecallChannel, ProductionRecallChannelError, ProductionRecallClock,
-    ProductionRecallCompletionAuthorityV1, ProductionRecallPlanner,
-    ProductionRecallStartAuthorityV1, ProductionRecallTickPreparation, evaluate_link_lost_tick,
+    ProductionRecallCompletionAuthorityV1, ProductionRecallIntentActor,
+    ProductionRecallPendingAuthorityV1, ProductionRecallPlanner, ProductionRecallStartAuthorityV1,
+    ProductionRecallTickPreparation, evaluate_link_lost_tick,
 };
 pub use progression_award::{
     CoreProgressionRules, ProgressionAwardCode, ProgressionAwardCommand, ProgressionAwardContext,
@@ -570,7 +571,7 @@ where
 /// World-flow messages share the reliable transport but cannot mutate identity state, and the
 /// normal world-flow authority remains fail-closed until its downstream packages are complete.
 #[allow(clippy::too_many_arguments)]
-pub async fn serve_core_reliable<R, C, G, E, W, P, D, OC, BC>(
+pub async fn serve_core_reliable<R, C, G, E, W, P, D, OC, BC, RA>(
     connection: &quinn::Connection,
     identity: &IdentityService<R, C, G, E>,
     world_flow: &W,
@@ -580,7 +581,7 @@ pub async fn serve_core_reliable<R, C, G, E, W, P, D, OC, BC>(
     bargain: &CoreBargainAuthority<BC>,
     safe_inventory: &CoreSafeInventoryAuthority,
     extraction: &CoreExtractionTerminalAuthority,
-    recall: &CoreRecallTerminalAuthority,
+    recall: &RA,
     authenticated: AuthenticatedAccount,
     response_sequence: u32,
     server_tick: u64,
@@ -595,6 +596,7 @@ where
     D: DeathViewRepository,
     OC: IdentityClock,
     BC: IdentityClock,
+    RA: CoreRecallIntentAuthority,
 {
     if response_sequence == 0 {
         return Err(ServerTransportError::UnexpectedMessage);
@@ -651,9 +653,11 @@ where
                 extraction.handle(authenticated, &frame),
             ))
         }
-        WireMessage::RecallFrame(frame) => {
-            protocol::ReliableEvent::RecallResult(Box::new(recall.handle(authenticated, &frame)))
-        }
+        WireMessage::RecallFrame(frame) => protocol::ReliableEvent::RecallResult(Box::new(
+            recall
+                .handle_recall(authenticated, &frame, server_tick)
+                .await,
+        )),
         _ => return Err(ServerTransportError::UnexpectedMessage),
     };
     let response = protocol::ReliableEventFrame {

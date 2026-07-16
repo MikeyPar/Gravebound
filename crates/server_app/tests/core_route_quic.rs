@@ -49,6 +49,7 @@ use server_app::{
     PostgresDangerEntryOathBargainProviderV3, PostgresDeathViewRepository,
     PostgresDormantWorldFlowCoordinator, PostgresProgressionAwardService,
     PostgresProgressionRestoreProvider, PostgresRewardService, PreparedTerminal,
+    ProductionRecallClock, ProductionRecallIntentActor, ProductionRecallPendingAuthorityV1,
     ProgressionQueryService, SecretRewardEpoch, SubmitResult, TerminalArbiter, TerminalCandidate,
     WorldFlowGateService, WorldFlowIdGenerator, durable_death_terminal_candidate,
     recover_committed_death_arbiter, serve_core_reliable, serve_handshake,
@@ -265,6 +266,12 @@ impl IdentityClock for FixedAuthority {
     }
 }
 
+impl ProductionRecallClock for FixedAuthority {
+    fn unix_millis(&self) -> u64 {
+        IdentityClock::unix_millis(self)
+    }
+}
+
 impl CharacterIdGenerator for FixedAuthority {
     fn next_id(&self) -> [u8; 16] {
         [221; 16]
@@ -439,6 +446,14 @@ fn death_view_policy() -> HandshakePolicy {
     policy
         .feature_flags
         .push(WireText::new(protocol::CORE_DEATH_VIEW_FEATURE_FLAG).unwrap());
+    policy
+}
+
+fn recall_policy() -> HandshakePolicy {
+    let mut policy = policy();
+    policy
+        .feature_flags
+        .push(WireText::new(protocol::CORE_RECALL_TERMINAL_FEATURE_FLAG).unwrap());
     policy
 }
 
@@ -1322,6 +1337,170 @@ async fn reliable_quic_rejects_disabled_recall_before_domain_access() {
     drop(client);
     client_endpoint.wait_idle().await;
     server_endpoint.close(0_u32.into(), b"disabled Recall complete");
+    server_endpoint.wait_idle().await;
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the authenticated Start/Cancel QUIC journey remains contiguous for wire-level audit"
+)]
+async fn reliable_quic_dispatches_recall_to_one_actor_owned_channel() {
+    let identity = IdentityService::new(
+        InMemoryAccountRepository::default(),
+        FixedAuthority,
+        FixedAuthority,
+        NoopIdentityEventSink,
+        ManifestHash::new("a".repeat(64)).unwrap(),
+    );
+    let world_flow = WorldFlowGateService::new(
+        InMemoryAccountRepository::default(),
+        FixedAuthority,
+        revision(),
+    );
+    let progression = disabled_progression();
+    let death_views = DeathViewService::new(
+        DisabledDeathViewRepository,
+        durable_death_fixture::death_view_revision(),
+    );
+    let oath = CoreOathSelectionAuthority::<FixedAuthority>::disabled();
+    let bargain = CoreBargainAuthority::<FixedAuthority>::disabled();
+    let safe_inventory = CoreSafeInventoryAuthority::disabled();
+    let extraction_terminal = CoreExtractionTerminalAuthority::disabled();
+    let authenticated = durable_death_fixture::authenticated_account();
+    let recall_actor = ProductionRecallIntentActor::new(
+        FixedAuthority,
+        authenticated.account_id.as_bytes(),
+        durable_death_fixture::CHARACTER_ID,
+        ProductionRecallPendingAuthorityV1 {
+            pending_item_count: 4,
+            pending_material_stack_count: 2,
+        },
+    )
+    .unwrap();
+    let start = RecallFrameV1 {
+        schema_version: TERMINAL_INVENTORY_SCHEMA_VERSION,
+        sequence: 1,
+        character_id: durable_death_fixture::CHARACTER_ID,
+        client_tick: 8_000,
+        intent: RecallIntentV1::Start,
+    };
+    let cancel = RecallFrameV1 {
+        schema_version: TERMINAL_INVENTORY_SCHEMA_VERSION,
+        sequence: 2,
+        character_id: durable_death_fixture::CHARACTER_ID,
+        client_tick: 8_001,
+        intent: RecallIntentV1::Cancel,
+    };
+    let (server_endpoint, client_endpoint, address) = endpoints();
+    let connecting = client_endpoint.connect(address, "localhost").unwrap();
+    let incoming = server_endpoint.accept().await.unwrap();
+    let (client, server) = tokio::join!(connecting, incoming);
+    let client = client.unwrap();
+    let server = server.unwrap();
+
+    let server_session = async {
+        serve_handshake(
+            &server,
+            &recall_policy(),
+            AuthenticationDecision::Accepted,
+            WireText::new("active-recall-session").unwrap(),
+        )
+        .await
+        .unwrap();
+        serve_core_reliable(
+            &server,
+            &identity,
+            &world_flow,
+            &progression,
+            &death_views,
+            &oath,
+            &bargain,
+            &safe_inventory,
+            &extraction_terminal,
+            &recall_actor,
+            authenticated,
+            1,
+            100,
+        )
+        .await
+        .unwrap();
+        serve_core_reliable(
+            &server,
+            &identity,
+            &world_flow,
+            &progression,
+            &death_views,
+            &oath,
+            &bargain,
+            &safe_inventory,
+            &extraction_terminal,
+            &recall_actor,
+            authenticated,
+            2,
+            111,
+        )
+        .await
+        .unwrap();
+    };
+    let client_session = async {
+        let HandshakeResponse::Accepted(server_hello) =
+            bot_client::perform_handshake(&client, hello())
+                .await
+                .unwrap()
+        else {
+            panic!("Core handshake must succeed");
+        };
+        assert!(
+            server_hello
+                .feature_flags
+                .iter()
+                .any(|flag| flag.as_str() == protocol::CORE_RECALL_TERMINAL_FEATURE_FLAG)
+        );
+        let pending = bot_client::perform_reliable_gameplay(
+            &client,
+            protocol::WireMessage::RecallFrame(start),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            pending.event,
+            ReliableEvent::RecallResult(result)
+                if matches!(
+                    *result,
+                    RecallResultV1::Pending {
+                        started_tick: 100,
+                        completion_tick: 112,
+                        pending_item_count: 4,
+                        pending_material_stack_count: 2,
+                        ..
+                    }
+                )
+        ));
+
+        let cancelled = bot_client::perform_reliable_gameplay(
+            &client,
+            protocol::WireMessage::RecallFrame(cancel),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            cancelled.event,
+            ReliableEvent::RecallResult(result)
+                if matches!(
+                    *result,
+                    RecallResultV1::Cancelled {
+                        started_tick: 100,
+                        cancelled_tick: 111,
+                        ..
+                    }
+                )
+        ));
+    };
+    tokio::join!(server_session, client_session);
+    drop(client);
+    client_endpoint.wait_idle().await;
+    server_endpoint.close(0_u32.into(), b"active Recall complete");
     server_endpoint.wait_idle().await;
 }
 

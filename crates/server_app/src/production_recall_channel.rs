@@ -23,10 +23,12 @@ use protocol::{
     TERMINAL_MATERIAL_CAPACITY, TERMINAL_PENDING_ITEM_CAPACITY, TerminalInventoryRejectionCodeV1,
 };
 use thiserror::Error;
+use tokio::sync::Mutex;
 
 use crate::{
-    AuthenticatedAccount, AuthenticatedNamespace, CoreTerminalEvaluation, CoreTerminalProducer,
-    TerminalBinding, production_recall_terminal_candidate,
+    AuthenticatedAccount, AuthenticatedNamespace, CoreRecallIntentAuthority,
+    CoreTerminalEvaluation, CoreTerminalProducer, TerminalBinding,
+    production_recall_terminal_candidate,
 };
 
 pub const PRODUCTION_RECALL_MOVEMENT_BASIS_POINTS: u16 =
@@ -70,6 +72,25 @@ impl ProductionRecallStartAuthorityV1 {
             || self.selected_character_id == [0; 16]
             || self.server_tick == 0
             || self.pending_item_count > TERMINAL_PENDING_ITEM_CAPACITY
+            || usize::from(self.pending_material_stack_count) > TERMINAL_MATERIAL_CAPACITY
+        {
+            return Err(ProductionRecallChannelError::InvalidServerAuthority);
+        }
+        Ok(())
+    }
+}
+
+/// Mutable actor projection used only to populate the player-visible pending result. Exact
+/// completion custody is always replanned from locked persistence authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProductionRecallPendingAuthorityV1 {
+    pub pending_item_count: u16,
+    pub pending_material_stack_count: u8,
+}
+
+impl ProductionRecallPendingAuthorityV1 {
+    fn validate(self) -> Result<(), ProductionRecallChannelError> {
+        if self.pending_item_count > TERMINAL_PENDING_ITEM_CAPACITY
             || usize::from(self.pending_material_stack_count) > TERMINAL_MATERIAL_CAPACITY
         {
             return Err(ProductionRecallChannelError::InvalidServerAuthority);
@@ -208,6 +229,146 @@ enum ProductionRecallChannelState {
 pub struct ProductionRecallChannel<Clock> {
     clock: Clock,
     state: ProductionRecallChannelState,
+}
+
+#[derive(Debug)]
+struct ProductionRecallIntentActorState<Clock> {
+    channel: ProductionRecallChannel<Clock>,
+    pending: ProductionRecallPendingAuthorityV1,
+}
+
+/// One live character actor's Recall intent and channel authority.
+///
+/// This type is intentionally actor-scoped: it owns no global account map and performs no
+/// repository lookup from the transport path. The gameplay actor refreshes bounded pending counts,
+/// supplies authoritative completion versions to [`Self::evaluate_explicit_tick`], and remains the
+/// owner of the shared terminal coordinator and execution service.
+#[derive(Debug)]
+pub struct ProductionRecallIntentActor<Clock> {
+    account_id: [u8; 16],
+    character_id: [u8; 16],
+    state: Mutex<ProductionRecallIntentActorState<Clock>>,
+}
+
+impl<Clock> ProductionRecallIntentActor<Clock> {
+    pub fn new(
+        clock: Clock,
+        account_id: [u8; 16],
+        character_id: [u8; 16],
+        pending: ProductionRecallPendingAuthorityV1,
+    ) -> Result<Self, ProductionRecallChannelError> {
+        if account_id == [0; 16] || character_id == [0; 16] {
+            return Err(ProductionRecallChannelError::InvalidServerAuthority);
+        }
+        pending.validate()?;
+        Ok(Self {
+            account_id,
+            character_id,
+            state: Mutex::new(ProductionRecallIntentActorState {
+                channel: ProductionRecallChannel::new(clock),
+                pending,
+            }),
+        })
+    }
+
+    #[must_use]
+    pub const fn account_id(&self) -> [u8; 16] {
+        self.account_id
+    }
+
+    #[must_use]
+    pub const fn character_id(&self) -> [u8; 16] {
+        self.character_id
+    }
+
+    /// Refreshes only server-observed pending counts for a future Start result. An active channel
+    /// retains the snapshot captured at its original start tick.
+    pub async fn refresh_pending_authority(
+        &self,
+        pending: ProductionRecallPendingAuthorityV1,
+    ) -> Result<(), ProductionRecallChannelError> {
+        pending.validate()?;
+        self.state.lock().await.pending = pending;
+        Ok(())
+    }
+
+    /// Handles one reliable Start/Cancel intent against the actor's immutable account/character
+    /// binding and the caller-supplied authoritative server tick.
+    pub async fn handle(
+        &self,
+        authenticated: AuthenticatedAccount,
+        frame: &RecallFrameV1,
+        server_tick: u64,
+    ) -> RecallResultV1
+    where
+        Clock: ProductionRecallClock,
+    {
+        let mut state = self.state.lock().await;
+        let authority = ProductionRecallStartAuthorityV1 {
+            account_id: self.account_id,
+            selected_character_id: self.character_id,
+            server_tick,
+            pending_item_count: state.pending.pending_item_count,
+            pending_material_stack_count: state.pending.pending_material_stack_count,
+        };
+        state.channel.handle(authenticated, authority, frame)
+    }
+
+    /// Evaluates the explicit producer through the same serialized actor channel used by reliable
+    /// intent dispatch. The caller retains ownership of all other producer evaluations and commit.
+    pub async fn evaluate_explicit_tick<Planner>(
+        &self,
+        planner: &Planner,
+        authority: &ProductionRecallCompletionAuthorityV1,
+    ) -> Result<ProductionRecallTickPreparation, ProductionRecallChannelError>
+    where
+        Clock: ProductionRecallClock,
+        Planner: ProductionRecallPlanner,
+    {
+        self.state
+            .lock()
+            .await
+            .channel
+            .evaluate_explicit_tick(planner, authority)
+            .await
+    }
+
+    #[must_use]
+    pub async fn is_channeling(&self) -> bool {
+        self.state.lock().await.channel.is_channeling()
+    }
+
+    #[must_use]
+    pub async fn movement_basis_points(&self) -> u16 {
+        self.state.lock().await.channel.movement_basis_points()
+    }
+
+    #[must_use]
+    pub async fn blocks_combat_interaction_and_consumables(&self) -> bool {
+        self.state
+            .lock()
+            .await
+            .channel
+            .blocks_combat_interaction_and_consumables()
+    }
+}
+
+impl<Clock> CoreRecallIntentAuthority for ProductionRecallIntentActor<Clock>
+where
+    Clock: ProductionRecallClock,
+{
+    #[allow(
+        clippy::manual_async_fn,
+        reason = "the desugared public trait contract guarantees a Send future for spawned QUIC workers"
+    )]
+    fn handle_recall<'a>(
+        &'a self,
+        authenticated: AuthenticatedAccount,
+        frame: &'a RecallFrameV1,
+        server_tick: u64,
+    ) -> impl Future<Output = RecallResultV1> + Send + 'a {
+        async move { self.handle(authenticated, frame, server_tick).await }
+    }
 }
 
 impl<Clock> ProductionRecallChannel<Clock> {
@@ -907,6 +1068,102 @@ mod tests {
             ProductionRecallTickPreparation::Fresh { .. }
         ));
         assert_eq!(planner.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn intent_actor_binds_transport_to_one_server_owned_character_snapshot() {
+        let actor = ProductionRecallIntentActor::new(
+            FixedClock(50),
+            [1; 16],
+            [2; 16],
+            ProductionRecallPendingAuthorityV1 {
+                pending_item_count: 3,
+                pending_material_stack_count: 1,
+            },
+        )
+        .unwrap();
+        let pending = actor
+            .handle(
+                authenticated(),
+                &frame(7, 9_999, RecallIntentV1::Start),
+                100,
+            )
+            .await;
+        assert!(matches!(
+            pending,
+            RecallResultV1::Pending {
+                started_tick: 100,
+                completion_tick: 112,
+                pending_item_count: 3,
+                pending_material_stack_count: 1,
+                ..
+            }
+        ));
+        assert!(actor.is_channeling().await);
+        assert_eq!(actor.movement_basis_points().await, 7_500);
+        assert!(actor.blocks_combat_interaction_and_consumables().await);
+
+        actor
+            .refresh_pending_authority(ProductionRecallPendingAuthorityV1 {
+                pending_item_count: 9,
+                pending_material_stack_count: 2,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            actor
+                .handle(
+                    authenticated(),
+                    &frame(7, 9_999, RecallIntentV1::Start),
+                    101,
+                )
+                .await,
+            pending
+        );
+        assert!(matches!(
+            actor
+                .handle(
+                    authenticated(),
+                    &frame(8, 10_000, RecallIntentV1::Cancel),
+                    111,
+                )
+                .await,
+            RecallResultV1::Cancelled {
+                cancelled_tick: 111,
+                ..
+            }
+        ));
+
+        assert!(matches!(
+            actor
+                .handle(
+                    authenticated(),
+                    &frame(9, 10_001, RecallIntentV1::Start),
+                    200,
+                )
+                .await,
+            RecallResultV1::Pending {
+                pending_item_count: 9,
+                pending_material_stack_count: 2,
+                started_tick: 200,
+                completion_tick: 212,
+                ..
+            }
+        ));
+
+        let foreign = AuthenticatedAccount {
+            account_id: AccountId::new([10; 16]).unwrap(),
+            namespace: AuthenticatedNamespace::WipeableTest,
+        };
+        assert!(matches!(
+            actor
+                .handle(foreign, &frame(10, 10_002, RecallIntentV1::Start), 201)
+                .await,
+            RecallResultV1::Rejected {
+                code: TerminalInventoryRejectionCodeV1::ForeignAuthority,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]
