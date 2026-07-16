@@ -11,10 +11,11 @@ use protocol::{
     DeathViewResultCodeV1,
 };
 
-use super::projection::DeathSummaryLossContinuation;
+use super::projection::{DeathSummaryLossContinuation, project_memorial_page};
 use super::{
     DeathSummaryPresentation, DeathViewClientError, DeathViewFailure, DeathViewProjectionError,
-    MemorialDetailQueryIntent, MemorialPageQueryIntent, PendingDeathViewQuery,
+    MemorialDetailQueryIntent, MemorialEntryPresentation, MemorialPageQueryIntent,
+    PendingDeathViewQuery,
 };
 
 pub const MEMORIAL_PAGE_LIMIT: u8 = protocol::DEATH_VIEW_MAX_MEMORIALS_PER_PAGE;
@@ -119,7 +120,7 @@ pub enum MemorialDetailPhase {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CachedMemorialPage {
-    entries: Vec<DeathMemorialEntryV1>,
+    entries: Vec<MemorialEntryPresentation>,
     next_cursor: Option<DeathMemorialCursorV1>,
 }
 
@@ -169,6 +170,15 @@ impl MemorialWallModel {
     }
 
     pub fn entries(&self) -> impl Iterator<Item = &DeathMemorialEntryV1> {
+        let visible = self.list_is_visible();
+        self.pages
+            .iter()
+            .filter(move |_| visible)
+            .flat_map(|page| page.entries.iter())
+            .map(|entry| &entry.authority)
+    }
+
+    pub fn presentations(&self) -> impl Iterator<Item = &MemorialEntryPresentation> {
         let visible = self.list_is_visible();
         self.pages
             .iter()
@@ -409,18 +419,12 @@ impl MemorialWallModel {
         entries: Vec<DeathMemorialEntryV1>,
         next_cursor: Option<DeathMemorialCursorV1>,
         required_revision: &DeathViewContentRevisionV1,
+        catalog: &sim_content::CoreDevelopmentDeathView,
     ) -> Result<(), DeathViewProjectionError> {
-        if entries
-            .iter()
-            .any(|entry| entry.presentation_revision != *required_revision)
-        {
-            return Err(DeathViewProjectionError::AuthorityMismatch(
-                "memorial page presentation revision",
-            ));
-        }
+        let entries = project_memorial_page(entries, required_revision, catalog)?;
         let page_ids = entries
             .iter()
-            .map(|entry| entry.cursor.death_id)
+            .map(|entry| entry.authority.cursor.death_id)
             .collect::<BTreeSet<_>>();
         if page_ids.len() != entries.len() {
             return Err(DeathViewProjectionError::InvalidMemorialPage(
@@ -448,16 +452,16 @@ impl MemorialWallModel {
                 }
                 if entries
                     .first()
-                    .is_none_or(|entry| !memorial_precedes(expected_after, entry.cursor))
+                    .is_none_or(|entry| !memorial_precedes(expected_after, entry.authority.cursor))
                 {
                     return Err(DeathViewProjectionError::InvalidMemorialPage(
                         "continuation was not strictly older",
                     ));
                 }
-                if entries
-                    .iter()
-                    .any(|entry| self.seen_death_ids.might_contain(entry.cursor.death_id))
-                {
+                if entries.iter().any(|entry| {
+                    self.seen_death_ids
+                        .might_contain(entry.authority.cursor.death_id)
+                }) {
                     return Err(DeathViewProjectionError::InvalidMemorialPage(
                         "death identity was duplicated across pages",
                     ));
@@ -677,7 +681,7 @@ impl MemorialWallModel {
         self.pages
             .iter()
             .flat_map(|page| page.entries.iter())
-            .any(|entry| entry == anchor)
+            .any(|entry| &entry.authority == anchor)
     }
 
     fn clear_detail(&mut self) {

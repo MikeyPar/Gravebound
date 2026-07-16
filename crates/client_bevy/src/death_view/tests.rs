@@ -398,7 +398,16 @@ fn acknowledged_summary_projects_exact_order_copy_and_action_gates() {
     assert_eq!(summary.hero.character_name, "Mara Ash");
     assert_eq!(summary.hero.class.label, "Grave Arbalist");
     assert_eq!(summary.hero.lifetime_ms, 600_000);
-    assert_eq!(summary.lethal_cause.killer.label, "Sepulcher Knight");
+    assert_eq!(summary.hero.formatted_lifetime, "0h 10m 00s");
+    assert_eq!(summary.death_at_unix_ms, 1_000);
+    assert_eq!(summary.formatted_death_at, "1970-01-01 00:00:01 UTC");
+    assert_eq!(summary.lethal_cause.killer.value.label, "Sepulcher Knight");
+    assert_eq!(
+        summary.lethal_cause.killer.portrait,
+        DeathSourcePortraitPresentation::Asset {
+            asset_id: "portrait.miniboss.sepulcher_knight".to_owned(),
+        }
+    );
     assert_eq!(
         summary
             .lethal_cause
@@ -409,8 +418,31 @@ fn acknowledged_summary_projects_exact_order_copy_and_action_gates() {
     );
     assert_eq!(summary.lethal_cause.source_x_milli_tiles, 1_000);
     assert_eq!(summary.lethal_cause.source_y_milli_tiles, -2_000);
+    assert_eq!(summary.lethal_cause.final_damage, 8);
+    assert_eq!(summary.lethal_cause.formatted_final_damage, "8 HP");
+    assert_eq!(
+        summary.lethal_cause.formatted_source_position,
+        "(1.000, -2.000) tiles"
+    );
     assert_eq!(summary.timeline.events[0].source_y_milli_tiles, -2_000);
+    assert_eq!(summary.timeline.events[0].raw_damage, 4);
+    assert_eq!(summary.timeline.events[0].formatted_raw_damage, "4 HP");
+    assert_eq!(summary.timeline.events[1].formatted_final_damage, "8 HP");
+    assert_eq!(
+        summary.timeline.events[0].formatted_source_position,
+        "(1.000, -2.000) tiles"
+    );
     assert_eq!(summary.lost.len(), 1);
+    assert!(matches!(
+        &summary.lost[0],
+        DeathLossPresentation::Item {
+            quantity: 1,
+            formatted_quantity,
+            ..
+        } if formatted_quantity == "×1"
+    ));
+    assert_eq!(summary.preserved[0].quantity, 1);
+    assert_eq!(summary.preserved[0].formatted_quantity, "×1");
     assert_eq!(
         summary.actions.primary.action,
         DeathSummaryAction::CreateSuccessor
@@ -441,6 +473,62 @@ fn acknowledged_summary_projects_exact_order_copy_and_action_gates() {
             .all(|action| action.state.is_enabled() && action.unavailable_detail.is_none())
     );
     assert_eq!(model.terminal().phase(), TerminalDeathPhase::SummaryReady);
+}
+
+fn complete_portraitless_summary(
+    source_id: &str,
+    attack_id: &str,
+    cause: protocol::DeathCauseV1,
+    network_state: DeathNetworkStateV1,
+) -> DeathSummaryPresentation {
+    let mut model = model();
+    let mut death = latest();
+    death.cause = cause;
+    death.killer_content_id = WireText::new(source_id).unwrap();
+    death.killer_pattern_id = None;
+    death.network_state = network_state;
+    let sequence = begin_to_summary(&mut model, death);
+    let mut summary = summary_page(1, 0, vec![item_loss(0)]);
+    for entry in &mut summary.last_five_damage {
+        entry.source_content_id = WireText::new(source_id).unwrap();
+        entry.source_entity_id = None;
+        entry.pattern_id = None;
+        entry.attack_id = WireText::new(attack_id).unwrap();
+        entry.network_state = network_state;
+        entry.statuses.clear();
+    }
+    model
+        .handle_result(&summary_result(sequence, summary))
+        .unwrap();
+    model.terminal().summary().unwrap().clone()
+}
+
+#[test]
+fn explicit_portraitless_sources_never_become_unknown_or_fallback_assets() {
+    for (source_id, attack_id, cause, network_state) in [
+        (
+            "environment.core.hazard",
+            "attack.environment.core_hazard",
+            protocol::DeathCauseV1::Environment,
+            DeathNetworkStateV1::Connected,
+        ),
+        (
+            "network.disconnect",
+            "attack.network.disconnect",
+            protocol::DeathCauseV1::Disconnect,
+            DeathNetworkStateV1::LinkLost,
+        ),
+    ] {
+        let summary = complete_portraitless_summary(source_id, attack_id, cause, network_state);
+        assert_eq!(summary.lethal_cause.killer.value.content_id, source_id);
+        assert_eq!(
+            summary.lethal_cause.killer.portrait,
+            DeathSourcePortraitPresentation::ExplicitlyAbsent
+        );
+        assert!(summary.timeline.events.iter().all(|entry| {
+            entry.source.portrait == DeathSourcePortraitPresentation::ExplicitlyAbsent
+        }));
+    }
 }
 
 #[test]
@@ -638,7 +726,16 @@ fn thirty_three_losses_retry_and_append_atomically() {
     model
         .handle_result(&summary_result(sequence, first_page_33()))
         .unwrap();
-    assert_eq!(model.terminal().summary().unwrap().lost.len(), 32);
+    let first_page = model.terminal().summary().unwrap();
+    assert_eq!(first_page.lost.len(), 32);
+    assert!(matches!(
+        &first_page.lost[0],
+        DeathLossPresentation::RunMaterial {
+            quantity: 3,
+            formatted_quantity,
+            ..
+        } if formatted_quantity == "×3"
+    ));
 
     let continuation = model.load_more_losses().unwrap();
     model

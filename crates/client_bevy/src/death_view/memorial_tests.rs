@@ -114,6 +114,55 @@ fn station_open_is_bounded_and_empty_is_explicit() {
 }
 
 #[test]
+fn list_projection_retains_raw_authority_and_resolves_canonical_copy() {
+    let mut model = new_model();
+    let entry = memorial_entry(1, 1_000);
+    open_with_entries(&mut model, vec![entry.clone()], false);
+
+    assert_eq!(model.memorial().entries().next(), Some(&entry));
+    let projected = model.memorial().presentations().next().unwrap();
+    assert_eq!(projected.authority, entry);
+    assert_eq!(projected.formatted_death_at, "1970-01-01 00:00:01 UTC");
+    assert_eq!(
+        projected.presentation.content_id,
+        "memorial.presentation.core_default"
+    );
+    assert_eq!(projected.presentation.label, "Lantern Halls Memorial");
+    assert_eq!(projected.class.label, "Grave Arbalist");
+    assert_eq!(projected.echo_outcome.label, "Available Echo");
+}
+
+#[test]
+fn unresolved_list_copy_rejects_the_page_before_cache_replacement() {
+    for corrupt in ["presentation", "class"] {
+        let mut model = new_model();
+        open_with_entries(&mut model, vec![memorial_entry(1, 2_000)], false);
+        let refresh = model.refresh_memorial_wall().unwrap();
+        let mut invalid = memorial_entry(2, 3_000);
+        match corrupt {
+            "presentation" => {
+                invalid.presentation_key = WireText::new("memorial.presentation.unknown").unwrap();
+            }
+            "class" => {
+                invalid.class_id = WireText::new("class.unknown").unwrap();
+            }
+            _ => unreachable!(),
+        }
+        assert!(matches!(
+            model.handle_result(&page_result(refresh.sequence, vec![invalid], false)),
+            Err(DeathViewClientError::Projection(
+                DeathViewProjectionError::MissingCopy { .. }
+            ))
+        ));
+        assert_eq!(model.memorial().cached_entry_count(), 1);
+        assert_eq!(
+            model.memorial().list_phase(),
+            MemorialListPhase::FatalRecordError
+        );
+    }
+}
+
+#[test]
 fn continuation_enforces_cross_page_order_and_death_identity_uniqueness() {
     let mut model = new_model();
     let mut duplicate_initial = vec![memorial_entry(1, 11_000), memorial_entry(2, 10_999)];
@@ -269,8 +318,21 @@ fn selection_requires_a_held_immutable_anchor_and_projects_stored_detail() {
     assert_eq!(detail.hero.character_name, "Mara Ash");
     assert_eq!(detail.lethal_cause.cause, None);
     assert_eq!(
-        detail.lethal_cause.killer.content_id,
+        detail.lethal_cause.killer.value.content_id,
         "miniboss.sepulcher_knight"
+    );
+    assert_eq!(detail.formatted_death_at, "1970-01-01 00:00:01 UTC");
+    assert_eq!(detail.hero.formatted_lifetime, "0h 10m 00s");
+    assert_eq!(detail.lethal_cause.formatted_final_damage, "8 HP");
+    assert_eq!(
+        detail.lethal_cause.formatted_source_position,
+        "(1.000, -2.000) tiles"
+    );
+    assert_eq!(
+        detail.lethal_cause.killer.portrait,
+        DeathSourcePortraitPresentation::Asset {
+            asset_id: "portrait.miniboss.sepulcher_knight".to_owned(),
+        }
     );
     assert_eq!(
         detail.actions.primary.state,

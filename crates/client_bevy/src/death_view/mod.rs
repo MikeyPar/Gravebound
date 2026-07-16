@@ -20,10 +20,11 @@ pub use memorial::{
 pub use projection::{
     DEATH_SUMMARY_SECTION_ORDER, DeathDamageEventPresentation, DeathFixedProjectionPresentation,
     DeathHeroPresentation, DeathLethalCausePresentation, DeathLocalizedValue,
-    DeathLossPresentation, DeathNetworkPresentation, DeathStatusPresentation, DeathSummaryAction,
+    DeathLossPresentation, DeathNetworkPresentation, DeathSourcePortraitPresentation,
+    DeathSourcePresentation, DeathStatusPresentation, DeathSummaryAction,
     DeathSummaryActionPresentation, DeathSummaryActionState, DeathSummaryActionsPresentation,
     DeathSummaryContext, DeathSummaryPresentation, DeathSummarySection, DeathTimelinePresentation,
-    DeathViewProjectionError,
+    DeathViewProjectionError, MemorialEntryPresentation,
 };
 pub use summary::{TerminalDeathModel, TerminalDeathPhase};
 
@@ -699,6 +700,7 @@ impl DeathViewClientModel {
             entries.to_vec(),
             next_cursor,
             &self.presentation_revision,
+            &self.presentation,
         )?;
         self.pending = None;
         self.last_accepted_result = Some(result.clone());

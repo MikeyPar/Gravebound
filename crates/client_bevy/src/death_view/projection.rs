@@ -1,8 +1,8 @@
 //! Renderer-independent projection of acknowledged durable-death records.
 //!
 //! The structures in this module retain authoritative integer values and stable IDs beside exact
-//! compiled copy. They deliberately perform no time, quantity, position, or damage formatting so
-//! the later native widgets cannot invent localization policy.
+//! compiled copy and canonical formatted siblings. Native widgets consume this projection instead
+//! of inventing time, quantity, position, damage, or portrait policy.
 
 use std::collections::BTreeSet;
 
@@ -12,7 +12,7 @@ use protocol::{
     DeathRecallStateV1, DeathSummaryProjectionEntryV1, DeathSummaryProjectionKindV1,
     DeathSummaryViewV1, DeathTraceEntryV1, DeathViewContentRevisionV1, LatestCommittedDeathV1,
 };
-use sim_content::CoreDevelopmentDeathView;
+use sim_content::{CoreDeathViewSourcePortrait, CoreDevelopmentDeathView};
 use thiserror::Error;
 
 /// GDD `DTH-020` order. Widgets consume this constant instead of choosing their own layout order.
@@ -45,6 +45,20 @@ pub struct DeathLocalizedValue {
     pub label: String,
 }
 
+/// Closed portrait policy. Explicit absence is valid only for the catalog's environment and
+/// connection-loss sources; an unknown policy is rejected during projection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeathSourcePortraitPresentation {
+    Asset { asset_id: String },
+    ExplicitlyAbsent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeathSourcePresentation {
+    pub value: DeathLocalizedValue,
+    pub portrait: DeathSourcePortraitPresentation,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeathHeroPresentation {
     pub section_title: String,
@@ -55,6 +69,7 @@ pub struct DeathHeroPresentation {
     pub oath: Option<DeathLocalizedValue>,
     pub bargains: Vec<DeathLocalizedValue>,
     pub lifetime_ms: u64,
+    pub formatted_lifetime: String,
     pub final_deed: DeathLocalizedValue,
 }
 
@@ -70,17 +85,20 @@ pub struct DeathDamageEventPresentation {
     pub ordinal: u16,
     pub event_tick: u64,
     pub event_ordinal: u32,
-    pub source: DeathLocalizedValue,
+    pub source: DeathSourcePresentation,
     pub source_entity_id: Option<[u8; 16]>,
     pub pattern: Option<DeathLocalizedValue>,
     pub attack: DeathLocalizedValue,
     pub raw_damage: u32,
+    pub formatted_raw_damage: String,
     pub final_damage: u32,
+    pub formatted_final_damage: String,
     pub damage_type: DeathLocalizedValue,
     pub pre_health: u32,
     pub post_health: u32,
     pub source_x_milli_tiles: i32,
     pub source_y_milli_tiles: i32,
+    pub formatted_source_position: String,
     pub network: DeathLocalizedValue,
     pub recall: DeathLocalizedValue,
     pub lethal: bool,
@@ -93,13 +111,15 @@ pub struct DeathLethalCausePresentation {
     /// Terminal summaries retain the stored cause. Memorial summaries omit it because the
     /// append-only Summary response carries every DTH-020 display field but not `DeathCauseV1`.
     pub cause: Option<DeathLocalizedValue>,
-    pub killer: DeathLocalizedValue,
+    pub killer: DeathSourcePresentation,
     pub pattern: Option<DeathLocalizedValue>,
     pub attack: DeathLocalizedValue,
     pub final_damage: u32,
+    pub formatted_final_damage: String,
     pub damage_type: DeathLocalizedValue,
     pub source_x_milli_tiles: i32,
     pub source_y_milli_tiles: i32,
+    pub formatted_source_position: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,11 +147,14 @@ pub enum DeathLossPresentation {
         ordinal: u16,
         item: DeathLocalizedValue,
         item_uid: [u8; 16],
+        quantity: u32,
+        formatted_quantity: String,
     },
     RunMaterial {
         ordinal: u16,
         material: DeathLocalizedValue,
         quantity: u32,
+        formatted_quantity: String,
     },
 }
 
@@ -150,6 +173,18 @@ pub struct DeathFixedProjectionPresentation {
     pub kind: DeathSummaryProjectionKindV1,
     pub value: DeathLocalizedValue,
     pub quantity: u32,
+    pub formatted_quantity: String,
+}
+
+/// Read-only Memorial list row. The complete immutable wire authority remains embedded so
+/// selection, ordering, and support diagnostics never depend on formatted strings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemorialEntryPresentation {
+    pub authority: DeathMemorialEntryV1,
+    pub formatted_death_at: String,
+    pub presentation: DeathLocalizedValue,
+    pub class: DeathLocalizedValue,
+    pub echo_outcome: DeathLocalizedValue,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,6 +233,7 @@ pub struct DeathSummaryPresentation {
     /// Summary responses deliberately reveal no character aggregate identity.
     pub character_id: Option<[u8; 16]>,
     pub death_at_unix_ms: u64,
+    pub formatted_death_at: String,
     pub death_tick: u64,
     pub content_revision: String,
     pub presentation_revision: DeathViewContentRevisionV1,
@@ -260,7 +296,7 @@ pub(crate) fn validate_latest(
         catalog,
     )?;
     cause_value(latest.cause, catalog)?;
-    source_value(latest.killer_content_id.as_str(), catalog)?;
+    project_source(latest.killer_content_id.as_str(), catalog)?;
     if let Some(pattern) = latest.killer_pattern_id.as_ref() {
         pattern_value(pattern.as_str(), catalog)?;
     }
@@ -279,7 +315,6 @@ pub(crate) fn project_summary(
         character_id: Some(latest.character_id),
         death_at_unix_ms: latest.death_at_unix_ms,
         cause: Some(latest.cause),
-        killer_content_id: latest.killer_content_id.as_str(),
         killer_pattern_id: latest
             .killer_pattern_id
             .as_ref()
@@ -306,12 +341,49 @@ pub(crate) fn project_memorial_summary(
         character_id: None,
         death_at_unix_ms: memorial.cursor.death_at_unix_ms,
         cause: None,
-        killer_content_id: lethal.source_content_id.as_str(),
         killer_pattern_id: lethal.pattern_id.as_ref().map(protocol::WireText::as_str),
         network_state: lethal.network_state,
         recall_state: lethal.recall_state,
     };
     project_summary_with_anchor(summary, anchor, catalog)
+}
+
+pub(crate) fn project_memorial_page(
+    entries: Vec<DeathMemorialEntryV1>,
+    required_revision: &DeathViewContentRevisionV1,
+    catalog: &CoreDevelopmentDeathView,
+) -> Result<Vec<MemorialEntryPresentation>, DeathViewProjectionError> {
+    entries
+        .into_iter()
+        .map(|authority| {
+            if authority.presentation_revision != *required_revision {
+                return Err(DeathViewProjectionError::AuthorityMismatch(
+                    "memorial page presentation revision",
+                ));
+            }
+            let formatted_death_at =
+                catalog.format_timestamp_utc(authority.cursor.death_at_unix_ms);
+            let presentation = death_owned_value(
+                catalog,
+                CoreDeathViewCopyKind::MemorialPresentation,
+                "Memorial presentation",
+                authority.presentation_key.as_str(),
+            )?;
+            let class = dependency_value(
+                "class",
+                authority.class_id.as_str(),
+                catalog.resolve_class(authority.class_id.as_str()),
+            )?;
+            let echo_outcome = echo_value(authority.echo_outcome, catalog)?;
+            Ok(MemorialEntryPresentation {
+                authority,
+                formatted_death_at,
+                presentation,
+                class,
+                echo_outcome,
+            })
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -320,7 +392,6 @@ struct SummaryProjectionAnchor<'a> {
     character_id: Option<[u8; 16]>,
     death_at_unix_ms: u64,
     cause: Option<DeathCauseV1>,
-    killer_content_id: &'a str,
     killer_pattern_id: Option<&'a str>,
     network_state: DeathNetworkStateV1,
     recall_state: DeathRecallStateV1,
@@ -354,6 +425,7 @@ fn project_summary_with_anchor(
         death_id: summary.death_id,
         character_id: anchor.character_id,
         death_at_unix_ms: anchor.death_at_unix_ms,
+        formatted_death_at: catalog.format_timestamp_utc(anchor.death_at_unix_ms),
         death_tick: summary.death_tick,
         content_revision: summary.content_revision.as_str().to_owned(),
         presentation_revision: summary.presentation_revision.clone(),
@@ -412,16 +484,18 @@ fn project_lethal_cause(
             .cause
             .map(|cause| cause_value(cause, catalog))
             .transpose()?,
-        killer: source_value(anchor.killer_content_id, catalog)?,
+        killer: lethal.source.clone(),
         pattern: anchor
             .killer_pattern_id
             .map(|id| pattern_value(id, catalog))
             .transpose()?,
         attack: lethal.attack.clone(),
         final_damage: lethal.final_damage,
+        formatted_final_damage: lethal.formatted_final_damage.clone(),
         damage_type: lethal.damage_type.clone(),
         source_x_milli_tiles: lethal.source_x_milli_tiles,
         source_y_milli_tiles: lethal.source_y_milli_tiles,
+        formatted_source_position: lethal.formatted_source_position.clone(),
     })
 }
 
@@ -695,6 +769,7 @@ fn project_hero(
             })
             .collect::<Result<Vec<_>, _>>()?,
         lifetime_ms: summary.lifetime_ms,
+        formatted_lifetime: catalog.format_lifetime(summary.lifetime_ms),
         final_deed: death_owned_value(
             catalog,
             CoreDeathViewCopyKind::Deed,
@@ -712,7 +787,7 @@ fn project_damage_event(
         ordinal: entry.ordinal,
         event_tick: entry.event_tick,
         event_ordinal: entry.event_ordinal,
-        source: source_value(entry.source_content_id.as_str(), catalog)?,
+        source: project_source(entry.source_content_id.as_str(), catalog)?,
         source_entity_id: entry.source_entity_id,
         pattern: entry
             .pattern_id
@@ -721,12 +796,16 @@ fn project_damage_event(
             .transpose()?,
         attack: attack_value(entry.attack_id.as_str(), catalog)?,
         raw_damage: entry.raw_damage,
+        formatted_raw_damage: catalog.format_damage(entry.raw_damage),
         final_damage: entry.final_damage,
+        formatted_final_damage: catalog.format_damage(entry.final_damage),
         damage_type: damage_type_value(entry.damage_type, catalog)?,
         pre_health: entry.pre_health,
         post_health: entry.post_health,
         source_x_milli_tiles: entry.source_x_milli_tiles,
         source_y_milli_tiles: entry.source_y_milli_tiles,
+        formatted_source_position: catalog
+            .format_position(entry.source_x_milli_tiles, entry.source_y_milli_tiles),
         network: network_value(entry.network_state, catalog)?,
         recall: recall_value(entry.recall_state, catalog)?,
         lethal: entry.lethal,
@@ -765,6 +844,8 @@ fn project_losses(
                 item_uid: entry.item_uid.ok_or(
                     DeathViewProjectionError::InvalidLossContinuation("item UID missing"),
                 )?,
+                quantity: entry.quantity,
+                formatted_quantity: catalog.format_quantity(entry.quantity),
             }),
             DeathSummaryProjectionKindV1::LostRunMaterial => {
                 Ok(DeathLossPresentation::RunMaterial {
@@ -776,6 +857,7 @@ fn project_losses(
                         entry.content_id.as_str(),
                     )?,
                     quantity: entry.quantity,
+                    formatted_quantity: catalog.format_quantity(entry.quantity),
                 })
             }
             _ => Err(DeathViewProjectionError::InvalidLossContinuation(
@@ -910,6 +992,7 @@ fn project_fixed(
                     entry.content_id.as_str(),
                 )?,
                 quantity: entry.quantity,
+                formatted_quantity: catalog.format_quantity(entry.quantity),
             })
         })
         .collect()
@@ -1019,11 +1102,28 @@ fn echo_value(
     )
 }
 
-fn source_value(
+fn project_source(
     content_id: &str,
     catalog: &CoreDevelopmentDeathView,
-) -> Result<DeathLocalizedValue, DeathViewProjectionError> {
-    dependency_value("source", content_id, catalog.resolve_source(content_id))
+) -> Result<DeathSourcePresentation, DeathViewProjectionError> {
+    let value = dependency_value("source", content_id, catalog.resolve_source(content_id))?;
+    let portrait = match catalog.resolve_source_portrait(content_id) {
+        Some(CoreDeathViewSourcePortrait::Asset(asset_id)) => {
+            DeathSourcePortraitPresentation::Asset {
+                asset_id: asset_id.to_owned(),
+            }
+        }
+        Some(CoreDeathViewSourcePortrait::ExplicitlyAbsent) => {
+            DeathSourcePortraitPresentation::ExplicitlyAbsent
+        }
+        None => {
+            return Err(DeathViewProjectionError::MissingCopy {
+                domain: "source portrait policy",
+                content_id: content_id.to_owned(),
+            });
+        }
+    };
+    Ok(DeathSourcePresentation { value, portrait })
 }
 
 fn attack_value(
