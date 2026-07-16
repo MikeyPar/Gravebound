@@ -10,7 +10,7 @@
 //! another receipt writer or permit repair: the immutable mutation result, death event, and
 //! terminal danger restore root must agree exactly or the read fails closed.
 
-use sqlx::Row;
+use sqlx::{PgConnection, Row};
 
 use crate::durable_death_repository::load_strict_stored_trace_promotion_v1;
 use crate::{
@@ -82,7 +82,7 @@ const COMMITTED_DEATH_TERMINAL_SQL: &str = "SELECT mutation.account_id AS mutati
 
 /// Strict server reconstruction material. `server_app` can map it to its versioned terminal
 /// receipt without depending on database rows or accepting client-authored authority.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct StoredCommittedDeathTerminalV1 {
     pub schema_version: u16,
     pub result: StoredCommittedDeathResultV1,
@@ -134,39 +134,53 @@ impl PostgresPersistence {
         if account_id == [0; 16] || character_id == [0; 16] {
             return Err(PersistenceError::DurableDeathBindingMismatch);
         }
-        let mut connection = self.pool.acquire().await?;
-        let rows = sqlx::query(COMMITTED_DEATH_TERMINAL_SQL)
-            .bind(WIPEABLE_CORE_NAMESPACE)
-            .bind(account_id.as_slice())
-            .bind(character_id.as_slice())
-            .bind(DURABLE_DEATH_CONTRACT)
-            .fetch_all(&mut *connection)
-            .await?;
-        let [row] = rows.as_slice() else {
-            return if rows.is_empty() {
-                Ok(None)
-            } else {
-                Err(corrupt())
-            };
-        };
-        let terminal = terminal_from_row(row, account_id, character_id)?;
-        let promotion = load_strict_stored_trace_promotion_v1(
-            &mut connection,
-            WIPEABLE_CORE_NAMESPACE,
-            terminal.result.death_id,
-            terminal.result.canonical_request_hash,
-        )
-        .await?
-        .ok_or_else(corrupt)?;
-        if promotion.account_id != account_id
-            || promotion.character_id != character_id
-            || promotion.promotion_digest != terminal.promotion_digest
-            || promotion.terminal_payload_hash != terminal.terminal_payload_hash
-        {
-            return Err(corrupt());
-        }
-        Ok(Some(terminal))
+        let mut transaction = self.begin_transaction().await?;
+        let terminal =
+            load_committed_death_terminal_v1_on(transaction.connection(), account_id, character_id)
+                .await?;
+        transaction.rollback().await?;
+        Ok(terminal)
     }
+}
+
+/// Connection-scoped form used by composite audit readers that must retain one serializable
+/// snapshot across terminal recovery and every dependent row family.
+pub(crate) async fn load_committed_death_terminal_v1_on(
+    connection: &mut PgConnection,
+    account_id: [u8; 16],
+    character_id: [u8; 16],
+) -> Result<Option<StoredCommittedDeathTerminalV1>, PersistenceError> {
+    let rows = sqlx::query(COMMITTED_DEATH_TERMINAL_SQL)
+        .bind(WIPEABLE_CORE_NAMESPACE)
+        .bind(account_id.as_slice())
+        .bind(character_id.as_slice())
+        .bind(DURABLE_DEATH_CONTRACT)
+        .fetch_all(&mut *connection)
+        .await?;
+    let [row] = rows.as_slice() else {
+        return if rows.is_empty() {
+            Ok(None)
+        } else {
+            Err(corrupt())
+        };
+    };
+    let terminal = terminal_from_row(row, account_id, character_id)?;
+    let promotion = load_strict_stored_trace_promotion_v1(
+        connection,
+        WIPEABLE_CORE_NAMESPACE,
+        terminal.result.death_id,
+        terminal.result.canonical_request_hash,
+    )
+    .await?
+    .ok_or_else(corrupt)?;
+    if promotion.account_id != account_id
+        || promotion.character_id != character_id
+        || promotion.promotion_digest != terminal.promotion_digest
+        || promotion.terminal_payload_hash != terminal.terminal_payload_hash
+    {
+        return Err(corrupt());
+    }
+    Ok(Some(terminal))
 }
 
 fn terminal_from_row(

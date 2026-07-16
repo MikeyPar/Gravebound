@@ -23,6 +23,7 @@ mod danger_crash_restore;
 mod danger_crash_restore_repository;
 mod danger_entry_restore;
 mod death_live_trace_promotion;
+mod death_terminal_signature;
 mod death_view_repository;
 mod durable_death;
 mod durable_death_repository;
@@ -93,6 +94,16 @@ pub use death_live_trace_promotion::{
     DEATH_LIVE_TRACE_PROMOTION_DIGEST_CONTEXT_V1, DEATH_TERMINAL_PAYLOAD_HASH_CONTEXT_V1,
     DurableDeathTraceEntryProvenanceV1, DurableDeathTracePromotionV1,
     canonical_death_terminal_payload_hash_v1,
+};
+pub use death_terminal_signature::{
+    CORE_DEATH_TERMINAL_SIGNATURE_CONTEXT_V1, StoredCoreDeathTerminalSignatureV1,
+    StoredDeathTerminalAggregateV1, StoredDeathTerminalAuditV1,
+    StoredDeathTerminalBargainCleanupV1, StoredDeathTerminalEchoTransitionV1,
+    StoredDeathTerminalEchoV1, StoredDeathTerminalGraphCountsV1, StoredDeathTerminalGraphRootV1,
+    StoredDeathTerminalItemLedgerV1, StoredDeathTerminalItemV1, StoredDeathTerminalMaterialV1,
+    StoredDeathTerminalOutboxV1, StoredDeathTerminalTraceConflictV1,
+    StoredDeathTerminalTracePromotionV1, StoredDeathTerminalTraceProvenanceV1,
+    StoredDeathTerminalTraceReceiptV1,
 };
 pub use death_view_repository::{
     DeathViewReadError, MAX_DEATH_VIEW_LOST_PER_PAGE, MAX_DEATH_VIEW_MEMORIALS_PER_PAGE,
@@ -358,6 +369,8 @@ pub enum PersistenceError {
     CorruptStoredSafeInventory,
     #[error("stored lifecycle signature violates the approved canonical contract")]
     CorruptStoredLifecycleSignature,
+    #[error("stored death terminal signature violates the approved canonical contract")]
+    CorruptStoredDeathTerminalSignature,
     #[error("safe-inventory account does not exist")]
     SafeInventoryAccountNotFound,
     #[error("safe-inventory transfer requires the selected living character in Lantern Halls")]
