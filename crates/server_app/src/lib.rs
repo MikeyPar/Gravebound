@@ -13,6 +13,7 @@ mod caldus_victory;
 mod combat_factory;
 mod core_journey_world_flow;
 mod core_lifecycle;
+mod core_recall_outbox;
 mod core_terminal_coordinator;
 mod death_view_service;
 mod durable_death_execution;
@@ -72,6 +73,11 @@ pub use core_lifecycle::{
     CoreCheckpointBinding, CoreCheckpointServiceError, CoreDangerCheckpointRepository,
     CoreDangerCheckpointService, CoreLifeKey, CoreLiveBindingId, CoreLiveCharacter,
     CoreLiveDirectory, CoreLiveError, CoreResumeOutcome, DANGER_CHECKPOINT_INTERVAL_TICKS,
+};
+pub use core_recall_outbox::{
+    CORE_RECALL_COMPLETION_OUTBOX_CAPACITY, CoreRecallCompletionDelivery,
+    CoreRecallCompletionInbox, CoreRecallCompletionOutbox, CoreRecallOutboxError,
+    CoreReliableSequence, core_recall_completion_outbox,
 };
 pub use core_terminal_coordinator::{
     CoreNonTerminalAdmission, CoreTerminalBarrierProgress, CoreTerminalCoordinator,
@@ -690,6 +696,29 @@ where
 
 pub fn close_transport(connection: &quinn::Connection, close_code: u32, reason: &'static [u8]) {
     connection.close(close_code.into(), reason);
+}
+
+/// Sends one server-initiated reliable event on a unidirectional QUIC stream.
+///
+/// The caller owns sequencing and durable replay. A transport failure never rolls
+/// back the already committed domain outcome.
+pub async fn send_server_reliable_event(
+    connection: &quinn::Connection,
+    event: &protocol::ReliableEventFrame,
+) -> Result<(), ServerTransportError> {
+    event
+        .validate()
+        .map_err(|_| ServerTransportError::UnexpectedMessage)?;
+    let mut send = connection
+        .open_uni()
+        .await
+        .map_err(|error| ServerTransportError::Quic(error.to_string()))?;
+    send.write_all(&encode_frame(&WireMessage::ReliableEvent(event.clone()))?)
+        .await
+        .map_err(|error| ServerTransportError::Quic(error.to_string()))?;
+    send.finish()
+        .map_err(|error| ServerTransportError::Quic(error.to_string()))?;
+    Ok(())
 }
 
 pub fn send_gameplay_snapshots(

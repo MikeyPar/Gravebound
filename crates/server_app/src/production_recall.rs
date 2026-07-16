@@ -178,6 +178,50 @@ pub struct ProductionRecallPublishedV1 {
 }
 
 impl ProductionRecallPublishedV1 {
+    pub fn validate(&self) -> Result<(), ProductionRecallExecutionError> {
+        self.result
+            .validate()
+            .map_err(|_| ProductionRecallExecutionError::PublishedReceiptMismatch)?;
+        let RecallResultV1::Stored {
+            request_sequence,
+            result,
+            ..
+        } = &self.result
+        else {
+            return Err(ProductionRecallExecutionError::PublishedReceiptMismatch);
+        };
+        let request_identity_matches = match result.trigger {
+            RecallTerminalTriggerV1::Explicit => {
+                request_sequence.is_some() && self.explicit_client_tick.is_some_and(|tick| tick > 0)
+            }
+            RecallTerminalTriggerV1::LinkLost => {
+                request_sequence.is_none() && self.explicit_client_tick.is_none()
+            }
+        };
+        if !request_identity_matches
+            || self.hall.character_id != result.character_id
+            || self.hall.character_version != result.versions.world.after
+            || !matches!(
+                &self.hall.location,
+                CharacterLocation::Safe {
+                    location_id,
+                    arrival: SafeArrival::HallDefault,
+                } if location_id.as_str() == persistence::PRODUCTION_RECALL_HALL_ID
+            )
+        {
+            return Err(ProductionRecallExecutionError::PublishedReceiptMismatch);
+        }
+        Ok(())
+    }
+
+    pub fn completion_tick(&self) -> Result<u64, ProductionRecallExecutionError> {
+        self.validate()?;
+        let RecallResultV1::Stored { result, .. } = &self.result else {
+            unreachable!("validated Recall publication is always stored");
+        };
+        Ok(result.completion_tick)
+    }
+
     #[must_use]
     pub fn as_replayed(&self) -> Self {
         let mut replayed = self.clone();
@@ -519,10 +563,7 @@ pub fn validate_published_recall_receipt(
     published: &ProductionRecallPublishedV1,
     receipt: &StoredTerminalReceipt,
 ) -> Result<(), ProductionRecallExecutionError> {
-    published
-        .result
-        .validate()
-        .map_err(|_| ProductionRecallExecutionError::PublishedReceiptMismatch)?;
+    published.validate()?;
     let RecallResultV1::Stored { result, .. } = &published.result else {
         return Err(ProductionRecallExecutionError::PublishedReceiptMismatch);
     };

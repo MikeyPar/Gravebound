@@ -119,6 +119,24 @@ pub async fn receive_snapshot_datagram(
     }
 }
 
+/// Receives one server-initiated reliable event from a unidirectional QUIC stream.
+pub async fn receive_server_reliable(
+    connection: &quinn::Connection,
+) -> Result<ReliableEventFrame, BotTransportError> {
+    let mut receive = connection
+        .accept_uni()
+        .await
+        .map_err(|error| BotTransportError::Quic(error.to_string()))?;
+    let response = receive
+        .read_to_end(RELIABLE_FRAME_LIMIT)
+        .await
+        .map_err(|error| BotTransportError::Quic(error.to_string()))?;
+    match decode_frame(&response)? {
+        WireMessage::ReliableEvent(event) => Ok(event),
+        _ => Err(BotTransportError::UnexpectedMessage),
+    }
+}
+
 pub async fn perform_reliable_gameplay(
     connection: &quinn::Connection,
     message: WireMessage,

@@ -22,12 +22,14 @@ use persistence::{
     StoredExtractionAuthority, StoredWorldFlowRevisionV1, WIPEABLE_CORE_NAMESPACE,
 };
 use protocol::{
-    AuthTicket, CharacterLocation, ClientHello, Compression, DEATH_VIEW_SCHEMA_VERSION,
-    DeathViewFrameV1, DeathViewRequestV1, DeathViewResultV1, ExtractionCommitFrameV1,
-    ExtractionCommitPayloadV1, ExtractionCommitResultV1, HandshakeResponse, ManifestHash, Platform,
-    ProtocolVersion, RecallFrameV1, RecallIntentV1, RecallResultV1, ReliableEvent, SafeArrival,
-    TERMINAL_INVENTORY_SCHEMA_VERSION, TerminalExpectedVersionsV1,
-    TerminalInventoryRejectionCodeV1, WireText, WorldFlowContentRevisionV1, WorldFlowFrame,
+    AuthTicket, CharacterLocation, CharacterLocationSnapshot, ClientHello, Compression,
+    DEATH_VIEW_SCHEMA_VERSION, DeathViewFrameV1, DeathViewRequestV1, DeathViewResultV1,
+    ExtractionCommitFrameV1, ExtractionCommitPayloadV1, ExtractionCommitResultV1,
+    HandshakeResponse, ManifestHash, Platform, ProtocolVersion, RecallFrameV1, RecallIntentV1,
+    RecallResultV1, RecallTerminalTriggerV1, ReliableEvent, SafeArrival,
+    StoredRecallTerminalResultV1, TERMINAL_HALL_CONTENT_ID, TERMINAL_INVENTORY_SCHEMA_VERSION,
+    TerminalExpectedVersionsV1, TerminalInventoryRejectionCodeV1, TerminalVersionAdvanceV1,
+    TerminalVersionVectorV1, WireText, WorldFlowContentRevisionV1, WorldFlowFrame,
     WorldFlowRequest, WorldFlowResult, WorldTransferCommand, WorldTransferMutation,
     WorldTransferPayload, WorldTransferResultCode,
 };
@@ -38,20 +40,21 @@ use server_app::{
     AuthenticationDecision, BoundCoreIdentityServer, CaldusVictoryOwnerCommand,
     CharacterIdGenerator, CoreBargainAuthority, CoreExtractionTerminalAuthority,
     CoreIdentityServerConfig, CoreIdentityServerReport, CoreNonTerminalAdmission,
-    CoreOathSelectionAuthority, CoreRecallTerminalAuthority, CoreSafeInventoryAuthority,
-    CoreTerminalCoordinator, CoreTerminalEvaluation, CoreTerminalProducer, CoreTerminalTickSeal,
-    DeathViewService, DisabledDeathViewRepository, DisabledProgressionQueryRepository,
-    DisposableCoreJourneyWorldFlow, DurableDeathExecutionError, DurableDeathExecutionService,
-    HandshakePolicy, IdentityClock, IdentityService, InMemoryAccountRepository,
-    NoopIdentityEventSink, PostgresAccountRepository, PostgresCaldusHallTransferCoordinator,
-    PostgresCaldusVictoryCoordinator, PostgresDangerEntryAshWalletProviderV3,
-    PostgresDangerEntryInventoryProviderV3, PostgresDangerEntryLifeMetricsProviderV3,
-    PostgresDangerEntryOathBargainProviderV3, PostgresDeathViewRepository,
-    PostgresDormantWorldFlowCoordinator, PostgresProgressionAwardService,
-    PostgresProgressionRestoreProvider, PostgresRewardService, PreparedTerminal,
-    ProductionRecallClock, ProductionRecallIntentActor, ProductionRecallPendingAuthorityV1,
-    ProgressionQueryService, SecretRewardEpoch, SubmitResult, TerminalArbiter, TerminalCandidate,
-    WorldFlowGateService, WorldFlowIdGenerator, durable_death_terminal_candidate,
+    CoreOathSelectionAuthority, CoreRecallTerminalAuthority, CoreReliableSequence,
+    CoreSafeInventoryAuthority, CoreTerminalCoordinator, CoreTerminalEvaluation,
+    CoreTerminalProducer, CoreTerminalTickSeal, DeathViewService, DisabledDeathViewRepository,
+    DisabledProgressionQueryRepository, DisposableCoreJourneyWorldFlow, DurableDeathExecutionError,
+    DurableDeathExecutionService, HandshakePolicy, IdentityClock, IdentityService,
+    InMemoryAccountRepository, NoopIdentityEventSink, PostgresAccountRepository,
+    PostgresCaldusHallTransferCoordinator, PostgresCaldusVictoryCoordinator,
+    PostgresDangerEntryAshWalletProviderV3, PostgresDangerEntryInventoryProviderV3,
+    PostgresDangerEntryLifeMetricsProviderV3, PostgresDangerEntryOathBargainProviderV3,
+    PostgresDeathViewRepository, PostgresDormantWorldFlowCoordinator,
+    PostgresProgressionAwardService, PostgresProgressionRestoreProvider, PostgresRewardService,
+    PreparedTerminal, ProductionRecallClock, ProductionRecallIntentActor,
+    ProductionRecallPendingAuthorityV1, ProductionRecallPublishedV1, ProgressionQueryService,
+    SecretRewardEpoch, SubmitResult, TerminalArbiter, TerminalCandidate, WorldFlowGateService,
+    WorldFlowIdGenerator, core_recall_completion_outbox, durable_death_terminal_candidate,
     production_recall_actor_mailbox, recover_committed_death_arbiter, serve_core_reliable,
     serve_handshake,
 };
@@ -456,6 +459,51 @@ fn recall_policy() -> HandshakePolicy {
         .feature_flags
         .push(WireText::new(protocol::CORE_RECALL_TERMINAL_FEATURE_FLAG).unwrap());
     policy
+}
+
+fn recall_completion_publication() -> ProductionRecallPublishedV1 {
+    ProductionRecallPublishedV1 {
+        result: RecallResultV1::Stored {
+            schema_version: TERMINAL_INVENTORY_SCHEMA_VERSION,
+            request_sequence: Some(1),
+            replayed: false,
+            result: Box::new(StoredRecallTerminalResultV1 {
+                character_id: durable_death_fixture::CHARACTER_ID,
+                terminal_id: [81; 16],
+                result_hash: [82; 32],
+                trigger: RecallTerminalTriggerV1::Explicit,
+                committed_at_unix_millis: 51,
+                completion_tick: 112,
+                destination_content_id: WireText::new(TERMINAL_HALL_CONTENT_ID).unwrap(),
+                versions: TerminalVersionVectorV1 {
+                    account: terminal_version(5, 5),
+                    character: terminal_version(6, 7),
+                    world: terminal_version(6, 7),
+                    inventory: terminal_version(7, 8),
+                    life_clock: terminal_version(8, 9),
+                },
+                stabilized_item_count: 0,
+                stabilized_items_digest: [83; 32],
+                destroyed_item_count: 4,
+                destroyed_items_digest: [84; 32],
+                destroyed_material_stack_count: 2,
+                destroyed_materials_digest: [85; 32],
+            }),
+        },
+        hall: CharacterLocationSnapshot {
+            character_id: durable_death_fixture::CHARACTER_ID,
+            character_version: 7,
+            location: CharacterLocation::Safe {
+                location_id: WireText::new(TERMINAL_HALL_CONTENT_ID).unwrap(),
+                arrival: SafeArrival::HallDefault,
+            },
+        },
+        explicit_client_tick: Some(8_000),
+    }
+}
+
+const fn terminal_version(before: u64, after: u64) -> TerminalVersionAdvanceV1 {
+    TerminalVersionAdvanceV1 { before, after }
 }
 
 fn hello() -> ClientHello {
@@ -1509,6 +1557,168 @@ async fn reliable_quic_dispatches_recall_to_one_actor_owned_channel() {
     drop(client);
     client_endpoint.wait_idle().await;
     server_endpoint.close(0_u32.into(), b"active Recall complete");
+    server_endpoint.wait_idle().await;
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the server-pushed Recall completion journey remains contiguous for wire-level audit"
+)]
+async fn reliable_quic_pushes_committed_recall_without_a_second_client_request() {
+    let identity = IdentityService::new(
+        InMemoryAccountRepository::default(),
+        FixedAuthority,
+        FixedAuthority,
+        NoopIdentityEventSink,
+        ManifestHash::new("a".repeat(64)).unwrap(),
+    );
+    let world_flow = WorldFlowGateService::new(
+        InMemoryAccountRepository::default(),
+        FixedAuthority,
+        revision(),
+    );
+    let progression = disabled_progression();
+    let death_views = DeathViewService::new(
+        DisabledDeathViewRepository,
+        durable_death_fixture::death_view_revision(),
+    );
+    let oath = CoreOathSelectionAuthority::<FixedAuthority>::disabled();
+    let bargain = CoreBargainAuthority::<FixedAuthority>::disabled();
+    let safe_inventory = CoreSafeInventoryAuthority::disabled();
+    let extraction_terminal = CoreExtractionTerminalAuthority::disabled();
+    let authenticated = durable_death_fixture::authenticated_account();
+    let recall_actor = ProductionRecallIntentActor::new(
+        FixedAuthority,
+        authenticated.account_id.as_bytes(),
+        durable_death_fixture::CHARACTER_ID,
+        ProductionRecallPendingAuthorityV1 {
+            pending_item_count: 4,
+            pending_material_stack_count: 2,
+        },
+    )
+    .unwrap();
+    let (recall_handle, mut recall_inbox) = production_recall_actor_mailbox();
+    let (completion_outbox, mut completion_inbox) = core_recall_completion_outbox();
+    let start = RecallFrameV1 {
+        schema_version: TERMINAL_INVENTORY_SCHEMA_VERSION,
+        sequence: 1,
+        character_id: durable_death_fixture::CHARACTER_ID,
+        client_tick: 8_000,
+        intent: RecallIntentV1::Start,
+    };
+    let (server_endpoint, client_endpoint, address) = endpoints();
+    let connecting = client_endpoint.connect(address, "localhost").unwrap();
+    let incoming = server_endpoint.accept().await.unwrap();
+    let (client, server) = tokio::join!(connecting, incoming);
+    let client = client.unwrap();
+    let server = server.unwrap();
+
+    let server_session = async {
+        serve_handshake(
+            &server,
+            &recall_policy(),
+            AuthenticationDecision::Accepted,
+            WireText::new("active-recall-push-session").unwrap(),
+        )
+        .await
+        .unwrap();
+        let mut sequence = CoreReliableSequence::new();
+        let response_sequence = sequence.next_sequence().unwrap();
+        serve_core_reliable(
+            &server,
+            &identity,
+            &world_flow,
+            &progression,
+            &death_views,
+            &oath,
+            &bargain,
+            &safe_inventory,
+            &extraction_terminal,
+            &recall_handle,
+            authenticated,
+            response_sequence,
+            9_000,
+        )
+        .await
+        .unwrap();
+        let delivery = completion_inbox
+            .send_next(&server, &mut sequence)
+            .await
+            .unwrap()
+            .expect("queued Recall completion");
+        assert_eq!(delivery.frame.sequence, 2);
+        assert_eq!(delivery.frame.server_tick, 112);
+        assert_eq!(sequence.last_sequence(), 2);
+        assert_eq!(delivery.hall, recall_completion_publication().hall);
+    };
+    let client_session = async {
+        let HandshakeResponse::Accepted(server_hello) =
+            bot_client::perform_handshake(&client, hello())
+                .await
+                .unwrap()
+        else {
+            panic!("Core handshake must succeed");
+        };
+        assert!(
+            server_hello
+                .feature_flags
+                .iter()
+                .any(|flag| flag.as_str() == protocol::CORE_RECALL_TERMINAL_FEATURE_FLAG)
+        );
+        let pending = bot_client::perform_reliable_gameplay(
+            &client,
+            protocol::WireMessage::RecallFrame(start),
+        )
+        .await
+        .unwrap();
+        assert_eq!(pending.sequence, 1);
+        assert_eq!(pending.server_tick, 100);
+        assert!(matches!(
+            pending.event,
+            ReliableEvent::RecallResult(result)
+                if matches!(
+                    *result,
+                    RecallResultV1::Pending {
+                        started_tick: 100,
+                        completion_tick: 112,
+                        ..
+                    }
+                )
+        ));
+
+        let pushed = bot_client::receive_server_reliable(&client).await.unwrap();
+        assert_eq!(pushed.sequence, 2);
+        assert_eq!(pushed.server_tick, 112);
+        let ReliableEvent::RecallResult(result) = pushed.event else {
+            panic!("server push must contain Recall completion");
+        };
+        let RecallResultV1::Stored {
+            request_sequence: Some(1),
+            replayed: false,
+            result,
+            ..
+        } = result.as_ref()
+        else {
+            panic!("server push must contain the fresh stored Recall");
+        };
+        assert_eq!(result.completion_tick, 112);
+        assert_eq!(result.trigger, RecallTerminalTriggerV1::Explicit);
+        assert_eq!(
+            result.destination_content_id.as_str(),
+            TERMINAL_HALL_CONTENT_ID
+        );
+    };
+    let actor_session = async {
+        assert!(recall_inbox.serve_next(&recall_actor, 100).await);
+        completion_outbox
+            .try_publish(recall_completion_publication())
+            .unwrap();
+    };
+    tokio::join!(actor_session, server_session, client_session);
+    drop(client);
+    client_endpoint.wait_idle().await;
+    server_endpoint.close(0_u32.into(), b"pushed Recall complete");
     server_endpoint.wait_idle().await;
 }
 
