@@ -17,6 +17,9 @@ use sysinfo::{Pid, ProcessesToUpdate, System, get_current_pid};
 use thiserror::Error;
 
 const REQUIRED_MEMORY_DURATION_MS: u64 = 30 * 60 * 1_000;
+const SUPPLEMENTAL_COMBINED_PROCESS_MEMORY_CEILING_BYTES: u64 = 1_500_000_000;
+pub const DEATH_SOAK_RECONNECT_INTERVAL_JOURNEYS: u64 = 20;
+pub const DEATH_VIEW_QUERIES_PER_SOAK_JOURNEY: u64 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct DurationStatsV1 {
@@ -302,6 +305,142 @@ impl ResidentMemoryAssessmentV1 {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct DeathRuntimeResidueV1 {
+    pub accepted_connections: u64,
+    pub rejected_connections: u64,
+    pub combat_sessions_admitted: u64,
+    pub completed_connection_tasks: u64,
+    pub failed_connection_tasks: u64,
+    pub remaining_connection_tasks: usize,
+    pub remaining_open_connections: usize,
+    pub zero_residue: bool,
+    pub persistence_enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeathMemorySoakInputV1 {
+    pub build_id: String,
+    pub death_view_records_blake3: String,
+    pub death_view_assets_blake3: String,
+    pub death_view_localization_blake3: String,
+    pub measured_duration_ms: u64,
+    pub query_journeys: u64,
+    pub death_view_queries: u64,
+    pub connection_generations: u64,
+    pub exact_replays: u64,
+    pub canonical_signature_checks: u64,
+    pub resident_memory_samples: Vec<ResidentMemorySampleV1>,
+    pub canonical_signature_unchanged: bool,
+    pub final_database_residue: PostgresResidueSnapshotV1,
+    pub runtime_residue: DeathRuntimeResidueV1,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DeathMemorySoakEvidenceV1 {
+    pub report_schema: &'static str,
+    pub feature_id: &'static str,
+    pub sample_scope: &'static str,
+    pub build_id: String,
+    pub death_view_records_blake3: String,
+    pub death_view_assets_blake3: String,
+    pub death_view_localization_blake3: String,
+    pub required_duration_ms: u64,
+    pub measured_duration_ms: u64,
+    pub query_journeys: u64,
+    pub death_view_queries: u64,
+    pub connection_generations: u64,
+    pub completed_reconnects: u64,
+    pub exact_replays: u64,
+    pub canonical_signature_checks: u64,
+    pub resident_memory_samples: Vec<ResidentMemorySampleV1>,
+    pub resident_memory_assessment: ResidentMemoryAssessmentV1,
+    pub supplemental_combined_process_memory_ceiling_bytes: u64,
+    pub combined_process_peak_within_supplemental_ceiling: bool,
+    pub canonical_signature_unchanged: bool,
+    pub final_database_residue: PostgresResidueSnapshotV1,
+    pub runtime_residue: DeathRuntimeResidueV1,
+    pub accepted: bool,
+    pub raw_report_hash_blake3: String,
+}
+
+impl DeathMemorySoakEvidenceV1 {
+    pub fn compile(input: DeathMemorySoakInputV1) -> Result<Self, DeathMeasurementError> {
+        let expected_query_count = input
+            .query_journeys
+            .checked_mul(DEATH_VIEW_QUERIES_PER_SOAK_JOURNEY)
+            .ok_or(DeathMeasurementError::CounterOverflow)?;
+        let expected_exact_replays = input.query_journeys / DEATH_SOAK_RECONNECT_INTERVAL_JOURNEYS;
+        let expected_connection_generations = input
+            .query_journeys
+            .div_ceil(DEATH_SOAK_RECONNECT_INTERVAL_JOURNEYS);
+        let completed_reconnects = input.connection_generations.saturating_sub(1);
+        let resident_memory_assessment =
+            ResidentMemoryAssessmentV1::compile(&input.resident_memory_samples)?;
+        let combined_process_peak_within_supplemental_ceiling = resident_memory_assessment
+            .peak_resident_bytes
+            <= SUPPLEMENTAL_COMBINED_PROCESS_MEMORY_CEILING_BYTES;
+        let runtime_clean = input.runtime_residue.zero_residue
+            && input.runtime_residue.persistence_enabled
+            && input.runtime_residue.accepted_connections == input.connection_generations
+            && input.runtime_residue.rejected_connections == 0
+            && input.runtime_residue.combat_sessions_admitted == 0
+            && input.runtime_residue.completed_connection_tasks == input.connection_generations
+            && input.runtime_residue.failed_connection_tasks == 0
+            && input.runtime_residue.remaining_connection_tasks == 0
+            && input.runtime_residue.remaining_open_connections == 0;
+        let accepted = input.measured_duration_ms >= REQUIRED_MEMORY_DURATION_MS
+            && input.query_journeys > DEATH_SOAK_RECONNECT_INTERVAL_JOURNEYS
+            && input.death_view_queries == expected_query_count
+            && input.connection_generations == expected_connection_generations
+            && completed_reconnects > 0
+            && input.exact_replays == expected_exact_replays
+            && input.canonical_signature_checks == expected_exact_replays
+            && resident_memory_assessment.kind == ResidentMemoryAssessmentKindV1::Stable
+            && combined_process_peak_within_supplemental_ceiling
+            && input.canonical_signature_unchanged
+            && input.final_database_residue.is_zero()
+            && runtime_clean;
+        let mut report = Self {
+            report_schema: "gravebound.performance.gb-m03-06e.death-memory-soak.v1",
+            feature_id: "GB-M03-06E",
+            sample_scope: "death-read-reconnect-replay-stability-not-final-private-loop-cohort",
+            build_id: input.build_id,
+            death_view_records_blake3: input.death_view_records_blake3,
+            death_view_assets_blake3: input.death_view_assets_blake3,
+            death_view_localization_blake3: input.death_view_localization_blake3,
+            required_duration_ms: REQUIRED_MEMORY_DURATION_MS,
+            measured_duration_ms: input.measured_duration_ms,
+            query_journeys: input.query_journeys,
+            death_view_queries: input.death_view_queries,
+            connection_generations: input.connection_generations,
+            completed_reconnects,
+            exact_replays: input.exact_replays,
+            canonical_signature_checks: input.canonical_signature_checks,
+            resident_memory_samples: input.resident_memory_samples,
+            resident_memory_assessment,
+            supplemental_combined_process_memory_ceiling_bytes:
+                SUPPLEMENTAL_COMBINED_PROCESS_MEMORY_CEILING_BYTES,
+            combined_process_peak_within_supplemental_ceiling,
+            canonical_signature_unchanged: input.canonical_signature_unchanged,
+            final_database_residue: input.final_database_residue,
+            runtime_residue: input.runtime_residue,
+            accepted,
+            raw_report_hash_blake3: String::new(),
+        };
+        report.raw_report_hash_blake3 = memory_report_hash(&report)?;
+        Ok(report)
+    }
+}
+
+fn memory_report_hash(report: &DeathMemorySoakEvidenceV1) -> Result<String, DeathMeasurementError> {
+    let mut hashable = report.clone();
+    hashable.raw_report_hash_blake3.clear();
+    let bytes = serde_json::to_vec(&hashable)
+        .map_err(|error| DeathMeasurementError::Serialization(error.to_string()))?;
+    Ok(blake3::hash(&bytes).to_hex().to_string())
+}
+
 fn nearest_rank(sorted_values: &[u64], percentile: usize) -> u64 {
     let rank = sorted_values.len().saturating_mul(percentile).div_ceil(100);
     sorted_values[rank.saturating_sub(1)]
@@ -315,6 +454,8 @@ pub enum DeathMeasurementError {
     DurationOverflow,
     #[error("duration sample count exceeds the evidence representation")]
     SampleCountOverflow,
+    #[error("measurement counter arithmetic overflowed")]
+    CounterOverflow,
     #[error("at least two resident-memory samples are required")]
     MissingMemorySamples,
     #[error("resident-memory samples must be strictly ordered")]
@@ -465,6 +606,100 @@ mod tests {
         assert_eq!(
             monotonic.kind,
             ResidentMemoryAssessmentKindV1::MonotonicGrowth
+        );
+    }
+
+    fn accepted_memory_soak_input() -> DeathMemorySoakInputV1 {
+        DeathMemorySoakInputV1 {
+            build_id: "core-dev".to_owned(),
+            death_view_records_blake3: "a".repeat(64),
+            death_view_assets_blake3: "b".repeat(64),
+            death_view_localization_blake3: "c".repeat(64),
+            measured_duration_ms: REQUIRED_MEMORY_DURATION_MS,
+            query_journeys: 21,
+            death_view_queries: 84,
+            connection_generations: 2,
+            exact_replays: 1,
+            canonical_signature_checks: 1,
+            resident_memory_samples: vec![
+                ResidentMemorySampleV1 {
+                    elapsed_ms: 0,
+                    resident_bytes: 100,
+                },
+                ResidentMemorySampleV1 {
+                    elapsed_ms: 600_000,
+                    resident_bytes: 110,
+                },
+                ResidentMemorySampleV1 {
+                    elapsed_ms: 1_200_000,
+                    resident_bytes: 105,
+                },
+                ResidentMemorySampleV1 {
+                    elapsed_ms: REQUIRED_MEMORY_DURATION_MS,
+                    resident_bytes: 108,
+                },
+            ],
+            canonical_signature_unchanged: true,
+            final_database_residue: PostgresResidueSnapshotV1 {
+                active_transactions: 0,
+                idle_transactions: 0,
+                aborted_transactions: 0,
+                waiting_locks: 0,
+                granted_locks: 0,
+            },
+            runtime_residue: DeathRuntimeResidueV1 {
+                accepted_connections: 2,
+                rejected_connections: 0,
+                combat_sessions_admitted: 0,
+                completed_connection_tasks: 2,
+                failed_connection_tasks: 0,
+                remaining_connection_tasks: 0,
+                remaining_open_connections: 0,
+                zero_residue: true,
+                persistence_enabled: true,
+            },
+        }
+    }
+
+    #[test]
+    fn memory_soak_report_is_hashed_and_fails_closed() {
+        let accepted = DeathMemorySoakEvidenceV1::compile(accepted_memory_soak_input()).unwrap();
+        assert!(accepted.accepted);
+        assert_eq!(accepted.raw_report_hash_blake3.len(), 64);
+
+        let same = DeathMemorySoakEvidenceV1::compile(accepted_memory_soak_input()).unwrap();
+        assert_eq!(accepted.raw_report_hash_blake3, same.raw_report_hash_blake3);
+
+        let mut short = accepted_memory_soak_input();
+        short.measured_duration_ms = REQUIRED_MEMORY_DURATION_MS - 1;
+        let short = DeathMemorySoakEvidenceV1::compile(short).unwrap();
+        assert!(!short.accepted);
+        assert_ne!(
+            accepted.raw_report_hash_blake3,
+            short.raw_report_hash_blake3
+        );
+
+        let mut wrong_query_count = accepted_memory_soak_input();
+        wrong_query_count.death_view_queries = 83;
+        assert!(
+            !DeathMemorySoakEvidenceV1::compile(wrong_query_count)
+                .unwrap()
+                .accepted
+        );
+
+        let mut no_completed_reconnect = accepted_memory_soak_input();
+        no_completed_reconnect.query_journeys = DEATH_SOAK_RECONNECT_INTERVAL_JOURNEYS;
+        no_completed_reconnect.death_view_queries =
+            DEATH_SOAK_RECONNECT_INTERVAL_JOURNEYS * DEATH_VIEW_QUERIES_PER_SOAK_JOURNEY;
+        no_completed_reconnect.connection_generations = 1;
+        no_completed_reconnect.runtime_residue.accepted_connections = 1;
+        no_completed_reconnect
+            .runtime_residue
+            .completed_connection_tasks = 1;
+        assert!(
+            !DeathMemorySoakEvidenceV1::compile(no_completed_reconnect)
+                .unwrap()
+                .accepted
         );
     }
 

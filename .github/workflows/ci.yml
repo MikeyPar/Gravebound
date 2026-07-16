@@ -5,6 +5,12 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      run_m03_death_soak:
+        description: Run the explicit release-profile 30-minute GB-M03-06E death persistence soak
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -110,3 +116,41 @@ jobs:
           cargo test --locked -p server_app --test postgres_safe_inventory -- --ignored --test-threads=1 --nocapture
           cargo test --locked -p server_app --test core_route_quic -- --ignored --test-threads=1 --nocapture
           cargo test --locked -p server_app --test postgres_identity -- --ignored --test-threads=1
+
+  m03-death-soak:
+    name: GB-M03-06E 30-minute death persistence soak
+    if: github.event_name == 'workflow_dispatch' && inputs.run_m03_death_soak
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    services:
+      postgres:
+        image: postgres:17.10-alpine3.23
+        env:
+          POSTGRES_DB: gravebound_test
+          POSTGRES_USER: gravebound_test
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 127.0.0.1:5432:5432
+        options: >-
+          --health-cmd "pg_isready -U gravebound_test -d gravebound_test"
+          --health-interval 1s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      RUSTFLAGS: -C link-arg=-fuse-ld=lld
+      CARGO_INCREMENTAL: "0"
+      TEST_DATABASE_URL: postgres://gravebound_test@127.0.0.1:5432/gravebound_test
+      GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS: "1"
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Linux integration dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes clang lld libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
+      - name: Run optimized death persistence soak
+        run: >-
+          cargo test --locked --release -p server_app --test death_memory_soak
+          death_persistence_real_quic_thirty_minute_soak --
+          --ignored --nocapture --test-threads=1

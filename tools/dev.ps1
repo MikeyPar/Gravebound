@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('bootstrap', 'format', 'lint', 'test', 'validate', 'headless', 'local-lab', 'server-doctor', 'bot-doctor', 'network-ci', 'm02-network-smoke', 'm02-soak', 'm02-server', 'm02-client', 'm02-package', 'm03-identity-smoke', 'm03-identity-server', 'm03-identity-server-ephemeral', 'm03-identity-client', 'persistence-ci', 'local-stack', 'ci', 'release')]
+    [ValidateSet('bootstrap', 'format', 'lint', 'test', 'validate', 'headless', 'local-lab', 'server-doctor', 'bot-doctor', 'network-ci', 'm02-network-smoke', 'm02-soak', 'm02-server', 'm02-client', 'm02-package', 'm03-identity-smoke', 'm03-identity-server', 'm03-identity-server-ephemeral', 'm03-identity-client', 'm03-death-soak', 'persistence-ci', 'local-stack', 'ci', 'release')]
     [string]$Command = 'ci'
 )
 
@@ -71,6 +71,9 @@ try {
         'm03-identity-client' {
             $identity = if ($env:GRAVEBOUND_TEST_IDENTITY) { $env:GRAVEBOUND_TEST_IDENTITY } else { 'local-identity-1' }
             Invoke-Cargo -Arguments @('run', '--locked', '-p', 'client_bevy', '--', 'core-identity', '--identity', $identity)
+        }
+        'm03-death-soak' {
+            Invoke-Cargo -Arguments @('test', '--locked', '--release', '-p', 'server_app', '--test', 'death_memory_soak', 'death_persistence_real_quic_thirty_minute_soak', '--', '--ignored', '--nocapture', '--test-threads=1')
         }
         'persistence-ci' {
             & (Join-Path $PSScriptRoot 'persistence-test.ps1')
