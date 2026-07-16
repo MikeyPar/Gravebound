@@ -147,8 +147,8 @@ pub fn committed_death_terminal_receipt(
         payload_hash: stored.terminal_payload_hash,
         server_plan_hash: result.canonical_plan_hash,
         result_hash: stored.result_hash,
-        expected_state_version: result.versions.account.pre,
-        post_state_version: result.versions.account.post,
+        expected_state_version: result.versions.character.pre,
+        post_state_version: result.versions.character.post,
         observed_tick: stored.death_tick,
         committed_tick: stored.death_tick,
         terminal_kind_code: TerminalKind::LethalDeath.stable_code(),
@@ -238,7 +238,7 @@ pub fn durable_death_terminal_candidate(
         event.mutation_id,
         death.promotion().terminal_payload_hash(),
         death.request().canonical_plan_hash,
-        event.versions.account.pre,
+        event.versions.character.pre,
         event.death_tick,
         TerminalKind::LethalDeath,
     )
@@ -425,7 +425,7 @@ mod tests {
         );
         assert_eq!(
             candidate.expected_state_version(),
-            event.versions.account.pre
+            event.versions.character.pre
         );
         assert_eq!(candidate.observed_tick(), event.death_tick);
         assert_eq!(candidate.kind(), TerminalKind::LethalDeath);
@@ -605,6 +605,14 @@ mod tests {
         assert_eq!(expected.terminal_id(), &stored.result.death_id);
         assert_eq!(expected.mutation_id(), &stored.result.mutation_id);
         assert_eq!(expected.result_hash(), &stored.result_hash);
+        assert_eq!(
+            expected.expected_state_version(),
+            stored.result.versions.character.pre
+        );
+        assert_eq!(
+            expected.post_state_version(),
+            stored.result.versions.character.post
+        );
         assert_eq!(expected.committed_tick(), stored.death_tick);
     }
 
