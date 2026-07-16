@@ -26,6 +26,7 @@ mod live_damage_trace_service;
 mod oath_selection;
 mod production_extraction;
 mod production_recall;
+mod production_recall_channel;
 mod progression_award;
 mod progression_query;
 mod progression_restore_provider;
@@ -139,6 +140,12 @@ pub use production_recall::{
     committed_recall_terminal_receipt_from_stored, hall_snapshot_from_stored_recall,
     production_recall_terminal_candidate, protocol_recall_terminal_result,
     recover_committed_recall_arbiter,
+};
+pub use production_recall_channel::{
+    PRODUCTION_RECALL_MOVEMENT_BASIS_POINTS, ProductionLinkLostRecallAuthorityV1,
+    ProductionRecallChannel, ProductionRecallChannelError, ProductionRecallClock,
+    ProductionRecallCompletionAuthorityV1, ProductionRecallPlanner,
+    ProductionRecallStartAuthorityV1, ProductionRecallTickPreparation, evaluate_link_lost_tick,
 };
 pub use progression_award::{
     CoreProgressionRules, ProgressionAwardCode, ProgressionAwardCommand, ProgressionAwardContext,
