@@ -111,7 +111,15 @@ pub const SECONDARY_IDENTITY: DurableDeathFixtureIdentityV1 = DurableDeathFixtur
     source_sim_entity_id: 82,
 };
 
+#[allow(
+    dead_code,
+    reason = "legacy primary aliases are consumed by other independently compiled integration targets"
+)]
 pub const CHARACTER_ID: [u8; 16] = PRIMARY_IDENTITY.character_id;
+#[allow(
+    dead_code,
+    reason = "legacy primary aliases are consumed by other independently compiled integration targets"
+)]
 pub const DEATH_ID: [u8; 16] = PRIMARY_IDENTITY.death_id;
 
 #[allow(
@@ -199,6 +207,7 @@ pub fn death_view_revision() -> DeathViewContentRevisionV1 {
 /// Seeds exactly one living danger aggregate. The staging helpers are the same V3 custody
 /// boundary used by production danger entry; final death rows are deliberately absent.
 #[allow(
+    dead_code,
     clippy::too_many_lines,
     reason = "the complete danger root remains explicit for hosted authority review"
 )]
@@ -611,6 +620,7 @@ fn build_echo_projection(scenario: &DurableDeathScenarioV1) -> Option<EligibleEc
 
 /// Produces one sealed death by traversing the production live trace and server death builder.
 #[allow(
+    dead_code,
     clippy::too_many_lines,
     reason = "the trace, simulation evidence, and sealed server context stay contiguous for audit"
 )]
@@ -793,6 +803,10 @@ pub async fn prepare_death_for(
     build_durable_death_commit(&inputs, &server_context, &presentation).unwrap()
 }
 
+#[allow(
+    dead_code,
+    reason = "the primary graph assertion is consumed by other independently compiled targets"
+)]
 async fn count(persistence: &PostgresPersistence, query: &'static str) -> i64 {
     let mut transaction = persistence.begin_transaction().await.unwrap();
     let value = sqlx::query_scalar::<_, i64>(query)
@@ -806,6 +820,10 @@ async fn count(persistence: &PostgresPersistence, query: &'static str) -> i64 {
 }
 
 /// Verifies terminal cleanup and exact nonduplication after replay/restart.
+#[allow(
+    dead_code,
+    reason = "the primary graph assertion is consumed by other independently compiled targets"
+)]
 pub async fn assert_committed_graph(persistence: &PostgresPersistence) {
     for (label, query, expected) in [
         (

@@ -1,14 +1,15 @@
 //! Reusable `GB-M03-06E` timing, cleanup, and memory evidence primitives.
 //!
 //! Authorities:
-//! - canonical GDD `DTH-001`, `DTH-021`, `TECH-022`, and `TECH-023`;
-//! - Content Production Spec `CONT-ECHO-009` and `CONT-HUB-002`;
-//! - Development Roadmap `GB-M03-06`, `GB-M03-13`, and the M03 exit gate.
+//! - `Gravebound_Production_GDD_v1_Canonical.md`: `DTH-001`, `DTH-021`, `TECH-022`,
+//!   and `TECH-023`;
+//! - `Gravebound_Content_Production_Spec_v1.md`: `CONT-ECHO-009` and `CONT-HUB-002`;
+//! - `Gravebound_Development_Roadmap_v1.md`: `GB-M03-06`, `GB-M03-13`, and the M03 exit gate.
 //!
 //! This module performs evidence arithmetic and bounded inspection only. It does not create a
 //! death, infer an Echo outcome, or become an alternate gameplay writer.
 
-use std::time::Duration;
+use std::{collections::BTreeSet, time::Duration};
 
 use persistence::PostgresPersistence;
 use serde::Serialize;
@@ -165,20 +166,27 @@ impl PostgresResidueSnapshotV1 {
             "SELECT \
              (SELECT count(*) FROM pg_stat_activity \
                WHERE datname=current_database() AND pid<>pg_backend_pid() \
+                 AND backend_type='client backend' AND usename=current_user \
                  AND xact_start IS NOT NULL) AS active_transactions,\
              (SELECT count(*) FROM pg_stat_activity \
                WHERE datname=current_database() AND pid<>pg_backend_pid() \
+                 AND backend_type='client backend' AND usename=current_user \
                  AND state='idle in transaction') AS idle_transactions,\
              (SELECT count(*) FROM pg_stat_activity \
                WHERE datname=current_database() AND pid<>pg_backend_pid() \
+                 AND backend_type='client backend' AND usename=current_user \
                  AND state='idle in transaction (aborted)') AS aborted_transactions,\
              (SELECT count(*) FROM pg_locks AS held \
                JOIN pg_stat_activity AS activity ON activity.pid=held.pid \
                WHERE activity.datname=current_database() AND held.pid<>pg_backend_pid() \
+                 AND activity.backend_type='client backend' \
+                 AND activity.usename=current_user \
                  AND NOT held.granted) AS waiting_locks,\
              (SELECT count(*) FROM pg_locks AS held \
                JOIN pg_stat_activity AS activity ON activity.pid=held.pid \
                WHERE activity.datname=current_database() AND held.pid<>pg_backend_pid() \
+                 AND activity.backend_type='client backend' \
+                 AND activity.usename=current_user \
                  AND held.granted \
                  AND held.locktype IN ('relation','tuple','transactionid','advisory')) \
                AS granted_locks",
@@ -431,6 +439,187 @@ impl DeathMemorySoakEvidenceV1 {
         report.raw_report_hash_blake3 = memory_report_hash(&report)?;
         Ok(report)
     }
+}
+
+#[allow(
+    dead_code,
+    reason = "shared measurement support is compiled separately by non-matrix integration targets"
+)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeathBranchKindV1 {
+    LevelBelowTen,
+    CombatBelowThreshold,
+    MissingQualifyingDeed,
+    VerifiedServerIncident,
+    EligibleSelfPromotion,
+    EligibleExistingAvailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeathBranchEchoOutcomeV1 {
+    NotEligible,
+    Dormant,
+    Available,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct DeathBranchSampleV1 {
+    pub branch: DeathBranchKindV1,
+    pub echo_outcome: DeathBranchEchoOutcomeV1,
+    pub terminal_commit_micros: u64,
+    pub exact_replay_micros: u64,
+    pub canonical_signature_query_micros: u64,
+    pub latest_round_trip_micros: u64,
+    pub summary_round_trip_micros: u64,
+    pub post_commit_to_client_model_ready_micros: u64,
+    pub target_echo_records: u32,
+    pub target_echo_transitions: u32,
+    pub target_outbox_events: u32,
+    pub account_available_echoes: u32,
+    pub account_dormant_echoes: u32,
+    pub canonical_signature_unchanged: bool,
+    pub database_residue: PostgresResidueSnapshotV1,
+    pub runtime_residue: DeathRuntimeResidueV1,
+}
+
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "the report retains four independent machine-readable audit gates"
+)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DeathBranchMatrixEvidenceV1 {
+    pub report_schema: &'static str,
+    pub feature_id: &'static str,
+    pub sample_scope: &'static str,
+    pub build_id: String,
+    pub death_view_records_blake3: String,
+    pub death_view_assets_blake3: String,
+    pub death_view_localization_blake3: String,
+    pub branch_count: usize,
+    pub branches: Vec<DeathBranchSampleV1>,
+    pub exact_required_branch_set: bool,
+    pub every_client_model_ready_under_two_seconds: bool,
+    pub every_signature_stable_and_zero_residue: bool,
+    pub accepted: bool,
+    pub raw_report_hash_blake3: String,
+}
+
+impl DeathBranchMatrixEvidenceV1 {
+    pub fn compile(
+        mut branches: Vec<DeathBranchSampleV1>,
+        build_id: impl Into<String>,
+        death_view_records_blake3: impl Into<String>,
+        death_view_assets_blake3: impl Into<String>,
+        death_view_localization_blake3: impl Into<String>,
+    ) -> Result<Self, DeathMeasurementError> {
+        branches.sort_by_key(|sample| sample.branch);
+        let actual = branches
+            .iter()
+            .map(|sample| sample.branch)
+            .collect::<BTreeSet<_>>();
+        let required = BTreeSet::from([
+            DeathBranchKindV1::LevelBelowTen,
+            DeathBranchKindV1::CombatBelowThreshold,
+            DeathBranchKindV1::MissingQualifyingDeed,
+            DeathBranchKindV1::VerifiedServerIncident,
+            DeathBranchKindV1::EligibleSelfPromotion,
+            DeathBranchKindV1::EligibleExistingAvailable,
+        ]);
+        let exact_required_branch_set = branches.len() == required.len() && actual == required;
+        let every_client_model_ready_under_two_seconds = branches
+            .iter()
+            .all(|sample| sample.post_commit_to_client_model_ready_micros < 2_000_000);
+        let every_signature_stable_and_zero_residue = branches.iter().all(|sample| {
+            sample.canonical_signature_unchanged
+                && sample.database_residue.is_zero()
+                && branch_runtime_residue_is_exact(sample.runtime_residue)
+        });
+        let exact_outcomes = branches.iter().all(branch_sample_is_exact);
+        let mut report = Self {
+            report_schema: "gravebound.performance.gb-m03-06e.death-branch-matrix.v1",
+            feature_id: "GB-M03-06E",
+            sample_scope: "reachable-death-eligibility-echo-availability-client-model-not-native-frame",
+            build_id: build_id.into(),
+            death_view_records_blake3: death_view_records_blake3.into(),
+            death_view_assets_blake3: death_view_assets_blake3.into(),
+            death_view_localization_blake3: death_view_localization_blake3.into(),
+            branch_count: branches.len(),
+            branches,
+            exact_required_branch_set,
+            every_client_model_ready_under_two_seconds,
+            every_signature_stable_and_zero_residue,
+            accepted: exact_required_branch_set
+                && every_client_model_ready_under_two_seconds
+                && every_signature_stable_and_zero_residue
+                && exact_outcomes,
+            raw_report_hash_blake3: String::new(),
+        };
+        report.raw_report_hash_blake3 = branch_matrix_report_hash(&report)?;
+        Ok(report)
+    }
+}
+
+const fn branch_runtime_residue_is_exact(residue: DeathRuntimeResidueV1) -> bool {
+    residue.accepted_connections == 2
+        && residue.rejected_connections == 0
+        && residue.combat_sessions_admitted == 0
+        && residue.completed_connection_tasks == 2
+        && residue.failed_connection_tasks == 0
+        && residue.remaining_connection_tasks == 0
+        && residue.remaining_open_connections == 0
+        && residue.zero_residue
+        && residue.persistence_enabled
+}
+
+fn branch_sample_is_exact(sample: &DeathBranchSampleV1) -> bool {
+    let positive_measurements = sample.terminal_commit_micros > 0
+        && sample.exact_replay_micros > 0
+        && sample.canonical_signature_query_micros > 0
+        && sample.latest_round_trip_micros > 0
+        && sample.summary_round_trip_micros > 0
+        && sample.post_commit_to_client_model_ready_micros > 0;
+    let outcome_exact = match sample.branch {
+        DeathBranchKindV1::LevelBelowTen
+        | DeathBranchKindV1::CombatBelowThreshold
+        | DeathBranchKindV1::MissingQualifyingDeed
+        | DeathBranchKindV1::VerifiedServerIncident => {
+            sample.echo_outcome == DeathBranchEchoOutcomeV1::NotEligible
+                && sample.target_echo_records == 0
+                && sample.target_echo_transitions == 0
+                && sample.target_outbox_events == 1
+                && sample.account_available_echoes == 0
+                && sample.account_dormant_echoes == 0
+        }
+        DeathBranchKindV1::EligibleSelfPromotion => {
+            sample.echo_outcome == DeathBranchEchoOutcomeV1::Available
+                && sample.target_echo_records == 1
+                && sample.target_echo_transitions == 2
+                && sample.target_outbox_events == 3
+                && sample.account_available_echoes == 1
+                && sample.account_dormant_echoes == 0
+        }
+        DeathBranchKindV1::EligibleExistingAvailable => {
+            sample.echo_outcome == DeathBranchEchoOutcomeV1::Dormant
+                && sample.target_echo_records == 1
+                && sample.target_echo_transitions == 1
+                && sample.target_outbox_events == 2
+                && sample.account_available_echoes == 1
+                && sample.account_dormant_echoes == 1
+        }
+    };
+    positive_measurements && outcome_exact
+}
+
+fn branch_matrix_report_hash(
+    report: &DeathBranchMatrixEvidenceV1,
+) -> Result<String, DeathMeasurementError> {
+    let mut hashable = report.clone();
+    hashable.raw_report_hash_blake3.clear();
+    let bytes = serde_json::to_vec(&hashable)
+        .map_err(|error| DeathMeasurementError::Serialization(error.to_string()))?;
+    Ok(blake3::hash(&bytes).to_hex().to_string())
 }
 
 fn memory_report_hash(report: &DeathMemorySoakEvidenceV1) -> Result<String, DeathMeasurementError> {
@@ -700,6 +889,114 @@ mod tests {
             !DeathMemorySoakEvidenceV1::compile(no_completed_reconnect)
                 .unwrap()
                 .accepted
+        );
+    }
+
+    fn branch_sample(
+        branch: DeathBranchKindV1,
+        echo_outcome: DeathBranchEchoOutcomeV1,
+        target_echo_records: u32,
+        target_echo_transitions: u32,
+        target_outbox_events: u32,
+        account_available_echoes: u32,
+        account_dormant_echoes: u32,
+    ) -> DeathBranchSampleV1 {
+        DeathBranchSampleV1 {
+            branch,
+            echo_outcome,
+            terminal_commit_micros: 10,
+            exact_replay_micros: 5,
+            canonical_signature_query_micros: 4,
+            latest_round_trip_micros: 3,
+            summary_round_trip_micros: 2,
+            post_commit_to_client_model_ready_micros: 8,
+            target_echo_records,
+            target_echo_transitions,
+            target_outbox_events,
+            account_available_echoes,
+            account_dormant_echoes,
+            canonical_signature_unchanged: true,
+            database_residue: PostgresResidueSnapshotV1 {
+                active_transactions: 0,
+                idle_transactions: 0,
+                aborted_transactions: 0,
+                waiting_locks: 0,
+                granted_locks: 0,
+            },
+            runtime_residue: DeathRuntimeResidueV1 {
+                accepted_connections: 2,
+                rejected_connections: 0,
+                combat_sessions_admitted: 0,
+                completed_connection_tasks: 2,
+                failed_connection_tasks: 0,
+                remaining_connection_tasks: 0,
+                remaining_open_connections: 0,
+                zero_residue: true,
+                persistence_enabled: true,
+            },
+        }
+    }
+
+    fn accepted_branch_matrix() -> Vec<DeathBranchSampleV1> {
+        let ineligible =
+            |branch| branch_sample(branch, DeathBranchEchoOutcomeV1::NotEligible, 0, 0, 1, 0, 0);
+        vec![
+            ineligible(DeathBranchKindV1::LevelBelowTen),
+            ineligible(DeathBranchKindV1::CombatBelowThreshold),
+            ineligible(DeathBranchKindV1::MissingQualifyingDeed),
+            ineligible(DeathBranchKindV1::VerifiedServerIncident),
+            branch_sample(
+                DeathBranchKindV1::EligibleSelfPromotion,
+                DeathBranchEchoOutcomeV1::Available,
+                1,
+                2,
+                3,
+                1,
+                0,
+            ),
+            branch_sample(
+                DeathBranchKindV1::EligibleExistingAvailable,
+                DeathBranchEchoOutcomeV1::Dormant,
+                1,
+                1,
+                2,
+                1,
+                1,
+            ),
+        ]
+    }
+
+    #[test]
+    fn branch_matrix_report_requires_every_exact_outcome_and_hashes_it() {
+        let compile = |branches| {
+            DeathBranchMatrixEvidenceV1::compile(
+                branches,
+                "core-dev",
+                "a".repeat(64),
+                "b".repeat(64),
+                "c".repeat(64),
+            )
+            .unwrap()
+        };
+        let accepted = compile(accepted_branch_matrix());
+        assert!(accepted.accepted);
+        assert_eq!(accepted.raw_report_hash_blake3.len(), 64);
+        assert_eq!(
+            accepted.raw_report_hash_blake3,
+            compile(accepted_branch_matrix()).raw_report_hash_blake3
+        );
+
+        let mut missing = accepted_branch_matrix();
+        missing.pop();
+        assert!(!compile(missing).accepted);
+
+        let mut wrong = accepted_branch_matrix();
+        wrong[0].target_outbox_events = 2;
+        let wrong = compile(wrong);
+        assert!(!wrong.accepted);
+        assert_ne!(
+            accepted.raw_report_hash_blake3,
+            wrong.raw_report_hash_blake3
         );
     }
 
