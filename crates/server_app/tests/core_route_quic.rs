@@ -7,6 +7,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+use client_bevy::{
+    DeathSummaryAction, DeathUiActivity, DeathUiSnapshot, DeathViewClientModel, TerminalDeathPhase,
+};
+use tokio::sync::oneshot;
+
 #[path = "support/death_measurement.rs"]
 mod death_measurement;
 #[path = "support/durable_death.rs"]
@@ -27,20 +32,22 @@ use rcgen::{CertifiedKey, generate_simple_self_signed};
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use server_app::{
     AccountId, AdmissionState, AuthenticatedAccount, AuthenticatedNamespace,
-    AuthenticationDecision, CaldusVictoryOwnerCommand, CharacterIdGenerator, CoreBargainAuthority,
+    AuthenticationDecision, BoundCoreIdentityServer, CaldusVictoryOwnerCommand,
+    CharacterIdGenerator, CoreBargainAuthority, CoreIdentityServerConfig, CoreIdentityServerReport,
     CoreNonTerminalAdmission, CoreOathSelectionAuthority, CoreSafeInventoryAuthority,
     CoreTerminalCoordinator, CoreTerminalEvaluation, CoreTerminalProducer, CoreTerminalTickSeal,
     DeathViewService, DisabledDeathViewRepository, DisabledProgressionQueryRepository,
     DisposableCoreJourneyWorldFlow, DurableDeathExecutionError, DurableDeathExecutionService,
     HandshakePolicy, IdentityClock, IdentityService, InMemoryAccountRepository,
-    NoopIdentityEventSink, PostgresCaldusHallTransferCoordinator, PostgresCaldusVictoryCoordinator,
-    PostgresDangerEntryAshWalletProviderV3, PostgresDangerEntryInventoryProviderV3,
-    PostgresDangerEntryLifeMetricsProviderV3, PostgresDangerEntryOathBargainProviderV3,
-    PostgresDeathViewRepository, PostgresDormantWorldFlowCoordinator,
-    PostgresProgressionAwardService, PostgresProgressionRestoreProvider, PostgresRewardService,
-    PreparedTerminal, ProgressionQueryService, SecretRewardEpoch, SubmitResult, TerminalArbiter,
-    TerminalCandidate, WorldFlowIdGenerator, durable_death_terminal_candidate,
-    recover_committed_death_arbiter, serve_core_reliable, serve_handshake,
+    NoopIdentityEventSink, PostgresAccountRepository, PostgresCaldusHallTransferCoordinator,
+    PostgresCaldusVictoryCoordinator, PostgresDangerEntryAshWalletProviderV3,
+    PostgresDangerEntryInventoryProviderV3, PostgresDangerEntryLifeMetricsProviderV3,
+    PostgresDangerEntryOathBargainProviderV3, PostgresDeathViewRepository,
+    PostgresDormantWorldFlowCoordinator, PostgresProgressionAwardService,
+    PostgresProgressionRestoreProvider, PostgresRewardService, PreparedTerminal,
+    ProgressionQueryService, SecretRewardEpoch, SubmitResult, TerminalArbiter, TerminalCandidate,
+    WorldFlowIdGenerator, durable_death_terminal_candidate, recover_committed_death_arbiter,
+    serve_core_reliable, serve_handshake,
 };
 use sim_core::{
     CoreBossParticipant, CoreBossParticipantLock, CoreCaldusAntiCheatState,
@@ -56,6 +63,7 @@ const RESTORE_ID: [u8; 16] = [215; 16];
 const EXTRACTION_RECEIPT_ID: [u8; 16] = [217; 16];
 const HALL_ID: &str = "hub.lantern_halls_01";
 const WORLD_ID: &str = "world.core_microrealm_01";
+const DEATH_LATENCY_SAMPLE_COUNT: usize = 10;
 
 fn content_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../content")
@@ -1151,6 +1159,161 @@ fn seal_complete_same_tick_terminal_set(
     (coordinator, prepared)
 }
 
+fn death_client_endpoint(certificate_der: &[u8]) -> quinn::Endpoint {
+    let mut roots = rustls::RootCertStore::empty();
+    roots
+        .add(CertificateDer::from(certificate_der.to_vec()))
+        .unwrap();
+    let config = quinn::ClientConfig::with_root_certificates(Arc::new(roots)).unwrap();
+    let mut endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+    endpoint.set_default_client_config(config);
+    endpoint
+}
+
+fn assert_measured_identity_shutdown(report: CoreIdentityServerReport) {
+    assert_eq!(report.accepted_connections, 1);
+    assert_eq!(report.rejected_connections, 0);
+    assert_eq!(report.combat_sessions_admitted, 0);
+    assert_eq!(report.completed_connection_tasks, 1);
+    assert_eq!(report.failed_connection_tasks, 0);
+    assert_eq!(report.remaining_connection_tasks, 0);
+    assert_eq!(report.remaining_open_connections, 0);
+    assert!(report.zero_residue);
+    assert!(report.persistence_enabled);
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "one measured journey preserves the exact commit, reducer, replay, and cleanup boundaries"
+)]
+async fn run_measured_death_journey(
+    persistence: &PostgresPersistence,
+    presentation: &sim_content::CoreDevelopmentDeathView,
+) -> death_measurement::DeathLatencySampleV1 {
+    persistence.reset_disposable_identity_data().await.unwrap();
+    durable_death_fixture::seed_danger_root(persistence).await;
+    let death = durable_death_fixture::prepare_death(persistence.clone()).await;
+    let candidate = durable_death_terminal_candidate(&death).unwrap();
+    let (mut coordinator, prepared) = seal_complete_same_tick_terminal_set(&candidate);
+
+    let server = BoundCoreIdentityServer::bind_persistent(
+        &CoreIdentityServerConfig {
+            bind_address: "127.0.0.1:0".parse().unwrap(),
+            content_root: content_root(),
+        },
+        PostgresAccountRepository::new(persistence.clone()),
+    )
+    .unwrap();
+    let address = server.local_address();
+    let client_endpoint = death_client_endpoint(server.certificate_der());
+    let (shutdown_send, shutdown_receive) = oneshot::channel::<()>();
+    let server_task = tokio::spawn(server.serve_until(async {
+        let _ = shutdown_receive.await;
+    }));
+    let connection = client_endpoint
+        .connect(address, "localhost")
+        .unwrap()
+        .await
+        .unwrap();
+    assert!(matches!(
+        bot_client::perform_handshake(&connection, production_death_view_hello())
+            .await
+            .unwrap(),
+        HandshakeResponse::Accepted(server)
+            if server.feature_flags.iter().any(
+                |flag| flag.as_str() == protocol::CORE_DEATH_VIEW_FEATURE_FLAG
+            )
+    ));
+
+    let terminal_commit_started = Instant::now();
+    let committed = DurableDeathExecutionService::new(persistence.clone())
+        .execute_coordinated(&mut coordinator, &prepared, &death)
+        .await
+        .unwrap();
+    let acknowledgement = Instant::now();
+    let terminal_commit_latency = terminal_commit_started.elapsed();
+    assert!(!committed.transaction.is_replay());
+
+    let mut model = DeathViewClientModel::new(presentation.clone()).unwrap();
+    let latest_request = model
+        .begin_committed_death_lookup(durable_death_fixture::CHARACTER_ID)
+        .unwrap();
+    let latest_started = Instant::now();
+    let (_, latest) = bot_client::perform_death_view(&connection, latest_request)
+        .await
+        .unwrap();
+    let latest_round_trip_latency = latest_started.elapsed();
+    let latest_outcome = model.handle_result(&latest).unwrap();
+    let summary_request = latest_outcome
+        .follow_up
+        .expect("latest committed death starts the summary query");
+    let summary_started = Instant::now();
+    let (_, summary) = bot_client::perform_death_view(&connection, summary_request)
+        .await
+        .unwrap();
+    let summary_round_trip_latency = summary_started.elapsed();
+    model.handle_result(&summary).unwrap();
+    assert_eq!(model.terminal().phase(), TerminalDeathPhase::SummaryReady);
+    assert!(
+        model
+            .terminal()
+            .action_state(DeathSummaryAction::InspectTrace)
+            .is_enabled()
+    );
+    let snapshot = DeathUiSnapshot::terminal(&model).unwrap();
+    assert!(snapshot.summary.is_some());
+    assert_eq!(snapshot.activity, DeathUiActivity::Idle);
+    let acknowledgement_to_interactive_latency = acknowledgement.elapsed();
+    assert!(
+        acknowledgement_to_interactive_latency < Duration::from_secs(2),
+        "durable acknowledgement to interactive summary exceeded DTH-021: \
+         {acknowledgement_to_interactive_latency:?}"
+    );
+
+    let signature_started = Instant::now();
+    let signature = canonical_death_terminal_signature(persistence).await;
+    let canonical_signature_query_latency = signature_started.elapsed();
+
+    let expected_result = committed.transaction.result().clone();
+    let mut replay_arbiter = TerminalArbiter::new(candidate.binding());
+    assert!(matches!(
+        replay_arbiter.submit(candidate),
+        SubmitResult::Accepted { .. }
+    ));
+    let replay_prepared = replay_arbiter
+        .prepare(death.request().plan.event.death_tick)
+        .unwrap();
+    let replay_started = Instant::now();
+    let replay = DurableDeathExecutionService::new(persistence.clone())
+        .execute_prepared(&mut replay_arbiter, &replay_prepared, &death)
+        .await
+        .unwrap();
+    let exact_replay_latency = replay_started.elapsed();
+    assert!(replay.transaction.is_replay());
+    assert_eq!(replay.transaction.result(), &expected_result);
+    assert_eq!(
+        canonical_death_terminal_signature(persistence).await,
+        signature
+    );
+
+    connection.close(0_u32.into(), b"measured death journey complete");
+    client_endpoint.wait_idle().await;
+    assert_eq!(client_endpoint.open_connections(), 0);
+    shutdown_send.send(()).unwrap();
+    assert_measured_identity_shutdown(server_task.await.unwrap().unwrap());
+    assert_complete_death_evidence(persistence).await;
+
+    death_measurement::DeathLatencySampleV1 {
+        terminal_commit: terminal_commit_latency,
+        exact_replay: exact_replay_latency,
+        canonical_signature_query: canonical_signature_query_latency,
+        latest_round_trip: latest_round_trip_latency,
+        summary_round_trip: summary_round_trip_latency,
+        acknowledgement_to_interactive: acknowledgement_to_interactive_latency,
+        zero_residue: true,
+    }
+}
+
 /// GDD `DTH-001`/`DTH-020` and `TECH-020`-`023`, Content Spec `CONT-ECHO-009` and
 /// `CONT-HUB-002`, and Roadmap `GB-M03-02`/`06`/`13` jointly require a committed lethal result to
 /// survive lost delivery, a complete process-local authority rebuild, and a newly launched server
@@ -1275,6 +1438,41 @@ async fn committed_death_survives_response_loss_and_full_process_restart_over_re
     );
     assert_complete_death_evidence(&restarted).await;
     restarted.close().await;
+}
+
+/// GDD `DTH-001` and `DTH-021` require the native summary to become interactive only after durable
+/// acknowledgement and within two seconds. Content `CONT-HUB-002` supplies the exact stored
+/// presentation, while Roadmap `GB-M03-06` requires measured latency and zero runtime/database
+/// residue. This sample set is death-performance evidence, not the roadmap's final 25 full-loop
+/// private-character journeys.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires explicitly authorized disposable PostgreSQL"]
+async fn durable_death_reaches_interactive_summary_within_two_seconds_over_real_quic() {
+    let persistence = disposable_database().await;
+    let presentation = sim_content::load_core_development_death_view(&content_root()).unwrap();
+    let mut journeys = Vec::with_capacity(DEATH_LATENCY_SAMPLE_COUNT);
+    for _ in 0..DEATH_LATENCY_SAMPLE_COUNT {
+        journeys.push(Box::pin(run_measured_death_journey(&persistence, &presentation)).await);
+    }
+    let hashes = presentation.hashes();
+    let evidence = death_measurement::DeathLatencyEvidenceV1::compile(
+        &journeys,
+        server_app::CORE_IDENTITY_BUILD_ID,
+        hashes.records_blake3.clone(),
+        hashes.assets_blake3.clone(),
+        hashes.localization_blake3.clone(),
+    )
+    .unwrap();
+    assert_eq!(evidence.sample_count, DEATH_LATENCY_SAMPLE_COUNT);
+    assert!(evidence.every_summary_interactive_under_two_seconds);
+    assert!(evidence.zero_transport_task_session_transaction_and_lock_residue);
+    assert!(evidence.accepted);
+    assert_ne!(evidence.raw_report_hash_blake3, "0".repeat(64));
+    println!(
+        "GB_M03_06E_LATENCY_EVIDENCE={}",
+        serde_json::to_string(&evidence).unwrap()
+    );
+    persistence.close().await;
 }
 
 fn assert_committed_death_view_results(

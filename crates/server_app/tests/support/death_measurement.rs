@@ -50,6 +50,99 @@ impl DurationStatsV1 {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct DeathLatencySampleV1 {
+    pub terminal_commit: Duration,
+    pub exact_replay: Duration,
+    pub canonical_signature_query: Duration,
+    pub latest_round_trip: Duration,
+    pub summary_round_trip: Duration,
+    pub acknowledgement_to_interactive: Duration,
+    pub zero_residue: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DeathLatencyEvidenceV1 {
+    pub report_schema: &'static str,
+    pub feature_id: &'static str,
+    pub sample_scope: &'static str,
+    pub build_id: String,
+    pub death_view_records_blake3: String,
+    pub death_view_assets_blake3: String,
+    pub death_view_localization_blake3: String,
+    pub sample_count: usize,
+    pub terminal_commit_latency: DurationStatsV1,
+    pub exact_replay_latency: DurationStatsV1,
+    pub canonical_signature_query_latency: DurationStatsV1,
+    pub latest_round_trip_latency: DurationStatsV1,
+    pub summary_round_trip_latency: DurationStatsV1,
+    pub acknowledgement_to_interactive_latency: DurationStatsV1,
+    pub every_summary_interactive_under_two_seconds: bool,
+    pub zero_transport_task_session_transaction_and_lock_residue: bool,
+    pub accepted: bool,
+    pub raw_report_hash_blake3: String,
+}
+
+impl DeathLatencyEvidenceV1 {
+    pub fn compile(
+        samples: &[DeathLatencySampleV1],
+        build_id: impl Into<String>,
+        death_view_records_blake3: impl Into<String>,
+        death_view_assets_blake3: impl Into<String>,
+        death_view_localization_blake3: impl Into<String>,
+    ) -> Result<Self, DeathMeasurementError> {
+        let collect = |field: fn(&DeathLatencySampleV1) -> Duration| {
+            samples.iter().map(field).collect::<Vec<_>>()
+        };
+        let acknowledgement_to_interactive =
+            collect(|sample| sample.acknowledgement_to_interactive);
+        let every_summary_interactive_under_two_seconds = acknowledgement_to_interactive
+            .iter()
+            .all(|sample| *sample < Duration::from_secs(2));
+        let zero_residue = samples.iter().all(|sample| sample.zero_residue);
+        let mut report = Self {
+            report_schema: "gravebound.performance.gb-m03-06e.latency.v1",
+            feature_id: "GB-M03-06E",
+            sample_scope: "death-performance-not-final-25-full-loop-journeys",
+            build_id: build_id.into(),
+            death_view_records_blake3: death_view_records_blake3.into(),
+            death_view_assets_blake3: death_view_assets_blake3.into(),
+            death_view_localization_blake3: death_view_localization_blake3.into(),
+            sample_count: samples.len(),
+            terminal_commit_latency: DurationStatsV1::compile(&collect(|sample| {
+                sample.terminal_commit
+            }))?,
+            exact_replay_latency: DurationStatsV1::compile(&collect(|sample| sample.exact_replay))?,
+            canonical_signature_query_latency: DurationStatsV1::compile(&collect(|sample| {
+                sample.canonical_signature_query
+            }))?,
+            latest_round_trip_latency: DurationStatsV1::compile(&collect(|sample| {
+                sample.latest_round_trip
+            }))?,
+            summary_round_trip_latency: DurationStatsV1::compile(&collect(|sample| {
+                sample.summary_round_trip
+            }))?,
+            acknowledgement_to_interactive_latency: DurationStatsV1::compile(
+                &acknowledgement_to_interactive,
+            )?,
+            every_summary_interactive_under_two_seconds,
+            zero_transport_task_session_transaction_and_lock_residue: zero_residue,
+            accepted: every_summary_interactive_under_two_seconds && zero_residue,
+            raw_report_hash_blake3: String::new(),
+        };
+        report.raw_report_hash_blake3 = report_hash(&report)?;
+        Ok(report)
+    }
+}
+
+fn report_hash(report: &DeathLatencyEvidenceV1) -> Result<String, DeathMeasurementError> {
+    let mut hashable = report.clone();
+    hashable.raw_report_hash_blake3.clear();
+    let bytes = serde_json::to_vec(&hashable)
+        .map_err(|error| DeathMeasurementError::Serialization(error.to_string()))?;
+    Ok(blake3::hash(&bytes).to_hex().to_string())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct PostgresResidueSnapshotV1 {
     pub active_transactions: u64,
@@ -234,6 +327,8 @@ pub enum DeathMeasurementError {
     ProcessMemory(String),
     #[error("the measured process disappeared")]
     ProcessUnavailable,
+    #[error("measurement report serialization failed: {0}")]
+    Serialization(String),
 }
 
 #[cfg(test)]
@@ -256,6 +351,39 @@ mod tests {
             DurationStatsV1::compile(&[]),
             Err(DeathMeasurementError::MissingDurationSamples)
         );
+    }
+
+    #[test]
+    fn latency_report_hash_is_stable_and_sensitive() {
+        let baseline = DeathLatencySampleV1 {
+            terminal_commit: Duration::from_micros(10),
+            exact_replay: Duration::from_micros(5),
+            canonical_signature_query: Duration::from_micros(4),
+            latest_round_trip: Duration::from_micros(3),
+            summary_round_trip: Duration::from_micros(2),
+            acknowledgement_to_interactive: Duration::from_micros(8),
+            zero_residue: true,
+        };
+        let compile = |sample| {
+            DeathLatencyEvidenceV1::compile(
+                &[sample],
+                "core-dev",
+                "a".repeat(64),
+                "b".repeat(64),
+                "c".repeat(64),
+            )
+            .unwrap()
+        };
+        let first = compile(baseline);
+        let same = compile(baseline);
+        assert_eq!(first.raw_report_hash_blake3, same.raw_report_hash_blake3);
+        assert_eq!(first.raw_report_hash_blake3.len(), 64);
+
+        let changed = compile(DeathLatencySampleV1 {
+            acknowledgement_to_interactive: Duration::from_micros(9),
+            ..baseline
+        });
+        assert_ne!(first.raw_report_hash_blake3, changed.raw_report_hash_blake3);
     }
 
     #[test]
