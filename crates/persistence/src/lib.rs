@@ -48,6 +48,7 @@ mod recall_terminal;
 mod recall_terminal_recovery;
 mod recall_terminal_repository;
 mod resolution_hold;
+mod resolution_hold_repository;
 mod reward;
 mod safe_inventory;
 mod world_flow;
