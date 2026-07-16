@@ -23,20 +23,93 @@ use protocol::{
     TERMINAL_MATERIAL_CAPACITY, TERMINAL_PENDING_ITEM_CAPACITY, TerminalInventoryRejectionCodeV1,
 };
 use thiserror::Error;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, mpsc, oneshot};
 
 use crate::{
-    AuthenticatedAccount, AuthenticatedNamespace, CoreRecallIntentAuthority,
+    AuthenticatedAccount, AuthenticatedNamespace, CoreRecallIntentAuthority, CoreRecallIntentReply,
     CoreTerminalEvaluation, CoreTerminalProducer, TerminalBinding,
     production_recall_terminal_candidate,
 };
 
 pub const PRODUCTION_RECALL_MOVEMENT_BASIS_POINTS: u16 =
     sim_core::EMERGENCY_RECALL_MOVEMENT_BASIS_POINTS;
+pub const CORE_RECALL_ACTOR_MAILBOX_CAPACITY: usize = 8;
 
 const MUTATION_ID_CONTEXT: &str = "gravebound.production-recall-channel-mutation.v1";
 const TERMINAL_ID_CONTEXT: &str = "gravebound.production-recall-channel-terminal.v1";
 const MAX_DURABLE_CLIENT_TICK: u64 = 9_223_372_036_854_775_807;
+
+#[derive(Debug, Clone)]
+pub struct CoreRecallActorHandle {
+    sender: mpsc::Sender<CoreRecallActorCommand>,
+}
+
+#[derive(Debug)]
+pub struct CoreRecallActorInbox {
+    receiver: mpsc::Receiver<CoreRecallActorCommand>,
+}
+
+#[derive(Debug)]
+struct CoreRecallActorCommand {
+    authenticated: AuthenticatedAccount,
+    frame: RecallFrameV1,
+    reply: oneshot::Sender<CoreRecallIntentReply>,
+}
+
+/// Creates one bounded mailbox for one selected character actor. The handle is transport-safe;
+/// the inbox remains with the serialized gameplay actor and is retired with it.
+#[must_use]
+pub fn production_recall_actor_mailbox() -> (CoreRecallActorHandle, CoreRecallActorInbox) {
+    let (sender, receiver) = mpsc::channel(CORE_RECALL_ACTOR_MAILBOX_CAPACITY);
+    (
+        CoreRecallActorHandle { sender },
+        CoreRecallActorInbox { receiver },
+    )
+}
+
+impl CoreRecallIntentAuthority for CoreRecallActorHandle {
+    #[allow(
+        clippy::manual_async_fn,
+        reason = "the desugared public trait contract guarantees a Send future for spawned QUIC workers"
+    )]
+    fn handle_recall<'a>(
+        &'a self,
+        authenticated: AuthenticatedAccount,
+        frame: &'a RecallFrameV1,
+        fallback_server_tick: u64,
+    ) -> impl Future<Output = CoreRecallIntentReply> + Send + 'a {
+        async move {
+            let rejected = |code| CoreRecallIntentReply {
+                server_tick: fallback_server_tick,
+                result: RecallResultV1::Rejected {
+                    schema_version: TERMINAL_INVENTORY_SCHEMA_VERSION,
+                    request_sequence: frame.sequence,
+                    character_id: frame.character_id,
+                    code,
+                },
+            };
+            if frame.validate().is_err() || frame.client_tick > MAX_DURABLE_CLIENT_TICK {
+                return rejected(TerminalInventoryRejectionCodeV1::InvalidRequest);
+            }
+            if authenticated.namespace != AuthenticatedNamespace::WipeableTest {
+                return rejected(TerminalInventoryRejectionCodeV1::ForeignAuthority);
+            }
+
+            let (reply, response) = oneshot::channel();
+            let command = CoreRecallActorCommand {
+                authenticated,
+                frame: *frame,
+                reply,
+            };
+            if self.sender.send(command).await.is_err() {
+                return rejected(TerminalInventoryRejectionCodeV1::SourceUnavailable);
+            }
+            response
+                .await
+                .unwrap_or_else(|_| rejected(TerminalInventoryRejectionCodeV1::SourceUnavailable))
+        }
+    }
+}
 
 pub trait ProductionRecallClock: Send + Sync {
     fn unix_millis(&self) -> u64;
@@ -354,21 +427,29 @@ impl<Clock> ProductionRecallIntentActor<Clock> {
     }
 }
 
-impl<Clock> CoreRecallIntentAuthority for ProductionRecallIntentActor<Clock>
-where
-    Clock: ProductionRecallClock,
-{
-    #[allow(
-        clippy::manual_async_fn,
-        reason = "the desugared public trait contract guarantees a Send future for spawned QUIC workers"
-    )]
-    fn handle_recall<'a>(
-        &'a self,
-        authenticated: AuthenticatedAccount,
-        frame: &'a RecallFrameV1,
-        server_tick: u64,
-    ) -> impl Future<Output = RecallResultV1> + Send + 'a {
-        async move { self.handle(authenticated, frame, server_tick).await }
+impl CoreRecallActorInbox {
+    /// Processes one bounded transport command inside the owning character actor's serialized
+    /// turn. The actor supplies the authoritative tick; the transport fallback tick is never used
+    /// for an accepted command.
+    pub async fn serve_next<Clock>(
+        &mut self,
+        actor: &ProductionRecallIntentActor<Clock>,
+        authoritative_tick: u64,
+    ) -> bool
+    where
+        Clock: ProductionRecallClock,
+    {
+        let Some(command) = self.receiver.recv().await else {
+            return false;
+        };
+        let result = actor
+            .handle(command.authenticated, &command.frame, authoritative_tick)
+            .await;
+        let _ = command.reply.send(CoreRecallIntentReply {
+            server_tick: authoritative_tick,
+            result,
+        });
+        true
     }
 }
 
@@ -1170,6 +1251,41 @@ mod tests {
                 .await,
             RecallResultV1::Rejected {
                 code: TerminalInventoryRejectionCodeV1::ForeignAuthority,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn bounded_actor_mailbox_fails_closed_before_or_after_actor_access() {
+        assert_eq!(CORE_RECALL_ACTOR_MAILBOX_CAPACITY, 8);
+        let (handle, inbox) = production_recall_actor_mailbox();
+
+        let production = AuthenticatedAccount {
+            account_id: authenticated().account_id,
+            namespace: AuthenticatedNamespace::Production,
+        };
+        let foreign = handle
+            .handle_recall(production, &frame(1, 100, RecallIntentV1::Start), 700)
+            .await;
+        assert_eq!(foreign.server_tick, 700);
+        assert!(matches!(
+            foreign.result,
+            RecallResultV1::Rejected {
+                code: TerminalInventoryRejectionCodeV1::ForeignAuthority,
+                ..
+            }
+        ));
+
+        drop(inbox);
+        let unavailable = handle
+            .handle_recall(authenticated(), &frame(2, 101, RecallIntentV1::Start), 701)
+            .await;
+        assert_eq!(unavailable.server_tick, 701);
+        assert!(matches!(
+            unavailable.result,
+            RecallResultV1::Rejected {
+                code: TerminalInventoryRejectionCodeV1::SourceUnavailable,
                 ..
             }
         ));

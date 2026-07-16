@@ -52,7 +52,8 @@ use server_app::{
     ProductionRecallClock, ProductionRecallIntentActor, ProductionRecallPendingAuthorityV1,
     ProgressionQueryService, SecretRewardEpoch, SubmitResult, TerminalArbiter, TerminalCandidate,
     WorldFlowGateService, WorldFlowIdGenerator, durable_death_terminal_candidate,
-    recover_committed_death_arbiter, serve_core_reliable, serve_handshake,
+    production_recall_actor_mailbox, recover_committed_death_arbiter, serve_core_reliable,
+    serve_handshake,
 };
 use sim_core::{
     CoreBossParticipant, CoreBossParticipantLock, CoreCaldusAntiCheatState,
@@ -1378,6 +1379,7 @@ async fn reliable_quic_dispatches_recall_to_one_actor_owned_channel() {
         },
     )
     .unwrap();
+    let (recall_handle, mut recall_inbox) = production_recall_actor_mailbox();
     let start = RecallFrameV1 {
         schema_version: TERMINAL_INVENTORY_SCHEMA_VERSION,
         sequence: 1,
@@ -1418,10 +1420,10 @@ async fn reliable_quic_dispatches_recall_to_one_actor_owned_channel() {
             &bargain,
             &safe_inventory,
             &extraction_terminal,
-            &recall_actor,
+            &recall_handle,
             authenticated,
             1,
-            100,
+            9_000,
         )
         .await
         .unwrap();
@@ -1435,10 +1437,10 @@ async fn reliable_quic_dispatches_recall_to_one_actor_owned_channel() {
             &bargain,
             &safe_inventory,
             &extraction_terminal,
-            &recall_actor,
+            &recall_handle,
             authenticated,
             2,
-            111,
+            9_001,
         )
         .await
         .unwrap();
@@ -1463,6 +1465,7 @@ async fn reliable_quic_dispatches_recall_to_one_actor_owned_channel() {
         )
         .await
         .unwrap();
+        assert_eq!(pending.server_tick, 100);
         assert!(matches!(
             pending.event,
             ReliableEvent::RecallResult(result)
@@ -1484,6 +1487,7 @@ async fn reliable_quic_dispatches_recall_to_one_actor_owned_channel() {
         )
         .await
         .unwrap();
+        assert_eq!(cancelled.server_tick, 111);
         assert!(matches!(
             cancelled.event,
             ReliableEvent::RecallResult(result)
@@ -1497,7 +1501,11 @@ async fn reliable_quic_dispatches_recall_to_one_actor_owned_channel() {
                 )
         ));
     };
-    tokio::join!(server_session, client_session);
+    let actor_session = async {
+        assert!(recall_inbox.serve_next(&recall_actor, 100).await);
+        assert!(recall_inbox.serve_next(&recall_actor, 111).await);
+    };
+    tokio::join!(actor_session, server_session, client_session);
     drop(client);
     client_endpoint.wait_idle().await;
     server_endpoint.close(0_u32.into(), b"active Recall complete");

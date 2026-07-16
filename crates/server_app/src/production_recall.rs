@@ -68,13 +68,19 @@ impl CoreRecallTerminalAuthority {
 /// Transport-facing Recall intent seam. The Core identity endpoint injects the disabled
 /// implementation, while a live character actor can inject its own bounded authority without
 /// moving channel state, inventory authority, or terminal arbitration into QUIC dispatch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreRecallIntentReply {
+    pub server_tick: u64,
+    pub result: RecallResultV1,
+}
+
 pub trait CoreRecallIntentAuthority: Send + Sync {
     fn handle_recall<'a>(
         &'a self,
         authenticated: AuthenticatedAccount,
         frame: &'a RecallFrameV1,
         server_tick: u64,
-    ) -> impl Future<Output = RecallResultV1> + Send + 'a;
+    ) -> impl Future<Output = CoreRecallIntentReply> + Send + 'a;
 }
 
 impl CoreRecallIntentAuthority for CoreRecallTerminalAuthority {
@@ -86,9 +92,14 @@ impl CoreRecallIntentAuthority for CoreRecallTerminalAuthority {
         &'a self,
         authenticated: AuthenticatedAccount,
         frame: &'a RecallFrameV1,
-        _server_tick: u64,
-    ) -> impl Future<Output = RecallResultV1> + Send + 'a {
-        async move { self.handle(authenticated, frame) }
+        server_tick: u64,
+    ) -> impl Future<Output = CoreRecallIntentReply> + Send + 'a {
+        async move {
+            CoreRecallIntentReply {
+                server_tick,
+                result: self.handle(authenticated, frame),
+            }
+        }
     }
 }
 

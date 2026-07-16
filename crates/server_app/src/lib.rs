@@ -133,7 +133,7 @@ pub use production_extraction::{
     protocol_extraction_terminal_result, recover_committed_extraction_arbiter,
 };
 pub use production_recall::{
-    CoreRecallIntentAuthority, CoreRecallTerminalAuthority,
+    CoreRecallIntentAuthority, CoreRecallIntentReply, CoreRecallTerminalAuthority,
     PostgresProductionRecallExecutionService, ProductionRecallExecutionError,
     ProductionRecallExecutionOutcome, ProductionRecallExecutionService,
     ProductionRecallReplayOutcome, ProductionRecallTerminalReader, ProductionRecallWriter,
@@ -142,11 +142,12 @@ pub use production_recall::{
     protocol_recall_terminal_result, recover_committed_recall_arbiter,
 };
 pub use production_recall_channel::{
+    CORE_RECALL_ACTOR_MAILBOX_CAPACITY, CoreRecallActorHandle, CoreRecallActorInbox,
     PRODUCTION_RECALL_MOVEMENT_BASIS_POINTS, ProductionLinkLostRecallAuthorityV1,
     ProductionRecallChannel, ProductionRecallChannelError, ProductionRecallClock,
     ProductionRecallCompletionAuthorityV1, ProductionRecallIntentActor,
     ProductionRecallPendingAuthorityV1, ProductionRecallPlanner, ProductionRecallStartAuthorityV1,
-    ProductionRecallTickPreparation, evaluate_link_lost_tick,
+    ProductionRecallTickPreparation, evaluate_link_lost_tick, production_recall_actor_mailbox,
 };
 pub use progression_award::{
     CoreProgressionRules, ProgressionAwardCode, ProgressionAwardCommand, ProgressionAwardContext,
@@ -609,6 +610,7 @@ where
         .read_to_end(RELIABLE_FRAME_LIMIT)
         .await
         .map_err(|error| ServerTransportError::Quic(error.to_string()))?;
+    let mut response_server_tick = server_tick;
     let event = match decode_frame(&request)? {
         WireMessage::AccountBootstrapFrame(frame) => {
             protocol::ReliableEvent::AccountBootstrapResult(
@@ -653,16 +655,18 @@ where
                 extraction.handle(authenticated, &frame),
             ))
         }
-        WireMessage::RecallFrame(frame) => protocol::ReliableEvent::RecallResult(Box::new(
-            recall
+        WireMessage::RecallFrame(frame) => {
+            let reply = recall
                 .handle_recall(authenticated, &frame, server_tick)
-                .await,
-        )),
+                .await;
+            response_server_tick = reply.server_tick;
+            protocol::ReliableEvent::RecallResult(Box::new(reply.result))
+        }
         _ => return Err(ServerTransportError::UnexpectedMessage),
     };
     let response = protocol::ReliableEventFrame {
         sequence: response_sequence,
-        server_tick,
+        server_tick: response_server_tick,
         event,
     };
     send.write_all(&encode_frame(&WireMessage::ReliableEvent(
