@@ -213,7 +213,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 52;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 54;
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -1583,6 +1583,10 @@ mod tests {
 
     #[test]
     fn deferred_death_graph_consumes_provenance_without_forking_its_closure() {
+        assert_eq!(
+            EXPECTED_SCHEMA_VERSION, 54,
+            "readiness must advance with the latest published migration"
+        );
         let migration = include_str!("../../../migrations/0054_death_provenance_echo_closure.sql");
         for required in [
             "Gravebound_Production_GDD_v1_Canonical.md",
