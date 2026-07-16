@@ -9,7 +9,13 @@
 //! This module performs evidence arithmetic and bounded inspection only. It does not create a
 //! death, infer an Echo outcome, or become an alternate gameplay writer.
 
-use std::{collections::BTreeSet, time::Duration};
+use std::{
+    collections::BTreeSet,
+    fs,
+    io::Write as _,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use persistence::PostgresPersistence;
 use serde::Serialize;
@@ -559,6 +565,51 @@ impl DeathBranchMatrixEvidenceV1 {
         report.raw_report_hash_blake3 = branch_matrix_report_hash(&report)?;
         Ok(report)
     }
+
+    pub fn write_json_atomically(&self, path: &Path) -> Result<(), DeathMeasurementError> {
+        if self.raw_report_hash_blake3 != branch_matrix_report_hash(self)? {
+            return Err(DeathMeasurementError::ReportHashMismatch);
+        }
+        if path.exists() {
+            return Err(DeathMeasurementError::EvidenceIo(format!(
+                "destination already exists: {}",
+                path.display()
+            )));
+        }
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            fs::create_dir_all(parent)
+                .map_err(|error| DeathMeasurementError::EvidenceIo(error.to_string()))?;
+        }
+        let temporary = partial_path(path);
+        let result = (|| -> Result<(), DeathMeasurementError> {
+            let bytes = serde_json::to_vec_pretty(self)
+                .map_err(|error| DeathMeasurementError::Serialization(error.to_string()))?;
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)
+                .map_err(|error| DeathMeasurementError::EvidenceIo(error.to_string()))?;
+            file.write_all(&bytes)
+                .map_err(|error| DeathMeasurementError::EvidenceIo(error.to_string()))?;
+            file.sync_all()
+                .map_err(|error| DeathMeasurementError::EvidenceIo(error.to_string()))?;
+            fs::rename(&temporary, path)
+                .map_err(|error| DeathMeasurementError::EvidenceIo(error.to_string()))
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(temporary);
+        }
+        result
+    }
+}
+
+fn partial_path(path: &Path) -> PathBuf {
+    let mut value = path.as_os_str().to_os_string();
+    value.push(".partial");
+    PathBuf::from(value)
 }
 
 const fn branch_runtime_residue_is_exact(residue: DeathRuntimeResidueV1) -> bool {
@@ -659,6 +710,10 @@ pub enum DeathMeasurementError {
     ProcessUnavailable,
     #[error("measurement report serialization failed: {0}")]
     Serialization(String),
+    #[error("measurement report hash does not match its payload")]
+    ReportHashMismatch,
+    #[error("measurement evidence I/O failed: {0}")]
+    EvidenceIo(String),
 }
 
 #[cfg(test)]
@@ -998,6 +1053,47 @@ mod tests {
             accepted.raw_report_hash_blake3,
             wrong.raw_report_hash_blake3
         );
+    }
+
+    #[test]
+    fn branch_matrix_report_publication_is_atomic_new_only_and_hash_checked() {
+        let report = DeathBranchMatrixEvidenceV1::compile(
+            accepted_branch_matrix(),
+            "core-dev",
+            "a".repeat(64),
+            "b".repeat(64),
+            "c".repeat(64),
+        )
+        .unwrap();
+        let ordinal = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "gravebound-death-branch-report-{}-{ordinal}",
+            std::process::id()
+        ));
+        let path = root.join("report.json");
+        report.write_json_atomically(&path).unwrap();
+        let encoded = fs::read(&path).unwrap();
+        let decoded = serde_json::from_slice::<serde_json::Value>(&encoded).unwrap();
+        assert_eq!(
+            decoded["raw_report_hash_blake3"],
+            report.raw_report_hash_blake3
+        );
+        assert!(!partial_path(&path).exists());
+        assert!(matches!(
+            report.write_json_atomically(&path),
+            Err(DeathMeasurementError::EvidenceIo(_))
+        ));
+
+        let mut tampered = report;
+        tampered.branch_count += 1;
+        assert_eq!(
+            tampered.write_json_atomically(&root.join("tampered.json")),
+            Err(DeathMeasurementError::ReportHashMismatch)
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

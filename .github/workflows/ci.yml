@@ -115,8 +115,90 @@ jobs:
           cargo test --locked -p server_app --test postgres_field_equipment -- --ignored --test-threads=1
           cargo test --locked -p server_app --test postgres_safe_inventory -- --ignored --test-threads=1 --nocapture
           cargo test --locked -p server_app --test core_route_quic -- --ignored --test-threads=1 --nocapture
-          cargo test --locked -p server_app --test death_branch_matrix -- --ignored --test-threads=1 --nocapture
           cargo test --locked -p server_app --test postgres_identity -- --ignored --test-threads=1
+      - name: Generate authenticated death branch and frame source evidence
+        env:
+          GRAVEBOUND_DEATH_BRANCH_MATRIX_REPORT_PATH: ${{ runner.temp }}/gb-m03-06e-death-branch-matrix.json
+          GRAVEBOUND_NATIVE_DEATH_FRAME_FIXTURE_PATH: ${{ runner.temp }}/gb-m03-06e-native-death-frame-fixture.json
+        run: cargo test --locked -p server_app --test death_branch_matrix -- --ignored --test-threads=1 --nocapture
+      - name: Upload authenticated death evidence source
+        uses: actions/upload-artifact@v4
+        with:
+          name: gb-m03-06e-death-source-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/gb-m03-06e-death-branch-matrix.json
+            ${{ runner.temp }}/gb-m03-06e-native-death-frame-fixture.json
+          if-no-files-found: error
+          retention-days: 14
+
+  m03-native-death-frame:
+    name: GB-M03-06E optimized native death frames
+    needs: postgres-persistence
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      RUSTFLAGS: -C link-arg=-fuse-ld=lld
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_RELEASE_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install optimized native rendering dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes clang lld libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev mesa-vulkan-drivers vulkan-tools xvfb xauth
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
+      - name: Download authenticated death evidence source
+        uses: actions/download-artifact@v4
+        with:
+          name: gb-m03-06e-death-source-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/gb-m03-06e-death-source
+      - name: Build optimized native client
+        run: cargo build --locked --release -p client_bevy
+      - name: Capture standard and reduced-effects native death frames
+        shell: bash
+        env:
+          WGPU_BACKEND: vulkan
+          LIBGL_ALWAYS_SOFTWARE: "1"
+          WINIT_UNIX_BACKEND: x11
+        run: |
+          software_icd="$(find /usr/share/vulkan/icd.d -name 'lvp_icd*.json' -print -quit)"
+          test -n "${software_icd}"
+          export VK_ICD_FILENAMES="${software_icd}"
+          fixture="${RUNNER_TEMP}/gb-m03-06e-death-source/gb-m03-06e-native-death-frame-fixture.json"
+          output="${RUNNER_TEMP}/gb-m03-06e-native-death-frame"
+          mkdir -p "${output}"
+          xvfb-run -a -s "-screen 0 1280x720x24" vulkaninfo --summary
+          for mode in standard reduced; do
+            for viewport in 1280x720 1920x1080; do
+              width="${viewport%x*}"
+              height="${viewport#*x}"
+              reduced_flag=()
+              if [[ "${mode}" == "reduced" ]]; then
+                reduced_flag=(--reduced-effects)
+              fi
+              xvfb-run -a -s "-screen 0 ${viewport}x24" \
+                ./target/release/client_bevy core-death-frame-probe \
+                --fixture "${fixture}" \
+                --screenshot "${output}/${mode}-${viewport}.png" \
+                --report "${output}/${mode}-${viewport}.json" \
+                --content-root content \
+                --width "${width}" \
+                --height "${height}" \
+                --ui-scale 100 \
+                --timeout-ms 20000 \
+                "${reduced_flag[@]}"
+            done
+          done
+          test "$(find "${output}" -maxdepth 1 -type f -name '*.png' | wc -l)" -eq 4
+          test "$(find "${output}" -maxdepth 1 -type f -name '*.json' | wc -l)" -eq 4
+      - name: Upload optimized native death frame evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: gb-m03-06e-native-death-frame-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/gb-m03-06e-native-death-frame
+          if-no-files-found: error
+          retention-days: 14
 
   m03-death-soak:
     name: GB-M03-06E 30-minute death persistence soak

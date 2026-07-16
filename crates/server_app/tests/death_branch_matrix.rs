@@ -20,9 +20,13 @@ use std::{
 };
 
 use client_bevy::{
-    DeathSummaryAction, DeathUiActivity, DeathUiSnapshot, DeathViewClientModel, TerminalDeathPhase,
+    DeathSummaryAction, DeathUiActivity, DeathUiSnapshot, DeathViewClientModel,
+    NativeDeathFrameProbeFixtureV1, TerminalDeathPhase,
 };
-use persistence::{PersistenceConfig, PostgresPersistence, WIPEABLE_CORE_NAMESPACE};
+use persistence::{
+    CORE_WORLD_ASSETS_BLAKE3, CORE_WORLD_LOCALIZATION_BLAKE3, CORE_WORLD_RECORDS_BLAKE3,
+    PersistenceConfig, PostgresPersistence, WIPEABLE_CORE_NAMESPACE,
+};
 use protocol::{
     AuthTicket, ClientHello, Compression, DEATH_VIEW_SCHEMA_VERSION, DeathEchoOutcomeV1,
     DeathViewFrameV1, DeathViewRequestV1, DeathViewResultV1, HandshakeResponse, ManifestHash,
@@ -40,6 +44,17 @@ use tokio::sync::oneshot;
 mod death_measurement;
 #[path = "support/durable_death.rs"]
 mod durable_death_fixture;
+
+const NATIVE_FRAME_FIXTURE_PATH_ENV: &str = "GRAVEBOUND_NATIVE_DEATH_FRAME_FIXTURE_PATH";
+const BRANCH_MATRIX_REPORT_PATH_ENV: &str = "GRAVEBOUND_DEATH_BRANCH_MATRIX_REPORT_PATH";
+
+struct TargetDeathReadV1 {
+    latest_round_trip: Duration,
+    summary_round_trip: Duration,
+    post_commit_to_client_model_ready: Duration,
+    latest_result: DeathViewResultV1,
+    summary_result: DeathViewResultV1,
+}
 
 fn content_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../content")
@@ -199,7 +214,7 @@ async fn read_target_death(
     scenario: &durable_death_fixture::DurableDeathScenarioV1,
     expected: death_measurement::DeathBranchEchoOutcomeV1,
     committed: Instant,
-) -> (Duration, Duration, Duration) {
+) -> TargetDeathReadV1 {
     let mut model = DeathViewClientModel::new(presentation.clone()).unwrap();
     let latest_request = model
         .begin_committed_death_lookup(scenario.identity.character_id)
@@ -276,11 +291,13 @@ async fn read_target_death(
                 && page.entries.len() == 2
                 && page.entries.last().is_some_and(|entry| entry.lethal)
     ));
-    (
+    TargetDeathReadV1 {
         latest_round_trip,
         summary_round_trip,
         post_commit_to_client_model_ready,
-    )
+        latest_result: latest,
+        summary_result: summary,
+    }
 }
 
 async fn assert_reconnected_latest(
@@ -370,7 +387,10 @@ async fn run_branch(
     branch: death_measurement::DeathBranchKindV1,
     scenario: &durable_death_fixture::DurableDeathScenarioV1,
     expected: death_measurement::DeathBranchEchoOutcomeV1,
-) -> death_measurement::DeathBranchSampleV1 {
+) -> (
+    death_measurement::DeathBranchSampleV1,
+    Option<NativeDeathFrameProbeFixtureV1>,
+) {
     durable_death_fixture::seed_danger_root_for(persistence, scenario).await;
     let death = durable_death_fixture::prepare_death_for(persistence.clone(), scenario).await;
     assert_eq!(
@@ -396,15 +416,30 @@ async fn run_branch(
 
     let (candidate, expected_result, terminal_commit) = commit_prepared(persistence, &death).await;
     let committed = Instant::now();
-    let (latest_round_trip, summary_round_trip, post_commit_to_client_model_ready) =
-        read_target_death(
-            &first_connection,
-            presentation,
-            scenario,
-            expected,
-            committed,
-        )
-        .await;
+    let target_read = read_target_death(
+        &first_connection,
+        presentation,
+        scenario,
+        expected,
+        committed,
+    )
+    .await;
+    let native_frame_fixture =
+        (branch == death_measurement::DeathBranchKindV1::EligibleSelfPromotion).then(|| {
+            NativeDeathFrameProbeFixtureV1::new(
+                server_app::CORE_IDENTITY_BUILD_ID,
+                scenario.identity.character_id,
+                protocol::WorldFlowContentRevisionV1 {
+                    records_blake3: ManifestHash::new(CORE_WORLD_RECORDS_BLAKE3).unwrap(),
+                    assets_blake3: ManifestHash::new(CORE_WORLD_ASSETS_BLAKE3).unwrap(),
+                    localization_blake3: ManifestHash::new(CORE_WORLD_LOCALIZATION_BLAKE3).unwrap(),
+                },
+                protocol::SessionDestination::DeathFinal,
+                target_read.latest_result,
+                target_read.summary_result,
+            )
+            .unwrap()
+        });
 
     let signature_started = Instant::now();
     let signature = canonical_signature_bytes(persistence, scenario.identity.character_id).await;
@@ -438,24 +473,29 @@ async fn run_branch(
         .unwrap();
     assert!(database_residue.is_zero());
 
-    death_measurement::DeathBranchSampleV1 {
-        branch,
-        echo_outcome: expected,
-        terminal_commit_micros: micros(terminal_commit),
-        exact_replay_micros: micros(exact_replay),
-        canonical_signature_query_micros: micros(canonical_signature_query),
-        latest_round_trip_micros: micros(latest_round_trip),
-        summary_round_trip_micros: micros(summary_round_trip),
-        post_commit_to_client_model_ready_micros: micros(post_commit_to_client_model_ready),
-        target_echo_records,
-        target_echo_transitions,
-        target_outbox_events,
-        account_available_echoes,
-        account_dormant_echoes,
-        canonical_signature_unchanged,
-        database_residue,
-        runtime_residue,
-    }
+    (
+        death_measurement::DeathBranchSampleV1 {
+            branch,
+            echo_outcome: expected,
+            terminal_commit_micros: micros(terminal_commit),
+            exact_replay_micros: micros(exact_replay),
+            canonical_signature_query_micros: micros(canonical_signature_query),
+            latest_round_trip_micros: micros(target_read.latest_round_trip),
+            summary_round_trip_micros: micros(target_read.summary_round_trip),
+            post_commit_to_client_model_ready_micros: micros(
+                target_read.post_commit_to_client_model_ready,
+            ),
+            target_echo_records,
+            target_echo_transitions,
+            target_outbox_events,
+            account_available_echoes,
+            account_dormant_echoes,
+            canonical_signature_unchanged,
+            database_residue,
+            runtime_residue,
+        },
+        native_frame_fixture,
+    )
 }
 
 fn ineligible_scenario(
@@ -500,30 +540,30 @@ async fn durable_death_echo_branch_matrix_over_real_quic_and_postgresql() {
     ] {
         persistence.reset_disposable_identity_data().await.unwrap();
         let scenario = ineligible_scenario(branch);
-        samples.push(
-            run_branch(
-                &persistence,
-                &presentation,
-                branch,
-                &scenario,
-                death_measurement::DeathBranchEchoOutcomeV1::NotEligible,
-            )
-            .await,
-        );
+        let (sample, fixture) = Box::pin(run_branch(
+            &persistence,
+            &presentation,
+            branch,
+            &scenario,
+            death_measurement::DeathBranchEchoOutcomeV1::NotEligible,
+        ))
+        .await;
+        assert!(fixture.is_none());
+        samples.push(sample);
     }
 
     persistence.reset_disposable_identity_data().await.unwrap();
     let self_promotion = durable_death_fixture::DurableDeathScenarioV1::primary_eligible();
-    samples.push(
-        run_branch(
-            &persistence,
-            &presentation,
-            death_measurement::DeathBranchKindV1::EligibleSelfPromotion,
-            &self_promotion,
-            death_measurement::DeathBranchEchoOutcomeV1::Available,
-        )
-        .await,
-    );
+    let (sample, native_frame_fixture) = Box::pin(run_branch(
+        &persistence,
+        &presentation,
+        death_measurement::DeathBranchKindV1::EligibleSelfPromotion,
+        &self_promotion,
+        death_measurement::DeathBranchEchoOutcomeV1::Available,
+    ))
+    .await;
+    let native_frame_fixture = native_frame_fixture.expect("self-promotion native frame fixture");
+    samples.push(sample);
 
     persistence.reset_disposable_identity_data().await.unwrap();
     durable_death_fixture::seed_danger_root_for(&persistence, &self_promotion).await;
@@ -538,16 +578,16 @@ async fn durable_death_echo_branch_matrix_over_real_quic_and_postgresql() {
         durable_death_fixture::DurableDeathScenarioV1::secondary_with_existing_available(
             self_promotion.identity.echo_id,
         );
-    samples.push(
-        run_branch(
-            &persistence,
-            &presentation,
-            death_measurement::DeathBranchKindV1::EligibleExistingAvailable,
-            &existing_available,
-            death_measurement::DeathBranchEchoOutcomeV1::Dormant,
-        )
-        .await,
-    );
+    let (sample, fixture) = Box::pin(run_branch(
+        &persistence,
+        &presentation,
+        death_measurement::DeathBranchKindV1::EligibleExistingAvailable,
+        &existing_available,
+        death_measurement::DeathBranchEchoOutcomeV1::Dormant,
+    ))
+    .await;
+    assert!(fixture.is_none());
+    samples.push(sample);
 
     let hashes = presentation.hashes();
     let evidence = death_measurement::DeathBranchMatrixEvidenceV1::compile(
@@ -561,6 +601,20 @@ async fn durable_death_echo_branch_matrix_over_real_quic_and_postgresql() {
     assert!(
         evidence.accepted,
         "death branch matrix failed: {evidence:#?}"
+    );
+    if let Some(path) = std::env::var_os(NATIVE_FRAME_FIXTURE_PATH_ENV) {
+        native_frame_fixture
+            .write_json_atomically(&PathBuf::from(path))
+            .unwrap();
+    }
+    if let Some(path) = std::env::var_os(BRANCH_MATRIX_REPORT_PATH_ENV) {
+        evidence
+            .write_json_atomically(&PathBuf::from(path))
+            .unwrap();
+    }
+    println!(
+        "GB_M03_06E_NATIVE_DEATH_FRAME_FIXTURE_HASH={}",
+        native_frame_fixture.fixture_hash_blake3()
     );
     println!(
         "GB_M03_06E_DEATH_BRANCH_MATRIX_EVIDENCE={}",
