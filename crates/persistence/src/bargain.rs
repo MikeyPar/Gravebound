@@ -229,6 +229,10 @@ impl PostgresPersistence {
             selected_character_id,
         )
         .await?;
+        validate_life(&life)?;
+        if life.life_state != 0 {
+            return Err(PersistenceError::BargainCharacterDead);
+        }
         let offer = lock_offer(
             transaction.connection(),
             &account_id,
@@ -236,7 +240,6 @@ impl PostgresPersistence {
             &offer_id,
         )
         .await?;
-        validate_life(&life)?;
         validate_offer(&offer)?;
         let original_life = life.clone();
         let original_offer = offer.clone();

@@ -397,6 +397,15 @@ where
                 };
                 return staged_result(frame.sequence, mutation, code, None, None);
             }
+            Err(PersistenceError::WorldFlowCharacterDead) => {
+                return staged_result(
+                    frame.sequence,
+                    mutation,
+                    WorldTransferResultCode::CharacterDead,
+                    None,
+                    None,
+                );
+            }
             Err(_) => {
                 return staged_result(
                     frame.sequence,

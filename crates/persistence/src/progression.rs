@@ -461,6 +461,9 @@ async fn lock_fresh_award_aggregates(
     PersistenceError,
 > {
     let character = lock_character(connection, account_id, character_id, contract).await?;
+    if character.life_state != 0 {
+        return Err(PersistenceError::ProgressionCharacterDead);
+    }
     let location = lock_award_location(
         connection,
         account_id,
@@ -1386,7 +1389,7 @@ fn validate_locked_character(
     if !(1..=i16::try_from(contract.cumulative_xp.len())
         .map_err(|_| PersistenceError::CorruptStoredProgression)?)
         .contains(&character.cached_level)
-        || character.life_state < 0
+        || !matches!(character.life_state, 0..=1)
         || character.security_state < 0
         || character.character_state_version < 1
     {

@@ -244,6 +244,12 @@ impl PostgresPersistence {
         let character = lock_character(transaction.connection(), &account_id, &character_id)
             .await?
             .ok_or(PersistenceError::WorldFlowCharacterNotFound)?;
+        if character.life_state == 1 {
+            return Err(PersistenceError::WorldFlowCharacterDead);
+        }
+        if character.life_state != 0 {
+            return Err(PersistenceError::CorruptStoredWorldFlow);
+        }
         let location_row =
             load_location(transaction.connection(), &account_id, &character_id, true)
                 .await?

@@ -178,6 +178,9 @@ where
             Err(PersistenceError::BargainCharacterNotFound) => {
                 decision_error(frame.mutation_id, BargainResultCode::CharacterNotOwned)
             }
+            Err(PersistenceError::BargainCharacterDead) => {
+                decision_error(frame.mutation_id, BargainResultCode::CharacterDead)
+            }
             Err(PersistenceError::BargainOfferNotFound) => {
                 decision_error(frame.mutation_id, BargainResultCode::OfferResolved)
             }

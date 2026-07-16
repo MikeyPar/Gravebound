@@ -340,8 +340,12 @@ pub enum PersistenceError {
     WorldFlowResultRequired,
     #[error("world-flow character does not exist for the authenticated account")]
     WorldFlowCharacterNotFound,
+    #[error("world-flow character is permanently dead")]
+    WorldFlowCharacterDead,
     #[error("progression character does not exist for the authenticated account")]
     ProgressionCharacterNotFound,
+    #[error("progression character is permanently dead")]
+    ProgressionCharacterDead,
     #[error("stored progression or XP award violates the approved schema")]
     CorruptStoredProgression,
     #[error("a fresh progression award transaction must append one typed result")]
@@ -398,6 +402,8 @@ pub enum PersistenceError {
     CorruptStoredBargain,
     #[error("Bargain character does not exist for the authenticated account")]
     BargainCharacterNotFound,
+    #[error("Bargain character is permanently dead")]
+    BargainCharacterDead,
     #[error("Bargain offer does not exist for the authenticated character")]
     BargainOfferNotFound,
     #[error("a fresh Bargain decision transaction must append one typed result")]

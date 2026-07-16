@@ -77,6 +77,9 @@ impl PostgresProgressionAwardService {
             Err(PersistenceError::ProgressionCharacterNotFound) => {
                 terminal_outcome(command, ProgressionAwardCode::CharacterNotFound)
             }
+            Err(PersistenceError::ProgressionCharacterDead) => {
+                terminal_outcome(command, ProgressionAwardCode::CharacterDead)
+            }
             Err(_) => terminal_outcome(command, ProgressionAwardCode::ServiceUnavailable),
         }
     }
