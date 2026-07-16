@@ -214,7 +214,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 54;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 55;
 const DISPOSABLE_DATABASE_RESET_SQL: &str = "TRUNCATE TABLE accounts, caldus_victory_exits CASCADE";
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -1595,7 +1595,7 @@ mod tests {
     #[test]
     fn deferred_death_graph_consumes_provenance_without_forking_its_closure() {
         assert_eq!(
-            EXPECTED_SCHEMA_VERSION, 54,
+            EXPECTED_SCHEMA_VERSION, 55,
             "readiness must advance with the latest published migration"
         );
         let migration = include_str!("../../../migrations/0054_death_provenance_echo_closure.sql");
@@ -1629,6 +1629,48 @@ mod tests {
             assert!(
                 !migration.contains(prohibited),
                 "provenance Echo closure migration leaked {prohibited}"
+            );
+        }
+    }
+
+    #[test]
+    fn extraction_terminal_custody_appends_exact_locations_and_provenance() {
+        let migration = include_str!("../../../migrations/0055_extraction_terminal_custody.sql");
+        for required in [
+            "Gravebound_Production_GDD_v1_Canonical.md",
+            "Gravebound_Content_Production_Spec_v1.md",
+            "Gravebound_Development_Roadmap_v1.md",
+            "SPEC-CONFLICT-029-m03-extraction-recall-terminal-authority.md",
+            "location_kind BETWEEN 0 AND 9",
+            "location_kind = 8 AND character_id IS NULL",
+            "slot_index BETWEEN 0 AND 19",
+            "overflow_expires_at = extracted_at + INTERVAL '72 hours'",
+            "location_kind = 9 AND character_id IS NOT NULL",
+            "slot_index BETWEEN 0 AND 7",
+            "source_kind BETWEEN 0 AND 5",
+            "source_kind = 5 AND event_kind = 1",
+            "one_overflow_equipment_per_slot",
+            "one_resolution_hold_equipment_per_stack",
+            "M03 never auto-deletes or salvages",
+            "Recovery/downgrade:",
+            "Published migration history must never be rewritten",
+        ] {
+            assert!(migration.contains(required), "migration omitted {required}");
+        }
+        for prohibited in [
+            "DROP TABLE",
+            "TRUNCATE",
+            "DELETE FROM",
+            "UPDATE item_instances",
+            "automatic salvage",
+            "JSON",
+            "JSONB",
+            "FLOAT",
+            "DOUBLE PRECISION",
+        ] {
+            assert!(
+                !migration.contains(prohibited),
+                "terminal custody migration leaked {prohibited}"
             );
         }
     }
