@@ -15,6 +15,7 @@ mod messages;
 mod oath;
 mod progression;
 mod safe_inventory;
+mod terminal_inventory;
 mod world_flow;
 
 pub use account::{
@@ -37,6 +38,7 @@ pub use bounded::{AuthTicket, BoundedValueError, ManifestHash, WireText};
 pub use codec::{
     DATAGRAM_FRAME_LIMIT, FRAME_HEADER_BYTES, RELIABLE_FRAME_LIMIT, WireCodecError, decode_frame,
     encode_frame, encode_m02_compatibility_frame, encode_protocol_1_12_compatibility_frame,
+    encode_protocol_1_14_compatibility_frame,
 };
 pub use death_view::{
     DEATH_SUMMARY_REVISION, DEATH_VIEW_CHARACTER_NAME_MAX_BYTES, DEATH_VIEW_DIGEST_BYTES,
@@ -90,6 +92,17 @@ pub use safe_inventory::{
     SafeInventoryResultCodeV1, SafeInventoryTransferFrameV1, SafeInventoryTransferKindV1,
     SafeInventoryTransferPayloadV1, SafeInventoryTransferResultV1, SafeInventoryValidationError,
 };
+pub use terminal_inventory::{
+    EXTRACTION_PLACEMENT_CAPACITY, ExtractionCommitFrameV1, ExtractionCommitPayloadV1,
+    ExtractionCommitResultV1, ExtractionDestinationV1, ExtractionMaterialCreditV1,
+    ExtractionPlacementV1, RECALL_CHANNEL_TICKS, RecallFrameV1, RecallIntentV1, RecallResultV1,
+    RecallTerminalTriggerV1, StoredExtractionTerminalResultV1, StoredRecallTerminalResultV1,
+    TERMINAL_HALL_CONTENT_ID, TERMINAL_INVENTORY_DIGEST_BYTES, TERMINAL_INVENTORY_ID_BYTES,
+    TERMINAL_INVENTORY_SCHEMA_VERSION, TERMINAL_MATERIAL_CAPACITY, TERMINAL_PENDING_ITEM_CAPACITY,
+    TERMINAL_STABILIZED_ITEM_CAPACITY, TerminalExpectedVersionsV1, TerminalInventoryCapabilityV1,
+    TerminalInventoryRejectionCodeV1, TerminalInventoryValidationError, TerminalVersionAdvanceV1,
+    TerminalVersionVectorV1,
+};
 pub use world_flow::{
     CharacterLocation, CharacterLocationSnapshot, INSTANCE_LINEAGE_ID_BYTES, SafeArrival,
     TRANSFER_ID_BYTES, WORLD_FLOW_ID_MAX_BYTES, WorldFlowContentRevisionV1, WorldFlowFrame,
@@ -103,7 +116,9 @@ use thiserror::Error;
 /// First incompatible protocol generation.
 pub const PROTOCOL_MAJOR: u16 = 1;
 /// Backward-compatible feature generation within [`PROTOCOL_MAJOR`].
-pub const PROTOCOL_MINOR: u16 = DEATH_VIEW_PROTOCOL_MINOR;
+pub const PROTOCOL_MINOR: u16 = TERMINAL_INVENTORY_PROTOCOL_MINOR;
+/// Exact successful-extraction and Emergency Recall generation.
+pub const TERMINAL_INVENTORY_PROTOCOL_MINOR: u16 = 15;
 /// Exact authenticated durable-death view generation.
 pub const DEATH_VIEW_PROTOCOL_MINOR: u16 = 14;
 /// Exact safe-inventory reliable mutation generation.
@@ -148,6 +163,10 @@ pub const CORE_WORLD_FLOW_FEATURE_FLAG: &str = "core_world_flow_integration";
 pub const CORE_SAFE_INVENTORY_FEATURE_FLAG: &str = "core_safe_inventory_integration";
 /// Advertises the authenticated, read-only durable-death query surface.
 pub const CORE_DEATH_VIEW_FEATURE_FLAG: &str = "core_death_views";
+/// Advertises the authenticated production extraction-commit mutation surface.
+pub const CORE_EXTRACTION_TERMINAL_FEATURE_FLAG: &str = "core_extraction_terminal_v1";
+/// Advertises the authenticated Emergency Recall intent and stored-result surface.
+pub const CORE_RECALL_TERMINAL_FEATURE_FLAG: &str = "core_emergency_recall_v1";
 /// Build admitted by the explicit wipeable Core identity development endpoint.
 pub const M03_CORE_DEV_BUILD_ID: &str = "m03-core-dev-identity-1";
 /// Non-promotable content target label advertised by the Core identity endpoint.
@@ -348,15 +367,17 @@ mod tests {
     }
 
     #[test]
-    fn death_views_require_protocol_1_14_and_explicit_feature_negotiation() {
-        assert_eq!(PROTOCOL_MINOR, 14);
+    fn terminal_inventory_requires_protocol_1_15_and_explicit_feature_negotiation() {
+        assert_eq!(PROTOCOL_MINOR, 15);
+        assert_eq!(TERMINAL_INVENTORY_PROTOCOL_MINOR, 15);
         assert_eq!(DEATH_VIEW_PROTOCOL_MINOR, 14);
         assert_eq!(SAFE_INVENTORY_PROTOCOL_MINOR, 12);
-        assert!(
-            WireText::<{ crate::handshake::FEATURE_FLAG_MAX_BYTES }>::new(
-                CORE_DEATH_VIEW_FEATURE_FLAG
-            )
-            .is_ok()
-        );
+        for feature in [
+            CORE_DEATH_VIEW_FEATURE_FLAG,
+            CORE_EXTRACTION_TERMINAL_FEATURE_FLAG,
+            CORE_RECALL_TERMINAL_FEATURE_FLAG,
+        ] {
+            assert!(WireText::<{ crate::handshake::FEATURE_FLAG_MAX_BYTES }>::new(feature).is_ok());
+        }
     }
 }

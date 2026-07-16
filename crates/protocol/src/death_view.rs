@@ -1067,9 +1067,10 @@ mod tests {
                 server_tick: 301,
                 event: crate::ReliableEvent::DeathViewResult(Box::new(result)),
             });
-            let frame = crate::encode_frame(&message).unwrap();
-            assert_eq!(crate::decode_frame(&frame), Ok(message));
-            blake3::hash(&frame).to_hex().to_string()
+            let current = crate::encode_frame(&message).unwrap();
+            assert_eq!(crate::decode_frame(&current), Ok(message.clone()));
+            let compatibility = crate::encode_protocol_1_14_compatibility_frame(&message).unwrap();
+            blake3::hash(&compatibility).to_hex().to_string()
         });
         assert_eq!(
             hashes,

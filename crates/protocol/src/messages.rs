@@ -6,10 +6,12 @@ use thiserror::Error;
 use crate::{
     AccountBootstrapFrame, AccountBootstrapResult, BargainDecisionFrame, BargainDecisionResult,
     BargainViewFrame, BargainViewResult, CharacterMutationFrame, CharacterMutationResult,
-    ClientHello, DeathViewFrameV1, DeathViewResultV1, HandshakeResponse, InitialOathSelectionFrame,
+    ClientHello, DeathViewFrameV1, DeathViewResultV1, ExtractionCommitFrameV1,
+    ExtractionCommitResultV1, HandshakeResponse, InitialOathSelectionFrame,
     InitialOathSelectionResult, NetworkChannel, OathViewFrame, OathViewResult,
-    ProgressionQueryFrame, ProgressionResult, SafeInventoryTransferFrameV1,
-    SafeInventoryTransferResultV1, WireText, WorldFlowFrame, WorldFlowResult,
+    ProgressionQueryFrame, ProgressionResult, RecallFrameV1, RecallResultV1,
+    SafeInventoryTransferFrameV1, SafeInventoryTransferResultV1, WireText, WorldFlowFrame,
+    WorldFlowResult,
 };
 
 pub const FIXED_VECTOR_SCALE: i16 = 1_000;
@@ -41,6 +43,8 @@ pub enum MessageKind {
     BargainDecisionFrame,
     SafeInventoryTransferFrame,
     DeathViewFrame,
+    ExtractionCommitFrame,
+    RecallFrame,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -444,19 +448,22 @@ pub enum ReliableEvent {
     BargainDecisionResult(BargainDecisionResult),
     SafeInventoryTransferResult(SafeInventoryTransferResultV1),
     DeathViewResult(Box<DeathViewResultV1>),
+    ExtractionCommitResult(Box<ExtractionCommitResultV1>),
+    RecallResult(Box<RecallResultV1>),
 }
 
 impl ReliableEvent {
     #[must_use]
     pub const fn channel(&self) -> NetworkChannel {
         match self {
-            Self::ActionResult { .. } => NetworkChannel::Action,
+            Self::ActionResult { .. } | Self::RecallResult(_) => NetworkChannel::Action,
             Self::PatternStarted(_) => NetworkChannel::Pattern,
             Self::MutationResult(_)
             | Self::CharacterMutationResult(_)
             | Self::InitialOathSelectionResult(_)
             | Self::BargainDecisionResult(_)
-            | Self::SafeInventoryTransferResult(_) => NetworkChannel::Mutation,
+            | Self::SafeInventoryTransferResult(_)
+            | Self::ExtractionCommitResult(_) => NetworkChannel::Mutation,
             Self::Control(_)
             | Self::AccountBootstrapResult(_)
             | Self::WorldFlowResult(_)
@@ -508,6 +515,12 @@ impl ReliableEvent {
             Self::DeathViewResult(result) => result
                 .validate()
                 .map_err(|_| MessageValidationError::DeathView),
+            Self::ExtractionCommitResult(result) => result
+                .validate()
+                .map_err(|_| MessageValidationError::TerminalInventory),
+            Self::RecallResult(result) => result
+                .validate()
+                .map_err(|_| MessageValidationError::TerminalInventory),
             _ => Ok(()),
         }
     }
@@ -550,6 +563,8 @@ pub enum WireMessage {
     BargainDecisionFrame(BargainDecisionFrame),
     SafeInventoryTransferFrame(SafeInventoryTransferFrameV1),
     DeathViewFrame(DeathViewFrameV1),
+    ExtractionCommitFrame(ExtractionCommitFrameV1),
+    RecallFrame(RecallFrameV1),
 }
 
 impl WireMessage {
@@ -574,6 +589,8 @@ impl WireMessage {
             Self::BargainDecisionFrame(_) => MessageKind::BargainDecisionFrame,
             Self::SafeInventoryTransferFrame(_) => MessageKind::SafeInventoryTransferFrame,
             Self::DeathViewFrame(_) => MessageKind::DeathViewFrame,
+            Self::ExtractionCommitFrame(_) => MessageKind::ExtractionCommitFrame,
+            Self::RecallFrame(_) => MessageKind::RecallFrame,
         }
     }
 
@@ -590,14 +607,15 @@ impl WireMessage {
             | Self::BargainViewFrame(_)
             | Self::DeathViewFrame(_) => NetworkChannel::Control,
             Self::InputFrame(_) => NetworkChannel::Input,
-            Self::ActionFrame(_) => NetworkChannel::Action,
+            Self::ActionFrame(_) | Self::RecallFrame(_) => NetworkChannel::Action,
             Self::SnapshotChunk(_) => NetworkChannel::Snapshot,
             Self::ReliableEvent(frame) => frame.event.channel(),
             Self::MutationRequest(_)
             | Self::CharacterMutationFrame(_)
             | Self::InitialOathSelectionFrame(_)
             | Self::BargainDecisionFrame(_)
-            | Self::SafeInventoryTransferFrame(_) => NetworkChannel::Mutation,
+            | Self::SafeInventoryTransferFrame(_)
+            | Self::ExtractionCommitFrame(_) => NetworkChannel::Mutation,
         }
     }
 
@@ -650,6 +668,12 @@ impl WireMessage {
             Self::DeathViewFrame(value) => value
                 .validate()
                 .map_err(|_| MessageValidationError::DeathView),
+            Self::ExtractionCommitFrame(value) => value
+                .validate()
+                .map_err(|_| MessageValidationError::TerminalInventory),
+            Self::RecallFrame(value) => value
+                .validate()
+                .map_err(|_| MessageValidationError::TerminalInventory),
         }
     }
 }
@@ -670,6 +694,8 @@ pub enum MessageValidationError {
     SafeInventory,
     #[error("death-view message failed semantic validation")]
     DeathView,
+    #[error("terminal-inventory message failed semantic validation")]
+    TerminalInventory,
     #[error("message sequence must be nonzero")]
     ZeroSequence,
     #[error("fixed-point vector component must remain within -1000..=1000")]
