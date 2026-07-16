@@ -174,6 +174,11 @@ async fn serve_core_identity_persistent(
         accepted_connections = report.accepted_connections,
         rejected_connections = report.rejected_connections,
         combat_sessions_admitted = report.combat_sessions_admitted,
+        completed_connection_tasks = report.completed_connection_tasks,
+        failed_connection_tasks = report.failed_connection_tasks,
+        remaining_connection_tasks = report.remaining_connection_tasks,
+        remaining_open_connections = report.remaining_open_connections,
+        zero_residue = report.zero_residue,
         persistence_enabled = report.persistence_enabled,
         "GB-M03-02B durable Core identity server stopped cleanly"
     );
@@ -204,6 +209,11 @@ async fn serve_core_identity_ephemeral(
     let report = server.serve_until(shutdown_signal()).await?;
     info!(
         accepted_connections = report.accepted_connections,
+        completed_connection_tasks = report.completed_connection_tasks,
+        failed_connection_tasks = report.failed_connection_tasks,
+        remaining_connection_tasks = report.remaining_connection_tasks,
+        remaining_open_connections = report.remaining_open_connections,
+        zero_residue = report.zero_residue,
         persistence_enabled = report.persistence_enabled,
         "ephemeral Core identity regression server stopped cleanly"
     );

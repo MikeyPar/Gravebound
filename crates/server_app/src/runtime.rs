@@ -491,6 +491,11 @@ pub struct CoreIdentityServerReport {
     pub accepted_connections: u64,
     pub rejected_connections: u64,
     pub combat_sessions_admitted: u64,
+    pub completed_connection_tasks: u64,
+    pub failed_connection_tasks: u64,
+    pub remaining_connection_tasks: usize,
+    pub remaining_open_connections: usize,
+    pub zero_residue: bool,
     pub persistence_enabled: bool,
 }
 
@@ -738,6 +743,8 @@ where
         );
         let accepted = Arc::new(AtomicU64::new(0));
         let rejected = Arc::new(AtomicU64::new(0));
+        let failed = Arc::new(AtomicU64::new(0));
+        let mut completed_connection_tasks = 0_u64;
         let mut workers = JoinSet::new();
         tokio::pin!(shutdown);
         loop {
@@ -756,17 +763,26 @@ where
                     let safe_inventory = Arc::clone(&self.safe_inventory);
                     let accepted = Arc::clone(&accepted);
                     let rejected = Arc::clone(&rejected);
+                    let failed = Arc::clone(&failed);
                     workers.spawn(async move {
                         match serve_core_identity_connection(incoming, policy, authority, world_flow, progression, death_views, oath, bargain, safe_inventory).await {
                             Ok(true) => { accepted.fetch_add(1, Ordering::Relaxed); }
                             Ok(false) => { rejected.fetch_add(1, Ordering::Relaxed); }
-                            Err(error) => warn!(%error, "Core identity connection ended"),
+                            Err(error) => {
+                                failed.fetch_add(1, Ordering::Relaxed);
+                                warn!(%error, "Core identity connection ended");
+                            }
                         }
                     });
                 }
                 completed = workers.join_next(), if !workers.is_empty() => {
-                    if let Some(Err(error)) = completed {
-                        warn!(%error, "Core identity task panicked or was cancelled");
+                    if let Some(completed) = completed {
+                        completed_connection_tasks =
+                            completed_connection_tasks.saturating_add(1);
+                        if let Err(error) = completed {
+                            failed.fetch_add(1, Ordering::Relaxed);
+                            warn!(%error, "Core identity task panicked or was cancelled");
+                        }
                     }
                 }
             }
@@ -775,12 +791,25 @@ where
             SERVER_SHUTDOWN_CLOSE_CODE.into(),
             b"Core identity server shutdown",
         );
-        while workers.join_next().await.is_some() {}
+        while let Some(completed) = workers.join_next().await {
+            completed_connection_tasks = completed_connection_tasks.saturating_add(1);
+            if let Err(error) = completed {
+                failed.fetch_add(1, Ordering::Relaxed);
+                warn!(%error, "Core identity task panicked or was cancelled");
+            }
+        }
+        let remaining_connection_tasks = workers.len();
         self.endpoint.wait_idle().await;
+        let remaining_open_connections = self.endpoint.open_connections();
         Ok(CoreIdentityServerReport {
             accepted_connections: accepted.load(Ordering::Relaxed),
             rejected_connections: rejected.load(Ordering::Relaxed),
             combat_sessions_admitted: 0,
+            completed_connection_tasks,
+            failed_connection_tasks: failed.load(Ordering::Relaxed),
+            remaining_connection_tasks,
+            remaining_open_connections,
+            zero_residue: remaining_connection_tasks == 0 && remaining_open_connections == 0,
             persistence_enabled: self.persistence_enabled,
         })
     }
@@ -1092,6 +1121,22 @@ mod tests {
         }
     }
 
+    fn assert_core_identity_shutdown_report(
+        report: CoreIdentityServerReport,
+        expected_connections: u64,
+        persistence_enabled: bool,
+    ) {
+        assert_eq!(report.accepted_connections, expected_connections);
+        assert_eq!(report.rejected_connections, 0);
+        assert_eq!(report.combat_sessions_admitted, 0);
+        assert_eq!(report.completed_connection_tasks, expected_connections);
+        assert_eq!(report.failed_connection_tasks, 0);
+        assert_eq!(report.remaining_connection_tasks, 0);
+        assert_eq!(report.remaining_open_connections, 0);
+        assert!(report.zero_residue);
+        assert_eq!(report.persistence_enabled, persistence_enabled);
+    }
+
     #[test]
     fn core_account_derivation_is_stable_ticket_bound_and_redaction_safe() {
         let ticket = AuthTicket::new(b"disposable-core-route".to_vec()).unwrap();
@@ -1321,8 +1366,7 @@ mod tests {
         connection.close(0_u32.into(), b"restart test");
         shutdown_send.send(()).unwrap();
         let report = server_task.await.unwrap().unwrap();
-        assert_eq!(report.combat_sessions_admitted, 0);
-        assert!(!report.persistence_enabled);
+        assert_core_identity_shutdown_report(report, 2, false);
         endpoint.wait_idle().await;
 
         assert_core_restart_wipes(&content_root, ticket).await;
