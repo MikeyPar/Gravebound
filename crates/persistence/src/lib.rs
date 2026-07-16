@@ -214,7 +214,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 55;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 56;
 const DISPOSABLE_DATABASE_RESET_SQL: &str = "TRUNCATE TABLE accounts, caldus_victory_exits CASCADE";
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -1595,7 +1595,7 @@ mod tests {
     #[test]
     fn deferred_death_graph_consumes_provenance_without_forking_its_closure() {
         assert_eq!(
-            EXPECTED_SCHEMA_VERSION, 55,
+            EXPECTED_SCHEMA_VERSION, 56,
             "readiness must advance with the latest published migration"
         );
         let migration = include_str!("../../../migrations/0054_death_provenance_echo_closure.sql");
@@ -1671,6 +1671,59 @@ mod tests {
             assert!(
                 !migration.contains(prohibited),
                 "terminal custody migration leaked {prohibited}"
+            );
+        }
+    }
+
+    #[test]
+    fn atomic_extraction_terminal_is_normalized_replay_first_and_fail_closed() {
+        assert_eq!(
+            EXPECTED_SCHEMA_VERSION, 56,
+            "readiness must advance with the atomic extraction terminal migration"
+        );
+        let migration = include_str!("../../../migrations/0056_atomic_extraction_terminal_v1.sql");
+        for required in [
+            "Gravebound_Production_GDD_v1_Canonical.md",
+            "Gravebound_Content_Production_Spec_v1.md",
+            "Gravebound_Development_Roadmap_v1.md",
+            "SPEC-CONFLICT-029-m03-extraction-recall-terminal-authority.md",
+            "character_extraction_terminal_results_v1",
+            "extraction_terminal_item_placements_v1",
+            "account_material_wallet_balances_v1",
+            "account_material_ledger_events_v1",
+            "extraction_terminal_material_credits_v1",
+            "extraction_terminal_audit_events_v1",
+            "extraction_terminal_conflict_audits_v1",
+            "extraction_terminal_outbox_events_v1",
+            "terminal_kind = 2",
+            "post_inventory_version = pre_inventory_version + 1",
+            "post_character_security_state IN (0, 1)",
+            "storage_resolution_required = (post_character_security_state = 1)",
+            "authority_kind = 1",
+            "terminal_reason = 'extraction'",
+            "source_kind = 5",
+            "destination_kind = 9",
+            "enforce_complete_extraction_terminal_v1",
+            "extraction terminal history is immutable",
+            "extraction terminal outbox permits only first publication",
+            "Recovery/downgrade:",
+            "Published migration history must never",
+        ] {
+            assert!(migration.contains(required), "migration omitted {required}");
+        }
+        for prohibited in [
+            "DROP TABLE",
+            "TRUNCATE",
+            "DELETE FROM",
+            "JSON",
+            "JSONB",
+            "FLOAT",
+            "DOUBLE PRECISION",
+            "automatic salvage",
+        ] {
+            assert!(
+                !migration.contains(prohibited),
+                "atomic extraction terminal migration leaked {prohibited}"
             );
         }
     }
