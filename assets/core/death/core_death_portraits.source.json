@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "asset_kind": "core_death_portrait_atlas",
+  "generation_method": "OpenAI built-in image generation",
+  "generated_date": "2026-07-15",
+  "design_authority": [
+    "Gravebound_Production_GDD_v1_Canonical.md:ART-001",
+    "Gravebound_Content_Production_Spec_v1.md:CONT-HUB-002",
+    "Gravebound_Development_Roadmap_v1.md:GB-M03-06"
+  ],
+  "runtime_file": "core_death_portraits.runtime.png",
+  "runtime_dimensions": [1254, 1254],
+  "runtime_mode": "RGB",
+  "runtime_sha256": "46b0631fdcad86da019300fc05ae6e96deaf90df2b9c5db3e71a4c6bbc4fe2bb",
+  "runtime_blake3": "e750553346829f5d4c0b7944da9b27ca79cfba5612f9e36e36ef707618678dd3",
+  "grid": {
+    "columns": 3,
+    "rows": 3,
+    "cell_pixels": 418,
+    "reading_order": [
+      "portrait.enemy.drowned_pilgrim",
+      "portrait.enemy.mire_leech",
+      "portrait.enemy.bell_reed",
+      "portrait.enemy.bell_acolyte",
+      "portrait.enemy.chain_sentry",
+      "portrait.enemy.choir_skull",
+      "portrait.miniboss.sepulcher_knight",
+      "portrait.miniboss.choir_abbot",
+      "portrait.boss.sir_caldus"
+    ]
+  },
+  "prompt": "Create an exact 3 by 3 atlas of the nine Core death-source portraits in canonical reading order. Use dark-fantasy pixel art readable at 96 by 96 pixels, consistent bust framing, wet stone, tarnished brass, ash, bone, moss, and restrained candlelight. No text, labels, logos, watermark, subject overlap, photorealism, anime, glossy mobile rendering, or excessive saturation."
+}

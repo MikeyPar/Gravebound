@@ -1,0 +1,44 @@
+{
+  "family": "Alegreya Sans",
+  "purpose": "Portable native death-summary and Memorial typography",
+  "source_repository": "https://github.com/google/fonts",
+  "source_commit": "88c2351fb58bf5dfedb96934de48be9a606c7d2e",
+  "source_directory": "ofl/alegreyasans",
+  "upstream_repository": "https://github.com/huertatipografica/Alegreya-Sans",
+  "upstream_commit": "030b9ac01fd9bcaccac0ebc8010283175f9ced4e",
+  "designer": "Juan Pablo del Peral, HT Fonts",
+  "license": "SIL Open Font License 1.1",
+  "files": [
+    {
+      "path": "AlegreyaSans-Regular.ttf",
+      "weight": 400,
+      "bytes": 263804,
+      "sha256": "8fab634196007afca839f1e5a6fb300976daff55d8528b590ef032f01b14ea10",
+      "blake3": "6c435d633146e3d45a22a0543b590cddb6d161db81055a2e93f0f43cf2d5df2a"
+    },
+    {
+      "path": "AlegreyaSans-Bold.ttf",
+      "weight": 700,
+      "bytes": 266856,
+      "sha256": "a3055a1893759bdbd7504bb22abc583769e7974c49353176eac0b03792c9fb8e",
+      "blake3": "c1e4ccd1cf57b5fb428f04f50d3c2532a185dcfa9ddaa2475eac146a313238d5"
+    },
+    {
+      "path": "OFL.txt",
+      "bytes": 4405,
+      "sha256": "0677891e6a143f297350d260ad766ad33bfc18ed5fa4f213acf648d6b597ec1a",
+      "blake3": "40b820ce6ce1298dccc542413918b9e38e1edd299b38138ac4e64ea2e2db01b0"
+    },
+    {
+      "path": "METADATA.pb",
+      "bytes": 4766,
+      "sha256": "3b4bf3eae006b88adad1c8a73ba4701d0847eb92f89f531ea5a61abe53a29e97",
+      "blake3": "3f8f31ca56949c85785643c6f12f7f272548aa533b80d8349b969cb1c30ced19"
+    }
+  ],
+  "design_authorities": [
+    "Gravebound_Production_GDD_v1_Canonical.md UI-010/UI-011/UI-030 and ART-001",
+    "Gravebound_Content_Production_Spec_v1.md CONT-HUB-001/CONT-HUB-002/CONT-LOC-001",
+    "Gravebound_Development_Roadmap_v1.md GB-M03-06"
+  ]
+}
