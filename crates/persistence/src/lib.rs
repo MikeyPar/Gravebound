@@ -119,16 +119,17 @@ pub use durable_death::{
     DeathVersionAdvanceV1, DurableCombatTraceEntryV1, DurableDamageTypeV1, DurableDeathCauseV1,
     DurableDeathCommitRequestV1, DurableDeathContentAuthorityV1, DurableDeathEventV1,
     DurableDeathItemContentAuthorityV1, DurableDeathPresentationAuthorityV1,
-    DurableDeathResultCodeV1, DurableDeathSummaryV1, DurableDestructionEntryV1,
-    DurableDestructionLocationV1, DurableEchoEnvelopeV1, DurableEchoOutcomeV1, DurableEchoRecordV1,
-    DurableEchoStateV1, DurableEchoTransitionReasonV1, DurableEchoTransitionV1,
-    DurableEquipmentSlotV1, DurableMemorialRecordV1, DurableNetworkStateV1,
-    DurableOrderedContentIdV1, DurableRecallStateV1, DurableSummaryDamageReferenceV1,
-    DurableSummaryProjectionEntryV1, DurableSummaryProjectionKindV1, DurableSummaryProjectionsV1,
-    DurableTraceStatusV1, MAX_DURABLE_DEATH_DESTRUCTION_ENTRIES,
-    MAX_DURABLE_DEATH_PLAN_PAYLOAD_BYTES, MAX_DURABLE_DEATH_RESULT_PAYLOAD_BYTES,
-    MAX_DURABLE_DEATH_STATUSES_PER_ENTRY, MAX_DURABLE_DEATH_TRACE_ENTRIES,
-    StoredCommittedDeathResultV1, derive_durable_death_bargain_cleanup_event_id,
+    DurableDeathProvenanceV1, DurableDeathResultCodeV1, DurableDeathSummaryV1,
+    DurableDestructionEntryV1, DurableDestructionLocationV1, DurableEchoEnvelopeV1,
+    DurableEchoOutcomeV1, DurableEchoRecordV1, DurableEchoStateV1, DurableEchoTransitionReasonV1,
+    DurableEchoTransitionV1, DurableEquipmentSlotV1, DurableMemorialRecordV1,
+    DurableNetworkStateV1, DurableOrderedContentIdV1, DurableRecallStateV1,
+    DurableSummaryDamageReferenceV1, DurableSummaryProjectionEntryV1,
+    DurableSummaryProjectionKindV1, DurableSummaryProjectionsV1, DurableTraceStatusV1,
+    MAX_DURABLE_DEATH_DESTRUCTION_ENTRIES, MAX_DURABLE_DEATH_PLAN_PAYLOAD_BYTES,
+    MAX_DURABLE_DEATH_RESULT_PAYLOAD_BYTES, MAX_DURABLE_DEATH_STATUSES_PER_ENTRY,
+    MAX_DURABLE_DEATH_TRACE_ENTRIES, StoredCommittedDeathResultV1,
+    derive_durable_death_bargain_cleanup_event_id,
 };
 pub use durable_death_repository::DurableDeathTransactionV1;
 pub use durable_terminal_recovery::{
@@ -1543,6 +1544,39 @@ mod tests {
             assert!(
                 !migration.contains(prohibited),
                 "life outbox immutability migration leaked {prohibited}"
+            );
+        }
+    }
+
+    #[test]
+    fn death_provenance_authority_is_additive_bounded_and_echo_excluding() {
+        let migration = include_str!("../../../migrations/0053_death_provenance_authority.sql");
+        for required in [
+            "Gravebound_Production_GDD_v1_Canonical.md",
+            "Gravebound_Content_Production_Spec_v1.md",
+            "Gravebound_Development_Roadmap_v1.md",
+            "SPEC-CONFLICT-009-m03-death-memorial.md",
+            "ADD COLUMN death_provenance SMALLINT NOT NULL DEFAULT 0",
+            "death_provenance BETWEEN 0 AND 2",
+            "death_provenance = 0 OR NOT echo_expected",
+            "ALTER COLUMN death_provenance DROP DEFAULT",
+            "0 ordinary gameplay, 1 verified server incident",
+            "before restoring a pre-0053 binary",
+            "published migration history must never be rewritten",
+        ] {
+            assert!(migration.contains(required), "migration omitted {required}");
+        }
+        for prohibited in [
+            "DROP TABLE",
+            "TRUNCATE",
+            "DELETE FROM",
+            "UPDATE death_events",
+            "JSON",
+            "JSONB",
+        ] {
+            assert!(
+                !migration.contains(prohibited),
+                "death provenance migration leaked {prohibited}"
             );
         }
     }

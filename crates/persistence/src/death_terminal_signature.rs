@@ -20,7 +20,7 @@ use crate::live_damage_trace_repository::{
 };
 use crate::{
     AuthoritativeDeathPlanV1, BARGAIN_LIFE_CLEANUP_EVENT_SCHEMA_VERSION, BargainLifeCleanupEventV1,
-    BargainLifeEndReason, DeathAggregateVersionsV1, DurableDeathCauseV1,
+    BargainLifeEndReason, DeathAggregateVersionsV1, DurableDeathCauseV1, DurableDeathProvenanceV1,
     DurableDeathTraceEntryProvenanceV1, DurableDestructionEntryV1, DurableDestructionLocationV1,
     DurableEchoOutcomeV1, DurableEchoRecordV1, DurableEchoStateV1, DurableEchoTransitionV1,
     DurableOrderedContentIdV1, LiveDamageTraceContentAuthorityV1, LiveDamageTraceDangerAuthorityV1,
@@ -120,6 +120,7 @@ pub struct StoredDeathTerminalGraphRootV1 {
     pub death_tick: u64,
     pub lifetime_ticks: u64,
     pub permadeath_combat_ticks: u64,
+    pub provenance: DurableDeathProvenanceV1,
     pub trace_entry_count: u16,
     pub destruction_entry_count: u16,
     pub former_roster_ordinal: u16,
@@ -416,6 +417,7 @@ fn validate_root(signature: &StoredCoreDeathTerminalSignatureV1) -> Result<(), P
         || event.death_tick != root.death_tick
         || event.lifetime_ticks != root.lifetime_ticks
         || event.permadeath_combat_ticks != root.permadeath_combat_ticks
+        || event.provenance != root.provenance
         || u16::from(event.former_roster_ordinal) != root.former_roster_ordinal
         || event.content_revision != root.content_revision
         || event.records_blake3 != root.world_records_blake3
@@ -1696,6 +1698,7 @@ mod tests {
                 death_tick: event.death_tick,
                 lifetime_ticks: event.lifetime_ticks,
                 permadeath_combat_ticks: event.permadeath_combat_ticks,
+                provenance: event.provenance,
                 trace_entry_count: event.trace_entry_count,
                 destruction_entry_count: event.destruction_entry_count,
                 former_roster_ordinal: u16::from(event.former_roster_ordinal),

@@ -22,13 +22,14 @@ use persistence::{
     AuthoritativeDeathPlanV1, DURABLE_DEATH_SCHEMA_VERSION, DURABLE_DEATH_SUMMARY_REVISION,
     DeathAggregateVersionsV1, DurableCombatTraceEntryV1, DurableDamageTypeV1, DurableDeathCauseV1,
     DurableDeathCommitRequestV1, DurableDeathContentAuthorityV1, DurableDeathEventV1,
-    DurableDeathPresentationAuthorityV1, DurableDeathSummaryV1, DurableDeathTracePromotionV1,
-    DurableDestructionEntryV1, DurableEchoEnvelopeV1, DurableEchoOutcomeV1, DurableEchoRecordV1,
-    DurableEchoStateV1, DurableEchoTransitionReasonV1, DurableEchoTransitionV1,
-    DurableMemorialRecordV1, DurableNetworkStateV1, DurableOrderedContentIdV1,
-    DurableRecallStateV1, DurableSummaryDamageReferenceV1, DurableSummaryProjectionEntryV1,
-    DurableSummaryProjectionKindV1, DurableSummaryProjectionsV1, DurableTraceStatusV1,
-    PersistenceError, WIPEABLE_CORE_NAMESPACE, derive_durable_death_bargain_cleanup_event_id,
+    DurableDeathPresentationAuthorityV1, DurableDeathProvenanceV1, DurableDeathSummaryV1,
+    DurableDeathTracePromotionV1, DurableDestructionEntryV1, DurableEchoEnvelopeV1,
+    DurableEchoOutcomeV1, DurableEchoRecordV1, DurableEchoStateV1, DurableEchoTransitionReasonV1,
+    DurableEchoTransitionV1, DurableMemorialRecordV1, DurableNetworkStateV1,
+    DurableOrderedContentIdV1, DurableRecallStateV1, DurableSummaryDamageReferenceV1,
+    DurableSummaryProjectionEntryV1, DurableSummaryProjectionKindV1, DurableSummaryProjectionsV1,
+    DurableTraceStatusV1, PersistenceError, WIPEABLE_CORE_NAMESPACE,
+    derive_durable_death_bargain_cleanup_event_id,
 };
 use sim_content::CoreDevelopmentDeathView;
 use sim_core::{
@@ -286,6 +287,7 @@ pub fn build_durable_death_commit(
         restore_point_id: context.world.restore_point_id,
         region_id: context.world.region_id.clone(),
         room_id: context.world.room_id.clone(),
+        provenance: map_provenance(context.world.lineage_state),
         death_tick,
         committed_at_unix_ms: context.mutation.accepted_at_unix_ms,
         cause: map_cause(inputs.cause.kind),
@@ -375,6 +377,25 @@ pub fn build_durable_death_commit(
         content: context.content.clone(),
         promotion,
     })
+}
+
+fn map_provenance(lineage: DeathLineageState) -> DurableDeathProvenanceV1 {
+    match lineage {
+        DeathLineageState::ActivePermadeath(DeathProvenance::OrdinaryGameplay) => {
+            DurableDeathProvenanceV1::OrdinaryGameplay
+        }
+        DeathLineageState::ActivePermadeath(DeathProvenance::VerifiedServerIncident) => {
+            DurableDeathProvenanceV1::VerifiedServerIncident
+        }
+        DeathLineageState::ActivePermadeath(DeathProvenance::AdministrativeAction) => {
+            DurableDeathProvenanceV1::AdministrativeAction
+        }
+        DeathLineageState::ActiveNonPermadeath
+        | DeathLineageState::Inactive
+        | DeathLineageState::Superseded => {
+            unreachable!("server authority validation rejects non-permadeath lineage states")
+        }
+    }
 }
 
 fn validate_presentation_content(
@@ -1414,6 +1435,18 @@ pub(crate) mod tests {
             without_echo.echo = None;
             let prepared = build_test_commit(&inputs(), &without_echo).unwrap();
             assert!(prepared.request.plan.echo.is_none());
+            assert_eq!(
+                prepared.request.plan.event.provenance,
+                match provenance {
+                    DeathProvenance::VerifiedServerIncident => {
+                        DurableDeathProvenanceV1::VerifiedServerIncident
+                    }
+                    DeathProvenance::AdministrativeAction => {
+                        DurableDeathProvenanceV1::AdministrativeAction
+                    }
+                    DeathProvenance::OrdinaryGameplay => unreachable!(),
+                }
+            );
             assert_eq!(
                 prepared.request.plan.summary.echo_outcome,
                 DurableEchoOutcomeV1::NotEligible

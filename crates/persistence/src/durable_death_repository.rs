@@ -3,8 +3,8 @@
 //! The lock and write order is part of the persistence contract. Account authority is locked
 //! first, followed by character/root/world authority, aggregate components, at-risk custody,
 //! deeds, and account Echo state. All mutable terminal state is finalized before the immutable
-//! `death_events` root is inserted; migrations 0037 and 0039 then close and seal the normalized
-//! graph, including Oath/Bargain receipts and terminal item custody.
+//! `death_events` root is inserted; migrations 0037, 0039, and 0053 then close and seal the
+//! normalized graph, including provenance, Oath/Bargain receipts, and terminal item custody.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -13,7 +13,7 @@ use sqlx::{PgConnection, Row};
 
 use crate::{
     AuthoritativeDeathPlanV1, DurableDamageTypeV1, DurableDeathCauseV1,
-    DurableDeathCommitRequestV1, DurableDeathContentAuthorityV1,
+    DurableDeathCommitRequestV1, DurableDeathContentAuthorityV1, DurableDeathProvenanceV1,
     DurableDeathTraceEntryProvenanceV1, DurableDeathTracePromotionV1, DurableDestructionEntryV1,
     DurableDestructionLocationV1, DurableEchoEnvelopeV1, DurableEchoOutcomeV1, DurableEchoStateV1,
     DurableEquipmentSlotV1, DurableNetworkStateV1, DurableRecallStateV1,
@@ -1109,7 +1109,8 @@ async fn validate_deeds(
         deed_ids.insert(deed_id);
     }
     let expected_final_deed = latest.as_deref().unwrap_or("deed.none");
-    let eligible = plan.summary.level == 10
+    let eligible = event.provenance == DurableDeathProvenanceV1::OrdinaryGameplay
+        && plan.summary.level == 10
         && event.permadeath_combat_ticks >= 18_000
         && (boss_count > 0 || major_events.len() >= 2);
     if plan.summary.final_deed_id != expected_final_deed || eligible != plan.echo.is_some() {
@@ -1501,10 +1502,11 @@ async fn insert_death_event(
             promoted_echo_id, world_records_blake3, world_assets_blake3, \
             world_localization_blake3, presentation_records_blake3, \
             presentation_assets_blake3, presentation_localization_blake3, \
-            bargain_cleanup_event_id, pre_oath_bargain_version, post_oath_bargain_version) \
+            bargain_cleanup_event_id, pre_oath_bargain_version, post_oath_bargain_version, \
+            death_provenance) \
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20, \
                  $21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38, \
-                 $39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52)",
+                 $39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53)",
     )
     .bind(&event.namespace_id)
     .bind(event.death_id.as_slice())
@@ -1572,6 +1574,7 @@ async fn insert_death_event(
     .bind(event.bargain_cleanup_event_id.as_slice())
     .bind(i64_value(event.versions.oath_bargain.pre)?)
     .bind(i64_value(event.versions.oath_bargain.post)?)
+    .bind(death_provenance(event.provenance))
     .execute(connection)
     .await?;
     Ok(())
@@ -2949,6 +2952,14 @@ fn death_cause(value: DurableDeathCauseV1) -> i16 {
         DurableDeathCauseV1::DamageOverTime => 1,
         DurableDeathCauseV1::Environment => 2,
         DurableDeathCauseV1::Disconnect => 3,
+    }
+}
+
+fn death_provenance(value: DurableDeathProvenanceV1) -> i16 {
+    match value {
+        DurableDeathProvenanceV1::OrdinaryGameplay => 0,
+        DurableDeathProvenanceV1::VerifiedServerIncident => 1,
+        DurableDeathProvenanceV1::AdministrativeAction => 2,
     }
 }
 

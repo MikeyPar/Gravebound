@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{PersistenceError, WIPEABLE_CORE_NAMESPACE};
 
-pub const DURABLE_DEATH_SCHEMA_VERSION: u16 = 3;
+pub const DURABLE_DEATH_SCHEMA_VERSION: u16 = 4;
 pub const DURABLE_DEATH_SUMMARY_REVISION: u16 = 1;
 pub const DURABLE_DEATH_CONTRACT: &str = "permadeath-v1";
 pub const DURABLE_DEATH_TRACE_WINDOW_TICKS: u64 = 300;
@@ -216,6 +216,13 @@ pub enum DurableDeathCauseV1 {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DurableDeathProvenanceV1 {
+    OrdinaryGameplay,
+    VerifiedServerIncident,
+    AdministrativeAction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DurableDamageTypeV1 {
     Physical,
     Veil,
@@ -257,6 +264,7 @@ pub struct DurableDeathEventV1 {
     pub restore_point_id: [u8; 16],
     pub region_id: String,
     pub room_id: String,
+    pub provenance: DurableDeathProvenanceV1,
     pub death_tick: u64,
     pub committed_at_unix_ms: u64,
     pub cause: DurableDeathCauseV1,
@@ -1289,6 +1297,9 @@ fn validate_memorial(plan: &AuthoritativeDeathPlanV1) -> Result<(), PersistenceE
 }
 
 fn validate_echo(plan: &AuthoritativeDeathPlanV1) -> Result<(), PersistenceError> {
+    if plan.event.provenance != DurableDeathProvenanceV1::OrdinaryGameplay && plan.echo.is_some() {
+        return Err(corrupt());
+    }
     let Some(envelope) = &plan.echo else {
         return if plan.summary.echo_outcome == DurableEchoOutcomeV1::NotEligible {
             Ok(())
@@ -1737,6 +1748,7 @@ pub(crate) mod tests {
             restore_point_id: [6; 16],
             region_id: "region.core".into(),
             room_id: "room.boss".into(),
+            provenance: DurableDeathProvenanceV1::OrdinaryGameplay,
             death_tick: 1_000,
             committed_at_unix_ms: 2_000,
             cause: DurableDeathCauseV1::DirectHit,
@@ -2015,6 +2027,26 @@ pub(crate) mod tests {
             .unwrap()
             .ordinal = 0;
         assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn incident_and_administrative_provenance_are_durable_echo_exclusions() {
+        for provenance in [
+            DurableDeathProvenanceV1::VerifiedServerIncident,
+            DurableDeathProvenanceV1::AdministrativeAction,
+        ] {
+            let mut ineligible = valid_request();
+            ineligible.plan.event.provenance = provenance;
+            ineligible.canonical_plan_hash = ineligible.plan.canonical_plan_hash().unwrap();
+            ineligible.canonical_request_hash = ineligible.expected_request_hash().unwrap();
+            ineligible.plan.event.canonical_request_hash = ineligible.canonical_request_hash;
+            ineligible.validate().unwrap();
+
+            let mut illegal_echo = valid_request();
+            enable_new_echo_promotion(&mut illegal_echo);
+            illegal_echo.plan.event.provenance = provenance;
+            assert!(illegal_echo.plan.validate().is_err());
+        }
     }
 
     #[test]

@@ -19,14 +19,14 @@ use crate::{
     AuthoritativeDeathPlanV1, DURABLE_DEATH_CONTRACT, DURABLE_DEATH_SCHEMA_VERSION,
     DeathAggregateVersionsV1, DeathVersionAdvanceV1, DurableCombatTraceEntryV1,
     DurableDamageTypeV1, DurableDeathCauseV1, DurableDeathEventV1,
-    DurableDeathPresentationAuthorityV1, DurableDestructionEntryV1, DurableDestructionLocationV1,
-    DurableEchoEnvelopeV1, DurableEchoOutcomeV1, DurableEchoRecordV1, DurableEchoStateV1,
-    DurableEchoTransitionReasonV1, DurableEchoTransitionV1, DurableEquipmentSlotV1,
-    DurableMemorialRecordV1, DurableNetworkStateV1, DurableOrderedContentIdV1,
-    DurableRecallStateV1, DurableSummaryDamageReferenceV1, DurableSummaryProjectionEntryV1,
-    DurableSummaryProjectionKindV1, DurableSummaryProjectionsV1, DurableTraceStatusV1,
-    PersistenceError, PostgresPersistence, StoredCoreDeathTerminalSignatureV1,
-    StoredDeathTerminalAggregateV1, StoredDeathTerminalAuditV1,
+    DurableDeathPresentationAuthorityV1, DurableDeathProvenanceV1, DurableDestructionEntryV1,
+    DurableDestructionLocationV1, DurableEchoEnvelopeV1, DurableEchoOutcomeV1, DurableEchoRecordV1,
+    DurableEchoStateV1, DurableEchoTransitionReasonV1, DurableEchoTransitionV1,
+    DurableEquipmentSlotV1, DurableMemorialRecordV1, DurableNetworkStateV1,
+    DurableOrderedContentIdV1, DurableRecallStateV1, DurableSummaryDamageReferenceV1,
+    DurableSummaryProjectionEntryV1, DurableSummaryProjectionKindV1, DurableSummaryProjectionsV1,
+    DurableTraceStatusV1, PersistenceError, PostgresPersistence,
+    StoredCoreDeathTerminalSignatureV1, StoredDeathTerminalAggregateV1, StoredDeathTerminalAuditV1,
     StoredDeathTerminalBargainCleanupV1, StoredDeathTerminalEchoTransitionV1,
     StoredDeathTerminalEchoV1, StoredDeathTerminalGraphCountsV1, StoredDeathTerminalGraphRootV1,
     StoredDeathTerminalItemLedgerV1, StoredDeathTerminalItemV1, StoredDeathTerminalMaterialV1,
@@ -134,6 +134,7 @@ pub(crate) async fn load_core_death_terminal_signature_v1_on(
         death_tick: root.event.death_tick,
         lifetime_ticks: root.event.lifetime_ticks,
         permadeath_combat_ticks: root.event.permadeath_combat_ticks,
+        provenance: root.event.provenance,
         trace_entry_count: root.event.trace_entry_count,
         destruction_entry_count: root.event.destruction_entry_count,
         former_roster_ordinal: u16::from(root.event.former_roster_ordinal),
@@ -237,7 +238,7 @@ async fn load_root_projection(
     let rows = sqlx::query(
         "SELECT event.contract_kind,event.mutation_id,event.canonical_request_hash,\
                 event.content_revision,event.instance_id,event.lineage_id,event.restore_point_id,\
-                event.region_id,event.room_id,event.death_tick,event.cause_kind,\
+                event.region_id,event.room_id,event.death_provenance,event.death_tick,event.cause_kind,\
                 event.killer_content_id,event.killer_pattern_id,event.killer_attack_id,\
                 event.raw_damage,event.final_damage,event.damage_type,event.pre_hit_health,\
                 event.source_x_milli_tiles,event.source_y_milli_tiles,event.network_state,\
@@ -346,6 +347,7 @@ async fn load_root_projection(
         restore_point_id: exact_id(row.try_get("restore_point_id")?)?,
         region_id: row.try_get("region_id")?,
         room_id: row.try_get("room_id")?,
+        provenance: death_provenance(row.try_get("death_provenance")?)?,
         death_tick: positive(row.try_get("death_tick")?)?,
         committed_at_unix_ms: positive(row.try_get("committed_at_ms")?)?,
         cause: death_cause(row.try_get("cause_kind")?)?,
@@ -475,6 +477,15 @@ fn death_cause(value: i16) -> Result<DurableDeathCauseV1, PersistenceError> {
         1 => Ok(DurableDeathCauseV1::DamageOverTime),
         2 => Ok(DurableDeathCauseV1::Environment),
         3 => Ok(DurableDeathCauseV1::Disconnect),
+        _ => Err(corrupt()),
+    }
+}
+
+fn death_provenance(value: i16) -> Result<DurableDeathProvenanceV1, PersistenceError> {
+    match value {
+        0 => Ok(DurableDeathProvenanceV1::OrdinaryGameplay),
+        1 => Ok(DurableDeathProvenanceV1::VerifiedServerIncident),
+        2 => Ok(DurableDeathProvenanceV1::AdministrativeAction),
         _ => Err(corrupt()),
     }
 }
