@@ -1136,9 +1136,10 @@ async fn lock_echoes(
     let rows = sqlx::query(
         "SELECT echo.echo_id, echo.death_id, echo.state, \
                 COALESCE((SELECT max(transition.transition_ordinal) \
-                          FROM echo_state_transitions AS transition \
-                          WHERE transition.namespace_id=echo.namespace_id \
-                            AND transition.echo_id=echo.echo_id), -1) AS tail_ordinal \
+                           FROM echo_state_transitions AS transition \
+                           WHERE transition.namespace_id=echo.namespace_id \
+                             AND transition.echo_id=echo.echo_id), CAST(-1 AS SMALLINT)) \
+                    AS tail_ordinal \
          FROM echo_records AS echo WHERE echo.namespace_id=$1 AND echo.account_id=$2 \
          ORDER BY echo.created_at, echo.echo_id FOR UPDATE OF echo",
     )
