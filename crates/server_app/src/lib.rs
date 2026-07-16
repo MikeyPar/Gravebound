@@ -25,6 +25,7 @@ mod lifecycle;
 mod live_damage_trace_service;
 mod oath_selection;
 mod production_extraction;
+mod production_recall;
 mod progression_award;
 mod progression_query;
 mod progression_restore_provider;
@@ -129,6 +130,15 @@ pub use production_extraction::{
     committed_extraction_terminal_receipt, committed_extraction_terminal_receipt_from_stored,
     hall_snapshot_from_stored_extraction, production_extraction_terminal_candidate,
     protocol_extraction_terminal_result, recover_committed_extraction_arbiter,
+};
+pub use production_recall::{
+    CoreRecallTerminalAuthority, PostgresProductionRecallExecutionService,
+    ProductionRecallExecutionError, ProductionRecallExecutionOutcome,
+    ProductionRecallExecutionService, ProductionRecallReplayOutcome,
+    ProductionRecallTerminalReader, ProductionRecallWriter, committed_recall_terminal_receipt,
+    committed_recall_terminal_receipt_from_stored, hall_snapshot_from_stored_recall,
+    production_recall_terminal_candidate, protocol_recall_terminal_result,
+    recover_committed_recall_arbiter,
 };
 pub use progression_award::{
     CoreProgressionRules, ProgressionAwardCode, ProgressionAwardCommand, ProgressionAwardContext,
