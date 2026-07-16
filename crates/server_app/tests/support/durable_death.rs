@@ -29,9 +29,9 @@ use server_app::{
     build_durable_death_commit,
 };
 use sim_core::{
-    AuthoritativeDeathCauseKind, AuthoritativeDeathInputs, DamageTraceObservation, DamageType,
-    DeathClockSnapshot, DeathTraceNetworkState, DeathTraceRecallState, DeathTraceStatus, EntityId,
-    FinalDeed, SimulationVector, Tick, ticks_to_milliseconds,
+    AuthoritativeDeathCauseKind, AuthoritativeDeathInputs, DEED_NONE_ID, DamageTraceObservation,
+    DamageType, DeathClockSnapshot, DeathTraceNetworkState, DeathTraceRecallState,
+    DeathTraceStatus, EntityId, FinalDeed, SimulationVector, Tick, ticks_to_milliseconds,
 };
 
 /// The production Core identity runtime derives this account from `AUTH_TICKET` with BLAKE3.
@@ -39,31 +39,146 @@ pub const ACCOUNT_ID: [u8; 16] = [
     165, 92, 48, 136, 62, 13, 73, 61, 120, 165, 179, 215, 25, 114, 58, 100,
 ];
 pub const AUTH_TICKET: &[u8] = b"disposable-core-route";
-pub const CHARACTER_ID: [u8; 16] = [231; 16];
-pub const LINEAGE_ID: [u8; 16] = [232; 16];
-pub const RESTORE_POINT_ID: [u8; 16] = [233; 16];
-pub const INSTANCE_ID: [u8; 16] = [234; 16];
-pub const ITEM_UID: [u8; 16] = [235; 16];
-pub const ITEM_LEDGER_ID: [u8; 16] = [236; 16];
-pub const ENTRY_MUTATION_ID: [u8; 16] = [237; 16];
-pub const DEED_REWARD_ID: [u8; 16] = [238; 16];
-pub const NONLETHAL_TRACE_TICK_ID: [u8; 16] = [239; 16];
-pub const LETHAL_TRACE_TICK_ID: [u8; 16] = [240; 16];
-pub const DEATH_ID: [u8; 16] = uuid_v7(41);
-pub const ECHO_ID: [u8; 16] = uuid_v7(42);
-pub const DEATH_MUTATION_ID: [u8; 16] = uuid_v7(43);
 pub const MATERIAL_ID: &str = "material.bell_brass";
 pub const ITEM_TEMPLATE_ID: &str = "item.weapon.crossbow.pine_crossbow";
 pub const DEED_ID: &str = "deed.core.sir_caldus_defeated";
-pub const SOURCE_SIM_ENTITY_ID: u64 = 81;
 
 const ISSUED_AT_UNIX_MS: u64 = 1;
+const TERMINAL_TICK: u64 = 20_000;
+const CHECKPOINT_TICK: u64 = TERMINAL_TICK - 10;
+const DEED_TICK: u64 = 19_000;
 
 const fn uuid_v7(seed: u8) -> [u8; 16] {
     let mut value = [seed; 16];
     value[6] = 0x70 | (seed & 0x0f);
     value[8] = 0x80 | (seed & 0x3f);
     value
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DurableDeathFixtureIdentityV1 {
+    pub character_id: [u8; 16],
+    pub lineage_id: [u8; 16],
+    pub restore_point_id: [u8; 16],
+    pub instance_id: [u8; 16],
+    pub item_uid: [u8; 16],
+    pub item_ledger_id: [u8; 16],
+    pub entry_mutation_id: [u8; 16],
+    pub deed_reward_id: [u8; 16],
+    pub nonlethal_trace_tick_id: [u8; 16],
+    pub lethal_trace_tick_id: [u8; 16],
+    pub death_id: [u8; 16],
+    pub echo_id: [u8; 16],
+    pub death_mutation_id: [u8; 16],
+    pub source_sim_entity_id: u64,
+}
+
+pub const PRIMARY_IDENTITY: DurableDeathFixtureIdentityV1 = DurableDeathFixtureIdentityV1 {
+    character_id: [231; 16],
+    lineage_id: [232; 16],
+    restore_point_id: [233; 16],
+    instance_id: [234; 16],
+    item_uid: [235; 16],
+    item_ledger_id: [236; 16],
+    entry_mutation_id: [237; 16],
+    deed_reward_id: [238; 16],
+    nonlethal_trace_tick_id: [239; 16],
+    lethal_trace_tick_id: [240; 16],
+    death_id: uuid_v7(41),
+    echo_id: uuid_v7(42),
+    death_mutation_id: uuid_v7(43),
+    source_sim_entity_id: 81,
+};
+
+#[allow(
+    dead_code,
+    reason = "shared integration support is compiled separately by tests that use only one identity"
+)]
+pub const SECONDARY_IDENTITY: DurableDeathFixtureIdentityV1 = DurableDeathFixtureIdentityV1 {
+    character_id: [201; 16],
+    lineage_id: [202; 16],
+    restore_point_id: [203; 16],
+    instance_id: [204; 16],
+    item_uid: [205; 16],
+    item_ledger_id: [206; 16],
+    entry_mutation_id: [207; 16],
+    deed_reward_id: [208; 16],
+    nonlethal_trace_tick_id: [209; 16],
+    lethal_trace_tick_id: [210; 16],
+    death_id: uuid_v7(51),
+    echo_id: uuid_v7(52),
+    death_mutation_id: uuid_v7(53),
+    source_sim_entity_id: 82,
+};
+
+pub const CHARACTER_ID: [u8; 16] = PRIMARY_IDENTITY.character_id;
+pub const DEATH_ID: [u8; 16] = PRIMARY_IDENTITY.death_id;
+
+#[allow(
+    dead_code,
+    reason = "shared integration support is compiled separately by tests that use one branch"
+)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FixtureEchoAvailabilityV1 {
+    None,
+    SelfPromote,
+    ExistingAvailable { echo_id: [u8; 16] },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DurableDeathScenarioV1 {
+    pub identity: DurableDeathFixtureIdentityV1,
+    pub reset_account: bool,
+    pub account_pre_version: u64,
+    pub level: u8,
+    pub lifetime_ticks: u64,
+    pub permadeath_combat_ticks: u64,
+    pub boss_deed: bool,
+    pub provenance: DeathProvenance,
+    pub echo_availability: FixtureEchoAvailabilityV1,
+}
+
+impl DurableDeathScenarioV1 {
+    #[must_use]
+    pub const fn primary_eligible() -> Self {
+        Self {
+            identity: PRIMARY_IDENTITY,
+            reset_account: true,
+            account_pre_version: 1,
+            level: 10,
+            lifetime_ticks: TERMINAL_TICK,
+            permadeath_combat_ticks: 18_000,
+            boss_deed: true,
+            provenance: DeathProvenance::OrdinaryGameplay,
+            echo_availability: FixtureEchoAvailabilityV1::SelfPromote,
+        }
+    }
+
+    #[must_use]
+    #[allow(
+        dead_code,
+        reason = "only the hosted branch-matrix integration target creates a second mortal life"
+    )]
+    pub const fn secondary_with_existing_available(echo_id: [u8; 16]) -> Self {
+        Self {
+            identity: SECONDARY_IDENTITY,
+            reset_account: false,
+            account_pre_version: 2,
+            level: 10,
+            lifetime_ticks: TERMINAL_TICK,
+            permadeath_combat_ticks: 18_000,
+            boss_deed: true,
+            provenance: DeathProvenance::OrdinaryGameplay,
+            echo_availability: FixtureEchoAvailabilityV1::ExistingAvailable { echo_id },
+        }
+    }
+
+    fn echo_eligible(&self) -> bool {
+        self.level >= 10
+            && self.permadeath_combat_ticks >= 18_000
+            && self.boss_deed
+            && self.provenance == DeathProvenance::OrdinaryGameplay
+    }
 }
 
 pub fn authenticated_account() -> AuthenticatedAccount {
@@ -88,46 +203,80 @@ pub fn death_view_revision() -> DeathViewContentRevisionV1 {
     reason = "the complete danger root remains explicit for hosted authority review"
 )]
 pub async fn seed_danger_root(persistence: &PostgresPersistence) {
+    seed_danger_root_for(persistence, &DurableDeathScenarioV1::primary_eligible()).await;
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the complete parameterized danger root remains explicit for hosted authority review"
+)]
+pub async fn seed_danger_root_for(
+    persistence: &PostgresPersistence,
+    scenario: &DurableDeathScenarioV1,
+) {
+    let identity = scenario.identity;
+    assert!((1..=10).contains(&scenario.level));
+    assert!(scenario.lifetime_ticks >= 10);
+    assert!(scenario.permadeath_combat_ticks >= 10);
+    assert!(scenario.permadeath_combat_ticks <= scenario.lifetime_ticks);
     let mut transaction = persistence.begin_transaction().await.unwrap();
-    sqlx::query("DELETE FROM accounts WHERE namespace_id=$1 AND account_id=$2")
+    if scenario.reset_account {
+        sqlx::query("DELETE FROM accounts WHERE namespace_id=$1 AND account_id=$2")
+            .bind(WIPEABLE_CORE_NAMESPACE)
+            .bind(ACCOUNT_ID.as_slice())
+            .execute(transaction.connection())
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO accounts (namespace_id,account_id,state_version,slot_capacity) \
+             VALUES ($1,$2,$3,2)",
+        )
+        .bind(WIPEABLE_CORE_NAMESPACE)
+        .bind(ACCOUNT_ID.as_slice())
+        .bind(i64::try_from(scenario.account_pre_version).unwrap())
+        .execute(transaction.connection())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO ash_wallets (namespace_id,account_id,balance,wallet_version) \
+             VALUES ($1,$2,0,1)",
+        )
         .bind(WIPEABLE_CORE_NAMESPACE)
         .bind(ACCOUNT_ID.as_slice())
         .execute(transaction.connection())
         .await
         .unwrap();
-    sqlx::query(
-        "INSERT INTO accounts (namespace_id,account_id,state_version,slot_capacity) \
-         VALUES ($1,$2,1,2)",
-    )
-    .bind(WIPEABLE_CORE_NAMESPACE)
-    .bind(ACCOUNT_ID.as_slice())
-    .execute(transaction.connection())
-    .await
-    .unwrap();
-    sqlx::query(
-        "INSERT INTO ash_wallets (namespace_id,account_id,balance,wallet_version) \
-         VALUES ($1,$2,0,1)",
-    )
-    .bind(WIPEABLE_CORE_NAMESPACE)
-    .bind(ACCOUNT_ID.as_slice())
-    .execute(transaction.connection())
-    .await
-    .unwrap();
+    } else {
+        let account: (i64, Option<Vec<u8>>) = sqlx::query_as(
+            "SELECT state_version,selected_character_id FROM accounts \
+             WHERE namespace_id=$1 AND account_id=$2 FOR UPDATE",
+        )
+        .bind(WIPEABLE_CORE_NAMESPACE)
+        .bind(ACCOUNT_ID.as_slice())
+        .fetch_one(transaction.connection())
+        .await
+        .unwrap();
+        assert_eq!(
+            account,
+            (i64::try_from(scenario.account_pre_version).unwrap(), None)
+        );
+    }
     sqlx::query(
         "INSERT INTO characters (namespace_id,account_id,character_id,roster_ordinal,class_id, \
          level,oath_id,life_state,security_state,character_state_version) \
-         VALUES ($1,$2,$3,1,'class.grave_arbalist',10,NULL,0,0,1)",
+         VALUES ($1,$2,$3,1,'class.grave_arbalist',$4,NULL,0,0,1)",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(ACCOUNT_ID.as_slice())
-    .bind(CHARACTER_ID.as_slice())
+    .bind(identity.character_id.as_slice())
+    .bind(i16::from(scenario.level))
     .execute(transaction.connection())
     .await
     .unwrap();
     sqlx::query(
         "UPDATE accounts SET selected_character_id=$1 WHERE namespace_id=$2 AND account_id=$3",
     )
-    .bind(CHARACTER_ID.as_slice())
+    .bind(identity.character_id.as_slice())
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(ACCOUNT_ID.as_slice())
     .execute(transaction.connection())
@@ -135,11 +284,13 @@ pub async fn seed_danger_root(persistence: &PostgresPersistence) {
     .unwrap();
     sqlx::query(
         "INSERT INTO character_progression (namespace_id,account_id,character_id,total_xp,level, \
-         current_health,progression_version) VALUES ($1,$2,$3,2700,10,120,1)",
+         current_health,progression_version) VALUES ($1,$2,$3,$4,$5,120,1)",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(ACCOUNT_ID.as_slice())
-    .bind(CHARACTER_ID.as_slice())
+    .bind(identity.character_id.as_slice())
+    .bind(i64::from(scenario.level) * 270)
+    .bind(i16::from(scenario.level))
     .execute(transaction.connection())
     .await
     .unwrap();
@@ -149,7 +300,7 @@ pub async fn seed_danger_root(persistence: &PostgresPersistence) {
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(ACCOUNT_ID.as_slice())
-    .bind(CHARACTER_ID.as_slice())
+    .bind(identity.character_id.as_slice())
     .execute(transaction.connection())
     .await
     .unwrap();
@@ -159,7 +310,7 @@ pub async fn seed_danger_root(persistence: &PostgresPersistence) {
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(ACCOUNT_ID.as_slice())
-    .bind(CHARACTER_ID.as_slice())
+    .bind(identity.character_id.as_slice())
     .execute(transaction.connection())
     .await
     .unwrap();
@@ -171,9 +322,9 @@ pub async fn seed_danger_root(persistence: &PostgresPersistence) {
          VALUES ($1,$2,$3,$4,$5,$6,0,10,0,0,$2,0,0,1,0,0,0,0,0,0)",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
-    .bind(ITEM_UID.as_slice())
+    .bind(identity.item_uid.as_slice())
     .bind(ACCOUNT_ID.as_slice())
-    .bind(CHARACTER_ID.as_slice())
+    .bind(identity.character_id.as_slice())
     .bind(ITEM_TEMPLATE_ID)
     .bind(CORE_ITEM_CONTENT_REVISION)
     .execute(transaction.connection())
@@ -186,8 +337,8 @@ pub async fn seed_danger_root(persistence: &PostgresPersistence) {
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(ACCOUNT_ID.as_slice())
-    .bind(CHARACTER_ID.as_slice())
-    .bind(LINEAGE_ID.as_slice())
+    .bind(identity.character_id.as_slice())
+    .bind(identity.lineage_id.as_slice())
     .bind(CORE_WORLD_RECORDS_BLAKE3)
     .bind(CORE_WORLD_ASSETS_BLAKE3)
     .bind(CORE_WORLD_LOCALIZATION_BLAKE3)
@@ -201,13 +352,14 @@ pub async fn seed_danger_root(persistence: &PostgresPersistence) {
          inventory_version,oath_bargain_version,life_metrics_version,ash_wallet_version, \
          component_mask,composite_digest,restore_state,records_blake3,assets_blake3, \
          localization_blake3) VALUES ($1,$2,$3,$4,$5,'hub.lantern_halls_01', \
-         'hub.lantern_halls_01',3,1,1,1,2,1,1,1,31,$6,0,$7,$8,$9)",
+         'hub.lantern_halls_01',3,$6,1,1,2,1,1,1,31,$7,0,$8,$9,$10)",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(ACCOUNT_ID.as_slice())
-    .bind(CHARACTER_ID.as_slice())
-    .bind(RESTORE_POINT_ID.as_slice())
-    .bind(LINEAGE_ID.as_slice())
+    .bind(identity.character_id.as_slice())
+    .bind(identity.restore_point_id.as_slice())
+    .bind(identity.lineage_id.as_slice())
+    .bind(i64::try_from(scenario.account_pre_version).unwrap())
     .bind([91_u8; 32].as_slice())
     .bind(CORE_WORLD_RECORDS_BLAKE3)
     .bind(CORE_WORLD_ASSETS_BLAKE3)
@@ -218,12 +370,14 @@ pub async fn seed_danger_root(persistence: &PostgresPersistence) {
     sqlx::query(
         "INSERT INTO entry_restore_progression_v3 (namespace_id,account_id,character_id, \
          restore_point_id,level,total_xp,current_health,progression_version,component_digest) \
-         VALUES ($1,$2,$3,$4,10,2700,120,1,$5)",
+         VALUES ($1,$2,$3,$4,$5,$6,120,1,$7)",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(ACCOUNT_ID.as_slice())
-    .bind(CHARACTER_ID.as_slice())
-    .bind(RESTORE_POINT_ID.as_slice())
+    .bind(identity.character_id.as_slice())
+    .bind(identity.restore_point_id.as_slice())
+    .bind(i16::from(scenario.level))
+    .bind(i64::from(scenario.level) * 270)
     .bind([92_u8; 32].as_slice())
     .execute(transaction.connection())
     .await
@@ -231,21 +385,23 @@ pub async fn seed_danger_root(persistence: &PostgresPersistence) {
     sqlx::query(
         "INSERT INTO entry_restore_progression_v1 (namespace_id,account_id,character_id, \
          restore_point_id,level,total_xp,current_health,progression_version) \
-         VALUES ($1,$2,$3,$4,10,2700,120,1)",
+         VALUES ($1,$2,$3,$4,$5,$6,120,1)",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(ACCOUNT_ID.as_slice())
-    .bind(CHARACTER_ID.as_slice())
-    .bind(RESTORE_POINT_ID.as_slice())
+    .bind(identity.character_id.as_slice())
+    .bind(identity.restore_point_id.as_slice())
+    .bind(i16::from(scenario.level))
+    .bind(i64::from(scenario.level) * 270)
     .execute(transaction.connection())
     .await
     .unwrap();
     stage_danger_entry_inventory_restore_v3(
         &mut transaction,
         ACCOUNT_ID,
-        CHARACTER_ID,
-        RESTORE_POINT_ID,
-        ENTRY_MUTATION_ID,
+        identity.character_id,
+        identity.restore_point_id,
+        identity.entry_mutation_id,
         0,
     )
     .await
@@ -253,24 +409,24 @@ pub async fn seed_danger_root(persistence: &PostgresPersistence) {
     stage_danger_entry_oath_bargain_restore_v3(
         &mut transaction,
         ACCOUNT_ID,
-        CHARACTER_ID,
-        RESTORE_POINT_ID,
+        identity.character_id,
+        identity.restore_point_id,
     )
     .await
     .unwrap();
     stage_danger_entry_life_metrics_restore_v3(
         &mut transaction,
         ACCOUNT_ID,
-        CHARACTER_ID,
-        RESTORE_POINT_ID,
+        identity.character_id,
+        identity.restore_point_id,
     )
     .await
     .unwrap();
     stage_danger_entry_ash_wallet_restore_v3(
         &mut transaction,
         ACCOUNT_ID,
-        CHARACTER_ID,
-        RESTORE_POINT_ID,
+        identity.character_id,
+        identity.restore_point_id,
     )
     .await
     .unwrap();
@@ -281,9 +437,9 @@ pub async fn seed_danger_root(persistence: &PostgresPersistence) {
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(ACCOUNT_ID.as_slice())
-    .bind(CHARACTER_ID.as_slice())
-    .bind(LINEAGE_ID.as_slice())
-    .bind(RESTORE_POINT_ID.as_slice())
+    .bind(identity.character_id.as_slice())
+    .bind(identity.lineage_id.as_slice())
+    .bind(identity.restore_point_id.as_slice())
     .execute(transaction.connection())
     .await
     .unwrap();
@@ -293,7 +449,7 @@ pub async fn seed_danger_root(persistence: &PostgresPersistence) {
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(ACCOUNT_ID.as_slice())
-    .bind(CHARACTER_ID.as_slice())
+    .bind(identity.character_id.as_slice())
     .execute(transaction.connection())
     .await
     .unwrap();
@@ -303,17 +459,19 @@ pub async fn seed_danger_root(persistence: &PostgresPersistence) {
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(ACCOUNT_ID.as_slice())
-    .bind(CHARACTER_ID.as_slice())
+    .bind(identity.character_id.as_slice())
     .execute(transaction.connection())
     .await
     .unwrap();
     sqlx::query(
-        "UPDATE character_life_metrics SET lifetime_ticks=19990,permadeath_combat_ticks=17990, \
-         life_metrics_version=2 WHERE namespace_id=$1 AND account_id=$2 AND character_id=$3",
+        "UPDATE character_life_metrics SET lifetime_ticks=$1,permadeath_combat_ticks=$2, \
+         life_metrics_version=2 WHERE namespace_id=$3 AND account_id=$4 AND character_id=$5",
     )
+    .bind(i64::try_from(scenario.lifetime_ticks - 10).unwrap())
+    .bind(i64::try_from(scenario.permadeath_combat_ticks - 10).unwrap())
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(ACCOUNT_ID.as_slice())
-    .bind(CHARACTER_ID.as_slice())
+    .bind(identity.character_id.as_slice())
     .execute(transaction.connection())
     .await
     .unwrap();
@@ -324,12 +482,13 @@ pub async fn seed_danger_root(persistence: &PostgresPersistence) {
          lineage_id,checkpoint_tick,component_mask,composite_digest,character_version, \
          progression_version,inventory_version,oath_bargain_version,records_blake3, \
          assets_blake3,localization_blake3,checkpoint_schema_version,checkpoint_payload, \
-         checkpoint_payload_digest) VALUES ($1,$2,$3,$4,19990,15,$5,2,2,2,1,$6,$7,$8,1,$9,$10)",
+         checkpoint_payload_digest) VALUES ($1,$2,$3,$4,$5,15,$6,2,2,2,1,$7,$8,$9,1,$10,$11)",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(ACCOUNT_ID.as_slice())
-    .bind(CHARACTER_ID.as_slice())
-    .bind(LINEAGE_ID.as_slice())
+    .bind(identity.character_id.as_slice())
+    .bind(identity.lineage_id.as_slice())
+    .bind(i64::try_from(CHECKPOINT_TICK).unwrap())
     .bind([94_u8; 32].as_slice())
     .bind(CORE_WORLD_RECORDS_BLAKE3)
     .bind(CORE_WORLD_ASSETS_BLAKE3)
@@ -345,35 +504,43 @@ pub async fn seed_danger_root(persistence: &PostgresPersistence) {
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(ACCOUNT_ID.as_slice())
-    .bind(CHARACTER_ID.as_slice())
+    .bind(identity.character_id.as_slice())
     .bind(MATERIAL_ID)
     .execute(transaction.connection())
     .await
     .unwrap();
-    sqlx::query(
-        "INSERT INTO character_life_deeds (namespace_id,account_id,character_id,deed_id, \
-         reward_event_id,source_content_id,deed_kind,achieved_tick,content_revision) \
-         VALUES ($1,$2,$3,$4,$5,'boss.sir_caldus',0,19000,$6)",
-    )
-    .bind(WIPEABLE_CORE_NAMESPACE)
-    .bind(ACCOUNT_ID.as_slice())
-    .bind(CHARACTER_ID.as_slice())
-    .bind(DEED_ID)
-    .bind(DEED_REWARD_ID.as_slice())
-    .bind(CORE_ITEM_CONTENT_REVISION)
-    .execute(transaction.connection())
-    .await
-    .unwrap();
+    if scenario.boss_deed {
+        sqlx::query(
+            "INSERT INTO character_life_deeds (namespace_id,account_id,character_id,deed_id, \
+             reward_event_id,source_content_id,deed_kind,achieved_tick,content_revision) \
+             VALUES ($1,$2,$3,$4,$5,'boss.sir_caldus',0,$6,$7)",
+        )
+        .bind(WIPEABLE_CORE_NAMESPACE)
+        .bind(ACCOUNT_ID.as_slice())
+        .bind(identity.character_id.as_slice())
+        .bind(DEED_ID)
+        .bind(identity.deed_reward_id.as_slice())
+        .bind(i64::try_from(DEED_TICK).unwrap())
+        .bind(CORE_ITEM_CONTENT_REVISION)
+        .execute(transaction.connection())
+        .await
+        .unwrap();
+    }
     transaction.commit().await.unwrap();
 }
 
-fn observation(tick: u64, pre_health: u32, final_damage: u32) -> DamageTraceObservation {
+fn observation(
+    source_sim_entity_id: u64,
+    tick: u64,
+    pre_health: u32,
+    final_damage: u32,
+) -> DamageTraceObservation {
     DamageTraceObservation {
         tick: Tick(tick),
         event_ordinal: 0,
         cause_kind: AuthoritativeDeathCauseKind::DirectHit,
         source_content_id: "miniboss.sepulcher_knight".into(),
-        source_entity_id: Some(EntityId::new(SOURCE_SIM_ENTITY_ID).unwrap()),
+        source_entity_id: Some(EntityId::new(source_sim_entity_id).unwrap()),
         pattern_id: Some("miniboss.sepulcher_knight.charge_lane".into()),
         attack_id: "miniboss.sepulcher_knight.charge_lane".into(),
         raw_damage: final_damage,
@@ -382,7 +549,7 @@ fn observation(tick: u64, pre_health: u32, final_damage: u32) -> DamageTraceObse
         pre_health,
         post_health: pre_health.saturating_sub(final_damage),
         source_position: SimulationVector::new(1.25, -0.5),
-        statuses: (tick == 19_990)
+        statuses: (tick == CHECKPOINT_TICK)
             .then_some(DeathTraceStatus {
                 status_id: "status.hex".into(),
                 remaining_ticks: 30,
@@ -395,9 +562,12 @@ fn observation(tick: u64, pre_health: u32, final_damage: u32) -> DamageTraceObse
     }
 }
 
-fn versions() -> DeathAggregateVersionsV1 {
+fn versions(account_pre_version: u64) -> DeathAggregateVersionsV1 {
     DeathAggregateVersionsV1 {
-        account: DeathVersionAdvanceV1 { pre: 1, post: 2 },
+        account: DeathVersionAdvanceV1 {
+            pre: account_pre_version,
+            post: account_pre_version + 1,
+        },
         character: DeathVersionAdvanceV1 { pre: 2, post: 3 },
         progression: DeathVersionAdvanceV1 { pre: 2, post: 3 },
         inventory: DeathVersionAdvanceV1 { pre: 2, post: 3 },
@@ -406,12 +576,57 @@ fn versions() -> DeathAggregateVersionsV1 {
     }
 }
 
+fn build_echo_projection(scenario: &DurableDeathScenarioV1) -> Option<EligibleEchoProjection> {
+    let identity = scenario.identity;
+    if !scenario.echo_eligible() {
+        assert_eq!(scenario.echo_availability, FixtureEchoAvailabilityV1::None);
+        return None;
+    }
+    let availability = match scenario.echo_availability {
+        FixtureEchoAvailabilityV1::None => {
+            panic!("eligible hosted death requires an account-locked Echo decision")
+        }
+        FixtureEchoAvailabilityV1::SelfPromote => {
+            EchoAvailabilityProjection::PromoteOldestDormant {
+                echo_id: identity.echo_id,
+                echo_death_id: identity.death_id,
+                next_transition_ordinal: 1,
+            }
+        }
+        FixtureEchoAvailabilityV1::ExistingAvailable { echo_id } => {
+            EchoAvailabilityProjection::ExistingAvailable { echo_id }
+        }
+    };
+    Some(EligibleEchoProjection {
+        echo_id: identity.echo_id,
+        appearance_snapshot_id: "appearance.default.grave_arbalist".into(),
+        appearance_theme_id: "theme.echo.arbalist_ash".into(),
+        weapon_signature_tag: None,
+        relic_signature_tag: None,
+        deed_tags: vec![DEED_ID.into()],
+        power_band: 1,
+        availability,
+    })
+}
+
 /// Produces one sealed death by traversing the production live trace and server death builder.
 #[allow(
     clippy::too_many_lines,
     reason = "the trace, simulation evidence, and sealed server context stay contiguous for audit"
 )]
 pub async fn prepare_death(persistence: PostgresPersistence) -> PreparedDurableDeathCommit {
+    prepare_death_for(persistence, &DurableDeathScenarioV1::primary_eligible()).await
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the parameterized trace, evidence, and server context remain contiguous for audit"
+)]
+pub async fn prepare_death_for(
+    persistence: PostgresPersistence,
+    scenario: &DurableDeathScenarioV1,
+) -> PreparedDurableDeathCommit {
+    let identity = scenario.identity;
     let presentation = Arc::new(
         sim_content::load_core_development_death_view(
             &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content"),
@@ -419,21 +634,27 @@ pub async fn prepare_death(persistence: PostgresPersistence) -> PreparedDurableD
         .unwrap(),
     );
     let danger = LiveDamageTraceDangerAuthorityV1 {
-        lineage_id: LINEAGE_ID,
-        restore_point_id: RESTORE_POINT_ID,
-        checkpoint_tick: 19_990,
+        lineage_id: identity.lineage_id,
+        restore_point_id: identity.restore_point_id,
+        checkpoint_tick: CHECKPOINT_TICK,
     };
     let content = LiveDamageTraceContentAuthorityV1::core();
     let identities = DeathEntityIdentityAuthority {
         by_sim_entity: BTreeMap::from([(
-            EntityId::new(SOURCE_SIM_ENTITY_ID).unwrap(),
-            [u8::try_from(SOURCE_SIM_ENTITY_ID).unwrap(); 16],
+            EntityId::new(identity.source_sim_entity_id).unwrap(),
+            [u8::try_from(identity.source_sim_entity_id).unwrap(); 16],
         )]),
     };
     let mut trace = LiveDamageTraceService::start_or_resume(
         persistence,
-        LiveDamageTraceBinding::new(ACCOUNT_ID, CHARACTER_ID, 2, danger.clone(), content.clone())
-            .unwrap(),
+        LiveDamageTraceBinding::new(
+            ACCOUNT_ID,
+            identity.character_id,
+            2,
+            danger.clone(),
+            content.clone(),
+        )
+        .unwrap(),
         identities.clone(),
         presentation.clone(),
     )
@@ -443,13 +664,18 @@ pub async fn prepare_death(persistence: PostgresPersistence) -> PreparedDurableD
         trace
             .ingest_tick(
                 LiveDamageTraceMutationAuthority::new(
-                    NONLETHAL_TRACE_TICK_ID,
+                    identity.nonlethal_trace_tick_id,
                     2,
                     danger.clone(),
                     ISSUED_AT_UNIX_MS,
                 )
                 .unwrap(),
-                vec![observation(19_990, 60, 10)],
+                vec![observation(
+                    identity.source_sim_entity_id,
+                    CHECKPOINT_TICK,
+                    60,
+                    10,
+                )],
             )
             .await
             .unwrap(),
@@ -458,13 +684,18 @@ pub async fn prepare_death(persistence: PostgresPersistence) -> PreparedDurableD
     let LiveDamageTraceIngestOutcome::TerminalPrepared(terminal_trace) = trace
         .ingest_tick(
             LiveDamageTraceMutationAuthority::new(
-                LETHAL_TRACE_TICK_ID,
+                identity.lethal_trace_tick_id,
                 2,
                 danger,
                 ISSUED_AT_UNIX_MS,
             )
             .unwrap(),
-            vec![observation(20_000, 50, 50)],
+            vec![observation(
+                identity.source_sim_entity_id,
+                TERMINAL_TICK,
+                50,
+                50,
+            )],
         )
         .await
         .unwrap()
@@ -474,19 +705,23 @@ pub async fn prepare_death(persistence: PostgresPersistence) -> PreparedDurableD
     let verified = terminal_trace.terminal_snapshot();
     let inputs = AuthoritativeDeathInputs {
         clocks: DeathClockSnapshot {
-            lifetime_ticks: 20_000,
-            lifetime_ms: ticks_to_milliseconds(20_000).unwrap(),
-            permadeath_combat_ticks: 18_000,
-            echo_time_eligible: true,
+            lifetime_ticks: scenario.lifetime_ticks,
+            lifetime_ms: ticks_to_milliseconds(scenario.lifetime_ticks).unwrap(),
+            permadeath_combat_ticks: scenario.permadeath_combat_ticks,
+            echo_time_eligible: scenario.permadeath_combat_ticks >= 18_000,
             danger_active: false,
             link_lost_ticks: 0,
             dead: true,
         },
         final_deed: FinalDeed {
-            deed_id: DEED_ID.into(),
-            achieved_tick: Some(Tick(19_000)),
+            deed_id: if scenario.boss_deed {
+                DEED_ID.into()
+            } else {
+                DEED_NONE_ID.into()
+            },
+            achieved_tick: scenario.boss_deed.then_some(Tick(DEED_TICK)),
         },
-        echo_deed_eligible: true,
+        echo_deed_eligible: scenario.boss_deed,
         cause: verified.cause.clone(),
         trace: verified.trace.clone(),
         last_five: verified.last_five.clone(),
@@ -495,20 +730,20 @@ pub async fn prepare_death(persistence: PostgresPersistence) -> PreparedDurableD
     let server_context = ServerAuthoredDeathContext {
         mutation: DeathMutationAuthority {
             authenticated_account: authenticated_account(),
-            selected_character_id: CHARACTER_ID,
+            selected_character_id: identity.character_id,
             former_roster_ordinal: 1,
-            mutation_id: DEATH_MUTATION_ID,
-            death_id: DEATH_ID,
+            mutation_id: identity.death_mutation_id,
+            death_id: identity.death_id,
             issued_at_unix_ms: ISSUED_AT_UNIX_MS,
             accepted_at_unix_ms: ISSUED_AT_UNIX_MS,
         },
         world: DeathWorldAuthority {
-            instance_id: INSTANCE_ID,
-            lineage_id: LINEAGE_ID,
-            restore_point_id: RESTORE_POINT_ID,
+            instance_id: identity.instance_id,
+            lineage_id: identity.lineage_id,
+            restore_point_id: identity.restore_point_id,
             region_id: "region.core.microrealm".into(),
             room_id: "room.core.sepulcher".into(),
-            lineage_state: DeathLineageState::ActivePermadeath(DeathProvenance::OrdinaryGameplay),
+            lineage_state: DeathLineageState::ActivePermadeath(scenario.provenance),
         },
         content: DurableDeathContentAuthorityV1 {
             content_revision: CORE_ITEM_CONTENT_REVISION.into(),
@@ -520,18 +755,18 @@ pub async fn prepare_death(persistence: PostgresPersistence) -> PreparedDurableD
                 echo_signature_tag: None,
             }],
         },
-        versions: versions(),
+        versions: versions(scenario.account_pre_version),
         destruction: vec![
             DurableDestructionEntryV1::Item {
                 ordinal: 0,
                 content_id: ITEM_TEMPLATE_ID.into(),
-                item_uid: ITEM_UID,
+                item_uid: identity.item_uid,
                 location: DurableDestructionLocationV1::Equipment {
                     slot: DurableEquipmentSlotV1::Weapon,
                 },
                 pre_item_version: 2,
                 post_item_version: 3,
-                ledger_event_id: ITEM_LEDGER_ID,
+                ledger_event_id: identity.item_ledger_id,
             },
             DurableDestructionEntryV1::RunMaterial {
                 ordinal: 1,
@@ -546,27 +781,14 @@ pub async fn prepare_death(persistence: PostgresPersistence) -> PreparedDurableD
             hero_label_key: "hero.core.grave_arbalist".into(),
             character_name: "Hosted Hero".into(),
             class_id: "class.grave_arbalist".into(),
-            level: 10,
+            level: scenario.level,
             oath_id: None,
             bargain_ids: vec![],
             memorial_presentation_key: "memorial.presentation.core_default".into(),
         },
         entity_identities: identities,
         terminal_trace: terminal_trace.as_ref().clone(),
-        echo: Some(EligibleEchoProjection {
-            echo_id: ECHO_ID,
-            appearance_snapshot_id: "appearance.default.grave_arbalist".into(),
-            appearance_theme_id: "theme.echo.arbalist_ash".into(),
-            weapon_signature_tag: None,
-            relic_signature_tag: None,
-            deed_tags: vec![DEED_ID.into()],
-            power_band: 1,
-            availability: EchoAvailabilityProjection::PromoteOldestDormant {
-                echo_id: ECHO_ID,
-                echo_death_id: DEATH_ID,
-                next_transition_ordinal: 1,
-            },
-        }),
+        echo: build_echo_projection(scenario),
     };
     build_durable_death_commit(&inputs, &server_context, &presentation).unwrap()
 }
