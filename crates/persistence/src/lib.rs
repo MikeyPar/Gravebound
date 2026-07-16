@@ -243,7 +243,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 56;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 57;
 const DISPOSABLE_DATABASE_RESET_SQL: &str = "TRUNCATE TABLE accounts, caldus_victory_exits CASCADE";
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -1650,7 +1650,7 @@ mod tests {
     #[test]
     fn deferred_death_graph_consumes_provenance_without_forking_its_closure() {
         assert_eq!(
-            EXPECTED_SCHEMA_VERSION, 56,
+            EXPECTED_SCHEMA_VERSION, 57,
             "readiness must advance with the latest published migration"
         );
         let migration = include_str!("../../../migrations/0054_death_provenance_echo_closure.sql");
@@ -1733,8 +1733,8 @@ mod tests {
     #[test]
     fn atomic_extraction_terminal_is_normalized_replay_first_and_fail_closed() {
         assert_eq!(
-            EXPECTED_SCHEMA_VERSION, 56,
-            "readiness must advance with the atomic extraction terminal migration"
+            EXPECTED_SCHEMA_VERSION, 57,
+            "readiness must advance with the latest published terminal migration"
         );
         let migration = include_str!("../../../migrations/0056_atomic_extraction_terminal_v1.sql");
         for required in [
@@ -1779,6 +1779,61 @@ mod tests {
             assert!(
                 !migration.contains(prohibited),
                 "atomic extraction terminal migration leaked {prohibited}"
+            );
+        }
+    }
+
+    #[test]
+    fn atomic_recall_terminal_is_normalized_clock_complete_and_fail_closed() {
+        assert_eq!(
+            EXPECTED_SCHEMA_VERSION, 57,
+            "readiness must advance with the atomic Recall terminal migration"
+        );
+        let migration = include_str!("../../../migrations/0057_atomic_recall_terminal_v1.sql");
+        for required in [
+            "Gravebound_Production_GDD_v1_Canonical.md",
+            "Gravebound_Content_Production_Spec_v1.md",
+            "Gravebound_Development_Roadmap_v1.md",
+            "SPEC-CONFLICT-029-m03-extraction-recall-terminal-authority.md",
+            "character_recall_terminal_results_v1",
+            "recall_terminal_item_stabilizations_v1",
+            "recall_terminal_item_destructions_v1",
+            "recall_terminal_material_destructions_v1",
+            "recall_terminal_audit_events_v1",
+            "recall_terminal_conflict_audits_v1",
+            "recall_terminal_outbox_events_v1",
+            "terminal_kind = 3",
+            "terminal_kind = 4",
+            "completion_tick = trigger_started_tick + 12",
+            "completion_tick = trigger_started_tick + 90",
+            "post_account_version = pre_account_version",
+            "post_inventory_version = pre_inventory_version + 1",
+            "post_lifetime_ticks >= pre_lifetime_ticks",
+            "post_permadeath_combat_ticks >= pre_permadeath_combat_ticks",
+            "terminal_reason = 'recall'",
+            "source_kind BETWEEN 0 AND 6",
+            "restore_state = 3",
+            "enforce_complete_recall_terminal_v1",
+            "Recall terminal history is immutable",
+            "Recall terminal outbox permits only first publication",
+            "Recovery/downgrade:",
+            "Published migration history must never be rewritten",
+        ] {
+            assert!(migration.contains(required), "migration omitted {required}");
+        }
+        for prohibited in [
+            "DROP TABLE",
+            "TRUNCATE",
+            "DELETE FROM",
+            "JSON",
+            "JSONB",
+            "FLOAT",
+            "DOUBLE PRECISION",
+            "wallet credit",
+        ] {
+            assert!(
+                !migration.contains(prohibited),
+                "atomic Recall terminal migration leaked {prohibited}"
             );
         }
     }
