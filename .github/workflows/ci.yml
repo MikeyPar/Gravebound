@@ -124,6 +124,7 @@ jobs:
         run: |
           cargo test --locked -p server_app --test death_branch_matrix -- --ignored --test-threads=1 --nocapture
           cargo test --locked -p server_app --test death_concurrency -- --ignored --test-threads=1 --nocapture
+          cargo test --locked -p server_app --test death_custody_matrix -- --ignored --test-threads=1 --nocapture
       - name: Upload authenticated death evidence source
         uses: actions/upload-artifact@v4
         with:

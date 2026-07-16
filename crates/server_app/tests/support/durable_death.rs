@@ -164,6 +164,7 @@ pub struct DurableDeathScenarioV1 {
     pub identity: DurableDeathFixtureIdentityV1,
     pub reset_account: bool,
     pub account_pre_version: u64,
+    pub inventory_pre_version: u64,
     pub level: u8,
     pub lifetime_ticks: u64,
     pub permadeath_combat_ticks: u64,
@@ -180,6 +181,7 @@ impl DurableDeathScenarioV1 {
             identity: PRIMARY_IDENTITY,
             reset_account: true,
             account_pre_version: 1,
+            inventory_pre_version: 2,
             level: 10,
             lifetime_ticks: TERMINAL_TICK,
             permadeath_combat_ticks: 18_000,
@@ -200,6 +202,7 @@ impl DurableDeathScenarioV1 {
             identity: SECONDARY_IDENTITY,
             reset_account: false,
             account_pre_version: 2,
+            inventory_pre_version: 2,
             level: 10,
             lifetime_ticks: TERMINAL_TICK,
             permadeath_combat_ticks: 18_000,
@@ -220,6 +223,7 @@ impl DurableDeathScenarioV1 {
             identity: PARALLEL_IDENTITY,
             reset_account: true,
             account_pre_version: 1,
+            inventory_pre_version: 2,
             level: 10,
             lifetime_ticks: TERMINAL_TICK,
             permadeath_combat_ticks: 18_000,
@@ -632,7 +636,7 @@ fn observation(
     }
 }
 
-fn versions(account_pre_version: u64) -> DeathAggregateVersionsV1 {
+fn versions(account_pre_version: u64, inventory_pre_version: u64) -> DeathAggregateVersionsV1 {
     DeathAggregateVersionsV1 {
         account: DeathVersionAdvanceV1 {
             pre: account_pre_version,
@@ -640,7 +644,10 @@ fn versions(account_pre_version: u64) -> DeathAggregateVersionsV1 {
         },
         character: DeathVersionAdvanceV1 { pre: 2, post: 3 },
         progression: DeathVersionAdvanceV1 { pre: 2, post: 3 },
-        inventory: DeathVersionAdvanceV1 { pre: 2, post: 3 },
+        inventory: DeathVersionAdvanceV1 {
+            pre: inventory_pre_version,
+            post: inventory_pre_version + 1,
+        },
         oath_bargain: DeathVersionAdvanceV1 { pre: 1, post: 2 },
         life_metrics: DeathVersionAdvanceV1 { pre: 2, post: 3 },
     }
@@ -696,6 +703,44 @@ pub async fn prepare_death(persistence: PostgresPersistence) -> PreparedDurableD
 pub async fn prepare_death_for(
     persistence: PostgresPersistence,
     scenario: &DurableDeathScenarioV1,
+) -> PreparedDurableDeathCommit {
+    let identity = scenario.identity;
+    prepare_death_for_with_custody(
+        persistence,
+        scenario,
+        DeathCustodySnapshot {
+            items: vec![DeathAtRiskItem {
+                content_id: ITEM_TEMPLATE_ID.into(),
+                item_uid: identity.item_uid,
+                location: DurableDestructionLocationV1::Equipment {
+                    slot: DurableEquipmentSlotV1::Weapon,
+                },
+                item_version: 2,
+            }],
+            run_materials: vec![DeathAtRiskRunMaterial {
+                material_id: MATERIAL_ID.into(),
+                quantity: 7,
+                material_version: 1,
+            }],
+        },
+        vec![DurableDeathItemContentAuthorityV1 {
+            template_id: ITEM_TEMPLATE_ID.into(),
+            echo_signature_tag: None,
+        }],
+    )
+    .await
+}
+
+#[allow(
+    dead_code,
+    clippy::too_many_lines,
+    reason = "the parameterized trace, custody, evidence, and server context remain contiguous for audit"
+)]
+pub async fn prepare_death_for_with_custody(
+    persistence: PostgresPersistence,
+    scenario: &DurableDeathScenarioV1,
+    custody: DeathCustodySnapshot,
+    enabled_items: Vec<DurableDeathItemContentAuthorityV1>,
 ) -> PreparedDurableDeathCommit {
     let identity = scenario.identity;
     let account_id = scenario.account_id;
@@ -822,27 +867,10 @@ pub async fn prepare_death_for(
             records_blake3: CORE_WORLD_RECORDS_BLAKE3.into(),
             assets_blake3: CORE_WORLD_ASSETS_BLAKE3.into(),
             localization_blake3: CORE_WORLD_LOCALIZATION_BLAKE3.into(),
-            enabled_items: vec![DurableDeathItemContentAuthorityV1 {
-                template_id: ITEM_TEMPLATE_ID.into(),
-                echo_signature_tag: None,
-            }],
+            enabled_items,
         },
-        versions: versions(scenario.account_pre_version),
-        custody: DeathCustodySnapshot {
-            items: vec![DeathAtRiskItem {
-                content_id: ITEM_TEMPLATE_ID.into(),
-                item_uid: identity.item_uid,
-                location: DurableDestructionLocationV1::Equipment {
-                    slot: DurableEquipmentSlotV1::Weapon,
-                },
-                item_version: 2,
-            }],
-            run_materials: vec![DeathAtRiskRunMaterial {
-                material_id: MATERIAL_ID.into(),
-                quantity: 7,
-                material_version: 1,
-            }],
-        },
+        versions: versions(scenario.account_pre_version, scenario.inventory_pre_version),
+        custody,
         hero: DeathHeroSnapshot {
             hero_label_key: "hero.core.grave_arbalist".into(),
             character_name: "Hosted Hero".into(),

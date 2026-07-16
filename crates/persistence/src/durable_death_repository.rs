@@ -29,7 +29,7 @@ use crate::{
         DurableDeathTracePromotionDigestMaterialV1,
         canonical_stored_death_trace_promotion_digest_v1,
     },
-    derive_durable_death_bargain_cleanup_event_id,
+    derive_durable_death_bargain_cleanup_event_id, derive_durable_death_item_ledger_event_id,
     live_damage_trace_repository::{
         LiveDamageTraceCauseV1, LiveDamageTraceDamageTypeV1, LiveDamageTraceEntryV1,
         LiveDamageTraceNetworkStateV1, LiveDamageTracePromotionReceiptV1,
@@ -391,7 +391,7 @@ impl PostgresPersistence {
         promotion.validate_against(&committed_request, &live_window.entries)?;
         let progression = lock_progression(transaction.connection(), event).await?;
         let inventory_version = lock_inventory(transaction.connection(), event).await?;
-        let items = lock_at_risk_items(transaction.connection(), event).await?;
+        let items = lock_terminal_custody_items(transaction.connection(), event).await?;
         let materials = lock_at_risk_materials(transaction.connection(), event).await?;
         let oath_bargain = lock_oath_bargain(transaction.connection(), event).await?;
         let life = lock_life(transaction.connection(), event).await?;
@@ -411,6 +411,8 @@ impl PostgresPersistence {
             &items,
             &materials,
             &plan.destruction,
+            event.death_id,
+            event.mutation_id,
             plan.echo.as_ref(),
             content,
         )?;
@@ -810,7 +812,7 @@ fn terminal_runtime_prestate(
     }
 }
 
-async fn lock_at_risk_items(
+async fn lock_terminal_custody_items(
     connection: &mut PgConnection,
     event: &crate::DurableDeathEventV1,
 ) -> Result<BTreeMap<[u8; 16], ItemLock>, PersistenceError> {
@@ -818,7 +820,7 @@ async fn lock_at_risk_items(
         "SELECT item_uid, template_id, content_revision, item_version, security_state, \
                 location_kind, slot_index, instance_id, pickup_id \
          FROM item_instances WHERE namespace_id=$1 \
-           AND account_id=$2 AND character_id=$3 AND security_state IN (1,2) \
+           AND account_id=$2 AND character_id=$3 AND location_kind IN (0,1,2,3,5) \
          ORDER BY item_uid FOR UPDATE",
     )
     .bind(&event.namespace_id)
@@ -975,9 +977,12 @@ fn validate_destruction_sources(
     items: &BTreeMap<[u8; 16], ItemLock>,
     materials: &BTreeMap<String, MaterialLock>,
     destruction: &[DurableDestructionEntryV1],
+    death_id: [u8; 16],
+    mutation_id: [u8; 16],
     echo: Option<&DurableEchoEnvelopeV1>,
     content: &DurableDeathContentAuthorityV1,
 ) -> Result<(), PersistenceError> {
+    let destructive_item_count = validate_terminal_item_custody(items, content)?;
     let (weapon_signature_tag, relic_signature_tag) = expected_echo_signatures(items, content)?;
     if echo.is_some_and(|envelope| {
         envelope.created.weapon_signature_tag != weapon_signature_tag
@@ -995,6 +1000,7 @@ fn validate_destruction_sources(
                 item_uid,
                 location,
                 pre_item_version,
+                ledger_event_id,
                 ..
             } => {
                 let binding = ItemLocationBinding::from_location(location);
@@ -1008,6 +1014,12 @@ fn validate_destruction_sources(
                     || item.slot_index != binding.slot_index
                     || item.instance_id != binding.instance_id
                     || item.pickup_id != binding.pickup_id
+                    || *ledger_event_id
+                        != derive_durable_death_item_ledger_event_id(
+                            death_id,
+                            mutation_id,
+                            *item_uid,
+                        )
                     || !expected_items.insert(*item_uid)
                 {
                     return Err(PersistenceError::DurableDeathBindingMismatch);
@@ -1031,10 +1043,43 @@ fn validate_destruction_sources(
             }
         }
     }
-    if expected_items.len() != items.len() || expected_materials.len() != materials.len() {
+    if expected_items.len() != destructive_item_count || expected_materials.len() != materials.len()
+    {
         return Err(PersistenceError::DurableDeathBindingMismatch);
     }
     Ok(())
+}
+
+fn validate_terminal_item_custody(
+    items: &BTreeMap<[u8; 16], ItemLock>,
+    content: &DurableDeathContentAuthorityV1,
+) -> Result<usize, PersistenceError> {
+    let mut destructive_item_count = 0_usize;
+    for item in items.values() {
+        let expected_security = match item.location_kind {
+            0 | 1 => SECURITY_AT_RISK_EQUIPPED,
+            2 | 3 => SECURITY_AT_RISK_PENDING,
+            5 => {
+                if item.security_state != 0 {
+                    return Err(PersistenceError::CorruptStoredDurableDeath);
+                }
+                continue;
+            }
+            _ => return Err(PersistenceError::CorruptStoredDurableDeath),
+        };
+        if item.security_state != expected_security {
+            return Err(PersistenceError::CorruptStoredDurableDeath);
+        }
+        if item.content_revision != content.content_revision
+            || content.item(&item.template_id).is_none()
+        {
+            return Err(PersistenceError::DurableDeathContentMismatch);
+        }
+        destructive_item_count = destructive_item_count
+            .checked_add(1)
+            .ok_or(PersistenceError::CorruptStoredDurableDeath)?;
+    }
+    Ok(destructive_item_count)
 }
 
 fn expected_echo_signatures(
@@ -1046,6 +1091,9 @@ fn expected_echo_signatures(
     let mut weapon_seen = false;
     let mut relic_seen = false;
     for item in items.values() {
+        if item.location_kind != 0 {
+            continue;
+        }
         let authority = content
             .item(&item.template_id)
             .ok_or(PersistenceError::DurableDeathContentMismatch)?;
@@ -3410,7 +3458,13 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the custody-exhaustion test keeps destructive, preserved, corrupt, and omitted shapes together"
+    )]
     fn destruction_sources_must_exhaust_locked_at_risk_custody() {
+        let death_id = [10; 16];
+        let mutation_id = [11; 16];
         let item_uid = [1; 16];
         let mut items = BTreeMap::from([(
             item_uid,
@@ -3444,7 +3498,11 @@ mod tests {
                 },
                 pre_item_version: 4,
                 post_item_version: 5,
-                ledger_event_id: [2; 16],
+                ledger_event_id: derive_durable_death_item_ledger_event_id(
+                    death_id,
+                    mutation_id,
+                    item_uid,
+                ),
             },
             DurableDestructionEntryV1::RunMaterial {
                 ordinal: 1,
@@ -3475,8 +3533,65 @@ mod tests {
             (Some("signature.core.test".into()), None)
         );
         assert!(
-            validate_destruction_sources(&items, &materials, &destruction, None, &content).is_ok()
+            validate_destruction_sources(
+                &items,
+                &materials,
+                &destruction,
+                death_id,
+                mutation_id,
+                None,
+                &content,
+            )
+            .is_ok()
         );
+        items.insert(
+            [4; 16],
+            ItemLock {
+                item_uid: [4; 16],
+                template_id: "item.core.safe".into(),
+                content_revision: "core-dev.blake3.dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd".into(),
+                item_version: 7,
+                security_state: 0,
+                location_kind: 5,
+                slot_index: Some(0),
+                instance_id: None,
+                pickup_id: None,
+            },
+        );
+        assert!(
+            validate_destruction_sources(
+                &items,
+                &materials,
+                &destruction,
+                death_id,
+                mutation_id,
+                None,
+                &content,
+            )
+            .is_ok(),
+            "safe CharacterSafe custody must be preserved and need not use current danger content"
+        );
+        for (location_kind, slot_index) in [(0, 0), (1, 0)] {
+            let safe_item = items.get_mut(&[4; 16]).unwrap();
+            safe_item.location_kind = location_kind;
+            safe_item.slot_index = Some(slot_index);
+            assert!(matches!(
+                validate_destruction_sources(
+                    &items,
+                    &materials,
+                    &destruction,
+                    death_id,
+                    mutation_id,
+                    None,
+                    &content,
+                ),
+                Err(PersistenceError::CorruptStoredDurableDeath)
+            ));
+            let safe_item = items.get_mut(&[4; 16]).unwrap();
+            safe_item.location_kind = 5;
+            safe_item.slot_index = Some(0);
+        }
+        items.remove(&[4; 16]);
         items.insert(
             [3; 16],
             ItemLock {
@@ -3492,7 +3607,16 @@ mod tests {
             },
         );
         assert!(
-            validate_destruction_sources(&items, &materials, &destruction, None, &content).is_err()
+            validate_destruction_sources(
+                &items,
+                &materials,
+                &destruction,
+                death_id,
+                mutation_id,
+                None,
+                &content,
+            )
+            .is_err()
         );
     }
 }

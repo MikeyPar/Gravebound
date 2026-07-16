@@ -19,8 +19,9 @@ use persistence::{
     LiveDamageTraceTickRequestV1, LiveDamageTraceTickTransactionV1, PersistenceConfig,
     PersistenceError, PostgresPersistence, StoredLiveDamageTraceSnapshotEntryV1,
     WIPEABLE_CORE_NAMESPACE, canonical_death_terminal_payload_hash_v1,
-    stage_danger_entry_ash_wallet_restore_v3, stage_danger_entry_inventory_restore_v3,
-    stage_danger_entry_life_metrics_restore_v3, stage_danger_entry_oath_bargain_restore_v3,
+    derive_durable_death_item_ledger_event_id, stage_danger_entry_ash_wallet_restore_v3,
+    stage_danger_entry_inventory_restore_v3, stage_danger_entry_life_metrics_restore_v3,
+    stage_danger_entry_oath_bargain_restore_v3,
 };
 use serde::Serialize;
 use sqlx::Row;
@@ -31,7 +32,8 @@ const LINEAGE_ID: [u8; 16] = [232; 16];
 const RESTORE_POINT_ID: [u8; 16] = [233; 16];
 const INSTANCE_ID: [u8; 16] = [234; 16];
 const ITEM_UID: [u8; 16] = [235; 16];
-const ITEM_LEDGER_ID: [u8; 16] = [236; 16];
+const CHARACTER_SAFE_ITEM_UID: [u8; 16] = [241; 16];
+const VAULT_ITEM_UID: [u8; 16] = [242; 16];
 const ENTRY_MUTATION_ID: [u8; 16] = [237; 16];
 const DEED_REWARD_ID: [u8; 16] = [238; 16];
 const MATERIAL_ID: &str = "material.bell_brass";
@@ -142,6 +144,24 @@ async fn reset_fixture(persistence: &PostgresPersistence) {
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(ACCOUNT_ID.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO item_instances (namespace_id,item_uid,account_id,character_id,template_id, \
+         content_revision,item_kind,item_level,rarity,creation_kind,creation_request_id,roll_index, \
+         unit_ordinal,item_version,security_state,location_kind,slot_index,provenance_kind, \
+         salvage_band,salvage_value) \
+         VALUES ($1,$2,$3,$4,$5,$6,0,10,0,0,$2,1,0,1,0,5,0,0,0,0), \
+                ($1,$7,$3,NULL,$5,$6,0,10,0,0,$7,2,0,1,0,6,0,0,0,0)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(CHARACTER_SAFE_ITEM_UID.as_slice())
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(CHARACTER_ID.as_slice())
+    .bind(ITEM_TEMPLATE_ID)
+    .bind(CORE_ITEM_CONTENT_REVISION)
+    .bind(VAULT_ITEM_UID.as_slice())
     .execute(transaction.connection())
     .await
     .unwrap();
@@ -489,7 +509,11 @@ fn request(ids: RequestIds) -> DurableDeathCommitRequestV1 {
             },
             pre_item_version: 2,
             post_item_version: 3,
-            ledger_event_id: ITEM_LEDGER_ID,
+            ledger_event_id: derive_durable_death_item_ledger_event_id(
+                ids.death_id,
+                ids.mutation_id,
+                ITEM_UID,
+            ),
         },
         DurableDestructionEntryV1::RunMaterial {
             ordinal: 1,
@@ -1051,6 +1075,51 @@ fn assert_terminal_root(root: &sqlx::postgres::PgRow) {
     assert_eq!(root.get::<i64, _>("life_metrics_version"), 3);
 }
 
+async fn assert_safe_storage_preserved(persistence: &PostgresPersistence) {
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let safe_storage = sqlx::query(
+        "SELECT item_uid,character_id,item_version,security_state,location_kind,slot_index, \
+                destruction_reason,terminal_death_id \
+         FROM item_instances WHERE namespace_id=$1 AND account_id=$2 AND item_uid IN ($3,$4) \
+         ORDER BY item_uid",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(CHARACTER_SAFE_ITEM_UID.as_slice())
+    .bind(VAULT_ITEM_UID.as_slice())
+    .fetch_all(transaction.connection())
+    .await
+    .unwrap();
+    transaction.rollback().await.unwrap();
+    assert_eq!(safe_storage.len(), 2);
+    assert_eq!(
+        safe_storage[0].get::<Vec<u8>, _>("item_uid"),
+        CHARACTER_SAFE_ITEM_UID
+    );
+    assert_eq!(
+        safe_storage[0].get::<Option<Vec<u8>>, _>("character_id"),
+        Some(CHARACTER_ID.to_vec())
+    );
+    assert_eq!(safe_storage[0].get::<i16, _>("location_kind"), 5);
+    assert_eq!(safe_storage[0].get::<Option<i16>, _>("slot_index"), Some(0));
+    assert_eq!(
+        safe_storage[1].get::<Vec<u8>, _>("item_uid"),
+        VAULT_ITEM_UID
+    );
+    assert_eq!(
+        safe_storage[1].get::<Option<Vec<u8>>, _>("character_id"),
+        None
+    );
+    assert_eq!(safe_storage[1].get::<i16, _>("location_kind"), 6);
+    assert_eq!(safe_storage[1].get::<Option<i16>, _>("slot_index"), Some(0));
+    for row in &safe_storage {
+        assert_eq!(row.get::<i64, _>("item_version"), 1);
+        assert_eq!(row.get::<i16, _>("security_state"), 0);
+        assert_eq!(row.get::<Option<String>, _>("destruction_reason"), None);
+        assert_eq!(row.get::<Option<Vec<u8>>, _>("terminal_death_id"), None);
+    }
+}
+
 async fn normalized_live_trace_counts(persistence: &PostgresPersistence) -> (i64, i64, i64) {
     let mut transaction = persistence.begin_transaction().await.unwrap();
     let counts = sqlx::query_as(
@@ -1145,6 +1214,7 @@ async fn assert_complete_graph(persistence: &PostgresPersistence, ids: RequestId
     assert_eq!(echo.get::<i16, _>("state"), 1);
     assert_eq!(echo.get::<i16, _>("power_band"), 1);
     transaction.rollback().await.unwrap();
+    assert_safe_storage_preserved(persistence).await;
     assert_normalized_live_trace_absent(persistence).await;
 
     for (table, expected) in [
@@ -1225,11 +1295,13 @@ async fn assert_rollback_pristine(persistence: &PostgresPersistence) {
          JOIN character_instance_lineages AS lineage USING (namespace_id,account_id,character_id) \
          JOIN character_run_material_stacks AS material \
              USING (namespace_id,account_id,character_id) \
-         WHERE account.namespace_id=$1 AND account.account_id=$2 AND character.character_id=$3",
+         WHERE account.namespace_id=$1 AND account.account_id=$2 AND character.character_id=$3 \
+           AND item.item_uid=$4",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(ACCOUNT_ID.as_slice())
     .bind(CHARACTER_ID.as_slice())
+    .bind(ITEM_UID.as_slice())
     .fetch_one(transaction.connection())
     .await
     .unwrap();
@@ -2464,6 +2536,58 @@ fn hosted_fixture_request_and_content_authority_are_canonical() {
     let request = request(RequestIds::primary());
     request.validate().unwrap();
     assert!(content.matches_event(&request.plan.event));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires explicitly authorized disposable PostgreSQL"]
+async fn safe_equipped_item_in_danger_fails_closed_without_terminal_writes() {
+    let persistence = disposable_database().await;
+    let content = content_authority();
+    reset_fixture(&persistence).await;
+    let death = request(RequestIds::primary());
+    let evidence = seed_hosted_death_trace(&persistence, &death).await;
+    let promotion = evidence.promotion_for(&death);
+
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let changed = sqlx::query(
+        "UPDATE item_instances SET security_state=0 WHERE namespace_id=$1 AND account_id=$2 \
+         AND character_id=$3 AND item_uid=$4 AND location_kind=0 AND security_state=1",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(CHARACTER_ID.as_slice())
+    .bind(ITEM_UID.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap()
+    .rows_affected();
+    assert_eq!(changed, 1);
+    transaction.commit().await.unwrap();
+
+    assert!(matches!(
+        persistence
+            .transact_durable_death(&death, &content, &promotion)
+            .await,
+        Err(PersistenceError::CorruptStoredDurableDeath)
+    ));
+    assert_safe_storage_preserved(&persistence).await;
+
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let restored = sqlx::query(
+        "UPDATE item_instances SET security_state=1 WHERE namespace_id=$1 AND account_id=$2 \
+         AND character_id=$3 AND item_uid=$4 AND location_kind=0 AND security_state=0",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(CHARACTER_ID.as_slice())
+    .bind(ITEM_UID.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap()
+    .rows_affected();
+    assert_eq!(restored, 1);
+    transaction.commit().await.unwrap();
+    assert_rollback_pristine(&persistence).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
