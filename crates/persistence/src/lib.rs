@@ -1582,6 +1582,43 @@ mod tests {
     }
 
     #[test]
+    fn deferred_death_graph_consumes_provenance_without_forking_its_closure() {
+        let migration = include_str!("../../../migrations/0054_death_provenance_echo_closure.sql");
+        for required in [
+            "Gravebound_Production_GDD_v1_Canonical.md",
+            "Gravebound_Content_Production_Spec_v1.md",
+            "Gravebound_Development_Roadmap_v1.md",
+            "SPEC-CONFLICT-009-m03-death-memorial.md",
+            "pg_get_functiondef",
+            "public.enforce_complete_death_graph_v1()",
+            "legacy_fragment CONSTANT TEXT := 'SELECT summary.level = 10'",
+            "death.death_provenance = 0",
+            "occurrence_count <> 1",
+            "EXECUTE definition",
+            "failed to install provenance-aware death Echo eligibility",
+            "do not restore the pre-0054 function",
+            "published migration history must never be rewritten",
+        ] {
+            assert!(migration.contains(required), "migration omitted {required}");
+        }
+        for prohibited in [
+            "DROP TABLE",
+            "TRUNCATE",
+            "DELETE FROM",
+            "UPDATE death_events",
+            "CREATE FUNCTION enforce_complete_death_graph_v1",
+            "CREATE OR REPLACE FUNCTION enforce_complete_death_graph_v1",
+            "JSON",
+            "JSONB",
+        ] {
+            assert!(
+                !migration.contains(prohibited),
+                "provenance Echo closure migration leaked {prohibited}"
+            );
+        }
+    }
+
+    #[test]
     fn danger_entry_restore_v2_is_component_complete_and_clock_authoritative() {
         let migration = include_str!("../../../migrations/0033_danger_entry_restore_v2.sql");
         for required in [
