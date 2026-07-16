@@ -31,6 +31,7 @@ mod durable_death_repository;
 mod durable_terminal_recovery;
 mod extraction;
 mod extraction_terminal;
+mod extraction_terminal_recovery;
 mod extraction_terminal_repository;
 mod field_equipment;
 mod ground_expiry;
@@ -153,6 +154,9 @@ pub use extraction_terminal::{
     StoredExtractionLocationV1, StoredProductionExtractionMaterialCreditV1,
     StoredProductionExtractionPlacementV1, StoredProductionExtractionResultV1,
     canonical_production_extraction_plan_hash_v1,
+};
+pub use extraction_terminal_recovery::{
+    PRODUCTION_EXTRACTION_RECOVERY_SCHEMA_VERSION, StoredCommittedExtractionTerminalV1,
 };
 pub use field_equipment::{
     StoredFieldEquipmentCommand, StoredFieldEquipmentItem, StoredFieldEquipmentResult,

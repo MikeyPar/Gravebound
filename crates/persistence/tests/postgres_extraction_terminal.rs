@@ -586,6 +586,28 @@ async fn extraction_commit_restart_replay_and_conflict_are_atomic() {
 
     persistence.close().await;
     let persistence = reconnect_database().await;
+    let recovered = persistence
+        .load_committed_extraction_terminal_by_identity_v1(
+            ACCOUNT_ID,
+            CHARACTER_ID,
+            EXTRACTION_REQUEST_ID,
+            EXTRACTION_RECEIPT_ID,
+        )
+        .await
+        .unwrap()
+        .expect("strict extraction recovery");
+    assert_eq!(recovered.result, fresh);
+    assert_eq!(recovered.lineage_id, LINEAGE_ID);
+    assert_eq!(recovered.restore_point_id, RESTORE_POINT_ID);
+    assert_eq!(recovered.encounter_id, ENCOUNTER_ID);
+    assert_eq!(recovered.exit_instance_id, EXIT_INSTANCE_ID);
+    assert_eq!(
+        persistence
+            .load_committed_extraction_terminal_v1(ACCOUNT_ID, CHARACTER_ID)
+            .await
+            .unwrap(),
+        Some(recovered)
+    );
     let replay_prepared = persistence
         .prepare_production_extraction_v1(&commit_request)
         .await
