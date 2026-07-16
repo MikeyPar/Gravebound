@@ -64,6 +64,7 @@ pub enum RecallItemLocation {
     PersonalGround {
         instance_id: [u8; 16],
         pickup_id: [u8; 16],
+        expires_at_tick: u64,
     },
 }
 
@@ -71,6 +72,7 @@ pub enum RecallItemLocation {
 pub struct RecallPersonalGroundStack {
     pub instance_id: [u8; 16],
     pub pickup_id: [u8; 16],
+    pub expires_at_tick: u64,
     pub stack: DurableStorageSlot,
 }
 
@@ -234,6 +236,7 @@ pub fn plan_emergency_recall(
             RecallItemLocation::PersonalGround {
                 instance_id: entry.instance_id,
                 pickup_id: entry.pickup_id,
+                expires_at_tick: entry.expires_at_tick,
             },
             &mut destroyed_items,
         );
@@ -803,6 +806,7 @@ fn validate_recall_snapshot(
     for entry in &snapshot.personal_ground {
         if entry.instance_id == [0; 16]
             || entry.pickup_id == [0; 16]
+            || entry.expires_at_tick == 0
             || matches!(entry.stack, DurableStorageSlot::Empty)
             || !ground_authorities.insert((entry.instance_id, entry.pickup_id))
         {
@@ -1100,11 +1104,13 @@ mod tests {
             RecallPersonalGroundStack {
                 instance_id: [9; 16],
                 pickup_id: [1; 16],
+                expires_at_tick: 900,
                 stack: tonic(&[60, 61]),
             },
             RecallPersonalGroundStack {
                 instance_id: [8; 16],
                 pickup_id: [2; 16],
+                expires_at_tick: 800,
                 stack: equipment(50),
             },
         ];
@@ -1147,6 +1153,7 @@ mod tests {
                     source: RecallItemLocation::PersonalGround {
                         instance_id: [8; 16],
                         pickup_id: [2; 16],
+                        expires_at_tick: 800,
                     },
                 },
                 RecallItemMutation {
@@ -1154,6 +1161,7 @@ mod tests {
                     source: RecallItemLocation::PersonalGround {
                         instance_id: [9; 16],
                         pickup_id: [1; 16],
+                        expires_at_tick: 900,
                     },
                 },
                 RecallItemMutation {
@@ -1161,6 +1169,7 @@ mod tests {
                     source: RecallItemLocation::PersonalGround {
                         instance_id: [9; 16],
                         pickup_id: [1; 16],
+                        expires_at_tick: 900,
                     },
                 },
             ]
@@ -1212,6 +1221,7 @@ mod tests {
         snapshot.personal_ground.push(RecallPersonalGroundStack {
             instance_id: [0; 16],
             pickup_id: [1; 16],
+            expires_at_tick: 100,
             stack: equipment(1),
         });
         assert_eq!(
@@ -1224,6 +1234,7 @@ mod tests {
         snapshot.personal_ground.push(RecallPersonalGroundStack {
             instance_id: [2; 16],
             pickup_id: [3; 16],
+            expires_at_tick: 100,
             stack: equipment(1),
         });
         assert_eq!(

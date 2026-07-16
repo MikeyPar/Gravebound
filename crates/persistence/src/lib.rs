@@ -44,6 +44,7 @@ mod live_damage_trace_repository;
 mod oath;
 mod progression;
 mod progression_restore;
+mod recall_terminal;
 mod reward;
 mod safe_inventory;
 mod world_flow;
@@ -210,6 +211,17 @@ pub use progression::{
 };
 pub use progression_restore::{
     StoredProgressionCrashRestore, capture_progression_restore, restore_progression_after_crash,
+};
+pub use recall_terminal::{
+    MAX_PRODUCTION_RECALL_DESTROYED_ITEMS, MAX_PRODUCTION_RECALL_DESTROYED_MATERIALS,
+    MAX_PRODUCTION_RECALL_STABILIZED_ITEMS, PRODUCTION_RECALL_CONTRACT_VERSION_V1,
+    PRODUCTION_RECALL_EXPLICIT_CHANNEL_TICKS, PRODUCTION_RECALL_EXPLICIT_TERMINAL_KIND,
+    PRODUCTION_RECALL_HALL_ID, PRODUCTION_RECALL_LINK_LOST_TERMINAL_KIND,
+    PRODUCTION_RECALL_LINK_LOST_TICKS, PreparedProductionRecallV1, ProductionRecallCommitRequestV1,
+    ProductionRecallExpectedVersionsV1, ProductionRecallTransactionV1, ProductionRecallTriggerV1,
+    ProductionRecallVersionAdvanceV1, ProductionRecallVersionsV1, StoredProductionRecallItemV1,
+    StoredProductionRecallMaterialDestructionV1, StoredProductionRecallResultV1,
+    StoredRecallLocationV1, canonical_production_recall_plan_hash_v1,
 };
 pub use reward::{
     RewardPlanningState, RewardTransaction, StoredPendingItem, StoredRewardCommit,
@@ -523,6 +535,8 @@ pub enum PersistenceError {
     ProductionExtractionPlanningFailed,
     #[error("production extraction plan changed after terminal preparation")]
     ProductionExtractionPlanChanged,
+    #[error("stored Recall request, plan, or result violates the approved terminal contract")]
+    CorruptStoredRecall,
     #[error("stored live-deed evidence violates the approved v2 contract")]
     CorruptStoredLifeDeed,
     #[error("live-deed account, character, or aggregate authority does not exist")]
