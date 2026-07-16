@@ -699,9 +699,20 @@ pub enum DeathUiScrollRequest {
 }
 
 #[derive(Debug, Default, Resource)]
-struct DeathUiFocus {
+pub struct DeathUiFocusState {
     focused_order: Option<u16>,
     ensure_visible: bool,
+}
+
+impl DeathUiFocusState {
+    /// Returns the semantic action order currently owned by keyboard/controller focus.
+    ///
+    /// Callers use this read-only projection instead of attempting to infer focus from render
+    /// colors, hover state, or widget-tree implementation details.
+    #[must_use]
+    pub const fn focused_order(&self) -> Option<u16> {
+        self.focused_order
+    }
 }
 
 #[derive(Debug, Default, Resource)]
@@ -791,7 +802,7 @@ pub struct NativeDeathViewPlugin;
 
 impl Plugin for NativeDeathViewPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<DeathUiFocus>()
+        app.init_resource::<DeathUiFocusState>()
             .init_resource::<DeathUiFonts>()
             .init_resource::<DeathUiRenderReadiness>()
             .init_resource::<DeathUiScrollState>()
@@ -892,7 +903,7 @@ fn rebuild_native_death_view(
     roots: Query<Entity, With<DeathUiRoot>>,
     assets: Res<AssetServer>,
     mut atlases: ResMut<Assets<TextureAtlasLayout>>,
-    mut focus: ResMut<DeathUiFocus>,
+    mut focus: ResMut<DeathUiFocusState>,
     mut readiness: ResMut<DeathUiRenderReadiness>,
 ) {
     if !view.is_changed() && !roots.is_empty() {
@@ -2274,7 +2285,7 @@ fn handle_death_ui_focus_and_activation(
     mut requested_focus: MessageReader<DeathUiFocusRequest>,
     mut changed_buttons: DeathUiButtonInteractions,
     all_buttons: Query<&DeathUiButton, With<Button>>,
-    mut focus: ResMut<DeathUiFocus>,
+    mut focus: ResMut<DeathUiFocusState>,
     mut commands: MessageWriter<DeathUiCommand>,
 ) {
     let mut ordered = all_buttons.iter().cloned().collect::<Vec<_>>();
@@ -2345,7 +2356,7 @@ fn enabled_back_action(buttons: &[DeathUiButton]) -> Option<DeathUiAction> {
 
 #[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 fn keep_focused_death_action_visible(
-    mut focus: ResMut<DeathUiFocus>,
+    mut focus: ResMut<DeathUiFocusState>,
     mut roots: Query<
         (&mut ScrollPosition, &ComputedNode, &UiGlobalTransform),
         With<DeathUiScrollRoot>,
@@ -2548,7 +2559,7 @@ fn scrollbar_geometry(
 
 #[allow(clippy::needless_pass_by_value)]
 fn style_death_ui_buttons(
-    focus: Res<DeathUiFocus>,
+    focus: Res<DeathUiFocusState>,
     mut buttons: Query<
         (
             &Interaction,

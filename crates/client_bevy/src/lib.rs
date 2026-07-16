@@ -7,6 +7,7 @@ mod bargain_ui;
 mod combat;
 mod consumable;
 mod core_caldus_showcase;
+mod core_death_frame_probe;
 mod core_death_view_showcase;
 mod core_encounter_showcase;
 mod core_equipment_showcase;
@@ -66,6 +67,12 @@ pub use combat::{AbilityOneBindings, CombatInputGate, PrimaryFireBindings};
 pub use core_caldus_showcase::{
     CoreCaldusShowcaseConfig, CoreCaldusShowcaseState, run_core_caldus_showcase,
 };
+pub use core_death_frame_probe::{
+    NATIVE_DEATH_FRAME_PROBE_FIXTURE_SCHEMA_VERSION,
+    NATIVE_DEATH_FRAME_PROBE_REPORT_SCHEMA_VERSION, NativeDeathFrameProbeActionV1,
+    NativeDeathFrameProbeConfig, NativeDeathFrameProbeError, NativeDeathFrameProbeFixtureV1,
+    NativeDeathFrameProbeReportV1, run_native_death_frame_probe,
+};
 pub use core_death_view_showcase::{
     CoreDeathViewShowcaseConfig, CoreDeathViewShowcaseState, run_core_death_view_showcase,
 };
@@ -111,10 +118,10 @@ pub use death_view_ui::{
     DEATH_FONT_REGULAR_PATH, DEATH_PORTRAIT_CELL_PIXELS, DEATH_PORTRAIT_COLUMNS,
     DEATH_PORTRAIT_ROWS, DEATH_PORTRAIT_RUNTIME_BLAKE3, DEATH_PORTRAIT_RUNTIME_PATH, DeathUiAction,
     DeathUiActionEmphasis, DeathUiActionSpec, DeathUiActivity, DeathUiAvailability, DeathUiCommand,
-    DeathUiConfig, DeathUiFocusOrder, DeathUiFocusRequest, DeathUiLayoutMode, DeathUiMetrics,
-    DeathUiRenderReadiness, DeathUiScrollRequest, DeathUiScrollState, DeathUiSnapshot,
-    DeathUiSnapshotError, DeathUiStatus, DeathUiSurface, DeathUiTraceMode, NativeDeathView,
-    NativeDeathViewPlugin, portrait_atlas_index, validate_death_portrait_atlas,
+    DeathUiConfig, DeathUiFocusOrder, DeathUiFocusRequest, DeathUiFocusState, DeathUiLayoutMode,
+    DeathUiMetrics, DeathUiRenderReadiness, DeathUiScrollRequest, DeathUiScrollState,
+    DeathUiSnapshot, DeathUiSnapshotError, DeathUiStatus, DeathUiSurface, DeathUiTraceMode,
+    NativeDeathView, NativeDeathViewPlugin, portrait_atlas_index, validate_death_portrait_atlas,
     validate_death_ui_assets,
 };
 pub use network_play::{NetworkPlayConfig, run_network_playtest};

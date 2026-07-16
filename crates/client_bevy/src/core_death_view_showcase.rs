@@ -26,7 +26,7 @@ use crate::{
 };
 
 const EVIDENCE_SETTLE_FRAMES: u8 = 90;
-const CHARACTER_ID: [u8; 16] = [0x42; 16];
+pub(crate) const CHARACTER_ID: [u8; 16] = [0x42; 16];
 const DEATH_AT_UNIX_MS: u64 = 1_784_167_200_000;
 const DEATH_TICK: u64 = 12_480;
 
@@ -393,7 +393,7 @@ fn memorial_summary(
     summary
 }
 
-fn revision(catalog: &CoreDevelopmentDeathView) -> Result<DeathViewContentRevisionV1> {
+pub(crate) fn revision(catalog: &CoreDevelopmentDeathView) -> Result<DeathViewContentRevisionV1> {
     Ok(DeathViewContentRevisionV1 {
         records_blake3: ManifestHash::new(catalog.hashes().records_blake3.clone())?,
         assets_blake3: ManifestHash::new(catalog.hashes().assets_blake3.clone())?,
@@ -408,7 +408,10 @@ fn uuid_v7(seed: u8) -> [u8; 16] {
     value
 }
 
-fn latest(revision: &DeathViewContentRevisionV1, content_revision: &str) -> LatestCommittedDeathV1 {
+pub(crate) fn latest(
+    revision: &DeathViewContentRevisionV1,
+    content_revision: &str,
+) -> LatestCommittedDeathV1 {
     LatestCommittedDeathV1 {
         death_id: uuid_v7(1),
         character_id: CHARACTER_ID,
@@ -431,7 +434,10 @@ fn latest(revision: &DeathViewContentRevisionV1, content_revision: &str) -> Late
     }
 }
 
-fn summary(revision: &DeathViewContentRevisionV1, content_revision: &str) -> DeathSummaryViewV1 {
+pub(crate) fn summary(
+    revision: &DeathViewContentRevisionV1,
+    content_revision: &str,
+) -> DeathSummaryViewV1 {
     let traces = [
         TraceFixture {
             source: "enemy.drowned_pilgrim",

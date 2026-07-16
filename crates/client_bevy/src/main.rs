@@ -199,6 +199,27 @@ enum Command {
         #[arg(long, value_enum, default_value_t = CoreDeathViewEvidenceStateArg::Summary)]
         state: CoreDeathViewEvidenceStateArg,
     },
+    /// Replay one authenticated durable-death fixture into a measured native rendered frame.
+    CoreDeathFrameProbe {
+        #[arg(long)]
+        fixture: PathBuf,
+        #[arg(long)]
+        screenshot: PathBuf,
+        #[arg(long)]
+        report: PathBuf,
+        #[arg(long, default_value = "content")]
+        content_root: PathBuf,
+        #[arg(long, default_value_t = 1920)]
+        width: u32,
+        #[arg(long, default_value_t = 1080)]
+        height: u32,
+        #[arg(long)]
+        reduced_effects: bool,
+        #[arg(long, default_value_t = 100)]
+        ui_scale: u16,
+        #[arg(long, default_value_t = 20_000)]
+        timeout_ms: u64,
+    },
 }
 
 fn main() {
@@ -285,6 +306,27 @@ fn run() -> anyhow::Result<()> {
             ui_scale,
             state,
         } => run_death_view_showcase(content_root, reduced_effects, ui_scale, state),
+        Command::CoreDeathFrameProbe {
+            fixture,
+            screenshot,
+            report,
+            content_root,
+            width,
+            height,
+            reduced_effects,
+            ui_scale,
+            timeout_ms,
+        } => client_bevy::run_native_death_frame_probe(&client_bevy::NativeDeathFrameProbeConfig {
+            fixture_path: fixture,
+            screenshot_path: screenshot,
+            report_path: report,
+            content_root,
+            viewport_width: width,
+            viewport_height: height,
+            reduced_effects,
+            ui_scale_percent: ui_scale,
+            timeout_ms,
+        }),
     }
 }
 
