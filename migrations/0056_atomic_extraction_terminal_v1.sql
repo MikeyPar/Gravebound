@@ -888,6 +888,7 @@ DECLARE
     actual_placements BIGINT;
     actual_credits BIGINT;
     account_changed BOOLEAN;
+    expected_post_account_version BIGINT;
 BEGIN
     SELECT count(*) INTO actual_placements
     FROM extraction_terminal_item_placements_v1
@@ -917,11 +918,13 @@ BEGIN
              AND credit.credit_ordinal = expected.ordinal
             WHERE credit.credit_ordinal IS NULL
         )
-        OR NEW.storage_resolution_required <> EXISTS (
-            SELECT 1 FROM extraction_terminal_item_placements_v1
-            WHERE namespace_id = NEW.namespace_id
-              AND terminal_id = NEW.terminal_id
-              AND destination_kind = 9
+        OR NEW.storage_resolution_required IS DISTINCT FROM (
+            SELECT EXISTS (
+                SELECT 1 FROM extraction_terminal_item_placements_v1
+                WHERE namespace_id = NEW.namespace_id
+                  AND terminal_id = NEW.terminal_id
+                  AND destination_kind = 9
+            )
         )
     THEN
         RAISE EXCEPTION 'extraction terminal projection count or ordering is incomplete';
@@ -938,8 +941,13 @@ BEGIN
         )
     ) INTO account_changed;
 
-    IF NEW.post_account_version
-            <> NEW.pre_account_version + CASE WHEN account_changed THEN 1 ELSE 0 END
+    IF account_changed THEN
+        expected_post_account_version := NEW.pre_account_version + 1;
+    ELSE
+        expected_post_account_version := NEW.pre_account_version;
+    END IF;
+
+    IF NEW.post_account_version <> expected_post_account_version
         OR NOT EXISTS (
             SELECT 1 FROM accounts
             WHERE namespace_id = NEW.namespace_id
