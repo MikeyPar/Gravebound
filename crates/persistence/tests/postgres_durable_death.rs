@@ -1433,6 +1433,217 @@ async fn rewrite_first_durable_trace_status_remaining_ticks(
 }
 
 #[derive(Clone, Copy)]
+struct SignatureRowCorruption {
+    label: &'static str,
+    table: &'static str,
+    triggers: &'static [&'static str],
+    corrupt_sql: &'static str,
+    restore_sql: &'static str,
+}
+
+const SIGNATURE_ROW_CORRUPTIONS: [SignatureRowCorruption; 4] = [
+    SignatureRowCorruption {
+        label: "death summary",
+        table: "death_summary_snapshots",
+        triggers: &["death_summary_immutable"],
+        corrupt_sql: "UPDATE death_summary_snapshots \
+            SET hero_label_key='hero.core.corrupt_signature' \
+            WHERE namespace_id=$1 AND death_id=$2",
+        restore_sql: "UPDATE death_summary_snapshots \
+            SET hero_label_key='hero.core.grave_arbalist' \
+            WHERE namespace_id=$1 AND death_id=$2",
+    },
+    SignatureRowCorruption {
+        label: "Memorial",
+        table: "memorial_records",
+        triggers: &["memorial_records_immutable"],
+        corrupt_sql: "UPDATE memorial_records \
+            SET presentation_key='memorial.presentation.corrupt_signature' \
+            WHERE namespace_id=$1 AND death_id=$2",
+        restore_sql: "UPDATE memorial_records \
+            SET presentation_key='memorial.presentation.core_default' \
+            WHERE namespace_id=$1 AND death_id=$2",
+    },
+    SignatureRowCorruption {
+        label: "destruction source",
+        table: "death_destruction_entries",
+        triggers: &[
+            "death_destruction_immutable",
+            "death_destruction_source_exact",
+        ],
+        corrupt_sql: "UPDATE death_destruction_entries SET pre_slot_index=1 \
+            WHERE namespace_id=$1 AND death_id=$2 AND entry_kind=0",
+        restore_sql: "UPDATE death_destruction_entries SET pre_slot_index=0 \
+            WHERE namespace_id=$1 AND death_id=$2 AND entry_kind=0",
+    },
+    SignatureRowCorruption {
+        label: "Echo snapshot",
+        table: "echo_records",
+        triggers: &["echo_records_transition_only"],
+        corrupt_sql: "UPDATE echo_records \
+            SET killer_pattern_id='pattern.core.corrupt_signature' \
+            WHERE namespace_id=$1 AND death_id=$2",
+        restore_sql: "UPDATE echo_records \
+            SET killer_pattern_id='miniboss.sepulcher_knight.charge_lane' \
+            WHERE namespace_id=$1 AND death_id=$2",
+    },
+];
+
+async fn apply_signature_row_fixture_update(
+    persistence: &PostgresPersistence,
+    corruption: SignatureRowCorruption,
+    sql: &'static str,
+) {
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    for trigger in corruption.triggers {
+        let statement = format!(
+            "ALTER TABLE {} DISABLE TRIGGER {}",
+            corruption.table, trigger
+        );
+        sqlx::query(sqlx::AssertSqlSafe(statement))
+            .execute(transaction.connection())
+            .await
+            .unwrap();
+    }
+    let changed = sqlx::query(sql)
+        .bind(WIPEABLE_CORE_NAMESPACE)
+        .bind(RequestIds::primary().death_id.as_slice())
+        .execute(transaction.connection())
+        .await
+        .unwrap()
+        .rows_affected();
+    assert_eq!(changed, 1, "{}", corruption.label);
+    for trigger in corruption.triggers.iter().rev() {
+        let statement = format!(
+            "ALTER TABLE {} ENABLE TRIGGER {}",
+            corruption.table, trigger
+        );
+        sqlx::query(sqlx::AssertSqlSafe(statement))
+            .execute(transaction.connection())
+            .await
+            .unwrap();
+    }
+    transaction.commit().await.unwrap();
+}
+
+async fn rewrite_bargain_cleanup_payload(
+    persistence: &PostgresPersistence,
+    replacement: &[u8],
+) -> Vec<u8> {
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let original: Vec<u8> = sqlx::query_scalar(
+        "SELECT event_payload FROM character_life_outbox \
+         WHERE namespace_id=$1 AND account_id=$2 AND character_id=$3 \
+           AND event_id=(SELECT bargain_cleanup_event_id FROM death_events \
+             WHERE namespace_id=$1 AND death_id=$4)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(CHARACTER_ID.as_slice())
+    .bind(RequestIds::primary().death_id.as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    let changed = sqlx::query(
+        "UPDATE character_life_outbox SET event_payload=$1 \
+         WHERE namespace_id=$2 AND account_id=$3 AND character_id=$4 \
+           AND event_id=(SELECT bargain_cleanup_event_id FROM death_events \
+             WHERE namespace_id=$2 AND death_id=$5)",
+    )
+    .bind(replacement)
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(CHARACTER_ID.as_slice())
+    .bind(RequestIds::primary().death_id.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap()
+    .rows_affected();
+    assert_eq!(changed, 1);
+    transaction.commit().await.unwrap();
+    original
+}
+
+async fn rewrite_death_committed_outbox_payload(
+    persistence: &PostgresPersistence,
+    replacement: &[u8],
+) -> Vec<u8> {
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let original: Vec<u8> = sqlx::query_scalar(
+        "SELECT event_payload FROM death_outbox_events \
+         WHERE namespace_id=$1 AND death_id=$2 AND event_type='death_committed'",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(RequestIds::primary().death_id.as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query("ALTER TABLE death_outbox_events DISABLE TRIGGER death_outbox_publish_only")
+        .execute(transaction.connection())
+        .await
+        .unwrap();
+    let changed = sqlx::query(
+        "UPDATE death_outbox_events SET event_payload=$1 \
+         WHERE namespace_id=$2 AND death_id=$3 AND event_type='death_committed'",
+    )
+    .bind(replacement)
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(RequestIds::primary().death_id.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap()
+    .rows_affected();
+    assert_eq!(changed, 1);
+    sqlx::query("ALTER TABLE death_outbox_events ENABLE TRIGGER death_outbox_publish_only")
+        .execute(transaction.connection())
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+    original
+}
+
+async fn assert_altered_signature_rows_fail_closed(
+    persistence: &PostgresPersistence,
+    baseline: &persistence::StoredCoreDeathTerminalSignatureV1,
+) {
+    for corruption in SIGNATURE_ROW_CORRUPTIONS {
+        apply_signature_row_fixture_update(persistence, corruption, corruption.corrupt_sql).await;
+        assert!(
+            matches!(
+                persistence
+                    .load_core_death_terminal_signature_v1(ACCOUNT_ID, CHARACTER_ID)
+                    .await,
+                Err(PersistenceError::CorruptStoredDeathTerminalSignature)
+            ),
+            "{} corruption was accepted",
+            corruption.label
+        );
+        apply_signature_row_fixture_update(persistence, corruption, corruption.restore_sql).await;
+        assert_eq!(canonical_terminal_signature(persistence).await, *baseline);
+    }
+
+    let cleanup_payload = rewrite_bargain_cleanup_payload(persistence, &[0xff]).await;
+    assert!(matches!(
+        persistence
+            .load_core_death_terminal_signature_v1(ACCOUNT_ID, CHARACTER_ID)
+            .await,
+        Err(PersistenceError::CorruptStoredDeathTerminalSignature)
+    ));
+    rewrite_bargain_cleanup_payload(persistence, &cleanup_payload).await;
+    assert_eq!(canonical_terminal_signature(persistence).await, *baseline);
+
+    let outbox_payload = rewrite_death_committed_outbox_payload(persistence, &[0xff]).await;
+    assert!(matches!(
+        persistence
+            .load_core_death_terminal_signature_v1(ACCOUNT_ID, CHARACTER_ID)
+            .await,
+        Err(PersistenceError::CorruptStoredDeathTerminalSignature)
+    ));
+    rewrite_death_committed_outbox_payload(persistence, &outbox_payload).await;
+    assert_eq!(canonical_terminal_signature(persistence).await, *baseline);
+}
+
+#[derive(Clone, Copy)]
 enum FaultTriggerTiming {
     Before {
         operation: &'static str,
@@ -2300,7 +2511,8 @@ async fn complete_durable_death_graph_is_atomic_replayable_terminal_and_wipeable
             .is_replay()
     );
     assert_committed_terminal_recovery(&restarted, committed.result(), &final_promotion).await;
-    canonical_terminal_signature(&restarted).await;
+    let restored_signature = canonical_terminal_signature(&restarted).await;
+    assert_altered_signature_rows_fail_closed(&restarted, &restored_signature).await;
     corrupt_result_hash(&restarted, [222; 32]).await;
     assert!(matches!(
         restarted
