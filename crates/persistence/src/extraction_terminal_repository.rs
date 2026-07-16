@@ -149,8 +149,10 @@ impl LockedProductionExtractionPlan {
 impl PostgresPersistence {
     /// Plans one exact extraction from locked durable custody and rolls the transaction back.
     ///
-    /// No gameplay row, audit, receipt, or outbox record is written. The returned hashes are the
-    /// only material the shared terminal coordinator may use for its extraction candidate.
+    /// Successful preparation writes no gameplay row, receipt, audit, or outbox record. An
+    /// altered replay writes only its mandatory idempotency-conflict audit before returning the
+    /// typed conflict. The returned hashes are the only material the shared terminal coordinator
+    /// may use for its extraction candidate.
     pub async fn prepare_production_extraction_v1(
         &self,
         request: &ProductionExtractionCommitRequestV1,
@@ -185,9 +187,9 @@ impl PostgresPersistence {
         )
         .await?
         {
-            transaction.rollback().await?;
             if exact_request_replay(&stored, request, request_hash) {
-                return PreparedProductionExtractionV1::new(
+                transaction.rollback().await?;
+                return PreparedProductionExtractionV1::seal(
                     request.clone(),
                     request_hash,
                     stored.canonical_plan_hash,
@@ -195,14 +197,17 @@ impl PostgresPersistence {
                 );
             }
             if stored.canonical_request_hash == request_hash {
+                transaction.rollback().await?;
                 return Err(PersistenceError::CorruptStoredExtraction);
             }
+            insert_conflict_audit(transaction.connection(), &stored, request, request_hash).await?;
+            transaction.commit().await?;
             return Err(PersistenceError::ExtractionIdempotencyConflict);
         }
         let plan = lock_and_plan_production_extraction(transaction.connection(), request).await?;
         let plan_hash = plan.canonical_plan_hash()?;
         transaction.rollback().await?;
-        PreparedProductionExtractionV1::new(request.clone(), request_hash, plan_hash, false)
+        PreparedProductionExtractionV1::seal(request.clone(), request_hash, plan_hash, false)
     }
 
     pub async fn commit_production_extraction_v1(
@@ -500,6 +505,9 @@ async fn lock_and_validate_authority(
     connection: &mut PgConnection,
     request: &ProductionExtractionCommitRequestV1,
 ) -> Result<LockedAuthority, PersistenceError> {
+    // Canonical lock order begins account -> character -> inventory. Reward publication also locks
+    // inventory before its reward row, so retaining this order prevents a reward/extraction
+    // deadlock cycle when a committed Caldus reward is replayed during exit interaction.
     let account = sqlx::query(
         "SELECT state_version,selected_character_id FROM accounts
          WHERE namespace_id=$1 AND account_id=$2 FOR UPDATE",
@@ -511,6 +519,16 @@ async fn lock_and_validate_authority(
     .ok_or(PersistenceError::ProductionExtractionOwnerNotFound)?;
     let character = sqlx::query(
         "SELECT life_state,security_state,character_state_version FROM characters
+         WHERE namespace_id=$1 AND account_id=$2 AND character_id=$3 FOR UPDATE",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(request.account_id.as_slice())
+    .bind(request.character_id.as_slice())
+    .fetch_optional(&mut *connection)
+    .await?
+    .ok_or(PersistenceError::ProductionExtractionOwnerNotFound)?;
+    let inventory = sqlx::query(
+        "SELECT inventory_version FROM character_inventories
          WHERE namespace_id=$1 AND account_id=$2 AND character_id=$3 FOR UPDATE",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
@@ -614,17 +632,6 @@ async fn lock_and_validate_authority(
     .fetch_optional(&mut *connection)
     .await?
     .ok_or(PersistenceError::ProductionExtractionOwnerNotFound)?;
-    let inventory = sqlx::query(
-        "SELECT inventory_version FROM character_inventories
-         WHERE namespace_id=$1 AND account_id=$2 AND character_id=$3 FOR UPDATE",
-    )
-    .bind(WIPEABLE_CORE_NAMESPACE)
-    .bind(request.account_id.as_slice())
-    .bind(request.character_id.as_slice())
-    .fetch_optional(&mut *connection)
-    .await?
-    .ok_or(PersistenceError::ProductionExtractionOwnerNotFound)?;
-
     let account_version = positive(account.try_get("state_version")?)?;
     let character_version = positive(character.try_get("character_state_version")?)?;
     let world_version = positive(world.try_get("character_version")?)?;

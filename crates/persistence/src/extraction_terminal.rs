@@ -127,7 +127,11 @@ pub struct PreparedProductionExtractionV1 {
 }
 
 impl PreparedProductionExtractionV1 {
-    pub(crate) fn new(
+    /// Seals hashes produced by the repository planner or strict durable recovery.
+    ///
+    /// This validates request binding and bounded hash shape. It intentionally cannot prove the
+    /// current database plan; commit always replans under locks and compares the plan hash again.
+    pub fn seal(
         request: ProductionExtractionCommitRequestV1,
         canonical_request_hash: [u8; HASH_BYTES],
         canonical_plan_hash: [u8; HASH_BYTES],
@@ -504,6 +508,21 @@ pub enum ProductionExtractionTransactionV1 {
     },
 }
 
+impl ProductionExtractionTransactionV1 {
+    #[must_use]
+    pub const fn result(&self) -> Option<&StoredProductionExtractionResultV1> {
+        match self {
+            Self::Fresh(result) | Self::Replayed(result) => Some(result),
+            Self::Conflict { .. } => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_replay(&self) -> bool {
+        matches!(self, Self::Replayed(_))
+    }
+}
+
 fn canonical_hash<T: Serialize>(
     context: &str,
     value: &T,
@@ -663,7 +682,7 @@ mod tests {
         let request_hash = request.canonical_hash().unwrap();
         let plan_hash = [44; 32];
         let prepared =
-            PreparedProductionExtractionV1::new(request.clone(), request_hash, plan_hash, false)
+            PreparedProductionExtractionV1::seal(request.clone(), request_hash, plan_hash, false)
                 .unwrap();
         assert_eq!(prepared.request(), &request);
         assert_eq!(prepared.canonical_request_hash(), request_hash);
@@ -671,11 +690,11 @@ mod tests {
         assert!(!prepared.replayed());
 
         assert!(matches!(
-            PreparedProductionExtractionV1::new(request.clone(), [0; 32], plan_hash, false),
+            PreparedProductionExtractionV1::seal(request.clone(), [0; 32], plan_hash, false),
             Err(PersistenceError::CorruptStoredExtraction)
         ));
         assert!(matches!(
-            PreparedProductionExtractionV1::new(request, request_hash, [0; 32], false),
+            PreparedProductionExtractionV1::seal(request, request_hash, [0; 32], false),
             Err(PersistenceError::CorruptStoredExtraction)
         ));
     }

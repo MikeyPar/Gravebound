@@ -606,6 +606,10 @@ async fn extraction_commit_restart_replay_and_conflict_are_atomic() {
 
     let mut changed = commit_request.clone();
     changed.issued_at_unix_ms += 1;
+    assert!(matches!(
+        persistence.prepare_production_extraction_v1(&changed).await,
+        Err(persistence::PersistenceError::ExtractionIdempotencyConflict)
+    ));
     let ProductionExtractionTransactionV1::Conflict {
         extraction_request_id,
         terminal_id,
