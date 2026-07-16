@@ -653,12 +653,16 @@ fn versions(account_pre_version: u64, inventory_pre_version: u64) -> DeathAggreg
     }
 }
 
-fn build_echo_projection(scenario: &DurableDeathScenarioV1) -> Option<EligibleEchoProjection> {
+fn build_echo_projection(
+    scenario: &DurableDeathScenarioV1,
+    server_computed_power_band: u8,
+) -> Option<EligibleEchoProjection> {
     let identity = scenario.identity;
     if !scenario.echo_eligible() {
         assert_eq!(scenario.echo_availability, FixtureEchoAvailabilityV1::None);
         return None;
     }
+    assert!((1..=5).contains(&server_computed_power_band));
     let availability = match scenario.echo_availability {
         FixtureEchoAvailabilityV1::None => {
             panic!("eligible hosted death requires an account-locked Echo decision")
@@ -681,7 +685,7 @@ fn build_echo_projection(scenario: &DurableDeathScenarioV1) -> Option<EligibleEc
         weapon_signature_tag: None,
         relic_signature_tag: None,
         deed_tags: vec![DEED_ID.into()],
-        power_band: 1,
+        power_band: server_computed_power_band,
         availability,
     })
 }
@@ -708,6 +712,7 @@ pub async fn prepare_death_for(
     prepare_death_for_with_custody(
         persistence,
         scenario,
+        1,
         DeathCustodySnapshot {
             items: vec![DeathAtRiskItem {
                 content_id: ITEM_TEMPLATE_ID.into(),
@@ -739,6 +744,7 @@ pub async fn prepare_death_for(
 pub async fn prepare_death_for_with_custody(
     persistence: PostgresPersistence,
     scenario: &DurableDeathScenarioV1,
+    server_computed_echo_power_band: u8,
     custody: DeathCustodySnapshot,
     enabled_items: Vec<DurableDeathItemContentAuthorityV1>,
 ) -> PreparedDurableDeathCommit {
@@ -882,7 +888,7 @@ pub async fn prepare_death_for_with_custody(
         },
         entity_identities: identities,
         terminal_trace: terminal_trace.as_ref().clone(),
-        echo: build_echo_projection(scenario),
+        echo: build_echo_projection(scenario, server_computed_echo_power_band),
     };
     build_durable_death_commit(&inputs, &server_context, &presentation).unwrap()
 }

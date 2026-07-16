@@ -399,6 +399,9 @@ async fn full_custody_death_is_canonical_atomic_preserving_and_replay_safe() {
     let prepared = durable_death_fixture::prepare_death_for_with_custody(
         persistence.clone(),
         &scenario,
+        // CONT-ECHO-001: four level-10 Worn slots produce functional 100 tenths;
+        // round_half_up((level 100 + functional 100) / 2) is index 100, hence Band 2.
+        2,
         custody.clone(),
         enabled_items(),
     )
@@ -407,6 +410,23 @@ async fn full_custody_death_is_canonical_atomic_preserving_and_replay_safe() {
         prepared.request().plan.destruction.len(),
         custody.items.len() + custody.run_materials.len()
     );
+    let plan = &prepared.request().plan;
+    let echo = &plan
+        .echo
+        .as_ref()
+        .expect("eligible full-custody death must create one Echo")
+        .created;
+    assert_eq!(echo.power_band, 2);
+    assert_eq!(
+        echo.character_name_snapshot,
+        plan.summary.character_name_snapshot
+    );
+    assert_eq!(echo.class_id, plan.summary.class_id);
+    assert_eq!(echo.oath_id, plan.summary.oath_id);
+    assert_eq!(echo.level, plan.summary.level);
+    assert_eq!(echo.killer_content_id, plan.event.killer_content_id);
+    assert_eq!(echo.killer_pattern_id, plan.event.killer_pattern_id);
+    assert_eq!(echo.death_region_id, plan.event.region_id);
 
     let fresh = persistence
         .transact_durable_death(prepared.request(), prepared.content(), prepared.promotion())
@@ -422,6 +442,8 @@ async fn full_custody_death_is_canonical_atomic_preserving_and_replay_safe() {
         .unwrap()
         .unwrap();
     first_signature.canonical_bytes().unwrap();
+    assert_eq!(first_signature.echoes.len(), 1);
+    assert_eq!(first_signature.echoes[0].power_band, 2);
 
     let replay = persistence
         .transact_durable_death(prepared.request(), prepared.content(), prepared.promotion())
