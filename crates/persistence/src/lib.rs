@@ -147,11 +147,12 @@ pub use extraction_terminal::{
     MAX_PRODUCTION_EXTRACTION_MATERIAL_CREDITS, MAX_PRODUCTION_EXTRACTION_PLACEMENTS,
     PRODUCTION_EXTRACTION_CONTRACT_VERSION_V1, PRODUCTION_EXTRACTION_EXIT_ID,
     PRODUCTION_EXTRACTION_HALL_ID, PRODUCTION_EXTRACTION_TERMINAL_KIND,
-    ProductionExtractionCommitRequestV1, ProductionExtractionExpectedVersionsV1,
-    ProductionExtractionTransactionV1, ProductionExtractionVersionAdvanceV1,
-    ProductionExtractionVersionsV1, StoredExtractionLocationV1,
-    StoredProductionExtractionMaterialCreditV1, StoredProductionExtractionPlacementV1,
-    StoredProductionExtractionResultV1, canonical_production_extraction_plan_hash_v1,
+    PreparedProductionExtractionV1, ProductionExtractionCommitRequestV1,
+    ProductionExtractionExpectedVersionsV1, ProductionExtractionTransactionV1,
+    ProductionExtractionVersionAdvanceV1, ProductionExtractionVersionsV1,
+    StoredExtractionLocationV1, StoredProductionExtractionMaterialCreditV1,
+    StoredProductionExtractionPlacementV1, StoredProductionExtractionResultV1,
+    canonical_production_extraction_plan_hash_v1,
 };
 pub use field_equipment::{
     StoredFieldEquipmentCommand, StoredFieldEquipmentItem, StoredFieldEquipmentResult,
@@ -516,6 +517,8 @@ pub enum PersistenceError {
     ProductionExtractionUnresolvedMutation,
     #[error("production extraction deterministic inventory planning failed")]
     ProductionExtractionPlanningFailed,
+    #[error("production extraction plan changed after terminal preparation")]
+    ProductionExtractionPlanChanged,
     #[error("stored live-deed evidence violates the approved v2 contract")]
     CorruptStoredLifeDeed,
     #[error("live-deed account, character, or aggregate authority does not exist")]

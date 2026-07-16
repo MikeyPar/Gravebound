@@ -11,13 +11,13 @@ use sim_core::{
 use sqlx::{PgConnection, Row};
 
 use crate::{
-    PersistenceError, PostgresPersistence, ProductionExtractionCommitRequestV1,
-    ProductionExtractionTransactionV1, ProductionExtractionVersionAdvanceV1,
-    ProductionExtractionVersionsV1, StoredExtractionLocationV1,
-    StoredProductionExtractionMaterialCreditV1, StoredProductionExtractionPlacementV1,
-    StoredProductionExtractionResultV1, WIPEABLE_CORE_NAMESPACE,
-    canonical_production_extraction_plan_hash_v1, is_retryable_transaction_failure,
-    stage_danger_checkpoint_cleanup,
+    PersistenceError, PostgresPersistence, PreparedProductionExtractionV1,
+    ProductionExtractionCommitRequestV1, ProductionExtractionTransactionV1,
+    ProductionExtractionVersionAdvanceV1, ProductionExtractionVersionsV1,
+    StoredExtractionLocationV1, StoredProductionExtractionMaterialCreditV1,
+    StoredProductionExtractionPlacementV1, StoredProductionExtractionResultV1,
+    WIPEABLE_CORE_NAMESPACE, canonical_production_extraction_plan_hash_v1,
+    is_retryable_transaction_failure, stage_danger_checkpoint_cleanup,
 };
 
 const MAX_TRANSACTION_ATTEMPTS: u8 = 3;
@@ -84,14 +84,141 @@ struct LockedAuthority {
     root: LockedRoot,
 }
 
+#[derive(Debug)]
+struct LockedProductionExtractionPlan {
+    authority: LockedAuthority,
+    wallets: BTreeMap<String, LockedWallet>,
+    pouches: BTreeMap<String, LockedPouch>,
+    committed_at_unix_ms: u64,
+    placements: Vec<StoredProductionExtractionPlacementV1>,
+    material_credits: Vec<StoredProductionExtractionMaterialCreditV1>,
+    post_account_version: u64,
+    post_inventory_version: u64,
+    storage_resolution_required: bool,
+}
+
+impl LockedProductionExtractionPlan {
+    fn canonical_plan_hash(&self) -> Result<[u8; HASH_BYTES], PersistenceError> {
+        canonical_production_extraction_plan_hash_v1(&self.placements, &self.material_credits)
+    }
+
+    fn stored_result(
+        &self,
+        request: &ProductionExtractionCommitRequestV1,
+        canonical_request_hash: [u8; HASH_BYTES],
+        canonical_plan_hash: [u8; HASH_BYTES],
+    ) -> Result<StoredProductionExtractionResultV1, PersistenceError> {
+        let result = StoredProductionExtractionResultV1 {
+            contract_version: request.contract_version,
+            namespace_id: WIPEABLE_CORE_NAMESPACE.into(),
+            account_id: request.account_id,
+            character_id: request.character_id,
+            mutation_id: request.mutation_id,
+            terminal_id: request.terminal_id,
+            extraction_request_id: request.extraction_request_id,
+            extraction_receipt_id: request.extraction_receipt_id,
+            canonical_request_hash,
+            canonical_plan_hash,
+            result_code: 1,
+            issued_at_unix_ms: request.issued_at_unix_ms,
+            observed_tick: request.observed_tick,
+            committed_at_unix_ms: self.committed_at_unix_ms,
+            destination_content_id: crate::PRODUCTION_EXTRACTION_HALL_ID.into(),
+            versions: ProductionExtractionVersionsV1 {
+                account: ProductionExtractionVersionAdvanceV1 {
+                    pre: self.authority.account_version,
+                    post: self.post_account_version,
+                },
+                character: advance(self.authority.character_version)?,
+                world: advance(self.authority.world_version)?,
+                inventory: ProductionExtractionVersionAdvanceV1 {
+                    pre: self.authority.inventory_version,
+                    post: self.post_inventory_version,
+                },
+                life_metrics: advance(self.authority.life_metrics_version)?,
+            },
+            placements: self.placements.clone(),
+            material_credits: self.material_credits.clone(),
+            storage_resolution_required: self.storage_resolution_required,
+        };
+        result.validate()?;
+        Ok(result)
+    }
+}
+
 impl PostgresPersistence {
+    /// Plans one exact extraction from locked durable custody and rolls the transaction back.
+    ///
+    /// No gameplay row, audit, receipt, or outbox record is written. The returned hashes are the
+    /// only material the shared terminal coordinator may use for its extraction candidate.
+    pub async fn prepare_production_extraction_v1(
+        &self,
+        request: &ProductionExtractionCommitRequestV1,
+    ) -> Result<PreparedProductionExtractionV1, PersistenceError> {
+        request.validate()?;
+        for attempt in 1..=MAX_TRANSACTION_ATTEMPTS {
+            match self.prepare_production_extraction_once_v1(request).await {
+                Err(error)
+                    if attempt < MAX_TRANSACTION_ATTEMPTS
+                        && is_retryable_transaction_failure(&error) => {}
+                outcome => return outcome,
+            }
+        }
+        Err(PersistenceError::ProductionExtractionTerminalSuperseded)
+    }
+
+    async fn prepare_production_extraction_once_v1(
+        &self,
+        request: &ProductionExtractionCommitRequestV1,
+    ) -> Result<PreparedProductionExtractionV1, PersistenceError> {
+        let request_hash = request.canonical_hash()?;
+        let mut transaction = self.begin_transaction().await?;
+        lock_terminal_identities(transaction.connection(), request).await?;
+        lock_account(transaction.connection(), request.account_id).await?;
+        if let Some(stored) = load_existing_terminal(
+            transaction.connection(),
+            request.account_id,
+            request.mutation_id,
+            request.extraction_request_id,
+            request.terminal_id,
+            request.extraction_receipt_id,
+        )
+        .await?
+        {
+            transaction.rollback().await?;
+            if exact_request_replay(&stored, request, request_hash) {
+                return PreparedProductionExtractionV1::new(
+                    request.clone(),
+                    request_hash,
+                    stored.canonical_plan_hash,
+                    true,
+                );
+            }
+            if stored.canonical_request_hash == request_hash {
+                return Err(PersistenceError::CorruptStoredExtraction);
+            }
+            return Err(PersistenceError::ExtractionIdempotencyConflict);
+        }
+        let plan = lock_and_plan_production_extraction(transaction.connection(), request).await?;
+        let plan_hash = plan.canonical_plan_hash()?;
+        transaction.rollback().await?;
+        PreparedProductionExtractionV1::new(request.clone(), request_hash, plan_hash, false)
+    }
+
     pub async fn commit_production_extraction_v1(
         &self,
         request: &ProductionExtractionCommitRequestV1,
+        expected_plan_hash: [u8; HASH_BYTES],
     ) -> Result<ProductionExtractionTransactionV1, PersistenceError> {
         request.validate()?;
+        if expected_plan_hash == [0; HASH_BYTES] {
+            return Err(PersistenceError::ProductionExtractionPlanChanged);
+        }
         for attempt in 1..=MAX_TRANSACTION_ATTEMPTS {
-            match self.commit_production_extraction_once_v1(request).await {
+            match self
+                .commit_production_extraction_once_v1(request, expected_plan_hash)
+                .await
+            {
                 Err(error)
                     if attempt < MAX_TRANSACTION_ATTEMPTS
                         && is_retryable_transaction_failure(&error) => {}
@@ -108,6 +235,7 @@ impl PostgresPersistence {
     async fn commit_production_extraction_once_v1(
         &self,
         request: &ProductionExtractionCommitRequestV1,
+        expected_plan_hash: [u8; HASH_BYTES],
     ) -> Result<ProductionExtractionTransactionV1, PersistenceError> {
         let request_hash = request.canonical_hash()?;
         let mut transaction = self.begin_transaction().await?;
@@ -124,16 +252,16 @@ impl PostgresPersistence {
         )
         .await?
         {
-            if stored.canonical_request_hash == request_hash
-                && stored.account_id == request.account_id
-                && stored.character_id == request.character_id
-                && stored.mutation_id == request.mutation_id
-                && stored.terminal_id == request.terminal_id
-                && stored.extraction_request_id == request.extraction_request_id
-                && stored.extraction_receipt_id == request.extraction_receipt_id
-            {
+            if exact_request_replay(&stored, request, request_hash) {
+                if stored.canonical_plan_hash != expected_plan_hash {
+                    transaction.rollback().await?;
+                    return Err(PersistenceError::ProductionExtractionPlanChanged);
+                }
                 transaction.rollback().await?;
                 return Ok(ProductionExtractionTransactionV1::Replayed(stored));
+            }
+            if stored.canonical_request_hash == request_hash {
+                return Err(PersistenceError::CorruptStoredExtraction);
             }
             insert_conflict_audit(transaction.connection(), &stored, request, request_hash).await?;
             transaction.commit().await?;
@@ -143,66 +271,20 @@ impl PostgresPersistence {
             });
         }
 
-        let authority = lock_and_validate_authority(transaction.connection(), request).await?;
-        reject_unresolved_reward_mutation(transaction.connection(), request).await?;
-        let (items, inventory_snapshot) =
-            load_inventory_snapshot(transaction.connection(), request, &authority).await?;
-        let (wallets, pouches, material_snapshots) =
-            load_material_snapshot(transaction.connection(), request).await?;
-        let committed_at_unix_micros =
-            transaction_time_unix_micros(transaction.connection()).await?;
-        let committed_at_unix_ms = committed_at_unix_micros / 1_000;
-        let mut snapshot = inventory_snapshot;
-        snapshot.committed_at_unix_micros = committed_at_unix_micros;
-        snapshot.materials = material_snapshots;
-        let plan = plan_successful_extraction(&snapshot)
-            .map_err(|_| PersistenceError::ProductionExtractionPlanningFailed)?;
-
-        let placements = build_placements(&items, request, &plan.placements)?;
-        let material_credits = build_material_credits(request, &plan.material_credits)?;
-        let canonical_plan_hash =
-            canonical_production_extraction_plan_hash_v1(&placements, &material_credits)?;
-        let result = StoredProductionExtractionResultV1 {
-            contract_version: request.contract_version,
-            namespace_id: WIPEABLE_CORE_NAMESPACE.into(),
-            account_id: request.account_id,
-            character_id: request.character_id,
-            mutation_id: request.mutation_id,
-            terminal_id: request.terminal_id,
-            extraction_request_id: request.extraction_request_id,
-            extraction_receipt_id: request.extraction_receipt_id,
-            canonical_request_hash: request_hash,
-            canonical_plan_hash,
-            result_code: 1,
-            issued_at_unix_ms: request.issued_at_unix_ms,
-            observed_tick: request.observed_tick,
-            committed_at_unix_ms,
-            destination_content_id: crate::PRODUCTION_EXTRACTION_HALL_ID.into(),
-            versions: ProductionExtractionVersionsV1 {
-                account: ProductionExtractionVersionAdvanceV1 {
-                    pre: authority.account_version,
-                    post: plan.post_account_version,
-                },
-                character: advance(authority.character_version)?,
-                world: advance(authority.world_version)?,
-                inventory: ProductionExtractionVersionAdvanceV1 {
-                    pre: authority.inventory_version,
-                    post: plan.post_inventory_version,
-                },
-                life_metrics: advance(authority.life_metrics_version)?,
-            },
-            placements,
-            material_credits,
-            storage_resolution_required: plan.resolution_required(),
-        };
-        result.validate()?;
+        let plan = lock_and_plan_production_extraction(transaction.connection(), request).await?;
+        let canonical_plan_hash = plan.canonical_plan_hash()?;
+        if canonical_plan_hash != expected_plan_hash {
+            transaction.rollback().await?;
+            return Err(PersistenceError::ProductionExtractionPlanChanged);
+        }
+        let result = plan.stored_result(request, request_hash, canonical_plan_hash)?;
         let result_payload = result.encode()?;
         let result_hash = result.digest()?;
 
         insert_terminal_root(
             transaction.connection(),
             request,
-            &authority,
+            &plan.authority,
             &result,
             result_hash,
             &result_payload,
@@ -213,8 +295,8 @@ impl PostgresPersistence {
             transaction.connection(),
             request,
             &result,
-            &wallets,
-            &pouches,
+            &plan.wallets,
+            &plan.pouches,
         )
         .await?;
         apply_aggregate_heads(transaction.connection(), request, &result).await?;
@@ -238,6 +320,50 @@ impl PostgresPersistence {
         transaction.commit().await?;
         Ok(ProductionExtractionTransactionV1::Fresh(result))
     }
+}
+
+fn exact_request_replay(
+    stored: &StoredProductionExtractionResultV1,
+    request: &ProductionExtractionCommitRequestV1,
+    request_hash: [u8; HASH_BYTES],
+) -> bool {
+    stored.canonical_request_hash == request_hash
+        && stored.account_id == request.account_id
+        && stored.character_id == request.character_id
+        && stored.mutation_id == request.mutation_id
+        && stored.terminal_id == request.terminal_id
+        && stored.extraction_request_id == request.extraction_request_id
+        && stored.extraction_receipt_id == request.extraction_receipt_id
+}
+
+async fn lock_and_plan_production_extraction(
+    connection: &mut PgConnection,
+    request: &ProductionExtractionCommitRequestV1,
+) -> Result<LockedProductionExtractionPlan, PersistenceError> {
+    let authority = lock_and_validate_authority(connection, request).await?;
+    reject_unresolved_reward_mutation(connection, request).await?;
+    let (items, mut inventory_snapshot) =
+        load_inventory_snapshot(connection, request, &authority).await?;
+    let (wallets, pouches, material_snapshots) =
+        load_material_snapshot(connection, request).await?;
+    let committed_at_unix_micros = transaction_time_unix_micros(connection).await?;
+    inventory_snapshot.committed_at_unix_micros = committed_at_unix_micros;
+    inventory_snapshot.materials = material_snapshots;
+    let plan = plan_successful_extraction(&inventory_snapshot)
+        .map_err(|_| PersistenceError::ProductionExtractionPlanningFailed)?;
+    let placements = build_placements(&items, request, &plan.placements)?;
+    let material_credits = build_material_credits(request, &plan.material_credits)?;
+    Ok(LockedProductionExtractionPlan {
+        authority,
+        wallets,
+        pouches,
+        committed_at_unix_ms: committed_at_unix_micros / 1_000,
+        placements,
+        material_credits,
+        post_account_version: plan.post_account_version,
+        post_inventory_version: plan.post_inventory_version,
+        storage_resolution_required: plan.resolution_required(),
+    })
 }
 
 async fn lock_terminal_identities(
@@ -435,13 +561,37 @@ async fn lock_and_validate_authority(
     let seam = sqlx::query(
         "SELECT account_id,character_id,encounter_id,instance_lineage_id,
                 entry_restore_point_id,exit_instance_id,exit_content_id,
-                attempt_ordinal,expected_character_version,records_blake3,assets_blake3,
-                localization_blake3,extraction_state,authority_kind
+                attempt_ordinal,party_slot,participant_entity_id,expected_character_version,
+                records_blake3,assets_blake3,localization_blake3,extraction_state,authority_kind
          FROM character_extraction_results
          WHERE namespace_id=$1 AND extraction_request_id=$2 FOR UPDATE",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(request.extraction_request_id.as_slice())
+    .fetch_optional(&mut *connection)
+    .await?
+    .ok_or(PersistenceError::ProductionExtractionBindingMismatch)?;
+    let party_slot: i16 = seam.try_get("party_slot")?;
+    let owner = sqlx::query(
+        "SELECT owner.account_id AS owner_account_id,
+                owner.character_id AS owner_character_id,
+                owner.participant_entity_id AS owner_participant_entity_id,
+                owner.reward_result_hash AS owner_reward_result_hash,
+                reward.account_id AS reward_account_id,
+                reward.character_id AS reward_character_id,
+                reward.source_instance_id AS reward_source_instance_id,
+                reward.reward_table_id,reward.content_revision,reward.result_hash,
+                reward.request_state
+         FROM caldus_victory_exit_owners AS owner
+         JOIN reward_requests AS reward
+           ON reward.namespace_id=owner.namespace_id
+          AND reward.reward_request_id=owner.reward_request_id
+         WHERE owner.namespace_id=$1 AND owner.encounter_id=$2 AND owner.party_slot=$3
+         FOR SHARE OF owner,reward",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(request.encounter_id.as_slice())
+    .bind(party_slot)
     .fetch_optional(&mut *connection)
     .await?
     .ok_or(PersistenceError::ProductionExtractionBindingMismatch)?;
@@ -531,11 +681,24 @@ async fn lock_and_validate_authority(
         || seam.try_get::<String, _>("exit_content_id")? != crate::PRODUCTION_EXTRACTION_EXIT_ID
         || seam.try_get::<i32, _>("attempt_ordinal")?
             != exit.try_get::<i32, _>("attempt_ordinal")?
+        || !(0..=7).contains(&party_slot)
+        || exact_entity(seam.try_get("participant_entity_id")?)?
+            != exact_entity(owner.try_get("owner_participant_entity_id")?)?
         || positive(seam.try_get("expected_character_version")?)? != character_version
         || seam.try_get::<i16, _>("extraction_state")? != 0
         || seam.try_get::<Option<i16>, _>("authority_kind")?.is_some()
         || exact_id(exit.try_get("instance_lineage_id")?)? != request.instance_lineage_id
         || exact_id(exit.try_get("exit_instance_id")?)? != request.exit_instance_id
+        || exact_id(owner.try_get("owner_account_id")?)? != request.account_id
+        || exact_id(owner.try_get("owner_character_id")?)? != request.character_id
+        || exact_id(owner.try_get("reward_account_id")?)? != request.account_id
+        || exact_id(owner.try_get("reward_character_id")?)? != request.character_id
+        || exact_id(owner.try_get("reward_source_instance_id")?)? != request.encounter_id
+        || owner.try_get::<String, _>("reward_table_id")? != "reward.boss_caldus"
+        || owner.try_get::<String, _>("content_revision")? != crate::CORE_ITEM_CONTENT_REVISION
+        || owner.try_get::<i16, _>("request_state")? != 1
+        || exact_hash(owner.try_get("owner_reward_result_hash")?)?
+            != exact_hash(owner.try_get("result_hash")?)?
     {
         return Err(PersistenceError::ProductionExtractionBindingMismatch);
     }
@@ -1450,6 +1613,14 @@ fn terminal_advisory_key(axis: u8, identity: [u8; ID_BYTES]) -> i64 {
 
 fn exact_id(value: Vec<u8>) -> Result<[u8; ID_BYTES], PersistenceError> {
     value.try_into().map_err(|_| corrupt())
+}
+
+fn exact_entity(value: Vec<u8>) -> Result<[u8; 8], PersistenceError> {
+    let value: [u8; 8] = value.try_into().map_err(|_| corrupt())?;
+    if value == [0; 8] {
+        return Err(corrupt());
+    }
+    Ok(value)
 }
 
 fn optional_id(value: Option<Vec<u8>>) -> Result<Option<[u8; ID_BYTES]>, PersistenceError> {

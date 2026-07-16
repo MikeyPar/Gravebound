@@ -113,6 +113,68 @@ impl ProductionExtractionCommitRequestV1 {
     }
 }
 
+/// Read-only repository preparation for one exact production extraction.
+///
+/// The shared terminal coordinator binds both hashes before it chooses a winner. Commit then
+/// replans under the same `PostgreSQL` locks and rejects any intervening inventory/material change
+/// before the first durable write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedProductionExtractionV1 {
+    request: ProductionExtractionCommitRequestV1,
+    canonical_request_hash: [u8; HASH_BYTES],
+    canonical_plan_hash: [u8; HASH_BYTES],
+    replayed: bool,
+}
+
+impl PreparedProductionExtractionV1 {
+    pub(crate) fn new(
+        request: ProductionExtractionCommitRequestV1,
+        canonical_request_hash: [u8; HASH_BYTES],
+        canonical_plan_hash: [u8; HASH_BYTES],
+        replayed: bool,
+    ) -> Result<Self, PersistenceError> {
+        let prepared = Self {
+            request,
+            canonical_request_hash,
+            canonical_plan_hash,
+            replayed,
+        };
+        prepared.validate()?;
+        Ok(prepared)
+    }
+
+    pub fn validate(&self) -> Result<(), PersistenceError> {
+        self.request.validate()?;
+        if self.canonical_request_hash == [0; HASH_BYTES]
+            || self.canonical_plan_hash == [0; HASH_BYTES]
+            || self.request.canonical_hash()? != self.canonical_request_hash
+        {
+            return Err(corrupt());
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub const fn request(&self) -> &ProductionExtractionCommitRequestV1 {
+        &self.request
+    }
+
+    #[must_use]
+    pub const fn canonical_request_hash(&self) -> [u8; HASH_BYTES] {
+        self.canonical_request_hash
+    }
+
+    #[must_use]
+    pub const fn canonical_plan_hash(&self) -> [u8; HASH_BYTES] {
+        self.canonical_plan_hash
+    }
+
+    #[must_use]
+    pub const fn replayed(&self) -> bool {
+        self.replayed
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum StoredExtractionLocationV1 {
     Equipped(u8),
@@ -593,6 +655,29 @@ mod tests {
         let mut changed = request;
         changed.expected_versions.inventory += 1;
         assert_ne!(changed.canonical_hash().unwrap(), digest);
+    }
+
+    #[test]
+    fn prepared_authority_binds_the_request_and_plan_hashes() {
+        let request = request();
+        let request_hash = request.canonical_hash().unwrap();
+        let plan_hash = [44; 32];
+        let prepared =
+            PreparedProductionExtractionV1::new(request.clone(), request_hash, plan_hash, false)
+                .unwrap();
+        assert_eq!(prepared.request(), &request);
+        assert_eq!(prepared.canonical_request_hash(), request_hash);
+        assert_eq!(prepared.canonical_plan_hash(), plan_hash);
+        assert!(!prepared.replayed());
+
+        assert!(matches!(
+            PreparedProductionExtractionV1::new(request.clone(), [0; 32], plan_hash, false),
+            Err(PersistenceError::CorruptStoredExtraction)
+        ));
+        assert!(matches!(
+            PreparedProductionExtractionV1::new(request, request_hash, [0; 32], false),
+            Err(PersistenceError::CorruptStoredExtraction)
+        ));
     }
 
     #[test]

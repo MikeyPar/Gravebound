@@ -9,13 +9,14 @@
 //!   idempotency, and no-duplication exit gates.
 
 use persistence::{
-    CORE_ITEM_CONTENT_REVISION, CORE_WORLD_ASSETS_BLAKE3, CORE_WORLD_LOCALIZATION_BLAKE3,
-    CORE_WORLD_RECORDS_BLAKE3, PRODUCTION_EXTRACTION_CONTRACT_VERSION_V1, PersistenceConfig,
-    PostgresPersistence, ProductionExtractionCommitRequestV1,
-    ProductionExtractionExpectedVersionsV1, ProductionExtractionTransactionV1,
-    StoredExtractionLocationV1, StoredWorldFlowRevisionV1, WIPEABLE_CORE_NAMESPACE,
-    stage_danger_entry_ash_wallet_restore_v3, stage_danger_entry_inventory_restore_v3,
-    stage_danger_entry_life_metrics_restore_v3, stage_danger_entry_oath_bargain_restore_v3,
+    CORE_ITEM_CONTENT_REVISION, CORE_PROGRESSION_RECORDS_BLAKE3, CORE_WORLD_ASSETS_BLAKE3,
+    CORE_WORLD_LOCALIZATION_BLAKE3, CORE_WORLD_RECORDS_BLAKE3,
+    PRODUCTION_EXTRACTION_CONTRACT_VERSION_V1, PersistenceConfig, PostgresPersistence,
+    ProductionExtractionCommitRequestV1, ProductionExtractionExpectedVersionsV1,
+    ProductionExtractionTransactionV1, StoredExtractionLocationV1, StoredWorldFlowRevisionV1,
+    WIPEABLE_CORE_NAMESPACE, stage_danger_entry_ash_wallet_restore_v3,
+    stage_danger_entry_inventory_restore_v3, stage_danger_entry_life_metrics_restore_v3,
+    stage_danger_entry_oath_bargain_restore_v3,
 };
 use sqlx::Row;
 
@@ -33,6 +34,9 @@ const ENTRY_MUTATION_ID: [u8; 16] = [211; 16];
 const EQUIPPED_ITEM_UID: [u8; 16] = [212; 16];
 const BELT_ITEM_UID: [u8; 16] = [213; 16];
 const BACKPACK_ITEM_UID: [u8; 16] = [214; 16];
+const REWARD_REQUEST_ID: [u8; 16] = [220; 16];
+const REWARD_RESULT_HASH: [u8; 32] = [221; 32];
+const PROGRESSION_PAYLOAD_HASH: [u8; 32] = [222; 32];
 const MATERIAL_ID: &str = "material.bell_brass";
 
 fn persistence_config() -> PersistenceConfig {
@@ -422,6 +426,55 @@ async fn reset_fixture(persistence: &PostgresPersistence) {
     .await
     .unwrap();
     sqlx::query(
+        "INSERT INTO reward_requests
+         (namespace_id,reward_request_id,account_id,character_id,source_instance_id,
+          reward_table_id,content_revision,epoch_id,canonical_request_hash,plan_hash,
+          result_hash,audit_digest,pre_inventory_version,post_inventory_version,
+          request_state,reward_item_count)
+         VALUES ($1,$2,$3,$4,$5,'reward.boss_caldus',$6,'extraction-terminal-v1',
+          $7,$8,$9,$10,3,3,1,0)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(REWARD_REQUEST_ID.as_slice())
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(CHARACTER_ID.as_slice())
+    .bind(ENCOUNTER_ID.as_slice())
+    .bind(CORE_ITEM_CONTENT_REVISION)
+    .bind([96_u8; 32].as_slice())
+    .bind([97_u8; 32].as_slice())
+    .bind(REWARD_RESULT_HASH.as_slice())
+    .bind([98_u8; 32].as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO character_xp_award_results
+         (namespace_id,account_id,character_id,reward_event_id,payload_hash,
+          source_content_id,xp_profile_id,progression_content_revision,
+          eligibility_kind,eligible,encounter_active_ticks,encounter_present_ticks,
+          encounter_longest_inactivity_ticks,encounter_reference_health,
+          encounter_direct_damage,encounter_effective_healing,encounter_damage_prevented,
+          encounter_objective_credits,encounter_life_state,encounter_recall_state,
+          encounter_trust_state,first_clear_awarded,base_xp,bonus_xp,requested_xp,
+          applied_xp,discarded_xp,pre_total_xp,post_total_xp,pre_level,post_level,
+          pre_progression_version,post_progression_version,result_code,result_payload,
+          entry_restore_point_id)
+         VALUES ($1,$2,$3,$4,$5,'boss.sir_caldus','xp.boss_caldus',$6,
+          1,TRUE,300,300,0,7200,1,0,0,0,0,0,0,FALSE,450,0,450,0,450,
+          2700,2700,10,10,1,1,0,$7,$8)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(CHARACTER_ID.as_slice())
+    .bind(REWARD_REQUEST_ID.as_slice())
+    .bind(PROGRESSION_PAYLOAD_HASH.as_slice())
+    .bind(CORE_PROGRESSION_RECORDS_BLAKE3)
+    .bind([1_u8].as_slice())
+    .bind(RESTORE_POINT_ID.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query(
         "INSERT INTO caldus_victory_exits
          (namespace_id,encounter_id,instance_lineage_id,attempt_ordinal,
           exit_instance_id,canonical_request_hash,eligible_owner_count)
@@ -432,6 +485,23 @@ async fn reset_fixture(persistence: &PostgresPersistence) {
     .bind(LINEAGE_ID.as_slice())
     .bind(EXIT_INSTANCE_ID.as_slice())
     .bind([94_u8; 32].as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO caldus_victory_exit_owners
+         (namespace_id,encounter_id,party_slot,participant_entity_id,account_id,
+          character_id,reward_request_id,reward_result_hash,progression_payload_hash)
+         VALUES ($1,$2,0,$3,$4,$5,$6,$7,$8)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ENCOUNTER_ID.as_slice())
+    .bind([1_u8; 8].as_slice())
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(CHARACTER_ID.as_slice())
+    .bind(REWARD_REQUEST_ID.as_slice())
+    .bind(REWARD_RESULT_HASH.as_slice())
+    .bind(PROGRESSION_PAYLOAD_HASH.as_slice())
     .execute(transaction.connection())
     .await
     .unwrap();
@@ -474,9 +544,19 @@ async fn extraction_commit_restart_replay_and_conflict_are_atomic() {
     let persistence = disposable_database().await;
     reset_fixture(&persistence).await;
     let commit_request = request();
+    let prepared = persistence
+        .prepare_production_extraction_v1(&commit_request)
+        .await
+        .unwrap();
+    assert!(!prepared.replayed());
+    assert_eq!(prepared.request(), &commit_request);
+    assert_eq!(
+        prepared.canonical_request_hash(),
+        commit_request.canonical_hash().unwrap()
+    );
 
     let ProductionExtractionTransactionV1::Fresh(fresh) = persistence
-        .commit_production_extraction_v1(&commit_request)
+        .commit_production_extraction_v1(&commit_request, prepared.canonical_plan_hash())
         .await
         .unwrap()
     else {
@@ -506,8 +586,17 @@ async fn extraction_commit_restart_replay_and_conflict_are_atomic() {
 
     persistence.close().await;
     let persistence = reconnect_database().await;
+    let replay_prepared = persistence
+        .prepare_production_extraction_v1(&commit_request)
+        .await
+        .unwrap();
+    assert!(replay_prepared.replayed());
+    assert_eq!(
+        replay_prepared.canonical_plan_hash(),
+        fresh.canonical_plan_hash
+    );
     let ProductionExtractionTransactionV1::Replayed(replayed) = persistence
-        .commit_production_extraction_v1(&commit_request)
+        .commit_production_extraction_v1(&commit_request, replay_prepared.canonical_plan_hash())
         .await
         .unwrap()
     else {
@@ -521,7 +610,7 @@ async fn extraction_commit_restart_replay_and_conflict_are_atomic() {
         extraction_request_id,
         terminal_id,
     } = persistence
-        .commit_production_extraction_v1(&changed)
+        .commit_production_extraction_v1(&changed, fresh.canonical_plan_hash)
         .await
         .unwrap()
     else {
@@ -539,7 +628,7 @@ async fn extraction_commit_restart_replay_and_conflict_are_atomic() {
         extraction_request_id,
         terminal_id,
     } = persistence
-        .commit_production_extraction_v1(&reused_terminal)
+        .commit_production_extraction_v1(&reused_terminal, fresh.canonical_plan_hash)
         .await
         .unwrap()
     else {
@@ -716,7 +805,7 @@ async fn extraction_rejects_unresolved_reward_stale_item_and_attempt_drift() {
     transaction.commit().await.unwrap();
     assert!(matches!(
         persistence
-            .commit_production_extraction_v1(&request())
+            .prepare_production_extraction_v1(&request())
             .await,
         Err(persistence::PersistenceError::ProductionExtractionUnresolvedMutation)
     ));
@@ -740,7 +829,7 @@ async fn extraction_rejects_unresolved_reward_stale_item_and_attempt_drift() {
     transaction.commit().await.unwrap();
     assert!(matches!(
         persistence
-            .commit_production_extraction_v1(&request())
+            .prepare_production_extraction_v1(&request())
             .await,
         Err(persistence::PersistenceError::ProductionExtractionContentMismatch)
     ));
@@ -763,7 +852,65 @@ async fn extraction_rejects_unresolved_reward_stale_item_and_attempt_drift() {
     transaction.commit().await.unwrap();
     assert!(matches!(
         persistence
-            .commit_production_extraction_v1(&request())
+            .prepare_production_extraction_v1(&request())
+            .await,
+        Err(persistence::PersistenceError::ProductionExtractionBindingMismatch)
+    ));
+    assert_eq!(terminal_count(&persistence).await, 0);
+    persistence.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires explicitly authorized disposable PostgreSQL"]
+async fn extraction_rejects_plan_drift_and_missing_caldus_owner() {
+    let persistence = disposable_database().await;
+    reset_fixture(&persistence).await;
+    let commit_request = request();
+    let prepared = persistence
+        .prepare_production_extraction_v1(&commit_request)
+        .await
+        .unwrap();
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let changed = sqlx::query(
+        "UPDATE item_instances SET slot_index=1
+         WHERE namespace_id=$1 AND account_id=$2 AND character_id=$3 AND item_uid=$4
+           AND location_kind=2 AND slot_index=0",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(CHARACTER_ID.as_slice())
+    .bind(BACKPACK_ITEM_UID.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap()
+    .rows_affected();
+    assert_eq!(changed, 1);
+    transaction.commit().await.unwrap();
+    assert!(matches!(
+        persistence
+            .commit_production_extraction_v1(&commit_request, prepared.canonical_plan_hash())
+            .await,
+        Err(persistence::PersistenceError::ProductionExtractionPlanChanged)
+    ));
+    assert_eq!(terminal_count(&persistence).await, 0);
+
+    reset_fixture(&persistence).await;
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let deleted = sqlx::query(
+        "DELETE FROM caldus_victory_exit_owners
+         WHERE namespace_id=$1 AND encounter_id=$2 AND party_slot=0",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ENCOUNTER_ID.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap()
+    .rows_affected();
+    assert_eq!(deleted, 1);
+    transaction.commit().await.unwrap();
+    assert!(matches!(
+        persistence
+            .prepare_production_extraction_v1(&request())
             .await,
         Err(persistence::PersistenceError::ProductionExtractionBindingMismatch)
     ));
