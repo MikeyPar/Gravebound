@@ -104,6 +104,12 @@ async fn reset_fixture(persistence: &PostgresPersistence) {
         .execute(transaction.connection())
         .await
         .unwrap();
+    sqlx::query("DELETE FROM caldus_victory_exits WHERE namespace_id=$1 AND encounter_id=$2")
+        .bind(WIPEABLE_CORE_NAMESPACE)
+        .bind(ENCOUNTER_ID.as_slice())
+        .execute(transaction.connection())
+        .await
+        .unwrap();
     sqlx::query(
         "INSERT INTO accounts (namespace_id,account_id,state_version,slot_capacity)
          VALUES ($1,$2,1,2)",

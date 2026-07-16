@@ -748,7 +748,7 @@ async fn load_material_snapshot(
     for row in pouch_rows {
         let pouch = LockedPouch {
             material_id: row.try_get("material_id")?,
-            quantity: u16_value(row.try_get("quantity")?)?,
+            quantity: u16_from_i32(row.try_get("quantity")?)?,
             version: positive(row.try_get("material_version")?)?,
         };
         let wallet = wallets
@@ -1471,6 +1471,10 @@ fn u16_value(value: i16) -> Result<u16, PersistenceError> {
     u16::try_from(value).map_err(|_| corrupt())
 }
 
+fn u16_from_i32(value: i32) -> Result<u16, PersistenceError> {
+    u16::try_from(value).map_err(|_| corrupt())
+}
+
 fn u32_value(value: i32) -> Result<u32, PersistenceError> {
     u32::try_from(value).map_err(|_| corrupt())
 }
@@ -1519,6 +1523,19 @@ mod tests {
             terminal_advisory_key(0, identity),
             terminal_advisory_key(1, identity)
         );
+    }
+
+    #[test]
+    fn material_quantity_uses_the_postgresql_integer_width() {
+        assert_eq!(u16_from_i32(99).unwrap(), 99);
+        assert!(matches!(
+            u16_from_i32(-1),
+            Err(PersistenceError::CorruptStoredExtraction)
+        ));
+        assert!(matches!(
+            u16_from_i32(i32::from(u16::MAX) + 1),
+            Err(PersistenceError::CorruptStoredExtraction)
+        ));
     }
 
     #[test]
