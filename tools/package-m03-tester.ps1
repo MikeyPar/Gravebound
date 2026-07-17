@@ -205,7 +205,8 @@ The other launchers expose implemented M03 surfaces for direct review: Lantern H
 the Core dungeon encounters, Sir Caldus, item/Vault state, and the durable death and
 Memorial presentation. These are isolated previews of implemented work. The production
 Character Select -> Hall -> dungeon -> terminal outcome route remains gated until
-GB-M03-07 and GB-M03-08 pass.
+GB-M03-07 successor recovery passes. GB-M03-08 extraction and Emergency Recall are
+implemented and closed, but remain behind that integrated-route gate.
 
 PACKAGE RULE
 Keep Gravebound.exe, content, and assets together. Moving only the EXE will make strict
@@ -214,7 +215,9 @@ content or asset validation fail at startup.
 USEFUL TEST NOTES
 - Please record which launcher you used when reporting a problem.
 - Include a screenshot and the exact action immediately before the issue when possible.
-- The successor and extraction/Recall flows are not ready for acceptance testing yet.
+- Successor recovery is not ready for acceptance testing yet.
+- Extraction and Emergency Recall are implemented, but their production player route
+  remains gated on successor recovery.
 
 BUILD VERIFICATION
 - Optimized Windows release compilation: PASS
