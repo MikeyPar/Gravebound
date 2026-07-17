@@ -411,7 +411,7 @@ async fn assert_complete_successor_graph(
     assert_eq!(u64::try_from(account.0).unwrap(), expected.versions.account);
     assert_eq!(account.1, expected.successor_id);
 
-    let aggregate: (i16, String, i32, i64, i16, i16, i64, i64, i64) = sqlx::query_as(
+    let aggregate: (i16, String, i32, i64, i16, i32, i64, i64, i64) = sqlx::query_as(
         "SELECT character.roster_ordinal,character.class_id,character.level, \
                 character.character_state_version,progression.level,progression.current_health, \
                 progression.progression_version,world.character_version,inventory.inventory_version \
