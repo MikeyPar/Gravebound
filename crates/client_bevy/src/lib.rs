@@ -67,11 +67,16 @@ use sim_core::{
 /// explicit `WGPU_BACKEND` remains available for diagnostics and future compatibility work.
 /// Other platforms retain Bevy's native backend selection.
 pub(crate) fn gravebound_default_plugins() -> bevy::app::PluginGroupBuilder {
-    let mut renderer = WgpuSettings::default();
+    let renderer = WgpuSettings::default();
     #[cfg(target_os = "windows")]
-    if env::var_os("WGPU_BACKEND").is_none() {
-        renderer.backends = Some(bevy::render::settings::Backends::DX12);
-    }
+    let renderer = if env::var_os("WGPU_BACKEND").is_none() {
+        WgpuSettings {
+            backends: Some(bevy::render::settings::Backends::DX12),
+            ..renderer
+        }
+    } else {
+        renderer
+    };
 
     DefaultPlugins.set(RenderPlugin {
         render_creation: renderer.into(),
