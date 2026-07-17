@@ -6,6 +6,7 @@ $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $DistRoot = Join-Path $RepoRoot 'dist'
 $StageRoot = Join-Path $RepoRoot "tmp\m03-tester-package-$PID"
 $PackagePrefix = 'Gravebound-GB-M03-Tester'
+$PackageRefreshFloor = 15
 $PackageInputs = @(
     'Cargo.lock',
     'Cargo.toml',
@@ -144,10 +145,13 @@ try {
             }
         }
     $Refresh = if ($ExistingRefreshes) {
-        1 + ($ExistingRefreshes | Measure-Object -Maximum).Maximum
+        [Math]::Max(
+            $PackageRefreshFloor,
+            1 + ($ExistingRefreshes | Measure-Object -Maximum).Maximum
+        )
     }
     else {
-        1
+        $PackageRefreshFloor
     }
     $PackageName = "$PackagePrefix-$BuildDate-r$Refresh"
     $StagePackage = Join-Path $StageRoot $PackageName
@@ -173,6 +177,7 @@ try {
     Write-Launcher -Path (Join-Path $StagePackage 'M03 BOSS PREVIEW.cmd') -Arguments 'core-caldus-showcase --content-root content --state phase-one'
     Write-Launcher -Path (Join-Path $StagePackage 'M03 ITEMS AND VAULT PREVIEW.cmd') -Arguments 'core-item-lifecycle-showcase --content-root content'
     Write-Launcher -Path (Join-Path $StagePackage 'M03 DEATH AND MEMORIAL PREVIEW.cmd') -Arguments 'core-death-view-showcase --content-root content --state summary'
+    Write-Launcher -Path (Join-Path $StagePackage 'M03 SUCCESSOR RECOVERY PREVIEW.cmd') -Arguments 'core-successor-recovery-showcase --content-root content --state death-summary'
 
     Invoke-Checked -Command git -Arguments @('archive', '--format=zip', "--output=$SourceArchive", 'HEAD')
     $SourceArchiveHash = (Get-FileHash -LiteralPath $SourceArchive -Algorithm SHA256).Hash
@@ -202,11 +207,12 @@ LOCAL LAB CONTROLS
 
 M03 PREVIEWS
 The other launchers expose implemented M03 surfaces for direct review: Lantern Halls,
-the Core dungeon encounters, Sir Caldus, item/Vault state, and the durable death and
-Memorial presentation. These are isolated previews of implemented work. The production
-Character Select -> Hall -> dungeon -> terminal outcome route remains gated until
-GB-M03-07 successor recovery passes. GB-M03-08 extraction and Emergency Recall are
-implemented and closed, but remain behind that integrated-route gate.
+the Core dungeon encounters, Sir Caldus, item/Vault state, durable death/Memorial, and
+the two-confirmation successor recovery handoff. These are isolated previews of
+implemented work. The production Character Select -> Hall -> dungeon -> terminal
+outcome route remains gated until GB-M03-07 journey/timing evidence passes. GB-M03-08
+extraction and Emergency Recall are implemented and closed, but remain behind that
+integrated-route gate.
 
 PACKAGE RULE
 Keep Gravebound.exe, content, and assets together. Moving only the EXE will make strict
@@ -215,7 +221,8 @@ content or asset validation fail at startup.
 USEFUL TEST NOTES
 - Please record which launcher you used when reporting a problem.
 - Include a screenshot and the exact action immediately before the issue when possible.
-- Successor recovery is not ready for acceptance testing yet.
+- The successor preview is ready for visual/input testing. Its final 25-journey timing
+  and zero-residue acceptance gate is still open.
 - Extraction and Emergency Recall are implemented, but their production player route
   remains gated on successor recovery.
 
@@ -223,9 +230,9 @@ BUILD VERIFICATION
 - Optimized Windows release compilation: PASS
 - Executable CLI smoke check: PASS
 - Local Lab twelve-second launch/responding check: PASS
-- All six packaged launch modes remained alive and responsive: PASS
+- All seven packaged launch modes remained alive and responsive: PASS
 - Strict compiled content validation: PASS
-- Startup stderr for all six launch modes: EMPTY
+- Startup stderr for all seven launch modes: EMPTY
 
 DESIGN AUTHORITIES
 - Gravebound_Production_GDD_v1_Canonical.md
@@ -244,7 +251,8 @@ DESIGN AUTHORITIES
         @{ Name = 'Dungeon'; Arguments = @('core-encounter-showcase', '--content-root', 'content'); HoldSeconds = 3 },
         @{ Name = 'Boss'; Arguments = @('core-caldus-showcase', '--content-root', 'content', '--state', 'phase-one'); HoldSeconds = 3 },
         @{ Name = 'Items and Vault'; Arguments = @('core-item-lifecycle-showcase', '--content-root', 'content'); HoldSeconds = 3 },
-        @{ Name = 'Death and Memorial'; Arguments = @('core-death-view-showcase', '--content-root', 'content', '--state', 'summary'); HoldSeconds = 3 }
+        @{ Name = 'Death and Memorial'; Arguments = @('core-death-view-showcase', '--content-root', 'content', '--state', 'summary'); HoldSeconds = 3 },
+        @{ Name = 'Successor Recovery'; Arguments = @('core-successor-recovery-showcase', '--content-root', 'content', '--state', 'death-summary'); HoldSeconds = 3 }
     )
     foreach ($LaunchMode in $LaunchModes) {
         Test-LaunchMode `
