@@ -279,7 +279,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 60;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 61;
 const DISPOSABLE_DATABASE_RESET_SQL: &str = "TRUNCATE TABLE accounts, caldus_victory_exits CASCADE";
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -1764,7 +1764,7 @@ mod tests {
     #[test]
     fn deferred_death_graph_consumes_provenance_without_forking_its_closure() {
         assert_eq!(
-            EXPECTED_SCHEMA_VERSION, 60,
+            EXPECTED_SCHEMA_VERSION, 61,
             "readiness must advance with the latest published migration"
         );
         let migration = include_str!("../../../migrations/0054_death_provenance_echo_closure.sql");
@@ -1847,7 +1847,7 @@ mod tests {
     #[test]
     fn atomic_extraction_terminal_is_normalized_replay_first_and_fail_closed() {
         assert_eq!(
-            EXPECTED_SCHEMA_VERSION, 60,
+            EXPECTED_SCHEMA_VERSION, 61,
             "readiness must advance with the latest published terminal migration"
         );
         let migration = include_str!("../../../migrations/0056_atomic_extraction_terminal_v1.sql");
@@ -1900,7 +1900,7 @@ mod tests {
     #[test]
     fn atomic_recall_terminal_is_normalized_clock_complete_and_fail_closed() {
         assert_eq!(
-            EXPECTED_SCHEMA_VERSION, 60,
+            EXPECTED_SCHEMA_VERSION, 61,
             "readiness must advance with the atomic Recall terminal migration"
         );
         let migration = include_str!("../../../migrations/0057_atomic_recall_terminal_v1.sql");
@@ -1992,7 +1992,7 @@ mod tests {
     #[test]
     fn resolution_hold_recovery_is_whole_stack_replay_first_and_fail_closed() {
         assert_eq!(
-            EXPECTED_SCHEMA_VERSION, 60,
+            EXPECTED_SCHEMA_VERSION, 61,
             "readiness must advance with the ResolutionHold recovery migration"
         );
         let migration = include_str!("../../../migrations/0059_resolution_hold_recovery_v1.sql");
@@ -2056,7 +2056,7 @@ mod tests {
     #[test]
     fn successor_recovery_authority_is_atomic_reserved_and_append_only() {
         assert_eq!(
-            EXPECTED_SCHEMA_VERSION, 60,
+            EXPECTED_SCHEMA_VERSION, 61,
             "readiness must advance with the successor recovery migration"
         );
         let migration =
@@ -2108,6 +2108,77 @@ mod tests {
             assert!(
                 !migration.contains(prohibited),
                 "successor recovery migration leaked {prohibited}"
+            );
+        }
+    }
+
+    #[test]
+    fn successor_insert_windows_are_relation_specific_and_forward_only() {
+        let migration =
+            include_str!("../../../migrations/0061_successor_trigger_relation_guard.sql");
+        for required in [
+            "Gravebound_Production_GDD_v1_Canonical.md",
+            "Gravebound_Content_Production_Spec_v1.md",
+            "Gravebound_Development_Roadmap_v1.md",
+            "SPEC-CONFLICT-031",
+            "migration 0041",
+            "CREATE OR REPLACE FUNCTION enforce_successor_result_insert_window_v1()",
+            "CREATE FUNCTION enforce_successor_audit_insert_window_v1()",
+            "CREATE FUNCTION enforce_successor_outbox_insert_window_v1()",
+            "TG_TABLE_NAME <> 'successor_mutation_results_v1'",
+            "TG_TABLE_NAME <> 'successor_mutation_audit_events_v1'",
+            "TG_TABLE_NAME <> 'successor_mutation_outbox_events_v1'",
+            "DROP TRIGGER successor_audit_insert_window_v1",
+            "EXECUTE FUNCTION enforce_successor_audit_insert_window_v1()",
+            "DROP TRIGGER successor_outbox_insert_window_v1",
+            "EXECUTE FUNCTION enforce_successor_outbox_insert_window_v1()",
+            "Schema-60 binaries must not run against schema 61",
+            "Published migration 0060 is never rewritten",
+        ] {
+            assert!(migration.contains(required), "migration omitted {required}");
+        }
+
+        let result_body = migration
+            .split("CREATE OR REPLACE FUNCTION enforce_successor_result_insert_window_v1()")
+            .nth(1)
+            .unwrap()
+            .split("$$;")
+            .next()
+            .unwrap();
+        let audit_body = migration
+            .split("CREATE FUNCTION enforce_successor_audit_insert_window_v1()")
+            .nth(1)
+            .unwrap()
+            .split("$$;")
+            .next()
+            .unwrap();
+        let outbox_body = migration
+            .split("CREATE FUNCTION enforce_successor_outbox_insert_window_v1()")
+            .nth(1)
+            .unwrap()
+            .split("$$;")
+            .next()
+            .unwrap();
+        assert!(!result_body.contains("NEW.published_at"));
+        assert!(!result_body.contains("NEW.created_at"));
+        assert!(!audit_body.contains("NEW.published_at"));
+        assert!(audit_body.contains("NEW.created_at"));
+        assert!(outbox_body.contains("NEW.published_at"));
+        assert!(outbox_body.contains("NEW.created_at"));
+
+        for prohibited in [
+            "CREATE TABLE",
+            "DROP TABLE",
+            "ALTER TABLE",
+            "INSERT INTO",
+            "UPDATE ",
+            "DELETE FROM",
+            "JSON",
+            "JSONB",
+        ] {
+            assert!(
+                !migration.contains(prohibited),
+                "successor relation guard leaked {prohibited}"
             );
         }
     }
