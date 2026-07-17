@@ -839,7 +839,7 @@ async fn fill_all_terminal_storage(persistence: &PostgresPersistence) {
             STORAGE_FILLER_CHARACTER_ID,
             restore_point_id,
             entry_mutation_id,
-            u16::from(batch_ordinal),
+            0,
         )
         .await
         .unwrap();
