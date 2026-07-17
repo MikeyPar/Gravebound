@@ -630,6 +630,7 @@ fn spawn_native_resolution_hold(
                 panel
                     .spawn(Node {
                         width: percent(100),
+                        height: px(0),
                         min_height: px(if metrics.layout_mode
                             == ResolutionHoldUiLayoutMode::Compact
                         {
@@ -638,6 +639,8 @@ fn spawn_native_resolution_hold(
                             300
                         }),
                         flex_grow: 1.0,
+                        flex_shrink: 1.0,
+                        flex_basis: px(0),
                         flex_direction: FlexDirection::Row,
                         column_gap: px(12),
                         overflow: Overflow::clip(),
