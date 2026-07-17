@@ -13,6 +13,7 @@ mod caldus_victory;
 mod combat_factory;
 mod core_journey_world_flow;
 mod core_lifecycle;
+mod core_private_route_actor;
 mod core_private_world_flow;
 mod core_recall_outbox;
 mod core_recall_runtime;
@@ -78,6 +79,12 @@ pub use core_lifecycle::{
     CoreCheckpointBinding, CoreCheckpointServiceError, CoreDangerCheckpointRepository,
     CoreDangerCheckpointService, CoreLifeKey, CoreLiveBindingId, CoreLiveCharacter,
     CoreLiveDirectory, CoreLiveError, CoreResumeOutcome, DANGER_CHECKPOINT_INTERVAL_TICKS,
+};
+pub use core_private_route_actor::{
+    CORE_PRIVATE_ROUTE_ACTOR_MAILBOX_CAPACITY, CorePrivateRouteActor, CorePrivateRouteActorAdvance,
+    CorePrivateRouteActorDirectory, CorePrivateRouteActorError, CorePrivateRouteActorLease,
+    CorePrivateRouteActorPosition, CorePrivateRouteActorSeed, CorePrivateRouteBellPermitLease,
+    CorePrivateRouteRuntimeError, CorePrivateRouteRuntimeReport,
 };
 pub use core_private_world_flow::{
     CoreBellPortalAbortReason, CoreBellPortalAuthority, CoreBellPortalBinding,
