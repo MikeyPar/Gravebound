@@ -99,6 +99,12 @@ const WORLD_ID: &str = "world.core_microrealm_01";
 const DEATH_LATENCY_SAMPLE_COUNT: usize = 10;
 const SUCCESSOR_SESSION_TIMEOUT: Duration = Duration::from_secs(30);
 const SUCCESSOR_TEARDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+const SUCCESSOR_CHILD_MODE_ENV: &str = "GRAVEBOUND_M03_SUCCESSOR_CHILD_MODE";
+const SUCCESSOR_CHILD_CERTIFICATE_ENV: &str = "GRAVEBOUND_M03_SUCCESSOR_CHILD_CERTIFICATE";
+const SUCCESSOR_CHILD_READINESS_ENV: &str = "GRAVEBOUND_M03_SUCCESSOR_CHILD_READINESS";
+const SUCCESSOR_CHILD_TEST_NAME: &str =
+    "successor_child_process_serves_stored_replay_over_real_quic";
+static SUCCESSOR_CHILD_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
 
 fn content_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../content")
@@ -650,7 +656,7 @@ async fn commit_caldus_fixture(persistence: &PostgresPersistence) -> ([u8; 16], 
     (extraction.request_id.bytes(), EXTRACTION_RECEIPT_ID)
 }
 
-fn endpoints() -> (quinn::Endpoint, quinn::Endpoint, std::net::SocketAddr) {
+fn loopback_server_endpoint() -> (quinn::Endpoint, CertificateDer<'static>) {
     let CertifiedKey { cert, signing_key } =
         generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
     let certificate = cert.der().clone();
@@ -659,12 +665,22 @@ fn endpoints() -> (quinn::Endpoint, quinn::Endpoint, std::net::SocketAddr) {
         quinn::ServerConfig::with_single_cert(vec![certificate.clone()], private_key.into())
             .unwrap();
     let server = quinn::Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap()).unwrap();
-    let address = server.local_addr().unwrap();
+    (server, certificate)
+}
+
+fn loopback_client_endpoint(certificate: CertificateDer<'static>) -> quinn::Endpoint {
     let mut roots = rustls::RootCertStore::empty();
     roots.add(certificate).unwrap();
     let config = quinn::ClientConfig::with_root_certificates(Arc::new(roots)).unwrap();
     let mut client = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
     client.set_default_client_config(config);
+    client
+}
+
+fn endpoints() -> (quinn::Endpoint, quinn::Endpoint, std::net::SocketAddr) {
+    let (server, certificate) = loopback_server_endpoint();
+    let address = server.local_addr().unwrap();
+    let client = loopback_client_endpoint(certificate);
     (server, client, address)
 }
 
@@ -1243,6 +1259,100 @@ impl ChildCoreIdentityServer {
 }
 
 impl Drop for ChildCoreIdentityServer {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+struct ChildSuccessorReplayServer {
+    child: Child,
+    certificate_path: PathBuf,
+    readiness_path: PathBuf,
+}
+
+impl ChildSuccessorReplayServer {
+    fn spawn() -> Self {
+        std::env::var(persistence::TEST_DATABASE_URL_ENV)
+            .expect("hosted successor child process requires TEST_DATABASE_URL");
+        let sequence = SUCCESSOR_CHILD_SEQUENCE.fetch_add(1, Ordering::SeqCst);
+        let nonce = format!("{}-{sequence}", std::process::id());
+        let certificate_path =
+            std::env::temp_dir().join(format!("gravebound-m03-successor-{nonce}-server.der"));
+        let readiness_path =
+            std::env::temp_dir().join(format!("gravebound-m03-successor-{nonce}-readiness.txt"));
+        let _ = fs::remove_file(&certificate_path);
+        let _ = fs::remove_file(&readiness_path);
+        let child = Command::new(std::env::current_exe().expect("resolve integration test binary"))
+            .arg(SUCCESSOR_CHILD_TEST_NAME)
+            .arg("--exact")
+            .arg("--ignored")
+            .arg("--nocapture")
+            .arg("--test-threads=1")
+            .env(SUCCESSOR_CHILD_MODE_ENV, "1")
+            .env(SUCCESSOR_CHILD_CERTIFICATE_ENV, &certificate_path)
+            .env(SUCCESSOR_CHILD_READINESS_ENV, &readiness_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("spawn test-only persistent successor child process");
+        Self {
+            child,
+            certificate_path,
+            readiness_path,
+        }
+    }
+
+    async fn readiness(&mut self) -> (SocketAddr, Vec<u8>) {
+        for _ in 0..400 {
+            if let (Ok(address), Ok(certificate)) = (
+                fs::read_to_string(&self.readiness_path),
+                fs::read(&self.certificate_path),
+            ) && !certificate.is_empty()
+            {
+                return (
+                    address
+                        .trim()
+                        .parse()
+                        .expect("published successor child socket address"),
+                    certificate,
+                );
+            }
+            if let Some(status) = self.child.try_wait().expect("poll successor child server") {
+                panic!("successor child exited before readiness: {status}");
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("successor child did not publish its certificate before timeout");
+    }
+
+    async fn finish(&mut self) {
+        for _ in 0..400 {
+            if let Some(status) = self.child.try_wait().expect("poll successor child exit") {
+                assert!(status.success(), "successor child failed: {status}");
+                self.cleanup_files();
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("successor child did not exit within ten seconds");
+    }
+
+    fn cleanup_files(&self) {
+        let _ = fs::remove_file(&self.certificate_path);
+        let _ = fs::remove_file(&self.readiness_path);
+    }
+
+    fn stop(&mut self) {
+        if self.child.try_wait().ok().flatten().is_none() {
+            let _ = self.child.kill();
+        }
+        let _ = self.child.wait();
+        self.cleanup_files();
+    }
+}
+
+impl Drop for ChildSuccessorReplayServer {
     fn drop(&mut self) {
         self.stop();
     }
@@ -2598,13 +2708,187 @@ async fn assert_database_peer_sessions_idle(persistence: &PostgresPersistence) {
     residue.rollback().await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "test-only child entry; the parent persistent successor journey launches it"]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the isolated test-process endpoint, persistent replay, and complete child teardown form one auditable process boundary"
+)]
+async fn successor_child_process_serves_stored_replay_over_real_quic() {
+    if std::env::var(SUCCESSOR_CHILD_MODE_ENV).as_deref() != Ok("1") {
+        return;
+    }
+    let certificate_path = PathBuf::from(
+        std::env::var_os(SUCCESSOR_CHILD_CERTIFICATE_ENV)
+            .expect("successor child certificate path is required"),
+    );
+    let readiness_path = PathBuf::from(
+        std::env::var_os(SUCCESSOR_CHILD_READINESS_ENV)
+            .expect("successor child readiness path is required"),
+    );
+    let persistence = reconnect_database().await;
+    let (endpoint, certificate) = loopback_server_endpoint();
+    let address = endpoint.local_addr().unwrap();
+    fs::write(&certificate_path, certificate.as_ref()).unwrap();
+    fs::write(&readiness_path, address.to_string()).unwrap();
+
+    let incoming = tokio::time::timeout(SUCCESSOR_SESSION_TIMEOUT, endpoint.accept())
+        .await
+        .expect("successor child must receive a connection within thirty seconds")
+        .expect("successor child endpoint remains open");
+    let server = tokio::time::timeout(SUCCESSOR_SESSION_TIMEOUT, incoming)
+        .await
+        .expect("successor child TLS handshake must finish within thirty seconds")
+        .expect("successor child accepts the authenticated connection");
+    let identity = IdentityService::new(
+        InMemoryAccountRepository::default(),
+        FixedAuthority,
+        FixedAuthority,
+        NoopIdentityEventSink,
+        ManifestHash::new("a".repeat(64)).unwrap(),
+    );
+    let world_flow = WorldFlowGateService::new(
+        InMemoryAccountRepository::default(),
+        FixedAuthority,
+        revision(),
+    );
+    let progression = disabled_progression();
+    let death_views = DeathViewService::new(
+        DisabledDeathViewRepository,
+        durable_death_fixture::death_view_revision(),
+    );
+    let oath = CoreOathSelectionAuthority::<FixedAuthority>::disabled();
+    let bargain = CoreBargainAuthority::<FixedAuthority>::disabled();
+    let safe_inventory = CoreSafeInventoryAuthority::disabled();
+    let successor =
+        CoreSuccessorAuthority::persistent(PostgresSuccessorService::new(persistence.clone()));
+    let extraction = CoreExtractionTerminalAuthority::disabled();
+    let recall = CoreRecallTerminalAuthority::disabled();
+    let event = Box::pin(tokio::time::timeout(SUCCESSOR_SESSION_TIMEOUT, async {
+        serve_handshake(
+            &server,
+            &successor_policy(),
+            AuthenticationDecision::Accepted,
+            WireText::new("successor-child-process-replay").unwrap(),
+        )
+        .await
+        .unwrap();
+        serve_core_reliable(
+            &server,
+            &identity,
+            &world_flow,
+            &progression,
+            &death_views,
+            &oath,
+            &bargain,
+            &safe_inventory,
+            &CoreResolutionHoldAuthority::disabled(),
+            &successor,
+            &extraction,
+            &recall,
+            durable_death_fixture::authenticated_account(),
+            1,
+            20_100,
+        )
+        .await
+        .unwrap()
+    }))
+    .await
+    .expect("successor child application exchange must finish within thirty seconds");
+    assert!(matches!(
+        &event.event,
+        ReliableEvent::SuccessorCreateResult(result)
+            if matches!(
+                result.as_ref(),
+                SuccessorCreateResultV1::Stored {
+                    request_sequence: 1,
+                    replayed: true,
+                    result,
+                    ..
+                } if result.mutation_id == SUCCESSOR_QUIC_MUTATION_ID
+                    && result.death_id == durable_death_fixture::PRIMARY_IDENTITY.death_id
+            )
+    ));
+    server.close(0_u32.into(), b"successor child replay complete");
+    drop(server);
+    endpoint.close(0_u32.into(), b"successor child replay complete");
+    tokio::time::timeout(SUCCESSOR_TEARDOWN_TIMEOUT, endpoint.wait_idle())
+        .await
+        .expect("successor child endpoint must reach idle within ten seconds");
+    tokio::time::timeout(SUCCESSOR_TEARDOWN_TIMEOUT, persistence.close())
+        .await
+        .expect("successor child database pool must close within ten seconds");
+}
+
+async fn run_child_process_successor_replay(
+    expected_bytes: &[u8],
+    expected_stored: &protocol::StoredSuccessorResultV1,
+) {
+    let mut child = ChildSuccessorReplayServer::spawn();
+    let (address, certificate) = child.readiness().await;
+    let endpoint = loopback_client_endpoint(CertificateDer::from(certificate));
+    let connection = tokio::time::timeout(
+        SUCCESSOR_SESSION_TIMEOUT,
+        endpoint.connect(address, "localhost").unwrap(),
+    )
+    .await
+    .expect("parent must connect to successor child within thirty seconds")
+    .expect("parent trusts the successor child certificate");
+    let (server_hello, event, result) =
+        Box::pin(tokio::time::timeout(SUCCESSOR_SESSION_TIMEOUT, async {
+            let HandshakeResponse::Accepted(server_hello) =
+                bot_client::perform_handshake(&connection, hello())
+                    .await
+                    .unwrap()
+            else {
+                panic!("successor child handshake must succeed");
+            };
+            let (event, result) =
+                bot_client::perform_successor_create(&connection, persistent_successor_frame(1))
+                    .await
+                    .unwrap();
+            (server_hello, event, result)
+        }))
+        .await
+        .expect("parent successor child exchange must finish within thirty seconds");
+    assert!(
+        server_hello
+            .feature_flags
+            .iter()
+            .any(|flag| flag.as_str() == protocol::CORE_SUCCESSOR_FEATURE_FLAG)
+    );
+    assert_eq!(
+        protocol::encode_frame(&WireMessage::ReliableEvent(event))
+            .unwrap()
+            .as_slice(),
+        expected_bytes
+    );
+    assert!(matches!(
+        result,
+        SuccessorCreateResultV1::Stored {
+            request_sequence: 1,
+            replayed: true,
+            result,
+            ..
+        } if result.as_ref() == expected_stored
+    ));
+    connection.close(0_u32.into(), b"successor child client complete");
+    drop(connection);
+    endpoint.close(0_u32.into(), b"successor child client complete");
+    tokio::time::timeout(SUCCESSOR_TEARDOWN_TIMEOUT, endpoint.wait_idle())
+        .await
+        .expect("successor child client endpoint must reach idle within ten seconds");
+    child.finish().await;
+}
+
 /// GDD `DTH-020`/`021` and `TECH-021`-`023`, Content Spec `CONT-CATALOG-003`, and
 /// Roadmap `GB-M03-07` require one authenticated successor with an exact four-instance starter
-/// kit to survive lost delivery, reconnect, and an authority/database-pool restart without a
-/// duplicate character or grant. Normal route admission remains disabled by the runtime test.
+/// kit to survive lost delivery, reconnect, authority/database-pool reconstruction, and a fresh
+/// OS process without a duplicate character or grant. Normal route admission remains disabled by
+/// the runtime test; only this integration-test binary exposes the child replay endpoint.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires explicitly authorized disposable PostgreSQL"]
-async fn persistent_successor_replays_identically_after_response_loss_and_pool_restart() {
+async fn persistent_successor_replays_identically_after_response_loss_pool_and_process_restart() {
     let persistence = disposable_database().await;
     commit_primary_successor_death(&persistence).await;
     let exact = persistent_successor_frame(1);
@@ -2682,6 +2966,13 @@ async fn persistent_successor_replays_identically_after_response_loss_and_pool_r
     tokio::time::timeout(SUCCESSOR_TEARDOWN_TIMEOUT, restarted.close())
         .await
         .expect("the restarted successor database pool must close within ten seconds");
+
+    run_child_process_successor_replay(&expected_bytes, &expected_stored).await;
+    let after_child = reconnect_database().await;
+    assert_persistent_successor_graph(&after_child, &expected_stored, 1).await;
+    tokio::time::timeout(SUCCESSOR_TEARDOWN_TIMEOUT, after_child.close())
+        .await
+        .expect("the post-child successor database pool must close within ten seconds");
 }
 
 #[tokio::test]
