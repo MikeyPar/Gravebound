@@ -42,6 +42,7 @@ mod life_deed_repository;
 mod lifecycle_signature;
 mod live_damage_trace_repository;
 mod oath;
+mod private_route_generation;
 mod progression;
 mod progression_restore;
 mod recall_terminal;
@@ -208,6 +209,7 @@ pub use oath::{
     OathSelectionTransaction, OathSelectionTransactionState, StoredCharacterLifeEvent,
     StoredOathCharacter, StoredOathInventory, StoredOathMutationResult,
 };
+pub use private_route_generation::StoredPrivateRouteGenerationV1;
 pub use progression::{
     ProgressionAwardTransaction, ProgressionAwardTransactionState, StoredBossFirstClear,
     StoredBossFirstClearState, StoredEncounterLifeState, StoredEncounterRecallState,
@@ -279,7 +281,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 61;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 62;
 const DISPOSABLE_DATABASE_RESET_SQL: &str = "TRUNCATE TABLE accounts, caldus_victory_exits CASCADE";
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -400,6 +402,14 @@ pub enum PersistenceError {
     CorruptStoredIdentity,
     #[error("stored world-flow aggregate violates the approved schema")]
     CorruptStoredWorldFlow,
+    #[error("private-route actor generation violates the durable authority contract")]
+    CorruptStoredPrivateRouteGeneration,
+    #[error("private-route character is unavailable or is not the selected character")]
+    PrivateRouteCharacterUnavailable,
+    #[error("private-route character is permanently dead")]
+    PrivateRouteCharacterDead,
+    #[error("private-route actor generation is exhausted")]
+    PrivateRouteGenerationExhausted,
     #[error("stored danger-entry restore graph violates the v2 authority contract")]
     CorruptStoredDangerEntryRestore,
     #[error("a fresh world-flow transaction must append one typed result")]
@@ -1764,7 +1774,7 @@ mod tests {
     #[test]
     fn deferred_death_graph_consumes_provenance_without_forking_its_closure() {
         assert_eq!(
-            EXPECTED_SCHEMA_VERSION, 61,
+            EXPECTED_SCHEMA_VERSION, 62,
             "readiness must advance with the latest published migration"
         );
         let migration = include_str!("../../../migrations/0054_death_provenance_echo_closure.sql");
@@ -1847,7 +1857,7 @@ mod tests {
     #[test]
     fn atomic_extraction_terminal_is_normalized_replay_first_and_fail_closed() {
         assert_eq!(
-            EXPECTED_SCHEMA_VERSION, 61,
+            EXPECTED_SCHEMA_VERSION, 62,
             "readiness must advance with the latest published terminal migration"
         );
         let migration = include_str!("../../../migrations/0056_atomic_extraction_terminal_v1.sql");
@@ -1900,7 +1910,7 @@ mod tests {
     #[test]
     fn atomic_recall_terminal_is_normalized_clock_complete_and_fail_closed() {
         assert_eq!(
-            EXPECTED_SCHEMA_VERSION, 61,
+            EXPECTED_SCHEMA_VERSION, 62,
             "readiness must advance with the atomic Recall terminal migration"
         );
         let migration = include_str!("../../../migrations/0057_atomic_recall_terminal_v1.sql");
@@ -1992,7 +2002,7 @@ mod tests {
     #[test]
     fn resolution_hold_recovery_is_whole_stack_replay_first_and_fail_closed() {
         assert_eq!(
-            EXPECTED_SCHEMA_VERSION, 61,
+            EXPECTED_SCHEMA_VERSION, 62,
             "readiness must advance with the ResolutionHold recovery migration"
         );
         let migration = include_str!("../../../migrations/0059_resolution_hold_recovery_v1.sql");
@@ -2056,7 +2066,7 @@ mod tests {
     #[test]
     fn successor_recovery_authority_is_atomic_reserved_and_append_only() {
         assert_eq!(
-            EXPECTED_SCHEMA_VERSION, 61,
+            EXPECTED_SCHEMA_VERSION, 62,
             "readiness must advance with the successor recovery migration"
         );
         let migration =
@@ -2179,6 +2189,51 @@ mod tests {
             assert!(
                 !migration.contains(prohibited),
                 "successor relation guard leaked {prohibited}"
+            );
+        }
+    }
+
+    #[test]
+    fn private_route_actor_generations_are_persistent_monotonic_and_audited() {
+        assert_eq!(
+            EXPECTED_SCHEMA_VERSION, 62,
+            "readiness must advance with private-route actor generation authority"
+        );
+        let migration =
+            include_str!("../../../migrations/0062_private_route_actor_generations_v1.sql");
+        for required in [
+            "Gravebound_Production_GDD_v1_Canonical.md",
+            "Gravebound_Content_Production_Spec_v1.md",
+            "Gravebound_Development_Roadmap_v1.md",
+            "ADR-037",
+            "character_private_route_generation_heads_v1",
+            "private_route_generation_allocations_v1",
+            "last_generation BIGINT NOT NULL",
+            "actor_generation BIGINT NOT NULL",
+            "private_route_generation_positive CHECK (last_generation > 0)",
+            "private_route_allocation_generation_positive CHECK (actor_generation > 0)",
+            "enforce_private_route_generation_allocation_insert_v1",
+            "prevent_private_route_generation_allocation_mutation_v1",
+            "enforce_private_route_generation_head_closure_v1",
+            "DEFERRABLE INITIALLY DEFERRED",
+            "gaps are valid and reuse is forbidden",
+            "Schema-61 binaries must not run against schema 62",
+            "Published migrations 0001 through 0061 are never rewritten",
+        ] {
+            assert!(migration.contains(required), "migration omitted {required}");
+        }
+        for prohibited in [
+            "DROP TABLE",
+            "TRUNCATE",
+            "DELETE FROM",
+            "JSON",
+            "JSONB",
+            "FLOAT",
+            "DOUBLE PRECISION",
+        ] {
+            assert!(
+                !migration.contains(prohibited),
+                "private-route generation migration leaked {prohibited}"
             );
         }
     }
