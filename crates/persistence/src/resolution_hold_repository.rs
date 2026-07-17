@@ -1097,8 +1097,10 @@ async fn lock_hold_authority_after_account(
     let location_content_id: String = world.try_get("location_content_id")?;
     let instance_lineage_id = optional_exact_id(world.try_get("instance_lineage_id")?)?;
     let entry_restore_point_id = optional_exact_id(world.try_get("entry_restore_point_id")?)?;
-    if account.selected_character_id != Some(character_id)
-        || life_state != LIFE_LIVING
+    if account.selected_character_id != Some(character_id) {
+        return Err(PersistenceError::ResolutionHoldOwnerNotFound);
+    }
+    if life_state != LIFE_LIVING
         || !matches!(
             security_state,
             SECURITY_NORMAL | SECURITY_STORAGE_RESOLUTION_REQUIRED

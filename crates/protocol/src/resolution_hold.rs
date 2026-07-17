@@ -213,6 +213,7 @@ pub enum ResolutionHoldRejectionCodeV1 {
     IdempotencyConflict,
     DatabaseUnavailable,
     CorruptStoredAuthority,
+    UnresolvedMutation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -734,6 +735,32 @@ mod tests {
             result.validate(),
             Err(ResolutionHoldValidationError::InvalidVersionAdvance)
         );
+    }
+
+    #[test]
+    fn rejection_codes_preserve_existing_bytes_and_append_unresolved_mutation() {
+        let codes = [
+            ResolutionHoldRejectionCodeV1::FeatureDisabled,
+            ResolutionHoldRejectionCodeV1::InvalidRequest,
+            ResolutionHoldRejectionCodeV1::IssuedAtInvalid,
+            ResolutionHoldRejectionCodeV1::ContentMismatch,
+            ResolutionHoldRejectionCodeV1::StaleAuthority,
+            ResolutionHoldRejectionCodeV1::ForeignAuthority,
+            ResolutionHoldRejectionCodeV1::HallBindingRequired,
+            ResolutionHoldRejectionCodeV1::StorageFull,
+            ResolutionHoldRejectionCodeV1::NoHeldStack,
+            ResolutionHoldRejectionCodeV1::ConfirmationRequired,
+            ResolutionHoldRejectionCodeV1::IdempotencyConflict,
+            ResolutionHoldRejectionCodeV1::DatabaseUnavailable,
+            ResolutionHoldRejectionCodeV1::CorruptStoredAuthority,
+            ResolutionHoldRejectionCodeV1::UnresolvedMutation,
+        ];
+        for (index, code) in codes.into_iter().enumerate() {
+            assert_eq!(
+                postcard::to_stdvec(&code).unwrap(),
+                vec![u8::try_from(index).unwrap()]
+            );
+        }
     }
 
     const fn advance(before: u64, after: u64) -> ResolutionHoldVersionAdvanceV1 {

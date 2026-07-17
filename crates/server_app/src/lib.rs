@@ -33,6 +33,7 @@ mod progression_award;
 mod progression_query;
 mod progression_restore_provider;
 mod progression_service;
+mod resolution_hold_service;
 mod restore_point;
 mod reward_rng;
 mod reward_service;
@@ -176,6 +177,10 @@ pub use progression_query::{
 };
 pub use progression_restore_provider::PostgresProgressionRestoreProvider;
 pub use progression_service::PostgresProgressionAwardService;
+pub use resolution_hold_service::{
+    CoreResolutionHoldAuthority, PostgresResolutionHoldService, ResolutionHoldRepository,
+    ResolutionHoldService, ResolutionHoldServiceError,
+};
 pub use restore_point::{
     ActiveBargainRestoreV3, AshWalletRestoreV3, BeltStackV1, CRASH_RESTORE_ORDER_V3,
     CrashRestoreComponentV3, CrashRestoreContext, DangerEntrySnapshotV1, DangerEntrySnapshotV2,
