@@ -465,15 +465,16 @@ BEGIN
         RAISE EXCEPTION
             '% may be inserted only with its ordinary owning death', TG_TABLE_NAME;
     END IF;
-    IF TG_TABLE_NAME = 'death_successor_presets_v1'
-        AND NEW.created_at IS DISTINCT FROM death_time
-    THEN
-        RAISE EXCEPTION 'successor preset time must equal its death commit';
-    END IF;
-    IF TG_TABLE_NAME = 'successor_roster_reservations_v1'
-        AND (NEW.reservation_state <> 0 OR NEW.reserved_at IS DISTINCT FROM death_time)
-    THEN
-        RAISE EXCEPTION 'successor reservation must begin Active with its death commit';
+    IF TG_TABLE_NAME = 'death_successor_presets_v1' THEN
+        IF NEW.created_at IS DISTINCT FROM death_time THEN
+            RAISE EXCEPTION 'successor preset time must equal its death commit';
+        END IF;
+    ELSIF TG_TABLE_NAME = 'successor_roster_reservations_v1' THEN
+        IF NEW.reservation_state <> 0 OR NEW.reserved_at IS DISTINCT FROM death_time THEN
+            RAISE EXCEPTION 'successor reservation must begin Active with its death commit';
+        END IF;
+    ELSE
+        RAISE EXCEPTION 'unsupported successor death-authority table %', TG_TABLE_NAME;
     END IF;
     RETURN NEW;
 END

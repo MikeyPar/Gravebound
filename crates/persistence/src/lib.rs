@@ -2052,6 +2052,8 @@ mod tests {
             "reservation_state = 1",
             "reservation_state = 2",
             "one_active_successor_reservation_v1",
+            "IF TG_TABLE_NAME = 'death_successor_presets_v1' THEN",
+            "ELSIF TG_TABLE_NAME = 'successor_roster_reservations_v1' THEN",
             "class_id = 'class.grave_arbalist'",
             "base_silhouette_id = 'sprite.class.grave_arbalist'",
             "preset_hash BYTEA NOT NULL",
