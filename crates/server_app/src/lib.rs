@@ -29,6 +29,7 @@ mod production_extraction;
 mod production_recall;
 mod production_recall_channel;
 mod production_recall_driver;
+mod production_recall_session;
 mod progression_award;
 mod progression_query;
 mod progression_restore_provider;
@@ -164,6 +165,11 @@ pub use production_recall_channel::{
 pub use production_recall_driver::{
     CoreRecallTerminalDriverError, CoreRecallTerminalTickOutcome, CoreTerminalOtherEvaluationsV1,
     drive_recall_terminal_tick,
+};
+pub use production_recall_session::{
+    ProductionRecallAttachDisposition, ProductionRecallDetachOutcome, ProductionRecallSessionError,
+    ProductionRecallSessionLifecycle, ProductionRecallSessionSnapshot,
+    ProductionRecallTransportGeneration, ProductionRecallTransportLease,
 };
 pub use progression_award::{
     CoreProgressionRules, ProgressionAwardCode, ProgressionAwardCommand, ProgressionAwardContext,
