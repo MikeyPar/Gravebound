@@ -24,9 +24,11 @@ use tokio::{
 
 use crate::{
     AuthenticatedAccount, AuthenticatedNamespace, CoreRecallActorHandle, CoreRecallActorInbox,
-    CoreRecallIntentAuthority, CoreRecallIntentReply, ProductionRecallClock,
-    ProductionRecallDetachOutcome, ProductionRecallIntentActor, ProductionRecallSessionError,
-    ProductionRecallSessionLifecycle, ProductionRecallTransportGeneration,
+    CoreRecallCompletionInbox, CoreRecallCompletionOutbox, CoreRecallIntentAuthority,
+    CoreRecallIntentReply, CoreRecallReliableWriter, ProductionRecallClock,
+    ProductionRecallDetachOutcome, ProductionRecallIntentActor, ProductionRecallPublishedV1,
+    ProductionRecallSessionError, ProductionRecallSessionLifecycle,
+    ProductionRecallTransportGeneration, core_recall_completion_outbox,
     production_recall_actor_mailbox,
 };
 
@@ -64,11 +66,20 @@ pub struct CoreRecallTransportAttach {
     pub invalidated_connection: Option<quinn::Connection>,
 }
 
+#[derive(Debug, Clone)]
+pub struct CoreRecallActorRegistration {
+    pub completion_outbox: CoreRecallCompletionOutbox,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CoreRecallRuntimeReport {
     pub served_actor_commands: u64,
     pub abandoned_actor_commands: u64,
+    pub delivered_completion_publications: u64,
+    pub undelivered_completion_publications: u64,
+    pub abandoned_completion_publications: u64,
     pub remaining_actor_tasks: usize,
+    pub remaining_completion_tasks: usize,
     pub remaining_registered_actors: usize,
     pub remaining_active_transports: usize,
     pub zero_residue: bool,
@@ -99,6 +110,8 @@ struct CoreRecallActorEntry<Clock> {
     handle: CoreRecallActorHandle,
     shutdown: Option<oneshot::Sender<()>>,
     actor_task: Option<JoinHandle<CoreRecallActorTaskReport>>,
+    completion_shutdown: Option<oneshot::Sender<()>>,
+    completion_task: Option<JoinHandle<CoreRecallCompletionTaskReport>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,10 +120,17 @@ struct CoreRecallActorTaskReport {
     abandoned: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CoreRecallCompletionTaskReport {
+    delivered: u64,
+    undelivered: u64,
+    abandoned: u64,
+}
+
 #[derive(Debug)]
 struct ActiveRecallTransport {
     lease: CoreRecallConnectionLease,
-    connection: quinn::Connection,
+    writer: Arc<CoreRecallReliableWriter>,
 }
 
 struct CoreRecallRuntimeState<Clock> {
@@ -144,10 +164,10 @@ where
     }
 
     pub async fn register_actor(
-        &self,
+        self: &Arc<Self>,
         authenticated: AuthenticatedAccount,
         actor: Arc<ProductionRecallIntentActor<Clock>>,
-    ) -> Result<(), CoreRecallRuntimeError> {
+    ) -> Result<CoreRecallActorRegistration, CoreRecallRuntimeError> {
         if authenticated.namespace != AuthenticatedNamespace::WipeableTest
             || authenticated.account_id.as_bytes() != actor.account_id()
         {
@@ -163,7 +183,9 @@ where
             return Err(CoreRecallRuntimeError::ActorAlreadyRegistered);
         }
         let (handle, inbox) = production_recall_actor_mailbox();
+        let (completion_outbox, completion_inbox) = core_recall_completion_outbox();
         let (shutdown_send, shutdown_receive) = oneshot::channel();
+        let (completion_shutdown_send, completion_shutdown_receive) = oneshot::channel();
         let tick_source = Arc::clone(&self.tick_source);
         let task_actor = Arc::clone(&actor);
         let actor_task = tokio::spawn(serve_actor_mailbox(
@@ -174,6 +196,12 @@ where
             character_id,
             shutdown_receive,
         ));
+        let completion_task = tokio::spawn(serve_completion_outbox(
+            completion_inbox,
+            Arc::downgrade(self),
+            account_id,
+            completion_shutdown_receive,
+        ));
         state.actors.insert(
             account_id,
             CoreRecallActorEntry {
@@ -183,9 +211,11 @@ where
                 handle,
                 shutdown: Some(shutdown_send),
                 actor_task: Some(actor_task),
+                completion_shutdown: Some(completion_shutdown_send),
+                completion_task: Some(completion_task),
             },
         );
-        Ok(())
+        Ok(CoreRecallActorRegistration { completion_outbox })
     }
 
     /// Installs the new generation before returning the connection that it superseded. The caller
@@ -219,8 +249,14 @@ where
         };
         let invalidated_connection = state
             .transports
-            .insert(account_id, ActiveRecallTransport { lease, connection })
-            .map(|active| active.connection);
+            .insert(
+                account_id,
+                ActiveRecallTransport {
+                    lease,
+                    writer: Arc::new(CoreRecallReliableWriter::new(connection)),
+                },
+            )
+            .map(|active| active.writer.connection().clone());
         Ok(CoreRecallTransportAttach {
             lease,
             invalidated_connection,
@@ -236,6 +272,21 @@ where
             directory: Arc::clone(self),
             lease,
         }
+    }
+
+    pub async fn reliable_writer(
+        &self,
+        lease: CoreRecallConnectionLease,
+    ) -> Result<Arc<CoreRecallReliableWriter>, CoreRecallRuntimeError> {
+        let state = self.state.lock().await;
+        let active = state
+            .transports
+            .get(&lease.account_id)
+            .ok_or(CoreRecallRuntimeError::ActorUnavailable)?;
+        if active.lease != lease {
+            return Err(CoreRecallRuntimeError::ActorUnavailable);
+        }
+        Ok(Arc::clone(&active.writer))
     }
 
     pub async fn detach_transport(
@@ -277,7 +328,7 @@ where
         state.shutdown_started = true;
         let connections = std::mem::take(&mut state.transports)
             .into_values()
-            .map(|active| active.connection)
+            .map(|active| active.writer.connection().clone())
             .collect();
         for entry in state.actors.values() {
             entry.lifecycle.retire_for_shutdown().await;
@@ -286,47 +337,80 @@ where
             if let Some(shutdown) = entry.shutdown.take() {
                 let _ = shutdown.send(());
             }
+            if let Some(shutdown) = entry.completion_shutdown.take() {
+                let _ = shutdown.send(());
+            }
         }
         connections
     }
 
     pub async fn finish_shutdown(&self) -> Result<CoreRecallRuntimeReport, CoreRecallRuntimeError> {
-        let tasks = {
+        let (actor_tasks, completion_tasks) = {
             let mut state = self.state.lock().await;
             if !state.shutdown_started {
                 return Err(CoreRecallRuntimeError::ShutdownNotStarted);
             }
-            state
+            let actor_tasks = state
                 .actors
                 .values_mut()
                 .filter_map(|entry| entry.actor_task.take())
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            let completion_tasks = state
+                .actors
+                .values_mut()
+                .filter_map(|entry| entry.completion_task.take())
+                .collect::<Vec<_>>();
+            (actor_tasks, completion_tasks)
         };
         let mut served_actor_commands = 0_u64;
         let mut abandoned_actor_commands = 0_u64;
-        for task in tasks {
+        for task in actor_tasks {
             let report = task
                 .await
                 .map_err(CoreRecallRuntimeError::ActorTaskFailed)?;
             served_actor_commands = served_actor_commands.saturating_add(report.served);
             abandoned_actor_commands = abandoned_actor_commands.saturating_add(report.abandoned);
         }
+        let mut delivered_completion_publications = 0_u64;
+        let mut undelivered_completion_publications = 0_u64;
+        let mut abandoned_completion_publications = 0_u64;
+        for task in completion_tasks {
+            let report = task
+                .await
+                .map_err(CoreRecallRuntimeError::ActorTaskFailed)?;
+            delivered_completion_publications =
+                delivered_completion_publications.saturating_add(report.delivered);
+            undelivered_completion_publications =
+                undelivered_completion_publications.saturating_add(report.undelivered);
+            abandoned_completion_publications =
+                abandoned_completion_publications.saturating_add(report.abandoned);
+        }
         let mut state = self.state.lock().await;
-        state.actors.clear();
         let remaining_actor_tasks = state
             .actors
             .values()
             .filter(|entry| entry.actor_task.is_some())
             .count();
+        let remaining_completion_tasks = state
+            .actors
+            .values()
+            .filter(|entry| entry.completion_task.is_some())
+            .count();
+        state.actors.clear();
         let remaining_registered_actors = state.actors.len();
         let remaining_active_transports = state.transports.len();
         Ok(CoreRecallRuntimeReport {
             served_actor_commands,
             abandoned_actor_commands,
+            delivered_completion_publications,
+            undelivered_completion_publications,
+            abandoned_completion_publications,
             remaining_actor_tasks,
+            remaining_completion_tasks,
             remaining_registered_actors,
             remaining_active_transports,
             zero_residue: remaining_actor_tasks == 0
+                && remaining_completion_tasks == 0
                 && remaining_registered_actors == 0
                 && remaining_active_transports == 0,
         })
@@ -370,6 +454,33 @@ where
         handle
             .handle_recall(authenticated, frame, fallback_server_tick)
             .await
+    }
+
+    async fn deliver_publication(
+        &self,
+        account_id: [u8; 16],
+        published: ProductionRecallPublishedV1,
+    ) -> bool {
+        let writer = {
+            let state = self.state.lock().await;
+            let Some(entry) = state.actors.get(&account_id) else {
+                return false;
+            };
+            let result_character_id = match &published.result {
+                RecallResultV1::Stored { result, .. } => result.character_id,
+                RecallResultV1::Pending { character_id, .. }
+                | RecallResultV1::Cancelled { character_id, .. }
+                | RecallResultV1::Rejected { character_id, .. } => *character_id,
+            };
+            if result_character_id != entry.character_id {
+                return false;
+            }
+            let Some(active) = state.transports.get(&account_id) else {
+                return false;
+            };
+            Arc::clone(&active.writer)
+        };
+        writer.send_publication(published).await.is_ok()
     }
 }
 
@@ -443,11 +554,55 @@ where
     }
 }
 
+async fn serve_completion_outbox<Clock, TickSource>(
+    mut inbox: CoreRecallCompletionInbox,
+    directory: std::sync::Weak<CoreRecallActorDirectory<Clock, TickSource>>,
+    account_id: [u8; 16],
+    mut shutdown: oneshot::Receiver<()>,
+) -> CoreRecallCompletionTaskReport
+where
+    Clock: ProductionRecallClock + 'static,
+    TickSource: CoreRecallAuthoritativeTick + 'static,
+{
+    let mut delivered = 0_u64;
+    let mut undelivered = 0_u64;
+    loop {
+        let next = tokio::select! {
+            biased;
+            _ = &mut shutdown => None,
+            published = inbox.receive_next() => published,
+        };
+        let Some(published) = next else {
+            let abandoned = u64::try_from(inbox.retire_undelivered()).unwrap_or(u64::MAX);
+            return CoreRecallCompletionTaskReport {
+                delivered,
+                undelivered,
+                abandoned,
+            };
+        };
+        let sent = if let Some(directory) = directory.upgrade() {
+            directory.deliver_publication(account_id, published).await
+        } else {
+            false
+        };
+        if sent {
+            delivered = delivered.saturating_add(1);
+        } else {
+            undelivered = undelivered.saturating_add(1);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use protocol::{RecallIntentV1, TerminalInventoryRejectionCodeV1};
+    use protocol::{
+        CharacterLocation, CharacterLocationSnapshot, RecallIntentV1, RecallTerminalTriggerV1,
+        ReliableEvent, SafeArrival, StoredRecallTerminalResultV1, TERMINAL_HALL_CONTENT_ID,
+        TerminalInventoryRejectionCodeV1, TerminalVersionAdvanceV1, TerminalVersionVectorV1,
+        WireText,
+    };
 
     use super::*;
     use crate::{AccountId, ProductionRecallPendingAuthorityV1};
@@ -507,7 +662,63 @@ mod tests {
         }
     }
 
+    const fn version(before: u64, after: u64) -> TerminalVersionAdvanceV1 {
+        TerminalVersionAdvanceV1 { before, after }
+    }
+
+    fn publication() -> ProductionRecallPublishedV1 {
+        ProductionRecallPublishedV1 {
+            result: RecallResultV1::Stored {
+                schema_version: TERMINAL_INVENTORY_SCHEMA_VERSION,
+                request_sequence: Some(1),
+                replayed: false,
+                result: Box::new(StoredRecallTerminalResultV1 {
+                    character_id: CHARACTER_ID,
+                    terminal_id: [51; 16],
+                    result_hash: [52; 32],
+                    trigger: RecallTerminalTriggerV1::Explicit,
+                    committed_at_unix_millis: 5_100,
+                    completion_tick: 112,
+                    destination_content_id: WireText::new(TERMINAL_HALL_CONTENT_ID).unwrap(),
+                    versions: TerminalVersionVectorV1 {
+                        account: version(5, 5),
+                        character: version(6, 7),
+                        world: version(6, 7),
+                        inventory: version(7, 8),
+                        life_clock: version(8, 9),
+                    },
+                    stabilized_item_count: 0,
+                    stabilized_items_digest: [53; 32],
+                    destroyed_item_count: 0,
+                    destroyed_items_digest: [54; 32],
+                    destroyed_material_stack_count: 0,
+                    destroyed_materials_digest: [55; 32],
+                }),
+            },
+            hall: CharacterLocationSnapshot {
+                character_id: CHARACTER_ID,
+                character_version: 7,
+                location: CharacterLocation::Safe {
+                    location_id: WireText::new(TERMINAL_HALL_CONTENT_ID).unwrap(),
+                    arrival: SafeArrival::HallDefault,
+                },
+            },
+            explicit_client_tick: Some(10),
+        }
+    }
+
     async fn connection_pair() -> (quinn::Endpoint, quinn::Endpoint, quinn::Connection) {
+        let (server_endpoint, client_endpoint, client, server) = live_connection_pair().await;
+        drop(client);
+        (server_endpoint, client_endpoint, server)
+    }
+
+    async fn live_connection_pair() -> (
+        quinn::Endpoint,
+        quinn::Endpoint,
+        quinn::Connection,
+        quinn::Connection,
+    ) {
         let rcgen::CertifiedKey { cert, signing_key } =
             rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
         let certificate = cert.der().clone();
@@ -526,8 +737,64 @@ mod tests {
         let connecting = client_endpoint.connect(address, "localhost").unwrap();
         let incoming = server_endpoint.accept().await.unwrap();
         let (client, server) = tokio::join!(connecting, incoming);
-        drop(client.unwrap());
-        (server_endpoint, client_endpoint, server.unwrap())
+        (
+            server_endpoint,
+            client_endpoint,
+            client.unwrap(),
+            server.unwrap(),
+        )
+    }
+
+    #[tokio::test]
+    async fn completion_push_shares_response_sequence_and_shutdown_drains_delivery_task() {
+        let tick_source = Arc::new(TickSource(AtomicU64::new(100)));
+        let directory = Arc::new(CoreRecallActorDirectory::new(tick_source));
+        let registration = directory
+            .register_actor(authenticated(), actor())
+            .await
+            .unwrap();
+        let (server_endpoint, client_endpoint, client, server) = live_connection_pair().await;
+        let attached = directory
+            .attach_transport(authenticated(), server)
+            .await
+            .unwrap();
+        let writer = directory.reliable_writer(attached.lease).await.unwrap();
+        let response = writer.begin_response().await.unwrap();
+        assert_eq!(response.sequence(), 1);
+        drop(response);
+
+        registration
+            .completion_outbox
+            .try_publish(publication())
+            .unwrap();
+        let pushed = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            bot_client::receive_server_reliable(&client),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(pushed.sequence, 2);
+        assert_eq!(pushed.server_tick, 112);
+        assert!(matches!(
+            pushed.event,
+            ReliableEvent::RecallResult(result)
+                if matches!(*result, RecallResultV1::Stored { replayed: false, .. })
+        ));
+        assert_eq!(writer.last_sequence().await, 2);
+
+        for connection in directory.begin_shutdown().await {
+            connection.close(0_u32.into(), b"test shutdown");
+        }
+        let report = directory.finish_shutdown().await.unwrap();
+        assert_eq!(report.delivered_completion_publications, 1);
+        assert_eq!(report.undelivered_completion_publications, 0);
+        assert_eq!(report.abandoned_completion_publications, 0);
+        assert_eq!(report.remaining_completion_tasks, 0);
+        assert!(report.zero_residue);
+        client.close(0_u32.into(), b"test complete");
+        server_endpoint.wait_idle().await;
+        client_endpoint.wait_idle().await;
     }
 
     #[tokio::test]

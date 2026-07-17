@@ -84,9 +84,9 @@ pub use core_recall_outbox::{
     core_recall_completion_outbox,
 };
 pub use core_recall_runtime::{
-    CoreRecallActorDirectory, CoreRecallAuthoritativeTick, CoreRecallConnectionAuthority,
-    CoreRecallConnectionLease, CoreRecallRuntimeError, CoreRecallRuntimeReport,
-    CoreRecallTransportAttach,
+    CoreRecallActorDirectory, CoreRecallActorRegistration, CoreRecallAuthoritativeTick,
+    CoreRecallConnectionAuthority, CoreRecallConnectionLease, CoreRecallRuntimeError,
+    CoreRecallRuntimeReport, CoreRecallTransportAttach,
 };
 pub use core_terminal_coordinator::{
     CoreNonTerminalAdmission, CoreTerminalBarrierProgress, CoreTerminalCoordinator,
