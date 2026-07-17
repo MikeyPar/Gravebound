@@ -229,6 +229,11 @@ pub struct SuccessorCreateRequestV1 {
 
 impl SuccessorCreateRequestV1 {
     pub fn validate(&self) -> Result<(), PersistenceError> {
+        self.validate_replay_safe()?;
+        self.validate_fresh_content()
+    }
+
+    pub(crate) fn validate_replay_safe(&self) -> Result<(), PersistenceError> {
         if !is_well_formed_core_content_revision(&self.content_revision)
             || self.contract_version != SUCCESSOR_CONTRACT_VERSION_V1
             || self.namespace_id != WIPEABLE_CORE_NAMESPACE
@@ -263,9 +268,6 @@ impl SuccessorCreateRequestV1 {
         {
             return Err(corrupt());
         }
-        if self.content_revision != CORE_ITEM_CONTENT_REVISION {
-            return Err(PersistenceError::SuccessorContentMismatch);
-        }
         validate_initializer_input(
             self.successor_id,
             self.starter_request_hash,
@@ -283,6 +285,13 @@ impl SuccessorCreateRequestV1 {
             .contains(&item.item_uid)
         }) {
             return Err(corrupt());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_fresh_content(&self) -> Result<(), PersistenceError> {
+        if self.content_revision != CORE_ITEM_CONTENT_REVISION {
+            return Err(PersistenceError::SuccessorContentMismatch);
         }
         Ok(())
     }
@@ -778,6 +787,11 @@ mod tests {
         let mut stale = request.clone();
         stale.content_revision = format!("core-dev.blake3.{}", "a".repeat(64));
         stale.canonical_request_hash = stale.expected_request_hash().unwrap();
+        assert!(stale.validate_replay_safe().is_ok());
+        assert!(matches!(
+            stale.validate_fresh_content(),
+            Err(PersistenceError::SuccessorContentMismatch)
+        ));
         assert!(matches!(
             stale.validate(),
             Err(PersistenceError::SuccessorContentMismatch)
@@ -785,6 +799,10 @@ mod tests {
 
         let mut malformed = request;
         malformed.content_revision = "core-dev.blake3.NOT-A-DIGEST".to_owned();
+        assert!(matches!(
+            malformed.validate_replay_safe(),
+            Err(PersistenceError::CorruptStoredSuccessor)
+        ));
         assert!(matches!(
             malformed.validate(),
             Err(PersistenceError::CorruptStoredSuccessor)

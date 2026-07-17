@@ -45,7 +45,7 @@ impl PostgresPersistence {
         &self,
         request: &SuccessorCreateRequestV1,
     ) -> Result<SuccessorCreateTransactionV1, PersistenceError> {
-        request.validate()?;
+        request.validate_replay_safe()?;
         for attempt in 1..=MAX_TRANSACTION_ATTEMPTS {
             match self.create_successor_once_v1(request).await {
                 Err(error)
@@ -89,6 +89,8 @@ impl PostgresPersistence {
                 stored_death_id: stored.death_id,
             });
         }
+
+        request.validate_fresh_content()?;
 
         if result_exists_for_death(
             transaction.connection(),
@@ -817,5 +819,23 @@ mod tests {
         assert_ne!(audit, [0; ID_BYTES]);
         assert_ne!(audit, outbox);
         assert_eq!(audit, derive_id(SUCCESSOR_AUDIT_ID_CONTEXT_V1, &parts));
+    }
+
+    #[test]
+    fn stored_mutation_lookup_precedes_fresh_content_admission() {
+        let source = include_str!("successor_repository.rs");
+        let transaction = source
+            .split("async fn create_successor_once_v1")
+            .nth(1)
+            .unwrap()
+            .split("fn exact_replay")
+            .next()
+            .unwrap();
+        let replay_lookup = transaction.find("load_result_by_mutation").unwrap();
+        let fresh_content = transaction.find("validate_fresh_content").unwrap();
+        assert!(
+            replay_lookup < fresh_content,
+            "stored mutation replay must precede current-content admission"
+        );
     }
 }
