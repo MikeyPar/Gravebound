@@ -56,16 +56,17 @@ use server_app::{
     PostgresDangerEntryAshWalletProviderV3, PostgresDangerEntryInventoryProviderV3,
     PostgresDangerEntryLifeMetricsProviderV3, PostgresDangerEntryOathBargainProviderV3,
     PostgresDeathViewRepository, PostgresDormantWorldFlowCoordinator,
-    PostgresProgressionAwardService, PostgresProgressionRestoreProvider, PostgresRewardService,
-    PreparedTerminal, ProductionRecallClock, ProductionRecallCompletionAuthorityV1,
-    ProductionRecallExecutionService, ProductionRecallIntentActor,
-    ProductionRecallPendingAuthorityV1, ProductionRecallPublishedV1, ProgressionQueryService,
-    RecoveredProductionRecallActorV1, STORED_TERMINAL_RECEIPT_SCHEMA_V1, SecretRewardEpoch,
-    StoredTerminalReceipt, StoredTerminalReceiptV1, SubmitResult, TerminalArbiter, TerminalBinding,
-    TerminalCandidate, TerminalKind, WorldFlowGateService, WorldFlowIdGenerator,
-    core_recall_completion_outbox, drive_recall_terminal_tick, durable_death_terminal_candidate,
-    production_recall_actor_mailbox, recover_committed_death_arbiter,
-    recover_committed_recall_actor, serve_core_reliable, serve_handshake,
+    PostgresProgressionAwardService, PostgresProgressionRestoreProvider,
+    PostgresResolutionHoldService, PostgresRewardService, PreparedTerminal, ProductionRecallClock,
+    ProductionRecallCompletionAuthorityV1, ProductionRecallExecutionService,
+    ProductionRecallIntentActor, ProductionRecallPendingAuthorityV1, ProductionRecallPublishedV1,
+    ProgressionQueryService, RecoveredProductionRecallActorV1, STORED_TERMINAL_RECEIPT_SCHEMA_V1,
+    SecretRewardEpoch, StoredTerminalReceipt, StoredTerminalReceiptV1, SubmitResult,
+    TerminalArbiter, TerminalBinding, TerminalCandidate, TerminalKind, WorldFlowGateService,
+    WorldFlowIdGenerator, core_recall_completion_outbox, drive_recall_terminal_tick,
+    durable_death_terminal_candidate, production_recall_actor_mailbox,
+    recover_committed_death_arbiter, recover_committed_recall_actor, serve_core_reliable,
+    serve_handshake,
 };
 use sim_core::{
     CoreBossParticipant, CoreBossParticipantLock, CoreCaldusAntiCheatState,
@@ -200,6 +201,27 @@ async fn seed_character(persistence: &PostgresPersistence) {
     .execute(transaction.connection())
     .await
     .unwrap();
+    transaction.commit().await.unwrap();
+}
+
+async fn seed_empty_resolution_hold_hall(persistence: &PostgresPersistence) {
+    seed_character(persistence).await;
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let changed = sqlx::query(
+        "UPDATE character_world_locations
+         SET location_kind=1,location_content_id=$1,safe_arrival_kind=0
+         WHERE namespace_id=$2 AND account_id=$3 AND character_id=$4
+           AND character_version=1 AND location_kind=0",
+    )
+    .bind(TERMINAL_HALL_CONTENT_ID)
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(CHARACTER_ID.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap()
+    .rows_affected();
+    assert_eq!(changed, 1);
     transaction.commit().await.unwrap();
 }
 
@@ -754,6 +776,37 @@ fn disabled_resolution_hold_frames() -> (ResolutionHoldQueryFrameV1, ResolutionH
         sequence: 3,
         mutation_id: [66; 16],
         character_id: [63; 16],
+        issued_at_unix_millis: 1,
+        payload_hash: payload.canonical_hash(),
+        payload,
+    };
+    (query, mutation)
+}
+
+fn empty_resolution_hold_frames() -> (ResolutionHoldQueryFrameV1, ResolutionHoldMutationFrameV1) {
+    let query = ResolutionHoldQueryFrameV1 {
+        schema_version: RESOLUTION_HOLD_SCHEMA_VERSION,
+        sequence: 1,
+        character_id: CHARACTER_ID,
+    };
+    let payload = ResolutionHoldMutationPayloadV1 {
+        extraction_id: [67; 16],
+        stack_index: 0,
+        action: ResolutionHoldActionV1::Move,
+        expected_versions: ResolutionHoldVersionsV1 {
+            account: 1,
+            character: 1,
+            world: 1,
+            inventory: 1,
+        },
+        content_revision: WireText::new(persistence::CORE_ITEM_CONTENT_REVISION).unwrap(),
+        expected_stack_digest: [68; 32],
+    };
+    let mutation = ResolutionHoldMutationFrameV1 {
+        schema_version: RESOLUTION_HOLD_SCHEMA_VERSION,
+        sequence: 2,
+        mutation_id: [69; 16],
+        character_id: CHARACTER_ID,
         issued_at_unix_millis: 1,
         payload_hash: payload.canonical_hash(),
         payload,
@@ -1685,6 +1738,166 @@ async fn reliable_quic_rejects_disabled_recall_before_domain_access() {
     server_endpoint.wait_idle().await;
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the authenticated persistent query and typed mutation rejection share one QUIC session"
+)]
+async fn run_empty_resolution_hold_quic(
+    persistence: &PostgresPersistence,
+    include_missing_stack_mutation: bool,
+) -> ResolutionHoldQueryResultV1 {
+    let identity = IdentityService::new(
+        InMemoryAccountRepository::default(),
+        FixedAuthority,
+        FixedAuthority,
+        NoopIdentityEventSink,
+        ManifestHash::new("a".repeat(64)).unwrap(),
+    );
+    let world_flow = disposable_world_flow(persistence.clone());
+    let progression = disabled_progression();
+    let death_views = DeathViewService::new(
+        DisabledDeathViewRepository,
+        durable_death_fixture::death_view_revision(),
+    );
+    let oath = CoreOathSelectionAuthority::<FixedAuthority>::disabled();
+    let bargain = CoreBargainAuthority::<FixedAuthority>::disabled();
+    let safe_inventory = CoreSafeInventoryAuthority::disabled();
+    let resolution_hold = CoreResolutionHoldAuthority::persistent(
+        PostgresResolutionHoldService::new(persistence.clone()),
+    );
+    let extraction_terminal = CoreExtractionTerminalAuthority::disabled();
+    let recall_terminal = CoreRecallTerminalAuthority::disabled();
+    let authenticated = AuthenticatedAccount {
+        account_id: AccountId::new(ACCOUNT_ID).unwrap(),
+        namespace: AuthenticatedNamespace::WipeableTest,
+    };
+    let (query, mutation) = empty_resolution_hold_frames();
+    let (server_endpoint, client_endpoint, address) = endpoints();
+    let connecting = client_endpoint.connect(address, "localhost").unwrap();
+    let incoming = server_endpoint.accept().await.unwrap();
+    let (client, server) = tokio::join!(connecting, incoming);
+    let client = client.unwrap();
+    let server = server.unwrap();
+    let mut hold_policy = policy();
+    hold_policy
+        .feature_flags
+        .push(WireText::new(protocol::CORE_RESOLUTION_HOLD_FEATURE_FLAG).unwrap());
+
+    let server_session = async {
+        serve_handshake(
+            &server,
+            &hold_policy,
+            AuthenticationDecision::Accepted,
+            WireText::new("persistent-resolution-hold-session").unwrap(),
+        )
+        .await
+        .unwrap();
+        serve_core_reliable(
+            &server,
+            &identity,
+            &world_flow,
+            &progression,
+            &death_views,
+            &oath,
+            &bargain,
+            &safe_inventory,
+            &resolution_hold,
+            &extraction_terminal,
+            &recall_terminal,
+            authenticated,
+            1,
+            100,
+        )
+        .await
+        .unwrap();
+        if include_missing_stack_mutation {
+            serve_core_reliable(
+                &server,
+                &identity,
+                &world_flow,
+                &progression,
+                &death_views,
+                &oath,
+                &bargain,
+                &safe_inventory,
+                &resolution_hold,
+                &extraction_terminal,
+                &recall_terminal,
+                authenticated,
+                2,
+                100,
+            )
+            .await
+            .unwrap();
+        }
+    };
+    let client_session = async {
+        let HandshakeResponse::Accepted(server_hello) =
+            bot_client::perform_handshake(&client, hello())
+                .await
+                .unwrap()
+        else {
+            panic!("Core handshake must succeed");
+        };
+        assert!(
+            server_hello
+                .feature_flags
+                .iter()
+                .any(|flag| flag.as_str() == protocol::CORE_RESOLUTION_HOLD_FEATURE_FLAG)
+        );
+        let event = bot_client::perform_reliable_gameplay(
+            &client,
+            protocol::WireMessage::ResolutionHoldQueryFrame(query),
+        )
+        .await
+        .unwrap();
+        let ReliableEvent::ResolutionHoldQueryResult(result) = event.event else {
+            panic!("persistent Hold query must use its dedicated result kind");
+        };
+        let result = *result;
+        assert!(matches!(
+            &result,
+            ResolutionHoldQueryResultV1::Stored {
+                versions: ResolutionHoldVersionsV1 {
+                    account: 1,
+                    character: 1,
+                    world: 1,
+                    inventory: 1,
+                },
+                storage_resolution_required: false,
+                stacks,
+                ..
+            } if stacks.is_empty()
+        ));
+        if include_missing_stack_mutation {
+            let event = bot_client::perform_reliable_gameplay(
+                &client,
+                protocol::WireMessage::ResolutionHoldMutationFrame(mutation),
+            )
+            .await
+            .unwrap();
+            assert!(matches!(
+                event.event,
+                ReliableEvent::ResolutionHoldMutationResult(result)
+                    if matches!(
+                        *result,
+                        ResolutionHoldMutationResultV1::Rejected {
+                            code: ResolutionHoldRejectionCodeV1::NoHeldStack,
+                            ..
+                        }
+                    )
+            ));
+        }
+        result
+    };
+    let ((), result) = tokio::join!(server_session, client_session);
+    drop(client);
+    client_endpoint.wait_idle().await;
+    server_endpoint.close(0_u32.into(), b"persistent ResolutionHold session complete");
+    server_endpoint.wait_idle().await;
+    result
+}
+
 #[tokio::test]
 #[allow(
     clippy::too_many_lines,
@@ -2584,6 +2797,20 @@ async fn reliable_quic_postgres_recall_replays_after_pool_and_actor_restart() {
     drop(restarted_handle);
     drop(restarted_inbox);
     drop(restarted_actor);
+    restarted.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires explicitly authorized disposable PostgreSQL"]
+async fn reliable_quic_reads_persistent_hold_and_rejects_missing_stack_after_restart() {
+    let persistence = disposable_database().await;
+    seed_empty_resolution_hold_hall(&persistence).await;
+    let before_restart = run_empty_resolution_hold_quic(&persistence, true).await;
+    persistence.close().await;
+
+    let restarted = reconnect_database().await;
+    let after_restart = run_empty_resolution_hold_quic(&restarted, false).await;
+    assert_eq!(before_restart, after_restart);
     restarted.close().await;
 }
 
