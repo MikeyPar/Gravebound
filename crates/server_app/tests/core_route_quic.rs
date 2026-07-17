@@ -34,18 +34,19 @@ use protocol::{
     ExtractionCommitFrameV1, ExtractionCommitPayloadV1, ExtractionCommitResultV1,
     HandshakeResponse, ManifestHash, Platform, ProtocolVersion, RESOLUTION_HOLD_SCHEMA_VERSION,
     RecallFrameV1, RecallIntentV1, RecallResultV1, RecallTerminalTriggerV1, ReliableEvent,
-    ResolutionHoldActionV1, ResolutionHoldDestinationV1, ResolutionHoldDispositionV1,
-    ResolutionHoldItemKindV1, ResolutionHoldItemTransitionV1, ResolutionHoldItemV1,
-    ResolutionHoldMutationFrameV1, ResolutionHoldMutationPayloadV1, ResolutionHoldMutationResultV1,
-    ResolutionHoldQueryFrameV1, ResolutionHoldQueryResultV1, ResolutionHoldRejectionCodeV1,
-    ResolutionHoldStackV1, ResolutionHoldVersionAdvanceV1, ResolutionHoldVersionVectorV1,
-    ResolutionHoldVersionsV1, SUCCESSOR_SCHEMA_VERSION, SafeArrival, StoredRecallTerminalResultV1,
-    StoredResolutionHoldMutationResultV1, SuccessorCreateFrameV1, SuccessorCreatePayloadV1,
-    SuccessorCreateResultV1, SuccessorRejectionCodeV1, TERMINAL_HALL_CONTENT_ID,
-    TERMINAL_INVENTORY_SCHEMA_VERSION, TerminalExpectedVersionsV1,
-    TerminalInventoryRejectionCodeV1, TerminalVersionAdvanceV1, TerminalVersionVectorV1, WireText,
-    WorldFlowContentRevisionV1, WorldFlowFrame, WorldFlowRequest, WorldFlowResult,
-    WorldTransferCommand, WorldTransferMutation, WorldTransferPayload, WorldTransferResultCode,
+    ReliableEventFrame, ResolutionHoldActionV1, ResolutionHoldDestinationV1,
+    ResolutionHoldDispositionV1, ResolutionHoldItemKindV1, ResolutionHoldItemTransitionV1,
+    ResolutionHoldItemV1, ResolutionHoldMutationFrameV1, ResolutionHoldMutationPayloadV1,
+    ResolutionHoldMutationResultV1, ResolutionHoldQueryFrameV1, ResolutionHoldQueryResultV1,
+    ResolutionHoldRejectionCodeV1, ResolutionHoldStackV1, ResolutionHoldVersionAdvanceV1,
+    ResolutionHoldVersionVectorV1, ResolutionHoldVersionsV1, SUCCESSOR_SCHEMA_VERSION, SafeArrival,
+    StoredRecallTerminalResultV1, StoredResolutionHoldMutationResultV1, SuccessorCreateFrameV1,
+    SuccessorCreatePayloadV1, SuccessorCreateResultV1, SuccessorRejectionCodeV1,
+    TERMINAL_HALL_CONTENT_ID, TERMINAL_INVENTORY_SCHEMA_VERSION, TerminalExpectedVersionsV1,
+    TerminalInventoryRejectionCodeV1, TerminalVersionAdvanceV1, TerminalVersionVectorV1,
+    WireMessage, WireText, WorldFlowContentRevisionV1, WorldFlowFrame, WorldFlowRequest,
+    WorldFlowResult, WorldTransferCommand, WorldTransferMutation, WorldTransferPayload,
+    WorldTransferResultCode,
 };
 use rcgen::{CertifiedKey, generate_simple_self_signed};
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
@@ -68,9 +69,9 @@ use server_app::{
     PostgresDangerEntryLifeMetricsProviderV3, PostgresDangerEntryOathBargainProviderV3,
     PostgresDeathViewRepository, PostgresDormantWorldFlowCoordinator,
     PostgresProgressionAwardService, PostgresProgressionRestoreProvider,
-    PostgresResolutionHoldService, PostgresRewardService, PreparedTerminal, ProductionRecallClock,
-    ProductionRecallCompletionAuthorityV1, ProductionRecallDetachOutcome,
-    ProductionRecallExecutionService, ProductionRecallIntentActor,
+    PostgresResolutionHoldService, PostgresRewardService, PostgresSuccessorService,
+    PreparedTerminal, ProductionRecallClock, ProductionRecallCompletionAuthorityV1,
+    ProductionRecallDetachOutcome, ProductionRecallExecutionService, ProductionRecallIntentActor,
     ProductionRecallPendingAuthorityV1, ProductionRecallPublishedV1, ProgressionQueryService,
     RecoveredProductionRecallActorV1, STORED_TERMINAL_RECEIPT_SCHEMA_V1, SecretRewardEpoch,
     StoredTerminalReceipt, StoredTerminalReceiptV1, SubmitResult, TerminalArbiter, TerminalBinding,
@@ -91,9 +92,13 @@ const TRANSFER_ID: [u8; 16] = [213; 16];
 const LINEAGE_ID: [u8; 16] = [214; 16];
 const RESTORE_ID: [u8; 16] = [215; 16];
 const EXTRACTION_RECEIPT_ID: [u8; 16] = [217; 16];
+const SUCCESSOR_QUIC_MUTATION_ID: [u8; 16] = [77; 16];
+const ALTERED_SUCCESSOR_DEATH_ID: [u8; 16] = [78; 16];
 const HALL_ID: &str = "hub.lantern_halls_01";
 const WORLD_ID: &str = "world.core_microrealm_01";
 const DEATH_LATENCY_SAMPLE_COUNT: usize = 10;
+const SUCCESSOR_SESSION_TIMEOUT: Duration = Duration::from_secs(30);
+const SUCCESSOR_TEARDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn content_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../content")
@@ -702,6 +707,14 @@ fn recall_policy() -> HandshakePolicy {
     policy
 }
 
+fn successor_policy() -> HandshakePolicy {
+    let mut policy = policy();
+    policy
+        .feature_flags
+        .push(WireText::new(protocol::CORE_SUCCESSOR_FEATURE_FLAG).unwrap());
+    policy
+}
+
 fn recall_completion_publication() -> ProductionRecallPublishedV1 {
     ProductionRecallPublishedV1 {
         result: RecallResultV1::Stored {
@@ -1060,18 +1073,42 @@ fn scripted_resolution_hold_frame(
     }
 }
 
-fn scripted_successor_frame() -> SuccessorCreateFrameV1 {
+fn successor_frame(
+    sequence: u32,
+    mutation_id: [u8; 16],
+    death_id: [u8; 16],
+) -> SuccessorCreateFrameV1 {
     let payload = SuccessorCreatePayloadV1 {
-        death_id: [75; 16],
+        death_id,
         content_revision: WireText::new(persistence::CORE_ITEM_CONTENT_REVISION).unwrap(),
     };
     SuccessorCreateFrameV1 {
         schema_version: SUCCESSOR_SCHEMA_VERSION,
-        sequence: 1,
-        mutation_id: [76; 16],
+        sequence,
+        mutation_id,
         payload_hash: payload.canonical_hash(),
         payload,
     }
+}
+
+fn scripted_successor_frame() -> SuccessorCreateFrameV1 {
+    successor_frame(1, [76; 16], [75; 16])
+}
+
+fn persistent_successor_frame(sequence: u32) -> SuccessorCreateFrameV1 {
+    successor_frame(
+        sequence,
+        SUCCESSOR_QUIC_MUTATION_ID,
+        durable_death_fixture::PRIMARY_IDENTITY.death_id,
+    )
+}
+
+fn altered_successor_frame(sequence: u32) -> SuccessorCreateFrameV1 {
+    successor_frame(
+        sequence,
+        SUCCESSOR_QUIC_MUTATION_ID,
+        ALTERED_SUCCESSOR_DEATH_ID,
+    )
 }
 
 fn production_death_view_hello() -> ClientHello {
@@ -2016,6 +2053,387 @@ async fn reliable_quic_dispatches_authenticated_successor_frame() {
     client_endpoint.wait_idle().await;
     server_endpoint.close(0_u32.into(), b"scripted successor complete");
     server_endpoint.wait_idle().await;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SuccessorResponseDelivery {
+    Abandon,
+    Receive,
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the authenticated handshake, successor dispatch, and complete endpoint teardown form one reusable transport boundary"
+)]
+async fn run_persistent_successor_quic_session(
+    persistence: &PostgresPersistence,
+    session_id: &'static str,
+    frames: Vec<SuccessorCreateFrameV1>,
+    delivery: SuccessorResponseDelivery,
+) -> Vec<(ReliableEventFrame, SuccessorCreateResultV1)> {
+    const SERVER_TICK: u64 = 20_100;
+    assert!(!frames.is_empty());
+    if delivery == SuccessorResponseDelivery::Abandon {
+        assert_eq!(frames.len(), 1);
+    }
+    for frame in &frames {
+        frame.validate().unwrap();
+    }
+
+    let identity = IdentityService::new(
+        InMemoryAccountRepository::default(),
+        FixedAuthority,
+        FixedAuthority,
+        NoopIdentityEventSink,
+        ManifestHash::new("a".repeat(64)).unwrap(),
+    );
+    let world_flow = WorldFlowGateService::new(
+        InMemoryAccountRepository::default(),
+        FixedAuthority,
+        revision(),
+    );
+    let progression = disabled_progression();
+    let death_views = DeathViewService::new(
+        DisabledDeathViewRepository,
+        durable_death_fixture::death_view_revision(),
+    );
+    let oath = CoreOathSelectionAuthority::<FixedAuthority>::disabled();
+    let bargain = CoreBargainAuthority::<FixedAuthority>::disabled();
+    let safe_inventory = CoreSafeInventoryAuthority::disabled();
+    let successor =
+        CoreSuccessorAuthority::persistent(PostgresSuccessorService::new(persistence.clone()));
+    let extraction = CoreExtractionTerminalAuthority::disabled();
+    let recall = CoreRecallTerminalAuthority::disabled();
+    let authenticated = durable_death_fixture::authenticated_account();
+    let request_count = frames.len();
+    let (server_endpoint, client_endpoint, address) = endpoints();
+    let (client, server) = connect_endpoint_pair(&server_endpoint, &client_endpoint, address).await;
+
+    let server_session = async {
+        serve_handshake(
+            &server,
+            &successor_policy(),
+            AuthenticationDecision::Accepted,
+            WireText::new(session_id).unwrap(),
+        )
+        .await
+        .unwrap();
+        for index in 0..request_count {
+            let response_sequence = u32::try_from(index + 1).unwrap();
+            let outcome = serve_core_reliable(
+                &server,
+                &identity,
+                &world_flow,
+                &progression,
+                &death_views,
+                &oath,
+                &bargain,
+                &safe_inventory,
+                &CoreResolutionHoldAuthority::disabled(),
+                &successor,
+                &extraction,
+                &recall,
+                authenticated,
+                response_sequence,
+                SERVER_TICK,
+            )
+            .await;
+            match delivery {
+                SuccessorResponseDelivery::Receive => {
+                    outcome.expect("the acknowledged successor response must reach the client");
+                }
+                SuccessorResponseDelivery::Abandon => {
+                    if let Err(error) = outcome {
+                        assert!(
+                            matches!(error, server_app::ServerTransportError::Quic(_)),
+                            "only response delivery may fail after the durable commit: {error}"
+                        );
+                    }
+                }
+            }
+        }
+    };
+    let client_session = async {
+        let HandshakeResponse::Accepted(server_hello) =
+            bot_client::perform_handshake(&client, hello())
+                .await
+                .unwrap()
+        else {
+            panic!("persistent successor handshake must succeed");
+        };
+        assert!(
+            server_hello
+                .feature_flags
+                .iter()
+                .any(|flag| flag.as_str() == protocol::CORE_SUCCESSOR_FEATURE_FLAG)
+        );
+        match delivery {
+            SuccessorResponseDelivery::Abandon => {
+                bot_client::submit_successor_create_without_response(
+                    &client,
+                    frames.into_iter().next().unwrap(),
+                )
+                .await
+                .unwrap();
+                Vec::new()
+            }
+            SuccessorResponseDelivery::Receive => {
+                let mut responses = Vec::with_capacity(frames.len());
+                for frame in frames {
+                    let response = bot_client::perform_successor_create(&client, frame)
+                        .await
+                        .unwrap();
+                    response.1.validate().unwrap();
+                    responses.push(response);
+                }
+                responses
+            }
+        }
+    };
+    let ((), responses) = Box::pin(tokio::time::timeout(SUCCESSOR_SESSION_TIMEOUT, async {
+        tokio::join!(server_session, client_session)
+    }))
+    .await
+    .expect("persistent successor QUIC session must finish within thirty seconds");
+    client.close(0_u32.into(), b"successor session complete");
+    server.close(0_u32.into(), b"successor session complete");
+    drop(client);
+    drop(server);
+    client_endpoint.close(0_u32.into(), b"successor endpoint complete");
+    server_endpoint.close(0_u32.into(), b"successor endpoint complete");
+    tokio::time::timeout(SUCCESSOR_TEARDOWN_TIMEOUT, async {
+        tokio::join!(client_endpoint.wait_idle(), server_endpoint.wait_idle());
+    })
+    .await
+    .expect("successor endpoints must reach idle within ten seconds");
+    responses
+}
+
+async fn commit_primary_successor_death(persistence: &PostgresPersistence) {
+    durable_death_fixture::seed_danger_root(persistence).await;
+    let death = durable_death_fixture::prepare_death(persistence.clone()).await;
+    let committed = persistence
+        .transact_durable_death(death.request(), death.content(), death.promotion())
+        .await
+        .unwrap();
+    assert!(!committed.is_replay());
+}
+
+async fn assert_persistent_successor_graph(
+    persistence: &PostgresPersistence,
+    stored: &protocol::StoredSuccessorResultV1,
+    expected_conflicts: i64,
+) {
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let counts: (i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT \
+           (SELECT count(*) FROM successor_mutation_results_v1 \
+            WHERE namespace_id=$1 AND account_id=$2 AND mutation_id=$3), \
+           (SELECT count(*) FROM successor_creation_receipts_v1 \
+            WHERE namespace_id=$1 AND account_id=$2 AND mutation_id=$3), \
+           (SELECT count(*) FROM successor_mutation_audit_events_v1 \
+            WHERE namespace_id=$1 AND account_id=$2 AND mutation_id=$3), \
+           (SELECT count(*) FROM successor_mutation_outbox_events_v1 \
+            WHERE namespace_id=$1 AND account_id=$2 AND mutation_id=$3), \
+           (SELECT count(*) FROM successor_mutation_conflict_audits_v1 \
+            WHERE namespace_id=$1 AND account_id=$2 AND mutation_id=$3), \
+           (SELECT count(*) FROM characters \
+            WHERE namespace_id=$1 AND account_id=$2 AND character_id=$4), \
+           (SELECT count(*) FROM item_instances \
+            WHERE namespace_id=$1 AND account_id=$2 AND character_id=$4)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(durable_death_fixture::ACCOUNT_ID.as_slice())
+    .bind(SUCCESSOR_QUIC_MUTATION_ID.as_slice())
+    .bind(stored.successor_id.as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    assert_eq!(counts, (1, 1, 1, 1, expected_conflicts, 1, 4));
+
+    let selected: Vec<u8> = sqlx::query_scalar(
+        "SELECT selected_character_id FROM accounts \
+         WHERE namespace_id=$1 AND account_id=$2",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(durable_death_fixture::ACCOUNT_ID.as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    assert_eq!(selected, stored.successor_id);
+    let reservation: (i16, Vec<u8>, Vec<u8>, Vec<u8>) = sqlx::query_as(
+        "SELECT reservation_state,consumed_mutation_id,consumed_successor_id,consumed_receipt_id \
+         FROM successor_roster_reservations_v1 \
+         WHERE namespace_id=$1 AND account_id=$2 AND death_id=$3",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(durable_death_fixture::ACCOUNT_ID.as_slice())
+    .bind(durable_death_fixture::PRIMARY_IDENTITY.death_id.as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    assert_eq!(reservation.0, 1);
+    assert_eq!(reservation.1, SUCCESSOR_QUIC_MUTATION_ID);
+    assert_eq!(reservation.2, stored.successor_id);
+    assert_eq!(reservation.3, stored.receipt_id);
+    transaction.rollback().await.unwrap();
+    assert_persistent_successor_starter_items(persistence, stored).await;
+    assert_database_peer_sessions_idle(persistence).await;
+}
+
+async fn assert_persistent_successor_starter_items(
+    persistence: &PostgresPersistence,
+    stored: &protocol::StoredSuccessorResultV1,
+) {
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let item_rows = sqlx::query(
+        "SELECT item_uid,template_id,location_kind,slot_index,provenance_kind \
+         FROM item_instances WHERE namespace_id=$1 AND account_id=$2 AND character_id=$3 \
+         ORDER BY roll_index,unit_ordinal,item_uid",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(durable_death_fixture::ACCOUNT_ID.as_slice())
+    .bind(stored.successor_id.as_slice())
+    .fetch_all(transaction.connection())
+    .await
+    .unwrap();
+    let expected_uids = stored.starter_items.ordered_uids();
+    assert_eq!(item_rows.len(), expected_uids.len());
+    for (index, row) in item_rows.iter().enumerate() {
+        assert_eq!(
+            row.try_get::<Vec<u8>, _>("item_uid").unwrap(),
+            expected_uids[index]
+        );
+    }
+    assert_eq!(
+        (
+            item_rows[0].try_get::<String, _>("template_id").unwrap(),
+            item_rows[0].try_get::<i16, _>("location_kind").unwrap(),
+            item_rows[0].try_get::<i16, _>("slot_index").unwrap(),
+            item_rows[0].try_get::<i16, _>("provenance_kind").unwrap(),
+        ),
+        ("item.weapon.crossbow.pine_crossbow".into(), 0, 0, 0,)
+    );
+    assert_eq!(
+        (
+            item_rows[1].try_get::<String, _>("template_id").unwrap(),
+            item_rows[1].try_get::<i16, _>("location_kind").unwrap(),
+            item_rows[1].try_get::<i16, _>("slot_index").unwrap(),
+            item_rows[1].try_get::<i16, _>("provenance_kind").unwrap(),
+        ),
+        ("item.relic.arbalist.cracked_mark_lens".into(), 0, 1, 0,)
+    );
+    for row in &item_rows[2..] {
+        assert_eq!(
+            (
+                row.try_get::<String, _>("template_id").unwrap(),
+                row.try_get::<i16, _>("location_kind").unwrap(),
+                row.try_get::<i16, _>("slot_index").unwrap(),
+                row.try_get::<i16, _>("provenance_kind").unwrap(),
+            ),
+            ("consumable.red_tonic".into(), 1, 0, 4)
+        );
+    }
+    transaction.rollback().await.unwrap();
+}
+
+async fn assert_database_peer_sessions_idle(persistence: &PostgresPersistence) {
+    let mut residue = persistence.begin_transaction().await.unwrap();
+    let non_idle_peer_sessions: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_stat_activity \
+         WHERE datname=current_database() AND pid<>pg_backend_pid() AND state<>'idle'",
+    )
+    .fetch_one(residue.connection())
+    .await
+    .unwrap();
+    assert_eq!(non_idle_peer_sessions, 0);
+    residue.rollback().await.unwrap();
+}
+
+/// GDD `DTH-020`/`021` and `TECH-021`-`023`, Content Spec `CONT-CATALOG-003`, and
+/// Roadmap `GB-M03-07` require one authenticated successor with an exact four-instance starter
+/// kit to survive lost delivery, reconnect, and an authority/database-pool restart without a
+/// duplicate character or grant. Normal route admission remains disabled by the runtime test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires explicitly authorized disposable PostgreSQL"]
+async fn persistent_successor_replays_identically_after_response_loss_and_pool_restart() {
+    let persistence = disposable_database().await;
+    commit_primary_successor_death(&persistence).await;
+    let exact = persistent_successor_frame(1);
+
+    let lost = Box::pin(run_persistent_successor_quic_session(
+        &persistence,
+        "successor-commit-response-loss",
+        vec![exact.clone()],
+        SuccessorResponseDelivery::Abandon,
+    ))
+    .await;
+    assert!(lost.is_empty());
+
+    let mut before_restart = Box::pin(run_persistent_successor_quic_session(
+        &persistence,
+        "successor-reconnect-replay",
+        vec![exact.clone()],
+        SuccessorResponseDelivery::Receive,
+    ))
+    .await;
+    assert_eq!(before_restart.len(), 1);
+    let (expected_event, expected_result) = before_restart.pop().unwrap();
+    let SuccessorCreateResultV1::Stored {
+        request_sequence: 1,
+        replayed: true,
+        result: expected_stored,
+        ..
+    } = expected_result
+    else {
+        panic!("the reconnect must return the exact stored successor");
+    };
+    assert_persistent_successor_graph(&persistence, &expected_stored, 0).await;
+    let expected_bytes =
+        protocol::encode_frame(&WireMessage::ReliableEvent(expected_event)).unwrap();
+    tokio::time::timeout(SUCCESSOR_TEARDOWN_TIMEOUT, persistence.close())
+        .await
+        .expect("the original successor database pool must close within ten seconds");
+
+    let restarted = reconnect_database().await;
+    let responses = Box::pin(run_persistent_successor_quic_session(
+        &restarted,
+        "successor-pool-restart-replay",
+        vec![exact, altered_successor_frame(2)],
+        SuccessorResponseDelivery::Receive,
+    ))
+    .await;
+    assert_eq!(responses.len(), 2);
+    let (replayed_event, replayed_result) = &responses[0];
+    assert_eq!(
+        protocol::encode_frame(&WireMessage::ReliableEvent(replayed_event.clone())).unwrap(),
+        expected_bytes
+    );
+    assert!(matches!(
+        replayed_result,
+        SuccessorCreateResultV1::Stored {
+            request_sequence: 1,
+            replayed: true,
+            result,
+            ..
+        } if result.as_ref() == expected_stored.as_ref()
+    ));
+    let (conflict_event, conflict_result) = &responses[1];
+    assert_eq!(conflict_event.sequence, 2);
+    assert!(matches!(
+        conflict_result,
+        SuccessorCreateResultV1::Rejected {
+            request_sequence: 2,
+            mutation_id: SUCCESSOR_QUIC_MUTATION_ID,
+            death_id: ALTERED_SUCCESSOR_DEATH_ID,
+            code: SuccessorRejectionCodeV1::IdempotencyConflict,
+            ..
+        }
+    ));
+    assert_persistent_successor_graph(&restarted, &expected_stored, 1).await;
+    tokio::time::timeout(SUCCESSOR_TEARDOWN_TIMEOUT, restarted.close())
+        .await
+        .expect("the restarted successor database pool must close within ten seconds");
 }
 
 #[tokio::test]
