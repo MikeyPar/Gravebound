@@ -382,7 +382,7 @@ pub async fn seed_danger_root_for(
         );
     }
     if scenario.character_precreated {
-        let character: (i16, String, i16, i16, i16, i64) = sqlx::query_as(
+        let character: (i16, String, i32, i16, i16, i64) = sqlx::query_as(
             "SELECT roster_ordinal,class_id,level,life_state,security_state, \
              character_state_version FROM characters WHERE namespace_id=$1 AND account_id=$2 \
              AND character_id=$3 FOR UPDATE",
@@ -398,7 +398,7 @@ pub async fn seed_danger_root_for(
             (
                 i16::from(scenario.roster_ordinal),
                 "class.grave_arbalist".to_owned(),
-                i16::from(scenario.level),
+                i32::from(scenario.level),
                 0,
                 0,
                 1,
