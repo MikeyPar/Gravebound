@@ -48,7 +48,7 @@ pub enum NetworkStartup {
 #[derive(Debug, Clone)]
 pub enum TransportEvent {
     Connecting,
-    HandshakeAccepted,
+    HandshakeAccepted(protocol::ServerHello),
     Reliable(ReliableEventFrame),
     LinkLost,
     Reconnecting { attempt: usize },
@@ -185,8 +185,8 @@ async fn run_worker(
     let mut control_sequence = 1_u32;
     let mut reconnect_attempt = 0_usize;
     loop {
-        let connection = match connect_and_handshake(&endpoint, &config).await {
-            Ok(connection) => connection,
+        let (connection, server_hello) = match connect_and_handshake(&endpoint, &config).await {
+            Ok(accepted) => accepted,
             Err(error)
                 if (prior_session.is_some() || core_bootstrapped)
                     && reconnect_attempt < RECONNECT_ATTEMPTS =>
@@ -204,7 +204,7 @@ async fn run_worker(
             }
             Err(error) => return Err(error),
         };
-        send_event(&events, TransportEvent::HandshakeAccepted)?;
+        send_event(&events, TransportEvent::HandshakeAccepted(server_hello))?;
         let lifecycle_event = match &config.startup {
             NetworkStartup::CombatSession => {
                 let request = match prior_session.clone() {
@@ -277,7 +277,7 @@ async fn run_worker(
 async fn connect_and_handshake(
     endpoint: &quinn::Endpoint,
     config: &NetworkTransportConfig,
-) -> Result<quinn::Connection, NetworkTransportError> {
+) -> Result<(quinn::Connection, protocol::ServerHello), NetworkTransportError> {
     let connection = endpoint
         .connect(config.server_address, &config.server_name)?
         .await?;
@@ -287,7 +287,7 @@ async fn connect_and_handshake(
         return Err(NetworkTransportError::UnexpectedMessage);
     };
     match response {
-        HandshakeResponse::Accepted(_) => Ok(connection),
+        HandshakeResponse::Accepted(server_hello) => Ok((connection, server_hello)),
         HandshakeResponse::Rejected(rejection) => {
             Err(NetworkTransportError::HandshakeRejected(rejection))
         }

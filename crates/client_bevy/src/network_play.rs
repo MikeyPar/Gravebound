@@ -263,7 +263,7 @@ fn poll_network_transport(
     for event in bridge.0.drain_events() {
         match event {
             TransportEvent::Connecting => "CONNECTING".clone_into(&mut state.status),
-            TransportEvent::HandshakeAccepted => "JOINING".clone_into(&mut state.status),
+            TransportEvent::HandshakeAccepted(_) => "JOINING".clone_into(&mut state.status),
             TransportEvent::Reliable(event) => {
                 state.reliable_results = state.reliable_results.saturating_add(1);
                 if matches!(event.event, ReliableEvent::Control(_)) {

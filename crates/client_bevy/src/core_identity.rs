@@ -22,7 +22,7 @@ use protocol::{
     CORE_TEST_IDENTITY_FEATURE_FLAG, CharacterMutationFrame, CharacterMutationPayload,
     CharacterMutationResult, ClientHello, Compression, GRAVE_ARBALIST_CLASS_ID,
     M02_LOCAL_SERVER_NAME, M03_CORE_DEV_BUILD_ID, ManifestHash, Platform, ProgressionQueryFrame,
-    ProtocolVersion, ReliableEvent, WireMessage, WireText,
+    ProtocolVersion, ReliableEvent, ServerHello, WireMessage, WireText,
 };
 use sim_content::{
     CoreDevelopmentIdentityCopy, load_and_validate, load_core_development_identity,
@@ -72,6 +72,7 @@ pub enum CoreIdentityPhase {
 pub struct CoreIdentityModel {
     phase: CoreIdentityPhase,
     snapshot: Option<AccountSnapshot>,
+    negotiated_server_hello: Option<ServerHello>,
     error: Option<AccountErrorCode>,
     transport_error: Option<String>,
 }
@@ -81,6 +82,7 @@ impl Default for CoreIdentityModel {
         Self {
             phase: CoreIdentityPhase::Boot,
             snapshot: None,
+            negotiated_server_hello: None,
             error: None,
             transport_error: None,
         }
@@ -98,14 +100,21 @@ impl CoreIdentityModel {
         self.snapshot.as_ref()
     }
 
+    #[must_use]
+    pub const fn negotiated_server_hello(&self) -> Option<&ServerHello> {
+        self.negotiated_server_hello.as_ref()
+    }
+
     fn begin_authentication(&mut self) {
         self.phase = CoreIdentityPhase::Authenticating;
+        self.negotiated_server_hello = None;
         self.error = None;
         self.transport_error = None;
     }
 
-    fn handshake_accepted(&mut self) {
+    fn handshake_accepted(&mut self, server_hello: ServerHello) {
         self.phase = CoreIdentityPhase::RosterLoading;
+        self.negotiated_server_hello = Some(server_hello);
     }
 
     fn apply_bootstrap(&mut self, result: AccountBootstrapResult) {
@@ -432,7 +441,9 @@ fn poll_core_transport(
     for event in bridge.0.drain_events() {
         match event {
             TransportEvent::Connecting => model.begin_authentication(),
-            TransportEvent::HandshakeAccepted => model.handshake_accepted(),
+            TransportEvent::HandshakeAccepted(server_hello) => {
+                model.handshake_accepted(server_hello);
+            }
             TransportEvent::Reliable(frame) => match frame.event {
                 ReliableEvent::AccountBootstrapResult(result) => model.apply_bootstrap(result),
                 ReliableEvent::CharacterMutationResult(result) => model.apply_mutation(result),
@@ -1564,8 +1575,8 @@ mod tests {
     use std::path::Path;
 
     use protocol::{
-        AccountNamespace, CORE_CHARACTER_SLOT_CAPACITY, CharacterLifeState, CharacterSecurityState,
-        CharacterSnapshot,
+        AccountNamespace, CORE_CHARACTER_SLOT_CAPACITY, CORE_RESOLUTION_HOLD_FEATURE_FLAG,
+        CharacterLifeState, CharacterSecurityState, CharacterSnapshot, SIMULATION_HZ, SNAPSHOT_HZ,
     };
 
     use super::*;
@@ -1592,13 +1603,34 @@ mod tests {
         }
     }
 
+    fn server_hello() -> ServerHello {
+        let version = ProtocolVersion::current();
+        ServerHello {
+            session_id: WireText::new("session-feature-proof").unwrap(),
+            protocol_major: version.major,
+            protocol_minor: version.minor,
+            required_client_build: WireText::new(M03_CORE_DEV_BUILD_ID).unwrap(),
+            content_bundle_version: WireText::new("core-test").unwrap(),
+            server_tick_rate: SIMULATION_HZ,
+            snapshot_rate: SNAPSHOT_HZ,
+            region_id: WireText::new("local").unwrap(),
+            feature_flags: vec![WireText::new(CORE_RESOLUTION_HOLD_FEATURE_FLAG).unwrap()],
+        }
+    }
+
     #[test]
     fn authoritative_snapshots_drive_empty_ready_and_selected_states() {
         let mut model = CoreIdentityModel::default();
         model.begin_authentication();
         assert_eq!(model.phase(), CoreIdentityPhase::Authenticating);
-        model.handshake_accepted();
+        model.handshake_accepted(server_hello());
         assert_eq!(model.phase(), CoreIdentityPhase::RosterLoading);
+        assert!(model.negotiated_server_hello().is_some_and(|hello| {
+            hello
+                .feature_flags
+                .iter()
+                .any(|flag| flag.as_str() == CORE_RESOLUTION_HOLD_FEATURE_FLAG)
+        }));
         model.apply_bootstrap(AccountBootstrapResult::Snapshot(snapshot(Vec::new(), None)));
         assert_eq!(model.phase(), CoreIdentityPhase::EmptyRoster);
         model.apply_mutation(CharacterMutationResult {
@@ -1615,6 +1647,9 @@ mod tests {
             snapshot: Some(snapshot(vec![character(1)], Some([1; 16]))),
         });
         assert_eq!(model.phase(), CoreIdentityPhase::Selected);
+
+        model.begin_authentication();
+        assert!(model.negotiated_server_hello().is_none());
     }
 
     #[test]
