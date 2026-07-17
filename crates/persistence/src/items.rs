@@ -71,92 +71,116 @@ impl PostgresPersistence {
         items: &[StoredStarterItem],
     ) -> Result<StoredStarterInitialization, PersistenceError> {
         let mut transaction = self.begin_transaction().await?;
-        let inventory_version =
-            lock_or_create_inventory(transaction.connection(), account_id, character_id).await?;
-
-        if let Some(row) = sqlx::query(
-            "SELECT request_hash, result_hash, pre_inventory_version, post_inventory_version \
-             FROM starter_initializer_results WHERE namespace_id = $1 AND account_id = $2 \
-             AND character_id = $3 AND initializer_revision = $4",
-        )
-        .bind(WIPEABLE_CORE_NAMESPACE)
-        .bind(account_id.as_slice())
-        .bind(character_id.as_slice())
-        .bind(STARTER_INITIALIZER_REVISION)
-        .fetch_optional(transaction.connection())
-        .await
-        .map_err(PersistenceError::Database)?
-        {
-            let stored_request = fixed_bytes::<32>(row.try_get("request_hash")?)?;
-            if stored_request != request_hash {
-                transaction.rollback().await?;
-                return Err(PersistenceError::ItemIdempotencyConflict);
-            }
-            let stored_result = fixed_bytes::<32>(row.try_get("result_hash")?)?;
-            let pre_inventory_version = row.try_get("pre_inventory_version")?;
-            let post_inventory_version = row.try_get("post_inventory_version")?;
-            let stored_items =
-                load_starter_items(transaction.connection(), account_id, character_id, items)
-                    .await?;
-            validate_initializer_input(stored_request, stored_result, &stored_items)?;
-            if stored_items != items {
-                transaction.rollback().await?;
-                return Err(PersistenceError::CorruptStoredItems);
-            }
-            transaction.rollback().await?;
-            return Ok(StoredStarterInitialization {
-                replayed: true,
-                pre_inventory_version,
-                post_inventory_version,
-                result_hash: stored_result,
-                items: stored_items,
-            });
-        }
-
-        for item in items {
-            insert_starter_item(transaction.connection(), account_id, character_id, item).await?;
-        }
-        let post_inventory_version = inventory_version
-            .checked_add(1)
-            .ok_or(PersistenceError::CorruptStoredItems)?;
-        sqlx::query(
-            "UPDATE character_inventories SET inventory_version = $1, \
-             updated_at = transaction_timestamp() WHERE namespace_id = $2 \
-             AND account_id = $3 AND character_id = $4",
-        )
-        .bind(post_inventory_version)
-        .bind(WIPEABLE_CORE_NAMESPACE)
-        .bind(account_id.as_slice())
-        .bind(character_id.as_slice())
-        .execute(transaction.connection())
-        .await
-        .map_err(PersistenceError::Database)?;
-        sqlx::query(
-            "INSERT INTO starter_initializer_results \
-             (namespace_id, account_id, character_id, initializer_revision, request_hash, \
-              result_hash, pre_inventory_version, post_inventory_version) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
-        )
-        .bind(WIPEABLE_CORE_NAMESPACE)
-        .bind(account_id.as_slice())
-        .bind(character_id.as_slice())
-        .bind(STARTER_INITIALIZER_REVISION)
-        .bind(request_hash.as_slice())
-        .bind(result_hash.as_slice())
-        .bind(inventory_version)
-        .bind(post_inventory_version)
-        .execute(transaction.connection())
-        .await
-        .map_err(PersistenceError::Database)?;
-        transaction.commit().await?;
-        Ok(StoredStarterInitialization {
-            replayed: false,
-            pre_inventory_version: inventory_version,
-            post_inventory_version,
+        let result = initialize_starter_items_in_transaction(
+            transaction.connection(),
+            account_id,
+            character_id,
+            request_hash,
             result_hash,
-            items: items.to_vec(),
-        })
+            items,
+        )
+        .await?;
+        if result.replayed {
+            transaction.rollback().await?;
+        } else {
+            transaction.commit().await?;
+        }
+        Ok(result)
     }
+}
+
+/// Applies the exact starter initializer on an existing serializable transaction.
+///
+/// The caller owns commit, rollback, and transaction retry policy. A replay is returned without
+/// mutating the connection so a larger aggregate writer can fail closed if it expected a fresh
+/// successor. This is the only transaction-local starter write seam used by successor recovery.
+pub(crate) async fn initialize_starter_items_in_transaction(
+    connection: &mut sqlx::PgConnection,
+    account_id: [u8; 16],
+    character_id: [u8; 16],
+    request_hash: [u8; 32],
+    result_hash: [u8; 32],
+    items: &[StoredStarterItem],
+) -> Result<StoredStarterInitialization, PersistenceError> {
+    validate_initializer_input(request_hash, result_hash, items)?;
+    let inventory_version = lock_or_create_inventory(connection, account_id, character_id).await?;
+
+    if let Some(row) = sqlx::query(
+        "SELECT request_hash, result_hash, pre_inventory_version, post_inventory_version \
+         FROM starter_initializer_results WHERE namespace_id = $1 AND account_id = $2 \
+         AND character_id = $3 AND initializer_revision = $4",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
+    .bind(STARTER_INITIALIZER_REVISION)
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(PersistenceError::Database)?
+    {
+        let stored_request = fixed_bytes::<32>(row.try_get("request_hash")?)?;
+        if stored_request != request_hash {
+            return Err(PersistenceError::ItemIdempotencyConflict);
+        }
+        let stored_result = fixed_bytes::<32>(row.try_get("result_hash")?)?;
+        let pre_inventory_version = row.try_get("pre_inventory_version")?;
+        let post_inventory_version = row.try_get("post_inventory_version")?;
+        let stored_items = load_starter_items(connection, account_id, character_id, items).await?;
+        validate_initializer_input(stored_request, stored_result, &stored_items)?;
+        if stored_result != result_hash || stored_items != items {
+            return Err(PersistenceError::CorruptStoredItems);
+        }
+        return Ok(StoredStarterInitialization {
+            replayed: true,
+            pre_inventory_version,
+            post_inventory_version,
+            result_hash: stored_result,
+            items: stored_items,
+        });
+    }
+
+    for item in items {
+        insert_starter_item(connection, account_id, character_id, item).await?;
+    }
+    let post_inventory_version = inventory_version
+        .checked_add(1)
+        .ok_or(PersistenceError::CorruptStoredItems)?;
+    sqlx::query(
+        "UPDATE character_inventories SET inventory_version = $1, \
+         updated_at = transaction_timestamp() WHERE namespace_id = $2 \
+         AND account_id = $3 AND character_id = $4",
+    )
+    .bind(post_inventory_version)
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
+    .execute(&mut *connection)
+    .await
+    .map_err(PersistenceError::Database)?;
+    sqlx::query(
+        "INSERT INTO starter_initializer_results \
+         (namespace_id, account_id, character_id, initializer_revision, request_hash, \
+          result_hash, pre_inventory_version, post_inventory_version) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
+    .bind(STARTER_INITIALIZER_REVISION)
+    .bind(request_hash.as_slice())
+    .bind(result_hash.as_slice())
+    .bind(inventory_version)
+    .bind(post_inventory_version)
+    .execute(connection)
+    .await
+    .map_err(PersistenceError::Database)?;
+    Ok(StoredStarterInitialization {
+        replayed: false,
+        pre_inventory_version: inventory_version,
+        post_inventory_version,
+        result_hash,
+        items: items.to_vec(),
+    })
 }
 
 pub(crate) async fn lock_or_create_inventory(
