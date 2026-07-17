@@ -135,7 +135,7 @@ pub fn run_core_item_lifecycle_showcase(config: &CoreItemLifecycleShowcaseConfig
     let mut app = App::new();
     app.insert_resource(ClearColor(Color::srgb_u8(6, 8, 10)))
         .insert_resource(model)
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
+        .add_plugins(crate::gravebound_default_plugins().set(WindowPlugin {
             primary_window: Some(Window {
                 title: if config.reduced_effects {
                     "Gravebound - GB-M03-04G Item Lifecycle - Reduced Effects".to_owned()

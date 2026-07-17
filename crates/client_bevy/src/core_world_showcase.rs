@@ -244,7 +244,7 @@ pub fn run_core_world_showcase(config: CoreWorldShowcaseConfig) -> Result<()> {
         .insert_resource(scene)
         .insert_resource(runtime)
         .add_plugins(
-            DefaultPlugins
+            crate::gravebound_default_plugins()
                 .set(ImagePlugin::default_nearest())
                 .set(WindowPlugin {
                     primary_window: Some(Window {

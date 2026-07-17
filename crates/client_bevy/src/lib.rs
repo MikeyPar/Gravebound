@@ -46,6 +46,7 @@ use bevy::{
     log::{error, info},
     prelude::*,
     render::view::screenshot::{Screenshot, ScreenshotCaptured, save_to_disk},
+    render::{RenderPlugin, settings::WgpuSettings},
     window::{PresentMode, WindowResolution},
 };
 use sim_content::{
@@ -59,6 +60,24 @@ use sim_core::{
     ArenaGeometry, EnemyLabDefinitions, PlayerCombatState, PlayerMovementState,
     ProjectileCollisionWorld, StillnessDefinition, StillnessDefinitionParameters,
 };
+
+/// Builds the shared native plugin group for every Gravebound client surface.
+///
+/// Windows is the first commercial target. DirectX 12 is the stable default there, while an
+/// explicit `WGPU_BACKEND` remains available for diagnostics and future compatibility work.
+/// Other platforms retain Bevy's native backend selection.
+pub(crate) fn gravebound_default_plugins() -> bevy::app::PluginGroupBuilder {
+    let mut renderer = WgpuSettings::default();
+    #[cfg(target_os = "windows")]
+    if env::var_os("WGPU_BACKEND").is_none() {
+        renderer.backends = Some(bevy::render::settings::Backends::DX12);
+    }
+
+    DefaultPlugins.set(RenderPlugin {
+        render_creation: renderer.into(),
+        ..default()
+    })
+}
 
 pub use arena_view::{
     ArenaRenderPlan, DEFAULT_VIEW_HEIGHT_TILES, DEFAULT_VIEW_WIDTH_AT_16_9_TILES, RenderRectangle,
@@ -369,7 +388,7 @@ pub fn run_local_lab() -> Result<()> {
             build_id,
         ))
         .add_plugins(
-            DefaultPlugins
+            crate::gravebound_default_plugins()
                 .set(ImagePlugin::default_nearest())
                 .set(WindowPlugin {
                     primary_window: Some(Window {

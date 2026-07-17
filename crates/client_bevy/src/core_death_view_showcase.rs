@@ -149,7 +149,7 @@ pub fn run_core_death_view_showcase(config: &CoreDeathViewShowcaseConfig) -> Res
         issued: false,
     })
     .add_plugins(
-        DefaultPlugins
+        crate::gravebound_default_plugins()
             .set(ImagePlugin::default_nearest())
             .set(WindowPlugin {
                 primary_window: Some(Window {

@@ -85,7 +85,7 @@ pub fn run_core_caldus_showcase(config: CoreCaldusShowcaseConfig) -> Result<()> 
     app.insert_resource(ClearColor(Color::srgb_u8(5, 7, 10)))
         .insert_resource(model)
         .add_plugins(
-            DefaultPlugins
+            crate::gravebound_default_plugins()
                 .set(ImagePlugin::default_nearest())
                 .set(WindowPlugin {
                     primary_window: Some(Window {

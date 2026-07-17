@@ -363,7 +363,7 @@ pub fn run_core_identity(config: CoreIdentityConfig) -> Result<()> {
         })
         .insert_resource(CoreEvidenceAutomation(screenshot_request.is_some()))
         .add_plugins(
-            DefaultPlugins
+            crate::gravebound_default_plugins()
                 .set(ImagePlugin::default_nearest())
                 .set(WindowPlugin {
                     primary_window: Some(Window {

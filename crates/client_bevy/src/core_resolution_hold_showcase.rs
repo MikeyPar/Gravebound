@@ -98,7 +98,7 @@ pub fn run_core_resolution_hold_showcase(config: &CoreResolutionHoldShowcaseConf
     .insert_resource(ClearColor(Color::srgb_u8(5, 8, 9)))
     .insert_resource(view)
     .add_plugins(
-        DefaultPlugins
+        crate::gravebound_default_plugins()
             .set(ImagePlugin::default_nearest())
             .set(WindowPlugin {
                 primary_window: Some(Window {

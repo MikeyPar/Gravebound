@@ -75,7 +75,7 @@ pub fn run_core_encounter_showcase(config: CoreEncounterShowcaseConfig) -> Resul
     app.insert_resource(ClearColor(Color::srgb_u8(7, 9, 12)))
         .insert_resource(model)
         .add_plugins(
-            DefaultPlugins
+            crate::gravebound_default_plugins()
                 .set(ImagePlugin::default_nearest())
                 .set(WindowPlugin {
                     primary_window: Some(Window {

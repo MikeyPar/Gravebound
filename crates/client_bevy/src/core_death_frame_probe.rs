@@ -525,7 +525,7 @@ pub fn run_native_death_frame_probe(config: &NativeDeathFrameProbeConfig) -> Res
     .insert_resource(prepared.native_view)
     .insert_resource(prepared.runtime)
     .add_plugins(
-        DefaultPlugins
+        crate::gravebound_default_plugins()
             .set(ImagePlugin::default_nearest())
             .set(WindowPlugin {
                 primary_window: Some(Window {

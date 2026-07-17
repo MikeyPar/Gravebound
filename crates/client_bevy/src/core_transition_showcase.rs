@@ -193,7 +193,7 @@ pub fn run_core_transition_showcase(config: &CoreTransitionShowcaseConfig) -> Re
     app.insert_resource(ClearColor(Color::srgb_u8(6, 8, 11)))
         .insert_resource(model)
         .add_plugins(
-            DefaultPlugins
+            crate::gravebound_default_plugins()
                 .set(ImagePlugin::default_nearest())
                 .set(WindowPlugin {
                     primary_window: Some(Window {

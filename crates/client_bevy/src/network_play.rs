@@ -206,7 +206,7 @@ pub fn run_network_playtest(config: NetworkPlayConfig) -> Result<()> {
         .insert_resource(NetworkInputSequencer::default())
         .insert_resource(projectile_spec)
         .add_plugins(
-            DefaultPlugins
+            crate::gravebound_default_plugins()
                 .set(ImagePlugin::default_nearest())
                 .set(WindowPlugin {
                     primary_window: Some(Window {
