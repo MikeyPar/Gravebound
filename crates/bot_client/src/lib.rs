@@ -13,10 +13,11 @@ use protocol::{
     ClientHello, ControlEvent, DeathViewFrameV1, DeathViewResultV1, HandshakeResponse,
     InitialOathSelectionFrame, InitialOathSelectionResult, InputFrame, OathViewFrame,
     OathViewResult, ProgressionQueryFrame, ProgressionResult, ProtocolVersion,
-    RELIABLE_FRAME_LIMIT, ReliableEvent, ReliableEventFrame, SIMULATION_HZ,
-    SafeInventoryTransferFrameV1, SafeInventoryTransferResultV1, SessionControlFrame,
-    SessionControlResult, SnapshotChunk, WireMessage, WorldFlowFrame, WorldFlowResult,
-    decode_frame, encode_frame,
+    RELIABLE_FRAME_LIMIT, ReliableEvent, ReliableEventFrame, ResolutionHoldMutationFrameV1,
+    ResolutionHoldMutationResultV1, ResolutionHoldQueryFrameV1, ResolutionHoldQueryResultV1,
+    SIMULATION_HZ, SafeInventoryTransferFrameV1, SafeInventoryTransferResultV1,
+    SessionControlFrame, SessionControlResult, SnapshotChunk, WireMessage, WorldFlowFrame,
+    WorldFlowResult, decode_frame, encode_frame,
 };
 use thiserror::Error;
 
@@ -298,6 +299,33 @@ pub async fn perform_safe_inventory_transfer(
     Ok((event.clone(), result.clone()))
 }
 
+/// Reads the bounded authoritative Resolution Hold snapshot for one authenticated Hall character.
+pub async fn perform_resolution_hold_query(
+    connection: &quinn::Connection,
+    frame: ResolutionHoldQueryFrameV1,
+) -> Result<(ReliableEventFrame, ResolutionHoldQueryResultV1), BotTransportError> {
+    let event =
+        perform_reliable_gameplay(connection, WireMessage::ResolutionHoldQueryFrame(frame)).await?;
+    let ReliableEvent::ResolutionHoldQueryResult(result) = &event.event else {
+        return Err(BotTransportError::UnexpectedMessage);
+    };
+    Ok((event.clone(), result.as_ref().clone()))
+}
+
+/// Submits one server-planned whole-stack Hold mutation and returns its typed stored/rejected result.
+pub async fn perform_resolution_hold_mutation(
+    connection: &quinn::Connection,
+    frame: ResolutionHoldMutationFrameV1,
+) -> Result<(ReliableEventFrame, ResolutionHoldMutationResultV1), BotTransportError> {
+    let event =
+        perform_reliable_gameplay(connection, WireMessage::ResolutionHoldMutationFrame(frame))
+            .await?;
+    let ReliableEvent::ResolutionHoldMutationResult(result) = &event.event else {
+        return Err(BotTransportError::UnexpectedMessage);
+    };
+    Ok((event.clone(), result.as_ref().clone()))
+}
+
 /// Reads one authenticated durable-death projection through the ordinary reliable route.
 pub async fn perform_death_view(
     connection: &quinn::Connection,
@@ -340,6 +368,28 @@ pub async fn submit_safe_inventory_without_response(
     frame: SafeInventoryTransferFrameV1,
 ) -> Result<(), BotTransportError> {
     let request = encode_frame(&WireMessage::SafeInventoryTransferFrame(frame))?;
+    let (mut send, receive) = connection
+        .open_bi()
+        .await
+        .map_err(|error| BotTransportError::Quic(error.to_string()))?;
+    send.write_all(&request)
+        .await
+        .map_err(|error| BotTransportError::Quic(error.to_string()))?;
+    send.finish()
+        .map_err(|error| BotTransportError::Quic(error.to_string()))?;
+    drop(receive);
+    Ok(())
+}
+
+/// Submits an authenticated Hold mutation and intentionally abandons its response stream.
+///
+/// Callers must retain and resend the exact frame after renegotiating the Hold capability. This
+/// helper never chooses a stack, destination, or destructive action for the bot.
+pub async fn submit_resolution_hold_mutation_without_response(
+    connection: &quinn::Connection,
+    frame: ResolutionHoldMutationFrameV1,
+) -> Result<(), BotTransportError> {
+    let request = encode_frame(&WireMessage::ResolutionHoldMutationFrame(frame))?;
     let (mut send, receive) = connection
         .open_bi()
         .await
