@@ -33,6 +33,7 @@ mod oath_feedback;
 mod oath_ui;
 mod player;
 mod progression_hud;
+mod resolution_hold;
 mod stress_benchmark;
 mod telemetry;
 
@@ -136,6 +137,10 @@ pub use network_session::{
     ClientSessionLifecycleError,
 };
 pub use player::{CAMERA_RESPONSE_SECONDS, MovementBindings, critically_damped_step};
+pub use resolution_hold::{
+    ResolutionHoldApplyOutcome, ResolutionHoldClientError, ResolutionHoldClientFailure,
+    ResolutionHoldClientModel, ResolutionHoldClientPhase, ResolutionHoldRetryDirective,
+};
 
 const WINDOW_TITLE: &str = "Gravebound - LocalLab";
 const DEFAULT_CONTENT_ROOT: &str = "content";
