@@ -679,6 +679,26 @@ async fn connect_endpoint_pair(
     (client.unwrap(), server.unwrap())
 }
 
+async fn close_endpoint_pair(
+    client: quinn::Connection,
+    server: quinn::Connection,
+    client_endpoint: quinn::Endpoint,
+    server_endpoint: quinn::Endpoint,
+    reason: &'static [u8],
+) {
+    client.close(0_u32.into(), reason);
+    server.close(0_u32.into(), reason);
+    drop(client);
+    drop(server);
+    client_endpoint.close(0_u32.into(), reason);
+    server_endpoint.close(0_u32.into(), reason);
+    tokio::time::timeout(SUCCESSOR_TEARDOWN_TIMEOUT, async {
+        tokio::join!(client_endpoint.wait_idle(), server_endpoint.wait_idle());
+    })
+    .await
+    .expect("QUIC endpoints must reach idle within ten seconds");
+}
+
 fn policy() -> HandshakePolicy {
     HandshakePolicy {
         required_protocol: ProtocolVersion::current(),
@@ -1109,6 +1129,29 @@ fn altered_successor_frame(sequence: u32) -> SuccessorCreateFrameV1 {
         SUCCESSOR_QUIC_MUTATION_ID,
         ALTERED_SUCCESSOR_DEATH_ID,
     )
+}
+
+fn malformed_successor_wire_frame() -> Vec<u8> {
+    let mut encoded = protocol::encode_frame(&WireMessage::SuccessorCreateFrame(
+        scripted_successor_frame(),
+    ))
+    .unwrap();
+    let revision = persistence::CORE_ITEM_CONTENT_REVISION.as_bytes();
+    let revision_start = encoded
+        .windows(revision.len())
+        .position(|window| window == revision)
+        .expect("the canonical content revision is present in the successor frame");
+    let last_revision_byte = &mut encoded[revision_start + revision.len() - 1];
+    *last_revision_byte = if *last_revision_byte == b'0' {
+        b'1'
+    } else {
+        b'0'
+    };
+    assert!(matches!(
+        protocol::decode_frame(&encoded),
+        Err(protocol::WireCodecError::InvalidMessage)
+    ));
+    encoded
 }
 
 fn production_death_view_hello() -> ClientHello {
@@ -1761,9 +1804,9 @@ async fn run_reliable_core_journey(persistence: &PostgresPersistence) -> Duratio
 #[tokio::test]
 #[allow(
     clippy::too_many_lines,
-    reason = "one connection proves all adjacent terminal capabilities remain absent and fail closed"
+    reason = "one connection proves all gated terminal capabilities remain absent and fail closed"
 )]
-async fn reliable_quic_rejects_disabled_extraction_and_hold_before_domain_access() {
+async fn reliable_quic_rejects_disabled_terminal_capabilities_before_domain_access() {
     let identity = IdentityService::new(
         InMemoryAccountRepository::default(),
         FixedAuthority,
@@ -1789,6 +1832,7 @@ async fn reliable_quic_rejects_disabled_extraction_and_hold_before_domain_access
     let authenticated = durable_death_fixture::authenticated_account();
     let frame = disabled_extraction_frame();
     let (hold_query, hold_mutation) = disabled_resolution_hold_frames();
+    let successor_frame = scripted_successor_frame();
     let (server_endpoint, client_endpoint, address) = endpoints();
     let connecting = client_endpoint.connect(address, "localhost").unwrap();
     let incoming = server_endpoint.accept().await.unwrap();
@@ -1862,6 +1906,25 @@ async fn reliable_quic_rejects_disabled_extraction_and_hold_before_domain_access
         )
         .await
         .unwrap();
+        serve_core_reliable(
+            &server,
+            &identity,
+            &world_flow,
+            &progression,
+            &death_views,
+            &oath,
+            &bargain,
+            &safe_inventory,
+            &CoreResolutionHoldAuthority::disabled(),
+            &CoreSuccessorAuthority::disabled(),
+            &extraction_terminal,
+            &recall_terminal,
+            authenticated,
+            4,
+            100,
+        )
+        .await
+        .unwrap();
     };
     let client_session = async {
         let HandshakeResponse::Accepted(server_hello) =
@@ -1882,6 +1945,12 @@ async fn reliable_quic_rejects_disabled_extraction_and_hold_before_domain_access
                 .feature_flags
                 .iter()
                 .all(|flag| flag.as_str() != protocol::CORE_RESOLUTION_HOLD_FEATURE_FLAG)
+        );
+        assert!(
+            server_hello
+                .feature_flags
+                .iter()
+                .all(|flag| flag.as_str() != protocol::CORE_SUCCESSOR_FEATURE_FLAG)
         );
         let event = bot_client::perform_reliable_gameplay(
             &client,
@@ -1934,12 +2003,41 @@ async fn reliable_quic_rejects_disabled_extraction_and_hold_before_domain_access
                     }
                 )
         ));
+        let event = bot_client::perform_reliable_gameplay(
+            &client,
+            protocol::WireMessage::SuccessorCreateFrame(successor_frame),
+        )
+        .await
+        .unwrap();
+        assert_eq!(event.sequence, 4);
+        assert!(matches!(
+            event.event,
+            ReliableEvent::SuccessorCreateResult(result)
+                if matches!(
+                    *result,
+                    SuccessorCreateResultV1::Rejected {
+                        request_sequence: 1,
+                        mutation_id,
+                        death_id,
+                        code: SuccessorRejectionCodeV1::FeatureDisabled,
+                        ..
+                    } if mutation_id == [76; 16] && death_id == [75; 16]
+                )
+        ));
     };
-    tokio::join!(server_session, client_session);
-    drop(client);
-    client_endpoint.wait_idle().await;
-    server_endpoint.close(0_u32.into(), b"disabled extraction complete");
-    server_endpoint.wait_idle().await;
+    Box::pin(tokio::time::timeout(SUCCESSOR_SESSION_TIMEOUT, async {
+        tokio::join!(server_session, client_session);
+    }))
+    .await
+    .expect("disabled terminal capability session must finish within thirty seconds");
+    close_endpoint_pair(
+        client,
+        server,
+        client_endpoint,
+        server_endpoint,
+        b"disabled terminal routes complete",
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -2053,6 +2151,159 @@ async fn reliable_quic_dispatches_authenticated_successor_frame() {
     client_endpoint.wait_idle().await;
     server_endpoint.close(0_u32.into(), b"scripted successor complete");
     server_endpoint.wait_idle().await;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RawSuccessorFrameRejection {
+    Malformed,
+    Oversized,
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the raw ingress, authority non-entry, typed transport failure, and bounded teardown form one adverse boundary"
+)]
+async fn run_raw_successor_rejection(
+    raw_frame: Vec<u8>,
+    session_id: &'static str,
+    expected: RawSuccessorFrameRejection,
+) {
+    match expected {
+        RawSuccessorFrameRejection::Malformed => {
+            assert!(raw_frame.len() <= protocol::RELIABLE_FRAME_LIMIT);
+        }
+        RawSuccessorFrameRejection::Oversized => {
+            assert_eq!(raw_frame.len(), protocol::RELIABLE_FRAME_LIMIT + 1);
+        }
+    }
+    let identity = IdentityService::new(
+        InMemoryAccountRepository::default(),
+        FixedAuthority,
+        FixedAuthority,
+        NoopIdentityEventSink,
+        ManifestHash::new("a".repeat(64)).unwrap(),
+    );
+    let world_flow = WorldFlowGateService::new(
+        InMemoryAccountRepository::default(),
+        FixedAuthority,
+        revision(),
+    );
+    let progression = disabled_progression();
+    let death_views = DeathViewService::new(
+        DisabledDeathViewRepository,
+        durable_death_fixture::death_view_revision(),
+    );
+    let oath = CoreOathSelectionAuthority::<FixedAuthority>::disabled();
+    let bargain = CoreBargainAuthority::<FixedAuthority>::disabled();
+    let safe_inventory = CoreSafeInventoryAuthority::disabled();
+    let successor = ScriptedSuccessorAuthority::default();
+    let extraction = CoreExtractionTerminalAuthority::disabled();
+    let recall = CoreRecallTerminalAuthority::disabled();
+    let authenticated = durable_death_fixture::authenticated_account();
+    let (server_endpoint, client_endpoint, address) = endpoints();
+    let (client, server) = connect_endpoint_pair(&server_endpoint, &client_endpoint, address).await;
+
+    let server_session = async {
+        serve_handshake(
+            &server,
+            &policy(),
+            AuthenticationDecision::Accepted,
+            WireText::new(session_id).unwrap(),
+        )
+        .await
+        .unwrap();
+        serve_core_reliable(
+            &server,
+            &identity,
+            &world_flow,
+            &progression,
+            &death_views,
+            &oath,
+            &bargain,
+            &safe_inventory,
+            &CoreResolutionHoldAuthority::disabled(),
+            &successor,
+            &extraction,
+            &recall,
+            authenticated,
+            1,
+            100,
+        )
+        .await
+    };
+    let client_session = async {
+        let HandshakeResponse::Accepted(server_hello) =
+            bot_client::perform_handshake(&client, hello())
+                .await
+                .unwrap()
+        else {
+            panic!("raw successor rejection handshake must succeed");
+        };
+        assert!(
+            server_hello
+                .feature_flags
+                .iter()
+                .all(|flag| flag.as_str() != protocol::CORE_SUCCESSOR_FEATURE_FLAG)
+        );
+        let (mut send, receive) = client.open_bi().await.unwrap();
+        let write = send.write_all(&raw_frame).await;
+        match expected {
+            RawSuccessorFrameRejection::Malformed => {
+                write.expect("the bounded malformed frame reaches the decoder");
+                send.finish().unwrap();
+            }
+            RawSuccessorFrameRejection::Oversized => {
+                let _stopped_after_limit = write;
+                let _stopped_finish = send.finish();
+            }
+        }
+        drop(receive);
+    };
+    let (server_outcome, ()) = Box::pin(tokio::time::timeout(SUCCESSOR_SESSION_TIMEOUT, async {
+        tokio::join!(server_session, client_session)
+    }))
+    .await
+    .expect("raw successor rejection must finish within thirty seconds");
+    match expected {
+        RawSuccessorFrameRejection::Malformed => assert!(matches!(
+            server_outcome,
+            Err(server_app::ServerTransportError::Codec(
+                protocol::WireCodecError::InvalidMessage
+            ))
+        )),
+        RawSuccessorFrameRejection::Oversized => assert!(matches!(
+            server_outcome,
+            Err(server_app::ServerTransportError::Quic(_))
+        )),
+    }
+    assert_eq!(successor.calls.load(Ordering::SeqCst), 0);
+    close_endpoint_pair(
+        client,
+        server,
+        client_endpoint,
+        server_endpoint,
+        b"raw successor rejection complete",
+    )
+    .await;
+}
+
+/// GDD `TECH-021`-`023`, Content Spec `CONT-CATALOG-003`, and Roadmap `GB-M03-07`
+/// require malformed or oversized successor input to fail before domain authority and leave no
+/// connection/task residue. Both sessions deliberately omit `core_successor_v1`.
+#[tokio::test]
+async fn reliable_quic_rejects_malformed_and_oversized_successor_before_authority() {
+    run_raw_successor_rejection(
+        malformed_successor_wire_frame(),
+        "malformed-successor-session",
+        RawSuccessorFrameRejection::Malformed,
+    )
+    .await;
+    run_raw_successor_rejection(
+        vec![0; protocol::RELIABLE_FRAME_LIMIT + 1],
+        "oversized-successor-session",
+        RawSuccessorFrameRejection::Oversized,
+    )
+    .await;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2195,17 +2446,14 @@ async fn run_persistent_successor_quic_session(
     }))
     .await
     .expect("persistent successor QUIC session must finish within thirty seconds");
-    client.close(0_u32.into(), b"successor session complete");
-    server.close(0_u32.into(), b"successor session complete");
-    drop(client);
-    drop(server);
-    client_endpoint.close(0_u32.into(), b"successor endpoint complete");
-    server_endpoint.close(0_u32.into(), b"successor endpoint complete");
-    tokio::time::timeout(SUCCESSOR_TEARDOWN_TIMEOUT, async {
-        tokio::join!(client_endpoint.wait_idle(), server_endpoint.wait_idle());
-    })
-    .await
-    .expect("successor endpoints must reach idle within ten seconds");
+    close_endpoint_pair(
+        client,
+        server,
+        client_endpoint,
+        server_endpoint,
+        b"successor session complete",
+    )
+    .await;
     responses
 }
 
