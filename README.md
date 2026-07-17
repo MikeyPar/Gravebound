@@ -102,6 +102,14 @@ The disposable native inspection surface composes the completed `04A`-`04F` auth
 
 The native Bevy surfaces consume only the durable, content-revision-bound client projection. The summary preserves exact `DTH-020` order, shows the stored Echo outcome, supports bounded focus-follow scrolling at 1280x720, and keeps `Create Successor` disabled until `GB-M03-07`. Memorial rows retain raw cursor authority and open their own immutable stored snapshot without a gameplay mutation. The optimized [presentation matrix](docs/evidence/GB-M03-06D-visual-manifest.md), final [source-driven integration evidence](docs/evidence/GB-M03-06E-integrated-evidence.md), and [parent completion audit](docs/milestones/GB-M03-06-audit.md) cover standard/reduced effects, both target resolutions, exact replay/restart, adverse PostgreSQL/QUIC behavior, latency, and soak.
 
+### GB-M03 Resolution Hold recovery
+
+| Full storage keeps Move disabled | Permanent destruction defaults to Cancel |
+|---|---|
+| <img src="docs/evidence/GB-M03-08-hold/GB-M03-08-hold-storage-full-standard-1280x720.png" alt="Resolution Hold full-storage state with Move disabled and permanent destruction separately available" width="720"> | <img src="docs/evidence/GB-M03-08-hold/GB-M03-08-hold-confirm-destroy-standard-1920x1080.png" alt="Resolution Hold permanent-destruction review with Cancel Keep Item focused by default" width="720"> |
+
+The blocking native surface consumes only negotiated server authority and the compiled Core item catalog. It shows exact whole-stack quantities, durable identities, one-based server-planned destinations, retained Overflow deadlines, typed retry state, and final-refresh acknowledgement without exposing a route-to-play escape. The optimized [24-frame visual manifest](docs/evidence/GB-M03-08-hold-visual-manifest.md) covers six states in standard and reduced effects at both target resolutions; normal route admission remains disabled until the remaining `GB-M03-08` adverse and cleanup gates pass.
+
 ## Technical direction
 
 - Rust stable and Bevy 0.19.
@@ -136,9 +144,9 @@ Concept images establish mood, hierarchy, and visual language. They are not fina
 
 Parents [`GB-M03-02`](docs/milestones/GB-M03-02-audit.md), [`GB-M03-04`](docs/milestones/GB-M03-04-audit.md), and [`GB-M03-06`](docs/milestones/GB-M03-06-audit.md), plus atomic Echo package [`GB-M03-13`](docs/milestones/GB-M03-13-audit.md), are complete. Hosted CI [`29506273492`](https://github.com/MikeyPar/Gravebound/actions/runs/29506273492) is the final death/Echo acceptance.
 
-[`GB-M03-08`](docs/tasks/GB-M03-08.md) is hosted green through extraction/Recall, append-only Hold protocol `1.16`, migration `0059`, persistent read/write dispatch, positive real-QUIC mutation, negotiated native feature authority, the pure resolver, bot transport helpers, and the content-safe UI projection. The full-viewport native overlay and its minimum-viewport correction are validating in runs [`29550582319`](https://github.com/MikeyPar/Gravebound/actions/runs/29550582319) and [`29551274598`](https://github.com/MikeyPar/Gravebound/actions/runs/29551274598).
+[`GB-M03-08`](docs/tasks/GB-M03-08.md) is hosted green through extraction/Recall, append-only Hold protocol `1.16`, migration `0059`, persistent read/write dispatch, positive real-QUIC mutation, negotiated native feature authority, the pure resolver, bot transport helpers, the content-safe UI projection, the full-viewport overlay, and its minimum-viewport correction. Showcase run [`29551599737`](https://github.com/MikeyPar/Gravebound/actions/runs/29551599737) is green.
 
-Commit `1628576` adds the disposable real-model Resolution Hold showcase. Original-resolution inspection rejected its first optimized matrix after exposing a cyclic flex-basis race; commit `8e88ae2` supplies the bounded layout fix, with hosted run [`29552308427`](https://github.com/MikeyPar/Gravebound/actions/runs/29552308427) validating it. Next, rebuild the optimized client and replace all 24 captures before hashing and accepting the visual manifest. Then close the remaining terminal adverse/cleanup evidence and `GB-M03-08` audit, followed by `GB-M03-07` successor recovery and parent `GB-M03-03`. Normal route admission and Core promotion remain fail closed.
+Commit `3167db9` publishes the accepted optimized 24-frame Resolution Hold matrix with exact dimensions, build/content identity, independent decode review, and per-file SHA-256 in the [visual manifest](docs/evidence/GB-M03-08-hold-visual-manifest.md). Next, close PostgreSQL/real-QUIC same-tick lethal precedence, LinkLost tick `90`, duplicate handoff, queue/actor/server shutdown, and zero-residue evidence before the `GB-M03-08` audit. Then complete `GB-M03-07` successor recovery and parent `GB-M03-03`; normal route admission and Core promotion remain fail closed.
 
 ## Resolved prior handoff
 
