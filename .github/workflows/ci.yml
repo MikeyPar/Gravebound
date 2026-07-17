@@ -104,6 +104,8 @@ jobs:
       - name: Install pinned Rust toolchain
         run: rustup show active-toolchain
       - name: Run mandatory PostgreSQL gate
+        env:
+          GRAVEBOUND_SUCCESSOR_JOURNEY_REPORT_PATH: ${{ runner.temp }}/gb-m03-07-successor-recovery.json
         run: |
           cargo test --locked -p persistence --test postgres_foundation -- --ignored --test-threads=1
           cargo test --locked -p persistence --test postgres_extraction_terminal -- --ignored --test-threads=1 --nocapture
@@ -122,6 +124,13 @@ jobs:
           cargo test --locked -p server_app --test death_post_terminal_rejection -- --ignored --test-threads=1 --nocapture
           cargo test --locked -p server_app --test core_route_quic -- --ignored --test-threads=1 --nocapture
           cargo test --locked -p server_app --test postgres_identity -- --ignored --test-threads=1
+      - name: Upload successor recovery journey evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: gb-m03-07-successor-recovery-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/gb-m03-07-successor-recovery.json
+          if-no-files-found: error
+          retention-days: 14
       - name: Generate authenticated death branch and frame source evidence
         env:
           GRAVEBOUND_DEATH_CONCURRENCY_REPORT_PATH: ${{ runner.temp }}/gb-m03-13-concurrent-eligible-deaths.json

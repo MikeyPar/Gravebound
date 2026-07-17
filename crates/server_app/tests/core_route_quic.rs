@@ -13,7 +13,9 @@ use std::{
 };
 
 use client_bevy::{
-    DeathSummaryAction, DeathUiActivity, DeathUiSnapshot, DeathViewClientModel, TerminalDeathPhase,
+    CoreSceneReadiness, CoreWorldTransitionPhase, DeathSummaryAction, DeathUiActivity,
+    DeathUiSnapshot, DeathViewClientModel, SuccessorRecoveryApplyDisposition,
+    SuccessorRecoveryClientModel, SuccessorRecoveryPhase, TerminalDeathPhase,
 };
 use sqlx::Row;
 use tokio::sync::oneshot;
@@ -22,6 +24,8 @@ use tokio::sync::oneshot;
 mod death_measurement;
 #[path = "support/durable_death.rs"]
 mod durable_death_fixture;
+#[path = "support/successor_measurement.rs"]
+mod successor_measurement;
 
 use persistence::{
     CaldusExtractionCommit, CaldusExtractionRequest, PersistenceConfig, PostgresPersistence,
@@ -104,6 +108,7 @@ const SUCCESSOR_CHILD_CERTIFICATE_ENV: &str = "GRAVEBOUND_M03_SUCCESSOR_CHILD_CE
 const SUCCESSOR_CHILD_READINESS_ENV: &str = "GRAVEBOUND_M03_SUCCESSOR_CHILD_READINESS";
 const SUCCESSOR_CHILD_TEST_NAME: &str =
     "successor_child_process_serves_stored_replay_over_real_quic";
+const SUCCESSOR_JOURNEY_REPORT_PATH_ENV: &str = "GRAVEBOUND_SUCCESSOR_JOURNEY_REPORT_PATH";
 static SUCCESSOR_CHILD_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
 
 fn content_root() -> PathBuf {
@@ -713,6 +718,8 @@ async fn close_endpoint_pair(
     })
     .await
     .expect("QUIC endpoints must reach idle within ten seconds");
+    assert_eq!(client_endpoint.open_connections(), 0);
+    assert_eq!(server_endpoint.open_connections(), 0);
 }
 
 fn policy() -> HandshakePolicy {
@@ -748,6 +755,14 @@ fn successor_policy() -> HandshakePolicy {
     policy
         .feature_flags
         .push(WireText::new(protocol::CORE_SUCCESSOR_FEATURE_FLAG).unwrap());
+    policy
+}
+
+fn successor_journey_policy() -> HandshakePolicy {
+    let mut policy = successor_policy();
+    policy
+        .feature_flags
+        .push(WireText::new(protocol::CORE_DEATH_VIEW_FEATURE_FLAG).unwrap());
     policy
 }
 
@@ -2580,6 +2595,8 @@ async fn commit_primary_successor_death(persistence: &PostgresPersistence) {
 async fn assert_persistent_successor_graph(
     persistence: &PostgresPersistence,
     stored: &protocol::StoredSuccessorResultV1,
+    mutation_id: [u8; 16],
+    death_id: [u8; 16],
     expected_conflicts: i64,
 ) {
     let mut transaction = persistence.begin_transaction().await.unwrap();
@@ -2602,7 +2619,7 @@ async fn assert_persistent_successor_graph(
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(durable_death_fixture::ACCOUNT_ID.as_slice())
-    .bind(SUCCESSOR_QUIC_MUTATION_ID.as_slice())
+    .bind(mutation_id.as_slice())
     .bind(stored.successor_id.as_slice())
     .fetch_one(transaction.connection())
     .await
@@ -2626,17 +2643,32 @@ async fn assert_persistent_successor_graph(
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(durable_death_fixture::ACCOUNT_ID.as_slice())
-    .bind(durable_death_fixture::PRIMARY_IDENTITY.death_id.as_slice())
+    .bind(death_id.as_slice())
     .fetch_one(transaction.connection())
     .await
     .unwrap();
     assert_eq!(reservation.0, 1);
-    assert_eq!(reservation.1, SUCCESSOR_QUIC_MUTATION_ID);
+    assert_eq!(reservation.1, mutation_id);
     assert_eq!(reservation.2, stored.successor_id);
     assert_eq!(reservation.3, stored.receipt_id);
     transaction.rollback().await.unwrap();
     assert_persistent_successor_starter_items(persistence, stored).await;
     assert_database_peer_sessions_idle(persistence).await;
+}
+
+async fn assert_primary_persistent_successor_graph(
+    persistence: &PostgresPersistence,
+    stored: &protocol::StoredSuccessorResultV1,
+    expected_conflicts: i64,
+) {
+    assert_persistent_successor_graph(
+        persistence,
+        stored,
+        SUCCESSOR_QUIC_MUTATION_ID,
+        durable_death_fixture::PRIMARY_IDENTITY.death_id,
+        expected_conflicts,
+    )
+    .await;
 }
 
 async fn assert_persistent_successor_starter_items(
@@ -2706,6 +2738,383 @@ async fn assert_database_peer_sessions_idle(persistence: &PostgresPersistence) {
     .unwrap();
     assert_eq!(non_idle_peer_sessions, 0);
     residue.rollback().await.unwrap();
+}
+
+#[derive(Debug)]
+struct SuccessorJourneyClientOutcome {
+    stored: protocol::StoredSuccessorResultV1,
+    successor_create_round_trip: Duration,
+    death_to_control: Duration,
+    summary_to_control: Duration,
+    control_to_combat: Duration,
+    summary_to_combat: Duration,
+    confirmations: u8,
+}
+
+fn successor_journey_id(kind: u8, ordinal: u8) -> [u8; 16] {
+    assert_ne!(kind, 0);
+    assert_ne!(ordinal, 0);
+    let mut id = [kind; 16];
+    id[0] = kind;
+    id[1] = ordinal;
+    id[6] = 0x70 | (kind & 0x0f);
+    id[8] = 0x80 | (ordinal & 0x3f);
+    id
+}
+
+fn successor_journey_scenario(ordinal: u8) -> durable_death_fixture::DurableDeathScenarioV1 {
+    let mut scenario = durable_death_fixture::DurableDeathScenarioV1::primary_eligible();
+    scenario.identity = durable_death_fixture::DurableDeathFixtureIdentityV1 {
+        character_id: successor_journey_id(1, ordinal),
+        lineage_id: successor_journey_id(2, ordinal),
+        restore_point_id: successor_journey_id(3, ordinal),
+        instance_id: successor_journey_id(4, ordinal),
+        item_uid: successor_journey_id(5, ordinal),
+        entry_mutation_id: successor_journey_id(6, ordinal),
+        deed_reward_id: successor_journey_id(7, ordinal),
+        nonlethal_trace_tick_id: successor_journey_id(8, ordinal),
+        lethal_trace_tick_id: successor_journey_id(9, ordinal),
+        death_id: successor_journey_id(10, ordinal),
+        echo_id: successor_journey_id(11, ordinal),
+        death_mutation_id: successor_journey_id(12, ordinal),
+        source_sim_entity_id: 100 + u64::from(ordinal),
+    };
+    scenario
+}
+
+fn duration_micros(duration: Duration) -> u64 {
+    u64::try_from(duration.as_micros()).expect("hosted successor duration fits u64 microseconds")
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the durable death, two native confirmations, danger admission, and bounded cleanup are one auditable recovery journey"
+)]
+async fn run_disposable_successor_recovery_journey(
+    persistence: &PostgresPersistence,
+    presentation: &sim_content::CoreDevelopmentDeathView,
+    ordinal: u8,
+) -> successor_measurement::SuccessorJourneySampleV1 {
+    persistence.reset_disposable_identity_data().await.unwrap();
+    let scenario = successor_journey_scenario(ordinal);
+    durable_death_fixture::seed_danger_root_for(persistence, &scenario).await;
+    let death = durable_death_fixture::prepare_death_for(persistence.clone(), &scenario).await;
+    let candidate = durable_death_terminal_candidate(&death).unwrap();
+    let (mut coordinator, prepared) = seal_complete_same_tick_terminal_set(&candidate);
+    let terminal_commit_started = Instant::now();
+    let committed = DurableDeathExecutionService::new(persistence.clone())
+        .execute_coordinated(&mut coordinator, &prepared, &death)
+        .await
+        .unwrap();
+    let terminal_commit = terminal_commit_started.elapsed();
+    let durable_acknowledgement = Instant::now();
+    assert!(!committed.transaction.is_replay());
+    assert_eq!(
+        committed.transaction.result().death_id,
+        scenario.identity.death_id
+    );
+
+    let identity = IdentityService::new(
+        InMemoryAccountRepository::default(),
+        FixedAuthority,
+        FixedAuthority,
+        NoopIdentityEventSink,
+        ManifestHash::new("a".repeat(64)).unwrap(),
+    );
+    let world_flow = disposable_world_flow(persistence.clone());
+    let progression = disabled_progression();
+    let death_views = DeathViewService::new(
+        PostgresDeathViewRepository::new(persistence.clone()),
+        durable_death_fixture::death_view_revision(),
+    );
+    let oath = CoreOathSelectionAuthority::<FixedAuthority>::disabled();
+    let bargain = CoreBargainAuthority::<FixedAuthority>::disabled();
+    let safe_inventory = CoreSafeInventoryAuthority::disabled();
+    let successor =
+        CoreSuccessorAuthority::persistent(PostgresSuccessorService::new(persistence.clone()));
+    let extraction = CoreExtractionTerminalAuthority::disabled();
+    let recall = CoreRecallTerminalAuthority::disabled();
+    let authenticated = durable_death_fixture::authenticated_account();
+    let (server_endpoint, client_endpoint, address) = endpoints();
+    let (client, server) = connect_endpoint_pair(&server_endpoint, &client_endpoint, address).await;
+    let session_id = WireText::new(format!("successor-recovery-journey-{ordinal:02}")).unwrap();
+    let mutation_id = successor_journey_id(13, ordinal);
+    let hall_mutation_id = successor_journey_id(14, ordinal);
+    let danger_mutation_id = successor_journey_id(15, ordinal);
+    let world_revision = revision();
+
+    let server_journey = async {
+        serve_handshake(
+            &server,
+            &successor_journey_policy(),
+            AuthenticationDecision::Accepted,
+            session_id,
+        )
+        .await
+        .unwrap();
+        for response_sequence in 1..=5 {
+            serve_core_reliable(
+                &server,
+                &identity,
+                &world_flow,
+                &progression,
+                &death_views,
+                &oath,
+                &bargain,
+                &safe_inventory,
+                &CoreResolutionHoldAuthority::disabled(),
+                &successor,
+                &extraction,
+                &recall,
+                authenticated,
+                response_sequence,
+                20_100,
+            )
+            .await
+            .unwrap();
+        }
+    };
+    let client_journey = async {
+        let HandshakeResponse::Accepted(server_hello) =
+            bot_client::perform_handshake(&client, hello())
+                .await
+                .unwrap()
+        else {
+            panic!("successor recovery journey handshake must succeed");
+        };
+        for required in [
+            "core_world_flow_integration",
+            protocol::CORE_DEATH_VIEW_FEATURE_FLAG,
+            protocol::CORE_SUCCESSOR_FEATURE_FLAG,
+        ] {
+            assert!(
+                server_hello
+                    .feature_flags
+                    .iter()
+                    .any(|flag| flag.as_str() == required),
+                "successor journey did not negotiate {required}"
+            );
+        }
+
+        let mut death_model = DeathViewClientModel::new(presentation.clone()).unwrap();
+        let latest_frame = death_model
+            .begin_committed_death_lookup(scenario.identity.character_id)
+            .unwrap();
+        let (_, latest_result) = bot_client::perform_death_view(&client, latest_frame)
+            .await
+            .unwrap();
+        let latest_outcome = death_model.handle_result(&latest_result).unwrap();
+        let summary_frame = latest_outcome
+            .follow_up
+            .expect("latest durable death must request its terminal summary");
+        let (_, summary_result) = bot_client::perform_death_view(&client, summary_frame)
+            .await
+            .unwrap();
+        death_model.handle_result(&summary_result).unwrap();
+        assert_eq!(
+            death_model.terminal().phase(),
+            TerminalDeathPhase::SummaryReady
+        );
+        let terminal_authority = death_model
+            .terminal_successor_authority()
+            .expect("only the active durable terminal summary can authorize recovery");
+        assert_eq!(terminal_authority.death_id(), scenario.identity.death_id);
+        let summary_ready = Instant::now();
+
+        let mut recovery = SuccessorRecoveryClientModel::new(
+            &server_hello,
+            WireText::new(persistence::CORE_ITEM_CONTENT_REVISION).unwrap(),
+        );
+        recovery
+            .observe_terminal_summary(terminal_authority)
+            .unwrap();
+        let create_frame = recovery.begin_create(mutation_id).unwrap();
+        let create_started = Instant::now();
+        let (_, create_result) = bot_client::perform_successor_create(&client, create_frame)
+            .await
+            .unwrap();
+        let successor_create_round_trip = create_started.elapsed();
+        assert_eq!(
+            recovery.apply_create_result(&create_result).unwrap(),
+            SuccessorRecoveryApplyDisposition::AppliedFresh
+        );
+        assert_eq!(recovery.phase(), SuccessorRecoveryPhase::CharacterSelect);
+        let stored = recovery
+            .stored()
+            .expect("fresh recovery must retain its durable successor result")
+            .clone();
+        assert_eq!(stored.death_id, scenario.identity.death_id);
+        assert_eq!(stored.mutation_id, mutation_id);
+        let projection = recovery.character_select_projection().unwrap();
+        assert_eq!(projection.selected_character_id, stored.successor_id);
+        assert_eq!(projection.roster_ordinal, scenario.roster_ordinal);
+        assert_eq!(projection.class_id.as_str(), "class.grave_arbalist");
+        assert_eq!(projection.level, 1);
+        assert!(!projection.has_oath);
+
+        let hall_frame = recovery
+            .begin_play(1, hall_mutation_id, 9_000, world_revision.clone())
+            .unwrap();
+        let (_, hall_result) = bot_client::perform_world_flow(&client, hall_frame)
+            .await
+            .unwrap();
+        assert_accepted(
+            &hall_result,
+            stored.versions.character.checked_add(1).unwrap(),
+            HALL_ID,
+        );
+        recovery.apply_hall_result(&hall_result).unwrap();
+        assert_eq!(recovery.phase(), SuccessorRecoveryPhase::LoadingHall);
+        recovery
+            .mark_hall_content_ready(&CoreSceneReadiness {
+                location_id: WireText::new(HALL_ID).unwrap(),
+                character_version: stored.versions.character.checked_add(1).unwrap(),
+                content_revision: world_revision.clone(),
+            })
+            .unwrap();
+        assert_eq!(recovery.phase(), SuccessorRecoveryPhase::ControllableHall);
+        assert_eq!(recovery.confirmations(), 2);
+        let controllable_hall = Instant::now();
+
+        let mut combat_transition = recovery
+            .hall_transition()
+            .expect("controllable Hall retains the checked world transition")
+            .clone();
+        assert_eq!(combat_transition.phase(), CoreWorldTransitionPhase::Ready);
+        let hall_snapshot = combat_transition.current_snapshot().unwrap().clone();
+        let danger_payload = WorldTransferPayload {
+            content_revision: world_revision.clone(),
+            command: WorldTransferCommand::UsePortal {
+                portal_id: WireText::new("station.realm_gate").unwrap(),
+            },
+        };
+        let danger_mutation = WorldTransferMutation {
+            mutation_id: danger_mutation_id,
+            character_id: stored.successor_id,
+            expected_character_version: hall_snapshot.character_version,
+            issued_at_unix_millis: 9_000,
+            payload_hash: danger_payload.canonical_hash(),
+            payload: danger_payload,
+        };
+        combat_transition
+            .begin_transfer(2, danger_mutation.clone())
+            .unwrap();
+        let danger_frame = WorldFlowFrame {
+            sequence: 2,
+            request: WorldFlowRequest::Transfer(danger_mutation),
+        };
+        danger_frame.validate().unwrap();
+        let (_, danger_result) = bot_client::perform_world_flow(&client, danger_frame)
+            .await
+            .unwrap();
+        assert_accepted(
+            &danger_result,
+            hall_snapshot.character_version.checked_add(1).unwrap(),
+            WORLD_ID,
+        );
+        combat_transition
+            .apply_world_flow_result(&danger_result)
+            .unwrap();
+        assert_eq!(
+            combat_transition.phase(),
+            CoreWorldTransitionPhase::LoadingContent
+        );
+        combat_transition
+            .mark_content_ready(&CoreSceneReadiness {
+                location_id: WireText::new(WORLD_ID).unwrap(),
+                character_version: hall_snapshot.character_version.checked_add(1).unwrap(),
+                content_revision: world_revision,
+            })
+            .unwrap();
+        assert_eq!(combat_transition.phase(), CoreWorldTransitionPhase::Ready);
+        assert!(matches!(
+            combat_transition.current_snapshot(),
+            Some(CharacterLocationSnapshot {
+                location: CharacterLocation::Danger { location_id, .. },
+                ..
+            }) if location_id.as_str() == WORLD_ID
+        ));
+        let combat_ready = Instant::now();
+
+        SuccessorJourneyClientOutcome {
+            stored,
+            successor_create_round_trip,
+            death_to_control: controllable_hall.duration_since(durable_acknowledgement),
+            summary_to_control: controllable_hall.duration_since(summary_ready),
+            control_to_combat: combat_ready.duration_since(controllable_hall),
+            summary_to_combat: combat_ready.duration_since(summary_ready),
+            confirmations: recovery.confirmations(),
+        }
+    };
+    let ((), client_outcome) = Box::pin(tokio::time::timeout(SUCCESSOR_SESSION_TIMEOUT, async {
+        tokio::join!(server_journey, client_journey)
+    }))
+    .await
+    .expect("successor recovery journey must finish within thirty seconds");
+    close_endpoint_pair(
+        client,
+        server,
+        client_endpoint,
+        server_endpoint,
+        b"successor recovery journey complete",
+    )
+    .await;
+
+    durable_death_fixture::assert_committed_graph(persistence).await;
+    assert_persistent_successor_graph(
+        persistence,
+        &client_outcome.stored,
+        mutation_id,
+        scenario.identity.death_id,
+        0,
+    )
+    .await;
+    let expected_danger_version = i64::try_from(
+        client_outcome
+            .stored
+            .versions
+            .character
+            .checked_add(2)
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        persistence
+            .world_location(scenario.account_id, client_outcome.stored.successor_id)
+            .await
+            .unwrap(),
+        Some(persistence::StoredWorldLocation::Danger {
+            character_version,
+            location_content_id,
+            ..
+        }) if character_version == expected_danger_version && location_content_id == WORLD_ID
+    ));
+    let database_residue = death_measurement::PostgresResidueSnapshotV1::capture(persistence)
+        .await
+        .unwrap();
+    assert!(database_residue.is_zero());
+    let starter_item_uids = client_outcome.stored.starter_items.ordered_uids();
+
+    successor_measurement::SuccessorJourneySampleV1 {
+        journey_ordinal: ordinal,
+        death_id: scenario.identity.death_id,
+        successor_id: client_outcome.stored.successor_id,
+        receipt_id: client_outcome.stored.receipt_id,
+        starter_item_uids,
+        terminal_commit_micros: duration_micros(terminal_commit),
+        successor_create_round_trip_micros: duration_micros(
+            client_outcome.successor_create_round_trip,
+        ),
+        death_to_control_micros: duration_micros(client_outcome.death_to_control),
+        summary_to_control_micros: duration_micros(client_outcome.summary_to_control),
+        control_to_combat_micros: duration_micros(client_outcome.control_to_combat),
+        summary_to_combat_micros: duration_micros(client_outcome.summary_to_combat),
+        confirmations: client_outcome.confirmations,
+        fresh_successor_result: true,
+        exact_durable_graph: true,
+        transport_and_task_zero_residue: true,
+        database_residue,
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2922,7 +3331,7 @@ async fn persistent_successor_replays_identically_after_response_loss_pool_and_p
     else {
         panic!("the reconnect must return the exact stored successor");
     };
-    assert_persistent_successor_graph(&persistence, &expected_stored, 0).await;
+    assert_primary_persistent_successor_graph(&persistence, &expected_stored, 0).await;
     let expected_bytes =
         protocol::encode_frame(&WireMessage::ReliableEvent(expected_event)).unwrap();
     tokio::time::timeout(SUCCESSOR_TEARDOWN_TIMEOUT, persistence.close())
@@ -2964,14 +3373,14 @@ async fn persistent_successor_replays_identically_after_response_loss_pool_and_p
             ..
         }
     ));
-    assert_persistent_successor_graph(&restarted, &expected_stored, 1).await;
+    assert_primary_persistent_successor_graph(&restarted, &expected_stored, 1).await;
     tokio::time::timeout(SUCCESSOR_TEARDOWN_TIMEOUT, restarted.close())
         .await
         .expect("the restarted successor database pool must close within ten seconds");
 
     run_child_process_successor_replay(&expected_bytes, &expected_stored).await;
     let after_child = reconnect_database().await;
-    assert_persistent_successor_graph(&after_child, &expected_stored, 1).await;
+    assert_primary_persistent_successor_graph(&after_child, &expected_stored, 1).await;
     tokio::time::timeout(SUCCESSOR_TEARDOWN_TIMEOUT, after_child.close())
         .await
         .expect("the post-child successor database pool must close within ten seconds");
@@ -4732,6 +5141,71 @@ async fn reliable_quic_completes_25_scripted_core_journeys_below_login_budget() 
         median.as_micros(),
         login_to_control[23].as_micros(),
         login_to_control[24].as_micros()
+    );
+    persistence.close().await;
+}
+
+/// GDD `DTH-020`/`DTH-021`, `UI-007`-`009`, and `QA-101`; Content Spec
+/// `CONT-CATALOG-003`; and Roadmap `GB-M03-07` require 25 exact two-confirmation recoveries with
+/// fresh starter identities, median death-to-control below 15 seconds, p95 below 30 seconds,
+/// checked return to permadeath combat, and zero operational residue. The combined capability is
+/// constructed only by this disposable evidence route; normal production admission stays disabled.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires explicitly authorized disposable PostgreSQL"]
+async fn successor_recovery_completes_25_real_quic_journeys_without_duplicates_or_residue() {
+    let persistence = disposable_database().await;
+    let presentation = sim_content::load_core_development_death_view(&content_root()).unwrap();
+    let mut samples = Vec::with_capacity(successor_measurement::REQUIRED_SUCCESSOR_JOURNEY_COUNT);
+    for ordinal in
+        1..=u8::try_from(successor_measurement::REQUIRED_SUCCESSOR_JOURNEY_COUNT).unwrap()
+    {
+        samples.push(
+            Box::pin(run_disposable_successor_recovery_journey(
+                &persistence,
+                &presentation,
+                ordinal,
+            ))
+            .await,
+        );
+    }
+    let world_revision = revision();
+    let death_revision = durable_death_fixture::death_view_revision();
+    let evidence = successor_measurement::SuccessorJourneyEvidenceV1::compile(
+        samples,
+        successor_measurement::SuccessorJourneyAuthorityV1 {
+            build_id: server_app::CORE_IDENTITY_BUILD_ID.to_owned(),
+            successor_content_revision: persistence::CORE_ITEM_CONTENT_REVISION.to_owned(),
+            world_records_blake3: world_revision.records_blake3.as_str().to_owned(),
+            world_assets_blake3: world_revision.assets_blake3.as_str().to_owned(),
+            world_localization_blake3: world_revision.localization_blake3.as_str().to_owned(),
+            death_view_records_blake3: death_revision.records_blake3.as_str().to_owned(),
+            death_view_assets_blake3: death_revision.assets_blake3.as_str().to_owned(),
+            death_view_localization_blake3: death_revision.localization_blake3.as_str().to_owned(),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        evidence.sample_count,
+        successor_measurement::REQUIRED_SUCCESSOR_JOURNEY_COUNT
+    );
+    assert!(evidence.death_to_control_median_under_fifteen_seconds);
+    assert!(evidence.death_to_control_p95_under_thirty_seconds);
+    assert!(evidence.successor_combat_route_meets_seventy_percent);
+    assert!(evidence.every_journey_used_two_confirmations);
+    assert!(evidence.every_successor_result_fresh);
+    assert!(evidence.all_death_successor_receipt_and_starter_ids_unique);
+    assert!(evidence.every_durable_graph_exact);
+    assert!(evidence.zero_transport_task_session_transaction_and_lock_residue);
+    assert!(evidence.accepted);
+    assert_ne!(evidence.raw_report_hash_blake3, "0".repeat(64));
+    if let Some(path) = std::env::var_os(SUCCESSOR_JOURNEY_REPORT_PATH_ENV) {
+        evidence
+            .write_json_atomically(&PathBuf::from(path))
+            .unwrap();
+    }
+    println!(
+        "GB_M03_07_SUCCESSOR_RECOVERY_EVIDENCE={}",
+        serde_json::to_string(&evidence).unwrap()
     );
     persistence.close().await;
 }
