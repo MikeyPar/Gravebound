@@ -56,6 +56,16 @@ enum CoreDeathViewEvidenceStateArg {
     RecoverableError,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CoreResolutionHoldEvidenceStateArg {
+    MixedDestinations,
+    StorageFull,
+    ConfirmDestroy,
+    MutationPending,
+    FinalClear,
+    RecoverableError,
+}
+
 impl From<CoreTransitionEvidenceStateArg> for client_bevy::CoreTransitionShowcaseState {
     fn from(value: CoreTransitionEvidenceStateArg) -> Self {
         match value {
@@ -96,6 +106,19 @@ impl From<CoreCaldusEvidenceStateArg> for client_bevy::CoreCaldusShowcaseState {
             CoreCaldusEvidenceStateArg::VictoryExit => Self::VictoryExit,
             CoreCaldusEvidenceStateArg::ExtractionCommitted => Self::ExtractionCommitted,
             CoreCaldusEvidenceStateArg::HallArrival => Self::HallArrival,
+        }
+    }
+}
+
+impl From<CoreResolutionHoldEvidenceStateArg> for client_bevy::CoreResolutionHoldShowcaseState {
+    fn from(value: CoreResolutionHoldEvidenceStateArg) -> Self {
+        match value {
+            CoreResolutionHoldEvidenceStateArg::MixedDestinations => Self::MixedDestinations,
+            CoreResolutionHoldEvidenceStateArg::StorageFull => Self::StorageFull,
+            CoreResolutionHoldEvidenceStateArg::ConfirmDestroy => Self::ConfirmDestroy,
+            CoreResolutionHoldEvidenceStateArg::MutationPending => Self::MutationPending,
+            CoreResolutionHoldEvidenceStateArg::FinalClear => Self::FinalClear,
+            CoreResolutionHoldEvidenceStateArg::RecoverableError => Self::RecoverableError,
         }
     }
 }
@@ -199,6 +222,21 @@ enum Command {
         #[arg(long, value_enum, default_value_t = CoreDeathViewEvidenceStateArg::Summary)]
         state: CoreDeathViewEvidenceStateArg,
     },
+    /// Open the disposable GB-M03-08 blocking Resolution Hold evidence surface.
+    CoreResolutionHoldShowcase {
+        #[arg(long, default_value = "content")]
+        content_root: PathBuf,
+        #[arg(long)]
+        reduced_effects: bool,
+        #[arg(long, default_value_t = 100)]
+        ui_scale: u16,
+        #[arg(
+            long,
+            value_enum,
+            default_value_t = CoreResolutionHoldEvidenceStateArg::MixedDestinations
+        )]
+        state: CoreResolutionHoldEvidenceStateArg,
+    },
     /// Replay one authenticated durable-death fixture into a measured native rendered frame.
     CoreDeathFrameProbe {
         #[arg(long)]
@@ -229,6 +267,7 @@ fn main() {
     }
 }
 
+#[allow(clippy::too_many_lines)] // Linear exhaustive CLI dispatch keeps evidence commands auditable.
 fn run() -> anyhow::Result<()> {
     match Cli::parse().command.unwrap_or_else(default_command) {
         Command::LocalLab => client_bevy::run_local_lab(),
@@ -306,6 +345,19 @@ fn run() -> anyhow::Result<()> {
             ui_scale,
             state,
         } => run_death_view_showcase(content_root, reduced_effects, ui_scale, state),
+        Command::CoreResolutionHoldShowcase {
+            content_root,
+            reduced_effects,
+            ui_scale,
+            state,
+        } => client_bevy::run_core_resolution_hold_showcase(
+            &client_bevy::CoreResolutionHoldShowcaseConfig {
+                content_root,
+                reduced_effects,
+                ui_scale_percent: ui_scale,
+                state: state.into(),
+            },
+        ),
         Command::CoreDeathFrameProbe {
             fixture,
             screenshot,
