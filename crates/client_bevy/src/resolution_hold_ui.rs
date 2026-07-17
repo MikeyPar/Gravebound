@@ -407,6 +407,11 @@ struct ResolutionHoldUiRoot;
 #[derive(Debug, Component)]
 struct ResolutionHoldUiScrollRoot;
 
+#[derive(Debug, Component)]
+struct ResolutionHoldUiFocusMarker {
+    order: u16,
+}
+
 #[derive(Debug, Clone, Component)]
 struct ResolutionHoldUiButton {
     action: ResolutionHoldUiAction,
@@ -449,6 +454,7 @@ impl Plugin for NativeResolutionHoldPlugin {
                     scroll_resolution_hold_list,
                     keep_focused_resolution_hold_row_visible,
                     update_resolution_hold_scroll_state,
+                    update_resolution_hold_focus_markers,
                     style_resolution_hold_buttons,
                 )
                     .chain(),
@@ -588,6 +594,7 @@ fn spawn_native_resolution_hold(
                 panel
                     .spawn(Node {
                         width: percent(100),
+                        flex_shrink: 0.0,
                         align_items: AlignItems::Center,
                         justify_content: JustifyContent::SpaceBetween,
                         column_gap: px(12),
@@ -626,7 +633,7 @@ fn spawn_native_resolution_hold(
                         min_height: px(if metrics.layout_mode
                             == ResolutionHoldUiLayoutMode::Compact
                         {
-                            230
+                            180
                         } else {
                             300
                         }),
@@ -734,6 +741,7 @@ fn spawn_hold_status(
             Node {
                 width: percent(100),
                 padding: UiRect::axes(px(14), px(9)),
+                flex_shrink: 0.0,
                 flex_direction: FlexDirection::Column,
                 row_gap: px(3),
                 border: UiRect::left(px(3)),
@@ -877,6 +885,7 @@ fn spawn_hold_stack_row(
             }),
         ))
         .with_children(|row| {
+            spawn_hold_focus_marker(row, order, metrics, fonts);
             row.spawn((
                 ImageNode::from_atlas_image(
                     texture.clone(),
@@ -1109,6 +1118,7 @@ fn spawn_hold_actions(
         .spawn(Node {
             width: percent(100),
             min_height: px(52),
+            flex_shrink: 0.0,
             flex_wrap: FlexWrap::Wrap,
             align_items: AlignItems::Center,
             justify_content: JustifyContent::End,
@@ -1154,6 +1164,7 @@ fn spawn_hold_action_button(
             Node {
                 min_width: px(if destructive { 230 } else { 210 }),
                 min_height: px(48),
+                column_gap: px(7),
                 padding: UiRect::axes(px(18), px(10)),
                 align_items: AlignItems::Center,
                 justify_content: JustifyContent::Center,
@@ -1170,6 +1181,7 @@ fn spawn_hold_action_button(
             BorderColor::all(action_border(action.emphasis, action.enabled)),
         ))
         .with_children(|button| {
+            spawn_hold_focus_marker(button, order, metrics, fonts);
             spawn_hold_text(
                 button,
                 &action.label,
@@ -1183,6 +1195,25 @@ fn spawn_hold_action_button(
                 fonts,
             );
         });
+}
+
+fn spawn_hold_focus_marker(
+    parent: &mut ChildSpawnerCommands,
+    order: u16,
+    metrics: ResolutionHoldUiMetrics,
+    fonts: &ResolutionHoldUiFonts,
+) {
+    parent.spawn((
+        ResolutionHoldUiFocusMarker { order },
+        Text::new("▶"),
+        TextFont {
+            font: FontSource::Handle(fonts.bold.clone()),
+            font_size: FontSize::Px(metrics.label_text_px),
+            ..default()
+        },
+        TextColor(Color::srgb_u8(244, 224, 164)),
+        Visibility::Hidden,
+    ));
 }
 
 fn spawn_hold_text(
@@ -1205,6 +1236,10 @@ fn spawn_hold_text(
             ..default()
         },
         TextColor(color),
+        Node {
+            flex_shrink: 0.0,
+            ..default()
+        },
     ));
 }
 
@@ -1433,6 +1468,23 @@ fn update_resolution_hold_scroll_state(
         offset: scroll.y,
         max_offset,
     };
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn update_resolution_hold_focus_markers(
+    focus: Res<ResolutionHoldUiFocusState>,
+    mut markers: Query<(&ResolutionHoldUiFocusMarker, &mut Visibility)>,
+) {
+    if !focus.is_changed() {
+        return;
+    }
+    for (marker, mut visibility) in &mut markers {
+        *visibility = if focus.focused_order == Some(marker.order) {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+    }
 }
 
 #[allow(clippy::needless_pass_by_value)]
