@@ -88,6 +88,9 @@ pub trait CoreBellPortalAuthority: Send + Sync {
 
     /// Reserve the exact actor generation and route state. This is always called without a
     /// `PostgreSQL` transaction so the actor may safely consult its own durable dependencies.
+    /// Implementations that mark a reservation before any suspension point must immediately own a
+    /// cancellation guard whose `Drop` releases it, then move that guard into the returned lease.
+    /// Dropping this future at the coordinator timeout must never strand `TransferInProgress`.
     fn prepare_bell_portal(
         &self,
         binding: CoreBellPortalBinding,

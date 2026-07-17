@@ -539,6 +539,11 @@ impl ExclusiveBellPortal {
 #[derive(Debug)]
 struct ExclusiveBellLease {
     permit: CoreBellPortalPermit,
+    _reservation: ExclusiveBellReservation,
+}
+
+#[derive(Debug)]
+struct ExclusiveBellReservation {
     active: Arc<AtomicBool>,
 }
 
@@ -548,7 +553,7 @@ impl CoreBellPortalPermitLease for ExclusiveBellLease {
     }
 }
 
-impl Drop for ExclusiveBellLease {
+impl Drop for ExclusiveBellReservation {
     fn drop(&mut self) {
         self.active.store(false, Ordering::Release);
     }
@@ -570,6 +575,9 @@ impl CoreBellPortalAuthority for ExclusiveBellPortal {
             self.contender_seen.notify_one();
             return Err(CoreBellPortalRejection::TransferInProgress);
         }
+        let reservation = ExclusiveBellReservation {
+            active: Arc::clone(&self.active),
+        };
         self.contender_seen.notified().await;
         Ok(ExclusiveBellLease {
             permit: CoreBellPortalPermit {
@@ -578,7 +586,7 @@ impl CoreBellPortalAuthority for ExclusiveBellPortal {
                 actor_generation: 9,
                 route_state_version: 11,
             },
-            active: Arc::clone(&self.active),
+            _reservation: reservation,
         })
     }
 
@@ -1162,6 +1170,65 @@ async fn concurrent_exact_bell_requests_commit_one_location_and_one_receipt() {
     let replayed = service.handle(authenticated(ACCOUNT_ID), &request).await;
     assert_eq!(code(&replayed), WorldTransferResultCode::Accepted);
     assert_eq!(actor.prepares.load(Ordering::Relaxed), 2);
+    assert_eq!(aggregate_counts(&persistence).await, (1, 1, 1, 2));
+}
+
+#[tokio::test]
+#[ignore = "requires explicitly authorized disposable PostgreSQL"]
+async fn cancelled_prepare_releases_generation_pin_and_exact_retry_can_commit() {
+    let persistence = disposable_database().await;
+    reset_fixture(&persistence).await;
+    let actor = ExclusiveBellPortal::new();
+    let service = Arc::new(bell_coordinator(persistence.clone(), actor.clone()));
+    assert_eq!(
+        code(
+            &service
+                .handle(authenticated(ACCOUNT_ID), &frame(1, 125, CHARACTER_ID, 1),)
+                .await
+        ),
+        WorldTransferResultCode::Accepted
+    );
+
+    let request = bell_frame(2, 126, 2);
+    let unavailable = service.handle(authenticated(ACCOUNT_ID), &request).await;
+    assert_eq!(
+        code(&unavailable),
+        WorldTransferResultCode::ServiceUnavailable
+    );
+    assert!(
+        actor.can_replace_generation(),
+        "cancelling prepare must drop its internal reservation guard"
+    );
+    assert_eq!(aggregate_counts(&persistence).await, (1, 1, 1, 1));
+
+    let retry_service = Arc::clone(&service);
+    let retry_request = request.clone();
+    let retry = tokio::spawn(async move {
+        retry_service
+            .handle(authenticated(ACCOUNT_ID), &retry_request)
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while actor.can_replace_generation() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("exact retry must acquire a fresh cancellation-safe lease");
+    let mut contender = request.clone();
+    contender.sequence = 3;
+    let in_progress = service.handle(authenticated(ACCOUNT_ID), &contender).await;
+    assert_eq!(
+        code(&in_progress),
+        WorldTransferResultCode::TransferInProgress
+    );
+    assert_eq!(
+        code(&retry.await.unwrap()),
+        WorldTransferResultCode::Accepted
+    );
+    assert!(actor.can_replace_generation());
+    assert_eq!(actor.prepares.load(Ordering::Relaxed), 3);
+    assert_eq!(actor.commits.load(Ordering::Relaxed), 1);
     assert_eq!(aggregate_counts(&persistence).await, (1, 1, 1, 2));
 }
 
