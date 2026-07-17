@@ -13,6 +13,7 @@ mod core_encounter_showcase;
 mod core_equipment_showcase;
 mod core_identity;
 mod core_item_lifecycle_showcase;
+mod core_private_route;
 mod core_resolution_hold_showcase;
 mod core_successor_recovery_showcase;
 mod core_transition_showcase;
@@ -115,6 +116,10 @@ pub use core_identity::{
 };
 pub use core_item_lifecycle_showcase::{
     CoreItemLifecycleShowcaseConfig, run_core_item_lifecycle_showcase,
+};
+pub use core_private_route::{
+    CorePrivateRouteClientError, CorePrivateRouteClientFailure, CorePrivateRouteClientModel,
+    CorePrivateRouteClientPhase, CorePrivateSceneReadiness,
 };
 pub use core_resolution_hold_showcase::{
     CoreResolutionHoldShowcaseConfig, CoreResolutionHoldShowcaseState,
