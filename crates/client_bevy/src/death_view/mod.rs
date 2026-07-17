@@ -48,6 +48,22 @@ use crate::core_world_transition::{
 
 pub const TERMINAL_SUMMARY_LOSS_PAGE_LIMIT: u16 = DEATH_VIEW_MAX_LOST_PROJECTIONS_PER_PAGE;
 
+/// Opaque proof that the native death coordinator holds a durably acknowledged terminal summary.
+///
+/// The field is crate-private so successor recovery cannot be started from a locally predicted
+/// death identity or a historical Memorial projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminalSuccessorAuthority {
+    pub(crate) death_id: [u8; 16],
+}
+
+impl TerminalSuccessorAuthority {
+    #[must_use]
+    pub const fn death_id(self) -> [u8; 16] {
+        self.death_id
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerminalQueryIntent {
     Initial,
@@ -279,6 +295,19 @@ impl DeathViewClientModel {
     #[must_use]
     pub const fn ui_copy(&self) -> &DeathViewUiCopy {
         &self.ui_copy
+    }
+
+    /// Returns successor authority only from the active, durably acknowledged terminal summary.
+    /// Memorial detail is owned by a separate model and can never construct this proof.
+    #[must_use]
+    pub fn terminal_successor_authority(&self) -> Option<TerminalSuccessorAuthority> {
+        self.terminal.summary().and_then(|summary| {
+            (summary.context == DeathSummaryContext::Terminal).then_some(
+                TerminalSuccessorAuthority {
+                    death_id: summary.death_id,
+                },
+            )
+        })
     }
 
     #[must_use]

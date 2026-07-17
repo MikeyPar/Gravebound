@@ -37,6 +37,7 @@ mod progression_hud;
 mod resolution_hold;
 mod resolution_hold_ui;
 mod stress_benchmark;
+mod successor_recovery;
 mod telemetry;
 
 use std::{env, fs, io::Read, path::PathBuf};
@@ -143,6 +144,7 @@ pub use death_view::{
     MemorialDetailPhase, MemorialDetailQueryIntent, MemorialEntryPresentation, MemorialListPhase,
     MemorialPageQueryIntent, MemorialWallModel, PendingDeathViewQuery, PendingDeathViewRequest,
     TERMINAL_SUMMARY_LOSS_PAGE_LIMIT, TerminalDeathModel, TerminalDeathPhase, TerminalQueryIntent,
+    TerminalSuccessorAuthority,
 };
 pub use death_view_ui::{
     DEATH_FONT_BOLD_BLAKE3, DEATH_FONT_BOLD_PATH, DEATH_FONT_REGULAR_BLAKE3,
@@ -180,6 +182,11 @@ pub use resolution_hold_ui::{
     ResolutionHoldUiFocusOrder, ResolutionHoldUiFocusState, ResolutionHoldUiLayoutMode,
     ResolutionHoldUiMetrics, ResolutionHoldUiScrollState, ResolutionHoldUiSnapshot,
     ResolutionHoldUiStatus, ResolutionHoldUiTone,
+};
+pub use successor_recovery::{
+    SuccessorCharacterSelectProjection, SuccessorRecoveryApplyDisposition,
+    SuccessorRecoveryClientError, SuccessorRecoveryClientFailure, SuccessorRecoveryClientModel,
+    SuccessorRecoveryPhase, SuccessorRecoveryRetryDirective,
 };
 
 const WINDOW_TITLE: &str = "Gravebound - LocalLab";

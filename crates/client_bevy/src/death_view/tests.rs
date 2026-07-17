@@ -278,6 +278,7 @@ fn local_health_zero_exposes_no_durable_data_or_actions() {
     assert!(model.pending().is_none());
     assert!(model.terminal().latest().is_none());
     assert!(model.terminal().summary().is_none());
+    assert!(model.terminal_successor_authority().is_none());
     assert_eq!(model.phase_copy(), Some("Recording the final moment"));
     assert!(model.awaiting_detail_copy().is_some());
     for action in [
@@ -496,6 +497,12 @@ fn acknowledged_summary_projects_exact_order_copy_and_action_gates() {
             .all(|action| action.state.is_enabled() && action.unavailable_detail.is_none())
     );
     assert_eq!(model.terminal().phase(), TerminalDeathPhase::SummaryReady);
+    assert_eq!(
+        model
+            .terminal_successor_authority()
+            .map(super::TerminalSuccessorAuthority::death_id),
+        Some(uuid_v7(1))
+    );
 }
 
 fn complete_portraitless_summary(
