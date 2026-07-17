@@ -38,4 +38,4 @@ Parent `GB-M03-03` owns normal Character Select → Hall → danger → dungeon 
 
 ## Handoff
 
-`GB-M03-07` is closed. Integrate and audit parent `GB-M03-03` next, removing only the normal-route gates whose owning packages now pass. Keep Core promotion, M04+ content, telemetry/support/platform surfaces, and every unrelated station fail closed.
+`GB-M03-07` is closed. Parent [`GB-M03-03`](../tasks/GB-M03-03.md) integration is active in [`GB-M03-03G`](../tasks/GB-M03-03G.md) under [`ADR-037`](../decisions/ADR-037-normal-core-private-route-composition.md). Remove normal-route gates only after the live actor, terminal owners, ordinary native route, and cumulative evidence pass. Keep Core promotion, M04+ content, telemetry/support/platform surfaces, and every unrelated station fail closed.
