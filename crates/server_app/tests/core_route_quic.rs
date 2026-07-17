@@ -2,11 +2,12 @@ use std::{
     fs,
     future::Future,
     net::SocketAddr,
+    num::NonZeroU64,
     path::PathBuf,
     process::{Child, Command, Stdio},
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -52,20 +53,21 @@ use server_app::{
     AuthenticationDecision, BoundCoreIdentityServer, CaldusVictoryOwnerCommand,
     CharacterIdGenerator, CoreBargainAuthority, CoreExtractionTerminalAuthority,
     CoreIdentityServerConfig, CoreIdentityServerReport, CoreNonTerminalAdmission,
-    CoreOathSelectionAuthority, CoreRecallTerminalAuthority, CoreRecallTerminalTickOutcome,
-    CoreReliableSequence, CoreResolutionHoldAuthority, CoreResolutionHoldIntentAuthority,
-    CoreSafeInventoryAuthority, CoreTerminalCoordinator, CoreTerminalEvaluation,
-    CoreTerminalOtherEvaluationsV1, CoreTerminalProducer, CoreTerminalTickSeal, DeathViewService,
-    DisabledDeathViewRepository, DisabledProgressionQueryRepository,
-    DisposableCoreJourneyWorldFlow, DurableDeathExecutionError, DurableDeathExecutionService,
-    HandshakePolicy, IdentityClock, IdentityService, InMemoryAccountRepository,
-    NoopIdentityEventSink, PostgresAccountRepository, PostgresCaldusHallTransferCoordinator,
-    PostgresCaldusVictoryCoordinator, PostgresDangerEntryAshWalletProviderV3,
-    PostgresDangerEntryInventoryProviderV3, PostgresDangerEntryLifeMetricsProviderV3,
-    PostgresDangerEntryOathBargainProviderV3, PostgresDeathViewRepository,
-    PostgresDormantWorldFlowCoordinator, PostgresProgressionAwardService,
-    PostgresProgressionRestoreProvider, PostgresResolutionHoldService, PostgresRewardService,
-    PreparedTerminal, ProductionRecallClock, ProductionRecallCompletionAuthorityV1,
+    CoreOathSelectionAuthority, CoreRecallActorDirectory, CoreRecallAuthoritativeTick,
+    CoreRecallTerminalAuthority, CoreRecallTerminalTickOutcome, CoreReliableSequence,
+    CoreResolutionHoldAuthority, CoreResolutionHoldIntentAuthority, CoreSafeInventoryAuthority,
+    CoreTerminalCoordinator, CoreTerminalEvaluation, CoreTerminalOtherEvaluationsV1,
+    CoreTerminalProducer, CoreTerminalTickSeal, DeathViewService, DisabledDeathViewRepository,
+    DisabledProgressionQueryRepository, DisposableCoreJourneyWorldFlow, DurableDeathExecutionError,
+    DurableDeathExecutionService, HandshakePolicy, IdentityClock, IdentityService,
+    InMemoryAccountRepository, NoopIdentityEventSink, PostgresAccountRepository,
+    PostgresCaldusHallTransferCoordinator, PostgresCaldusVictoryCoordinator,
+    PostgresDangerEntryAshWalletProviderV3, PostgresDangerEntryInventoryProviderV3,
+    PostgresDangerEntryLifeMetricsProviderV3, PostgresDangerEntryOathBargainProviderV3,
+    PostgresDeathViewRepository, PostgresDormantWorldFlowCoordinator,
+    PostgresProgressionAwardService, PostgresProgressionRestoreProvider,
+    PostgresResolutionHoldService, PostgresRewardService, PreparedTerminal, ProductionRecallClock,
+    ProductionRecallCompletionAuthorityV1, ProductionRecallDetachOutcome,
     ProductionRecallExecutionService, ProductionRecallIntentActor,
     ProductionRecallPendingAuthorityV1, ProductionRecallPublishedV1, ProgressionQueryService,
     RecoveredProductionRecallActorV1, STORED_TERMINAL_RECEIPT_SCHEMA_V1, SecretRewardEpoch,
@@ -319,6 +321,22 @@ impl IdentityClock for FixedAuthority {
 impl ProductionRecallClock for FixedAuthority {
     fn unix_millis(&self) -> u64 {
         IdentityClock::unix_millis(self)
+    }
+}
+
+#[derive(Debug)]
+struct RecallRuntimeTick(AtomicU64);
+
+impl RecallRuntimeTick {
+    fn set(&self, tick: u64) {
+        assert_ne!(tick, 0);
+        self.0.store(tick, Ordering::SeqCst);
+    }
+}
+
+impl CoreRecallAuthoritativeTick for RecallRuntimeTick {
+    fn current_tick(&self, _account_id: [u8; 16], _character_id: [u8; 16]) -> NonZeroU64 {
+        NonZeroU64::new(self.0.load(Ordering::SeqCst)).expect("test tick remains nonzero")
     }
 }
 
@@ -613,6 +631,17 @@ fn endpoints() -> (quinn::Endpoint, quinn::Endpoint, std::net::SocketAddr) {
     (server, client, address)
 }
 
+async fn connect_endpoint_pair(
+    server_endpoint: &quinn::Endpoint,
+    client_endpoint: &quinn::Endpoint,
+    address: SocketAddr,
+) -> (quinn::Connection, quinn::Connection) {
+    let connecting = client_endpoint.connect(address, "localhost").unwrap();
+    let incoming = server_endpoint.accept().await.unwrap();
+    let (client, server) = tokio::join!(connecting, incoming);
+    (client.unwrap(), server.unwrap())
+}
+
 fn policy() -> HandshakePolicy {
     HandshakePolicy {
         required_protocol: ProtocolVersion::current(),
@@ -717,6 +746,23 @@ async fn active_route_recall_completion(
     persistence: &PostgresPersistence,
     server_tick: u64,
 ) -> ProductionRecallCompletionAuthorityV1 {
+    recall_completion_for_active_character(
+        persistence,
+        ACCOUNT_ID,
+        CHARACTER_ID,
+        server_tick,
+        persistence::PRODUCTION_RECALL_EXPLICIT_CHANNEL_TICKS,
+    )
+    .await
+}
+
+async fn recall_completion_for_active_character(
+    persistence: &PostgresPersistence,
+    account_id: [u8; 16],
+    character_id: [u8; 16],
+    server_tick: u64,
+    elapsed_ticks: u64,
+) -> ProductionRecallCompletionAuthorityV1 {
     let mut transaction = persistence.begin_transaction().await.unwrap();
     let row = sqlx::query(
         "SELECT account.state_version AS account_version,
@@ -761,8 +807,8 @@ async fn active_route_recall_completion(
            AND character.character_id=$3",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
-    .bind(ACCOUNT_ID.as_slice())
-    .bind(CHARACTER_ID.as_slice())
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
     .fetch_one(transaction.connection())
     .await
     .unwrap();
@@ -784,11 +830,10 @@ async fn active_route_recall_completion(
     let lifetime_ticks = u64::try_from(row.try_get::<i64, _>("lifetime_ticks").unwrap()).unwrap();
     let combat_ticks =
         u64::try_from(row.try_get::<i64, _>("permadeath_combat_ticks").unwrap()).unwrap();
-    let channel_ticks = persistence::PRODUCTION_RECALL_EXPLICIT_CHANNEL_TICKS;
     let content = revision();
     let completion = ProductionRecallCompletionAuthorityV1 {
-        account_id: ACCOUNT_ID,
-        character_id: CHARACTER_ID,
+        account_id,
+        character_id,
         instance_lineage_id: lineage,
         entry_restore_point_id: restore_point,
         expected_versions: ProductionRecallExpectedVersionsV1 {
@@ -810,8 +855,8 @@ async fn active_route_recall_completion(
             localization_blake3: content.localization_blake3.as_str().to_owned(),
         },
         server_tick,
-        final_lifetime_ticks: lifetime_ticks.checked_add(channel_ticks).unwrap(),
-        final_permadeath_combat_ticks: combat_ticks.checked_add(channel_ticks).unwrap(),
+        final_lifetime_ticks: lifetime_ticks.checked_add(elapsed_ticks).unwrap(),
+        final_permadeath_combat_ticks: combat_ticks.checked_add(elapsed_ticks).unwrap(),
     };
     transaction.rollback().await.unwrap();
     completion
@@ -2757,6 +2802,360 @@ async fn reliable_quic_abandoned_recall_push_replays_on_exact_reconnect() {
     client_endpoint.wait_idle().await;
     server_endpoint.close(0_u32.into(), b"Recall replay complete");
     server_endpoint.wait_idle().await;
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the exact LinkLost boundary, reconnect push, restart recovery, and cleanup remain one auditable branch"
+)]
+async fn run_postgres_quic_link_lost_recall_branch(
+    persistence: &PostgresPersistence,
+) -> StoredRecallTerminalResultV1 {
+    const LOST_TICK: u64 = 200;
+    const EARLY_TICK: u64 = LOST_TICK + persistence::PRODUCTION_RECALL_LINK_LOST_TICKS - 1;
+    const DUE_TICK: u64 = LOST_TICK + persistence::PRODUCTION_RECALL_LINK_LOST_TICKS;
+    let authenticated = durable_death_fixture::authenticated_account();
+    let tick_source = Arc::new(RecallRuntimeTick(AtomicU64::new(LOST_TICK)));
+    let actor = Arc::new(
+        ProductionRecallIntentActor::new(
+            FixedAuthority,
+            authenticated.account_id.as_bytes(),
+            durable_death_fixture::CHARACTER_ID,
+            ProductionRecallPendingAuthorityV1 {
+                pending_item_count: 1,
+                pending_material_stack_count: 1,
+            },
+        )
+        .unwrap(),
+    );
+    let directory = Arc::new(CoreRecallActorDirectory::new(Arc::clone(&tick_source)));
+    let registration = directory
+        .register_actor(authenticated, Arc::clone(&actor))
+        .await
+        .unwrap();
+    let (server_endpoint, client_endpoint, address) = endpoints();
+    let (lost_client, lost_server) =
+        connect_endpoint_pair(&server_endpoint, &client_endpoint, address).await;
+    let lost_transport = directory
+        .attach_transport(authenticated, lost_server)
+        .await
+        .unwrap();
+    lost_client.close(0_u32.into(), b"enter LinkLost");
+    assert_eq!(
+        directory
+            .detach_transport(lost_transport.lease, 20_000)
+            .await
+            .unwrap(),
+        ProductionRecallDetachOutcome::LinkLostStarted {
+            deadline_tick: DUE_TICK
+        }
+    );
+
+    let early = recall_completion_for_active_character(
+        persistence,
+        authenticated.account_id.as_bytes(),
+        durable_death_fixture::CHARACTER_ID,
+        EARLY_TICK,
+        persistence::PRODUCTION_RECALL_LINK_LOST_TICKS - 1,
+    )
+    .await;
+    let binding = TerminalBinding::new(
+        early.account_id,
+        early.character_id,
+        early.instance_lineage_id,
+        early.entry_restore_point_id,
+    )
+    .unwrap();
+    let mut coordinator = CoreTerminalCoordinator::new(authenticated, binding).unwrap();
+    let executor = ProductionRecallExecutionService::new(persistence.clone());
+    assert_eq!(
+        drive_recall_terminal_tick(
+            actor.as_ref(),
+            &mut coordinator,
+            persistence,
+            &executor,
+            &early,
+            absent_recall_other_evaluations(&early),
+        )
+        .await
+        .unwrap(),
+        CoreRecallTerminalTickOutcome::NoTerminal
+    );
+
+    tick_source.set(DUE_TICK);
+    let due = recall_completion_for_active_character(
+        persistence,
+        authenticated.account_id.as_bytes(),
+        durable_death_fixture::CHARACTER_ID,
+        DUE_TICK,
+        persistence::PRODUCTION_RECALL_LINK_LOST_TICKS,
+    )
+    .await;
+    let outcome = drive_recall_terminal_tick(
+        actor.as_ref(),
+        &mut coordinator,
+        persistence,
+        &executor,
+        &due,
+        absent_recall_other_evaluations(&due),
+    )
+    .await
+    .unwrap();
+    let CoreRecallTerminalTickOutcome::RecallStored(published) = &outcome else {
+        panic!("tick ninety must commit automatic DisconnectRecovery")
+    };
+    let RecallResultV1::Stored {
+        request_sequence: None,
+        replayed: false,
+        result,
+        ..
+    } = &published.result
+    else {
+        panic!("fresh LinkLost publication must carry the stored server-generated result")
+    };
+    assert_eq!(result.trigger, RecallTerminalTriggerV1::LinkLost);
+    assert_eq!(result.completion_tick, DUE_TICK);
+    let expected_result = result.as_ref().clone();
+
+    let (reconnected_client, reconnected_server) =
+        connect_endpoint_pair(&server_endpoint, &client_endpoint, address).await;
+    let reconnected = directory
+        .attach_transport(authenticated, reconnected_server)
+        .await
+        .unwrap();
+    assert!(reconnected.invalidated_connection.is_none());
+    assert!(
+        registration
+            .completion_outbox
+            .try_publish_outcome(&outcome)
+            .unwrap()
+    );
+    let pushed = tokio::time::timeout(
+        Duration::from_secs(5),
+        bot_client::receive_server_reliable(&reconnected_client),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(pushed.sequence, 1);
+    assert_eq!(pushed.server_tick, DUE_TICK);
+    assert!(matches!(
+        pushed.event,
+        ReliableEvent::RecallResult(result)
+            if matches!(
+                result.as_ref(),
+                RecallResultV1::Stored {
+                    request_sequence: None,
+                    replayed: false,
+                    result,
+                    ..
+                } if result.as_ref() == &expected_result
+            )
+    ));
+
+    for connection in directory.begin_shutdown().await {
+        connection.close(0_u32.into(), b"LinkLost branch shutdown");
+    }
+    let report = directory.finish_shutdown().await.unwrap();
+    assert_eq!(report.served_actor_commands, 0);
+    assert_eq!(report.delivered_completion_publications, 1);
+    assert_eq!(report.undelivered_completion_publications, 0);
+    assert_eq!(report.abandoned_completion_publications, 0);
+    assert!(report.zero_residue);
+    reconnected_client.close(0_u32.into(), b"LinkLost branch complete");
+    server_endpoint.close(0_u32.into(), b"LinkLost branch complete");
+    client_endpoint.wait_idle().await;
+    server_endpoint.wait_idle().await;
+    assert_zero_death_database_residue(persistence).await;
+    expected_result
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the duplicate handoff, real lethal candidate, terminal commit, and complete cleanup form one auditable branch"
+)]
+async fn run_postgres_quic_link_lost_lethal_branch(persistence: &PostgresPersistence) {
+    let authenticated = durable_death_fixture::authenticated_account();
+    let death = durable_death_fixture::prepare_death(persistence.clone()).await;
+    let lethal = durable_death_terminal_candidate(&death).unwrap();
+    let due_tick = lethal.observed_tick();
+    let lost_tick = due_tick
+        .checked_sub(persistence::PRODUCTION_RECALL_LINK_LOST_TICKS)
+        .unwrap();
+    let tick_source = Arc::new(RecallRuntimeTick(AtomicU64::new(lost_tick)));
+    let actor = Arc::new(
+        ProductionRecallIntentActor::new(
+            FixedAuthority,
+            authenticated.account_id.as_bytes(),
+            durable_death_fixture::CHARACTER_ID,
+            ProductionRecallPendingAuthorityV1 {
+                pending_item_count: 1,
+                pending_material_stack_count: 1,
+            },
+        )
+        .unwrap(),
+    );
+    let directory = Arc::new(CoreRecallActorDirectory::new(Arc::clone(&tick_source)));
+    let registration = directory
+        .register_actor(authenticated, Arc::clone(&actor))
+        .await
+        .unwrap();
+    let (server_endpoint, client_endpoint, address) = endpoints();
+    let (old_client, old_server) =
+        connect_endpoint_pair(&server_endpoint, &client_endpoint, address).await;
+    let old = directory
+        .attach_transport(authenticated, old_server)
+        .await
+        .unwrap();
+    let (current_client, current_server) =
+        connect_endpoint_pair(&server_endpoint, &client_endpoint, address).await;
+    let current = directory
+        .attach_transport(authenticated, current_server)
+        .await
+        .unwrap();
+    current
+        .invalidated_connection
+        .expect("duplicate handoff returns the old connection after generation commit")
+        .close(0_u32.into(), b"authoritative duplicate handoff");
+    assert_eq!(
+        directory.detach_transport(old.lease, 30_000).await.unwrap(),
+        ProductionRecallDetachOutcome::StaleGenerationIgnored
+    );
+    old_client.close(0_u32.into(), b"stale transport retired");
+    current_client.close(0_u32.into(), b"current transport lost");
+    assert_eq!(
+        directory
+            .detach_transport(current.lease, 30_001)
+            .await
+            .unwrap(),
+        ProductionRecallDetachOutcome::LinkLostStarted {
+            deadline_tick: due_tick
+        }
+    );
+
+    tick_source.set(due_tick);
+    let due = recall_completion_for_active_character(
+        persistence,
+        authenticated.account_id.as_bytes(),
+        durable_death_fixture::CHARACTER_ID,
+        due_tick,
+        persistence::PRODUCTION_RECALL_LINK_LOST_TICKS,
+    )
+    .await;
+    let due_binding = TerminalBinding::new(
+        due.account_id,
+        due.character_id,
+        due.instance_lineage_id,
+        due.entry_restore_point_id,
+    )
+    .unwrap();
+    assert_eq!(lethal.binding(), due_binding);
+    assert_eq!(
+        lethal.expected_state_version(),
+        due.expected_versions.character
+    );
+    let mut others = absent_recall_other_evaluations(&due);
+    others.lethal = CoreTerminalEvaluation::candidate(
+        CoreTerminalProducer::LethalHealth,
+        lethal.binding(),
+        due_tick,
+        due.expected_versions.character,
+        lethal.clone(),
+    );
+    let mut coordinator = CoreTerminalCoordinator::new(authenticated, lethal.binding()).unwrap();
+    let recall_executor = ProductionRecallExecutionService::new(persistence.clone());
+    let outcome = drive_recall_terminal_tick(
+        actor.as_ref(),
+        &mut coordinator,
+        persistence,
+        &recall_executor,
+        &due,
+        others,
+    )
+    .await
+    .unwrap();
+    assert!(
+        !registration
+            .completion_outbox
+            .try_publish_outcome(&outcome)
+            .unwrap()
+    );
+    let CoreRecallTerminalTickOutcome::OtherTerminalPrepared(prepared) = outcome else {
+        panic!("real lethal death must win the exact LinkLost deadline")
+    };
+    assert_eq!(prepared.winner(), &lethal);
+    let committed = DurableDeathExecutionService::new(persistence.clone())
+        .execute_coordinated(&mut coordinator, &prepared, &death)
+        .await
+        .unwrap();
+    assert!(!committed.transaction.is_replay());
+
+    let mut verification = persistence.begin_transaction().await.unwrap();
+    let recall_results: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM character_recall_terminal_results_v1
+         WHERE namespace_id=$1 AND account_id=$2 AND character_id=$3",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(authenticated.account_id.as_bytes().as_slice())
+    .bind(durable_death_fixture::CHARACTER_ID.as_slice())
+    .fetch_one(verification.connection())
+    .await
+    .unwrap();
+    assert_eq!(recall_results, 0);
+    verification.rollback().await.unwrap();
+    durable_death_fixture::assert_committed_graph(persistence).await;
+    canonical_death_terminal_signature(persistence).await;
+
+    for connection in directory.begin_shutdown().await {
+        connection.close(0_u32.into(), b"lethal branch shutdown");
+    }
+    let report = directory.finish_shutdown().await.unwrap();
+    assert_eq!(report.delivered_completion_publications, 0);
+    assert_eq!(report.undelivered_completion_publications, 0);
+    assert_eq!(report.abandoned_completion_publications, 0);
+    assert!(report.zero_residue);
+    server_endpoint.close(0_u32.into(), b"lethal branch complete");
+    client_endpoint.wait_idle().await;
+    server_endpoint.wait_idle().await;
+    assert_zero_death_database_residue(persistence).await;
+}
+
+/// GDD `TECH-015`/`021`-`023` and `DTH-010`/`011`, Content Spec Core danger/Hall
+/// authority, and Roadmap `GB-M03-03`/`08` require automatic Recall and lethal resolution to
+/// share one exact tick, survive reconnect/restart, and leave no transport, actor, queue,
+/// transaction, or lock residue.
+#[tokio::test]
+#[ignore = "requires explicitly authorized disposable PostgreSQL"]
+async fn postgres_quic_link_lost_terminal_matrix_is_lethal_first_and_residue_free() {
+    let persistence = disposable_database().await;
+    durable_death_fixture::seed_danger_root(&persistence).await;
+    let expected_recall = run_postgres_quic_link_lost_recall_branch(&persistence).await;
+    persistence.close().await;
+
+    let restarted = reconnect_database().await;
+    let recovered = recover_committed_recall_actor(
+        &restarted,
+        durable_death_fixture::authenticated_account(),
+        durable_death_fixture::CHARACTER_ID,
+    )
+    .await
+    .unwrap()
+    .expect("process restart recovers the committed LinkLost terminal");
+    let RecallResultV1::Stored {
+        replayed: true,
+        result,
+        ..
+    } = recovered.published.result
+    else {
+        panic!("restart publication must be the exact stored replay")
+    };
+    assert_eq!(result.as_ref(), &expected_recall);
+    assert_zero_death_database_residue(&restarted).await;
+
+    restarted.reset_disposable_identity_data().await.unwrap();
+    durable_death_fixture::seed_danger_root(&restarted).await;
+    run_postgres_quic_link_lost_lethal_branch(&restarted).await;
+    restarted.close().await;
 }
 
 #[tokio::test]
