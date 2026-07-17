@@ -1,9 +1,13 @@
 use std::{
     fs,
+    future::Future,
     net::SocketAddr,
     path::PathBuf,
     process::{Child, Command, Stdio},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -29,14 +33,17 @@ use protocol::{
     ExtractionCommitFrameV1, ExtractionCommitPayloadV1, ExtractionCommitResultV1,
     HandshakeResponse, ManifestHash, Platform, ProtocolVersion, RESOLUTION_HOLD_SCHEMA_VERSION,
     RecallFrameV1, RecallIntentV1, RecallResultV1, RecallTerminalTriggerV1, ReliableEvent,
-    ResolutionHoldActionV1, ResolutionHoldMutationFrameV1, ResolutionHoldMutationPayloadV1,
-    ResolutionHoldMutationResultV1, ResolutionHoldQueryFrameV1, ResolutionHoldQueryResultV1,
-    ResolutionHoldRejectionCodeV1, ResolutionHoldVersionsV1, SafeArrival,
-    StoredRecallTerminalResultV1, TERMINAL_HALL_CONTENT_ID, TERMINAL_INVENTORY_SCHEMA_VERSION,
-    TerminalExpectedVersionsV1, TerminalInventoryRejectionCodeV1, TerminalVersionAdvanceV1,
-    TerminalVersionVectorV1, WireText, WorldFlowContentRevisionV1, WorldFlowFrame,
-    WorldFlowRequest, WorldFlowResult, WorldTransferCommand, WorldTransferMutation,
-    WorldTransferPayload, WorldTransferResultCode,
+    ResolutionHoldActionV1, ResolutionHoldDestinationV1, ResolutionHoldDispositionV1,
+    ResolutionHoldItemKindV1, ResolutionHoldItemTransitionV1, ResolutionHoldItemV1,
+    ResolutionHoldMutationFrameV1, ResolutionHoldMutationPayloadV1, ResolutionHoldMutationResultV1,
+    ResolutionHoldQueryFrameV1, ResolutionHoldQueryResultV1, ResolutionHoldRejectionCodeV1,
+    ResolutionHoldStackV1, ResolutionHoldVersionAdvanceV1, ResolutionHoldVersionVectorV1,
+    ResolutionHoldVersionsV1, SafeArrival, StoredRecallTerminalResultV1,
+    StoredResolutionHoldMutationResultV1, TERMINAL_HALL_CONTENT_ID,
+    TERMINAL_INVENTORY_SCHEMA_VERSION, TerminalExpectedVersionsV1,
+    TerminalInventoryRejectionCodeV1, TerminalVersionAdvanceV1, TerminalVersionVectorV1, WireText,
+    WorldFlowContentRevisionV1, WorldFlowFrame, WorldFlowRequest, WorldFlowResult,
+    WorldTransferCommand, WorldTransferMutation, WorldTransferPayload, WorldTransferResultCode,
 };
 use rcgen::{CertifiedKey, generate_simple_self_signed};
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
@@ -46,27 +53,27 @@ use server_app::{
     CharacterIdGenerator, CoreBargainAuthority, CoreExtractionTerminalAuthority,
     CoreIdentityServerConfig, CoreIdentityServerReport, CoreNonTerminalAdmission,
     CoreOathSelectionAuthority, CoreRecallTerminalAuthority, CoreRecallTerminalTickOutcome,
-    CoreReliableSequence, CoreResolutionHoldAuthority, CoreSafeInventoryAuthority,
-    CoreTerminalCoordinator, CoreTerminalEvaluation, CoreTerminalOtherEvaluationsV1,
-    CoreTerminalProducer, CoreTerminalTickSeal, DeathViewService, DisabledDeathViewRepository,
-    DisabledProgressionQueryRepository, DisposableCoreJourneyWorldFlow, DurableDeathExecutionError,
-    DurableDeathExecutionService, HandshakePolicy, IdentityClock, IdentityService,
-    InMemoryAccountRepository, NoopIdentityEventSink, PostgresAccountRepository,
-    PostgresCaldusHallTransferCoordinator, PostgresCaldusVictoryCoordinator,
-    PostgresDangerEntryAshWalletProviderV3, PostgresDangerEntryInventoryProviderV3,
-    PostgresDangerEntryLifeMetricsProviderV3, PostgresDangerEntryOathBargainProviderV3,
-    PostgresDeathViewRepository, PostgresDormantWorldFlowCoordinator,
-    PostgresProgressionAwardService, PostgresProgressionRestoreProvider,
-    PostgresResolutionHoldService, PostgresRewardService, PreparedTerminal, ProductionRecallClock,
-    ProductionRecallCompletionAuthorityV1, ProductionRecallExecutionService,
-    ProductionRecallIntentActor, ProductionRecallPendingAuthorityV1, ProductionRecallPublishedV1,
-    ProgressionQueryService, RecoveredProductionRecallActorV1, STORED_TERMINAL_RECEIPT_SCHEMA_V1,
-    SecretRewardEpoch, StoredTerminalReceipt, StoredTerminalReceiptV1, SubmitResult,
-    TerminalArbiter, TerminalBinding, TerminalCandidate, TerminalKind, WorldFlowGateService,
-    WorldFlowIdGenerator, core_recall_completion_outbox, drive_recall_terminal_tick,
-    durable_death_terminal_candidate, production_recall_actor_mailbox,
-    recover_committed_death_arbiter, recover_committed_recall_actor, serve_core_reliable,
-    serve_handshake,
+    CoreReliableSequence, CoreResolutionHoldAuthority, CoreResolutionHoldIntentAuthority,
+    CoreSafeInventoryAuthority, CoreTerminalCoordinator, CoreTerminalEvaluation,
+    CoreTerminalOtherEvaluationsV1, CoreTerminalProducer, CoreTerminalTickSeal, DeathViewService,
+    DisabledDeathViewRepository, DisabledProgressionQueryRepository,
+    DisposableCoreJourneyWorldFlow, DurableDeathExecutionError, DurableDeathExecutionService,
+    HandshakePolicy, IdentityClock, IdentityService, InMemoryAccountRepository,
+    NoopIdentityEventSink, PostgresAccountRepository, PostgresCaldusHallTransferCoordinator,
+    PostgresCaldusVictoryCoordinator, PostgresDangerEntryAshWalletProviderV3,
+    PostgresDangerEntryInventoryProviderV3, PostgresDangerEntryLifeMetricsProviderV3,
+    PostgresDangerEntryOathBargainProviderV3, PostgresDeathViewRepository,
+    PostgresDormantWorldFlowCoordinator, PostgresProgressionAwardService,
+    PostgresProgressionRestoreProvider, PostgresResolutionHoldService, PostgresRewardService,
+    PreparedTerminal, ProductionRecallClock, ProductionRecallCompletionAuthorityV1,
+    ProductionRecallExecutionService, ProductionRecallIntentActor,
+    ProductionRecallPendingAuthorityV1, ProductionRecallPublishedV1, ProgressionQueryService,
+    RecoveredProductionRecallActorV1, STORED_TERMINAL_RECEIPT_SCHEMA_V1, SecretRewardEpoch,
+    StoredTerminalReceipt, StoredTerminalReceiptV1, SubmitResult, TerminalArbiter, TerminalBinding,
+    TerminalCandidate, TerminalKind, WorldFlowGateService, WorldFlowIdGenerator,
+    core_recall_completion_outbox, drive_recall_terminal_tick, durable_death_terminal_candidate,
+    production_recall_actor_mailbox, recover_committed_death_arbiter,
+    recover_committed_recall_actor, serve_core_reliable, serve_handshake,
 };
 use sim_core::{
     CoreBossParticipant, CoreBossParticipantLock, CoreCaldusAntiCheatState,
@@ -333,6 +340,140 @@ impl WorldFlowIdGenerator for FixedAuthority {
     fn next_restore_point_id(&self) -> [u8; 16] {
         RESTORE_ID
     }
+}
+
+#[derive(Debug, Default)]
+struct ScriptedResolutionHoldAuthority {
+    mutation_calls: AtomicUsize,
+}
+
+impl CoreResolutionHoldIntentAuthority for ScriptedResolutionHoldAuthority {
+    #[allow(
+        clippy::manual_async_fn,
+        reason = "the test authority mirrors the production Send-future transport contract"
+    )]
+    fn handle_resolution_hold_query<'a>(
+        &'a self,
+        authenticated: AuthenticatedAccount,
+        frame: &'a ResolutionHoldQueryFrameV1,
+    ) -> impl Future<Output = ResolutionHoldQueryResultV1> + Send + 'a {
+        async move {
+            assert_eq!(authenticated.account_id.as_bytes(), ACCOUNT_ID);
+            scripted_resolution_hold_query(frame.sequence, frame.character_id)
+        }
+    }
+
+    #[allow(
+        clippy::manual_async_fn,
+        reason = "the test authority mirrors the production Send-future transport contract"
+    )]
+    fn handle_resolution_hold_mutation<'a>(
+        &'a self,
+        authenticated: AuthenticatedAccount,
+        frame: &'a ResolutionHoldMutationFrameV1,
+    ) -> impl Future<Output = ResolutionHoldMutationResultV1> + Send + 'a {
+        async move {
+            assert_eq!(authenticated.account_id.as_bytes(), ACCOUNT_ID);
+            match self.mutation_calls.fetch_add(1, Ordering::SeqCst) {
+                0 => scripted_resolution_hold_mutation(frame.sequence, false),
+                1 => scripted_resolution_hold_mutation(frame.sequence, true),
+                _ => ResolutionHoldMutationResultV1::Rejected {
+                    schema_version: RESOLUTION_HOLD_SCHEMA_VERSION,
+                    request_sequence: frame.sequence,
+                    mutation_id: frame.mutation_id,
+                    character_id: frame.character_id,
+                    extraction_id: frame.payload.extraction_id,
+                    stack_index: frame.payload.stack_index,
+                    code: ResolutionHoldRejectionCodeV1::IdempotencyConflict,
+                },
+            }
+        }
+    }
+}
+
+fn scripted_resolution_hold_query(
+    request_sequence: u32,
+    character_id: [u8; 16],
+) -> ResolutionHoldQueryResultV1 {
+    let result = ResolutionHoldQueryResultV1::Stored {
+        schema_version: RESOLUTION_HOLD_SCHEMA_VERSION,
+        request_sequence,
+        character_id,
+        versions: ResolutionHoldVersionsV1 {
+            account: 1,
+            character: 1,
+            world: 1,
+            inventory: 1,
+        },
+        storage_resolution_required: true,
+        stacks: vec![ResolutionHoldStackV1 {
+            extraction_id: [71; 16],
+            stack_index: 0,
+            template_id: WireText::new("item.armor.parish_leather").unwrap(),
+            content_revision: WireText::new(persistence::CORE_ITEM_CONTENT_REVISION).unwrap(),
+            item_kind: ResolutionHoldItemKindV1::Equipment,
+            items: vec![ResolutionHoldItemV1 {
+                item_uid: [72; 16],
+                item_version: 1,
+            }],
+            stack_digest: [73; 32],
+            extracted_at_unix_millis: 1_000,
+            overflow_deadline_unix_millis: 259_201_000,
+            planned_destination: Some(ResolutionHoldDestinationV1::CharacterSafe { slot_index: 0 }),
+        }],
+    };
+    result.validate().unwrap();
+    result
+}
+
+fn scripted_resolution_hold_mutation(
+    request_sequence: u32,
+    replayed: bool,
+) -> ResolutionHoldMutationResultV1 {
+    let result = ResolutionHoldMutationResultV1::Stored {
+        schema_version: RESOLUTION_HOLD_SCHEMA_VERSION,
+        request_sequence,
+        replayed,
+        result: Box::new(StoredResolutionHoldMutationResultV1 {
+            mutation_id: [74; 16],
+            character_id: CHARACTER_ID,
+            extraction_id: [71; 16],
+            stack_index: 0,
+            action: ResolutionHoldActionV1::Move,
+            result_hash: [75; 32],
+            committed_at_unix_millis: 2_000,
+            versions: ResolutionHoldVersionVectorV1 {
+                account: ResolutionHoldVersionAdvanceV1 {
+                    before: 1,
+                    after: 1,
+                },
+                character: ResolutionHoldVersionAdvanceV1 {
+                    before: 1,
+                    after: 2,
+                },
+                world: ResolutionHoldVersionAdvanceV1 {
+                    before: 1,
+                    after: 2,
+                },
+                inventory: ResolutionHoldVersionAdvanceV1 {
+                    before: 1,
+                    after: 2,
+                },
+            },
+            transitions: vec![ResolutionHoldItemTransitionV1 {
+                ordinal: 0,
+                item_uid: [72; 16],
+                item_version: 2,
+                disposition: ResolutionHoldDispositionV1::Moved {
+                    destination: ResolutionHoldDestinationV1::CharacterSafe { slot_index: 0 },
+                },
+            }],
+            remaining_hold_stack_count: 0,
+            storage_resolution_required: false,
+        }),
+    };
+    result.validate().unwrap();
+    result
 }
 
 fn route_frame(
@@ -812,6 +953,34 @@ fn empty_resolution_hold_frames() -> (ResolutionHoldQueryFrameV1, ResolutionHold
         payload,
     };
     (query, mutation)
+}
+
+fn scripted_resolution_hold_frame(
+    sequence: u32,
+    action: ResolutionHoldActionV1,
+) -> ResolutionHoldMutationFrameV1 {
+    let payload = ResolutionHoldMutationPayloadV1 {
+        extraction_id: [71; 16],
+        stack_index: 0,
+        action,
+        expected_versions: ResolutionHoldVersionsV1 {
+            account: 1,
+            character: 1,
+            world: 1,
+            inventory: 1,
+        },
+        content_revision: WireText::new(persistence::CORE_ITEM_CONTENT_REVISION).unwrap(),
+        expected_stack_digest: [73; 32],
+    };
+    ResolutionHoldMutationFrameV1 {
+        schema_version: RESOLUTION_HOLD_SCHEMA_VERSION,
+        sequence,
+        mutation_id: [74; 16],
+        character_id: CHARACTER_ID,
+        issued_at_unix_millis: 1_500,
+        payload_hash: payload.canonical_hash(),
+        payload,
+    }
 }
 
 fn production_death_view_hello() -> ClientHello {
@@ -1635,6 +1804,191 @@ async fn reliable_quic_rejects_disabled_extraction_and_hold_before_domain_access
     drop(client);
     client_endpoint.wait_idle().await;
     server_endpoint.close(0_u32.into(), b"disabled extraction complete");
+    server_endpoint.wait_idle().await;
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one connection proves positive Hold query, fresh Move, replay, and altered conflict ordering"
+)]
+async fn reliable_quic_dispatches_resolution_hold_move_replay_and_conflict() {
+    let identity = IdentityService::new(
+        InMemoryAccountRepository::default(),
+        FixedAuthority,
+        FixedAuthority,
+        NoopIdentityEventSink,
+        ManifestHash::new("a".repeat(64)).unwrap(),
+    );
+    let world_flow = WorldFlowGateService::new(
+        InMemoryAccountRepository::default(),
+        FixedAuthority,
+        revision(),
+    );
+    let progression = disabled_progression();
+    let death_views = DeathViewService::new(
+        DisabledDeathViewRepository,
+        durable_death_fixture::death_view_revision(),
+    );
+    let oath = CoreOathSelectionAuthority::<FixedAuthority>::disabled();
+    let bargain = CoreBargainAuthority::<FixedAuthority>::disabled();
+    let safe_inventory = CoreSafeInventoryAuthority::disabled();
+    let resolution_hold = ScriptedResolutionHoldAuthority::default();
+    let extraction_terminal = CoreExtractionTerminalAuthority::disabled();
+    let recall_terminal = CoreRecallTerminalAuthority::disabled();
+    let authenticated = AuthenticatedAccount {
+        account_id: AccountId::new(ACCOUNT_ID).unwrap(),
+        namespace: AuthenticatedNamespace::WipeableTest,
+    };
+    let query = ResolutionHoldQueryFrameV1 {
+        schema_version: RESOLUTION_HOLD_SCHEMA_VERSION,
+        sequence: 1,
+        character_id: CHARACTER_ID,
+    };
+    let fresh = scripted_resolution_hold_frame(2, ResolutionHoldActionV1::Move);
+    let replay = scripted_resolution_hold_frame(3, ResolutionHoldActionV1::Move);
+    let altered = scripted_resolution_hold_frame(4, ResolutionHoldActionV1::DestroyConfirmed);
+    let (server_endpoint, client_endpoint, address) = endpoints();
+    let connecting = client_endpoint.connect(address, "localhost").unwrap();
+    let incoming = server_endpoint.accept().await.unwrap();
+    let (client, server) = tokio::join!(connecting, incoming);
+    let client = client.unwrap();
+    let server = server.unwrap();
+    let mut hold_policy = policy();
+    hold_policy
+        .feature_flags
+        .push(WireText::new(protocol::CORE_RESOLUTION_HOLD_FEATURE_FLAG).unwrap());
+
+    let server_session = async {
+        serve_handshake(
+            &server,
+            &hold_policy,
+            AuthenticationDecision::Accepted,
+            WireText::new("scripted-resolution-hold-session").unwrap(),
+        )
+        .await
+        .unwrap();
+        for response_sequence in 1..=4 {
+            serve_core_reliable(
+                &server,
+                &identity,
+                &world_flow,
+                &progression,
+                &death_views,
+                &oath,
+                &bargain,
+                &safe_inventory,
+                &resolution_hold,
+                &extraction_terminal,
+                &recall_terminal,
+                authenticated,
+                response_sequence,
+                100,
+            )
+            .await
+            .unwrap();
+        }
+    };
+    let client_session = async {
+        let HandshakeResponse::Accepted(server_hello) =
+            bot_client::perform_handshake(&client, hello())
+                .await
+                .unwrap()
+        else {
+            panic!("Core handshake must succeed");
+        };
+        assert!(
+            server_hello
+                .feature_flags
+                .iter()
+                .any(|flag| flag.as_str() == protocol::CORE_RESOLUTION_HOLD_FEATURE_FLAG)
+        );
+
+        let event = bot_client::perform_reliable_gameplay(
+            &client,
+            protocol::WireMessage::ResolutionHoldQueryFrame(query),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            event.event,
+            ReliableEvent::ResolutionHoldQueryResult(result)
+                if matches!(
+                    *result,
+                    ResolutionHoldQueryResultV1::Stored {
+                        storage_resolution_required: true,
+                        ref stacks,
+                        ..
+                    } if stacks.len() == 1
+                        && stacks[0].planned_destination
+                            == Some(ResolutionHoldDestinationV1::CharacterSafe {
+                                slot_index: 0,
+                            })
+                )
+        ));
+
+        let event = bot_client::perform_reliable_gameplay(
+            &client,
+            protocol::WireMessage::ResolutionHoldMutationFrame(fresh),
+        )
+        .await
+        .unwrap();
+        let ReliableEvent::ResolutionHoldMutationResult(result) = event.event else {
+            panic!("fresh Hold Move must use its dedicated result kind");
+        };
+        let ResolutionHoldMutationResultV1::Stored {
+            replayed: false,
+            result: fresh_result,
+            ..
+        } = *result
+        else {
+            panic!("first Hold Move must return fresh stored authority");
+        };
+        assert!(!fresh_result.storage_resolution_required);
+        assert_eq!(fresh_result.transitions[0].item_version, 2);
+
+        let event = bot_client::perform_reliable_gameplay(
+            &client,
+            protocol::WireMessage::ResolutionHoldMutationFrame(replay),
+        )
+        .await
+        .unwrap();
+        let ReliableEvent::ResolutionHoldMutationResult(result) = event.event else {
+            panic!("replayed Hold Move must use its dedicated result kind");
+        };
+        let ResolutionHoldMutationResultV1::Stored {
+            replayed: true,
+            result: replayed_result,
+            ..
+        } = *result
+        else {
+            panic!("second exact Hold Move must return replayed stored authority");
+        };
+        assert_eq!(fresh_result, replayed_result);
+
+        let event = bot_client::perform_reliable_gameplay(
+            &client,
+            protocol::WireMessage::ResolutionHoldMutationFrame(altered),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            event.event,
+            ReliableEvent::ResolutionHoldMutationResult(result)
+                if matches!(
+                    *result,
+                    ResolutionHoldMutationResultV1::Rejected {
+                        code: ResolutionHoldRejectionCodeV1::IdempotencyConflict,
+                        ..
+                    }
+                )
+        ));
+    };
+    tokio::join!(server_session, client_session);
+    assert_eq!(resolution_hold.mutation_calls.load(Ordering::SeqCst), 3);
+    drop(client);
+    client_endpoint.wait_idle().await;
+    server_endpoint.close(0_u32.into(), b"scripted ResolutionHold session complete");
     server_endpoint.wait_idle().await;
 }
 

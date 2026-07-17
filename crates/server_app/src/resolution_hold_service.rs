@@ -81,6 +81,46 @@ pub enum CoreResolutionHoldAuthority {
     Persistent(PostgresResolutionHoldService),
 }
 
+pub trait CoreResolutionHoldIntentAuthority: Send + Sync {
+    fn handle_resolution_hold_query<'a>(
+        &'a self,
+        authenticated: AuthenticatedAccount,
+        frame: &'a ResolutionHoldQueryFrameV1,
+    ) -> impl Future<Output = ResolutionHoldQueryResultV1> + Send + 'a;
+
+    fn handle_resolution_hold_mutation<'a>(
+        &'a self,
+        authenticated: AuthenticatedAccount,
+        frame: &'a ResolutionHoldMutationFrameV1,
+    ) -> impl Future<Output = ResolutionHoldMutationResultV1> + Send + 'a;
+}
+
+impl CoreResolutionHoldIntentAuthority for CoreResolutionHoldAuthority {
+    #[allow(
+        clippy::manual_async_fn,
+        reason = "the desugared public trait contract guarantees Send futures for spawned QUIC workers"
+    )]
+    fn handle_resolution_hold_query<'a>(
+        &'a self,
+        authenticated: AuthenticatedAccount,
+        frame: &'a ResolutionHoldQueryFrameV1,
+    ) -> impl Future<Output = ResolutionHoldQueryResultV1> + Send + 'a {
+        async move { self.query(authenticated, frame).await }
+    }
+
+    #[allow(
+        clippy::manual_async_fn,
+        reason = "the desugared public trait contract guarantees Send futures for spawned QUIC workers"
+    )]
+    fn handle_resolution_hold_mutation<'a>(
+        &'a self,
+        authenticated: AuthenticatedAccount,
+        frame: &'a ResolutionHoldMutationFrameV1,
+    ) -> impl Future<Output = ResolutionHoldMutationResultV1> + Send + 'a {
+        async move { self.mutate(authenticated, frame).await }
+    }
+}
+
 impl CoreResolutionHoldAuthority {
     #[must_use]
     pub const fn disabled() -> Self {

@@ -178,8 +178,8 @@ pub use progression_query::{
 pub use progression_restore_provider::PostgresProgressionRestoreProvider;
 pub use progression_service::PostgresProgressionAwardService;
 pub use resolution_hold_service::{
-    CoreResolutionHoldAuthority, PostgresResolutionHoldService, ResolutionHoldRepository,
-    ResolutionHoldService, ResolutionHoldServiceError,
+    CoreResolutionHoldAuthority, CoreResolutionHoldIntentAuthority, PostgresResolutionHoldService,
+    ResolutionHoldRepository, ResolutionHoldService, ResolutionHoldServiceError,
 };
 pub use restore_point::{
     ActiveBargainRestoreV3, AshWalletRestoreV3, BeltStackV1, CRASH_RESTORE_ORDER_V3,
@@ -592,7 +592,7 @@ where
 /// World-flow messages share the reliable transport but cannot mutate identity state, and the
 /// normal world-flow authority remains fail-closed until its downstream packages are complete.
 #[allow(clippy::too_many_arguments)]
-pub async fn serve_core_reliable<R, C, G, E, W, P, D, OC, BC, RA>(
+pub async fn serve_core_reliable<R, C, G, E, W, P, D, OC, BC, HA, RA>(
     connection: &quinn::Connection,
     identity: &IdentityService<R, C, G, E>,
     world_flow: &W,
@@ -601,7 +601,7 @@ pub async fn serve_core_reliable<R, C, G, E, W, P, D, OC, BC, RA>(
     oath: &CoreOathSelectionAuthority<OC>,
     bargain: &CoreBargainAuthority<BC>,
     safe_inventory: &CoreSafeInventoryAuthority,
-    resolution_hold: &CoreResolutionHoldAuthority,
+    resolution_hold: &HA,
     extraction: &CoreExtractionTerminalAuthority,
     recall: &RA,
     authenticated: AuthenticatedAccount,
@@ -618,6 +618,7 @@ where
     D: DeathViewRepository,
     OC: IdentityClock,
     BC: IdentityClock,
+    HA: CoreResolutionHoldIntentAuthority,
     RA: CoreRecallIntentAuthority,
 {
     if response_sequence == 0 {
@@ -673,12 +674,16 @@ where
         }
         WireMessage::ResolutionHoldQueryFrame(frame) => {
             protocol::ReliableEvent::ResolutionHoldQueryResult(Box::new(
-                resolution_hold.query(authenticated, &frame).await,
+                resolution_hold
+                    .handle_resolution_hold_query(authenticated, &frame)
+                    .await,
             ))
         }
         WireMessage::ResolutionHoldMutationFrame(frame) => {
             protocol::ReliableEvent::ResolutionHoldMutationResult(Box::new(
-                resolution_hold.mutate(authenticated, &frame).await,
+                resolution_hold
+                    .handle_resolution_hold_mutation(authenticated, &frame)
+                    .await,
             ))
         }
         WireMessage::ExtractionCommitFrame(frame) => {
