@@ -34,11 +34,12 @@ use crate::{
     AccountId, AccountRepository, AdmissionState, AuthenticatedAccount, AuthenticatedNamespace,
     AuthenticationDecision, CharacterIdGenerator, CoreBargainAuthority,
     CoreExtractionTerminalAuthority, CoreOathSelectionAuthority, CoreRecallTerminalAuthority,
-    CoreResolutionHoldAuthority, CoreSafeInventoryAuthority, DeathViewRepository, DeathViewService,
-    DisabledDeathViewRepository, DisabledProgressionQueryRepository, HandshakePolicy,
-    IdentityClock, IdentityService, InMemoryAccountRepository, InstanceError, InstanceScheduler,
-    NoopIdentityEventSink, PostgresAccountRepository, PostgresBargainService,
-    PostgresDeathViewRepository, PostgresOathSelectionService, PostgresProgressionQueryRepository,
+    CoreResolutionHoldAuthority, CoreSafeInventoryAuthority, CoreSuccessorAuthority,
+    DeathViewRepository, DeathViewService, DisabledDeathViewRepository,
+    DisabledProgressionQueryRepository, HandshakePolicy, IdentityClock, IdentityService,
+    InMemoryAccountRepository, InstanceError, InstanceScheduler, NoopIdentityEventSink,
+    PostgresAccountRepository, PostgresBargainService, PostgresDeathViewRepository,
+    PostgresOathSelectionService, PostgresProgressionQueryRepository,
     PostgresWorldFlowLocationRepository, ProgressionQueryRepository, ProgressionQueryService,
     SERVER_SHUTDOWN_CLOSE_CODE, SessionOwnerId, TransportId, WorldFlowGateService,
     WorldFlowLocationRepository, close_transport, serve_core_reliable,
@@ -543,6 +544,7 @@ pub struct BoundCoreIdentityServer<
     bargain: Arc<CoreBargainAuthority<SystemIdentityClock>>,
     safe_inventory: Arc<CoreSafeInventoryAuthority>,
     resolution_hold: Arc<CoreResolutionHoldAuthority>,
+    successor: Arc<CoreSuccessorAuthority>,
     extraction: Arc<CoreExtractionTerminalAuthority>,
     recall: Arc<CoreRecallTerminalAuthority>,
     persistence_enabled: bool,
@@ -707,6 +709,7 @@ where
         let bargain = Arc::new(shrines.bargain);
         let safe_inventory = Arc::new(CoreSafeInventoryAuthority::disabled());
         let resolution_hold = Arc::new(CoreResolutionHoldAuthority::disabled());
+        let successor = Arc::new(CoreSuccessorAuthority::disabled());
         let extraction = Arc::new(CoreExtractionTerminalAuthority::disabled());
         let recall = Arc::new(CoreRecallTerminalAuthority::disabled());
         Ok(Self {
@@ -722,6 +725,7 @@ where
             bargain,
             safe_inventory,
             resolution_hold,
+            successor,
             extraction,
             recall,
             persistence_enabled,
@@ -772,13 +776,14 @@ where
                     let bargain = Arc::clone(&self.bargain);
                     let safe_inventory = Arc::clone(&self.safe_inventory);
                     let resolution_hold = Arc::clone(&self.resolution_hold);
+                    let successor = Arc::clone(&self.successor);
                     let extraction = Arc::clone(&self.extraction);
                     let recall = Arc::clone(&self.recall);
                     let accepted = Arc::clone(&accepted);
                     let rejected = Arc::clone(&rejected);
                     let failed = Arc::clone(&failed);
                     workers.spawn(async move {
-                        match serve_core_identity_connection(incoming, policy, authority, world_flow, progression, death_views, oath, bargain, safe_inventory, resolution_hold, extraction, recall).await {
+                        match serve_core_identity_connection(incoming, policy, authority, world_flow, progression, death_views, oath, bargain, safe_inventory, resolution_hold, successor, extraction, recall).await {
                             Ok(true) => { accepted.fetch_add(1, Ordering::Relaxed); }
                             Ok(false) => { rejected.fetch_add(1, Ordering::Relaxed); }
                             Err(error) => {
@@ -867,6 +872,7 @@ async fn serve_core_identity_connection<R, W, P, D>(
     bargain: Arc<CoreBargainAuthority<SystemIdentityClock>>,
     safe_inventory: Arc<CoreSafeInventoryAuthority>,
     resolution_hold: Arc<CoreResolutionHoldAuthority>,
+    successor: Arc<CoreSuccessorAuthority>,
     extraction: Arc<CoreExtractionTerminalAuthority>,
     recall: Arc<CoreRecallTerminalAuthority>,
 ) -> Result<bool, LocalServerRuntimeError>
@@ -916,6 +922,7 @@ where
             bargain.as_ref(),
             safe_inventory.as_ref(),
             resolution_hold.as_ref(),
+            successor.as_ref(),
             extraction.as_ref(),
             recall.as_ref(),
             authenticated,
@@ -1321,24 +1328,19 @@ mod tests {
         let HandshakeResponse::Accepted(server_hello) = handshake else {
             panic!("Core handshake must be accepted")
         };
-        assert!(
-            server_hello
-                .feature_flags
-                .iter()
-                .all(|flag| flag.as_str() != protocol::CORE_WORLD_FLOW_FEATURE_FLAG)
-        );
-        assert!(
-            server_hello
-                .feature_flags
-                .iter()
-                .all(|flag| flag.as_str() != protocol::CORE_SAFE_INVENTORY_FEATURE_FLAG)
-        );
-        assert!(
-            server_hello
-                .feature_flags
-                .iter()
-                .all(|flag| flag.as_str() != protocol::CORE_DEATH_VIEW_FEATURE_FLAG)
-        );
+        for absent_feature in [
+            protocol::CORE_WORLD_FLOW_FEATURE_FLAG,
+            protocol::CORE_SAFE_INVENTORY_FEATURE_FLAG,
+            protocol::CORE_DEATH_VIEW_FEATURE_FLAG,
+            protocol::CORE_SUCCESSOR_FEATURE_FLAG,
+        ] {
+            assert!(
+                server_hello
+                    .feature_flags
+                    .iter()
+                    .all(|flag| flag.as_str() != absent_feature)
+            );
+        }
         let (_, initial) =
             bot_client::perform_account_bootstrap(&connection, bootstrap(&content_root, 1))
                 .await

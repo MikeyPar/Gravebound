@@ -16,8 +16,9 @@ use protocol::{
     RELIABLE_FRAME_LIMIT, ReliableEvent, ReliableEventFrame, ResolutionHoldMutationFrameV1,
     ResolutionHoldMutationResultV1, ResolutionHoldQueryFrameV1, ResolutionHoldQueryResultV1,
     SIMULATION_HZ, SafeInventoryTransferFrameV1, SafeInventoryTransferResultV1,
-    SessionControlFrame, SessionControlResult, SnapshotChunk, WireMessage, WorldFlowFrame,
-    WorldFlowResult, decode_frame, encode_frame,
+    SessionControlFrame, SessionControlResult, SnapshotChunk, SuccessorCreateFrameV1,
+    SuccessorCreateResultV1, WireMessage, WorldFlowFrame, WorldFlowResult, decode_frame,
+    encode_frame,
 };
 use thiserror::Error;
 
@@ -326,6 +327,21 @@ pub async fn perform_resolution_hold_mutation(
     Ok((event.clone(), result.as_ref().clone()))
 }
 
+/// Submits one authenticated successor mutation and returns only the server-owned stored or
+/// rejected result. The bot cannot author a successor identity, roster slot, starter item, or
+/// aggregate version.
+pub async fn perform_successor_create(
+    connection: &quinn::Connection,
+    frame: SuccessorCreateFrameV1,
+) -> Result<(ReliableEventFrame, SuccessorCreateResultV1), BotTransportError> {
+    let event =
+        perform_reliable_gameplay(connection, WireMessage::SuccessorCreateFrame(frame)).await?;
+    let ReliableEvent::SuccessorCreateResult(result) = &event.event else {
+        return Err(BotTransportError::UnexpectedMessage);
+    };
+    Ok((event.clone(), result.as_ref().clone()))
+}
+
 /// Reads one authenticated durable-death projection through the ordinary reliable route.
 pub async fn perform_death_view(
     connection: &quinn::Connection,
@@ -390,6 +406,28 @@ pub async fn submit_resolution_hold_mutation_without_response(
     frame: ResolutionHoldMutationFrameV1,
 ) -> Result<(), BotTransportError> {
     let request = encode_frame(&WireMessage::ResolutionHoldMutationFrame(frame))?;
+    let (mut send, receive) = connection
+        .open_bi()
+        .await
+        .map_err(|error| BotTransportError::Quic(error.to_string()))?;
+    send.write_all(&request)
+        .await
+        .map_err(|error| BotTransportError::Quic(error.to_string()))?;
+    send.finish()
+        .map_err(|error| BotTransportError::Quic(error.to_string()))?;
+    drop(receive);
+    Ok(())
+}
+
+/// Submits one authenticated successor mutation and intentionally abandons its response stream.
+///
+/// The caller must retain and retry the exact frame after reconnecting and renegotiating
+/// `core_successor_v1`; this helper never synthesizes replacement mutation or death authority.
+pub async fn submit_successor_create_without_response(
+    connection: &quinn::Connection,
+    frame: SuccessorCreateFrameV1,
+) -> Result<(), BotTransportError> {
+    let request = encode_frame(&WireMessage::SuccessorCreateFrame(frame))?;
     let (mut send, receive) = connection
         .open_bi()
         .await

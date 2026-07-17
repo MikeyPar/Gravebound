@@ -570,7 +570,7 @@ where
     if response_sequence == 0 {
         return Err(ServerTransportError::UnexpectedMessage);
     }
-    let (mut send, mut receive) = connection
+    let (send, mut receive) = connection
         .accept_bi()
         .await
         .map_err(|error| ServerTransportError::Quic(error.to_string()))?;
@@ -596,6 +596,14 @@ where
         server_tick,
         event,
     };
+    write_reliable_response(send, &response).await?;
+    Ok(response)
+}
+
+async fn write_reliable_response(
+    mut send: quinn::SendStream,
+    response: &protocol::ReliableEventFrame,
+) -> Result<(), ServerTransportError> {
     send.write_all(&encode_frame(&WireMessage::ReliableEvent(
         response.clone(),
     ))?)
@@ -603,14 +611,14 @@ where
     .map_err(|error| ServerTransportError::Quic(error.to_string()))?;
     send.finish()
         .map_err(|error| ServerTransportError::Quic(error.to_string()))?;
-    Ok(response)
+    Ok(())
 }
 
 /// Serves one authenticated Core request and dispatches it to the owning domain authority.
 /// World-flow messages share the reliable transport but cannot mutate identity state, and the
 /// normal world-flow authority remains fail-closed until its downstream packages are complete.
 #[allow(clippy::too_many_arguments)]
-pub async fn serve_core_reliable<R, C, G, E, W, P, D, OC, BC, HA, RA>(
+pub async fn serve_core_reliable<R, C, G, E, W, P, D, OC, BC, HA, SA, RA>(
     connection: &quinn::Connection,
     identity: &IdentityService<R, C, G, E>,
     world_flow: &W,
@@ -620,6 +628,7 @@ pub async fn serve_core_reliable<R, C, G, E, W, P, D, OC, BC, HA, RA>(
     bargain: &CoreBargainAuthority<BC>,
     safe_inventory: &CoreSafeInventoryAuthority,
     resolution_hold: &HA,
+    successor: &SA,
     extraction: &CoreExtractionTerminalAuthority,
     recall: &RA,
     authenticated: AuthenticatedAccount,
@@ -637,12 +646,13 @@ where
     OC: IdentityClock,
     BC: IdentityClock,
     HA: CoreResolutionHoldIntentAuthority,
+    SA: CoreSuccessorIntentAuthority,
     RA: CoreRecallIntentAuthority,
 {
     if response_sequence == 0 {
         return Err(ServerTransportError::UnexpectedMessage);
     }
-    let (mut send, mut receive) = connection
+    let (send, mut receive) = connection
         .accept_bi()
         .await
         .map_err(|error| ServerTransportError::Quic(error.to_string()))?;
@@ -709,6 +719,13 @@ where
                 extraction.handle(authenticated, &frame),
             ))
         }
+        WireMessage::SuccessorCreateFrame(frame) => {
+            protocol::ReliableEvent::SuccessorCreateResult(Box::new(
+                successor
+                    .handle_successor_create(authenticated, &frame)
+                    .await,
+            ))
+        }
         WireMessage::RecallFrame(frame) => {
             let reply = recall
                 .handle_recall(authenticated, &frame, server_tick)
@@ -723,13 +740,7 @@ where
         server_tick: response_server_tick,
         event,
     };
-    send.write_all(&encode_frame(&WireMessage::ReliableEvent(
-        response.clone(),
-    ))?)
-    .await
-    .map_err(|error| ServerTransportError::Quic(error.to_string()))?;
-    send.finish()
-        .map_err(|error| ServerTransportError::Quic(error.to_string()))?;
+    write_reliable_response(send, &response).await?;
     Ok(response)
 }
 

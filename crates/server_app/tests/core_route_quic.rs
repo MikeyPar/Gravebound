@@ -39,8 +39,9 @@ use protocol::{
     ResolutionHoldMutationFrameV1, ResolutionHoldMutationPayloadV1, ResolutionHoldMutationResultV1,
     ResolutionHoldQueryFrameV1, ResolutionHoldQueryResultV1, ResolutionHoldRejectionCodeV1,
     ResolutionHoldStackV1, ResolutionHoldVersionAdvanceV1, ResolutionHoldVersionVectorV1,
-    ResolutionHoldVersionsV1, SafeArrival, StoredRecallTerminalResultV1,
-    StoredResolutionHoldMutationResultV1, TERMINAL_HALL_CONTENT_ID,
+    ResolutionHoldVersionsV1, SUCCESSOR_SCHEMA_VERSION, SafeArrival, StoredRecallTerminalResultV1,
+    StoredResolutionHoldMutationResultV1, SuccessorCreateFrameV1, SuccessorCreatePayloadV1,
+    SuccessorCreateResultV1, SuccessorRejectionCodeV1, TERMINAL_HALL_CONTENT_ID,
     TERMINAL_INVENTORY_SCHEMA_VERSION, TerminalExpectedVersionsV1,
     TerminalInventoryRejectionCodeV1, TerminalVersionAdvanceV1, TerminalVersionVectorV1, WireText,
     WorldFlowContentRevisionV1, WorldFlowFrame, WorldFlowRequest, WorldFlowResult,
@@ -56,8 +57,9 @@ use server_app::{
     CoreOathSelectionAuthority, CoreRecallActorDirectory, CoreRecallAuthoritativeTick,
     CoreRecallTerminalAuthority, CoreRecallTerminalTickOutcome, CoreReliableSequence,
     CoreResolutionHoldAuthority, CoreResolutionHoldIntentAuthority, CoreSafeInventoryAuthority,
-    CoreTerminalCoordinator, CoreTerminalEvaluation, CoreTerminalOtherEvaluationsV1,
-    CoreTerminalProducer, CoreTerminalTickSeal, DeathViewService, DisabledDeathViewRepository,
+    CoreSuccessorAuthority, CoreSuccessorIntentAuthority, CoreTerminalCoordinator,
+    CoreTerminalEvaluation, CoreTerminalOtherEvaluationsV1, CoreTerminalProducer,
+    CoreTerminalTickSeal, DeathViewService, DisabledDeathViewRepository,
     DisabledProgressionQueryRepository, DisposableCoreJourneyWorldFlow, DurableDeathExecutionError,
     DurableDeathExecutionService, HandshakePolicy, IdentityClock, IdentityService,
     InMemoryAccountRepository, NoopIdentityEventSink, PostgresAccountRepository,
@@ -404,6 +406,36 @@ impl CoreResolutionHoldIntentAuthority for ScriptedResolutionHoldAuthority {
                     stack_index: frame.payload.stack_index,
                     code: ResolutionHoldRejectionCodeV1::IdempotencyConflict,
                 },
+            }
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct ScriptedSuccessorAuthority {
+    calls: AtomicUsize,
+}
+
+impl CoreSuccessorIntentAuthority for ScriptedSuccessorAuthority {
+    #[allow(
+        clippy::manual_async_fn,
+        reason = "the test authority mirrors the production Send-future transport contract"
+    )]
+    fn handle_successor_create<'a>(
+        &'a self,
+        authenticated: AuthenticatedAccount,
+        frame: &'a SuccessorCreateFrameV1,
+    ) -> impl Future<Output = SuccessorCreateResultV1> + Send + 'a {
+        async move {
+            assert_eq!(authenticated.account_id.as_bytes(), ACCOUNT_ID);
+            frame.validate().unwrap();
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            SuccessorCreateResultV1::Rejected {
+                schema_version: SUCCESSOR_SCHEMA_VERSION,
+                request_sequence: frame.sequence,
+                mutation_id: frame.mutation_id,
+                death_id: frame.payload.death_id,
+                code: SuccessorRejectionCodeV1::DeathNotFound,
             }
         }
     }
@@ -1028,6 +1060,20 @@ fn scripted_resolution_hold_frame(
     }
 }
 
+fn scripted_successor_frame() -> SuccessorCreateFrameV1 {
+    let payload = SuccessorCreatePayloadV1 {
+        death_id: [75; 16],
+        content_revision: WireText::new(persistence::CORE_ITEM_CONTENT_REVISION).unwrap(),
+    };
+    SuccessorCreateFrameV1 {
+        schema_version: SUCCESSOR_SCHEMA_VERSION,
+        sequence: 1,
+        mutation_id: [76; 16],
+        payload_hash: payload.canonical_hash(),
+        payload,
+    }
+}
+
 fn production_death_view_hello() -> ClientHello {
     let (_, source_report) = sim_content::load_and_validate(&content_root()).unwrap();
     ClientHello {
@@ -1188,6 +1234,7 @@ async fn run_lost_death_summary_session(persistence: &PostgresPersistence) -> De
             &bargain,
             &safe_inventory,
             &CoreResolutionHoldAuthority::disabled(),
+            &CoreSuccessorAuthority::disabled(),
             &extraction_terminal,
             &recall_terminal,
             authenticated,
@@ -1209,6 +1256,7 @@ async fn run_lost_death_summary_session(persistence: &PostgresPersistence) -> De
             &bargain,
             &safe_inventory,
             &CoreResolutionHoldAuthority::disabled(),
+            &CoreSuccessorAuthority::disabled(),
             &extraction_terminal,
             &recall_terminal,
             authenticated,
@@ -1314,6 +1362,7 @@ async fn run_restarted_death_read_session(
                 &bargain,
                 &safe_inventory,
                 &CoreResolutionHoldAuthority::disabled(),
+                &CoreSuccessorAuthority::disabled(),
                 &extraction_terminal,
                 &recall_terminal,
                 authenticated,
@@ -1549,6 +1598,7 @@ async fn run_reliable_core_journey(persistence: &PostgresPersistence) -> Duratio
                 &bargain,
                 &safe_inventory,
                 &CoreResolutionHoldAuthority::disabled(),
+                &CoreSuccessorAuthority::disabled(),
                 &extraction_terminal,
                 &recall_terminal,
                 authenticated,
@@ -1728,6 +1778,7 @@ async fn reliable_quic_rejects_disabled_extraction_and_hold_before_domain_access
             &bargain,
             &safe_inventory,
             &CoreResolutionHoldAuthority::disabled(),
+            &CoreSuccessorAuthority::disabled(),
             &extraction_terminal,
             &recall_terminal,
             authenticated,
@@ -1746,6 +1797,7 @@ async fn reliable_quic_rejects_disabled_extraction_and_hold_before_domain_access
             &bargain,
             &safe_inventory,
             &CoreResolutionHoldAuthority::disabled(),
+            &CoreSuccessorAuthority::disabled(),
             &extraction_terminal,
             &recall_terminal,
             authenticated,
@@ -1764,6 +1816,7 @@ async fn reliable_quic_rejects_disabled_extraction_and_hold_before_domain_access
             &bargain,
             &safe_inventory,
             &CoreResolutionHoldAuthority::disabled(),
+            &CoreSuccessorAuthority::disabled(),
             &extraction_terminal,
             &recall_terminal,
             authenticated,
@@ -1855,6 +1908,119 @@ async fn reliable_quic_rejects_disabled_extraction_and_hold_before_domain_access
 #[tokio::test]
 #[allow(
     clippy::too_many_lines,
+    reason = "one connection proves negotiated authentication, successor dispatch, wire projection, and cleanup"
+)]
+async fn reliable_quic_dispatches_authenticated_successor_frame() {
+    let identity = IdentityService::new(
+        InMemoryAccountRepository::default(),
+        FixedAuthority,
+        FixedAuthority,
+        NoopIdentityEventSink,
+        ManifestHash::new("a".repeat(64)).unwrap(),
+    );
+    let world_flow = WorldFlowGateService::new(
+        InMemoryAccountRepository::default(),
+        FixedAuthority,
+        revision(),
+    );
+    let progression = disabled_progression();
+    let death_views = DeathViewService::new(
+        DisabledDeathViewRepository,
+        durable_death_fixture::death_view_revision(),
+    );
+    let oath = CoreOathSelectionAuthority::<FixedAuthority>::disabled();
+    let bargain = CoreBargainAuthority::<FixedAuthority>::disabled();
+    let safe_inventory = CoreSafeInventoryAuthority::disabled();
+    let successor = ScriptedSuccessorAuthority::default();
+    let extraction_terminal = CoreExtractionTerminalAuthority::disabled();
+    let recall_terminal = CoreRecallTerminalAuthority::disabled();
+    let authenticated = AuthenticatedAccount {
+        account_id: AccountId::new(ACCOUNT_ID).unwrap(),
+        namespace: AuthenticatedNamespace::WipeableTest,
+    };
+    let frame = scripted_successor_frame();
+    let (server_endpoint, client_endpoint, address) = endpoints();
+    let connecting = client_endpoint.connect(address, "localhost").unwrap();
+    let incoming = server_endpoint.accept().await.unwrap();
+    let (client, server) = tokio::join!(connecting, incoming);
+    let client = client.unwrap();
+    let server = server.unwrap();
+    let mut successor_policy = policy();
+    successor_policy
+        .feature_flags
+        .push(WireText::new(protocol::CORE_SUCCESSOR_FEATURE_FLAG).unwrap());
+
+    let server_session = async {
+        serve_handshake(
+            &server,
+            &successor_policy,
+            AuthenticationDecision::Accepted,
+            WireText::new("scripted-successor-session").unwrap(),
+        )
+        .await
+        .unwrap();
+        serve_core_reliable(
+            &server,
+            &identity,
+            &world_flow,
+            &progression,
+            &death_views,
+            &oath,
+            &bargain,
+            &safe_inventory,
+            &CoreResolutionHoldAuthority::disabled(),
+            &successor,
+            &extraction_terminal,
+            &recall_terminal,
+            authenticated,
+            1,
+            100,
+        )
+        .await
+        .unwrap();
+    };
+    let client_session = async {
+        let HandshakeResponse::Accepted(server_hello) =
+            bot_client::perform_handshake(&client, hello())
+                .await
+                .unwrap()
+        else {
+            panic!("Core handshake must succeed");
+        };
+        assert!(
+            server_hello
+                .feature_flags
+                .iter()
+                .any(|flag| flag.as_str() == protocol::CORE_SUCCESSOR_FEATURE_FLAG)
+        );
+        let (event, result) = bot_client::perform_successor_create(&client, frame.clone())
+            .await
+            .unwrap();
+        assert_eq!(event.sequence, 1);
+        assert_eq!(event.server_tick, 100);
+        result.validate().unwrap();
+        assert!(matches!(
+            result,
+            SuccessorCreateResultV1::Rejected {
+                request_sequence: 1,
+                mutation_id,
+                death_id,
+                code: SuccessorRejectionCodeV1::DeathNotFound,
+                ..
+            } if mutation_id == [76; 16] && death_id == [75; 16]
+        ));
+    };
+    tokio::join!(server_session, client_session);
+    assert_eq!(successor.calls.load(Ordering::SeqCst), 1);
+    drop(client);
+    client_endpoint.wait_idle().await;
+    server_endpoint.close(0_u32.into(), b"scripted successor complete");
+    server_endpoint.wait_idle().await;
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
     reason = "one connection proves positive Hold query, fresh Move, replay, and altered conflict ordering"
 )]
 async fn reliable_quic_dispatches_resolution_hold_move_replay_and_conflict() {
@@ -1924,6 +2090,7 @@ async fn reliable_quic_dispatches_resolution_hold_move_replay_and_conflict() {
                 &bargain,
                 &safe_inventory,
                 &resolution_hold,
+                &CoreSuccessorAuthority::disabled(),
                 &extraction_terminal,
                 &recall_terminal,
                 authenticated,
@@ -2089,6 +2256,7 @@ async fn reliable_quic_rejects_disabled_recall_before_domain_access() {
             &bargain,
             &safe_inventory,
             &CoreResolutionHoldAuthority::disabled(),
+            &CoreSuccessorAuthority::disabled(),
             &extraction_terminal,
             &recall_terminal,
             authenticated,
@@ -2201,6 +2369,7 @@ async fn run_empty_resolution_hold_quic(
             &bargain,
             &safe_inventory,
             &resolution_hold,
+            &CoreSuccessorAuthority::disabled(),
             &extraction_terminal,
             &recall_terminal,
             authenticated,
@@ -2220,6 +2389,7 @@ async fn run_empty_resolution_hold_quic(
                 &bargain,
                 &safe_inventory,
                 &resolution_hold,
+                &CoreSuccessorAuthority::disabled(),
                 &extraction_terminal,
                 &recall_terminal,
                 authenticated,
@@ -2376,6 +2546,7 @@ async fn reliable_quic_dispatches_recall_to_one_actor_owned_channel() {
             &bargain,
             &safe_inventory,
             &CoreResolutionHoldAuthority::disabled(),
+            &CoreSuccessorAuthority::disabled(),
             &extraction_terminal,
             &recall_handle,
             authenticated,
@@ -2394,6 +2565,7 @@ async fn reliable_quic_dispatches_recall_to_one_actor_owned_channel() {
             &bargain,
             &safe_inventory,
             &CoreResolutionHoldAuthority::disabled(),
+            &CoreSuccessorAuthority::disabled(),
             &extraction_terminal,
             &recall_handle,
             authenticated,
@@ -2545,6 +2717,7 @@ async fn reliable_quic_pushes_committed_recall_without_a_second_client_request()
             &bargain,
             &safe_inventory,
             &CoreResolutionHoldAuthority::disabled(),
+            &CoreSuccessorAuthority::disabled(),
             &extraction_terminal,
             &recall_handle,
             authenticated,
@@ -2747,6 +2920,7 @@ async fn reliable_quic_abandoned_recall_push_replays_on_exact_reconnect() {
             &bargain,
             &safe_inventory,
             &CoreResolutionHoldAuthority::disabled(),
+            &CoreSuccessorAuthority::disabled(),
             &extraction_terminal,
             &recall_handle,
             authenticated,
@@ -3238,6 +3412,7 @@ async fn reliable_quic_postgres_recall_replays_after_pool_and_actor_restart() {
                 &bargain,
                 &safe_inventory,
                 &CoreResolutionHoldAuthority::disabled(),
+                &CoreSuccessorAuthority::disabled(),
                 &extraction_terminal,
                 &recall_handle,
                 authenticated,
@@ -3457,6 +3632,7 @@ async fn reliable_quic_postgres_recall_replays_after_pool_and_actor_restart() {
                 &bargain,
                 &safe_inventory,
                 &CoreResolutionHoldAuthority::disabled(),
+                &CoreSuccessorAuthority::disabled(),
                 &extraction_terminal,
                 &restarted_handle,
                 authenticated,
