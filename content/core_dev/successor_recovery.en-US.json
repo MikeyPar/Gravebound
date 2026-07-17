@@ -7,6 +7,7 @@
     {"key":"successor.surface.subtitle","value":"A successor stands ready."},
     {"key":"successor.badge.selected","value":"SELECTED"},
     {"key":"successor.field.level","value":"LEVEL {level}"},
+    {"key":"successor.field.slot","value":"SLOT {ordinal}"},
     {"key":"successor.field.oath_none","value":"OATH: NONE"},
     {"key":"successor.field.new_starter_kit","value":"NEW STARTER KIT"},
     {"key":"successor.field.safe_character_select","value":"SAFE — CHARACTER SELECT"},

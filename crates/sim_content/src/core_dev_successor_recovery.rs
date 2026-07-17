@@ -32,6 +32,7 @@ pub enum CoreSuccessorRecoveryCopyKey {
     SurfaceSubtitle,
     BadgeSelected,
     FieldLevel,
+    FieldSlot,
     FieldOathNone,
     FieldNewStarterKit,
     FieldSafeCharacterSelect,
@@ -53,12 +54,13 @@ pub enum CoreSuccessorRecoveryCopyKey {
 }
 
 impl CoreSuccessorRecoveryCopyKey {
-    pub const ALL: [Self; 23] = [
+    pub const ALL: [Self; 24] = [
         Self::SurfaceEyebrow,
         Self::SurfaceTitle,
         Self::SurfaceSubtitle,
         Self::BadgeSelected,
         Self::FieldLevel,
+        Self::FieldSlot,
         Self::FieldOathNone,
         Self::FieldNewStarterKit,
         Self::FieldSafeCharacterSelect,
@@ -87,6 +89,7 @@ impl CoreSuccessorRecoveryCopyKey {
             Self::SurfaceSubtitle => "successor.surface.subtitle",
             Self::BadgeSelected => "successor.badge.selected",
             Self::FieldLevel => "successor.field.level",
+            Self::FieldSlot => "successor.field.slot",
             Self::FieldOathNone => "successor.field.oath_none",
             Self::FieldNewStarterKit => "successor.field.new_starter_kit",
             Self::FieldSafeCharacterSelect => "successor.field.safe_character_select",
@@ -124,6 +127,7 @@ pub struct CoreSuccessorRecoveryContent {
     hall_id: ContentId,
     hall_name: String,
     appearance_id: ContentId,
+    item_content_revision: String,
     copy: BTreeMap<String, String>,
     hashes: CoreSuccessorRecoveryHashes,
 }
@@ -157,6 +161,11 @@ impl CoreSuccessorRecoveryContent {
     #[must_use]
     pub fn appearance_id(&self) -> &str {
         self.appearance_id.as_str()
+    }
+
+    #[must_use]
+    pub fn item_content_revision(&self) -> &str {
+        &self.item_content_revision
     }
 
     #[must_use]
@@ -216,6 +225,7 @@ pub fn compile_core_successor_recovery(
         hall_id: target.required_hall_id.clone(),
         hall_name,
         appearance_id: target.required_appearance_id.clone(),
+        item_content_revision: death.item_content_revision().to_owned(),
         copy: localization,
         hashes: CoreSuccessorRecoveryHashes {
             records_blake3,
@@ -296,21 +306,30 @@ fn validate_copy(
             bail!("Core successor recovery copy contains a duplicate key");
         }
     }
-    let level = localized
-        .get(CoreSuccessorRecoveryCopyKey::FieldLevel.content_id())
-        .context("successor level copy is missing")?;
-    let level_without_placeholder = level.replace("{level}", "");
-    if level.matches("{level}").count() != 1
-        || level_without_placeholder.contains('{')
-        || level_without_placeholder.contains('}')
-    {
-        bail!("Core successor recovery level copy has invalid placeholders");
+    for (key, placeholder) in [
+        (CoreSuccessorRecoveryCopyKey::FieldLevel, "{level}"),
+        (CoreSuccessorRecoveryCopyKey::FieldSlot, "{ordinal}"),
+    ] {
+        let value = localized
+            .get(key.content_id())
+            .with_context(|| format!("successor copy {} is missing", key.content_id()))?;
+        let without_placeholder = value.replace(placeholder, "");
+        if value.matches(placeholder).count() != 1
+            || without_placeholder.contains('{')
+            || without_placeholder.contains('}')
+        {
+            bail!(
+                "Core successor recovery copy {} has invalid placeholders",
+                key.content_id()
+            );
+        }
     }
-    if localized
-        .iter()
-        .filter(|(key, _)| key.as_str() != CoreSuccessorRecoveryCopyKey::FieldLevel.content_id())
-        .any(|(_, value)| value.contains('{') || value.contains('}'))
-    {
+    if localized.iter().any(|(key, value)| {
+        !matches!(
+            key.as_str(),
+            "successor.field.level" | "successor.field.slot"
+        ) && (value.contains('{') || value.contains('}'))
+    }) {
         bail!("Core successor recovery copy has an unauthorized placeholder");
     }
     Ok(localized)
@@ -397,6 +416,11 @@ mod tests {
         assert_eq!(compiled.class_id(), FIRST_PLAYABLE_CLASS_ID);
         assert_eq!(compiled.hall_id(), CORE_SUCCESSOR_RECOVERY_HALL_ID);
         assert_eq!(compiled.appearance_id(), CORE_DEVELOPMENT_BASE_SPRITE_ID);
+        assert!(
+            compiled
+                .item_content_revision()
+                .starts_with("core-dev.blake3.")
+        );
         assert_eq!(compiled.class_name(), "Grave Arbalist");
         assert_eq!(compiled.hall_name(), "Lantern Halls");
         assert_eq!(

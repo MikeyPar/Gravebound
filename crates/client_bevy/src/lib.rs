@@ -38,6 +38,7 @@ mod resolution_hold;
 mod resolution_hold_ui;
 mod stress_benchmark;
 mod successor_recovery;
+mod successor_recovery_ui;
 mod telemetry;
 
 use std::{env, fs, io::Read, path::PathBuf};
@@ -187,6 +188,14 @@ pub use successor_recovery::{
     SuccessorCharacterSelectProjection, SuccessorRecoveryApplyDisposition,
     SuccessorRecoveryClientError, SuccessorRecoveryClientFailure, SuccessorRecoveryClientModel,
     SuccessorRecoveryPhase, SuccessorRecoveryRetryDirective,
+};
+pub use successor_recovery_ui::{
+    NativeSuccessorRecoveryPlugin, NativeSuccessorRecoveryView, SuccessorRecoveryUiAction,
+    SuccessorRecoveryUiActionSpec, SuccessorRecoveryUiActivity, SuccessorRecoveryUiCharacter,
+    SuccessorRecoveryUiCommand, SuccessorRecoveryUiConfig, SuccessorRecoveryUiError,
+    SuccessorRecoveryUiFocusState, SuccessorRecoveryUiLayoutMode, SuccessorRecoveryUiMetrics,
+    SuccessorRecoveryUiReadiness, SuccessorRecoveryUiScrollState, SuccessorRecoveryUiSnapshot,
+    SuccessorRecoveryUiSurface, SuccessorRecoveryUiTone,
 };
 
 const WINDOW_TITLE: &str = "Gravebound - LocalLab";
