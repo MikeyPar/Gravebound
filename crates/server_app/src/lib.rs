@@ -43,6 +43,7 @@ mod runtime;
 mod safe_inventory;
 mod session;
 mod starter_items;
+mod successor_service;
 mod terminal_arbiter;
 mod world_flow_coordinator;
 mod world_flow_gate;
@@ -232,6 +233,10 @@ pub use session::{
 pub use starter_items::{
     CORE_ITEM_CONTENT_REVISION, STARTER_RELIC_ID, STARTER_TONIC_ID, STARTER_WEAPON_ID,
     StarterItemError, StarterItemPlan, initialize_postgres_starter,
+};
+pub use successor_service::{
+    CoreSuccessorAuthority, CoreSuccessorIntentAuthority, PostgresSuccessorService,
+    SuccessorRepository, SuccessorService, SuccessorServiceError,
 };
 pub use terminal_arbiter::{
     CommitError, CommitResult, MAX_TERMINAL_CANDIDATES_PER_TICK, NonTerminalAdmission,
