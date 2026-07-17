@@ -502,13 +502,26 @@ async fn insert_successor_aggregate(
     sqlx::query(
         "INSERT INTO character_life_metrics \
          (namespace_id, account_id, character_id, lifetime_ticks, permadeath_combat_ticks, \
-          life_metrics_version) VALUES ($1,$2,$3,0,0,1)",
+          life_metrics_version) VALUES ($1,$2,$3,0,0,1) \
+          ON CONFLICT (namespace_id, account_id, character_id) DO NOTHING",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(request.account_id.as_slice())
     .bind(request.successor_id.as_slice())
     .execute(&mut *connection)
     .await?;
+    let life_metrics: (i64, i64, i64) = sqlx::query_as(
+        "SELECT lifetime_ticks,permadeath_combat_ticks,life_metrics_version \
+         FROM character_life_metrics WHERE namespace_id=$1 AND account_id=$2 AND character_id=$3",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(request.account_id.as_slice())
+    .bind(request.successor_id.as_slice())
+    .fetch_one(&mut *connection)
+    .await?;
+    if life_metrics != (0, 0, 1) {
+        return Err(PersistenceError::CorruptStoredSuccessor);
+    }
     sqlx::query(
         "INSERT INTO character_oath_bargain_state \
          (namespace_id, account_id, character_id, earned_bargain_slots, oath_bargain_version) \
