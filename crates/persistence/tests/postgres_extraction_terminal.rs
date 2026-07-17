@@ -700,6 +700,7 @@ async fn fill_all_terminal_storage(persistence: &PostgresPersistence) {
         let reward_request_id = fixture_id(235, batch_ordinal);
         let participant_entity_id = [batch_ordinal + 2; 8];
         let reward_result_hash = [batch_ordinal + 101; 32];
+        let progression_payload_hash = [batch_ordinal + 91; 32];
 
         let mut transaction = persistence.begin_transaction().await.unwrap();
         let versions = sqlx::query(
@@ -979,6 +980,33 @@ async fn fill_all_terminal_storage(persistence: &PostgresPersistence) {
         .await
         .unwrap();
         sqlx::query(
+            "INSERT INTO character_xp_award_results
+             (namespace_id,account_id,character_id,reward_event_id,payload_hash,
+              source_content_id,xp_profile_id,progression_content_revision,
+              eligibility_kind,eligible,encounter_active_ticks,encounter_present_ticks,
+              encounter_longest_inactivity_ticks,encounter_reference_health,
+              encounter_direct_damage,encounter_effective_healing,encounter_damage_prevented,
+              encounter_objective_credits,encounter_life_state,encounter_recall_state,
+              encounter_trust_state,first_clear_awarded,base_xp,bonus_xp,requested_xp,
+              applied_xp,discarded_xp,pre_total_xp,post_total_xp,pre_level,post_level,
+              pre_progression_version,post_progression_version,result_code,result_payload,
+              entry_restore_point_id)
+             VALUES ($1,$2,$3,$4,$5,'boss.sir_caldus','xp.boss_caldus',$6,
+              1,TRUE,300,300,0,7200,1,0,0,0,0,0,0,FALSE,450,0,450,0,450,
+              2700,2700,10,10,1,1,0,$7,$8)",
+        )
+        .bind(WIPEABLE_CORE_NAMESPACE)
+        .bind(ACCOUNT_ID.as_slice())
+        .bind(STORAGE_FILLER_CHARACTER_ID.as_slice())
+        .bind(reward_request_id.as_slice())
+        .bind(progression_payload_hash.as_slice())
+        .bind(CORE_PROGRESSION_RECORDS_BLAKE3)
+        .bind([1_u8].as_slice())
+        .bind(restore_point_id.as_slice())
+        .execute(transaction.connection())
+        .await
+        .unwrap();
+        sqlx::query(
             "INSERT INTO caldus_victory_exits
              (namespace_id,encounter_id,instance_lineage_id,attempt_ordinal,
               exit_instance_id,canonical_request_hash,eligible_owner_count)
@@ -1005,7 +1033,7 @@ async fn fill_all_terminal_storage(persistence: &PostgresPersistence) {
         .bind(STORAGE_FILLER_CHARACTER_ID.as_slice())
         .bind(reward_request_id.as_slice())
         .bind(reward_result_hash.as_slice())
-        .bind([batch_ordinal + 91; 32].as_slice())
+        .bind(progression_payload_hash.as_slice())
         .execute(transaction.connection())
         .await
         .unwrap();
