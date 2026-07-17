@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "locale": "en-US",
+  "entries": [
+    {"key":"successor.surface.eyebrow","value":"THE BELL REMEMBERS"},
+    {"key":"successor.surface.title","value":"CHARACTER SELECT"},
+    {"key":"successor.surface.subtitle","value":"A successor stands ready."},
+    {"key":"successor.badge.selected","value":"SELECTED"},
+    {"key":"successor.field.level","value":"LEVEL {level}"},
+    {"key":"successor.field.oath_none","value":"OATH: NONE"},
+    {"key":"successor.field.new_starter_kit","value":"NEW STARTER KIT"},
+    {"key":"successor.field.safe_character_select","value":"SAFE — CHARACTER SELECT"},
+    {"key":"successor.field.confirmation_one","value":"CONFIRMATION 1 OF 2 COMPLETE"},
+    {"key":"successor.field.confirmation_two","value":"CONFIRMATION 2 OF 2"},
+    {"key":"successor.action.play","value":"PLAY"},
+    {"key":"successor.action.retry","value":"RETRY"},
+    {"key":"successor.input.play","value":"ENTER / A"},
+    {"key":"successor.status.creating","value":"CREATING SUCCESSOR"},
+    {"key":"successor.status.ready","value":"SUCCESSOR READY"},
+    {"key":"successor.status.entering_hall","value":"ENTERING LANTERN HALLS"},
+    {"key":"successor.status.loading_hall","value":"PREPARING LANTERN HALLS"},
+    {"key":"successor.status.hall_ready","value":"LANTERN HALLS — CONTROL READY"},
+    {"key":"successor.status.recoverable","value":"RECOVERY INTERRUPTED"},
+    {"key":"successor.status.fatal","value":"RECOVERY UNAVAILABLE"},
+    {"key":"successor.status.update","value":"UPDATE REQUIRED"},
+    {"key":"successor.footer.clean_recovery","value":"Recovery remains free of store and promotional offers."},
+    {"key":"successor.footer.authority","value":"Server authority confirms creation before Play."}
+  ]
+}

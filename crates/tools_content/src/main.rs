@@ -80,6 +80,12 @@ enum Command {
         #[arg(long, default_value = "content")]
         root: PathBuf,
     },
+    /// Validate the transitive, non-promotable Core successor-recovery presentation target.
+    ValidateCoreSuccessorRecovery {
+        /// Content root containing every compiled Core recovery dependency and successor copy.
+        #[arg(long, default_value = "content")]
+        root: PathBuf,
+    },
     /// Regenerate checked-in JSON Schema contracts.
     GenerateSchemas {
         /// Destination directory for generated schemas.
@@ -122,6 +128,9 @@ fn main() -> Result<()> {
             validate_core_oaths_bargains_command(&root)?;
         }
         Command::ValidateCoreDeathView { root } => validate_core_death_view_command(&root)?,
+        Command::ValidateCoreSuccessorRecovery { root } => {
+            validate_core_successor_recovery_command(&root)?;
+        }
         Command::GenerateSchemas { output } => generate_schemas_command(&output)?,
     }
 
@@ -137,6 +146,20 @@ fn validate_core_death_view_command(root: &std::path::Path) -> Result<()> {
         assets_blake3 = compiled.hashes().assets_blake3,
         localization_blake3 = compiled.hashes().localization_blake3,
         "unpromoted Core death-view target is valid"
+    );
+    Ok(())
+}
+
+fn validate_core_successor_recovery_command(root: &std::path::Path) -> Result<()> {
+    let compiled = sim_content::load_core_successor_recovery(root)?;
+    info!(
+        target = compiled.target_name(),
+        class = compiled.class_id(),
+        hall = compiled.hall_id(),
+        appearance = compiled.appearance_id(),
+        records_blake3 = compiled.hashes().records_blake3,
+        localization_blake3 = compiled.hashes().localization_blake3,
+        "unpromoted Core successor-recovery target is valid"
     );
     Ok(())
 }
@@ -286,6 +309,7 @@ fn validate_content_command(root: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)] // One ordered registry keeps every checked-in schema discoverable.
 fn generate_schemas_command(output: &std::path::Path) -> Result<()> {
     fs::create_dir_all(output)
         .with_context(|| format!("failed to create schema directory {}", output.display()))?;
@@ -327,6 +351,14 @@ fn generate_schemas_command(output: &std::path::Path) -> Result<()> {
     write_schema::<content_schema::CoreDeathViewAssetManifest>(
         output,
         "core_death_view_assets.schema.json",
+    )?;
+    write_schema::<content_schema::CoreSuccessorRecoveryDevelopmentTarget>(
+        output,
+        "core_successor_recovery_target.schema.json",
+    )?;
+    write_schema::<content_schema::CoreSuccessorRecoveryCopyFile>(
+        output,
+        "core_successor_recovery_copy.schema.json",
     )?;
     write_schema::<content_schema::CoreEncounterRoomDevelopmentTarget>(
         output,

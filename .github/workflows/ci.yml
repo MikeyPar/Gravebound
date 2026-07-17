@@ -48,6 +48,8 @@ jobs:
         run: cargo run --locked -p tools_content -- validate-core-caldus
       - name: Validate unpromoted Core death presentation
         run: cargo run --locked -p tools_content -- validate-core-death-view
+      - name: Validate unpromoted Core successor recovery presentation
+        run: cargo run --locked -p tools_content -- validate-core-successor-recovery
       - name: Verify deterministic trace
         run: |
           cargo run --locked -p tools_content -- trace tests/deterministic/m00_smoke.json

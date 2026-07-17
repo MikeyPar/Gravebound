@@ -967,6 +967,41 @@ pub struct CoreDeathViewDevelopmentTarget {
     pub expected_localization_blake3: String,
 }
 
+/// Identifies the wipeable, non-promotable post-death successor presentation target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CoreSuccessorRecoveryTargetKind {
+    UnpromotedSuccessorRecoverySubset,
+}
+
+/// Closed dependency and copy contract for the `GB-M03-07` native recovery surface.
+///
+/// This target deliberately contains no release stage, package identity, route-admission flag,
+/// or promotion metadata. It binds presentation to the already compiled death, identity, item,
+/// and Lantern Halls authorities without becoming another gameplay writer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CoreSuccessorRecoveryDevelopmentTarget {
+    pub schema_version: u32,
+    pub target_kind: CoreSuccessorRecoveryTargetKind,
+    pub target_name: String,
+    pub required_class_id: ContentId,
+    pub required_hall_id: ContentId,
+    pub required_appearance_id: ContentId,
+    pub required_copy_ids: Vec<ContentId>,
+    pub expected_records_blake3: String,
+    pub expected_localization_blake3: String,
+}
+
+/// Exact localized labels owned by the post-death successor recovery surface.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CoreSuccessorRecoveryCopyFile {
+    pub schema_version: u32,
+    pub locale: String,
+    pub entries: Vec<CoreLocalizedCopyEntry>,
+}
+
 /// Hashes of every independently compiled package that may supply a localized name to a Core
 /// death snapshot. Hashing this structure into the death records makes the closure transitive.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1326,6 +1361,31 @@ mod tests {
                 "core_death_view_assets.schema.json",
                 serde_json::to_value(schemars::schema_for!(CoreDeathViewAssetManifest))
                     .expect("serializable death-view asset schema"),
+            ),
+        ];
+        for (name, generated) in cases {
+            let text = fs::read_to_string(schema_root.join(name)).expect("checked-in schema");
+            let checked_in: serde_json::Value =
+                serde_json::from_str(&text).expect("valid checked-in schema");
+            assert_eq!(checked_in, generated, "schema drift in {name}");
+        }
+    }
+
+    #[test]
+    fn checked_in_core_successor_recovery_schemas_match_the_rust_contracts() {
+        let schema_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../schemas");
+        let cases = [
+            (
+                "core_successor_recovery_target.schema.json",
+                serde_json::to_value(schemars::schema_for!(
+                    CoreSuccessorRecoveryDevelopmentTarget
+                ))
+                .expect("serializable successor-recovery target schema"),
+            ),
+            (
+                "core_successor_recovery_copy.schema.json",
+                serde_json::to_value(schemars::schema_for!(CoreSuccessorRecoveryCopyFile))
+                    .expect("serializable successor-recovery copy schema"),
             ),
         ];
         for (name, generated) in cases {

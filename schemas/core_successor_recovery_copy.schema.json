@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CoreSuccessorRecoveryCopyFile",
+  "description": "Exact localized labels owned by the post-death successor recovery surface.",
+  "type": "object",
+  "properties": {
+    "entries": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CoreLocalizedCopyEntry"
+      }
+    },
+    "locale": {
+      "type": "string"
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "locale",
+    "entries"
+  ],
+  "$defs": {
+    "ContentId": {
+      "description": "Stable dot-separated content identifier.",
+      "type": "string"
+    },
+    "CoreLocalizedCopyEntry": {
+      "type": "object",
+      "properties": {
+        "key": {
+          "$ref": "#/$defs/ContentId"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "key",
+        "value"
+      ]
+    }
+  }
+}

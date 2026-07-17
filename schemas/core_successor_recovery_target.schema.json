@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CoreSuccessorRecoveryDevelopmentTarget",
+  "description": "Closed dependency and copy contract for the `GB-M03-07` native recovery surface.\n\nThis target deliberately contains no release stage, package identity, route-admission flag,\nor promotion metadata. It binds presentation to the already compiled death, identity, item,\nand Lantern Halls authorities without becoming another gameplay writer.",
+  "type": "object",
+  "properties": {
+    "expected_localization_blake3": {
+      "type": "string"
+    },
+    "expected_records_blake3": {
+      "type": "string"
+    },
+    "required_appearance_id": {
+      "$ref": "#/$defs/ContentId"
+    },
+    "required_class_id": {
+      "$ref": "#/$defs/ContentId"
+    },
+    "required_copy_ids": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ContentId"
+      }
+    },
+    "required_hall_id": {
+      "$ref": "#/$defs/ContentId"
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "target_kind": {
+      "$ref": "#/$defs/CoreSuccessorRecoveryTargetKind"
+    },
+    "target_name": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "target_kind",
+    "target_name",
+    "required_class_id",
+    "required_hall_id",
+    "required_appearance_id",
+    "required_copy_ids",
+    "expected_records_blake3",
+    "expected_localization_blake3"
+  ],
+  "$defs": {
+    "ContentId": {
+      "description": "Stable dot-separated content identifier.",
+      "type": "string"
+    },
+    "CoreSuccessorRecoveryTargetKind": {
+      "description": "Identifies the wipeable, non-promotable post-death successor presentation target.",
+      "type": "string",
+      "enum": [
+        "unpromoted_successor_recovery_subset"
+      ]
+    }
+  }
+}
