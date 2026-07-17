@@ -325,7 +325,9 @@ fn build_showcase_deck(catalog: CoreDevelopmentDeathView) -> Result<ShowcaseDeck
     })
 }
 
-fn ready_terminal_model(catalog: CoreDevelopmentDeathView) -> Result<crate::DeathViewClientModel> {
+pub(crate) fn ready_terminal_model(
+    catalog: CoreDevelopmentDeathView,
+) -> Result<crate::DeathViewClientModel> {
     let revision = revision(&catalog)?;
     let content_revision = catalog.item_content_revision().to_owned();
     let mut model = crate::DeathViewClientModel::new(catalog)?;

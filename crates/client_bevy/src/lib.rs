@@ -14,6 +14,7 @@ mod core_equipment_showcase;
 mod core_identity;
 mod core_item_lifecycle_showcase;
 mod core_resolution_hold_showcase;
+mod core_successor_recovery_showcase;
 mod core_transition_showcase;
 mod core_world_showcase;
 mod core_world_transition;
@@ -118,6 +119,10 @@ pub use core_item_lifecycle_showcase::{
 pub use core_resolution_hold_showcase::{
     CoreResolutionHoldShowcaseConfig, CoreResolutionHoldShowcaseState,
     run_core_resolution_hold_showcase,
+};
+pub use core_successor_recovery_showcase::{
+    CoreSuccessorRecoveryShowcaseConfig, CoreSuccessorRecoveryShowcaseState,
+    run_core_successor_recovery_showcase,
 };
 pub use core_transition_showcase::{
     CoreTransitionShowcaseConfig, CoreTransitionShowcaseState, run_core_transition_showcase,

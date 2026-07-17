@@ -57,6 +57,17 @@ enum CoreDeathViewEvidenceStateArg {
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
+enum CoreSuccessorRecoveryEvidenceStateArg {
+    DeathSummary,
+    Creating,
+    RecoverableCreate,
+    CharacterSelect,
+    EnteringHall,
+    LoadingHall,
+    HallReady,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
 enum CoreResolutionHoldEvidenceStateArg {
     MixedDestinations,
     StorageFull,
@@ -91,6 +102,22 @@ impl From<CoreDeathViewEvidenceStateArg> for client_bevy::CoreDeathViewShowcaseS
             CoreDeathViewEvidenceStateArg::MemorialDetail => Self::MemorialDetail,
             CoreDeathViewEvidenceStateArg::AwaitingCommit => Self::AwaitingCommit,
             CoreDeathViewEvidenceStateArg::RecoverableError => Self::RecoverableError,
+        }
+    }
+}
+
+impl From<CoreSuccessorRecoveryEvidenceStateArg>
+    for client_bevy::CoreSuccessorRecoveryShowcaseState
+{
+    fn from(value: CoreSuccessorRecoveryEvidenceStateArg) -> Self {
+        match value {
+            CoreSuccessorRecoveryEvidenceStateArg::DeathSummary => Self::DeathSummary,
+            CoreSuccessorRecoveryEvidenceStateArg::Creating => Self::Creating,
+            CoreSuccessorRecoveryEvidenceStateArg::RecoverableCreate => Self::RecoverableCreate,
+            CoreSuccessorRecoveryEvidenceStateArg::CharacterSelect => Self::CharacterSelect,
+            CoreSuccessorRecoveryEvidenceStateArg::EnteringHall => Self::EnteringHall,
+            CoreSuccessorRecoveryEvidenceStateArg::LoadingHall => Self::LoadingHall,
+            CoreSuccessorRecoveryEvidenceStateArg::HallReady => Self::HallReady,
         }
     }
 }
@@ -222,6 +249,21 @@ enum Command {
         #[arg(long, value_enum, default_value_t = CoreDeathViewEvidenceStateArg::Summary)]
         state: CoreDeathViewEvidenceStateArg,
     },
+    /// Open the disposable GB-M03-07 durable-death-to-Hall recovery evidence coordinator.
+    CoreSuccessorRecoveryShowcase {
+        #[arg(long, default_value = "content")]
+        content_root: PathBuf,
+        #[arg(long)]
+        reduced_effects: bool,
+        #[arg(long, default_value_t = 100)]
+        ui_scale: u16,
+        #[arg(
+            long,
+            value_enum,
+            default_value_t = CoreSuccessorRecoveryEvidenceStateArg::DeathSummary
+        )]
+        state: CoreSuccessorRecoveryEvidenceStateArg,
+    },
     /// Open the disposable GB-M03-08 blocking Resolution Hold evidence surface.
     CoreResolutionHoldShowcase {
         #[arg(long, default_value = "content")]
@@ -345,6 +387,19 @@ fn run() -> anyhow::Result<()> {
             ui_scale,
             state,
         } => run_death_view_showcase(content_root, reduced_effects, ui_scale, state),
+        Command::CoreSuccessorRecoveryShowcase {
+            content_root,
+            reduced_effects,
+            ui_scale,
+            state,
+        } => client_bevy::run_core_successor_recovery_showcase(
+            &client_bevy::CoreSuccessorRecoveryShowcaseConfig {
+                content_root,
+                reduced_effects,
+                ui_scale_percent: ui_scale,
+                state: state.into(),
+            },
+        ),
         Command::CoreResolutionHoldShowcase {
             content_root,
             reduced_effects,

@@ -920,9 +920,11 @@ fn apply_death_ui_fonts(
 #[allow(clippy::needless_pass_by_value)]
 fn track_death_ui_window_resize(
     mut resized: MessageReader<WindowResized>,
-    mut view: ResMut<NativeDeathView>,
+    view: Option<ResMut<NativeDeathView>>,
 ) {
-    if resized.read().next().is_some() {
+    if resized.read().next().is_some()
+        && let Some(mut view) = view
+    {
         view.layout_epoch = view.layout_epoch.saturating_add(1);
     }
 }
@@ -930,7 +932,7 @@ fn track_death_ui_window_resize(
 #[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
 fn rebuild_native_death_view(
     mut commands: Commands,
-    view: Res<NativeDeathView>,
+    view: Option<Res<NativeDeathView>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     roots: Query<Entity, With<DeathUiRoot>>,
     assets: Res<AssetServer>,
@@ -938,6 +940,15 @@ fn rebuild_native_death_view(
     mut focus: ResMut<DeathUiFocusState>,
     mut readiness: ResMut<DeathUiRenderReadiness>,
 ) {
+    let Some(view) = view else {
+        for entity in &roots {
+            commands.entity(entity).despawn();
+        }
+        focus.focused_order = None;
+        focus.ensure_visible = false;
+        readiness.ready = false;
+        return;
+    };
     if !view.is_changed() && !roots.is_empty() {
         return;
     }

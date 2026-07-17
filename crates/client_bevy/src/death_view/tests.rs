@@ -396,6 +396,7 @@ fn lost_latest_and_summary_responses_remain_safely_gated() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn acknowledged_summary_projects_exact_order_copy_and_action_gates() {
     let mut model = model();
     complete_one_loss_summary(&mut model);
