@@ -28,6 +28,7 @@ use server_app::{
     PostgresDangerEntryAshWalletProviderV3, PostgresDangerEntryInventoryProviderV3,
     PostgresDangerEntryLifeMetricsProviderV3, PostgresDangerEntryOathBargainProviderV3,
     PostgresDormantWorldFlowCoordinator, PostgresProgressionRestoreProvider, WorldFlowIdGenerator,
+    WorldFlowIdentityMaterial,
 };
 
 const ACCOUNT_ID: [u8; 16] = [141; 16];
@@ -60,15 +61,15 @@ struct FixedIds {
 }
 
 impl WorldFlowIdGenerator for FixedIds {
-    fn next_transfer_id(&self) -> [u8; 16] {
+    fn transfer_id(&self, _material: WorldFlowIdentityMaterial) -> [u8; 16] {
         self.transfer
     }
 
-    fn next_lineage_id(&self) -> [u8; 16] {
+    fn lineage_id(&self, _material: WorldFlowIdentityMaterial) -> [u8; 16] {
         self.lineage
     }
 
-    fn next_restore_point_id(&self) -> [u8; 16] {
+    fn restore_point_id(&self, _material: WorldFlowIdentityMaterial) -> [u8; 16] {
         self.restore
     }
 }

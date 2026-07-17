@@ -28,6 +28,7 @@ use server_app::{
     PostgresProgressionAwardService, PostgresProgressionRestoreProvider,
     PostgresSafeInventoryService, ProgressionAwardCode, ProgressionAwardCommand,
     ProgressionAwardEvidence, ProgressionAwardPayload, WorldFlowIdGenerator,
+    WorldFlowIdentityMaterial,
 };
 use sim_core::NormalXpEvidence;
 use sqlx::Row;
@@ -218,15 +219,15 @@ impl IdentityClock for FixedClock {
 struct FixedWorldIds;
 
 impl WorldFlowIdGenerator for FixedWorldIds {
-    fn next_transfer_id(&self) -> [u8; 16] {
+    fn transfer_id(&self, _material: WorldFlowIdentityMaterial) -> [u8; 16] {
         [191; 16]
     }
 
-    fn next_lineage_id(&self) -> [u8; 16] {
+    fn lineage_id(&self, _material: WorldFlowIdentityMaterial) -> [u8; 16] {
         [192; 16]
     }
 
-    fn next_restore_point_id(&self) -> [u8; 16] {
+    fn restore_point_id(&self, _material: WorldFlowIdentityMaterial) -> [u8; 16] {
         [193; 16]
     }
 }

@@ -80,9 +80,10 @@ use server_app::{
     RecoveredProductionRecallActorV1, STORED_TERMINAL_RECEIPT_SCHEMA_V1, SecretRewardEpoch,
     StoredTerminalReceipt, StoredTerminalReceiptV1, SubmitResult, TerminalArbiter, TerminalBinding,
     TerminalCandidate, TerminalKind, WorldFlowGateService, WorldFlowIdGenerator,
-    core_recall_completion_outbox, drive_recall_terminal_tick, durable_death_terminal_candidate,
-    production_recall_actor_mailbox, recover_committed_death_arbiter,
-    recover_committed_recall_actor, serve_core_reliable, serve_handshake,
+    WorldFlowIdentityMaterial, core_recall_completion_outbox, drive_recall_terminal_tick,
+    durable_death_terminal_candidate, production_recall_actor_mailbox,
+    recover_committed_death_arbiter, recover_committed_recall_actor, serve_core_reliable,
+    serve_handshake,
 };
 use sim_core::{
     CoreBossParticipant, CoreBossParticipantLock, CoreCaldusAntiCheatState,
@@ -365,15 +366,15 @@ impl CharacterIdGenerator for FixedAuthority {
 }
 
 impl WorldFlowIdGenerator for FixedAuthority {
-    fn next_transfer_id(&self) -> [u8; 16] {
+    fn transfer_id(&self, _material: WorldFlowIdentityMaterial) -> [u8; 16] {
         TRANSFER_ID
     }
 
-    fn next_lineage_id(&self) -> [u8; 16] {
+    fn lineage_id(&self, _material: WorldFlowIdentityMaterial) -> [u8; 16] {
         LINEAGE_ID
     }
 
-    fn next_restore_point_id(&self) -> [u8; 16] {
+    fn restore_point_id(&self, _material: WorldFlowIdentityMaterial) -> [u8; 16] {
         RESTORE_ID
     }
 }

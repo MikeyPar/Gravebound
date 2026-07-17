@@ -1,4 +1,10 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+};
 
 use persistence::{
     CORE_ITEM_CONTENT_REVISION, PersistenceConfig, PersistenceTransaction, PostgresPersistence,
@@ -11,14 +17,17 @@ use protocol::{
 };
 use server_app::{
     AccountId, AshWalletRestoreV3, AuthenticatedAccount, AuthenticatedNamespace,
-    CrashRestoreContext, DangerEntrySnapshotV3, EntryCaptureContext, EntryRestoreProvider,
-    IdentityClock, InventorySecurityRestoreV3, LifeMetricsRestoreV3, OathBargainRestoreV3,
+    Blake3WorldFlowIds, CoreBellPortalAbortReason, CoreBellPortalAuthority, CoreBellPortalBinding,
+    CoreBellPortalPermit, CoreBellPortalPermitLease, CoreBellPortalRejection,
+    CoreBellPortalTransition, CrashRestoreContext, DangerEntrySnapshotV3, EntryCaptureContext,
+    EntryRestoreProvider, IdentityClock, InventorySecurityRestoreV3, LifeMetricsRestoreV3,
+    OathBargainRestoreV3, PostgresCorePrivateWorldFlowCoordinator,
     PostgresDangerEntryAshWalletProviderV3, PostgresDangerEntryInventoryProviderV3,
     PostgresDangerEntryLifeMetricsProviderV3, PostgresDangerEntryOathBargainProviderV3,
     PostgresDormantWorldFlowCoordinator, PostgresProgressionRestoreProvider,
     PostgresSafeInventoryService, ProgressionRestoreV1, RestorePointError, SafeAggregateVersionsV3,
     SafeInventoryServiceError, SafeInventoryTransferCommand, SafeInventoryTransferKind,
-    WorldFlowIdGenerator,
+    WorldFlowIdGenerator, WorldFlowIdentityMaterial,
 };
 
 const ACCOUNT_ID: [u8; 16] = [81; 16];
@@ -30,6 +39,8 @@ const LINEAGE_ID: [u8; 16] = [86; 16];
 const RESTORE_ID: [u8; 16] = [87; 16];
 const HALL_ID: &str = "hub.lantern_halls_01";
 const WORLD_ID: &str = "world.core_microrealm_01";
+const BELL_PORTAL_ID: &str = "portal.dungeon.bell_sepulcher";
+const BELL_DUNGEON_ID: &str = "dungeon.bell_sepulcher";
 const LAYOUT_ID: &str = "layout.core_private_life_01";
 
 fn content_root() -> PathBuf {
@@ -278,19 +289,39 @@ fn frame(sequence: u32, mutation_id: u8, character_id: [u8; 16], version: u64) -
     }
 }
 
+fn bell_frame(sequence: u32, mutation_id: u8, version: u64) -> WorldFlowFrame {
+    let payload = WorldTransferPayload {
+        content_revision: revision(),
+        command: WorldTransferCommand::UsePortal {
+            portal_id: WireText::new(BELL_PORTAL_ID).unwrap(),
+        },
+    };
+    WorldFlowFrame {
+        sequence,
+        request: WorldFlowRequest::Transfer(WorldTransferMutation {
+            mutation_id: [mutation_id; 16],
+            character_id: CHARACTER_ID,
+            expected_character_version: version,
+            issued_at_unix_millis: 9_000,
+            payload_hash: payload.canonical_hash(),
+            payload,
+        }),
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct FixedIds;
 
 impl WorldFlowIdGenerator for FixedIds {
-    fn next_transfer_id(&self) -> [u8; 16] {
+    fn transfer_id(&self, _material: WorldFlowIdentityMaterial) -> [u8; 16] {
         TRANSFER_ID
     }
 
-    fn next_lineage_id(&self) -> [u8; 16] {
+    fn lineage_id(&self, _material: WorldFlowIdentityMaterial) -> [u8; 16] {
         LINEAGE_ID
     }
 
-    fn next_restore_point_id(&self) -> [u8; 16] {
+    fn restore_point_id(&self, _material: WorldFlowIdentityMaterial) -> [u8; 16] {
         RESTORE_ID
     }
 }
@@ -301,6 +332,277 @@ struct FixedClock;
 impl IdentityClock for FixedClock {
     fn unix_millis(&self) -> u64 {
         10_000
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RecordingBellPortal {
+    state: Arc<Mutex<RecordingBellPortalState>>,
+}
+
+#[derive(Debug)]
+struct RecordingBellPortalState {
+    decision: Result<(), CoreBellPortalRejection>,
+    bindings: Vec<CoreBellPortalBinding>,
+    commits: Vec<(CoreBellPortalPermit, CoreBellPortalTransition)>,
+    aborts: Vec<(CoreBellPortalPermit, CoreBellPortalAbortReason)>,
+    reconciliations: Vec<CoreBellPortalTransition>,
+}
+
+impl RecordingBellPortal {
+    fn new(decision: Result<(), CoreBellPortalRejection>) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(RecordingBellPortalState {
+                decision,
+                bindings: Vec::new(),
+                commits: Vec::new(),
+                aborts: Vec::new(),
+                reconciliations: Vec::new(),
+            })),
+        }
+    }
+
+    fn set_decision(&self, decision: Result<(), CoreBellPortalRejection>) {
+        self.state.lock().unwrap().decision = decision;
+    }
+
+    fn bindings(&self) -> Vec<CoreBellPortalBinding> {
+        self.state.lock().unwrap().bindings.clone()
+    }
+
+    fn commit_count(&self) -> usize {
+        self.state.lock().unwrap().commits.len()
+    }
+
+    fn reconciliation_count(&self) -> usize {
+        self.state.lock().unwrap().reconciliations.len()
+    }
+}
+
+#[derive(Debug)]
+struct RecordingBellLease {
+    permit: CoreBellPortalPermit,
+}
+
+impl CoreBellPortalPermitLease for RecordingBellLease {
+    fn permit(&self) -> &CoreBellPortalPermit {
+        &self.permit
+    }
+}
+
+impl CoreBellPortalAuthority for RecordingBellPortal {
+    type PermitLease = RecordingBellLease;
+
+    async fn prepare_bell_portal(
+        &self,
+        binding: CoreBellPortalBinding,
+    ) -> Result<Self::PermitLease, CoreBellPortalRejection> {
+        let mut state = self.state.lock().unwrap();
+        state.bindings.push(binding.clone());
+        state.decision?;
+        Ok(RecordingBellLease {
+            permit: CoreBellPortalPermit {
+                binding,
+                permit_id: [171; 16],
+                actor_generation: 7,
+                route_state_version: 9,
+            },
+        })
+    }
+
+    async fn commit_bell_portal(
+        &self,
+        permit: Self::PermitLease,
+        transition: CoreBellPortalTransition,
+    ) -> Result<(), CoreBellPortalRejection> {
+        let RecordingBellLease { permit } = permit;
+        self.state
+            .lock()
+            .unwrap()
+            .commits
+            .push((permit, transition));
+        Ok(())
+    }
+
+    async fn abort_bell_portal(
+        &self,
+        permit: Self::PermitLease,
+        reason: CoreBellPortalAbortReason,
+    ) {
+        let RecordingBellLease { permit } = permit;
+        self.state.lock().unwrap().aborts.push((permit, reason));
+    }
+
+    async fn reconcile_bell_portal(
+        &self,
+        transition: CoreBellPortalTransition,
+    ) -> Result<(), CoreBellPortalRejection> {
+        self.state.lock().unwrap().reconciliations.push(transition);
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PersistenceReadingBellPortal {
+    persistence: PostgresPersistence,
+}
+
+impl CoreBellPortalAuthority for PersistenceReadingBellPortal {
+    type PermitLease = RecordingBellLease;
+
+    async fn prepare_bell_portal(
+        &self,
+        binding: CoreBellPortalBinding,
+    ) -> Result<Self::PermitLease, CoreBellPortalRejection> {
+        let begin = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            self.persistence
+                .begin_world_flow(binding.account_id, binding.character_id, [250; 16]),
+        )
+        .await
+        .map_err(|_| CoreBellPortalRejection::ServiceUnavailable)?
+        .map_err(|_| CoreBellPortalRejection::ServiceUnavailable)?;
+        let persistence::WorldFlowBegin::Fresh(write) = begin else {
+            return Err(CoreBellPortalRejection::ServiceUnavailable);
+        };
+        assert!(matches!(
+            write.state().location,
+            persistence::StoredWorldLocation::Danger {
+                ref location_content_id,
+                instance_lineage_id,
+                entry_restore_point_id,
+                ..
+            } if location_content_id == WORLD_ID
+                && instance_lineage_id == binding.instance_lineage_id
+                && entry_restore_point_id == binding.entry_restore_point_id
+        ));
+        write
+            .rollback()
+            .await
+            .map_err(|_| CoreBellPortalRejection::ServiceUnavailable)?;
+        Ok(RecordingBellLease {
+            permit: CoreBellPortalPermit {
+                binding,
+                permit_id: [172; 16],
+                actor_generation: 8,
+                route_state_version: 10,
+            },
+        })
+    }
+
+    async fn commit_bell_portal(
+        &self,
+        _permit: Self::PermitLease,
+        _transition: CoreBellPortalTransition,
+    ) -> Result<(), CoreBellPortalRejection> {
+        Ok(())
+    }
+
+    async fn abort_bell_portal(
+        &self,
+        _permit: Self::PermitLease,
+        _reason: CoreBellPortalAbortReason,
+    ) {
+    }
+
+    async fn reconcile_bell_portal(
+        &self,
+        _transition: CoreBellPortalTransition,
+    ) -> Result<(), CoreBellPortalRejection> {
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ExclusiveBellPortal {
+    active: Arc<AtomicBool>,
+    contender_seen: Arc<tokio::sync::Notify>,
+    prepares: Arc<AtomicUsize>,
+    commits: Arc<AtomicUsize>,
+}
+
+impl ExclusiveBellPortal {
+    fn new() -> Self {
+        Self {
+            active: Arc::new(AtomicBool::new(false)),
+            contender_seen: Arc::new(tokio::sync::Notify::new()),
+            prepares: Arc::new(AtomicUsize::new(0)),
+            commits: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn can_replace_generation(&self) -> bool {
+        !self.active.load(Ordering::Acquire)
+    }
+}
+
+#[derive(Debug)]
+struct ExclusiveBellLease {
+    permit: CoreBellPortalPermit,
+    active: Arc<AtomicBool>,
+}
+
+impl CoreBellPortalPermitLease for ExclusiveBellLease {
+    fn permit(&self) -> &CoreBellPortalPermit {
+        &self.permit
+    }
+}
+
+impl Drop for ExclusiveBellLease {
+    fn drop(&mut self) {
+        self.active.store(false, Ordering::Release);
+    }
+}
+
+impl CoreBellPortalAuthority for ExclusiveBellPortal {
+    type PermitLease = ExclusiveBellLease;
+
+    async fn prepare_bell_portal(
+        &self,
+        binding: CoreBellPortalBinding,
+    ) -> Result<Self::PermitLease, CoreBellPortalRejection> {
+        self.prepares.fetch_add(1, Ordering::Relaxed);
+        if self
+            .active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            self.contender_seen.notify_one();
+            return Err(CoreBellPortalRejection::TransferInProgress);
+        }
+        self.contender_seen.notified().await;
+        Ok(ExclusiveBellLease {
+            permit: CoreBellPortalPermit {
+                binding,
+                permit_id: [173; 16],
+                actor_generation: 9,
+                route_state_version: 11,
+            },
+            active: Arc::clone(&self.active),
+        })
+    }
+
+    async fn commit_bell_portal(
+        &self,
+        _permit: Self::PermitLease,
+        _transition: CoreBellPortalTransition,
+    ) -> Result<(), CoreBellPortalRejection> {
+        self.commits.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    async fn abort_bell_portal(
+        &self,
+        _permit: Self::PermitLease,
+        _reason: CoreBellPortalAbortReason,
+    ) {
+    }
+
+    async fn reconcile_bell_portal(
+        &self,
+        _transition: CoreBellPortalTransition,
+    ) -> Result<(), CoreBellPortalRejection> {
+        Ok(())
     }
 }
 
@@ -355,11 +657,94 @@ where
     )
 }
 
+fn bell_coordinator<BellPortal>(
+    persistence: PostgresPersistence,
+    bell_portal: BellPortal,
+) -> PostgresCorePrivateWorldFlowCoordinator<
+    Blake3WorldFlowIds,
+    FixedClock,
+    PostgresDangerEntryInventoryProviderV3,
+    PostgresDangerEntryOathBargainProviderV3,
+    PostgresDangerEntryLifeMetricsProviderV3,
+    PostgresDangerEntryAshWalletProviderV3,
+    BellPortal,
+>
+where
+    BellPortal: CoreBellPortalAuthority,
+{
+    let progression = sim_content::load_core_development_progression(&content_root()).unwrap();
+    PostgresCorePrivateWorldFlowCoordinator::with_bell_portal_authority(
+        persistence,
+        Blake3WorldFlowIds,
+        FixedClock,
+        revision(),
+        PostgresProgressionRestoreProvider::new(&progression).unwrap(),
+        PostgresDangerEntryInventoryProviderV3,
+        PostgresDangerEntryOathBargainProviderV3,
+        PostgresDangerEntryLifeMetricsProviderV3,
+        PostgresDangerEntryAshWalletProviderV3,
+        bell_portal,
+    )
+}
+
 fn code(result: &WorldFlowResult) -> WorldTransferResultCode {
     match result {
         WorldFlowResult::Transfer { code, .. } | WorldFlowResult::Error { code, .. } => *code,
         WorldFlowResult::Location { .. } => panic!("unexpected location result"),
     }
+}
+
+fn assert_accepted_bell_transfer(
+    result: &WorldFlowResult,
+    sequence: u32,
+    mutation_id: [u8; 16],
+    lineage_id: [u8; 16],
+    restore_point_id: [u8; 16],
+) {
+    assert!(matches!(
+        result,
+        WorldFlowResult::Transfer {
+            request_sequence,
+            mutation_id: result_mutation_id,
+            code: WorldTransferResultCode::Accepted,
+            snapshot: Some(protocol::CharacterLocationSnapshot {
+                character_version: 3,
+                location: protocol::CharacterLocation::Danger {
+                    location_id,
+                    instance_lineage_id,
+                    entry_restore_point_id,
+                },
+                ..
+            }),
+            transfer_id: Some(_),
+            ..
+        } if *request_sequence == sequence
+            && *result_mutation_id == mutation_id
+            && location_id.as_str() == BELL_DUNGEON_ID
+            && *instance_lineage_id == lineage_id
+            && *entry_restore_point_id == restore_point_id
+    ));
+}
+
+async fn assert_bell_dungeon_location(
+    persistence: &PostgresPersistence,
+    lineage_id: [u8; 16],
+    restore_point_id: [u8; 16],
+) {
+    assert!(matches!(
+        persistence
+            .world_location(ACCOUNT_ID, CHARACTER_ID)
+            .await
+            .unwrap(),
+        Some(persistence::StoredWorldLocation::Danger {
+            character_version: 3,
+            ref location_content_id,
+            instance_lineage_id,
+            entry_restore_point_id,
+        }) if location_content_id == BELL_DUNGEON_ID
+            && instance_lineage_id == lineage_id
+            && entry_restore_point_id == restore_point_id
+    ));
 }
 
 async fn aggregate_counts(persistence: &PostgresPersistence) -> (i64, i64, i64, i64) {
@@ -376,6 +761,40 @@ async fn aggregate_counts(persistence: &PostgresPersistence) -> (i64, i64, i64, 
     .unwrap();
     transaction.rollback().await.unwrap();
     counts
+}
+
+async fn root_v3_component_counts(persistence: &PostgresPersistence) -> (i64, i64, i64, i64, i64) {
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let counts = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM entry_restore_progression_v3 WHERE account_id = $1), \
+                (SELECT count(*) FROM entry_restore_inventory_v3 WHERE account_id = $1), \
+                (SELECT count(*) FROM entry_restore_oath_bargain_v3 WHERE account_id = $1), \
+                (SELECT count(*) FROM entry_restore_life_metrics_v3 WHERE account_id = $1), \
+                (SELECT count(*) FROM entry_restore_ash_wallet_v3 WHERE account_id = $1)",
+    )
+    .bind(ACCOUNT_ID.as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    transaction.rollback().await.unwrap();
+    counts
+}
+
+async fn safe_aggregate_versions(persistence: &PostgresPersistence) -> (i64, i64) {
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let versions = sqlx::query_as(
+        "SELECT a.state_version, i.inventory_version FROM accounts a \
+         JOIN character_inventories i USING (namespace_id, account_id) \
+         WHERE a.namespace_id = $1 AND a.account_id = $2 AND i.character_id = $3",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(CHARACTER_ID.as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    transaction.rollback().await.unwrap();
+    versions
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -545,6 +964,334 @@ async fn danger_entry_commits_complete_root_and_replays_after_pool_restart() {
         WorldTransferResultCode::IdempotencyConflict
     );
     assert_eq!(aggregate_counts(&restarted).await, (1, 1, 1, 1));
+}
+
+#[tokio::test]
+#[ignore = "requires explicitly authorized disposable PostgreSQL"]
+async fn cleared_bell_portal_preserves_entry_root_and_replays_after_pool_restart() {
+    let persistence = disposable_database().await;
+    reset_fixture(&persistence).await;
+    let actor = RecordingBellPortal::new(Ok(()));
+    let service = bell_coordinator(persistence.clone(), actor.clone());
+
+    let entered = service
+        .handle(authenticated(ACCOUNT_ID), &frame(1, 110, CHARACTER_ID, 1))
+        .await;
+    assert_eq!(code(&entered), WorldTransferResultCode::Accepted);
+    let Some(persistence::StoredWorldLocation::Danger {
+        character_version: 2,
+        location_content_id,
+        instance_lineage_id,
+        entry_restore_point_id,
+    }) = persistence
+        .world_location(ACCOUNT_ID, CHARACTER_ID)
+        .await
+        .unwrap()
+    else {
+        panic!("Hall entry must persist the Core microrealm danger root");
+    };
+    assert_eq!(location_content_id, WORLD_ID);
+    assert!(actor.bindings().is_empty());
+    let safe_versions_before_bell = safe_aggregate_versions(&persistence).await;
+    let root_components_before_bell = root_v3_component_counts(&persistence).await;
+    assert_eq!(root_components_before_bell, (1, 1, 1, 1, 1));
+
+    let request = bell_frame(2, 111, 2);
+    let accepted = service.handle(authenticated(ACCOUNT_ID), &request).await;
+    assert_accepted_bell_transfer(
+        &accepted,
+        2,
+        [111; 16],
+        instance_lineage_id,
+        entry_restore_point_id,
+    );
+    assert_eq!(
+        actor.bindings(),
+        vec![CoreBellPortalBinding {
+            account_id: ACCOUNT_ID,
+            character_id: CHARACTER_ID,
+            mutation_id: [111; 16],
+            instance_lineage_id,
+            entry_restore_point_id,
+            character_version: 2,
+            content_revision: revision(),
+        }]
+    );
+    assert_eq!(actor.commit_count(), 1);
+    assert_eq!(aggregate_counts(&persistence).await, (1, 1, 1, 2));
+    assert_eq!(
+        safe_aggregate_versions(&persistence).await,
+        safe_versions_before_bell,
+        "danger-to-danger scene transfer must not rewrite safe inventory aggregates"
+    );
+    assert_eq!(
+        root_v3_component_counts(&persistence).await,
+        root_components_before_bell,
+        "Bell transfer must preserve the original complete entry restore graph"
+    );
+    assert_bell_dungeon_location(&persistence, instance_lineage_id, entry_restore_point_id).await;
+
+    drop(service);
+    persistence.close().await;
+    let restarted = disposable_database().await;
+    let replay_actor = RecordingBellPortal::new(Err(CoreBellPortalRejection::ServiceUnavailable));
+    let restarted_service = bell_coordinator(restarted.clone(), replay_actor.clone());
+    let replayed = restarted_service
+        .handle(
+            authenticated(ACCOUNT_ID),
+            &WorldFlowFrame {
+                sequence: 99,
+                ..request.clone()
+            },
+        )
+        .await;
+    assert!(matches!(
+        replayed,
+        WorldFlowResult::Transfer {
+            request_sequence: 99,
+            code: WorldTransferResultCode::Accepted,
+            ..
+        }
+    ));
+    assert!(replay_actor.bindings().is_empty());
+    assert_eq!(
+        replay_actor.reconciliation_count(),
+        1,
+        "durable replay must reconcile without acquiring a new permit"
+    );
+
+    let mut changed_binding = request;
+    let WorldFlowRequest::Transfer(ref mut mutation) = changed_binding.request else {
+        unreachable!();
+    };
+    mutation.expected_character_version = 3;
+    let conflicted = restarted_service
+        .handle(authenticated(ACCOUNT_ID), &changed_binding)
+        .await;
+    assert_eq!(
+        code(&conflicted),
+        WorldTransferResultCode::IdempotencyConflict
+    );
+    assert_eq!(aggregate_counts(&restarted).await, (1, 1, 1, 2));
+}
+
+#[tokio::test]
+#[ignore = "requires explicitly authorized disposable PostgreSQL"]
+async fn bell_actor_can_lock_the_same_aggregate_during_prepare_without_deadlock() {
+    let persistence = disposable_database().await;
+    reset_fixture(&persistence).await;
+    let actor = PersistenceReadingBellPortal {
+        persistence: persistence.clone(),
+    };
+    let service = bell_coordinator(persistence.clone(), actor);
+    let entered = service
+        .handle(authenticated(ACCOUNT_ID), &frame(1, 117, CHARACTER_ID, 1))
+        .await;
+    assert_eq!(code(&entered), WorldTransferResultCode::Accepted);
+
+    let transfer = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        service.handle(authenticated(ACCOUNT_ID), &bell_frame(2, 118, 2)),
+    )
+    .await
+    .expect("actor preparation must not wait behind a coordinator-held aggregate lock");
+    assert_eq!(code(&transfer), WorldTransferResultCode::Accepted);
+    assert_eq!(aggregate_counts(&persistence).await, (1, 1, 1, 2));
+}
+
+#[tokio::test]
+#[ignore = "requires explicitly authorized disposable PostgreSQL"]
+async fn concurrent_exact_bell_requests_commit_one_location_and_one_receipt() {
+    let persistence = disposable_database().await;
+    reset_fixture(&persistence).await;
+    let actor = ExclusiveBellPortal::new();
+    let service = Arc::new(bell_coordinator(persistence.clone(), actor.clone()));
+    assert_eq!(
+        code(
+            &service
+                .handle(authenticated(ACCOUNT_ID), &frame(1, 123, CHARACTER_ID, 1),)
+                .await
+        ),
+        WorldTransferResultCode::Accepted
+    );
+
+    let request = bell_frame(2, 124, 2);
+    let mut resequenced = request.clone();
+    resequenced.sequence = 3;
+    let first_service = Arc::clone(&service);
+    let first_request = request.clone();
+    let first = tokio::spawn(async move {
+        first_service
+            .handle(authenticated(ACCOUNT_ID), &first_request)
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while actor.can_replace_generation() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the first prepared lease must pin its actor generation");
+    assert!(!actor.can_replace_generation());
+
+    let contender = service
+        .handle(authenticated(ACCOUNT_ID), &resequenced)
+        .await;
+    assert_eq!(
+        code(&contender),
+        WorldTransferResultCode::TransferInProgress
+    );
+    let accepted = first.await.unwrap();
+    assert_eq!(code(&accepted), WorldTransferResultCode::Accepted);
+    assert_eq!(aggregate_counts(&persistence).await, (1, 1, 1, 2));
+    assert!(matches!(
+        persistence
+            .world_location(ACCOUNT_ID, CHARACTER_ID)
+            .await
+            .unwrap(),
+        Some(persistence::StoredWorldLocation::Danger {
+            character_version: 3,
+            ref location_content_id,
+            ..
+        }) if location_content_id == BELL_DUNGEON_ID
+    ));
+    assert_eq!(actor.prepares.load(Ordering::Relaxed), 2);
+    assert_eq!(actor.commits.load(Ordering::Relaxed), 1);
+    assert!(actor.can_replace_generation());
+
+    let replayed = service.handle(authenticated(ACCOUNT_ID), &request).await;
+    assert_eq!(code(&replayed), WorldTransferResultCode::Accepted);
+    assert_eq!(actor.prepares.load(Ordering::Relaxed), 2);
+    assert_eq!(aggregate_counts(&persistence).await, (1, 1, 1, 2));
+}
+
+#[tokio::test]
+#[ignore = "requires explicitly authorized disposable PostgreSQL"]
+async fn invalid_source_stale_and_content_mismatch_never_reach_the_bell_actor() {
+    let persistence = disposable_database().await;
+    reset_fixture(&persistence).await;
+    let actor = RecordingBellPortal::new(Ok(()));
+    let service = bell_coordinator(persistence.clone(), actor.clone());
+
+    let wrong_source = service
+        .handle(authenticated(ACCOUNT_ID), &bell_frame(1, 119, 1))
+        .await;
+    assert_eq!(code(&wrong_source), WorldTransferResultCode::InvalidSource);
+    assert!(actor.bindings().is_empty());
+    assert_eq!(aggregate_counts(&persistence).await, (0, 0, 0, 1));
+
+    reset_fixture(&persistence).await;
+    assert_eq!(
+        code(
+            &service
+                .handle(authenticated(ACCOUNT_ID), &frame(2, 120, CHARACTER_ID, 1),)
+                .await
+        ),
+        WorldTransferResultCode::Accepted
+    );
+    let stale = service
+        .handle(authenticated(ACCOUNT_ID), &bell_frame(3, 121, 1))
+        .await;
+    assert_eq!(code(&stale), WorldTransferResultCode::StateVersionMismatch);
+
+    let mut content_mismatch = bell_frame(4, 122, 2);
+    let WorldFlowRequest::Transfer(ref mut mutation) = content_mismatch.request else {
+        unreachable!();
+    };
+    mutation.payload.content_revision.records_blake3 = ManifestHash::new("f".repeat(64)).unwrap();
+    mutation.payload_hash = mutation.payload.canonical_hash();
+    let mismatched = service
+        .handle(authenticated(ACCOUNT_ID), &content_mismatch)
+        .await;
+    assert_eq!(code(&mismatched), WorldTransferResultCode::ContentMismatch);
+    assert!(actor.bindings().is_empty());
+    assert_eq!(aggregate_counts(&persistence).await, (1, 1, 1, 3));
+}
+
+#[tokio::test]
+#[ignore = "requires explicitly authorized disposable PostgreSQL"]
+async fn bell_portal_receipts_stable_denial_but_retries_transient_actor_failure() {
+    let persistence = disposable_database().await;
+    reset_fixture(&persistence).await;
+    let actor = RecordingBellPortal::new(Err(CoreBellPortalRejection::NotCleared));
+    let service = bell_coordinator(persistence.clone(), actor.clone());
+    assert_eq!(
+        code(
+            &service
+                .handle(authenticated(ACCOUNT_ID), &frame(1, 112, CHARACTER_ID, 1),)
+                .await
+        ),
+        WorldTransferResultCode::Accepted
+    );
+
+    let rejected_request = bell_frame(2, 113, 2);
+    let rejected = service
+        .handle(authenticated(ACCOUNT_ID), &rejected_request)
+        .await;
+    assert_eq!(
+        code(&rejected),
+        WorldTransferResultCode::DestinationDisabled
+    );
+    assert_eq!(aggregate_counts(&persistence).await, (1, 1, 1, 2));
+    actor.set_decision(Ok(()));
+    let replayed_denial = service
+        .handle(
+            authenticated(ACCOUNT_ID),
+            &WorldFlowFrame {
+                sequence: 3,
+                ..rejected_request
+            },
+        )
+        .await;
+    assert_eq!(
+        code(&replayed_denial),
+        WorldTransferResultCode::DestinationDisabled
+    );
+    assert_eq!(
+        actor.bindings().len(),
+        1,
+        "a stable denial must replay without asking the actor again"
+    );
+
+    let accepted = service
+        .handle(authenticated(ACCOUNT_ID), &bell_frame(4, 114, 2))
+        .await;
+    assert_eq!(code(&accepted), WorldTransferResultCode::Accepted);
+    assert_eq!(aggregate_counts(&persistence).await, (1, 1, 1, 3));
+
+    reset_fixture(&persistence).await;
+    let transient_actor =
+        RecordingBellPortal::new(Err(CoreBellPortalRejection::ServiceUnavailable));
+    let transient_service = bell_coordinator(persistence.clone(), transient_actor.clone());
+    assert_eq!(
+        code(
+            &transient_service
+                .handle(authenticated(ACCOUNT_ID), &frame(5, 115, CHARACTER_ID, 1),)
+                .await
+        ),
+        WorldTransferResultCode::Accepted
+    );
+    let transient_request = bell_frame(6, 116, 2);
+    let unavailable = transient_service
+        .handle(authenticated(ACCOUNT_ID), &transient_request)
+        .await;
+    assert_eq!(
+        code(&unavailable),
+        WorldTransferResultCode::ServiceUnavailable
+    );
+    assert_eq!(aggregate_counts(&persistence).await, (1, 1, 1, 1));
+
+    transient_actor.set_decision(Ok(()));
+    let retried = transient_service
+        .handle(authenticated(ACCOUNT_ID), &transient_request)
+        .await;
+    assert_eq!(code(&retried), WorldTransferResultCode::Accepted);
+    assert_eq!(aggregate_counts(&persistence).await, (1, 1, 1, 2));
+    assert_eq!(
+        transient_actor.bindings().len(),
+        2,
+        "a transient actor failure must not consume the mutation identity"
+    );
 }
 
 #[tokio::test]

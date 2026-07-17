@@ -1,7 +1,11 @@
-//! Dormant disposable transfer coordinator for approved `SPEC-CONFLICT-010`.
+//! Transactional world-flow coordinator for the capacity-one Core private route.
 //!
-//! This authority is deliberately not wired into the normal Core endpoint. It proves safe-route
-//! transaction semantics while the player route remains fail-closed in [`crate::WorldFlowGateService`].
+//! Approved `SPEC-CONFLICT-006`/`010` and `ADR-037` keep normal admission fail closed until the
+//! complete actor/terminal/client composition passes. This authority nevertheless owns the real
+//! production mutation rules: durable safe arrival, one safe-to-danger restore capture, and the
+//! same-lineage microrealm-to-fixed-dungeon transition authorized only by a live actor.
+
+use std::time::Duration;
 
 use persistence::{
     PersistenceError, PostgresPersistence, StoredDangerEntryRootV3, StoredSafeArrival,
@@ -16,10 +20,13 @@ use protocol::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AshWalletRestoreV3, AuthenticatedAccount, AuthenticatedNamespace, EntryCaptureContext,
-    EntryRestoreProvider, IdentityClock, InventorySecurityRestoreV3, LifeMetricsRestoreV3,
-    OathBargainRestoreV3, PostgresProgressionRestoreProvider, RestorePointError,
-    RestorePointProvidersV3, SafeInventoryServiceError, WorldFlowRepositoryError,
+    AshWalletRestoreV3, AuthenticatedAccount, AuthenticatedNamespace, CoreBellPortalAbortReason,
+    CoreBellPortalAuthority, CoreBellPortalBinding, CoreBellPortalPermitLease,
+    CoreBellPortalRejection, CoreBellPortalTransition, DisabledCoreBellPortalAuthority,
+    EntryCaptureContext, EntryRestoreProvider, IdentityClock, InventorySecurityRestoreV3,
+    LifeMetricsRestoreV3, OathBargainRestoreV3, PostgresProgressionRestoreProvider,
+    RestorePointError, RestorePointProvidersV3, SafeInventoryServiceError,
+    WorldFlowRepositoryError,
     safe_inventory::plan_danger_entry_safe_deposit,
     world_flow_gate::{CoreWorldFlowAuthority, stored_location_snapshot},
 };
@@ -28,22 +35,66 @@ const HALL_ID: &str = "hub.lantern_halls_01";
 const CHARACTER_SELECT_RETURN_SPAWN_ID: &str = "spawn.hub.character_select_return";
 const REALM_GATE_ID: &str = "station.realm_gate";
 const CORE_MICROREALM_ID: &str = "world.core_microrealm_01";
+const BELL_DUNGEON_PORTAL_ID: &str = "portal.dungeon.bell_sepulcher";
+const CORE_BELL_DUNGEON_ID: &str = "dungeon.bell_sepulcher";
 const CORE_PRIVATE_LIFE_LAYOUT_ID: &str = "layout.core_private_life_01";
+const CORE_BELL_PORTAL_ACTOR_TIMEOUT: Duration = Duration::from_secs(2);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorldFlowIdentityMaterial {
+    pub account_id: [u8; 16],
+    pub character_id: [u8; 16],
+    pub mutation_id: [u8; 16],
+}
 
 pub trait WorldFlowIdGenerator: Send + Sync {
-    fn next_transfer_id(&self) -> [u8; 16];
-    fn next_lineage_id(&self) -> [u8; 16];
-    fn next_restore_point_id(&self) -> [u8; 16];
+    fn transfer_id(&self, material: WorldFlowIdentityMaterial) -> [u8; 16];
+    fn lineage_id(&self, material: WorldFlowIdentityMaterial) -> [u8; 16];
+    fn restore_point_id(&self, material: WorldFlowIdentityMaterial) -> [u8; 16];
+}
+
+/// Restart-stable, server-planned identifiers derived from authenticated authority plus the
+/// canonical mutation identity. Domain separation makes all three IDs disjoint without trusting a
+/// client-selected destination or retaining process-local counters.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Blake3WorldFlowIds;
+
+impl WorldFlowIdGenerator for Blake3WorldFlowIds {
+    fn transfer_id(&self, material: WorldFlowIdentityMaterial) -> [u8; 16] {
+        derive_world_flow_id(b"transfer", material)
+    }
+
+    fn lineage_id(&self, material: WorldFlowIdentityMaterial) -> [u8; 16] {
+        derive_world_flow_id(b"lineage", material)
+    }
+
+    fn restore_point_id(&self, material: WorldFlowIdentityMaterial) -> [u8; 16] {
+        derive_world_flow_id(b"restore", material)
+    }
+}
+
+fn derive_world_flow_id(domain: &[u8], material: WorldFlowIdentityMaterial) -> [u8; 16] {
+    let mut input = Vec::with_capacity(39 + domain.len());
+    input.extend_from_slice(b"gravebound.core-world-flow.v1\0");
+    input.extend_from_slice(domain);
+    input.push(0);
+    input.extend_from_slice(&material.account_id);
+    input.extend_from_slice(&material.character_id);
+    input.extend_from_slice(&material.mutation_id);
+    let hash = blake3::hash(&input);
+    let mut id = [0; 16];
+    id.copy_from_slice(&hash.as_bytes()[..16]);
+    id
 }
 
 #[derive(Debug, Clone)]
-pub struct DormantWorldFlowPlanner<Generator, Clock> {
+pub struct CorePrivateWorldFlowPlanner<Generator, Clock> {
     generator: Generator,
     clock: Clock,
     required_content_revision: WorldFlowContentRevisionV1,
 }
 
-impl<Generator, Clock> DormantWorldFlowPlanner<Generator, Clock>
+impl<Generator, Clock> CorePrivateWorldFlowPlanner<Generator, Clock>
 where
     Generator: WorldFlowIdGenerator,
     Clock: IdentityClock,
@@ -68,9 +119,32 @@ where
         mutation: &WorldTransferMutation,
         state: &mut WorldFlowTransactionState,
     ) -> Result<WorldFlowResult, PersistenceError> {
+        self.plan_fresh_with_bell_portal(authenticated, request_sequence, mutation, state, false)
+    }
+
+    #[cfg(test)]
+    fn plan_fresh_with_bell_portal(
+        &self,
+        authenticated: AuthenticatedAccount,
+        request_sequence: u32,
+        mutation: &WorldTransferMutation,
+        state: &mut WorldFlowTransactionState,
+        bell_portal_authorized: bool,
+    ) -> Result<WorldFlowResult, PersistenceError> {
         let planned = self
             .validate_fresh(request_sequence, mutation, state)?
-            .map_or_else(|| self.plan_route(request_sequence, mutation, state), Ok)?;
+            .map_or_else(
+                || {
+                    self.plan_route(
+                        authenticated,
+                        request_sequence,
+                        mutation,
+                        state,
+                        bell_portal_authorized,
+                    )
+                },
+                Ok,
+            )?;
         stage_receipt(authenticated, mutation, state, &planned)?;
         Ok(planned)
     }
@@ -118,8 +192,15 @@ where
         request_sequence: u32,
         mutation: &WorldTransferMutation,
         state: &mut WorldFlowTransactionState,
+        bell_portal_authorized: bool,
     ) -> Result<WorldFlowResult, PersistenceError> {
-        let planned = self.plan_route(request_sequence, mutation, state)?;
+        let planned = self.plan_route(
+            authenticated,
+            request_sequence,
+            mutation,
+            state,
+            bell_portal_authorized,
+        )?;
         stage_receipt(authenticated, mutation, state, &planned)?;
         Ok(planned)
     }
@@ -130,9 +211,11 @@ where
     )]
     fn plan_route(
         &self,
+        authenticated: AuthenticatedAccount,
         request_sequence: u32,
         mutation: &WorldTransferMutation,
         state: &mut WorldFlowTransactionState,
+        bell_portal_authorized: bool,
     ) -> Result<WorldFlowResult, PersistenceError> {
         let next_version = state
             .location
@@ -169,9 +252,14 @@ where
                     ..
                 },
             ) if portal_id.as_str() == REALM_GATE_ID && location_content_id == HALL_ID => {
-                let transfer_id = self.generator.next_transfer_id();
-                let lineage_id = self.generator.next_lineage_id();
-                let restore_point_id = self.generator.next_restore_point_id();
+                let material = WorldFlowIdentityMaterial {
+                    account_id: authenticated.account_id.as_bytes(),
+                    character_id: mutation.character_id,
+                    mutation_id: mutation.mutation_id,
+                };
+                let transfer_id = self.generator.transfer_id(material);
+                let lineage_id = self.generator.lineage_id(material);
+                let restore_point_id = self.generator.restore_point_id(material);
                 if [transfer_id, lineage_id, restore_point_id]
                     .into_iter()
                     .any(|identity| identity.iter().all(|byte| *byte == 0))
@@ -199,6 +287,53 @@ where
                 ));
             }
             (
+                WorldTransferCommand::UsePortal { portal_id },
+                StoredWorldLocation::Danger {
+                    location_content_id,
+                    instance_lineage_id,
+                    entry_restore_point_id,
+                    ..
+                },
+            ) if portal_id.as_str() == BELL_DUNGEON_PORTAL_ID
+                && location_content_id == CORE_MICROREALM_ID
+                && bell_portal_authorized =>
+            {
+                StoredWorldLocation::Danger {
+                    character_version: next_version,
+                    location_content_id: CORE_BELL_DUNGEON_ID.to_owned(),
+                    instance_lineage_id: *instance_lineage_id,
+                    entry_restore_point_id: *entry_restore_point_id,
+                }
+            }
+            (
+                WorldTransferCommand::UsePortal { portal_id },
+                StoredWorldLocation::Danger {
+                    location_content_id,
+                    ..
+                },
+            ) if portal_id.as_str() == BELL_DUNGEON_PORTAL_ID
+                && location_content_id == CORE_MICROREALM_ID =>
+            {
+                return Ok(staged_result(
+                    request_sequence,
+                    mutation,
+                    WorldTransferResultCode::DestinationDisabled,
+                    protocol_snapshot(mutation.character_id, &state.location).ok(),
+                    None,
+                ));
+            }
+            (WorldTransferCommand::UsePortal { portal_id }, _)
+                if matches!(portal_id.as_str(), REALM_GATE_ID | BELL_DUNGEON_PORTAL_ID) =>
+            {
+                return Ok(staged_result(
+                    request_sequence,
+                    mutation,
+                    WorldTransferResultCode::InvalidSource,
+                    protocol_snapshot(mutation.character_id, &state.location).ok(),
+                    None,
+                ));
+            }
+            (
                 WorldTransferCommand::UsePortal { .. }
                 | WorldTransferCommand::UseCommittedExtraction { .. },
                 _,
@@ -221,7 +356,11 @@ where
                 ));
             }
         };
-        let transfer_id = self.generator.next_transfer_id();
+        let transfer_id = self.generator.transfer_id(WorldFlowIdentityMaterial {
+            account_id: authenticated.account_id.as_bytes(),
+            character_id: mutation.character_id,
+            mutation_id: mutation.mutation_id,
+        });
         if transfer_id.iter().all(|byte| *byte == 0) {
             return Err(PersistenceError::CorruptStoredWorldFlow);
         }
@@ -274,17 +413,23 @@ where
     }
 }
 
+/// Compatibility name retained for completed `03B`/`03F` evidence. New production composition
+/// should use [`CorePrivateWorldFlowPlanner`].
+pub type DormantWorldFlowPlanner<Generator, Clock> = CorePrivateWorldFlowPlanner<Generator, Clock>;
+
 #[derive(Debug, Clone)]
-pub struct PostgresDormantWorldFlowCoordinator<
+pub struct PostgresCorePrivateWorldFlowCoordinator<
     Generator,
     Clock,
     Inventory,
     OathBargains,
     LifeMetrics,
     AshWallet,
+    BellPortal = DisabledCoreBellPortalAuthority,
 > {
     persistence: PostgresPersistence,
-    planner: DormantWorldFlowPlanner<Generator, Clock>,
+    planner: CorePrivateWorldFlowPlanner<Generator, Clock>,
+    bell_portal: BellPortal,
     restore_providers: RestorePointProvidersV3<
         PostgresProgressionRestoreProvider,
         Inventory,
@@ -294,14 +439,35 @@ pub struct PostgresDormantWorldFlowCoordinator<
     >,
 }
 
+/// Compatibility name retained for completed disposable evidence. It keeps Bell admission closed;
+/// the normal server must construct [`PostgresCorePrivateWorldFlowCoordinator`] with a live portal
+/// authority explicitly.
+pub type PostgresDormantWorldFlowCoordinator<
+    Generator,
+    Clock,
+    Inventory,
+    OathBargains,
+    LifeMetrics,
+    AshWallet,
+> = PostgresCorePrivateWorldFlowCoordinator<
+    Generator,
+    Clock,
+    Inventory,
+    OathBargains,
+    LifeMetrics,
+    AshWallet,
+    DisabledCoreBellPortalAuthority,
+>;
+
 impl<Generator, Clock, Inventory, OathBargains, LifeMetrics, AshWallet>
-    PostgresDormantWorldFlowCoordinator<
+    PostgresCorePrivateWorldFlowCoordinator<
         Generator,
         Clock,
         Inventory,
         OathBargains,
         LifeMetrics,
         AshWallet,
+        DisabledCoreBellPortalAuthority,
     >
 where
     Generator: WorldFlowIdGenerator,
@@ -313,7 +479,7 @@ where
 {
     #[allow(
         clippy::too_many_arguments,
-        reason = "the dormant coordinator keeps each mandatory V2 provider explicit at its composition root"
+        reason = "the coordinator keeps each mandatory V3 provider explicit at its composition root"
     )]
     pub fn new(
         persistence: PostgresPersistence,
@@ -326,6 +492,56 @@ where
         life_metrics: LifeMetrics,
         ash_wallet: AshWallet,
     ) -> Self {
+        Self::with_bell_portal_authority(
+            persistence,
+            generator,
+            clock,
+            required_content_revision,
+            progression,
+            inventory,
+            oath_bargains,
+            life_metrics,
+            ash_wallet,
+            DisabledCoreBellPortalAuthority,
+        )
+    }
+}
+
+impl<Generator, Clock, Inventory, OathBargains, LifeMetrics, AshWallet, BellPortal>
+    PostgresCorePrivateWorldFlowCoordinator<
+        Generator,
+        Clock,
+        Inventory,
+        OathBargains,
+        LifeMetrics,
+        AshWallet,
+        BellPortal,
+    >
+where
+    Generator: WorldFlowIdGenerator,
+    Clock: IdentityClock,
+    Inventory: EntryRestoreProvider<Snapshot = InventorySecurityRestoreV3>,
+    OathBargains: EntryRestoreProvider<Snapshot = OathBargainRestoreV3>,
+    LifeMetrics: EntryRestoreProvider<Snapshot = LifeMetricsRestoreV3>,
+    AshWallet: EntryRestoreProvider<Snapshot = AshWalletRestoreV3>,
+    BellPortal: CoreBellPortalAuthority,
+{
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the production composition keeps every restore provider and live portal authority explicit"
+    )]
+    pub fn with_bell_portal_authority(
+        persistence: PostgresPersistence,
+        generator: Generator,
+        clock: Clock,
+        required_content_revision: WorldFlowContentRevisionV1,
+        progression: PostgresProgressionRestoreProvider,
+        inventory: Inventory,
+        oath_bargains: OathBargains,
+        life_metrics: LifeMetrics,
+        ash_wallet: AshWallet,
+        bell_portal: BellPortal,
+    ) -> Self {
         let restore_providers = RestorePointProvidersV3::new(
             progression,
             inventory,
@@ -335,7 +551,8 @@ where
         );
         Self {
             persistence,
-            planner: DormantWorldFlowPlanner::new(generator, clock, required_content_revision),
+            planner: CorePrivateWorldFlowPlanner::new(generator, clock, required_content_revision),
+            bell_portal,
             restore_providers,
         }
     }
@@ -365,6 +582,11 @@ where
                 None,
                 None,
             );
+        }
+        if is_bell_portal_request(mutation) {
+            return self
+                .handle_bell_portal(authenticated, frame.sequence, mutation)
+                .await;
         }
         let begin = self
             .persistence
@@ -428,6 +650,7 @@ where
                 None,
             );
         };
+        let captures_danger_entry = requires_safe_preflight(mutation, write.state());
         let mut safe_placement_count = 0_u16;
         let result = if let Some(rejection) = validation {
             if stage_receipt(authenticated, mutation, write.state_mut(), &rejection).is_err() {
@@ -441,7 +664,7 @@ where
             }
             rejection
         } else {
-            if requires_safe_preflight(mutation, write.state()) {
+            if captures_danger_entry {
                 let preflight = self
                     .preflight_safe_inventory(&mut write, authenticated, mutation)
                     .await;
@@ -478,6 +701,7 @@ where
                 frame.sequence,
                 mutation,
                 write.state_mut(),
+                false,
             ) {
                 Ok(result) => result,
                 Err(_) => {
@@ -492,7 +716,12 @@ where
             }
         };
         if let Err(code) = self
-            .capture_danger_entry(&mut write, mutation, safe_placement_count)
+            .capture_danger_entry(
+                &mut write,
+                mutation,
+                safe_placement_count,
+                captures_danger_entry,
+            )
             .await
         {
             return staged_result(frame.sequence, mutation, code, None, None);
@@ -508,6 +737,437 @@ where
                 None,
             ),
         }
+    }
+
+    /// Bell admission is a two-phase cross-authority operation. The first serializable read
+    /// validates durable identity and is explicitly rolled back before the actor is awaited. The
+    /// actor then reserves one generation/version-bound permit. A second serializable transaction
+    /// revalidates the exact binding and commits the location; only after every database lock is
+    /// released does the actor receive commit/abort/reconcile notification.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the preview, explicit lock release, actor prepare, and second durable phase remain contiguous for cross-authority auditability"
+    )]
+    async fn handle_bell_portal(
+        &self,
+        authenticated: AuthenticatedAccount,
+        request_sequence: u32,
+        mutation: &WorldTransferMutation,
+    ) -> WorldFlowResult {
+        let begin = self
+            .persistence
+            .begin_world_flow(
+                authenticated.account_id.as_bytes(),
+                mutation.character_id,
+                mutation.mutation_id,
+            )
+            .await;
+        let mut preview = match begin {
+            Ok(WorldFlowBegin::Replayed(receipt)) => {
+                return self
+                    .replay_and_reconcile_bell(authenticated, request_sequence, mutation, &receipt)
+                    .await;
+            }
+            Ok(WorldFlowBegin::Fresh(write)) => *write,
+            Err(error) => {
+                return world_flow_begin_failure(
+                    &self.persistence,
+                    authenticated,
+                    request_sequence,
+                    mutation,
+                    error,
+                )
+                .await;
+            }
+        };
+        let Ok(validation) =
+            self.planner
+                .validate_fresh(request_sequence, mutation, preview.state())
+        else {
+            let _ = preview.rollback().await;
+            return staged_result(
+                request_sequence,
+                mutation,
+                WorldTransferResultCode::ServiceUnavailable,
+                None,
+                None,
+            );
+        };
+        if let Some(rejection) = validation {
+            if stage_receipt(authenticated, mutation, preview.state_mut(), &rejection).is_err() {
+                let _ = preview.rollback().await;
+                return staged_result(
+                    request_sequence,
+                    mutation,
+                    WorldTransferResultCode::ServiceUnavailable,
+                    None,
+                    None,
+                );
+            }
+            return commit_world_flow_rejection(preview, rejection, request_sequence, mutation)
+                .await;
+        }
+        let Some(binding) = bell_portal_binding(authenticated, mutation, preview.state()) else {
+            let Ok(result) = self.planner.plan_validated(
+                authenticated,
+                request_sequence,
+                mutation,
+                preview.state_mut(),
+                false,
+            ) else {
+                let _ = preview.rollback().await;
+                return staged_result(
+                    request_sequence,
+                    mutation,
+                    WorldTransferResultCode::ServiceUnavailable,
+                    None,
+                    None,
+                );
+            };
+            return commit_world_flow_rejection(preview, result, request_sequence, mutation).await;
+        };
+        let snapshot = protocol_snapshot(mutation.character_id, &preview.state().location).ok();
+        if preview.rollback().await.is_err() {
+            return staged_result(
+                request_sequence,
+                mutation,
+                WorldTransferResultCode::ServiceUnavailable,
+                None,
+                None,
+            );
+        }
+
+        match self.prepare_bell_portal(binding.clone()).await {
+            Ok(permit) if permit.permit().is_well_formed_for(&binding) => {
+                self.commit_prepared_bell(authenticated, request_sequence, mutation, permit)
+                    .await
+            }
+            Ok(permit) => {
+                self.abort_bell_portal(permit, CoreBellPortalAbortReason::PersistentStateChanged)
+                    .await;
+                staged_result(
+                    request_sequence,
+                    mutation,
+                    WorldTransferResultCode::ServiceUnavailable,
+                    snapshot,
+                    None,
+                )
+            }
+            Err(rejection) if bell_portal_rejection_is_durable(rejection) => {
+                self.commit_bell_denial(
+                    authenticated,
+                    request_sequence,
+                    mutation,
+                    binding,
+                    rejection,
+                )
+                .await
+            }
+            Err(rejection) => staged_result(
+                request_sequence,
+                mutation,
+                bell_portal_rejection_code(rejection),
+                snapshot,
+                None,
+            ),
+        }
+    }
+
+    async fn commit_bell_denial(
+        &self,
+        authenticated: AuthenticatedAccount,
+        request_sequence: u32,
+        mutation: &WorldTransferMutation,
+        binding: CoreBellPortalBinding,
+        actor_rejection: CoreBellPortalRejection,
+    ) -> WorldFlowResult {
+        let begin = self
+            .persistence
+            .begin_world_flow(
+                authenticated.account_id.as_bytes(),
+                mutation.character_id,
+                mutation.mutation_id,
+            )
+            .await;
+        let mut write = match begin {
+            Ok(WorldFlowBegin::Replayed(receipt)) => {
+                return self
+                    .replay_and_reconcile_bell(authenticated, request_sequence, mutation, &receipt)
+                    .await;
+            }
+            Ok(WorldFlowBegin::Fresh(write)) => *write,
+            Err(error) => {
+                return world_flow_begin_failure(
+                    &self.persistence,
+                    authenticated,
+                    request_sequence,
+                    mutation,
+                    error,
+                )
+                .await;
+            }
+        };
+        let Ok(validation) = self
+            .planner
+            .validate_fresh(request_sequence, mutation, write.state())
+        else {
+            let _ = write.rollback().await;
+            return staged_result(
+                request_sequence,
+                mutation,
+                WorldTransferResultCode::ServiceUnavailable,
+                None,
+                None,
+            );
+        };
+        let rejection = if let Some(rejection) = validation {
+            rejection
+        } else if bell_portal_binding(authenticated, mutation, write.state()).as_ref()
+            == Some(&binding)
+        {
+            staged_result(
+                request_sequence,
+                mutation,
+                bell_portal_rejection_code(actor_rejection),
+                protocol_snapshot(mutation.character_id, &write.state().location).ok(),
+                None,
+            )
+        } else {
+            let _ = write.rollback().await;
+            return staged_result(
+                request_sequence,
+                mutation,
+                WorldTransferResultCode::StateVersionMismatch,
+                None,
+                None,
+            );
+        };
+        if stage_receipt(authenticated, mutation, write.state_mut(), &rejection).is_err() {
+            let _ = write.rollback().await;
+            return staged_result(
+                request_sequence,
+                mutation,
+                WorldTransferResultCode::ServiceUnavailable,
+                None,
+                None,
+            );
+        }
+        commit_world_flow_rejection(write, rejection, request_sequence, mutation).await
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the revalidation, durable commit, and post-lock permit outcome remain contiguous for cross-authority auditability"
+    )]
+    async fn commit_prepared_bell(
+        &self,
+        authenticated: AuthenticatedAccount,
+        request_sequence: u32,
+        mutation: &WorldTransferMutation,
+        permit: BellPortal::PermitLease,
+    ) -> WorldFlowResult {
+        let begin = self
+            .persistence
+            .begin_world_flow(
+                authenticated.account_id.as_bytes(),
+                mutation.character_id,
+                mutation.mutation_id,
+            )
+            .await;
+        let mut write = match begin {
+            Ok(WorldFlowBegin::Replayed(receipt)) => {
+                let result = DormantWorldFlowPlanner::<Generator, Clock>::replay(
+                    request_sequence,
+                    mutation,
+                    &receipt,
+                );
+                return self.finish_prepared_bell(permit, result).await;
+            }
+            Ok(WorldFlowBegin::Fresh(write)) => *write,
+            Err(error) => {
+                self.abort_bell_portal(permit, CoreBellPortalAbortReason::PersistenceUnavailable)
+                    .await;
+                return world_flow_begin_failure(
+                    &self.persistence,
+                    authenticated,
+                    request_sequence,
+                    mutation,
+                    error,
+                )
+                .await;
+            }
+        };
+        let Ok(validation) = self
+            .planner
+            .validate_fresh(request_sequence, mutation, write.state())
+        else {
+            let _ = write.rollback().await;
+            self.abort_bell_portal(permit, CoreBellPortalAbortReason::PersistentStateChanged)
+                .await;
+            return staged_result(
+                request_sequence,
+                mutation,
+                WorldTransferResultCode::ServiceUnavailable,
+                None,
+                None,
+            );
+        };
+        if let Some(rejection) = validation {
+            if stage_receipt(authenticated, mutation, write.state_mut(), &rejection).is_err() {
+                let _ = write.rollback().await;
+                self.abort_bell_portal(permit, CoreBellPortalAbortReason::PersistentStateChanged)
+                    .await;
+                return staged_result(
+                    request_sequence,
+                    mutation,
+                    WorldTransferResultCode::ServiceUnavailable,
+                    None,
+                    None,
+                );
+            }
+            let result =
+                commit_world_flow_rejection(write, rejection, request_sequence, mutation).await;
+            self.abort_bell_portal(permit, CoreBellPortalAbortReason::DurableRejection)
+                .await;
+            return result;
+        }
+        if bell_portal_binding(authenticated, mutation, write.state()).as_ref()
+            != Some(&permit.permit().binding)
+        {
+            let _ = write.rollback().await;
+            self.abort_bell_portal(permit, CoreBellPortalAbortReason::PersistentStateChanged)
+                .await;
+            return staged_result(
+                request_sequence,
+                mutation,
+                WorldTransferResultCode::StateVersionMismatch,
+                None,
+                None,
+            );
+        }
+        let Ok(result) = self.planner.plan_validated(
+            authenticated,
+            request_sequence,
+            mutation,
+            write.state_mut(),
+            true,
+        ) else {
+            let _ = write.rollback().await;
+            self.abort_bell_portal(permit, CoreBellPortalAbortReason::PersistentStateChanged)
+                .await;
+            return staged_result(
+                request_sequence,
+                mutation,
+                WorldTransferResultCode::ServiceUnavailable,
+                None,
+                None,
+            );
+        };
+        let result = match write.commit(result).await {
+            Ok(WorldFlowTransaction::Committed(result)) => result,
+            Ok(WorldFlowTransaction::Replayed(_)) => unreachable!("fresh write cannot replay"),
+            Err(_) => {
+                self.abort_bell_portal(permit, CoreBellPortalAbortReason::PersistenceUnavailable)
+                    .await;
+                return staged_result(
+                    request_sequence,
+                    mutation,
+                    WorldTransferResultCode::ServiceUnavailable,
+                    None,
+                    None,
+                );
+            }
+        };
+        self.finish_prepared_bell(permit, result).await
+    }
+
+    async fn prepare_bell_portal(
+        &self,
+        binding: CoreBellPortalBinding,
+    ) -> Result<BellPortal::PermitLease, CoreBellPortalRejection> {
+        tokio::time::timeout(
+            CORE_BELL_PORTAL_ACTOR_TIMEOUT,
+            self.bell_portal.prepare_bell_portal(binding),
+        )
+        .await
+        .map_err(|_| CoreBellPortalRejection::ServiceUnavailable)?
+    }
+
+    async fn commit_bell_portal(
+        &self,
+        permit: BellPortal::PermitLease,
+        transition: CoreBellPortalTransition,
+    ) -> Result<(), CoreBellPortalRejection> {
+        tokio::time::timeout(
+            CORE_BELL_PORTAL_ACTOR_TIMEOUT,
+            self.bell_portal.commit_bell_portal(permit, transition),
+        )
+        .await
+        .map_err(|_| CoreBellPortalRejection::ServiceUnavailable)?
+    }
+
+    async fn abort_bell_portal(
+        &self,
+        permit: BellPortal::PermitLease,
+        reason: CoreBellPortalAbortReason,
+    ) {
+        let _ = tokio::time::timeout(
+            CORE_BELL_PORTAL_ACTOR_TIMEOUT,
+            self.bell_portal.abort_bell_portal(permit, reason),
+        )
+        .await;
+    }
+
+    async fn reconcile_bell_portal(
+        &self,
+        transition: CoreBellPortalTransition,
+    ) -> Result<(), CoreBellPortalRejection> {
+        tokio::time::timeout(
+            CORE_BELL_PORTAL_ACTOR_TIMEOUT,
+            self.bell_portal.reconcile_bell_portal(transition),
+        )
+        .await
+        .map_err(|_| CoreBellPortalRejection::ServiceUnavailable)?
+    }
+
+    async fn finish_prepared_bell(
+        &self,
+        permit: BellPortal::PermitLease,
+        result: WorldFlowResult,
+    ) -> WorldFlowResult {
+        let Some(transition) = bell_portal_transition(&permit.permit().binding, &result) else {
+            self.abort_bell_portal(permit, CoreBellPortalAbortReason::ConcurrentResolution)
+                .await;
+            return result;
+        };
+        if self
+            .commit_bell_portal(permit, transition.clone())
+            .await
+            .is_err()
+        {
+            let _ = self.reconcile_bell_portal(transition).await;
+        }
+        result
+    }
+
+    async fn replay_and_reconcile_bell(
+        &self,
+        authenticated: AuthenticatedAccount,
+        request_sequence: u32,
+        mutation: &WorldTransferMutation,
+        receipt: &StoredWorldTransferReceipt,
+    ) -> WorldFlowResult {
+        let result = DormantWorldFlowPlanner::<Generator, Clock>::replay(
+            request_sequence,
+            mutation,
+            receipt,
+        );
+        if let Some(binding) = bell_portal_binding_from_result(authenticated, mutation, &result)
+            && let Some(transition) = bell_portal_transition(&binding, &result)
+        {
+            let _ = self.reconcile_bell_portal(transition).await;
+        }
+        result
     }
 
     async fn preflight_safe_inventory(
@@ -550,8 +1210,9 @@ where
         write: &mut persistence::WorldFlowWrite<'_>,
         mutation: &WorldTransferMutation,
         safe_placement_count: u16,
+        captures_danger_entry: bool,
     ) -> Result<(), WorldTransferResultCode> {
-        if !write.state().location_changed {
+        if !captures_danger_entry || !write.state().location_changed {
             return Ok(());
         }
         let (
@@ -655,6 +1316,139 @@ async fn commit_world_flow_rejection(
     }
 }
 
+async fn world_flow_begin_failure(
+    persistence: &PostgresPersistence,
+    authenticated: AuthenticatedAccount,
+    request_sequence: u32,
+    mutation: &WorldTransferMutation,
+    error: PersistenceError,
+) -> WorldFlowResult {
+    let code = match error {
+        PersistenceError::WorldFlowCharacterNotFound => {
+            match persistence
+                .identity_character_owner(mutation.character_id)
+                .await
+            {
+                Ok(Some(owner)) if owner != authenticated.account_id.as_bytes() => {
+                    WorldTransferResultCode::CharacterNotOwned
+                }
+                Ok(_) => WorldTransferResultCode::CharacterNotFound,
+                Err(_) => WorldTransferResultCode::ServiceUnavailable,
+            }
+        }
+        PersistenceError::WorldFlowCharacterDead => WorldTransferResultCode::CharacterDead,
+        _ => WorldTransferResultCode::ServiceUnavailable,
+    };
+    staged_result(request_sequence, mutation, code, None, None)
+}
+
+fn is_bell_portal_request(mutation: &WorldTransferMutation) -> bool {
+    matches!(
+        &mutation.payload.command,
+        WorldTransferCommand::UsePortal { portal_id }
+            if portal_id.as_str() == BELL_DUNGEON_PORTAL_ID
+    )
+}
+
+fn bell_portal_binding(
+    authenticated: AuthenticatedAccount,
+    mutation: &WorldTransferMutation,
+    state: &WorldFlowTransactionState,
+) -> Option<CoreBellPortalBinding> {
+    let StoredWorldLocation::Danger {
+        character_version,
+        location_content_id,
+        instance_lineage_id,
+        entry_restore_point_id,
+    } = &state.location
+    else {
+        return None;
+    };
+    if location_content_id != CORE_MICROREALM_ID {
+        return None;
+    }
+    let character_version = u64::try_from(*character_version).ok()?;
+    Some(CoreBellPortalBinding {
+        account_id: authenticated.account_id.as_bytes(),
+        character_id: mutation.character_id,
+        mutation_id: mutation.mutation_id,
+        instance_lineage_id: *instance_lineage_id,
+        entry_restore_point_id: *entry_restore_point_id,
+        character_version,
+        content_revision: mutation.payload.content_revision.clone(),
+    })
+}
+
+fn bell_portal_binding_from_result(
+    authenticated: AuthenticatedAccount,
+    mutation: &WorldTransferMutation,
+    result: &WorldFlowResult,
+) -> Option<CoreBellPortalBinding> {
+    let WorldFlowResult::Transfer {
+        accepted: true,
+        code: WorldTransferResultCode::Accepted,
+        snapshot:
+            Some(CharacterLocationSnapshot {
+                location:
+                    protocol::CharacterLocation::Danger {
+                        location_id,
+                        instance_lineage_id,
+                        entry_restore_point_id,
+                    },
+                ..
+            }),
+        ..
+    } = result
+    else {
+        return None;
+    };
+    (location_id.as_str() == CORE_BELL_DUNGEON_ID).then(|| CoreBellPortalBinding {
+        account_id: authenticated.account_id.as_bytes(),
+        character_id: mutation.character_id,
+        mutation_id: mutation.mutation_id,
+        instance_lineage_id: *instance_lineage_id,
+        entry_restore_point_id: *entry_restore_point_id,
+        character_version: mutation.expected_character_version,
+        content_revision: mutation.payload.content_revision.clone(),
+    })
+}
+
+fn bell_portal_transition(
+    binding: &CoreBellPortalBinding,
+    result: &WorldFlowResult,
+) -> Option<CoreBellPortalTransition> {
+    let WorldFlowResult::Transfer {
+        accepted: true,
+        code: WorldTransferResultCode::Accepted,
+        snapshot:
+            Some(CharacterLocationSnapshot {
+                character_id,
+                character_version,
+                location:
+                    protocol::CharacterLocation::Danger {
+                        location_id,
+                        instance_lineage_id,
+                        entry_restore_point_id,
+                    },
+            }),
+        transfer_id: Some(transfer_id),
+        ..
+    } = result
+    else {
+        return None;
+    };
+    (*character_id == binding.character_id
+        && location_id.as_str() == CORE_BELL_DUNGEON_ID
+        && *instance_lineage_id == binding.instance_lineage_id
+        && *entry_restore_point_id == binding.entry_restore_point_id
+        && *character_version == binding.character_version.checked_add(1)?)
+    .then(|| CoreBellPortalTransition {
+        binding: binding.clone(),
+        transfer_id: *transfer_id,
+        destination_character_version: *character_version,
+    })
+}
+
 fn requires_safe_preflight(
     mutation: &WorldTransferMutation,
     state: &WorldFlowTransactionState,
@@ -668,6 +1462,25 @@ fn requires_safe_preflight(
                 ..
             }
         ) if portal_id.as_str() == REALM_GATE_ID && location_content_id == HALL_ID
+    )
+}
+
+const fn bell_portal_rejection_code(rejection: CoreBellPortalRejection) -> WorldTransferResultCode {
+    match rejection {
+        CoreBellPortalRejection::NotCleared => WorldTransferResultCode::DestinationDisabled,
+        CoreBellPortalRejection::OutOfRange => WorldTransferResultCode::OutOfRange,
+        CoreBellPortalRejection::TransferInProgress => WorldTransferResultCode::TransferInProgress,
+        CoreBellPortalRejection::InstanceUnavailable => {
+            WorldTransferResultCode::InstanceUnavailable
+        }
+        CoreBellPortalRejection::ServiceUnavailable => WorldTransferResultCode::ServiceUnavailable,
+    }
+}
+
+const fn bell_portal_rejection_is_durable(rejection: CoreBellPortalRejection) -> bool {
+    matches!(
+        rejection,
+        CoreBellPortalRejection::NotCleared | CoreBellPortalRejection::OutOfRange
     )
 }
 
@@ -690,14 +1503,16 @@ fn preflight_persistence_code(error: &PersistenceError) -> WorldTransferResultCo
     }
 }
 
-impl<Generator, Clock, Inventory, OathBargains, LifeMetrics, AshWallet> CoreWorldFlowAuthority
-    for PostgresDormantWorldFlowCoordinator<
+impl<Generator, Clock, Inventory, OathBargains, LifeMetrics, AshWallet, BellPortal>
+    CoreWorldFlowAuthority
+    for PostgresCorePrivateWorldFlowCoordinator<
         Generator,
         Clock,
         Inventory,
         OathBargains,
         LifeMetrics,
         AshWallet,
+        BellPortal,
     >
 where
     Generator: WorldFlowIdGenerator,
@@ -706,6 +1521,7 @@ where
     OathBargains: EntryRestoreProvider<Snapshot = OathBargainRestoreV3>,
     LifeMetrics: EntryRestoreProvider<Snapshot = LifeMetricsRestoreV3>,
     AshWallet: EntryRestoreProvider<Snapshot = AshWalletRestoreV3>,
+    BellPortal: CoreBellPortalAuthority,
 {
     async fn handle_world_flow(
         &self,
@@ -887,15 +1703,15 @@ mod tests {
     struct FixedIds;
 
     impl WorldFlowIdGenerator for FixedIds {
-        fn next_transfer_id(&self) -> [u8; 16] {
+        fn transfer_id(&self, _material: WorldFlowIdentityMaterial) -> [u8; 16] {
             [8; 16]
         }
 
-        fn next_lineage_id(&self) -> [u8; 16] {
+        fn lineage_id(&self, _material: WorldFlowIdentityMaterial) -> [u8; 16] {
             [9; 16]
         }
 
-        fn next_restore_point_id(&self) -> [u8; 16] {
+        fn restore_point_id(&self, _material: WorldFlowIdentityMaterial) -> [u8; 16] {
             [10; 16]
         }
     }
@@ -1019,7 +1835,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_dead_unselected_and_disabled_portal_results_are_stored_without_mutation() {
+    fn stale_dead_unselected_and_invalid_source_results_are_stored_without_mutation() {
         let planner = DormantWorldFlowPlanner::new(FixedIds, FixedClock, revision());
         let base = StoredWorldLocation::CharacterSelect {
             character_version: 1,
@@ -1093,11 +1909,37 @@ mod tests {
         assert!(matches!(
             result,
             WorldFlowResult::Transfer {
-                code: WorldTransferResultCode::DestinationDisabled,
+                code: WorldTransferResultCode::InvalidSource,
                 ..
             }
         ));
         assert!(!portal.location_changed);
+
+        let mut later_portal = state(StoredWorldLocation::CharacterSelect {
+            character_version: 1,
+            next_hall_arrival: StoredSafeArrival::HallDefault,
+        });
+        let result = planner
+            .plan_fresh(
+                authenticated(),
+                2,
+                &mutation(
+                    WorldTransferCommand::UsePortal {
+                        portal_id: WireText::new("portal.later_stage").unwrap(),
+                    },
+                    1,
+                ),
+                &mut later_portal,
+            )
+            .unwrap();
+        assert!(matches!(
+            result,
+            WorldFlowResult::Transfer {
+                code: WorldTransferResultCode::DestinationDisabled,
+                ..
+            }
+        ));
+        assert!(!later_portal.location_changed);
     }
 
     #[test]
@@ -1138,6 +1980,101 @@ mod tests {
                 && location_id.as_str() == CORE_MICROREALM_ID
         ));
         assert!(state.location_changed);
+    }
+
+    #[test]
+    fn bell_portal_requires_live_clearance_and_preserves_the_entry_authority() {
+        let planner = CorePrivateWorldFlowPlanner::new(FixedIds, FixedClock, revision());
+        let original = StoredWorldLocation::Danger {
+            character_version: 6,
+            location_content_id: CORE_MICROREALM_ID.to_owned(),
+            instance_lineage_id: [41; 16],
+            entry_restore_point_id: [42; 16],
+        };
+        let request = mutation(
+            WorldTransferCommand::UsePortal {
+                portal_id: WireText::new(BELL_DUNGEON_PORTAL_ID).unwrap(),
+            },
+            6,
+        );
+
+        let mut uncleared = state(original.clone());
+        let rejected = planner
+            .plan_fresh(authenticated(), 8, &request, &mut uncleared)
+            .unwrap();
+        assert!(matches!(
+            rejected,
+            WorldFlowResult::Transfer {
+                code: WorldTransferResultCode::DestinationDisabled,
+                transfer_id: None,
+                ..
+            }
+        ));
+        assert_eq!(uncleared.location, original);
+        assert!(!uncleared.location_changed);
+
+        let mut cleared = state(original);
+        let accepted = planner
+            .plan_fresh_with_bell_portal(authenticated(), 9, &request, &mut cleared, true)
+            .unwrap();
+        assert!(matches!(
+            accepted,
+            WorldFlowResult::Transfer {
+                code: WorldTransferResultCode::Accepted,
+                transfer_id: Some(transfer_id),
+                snapshot: Some(CharacterLocationSnapshot {
+                    character_version: 7,
+                    location: CharacterLocation::Danger {
+                        ref location_id,
+                        instance_lineage_id,
+                        entry_restore_point_id,
+                    },
+                    ..
+                }),
+                ..
+            } if transfer_id == [8; 16]
+                && location_id.as_str() == CORE_BELL_DUNGEON_ID
+                && instance_lineage_id == [41; 16]
+                && entry_restore_point_id == [42; 16]
+        ));
+        assert!(matches!(
+            cleared.location,
+            StoredWorldLocation::Danger {
+                character_version: 7,
+                ref location_content_id,
+                instance_lineage_id,
+                entry_restore_point_id,
+            } if location_content_id == CORE_BELL_DUNGEON_ID
+                && instance_lineage_id == [41; 16]
+                && entry_restore_point_id == [42; 16]
+        ));
+    }
+
+    #[test]
+    fn production_world_flow_ids_are_disjoint_restart_stable_and_authority_scoped() {
+        let generator = Blake3WorldFlowIds;
+        let material = WorldFlowIdentityMaterial {
+            account_id: [1; 16],
+            character_id: [2; 16],
+            mutation_id: [3; 16],
+        };
+        let ids = [
+            generator.transfer_id(material),
+            generator.lineage_id(material),
+            generator.restore_point_id(material),
+        ];
+        assert!(ids.iter().all(|id| id.iter().any(|byte| *byte != 0)));
+        assert_ne!(ids[0], ids[1]);
+        assert_ne!(ids[0], ids[2]);
+        assert_ne!(ids[1], ids[2]);
+        assert_eq!(Blake3WorldFlowIds.transfer_id(material), ids[0]);
+
+        let mut foreign = material;
+        foreign.account_id = [4; 16];
+        assert_ne!(generator.transfer_id(foreign), ids[0]);
+        let mut changed = material;
+        changed.mutation_id = [5; 16];
+        assert_ne!(generator.transfer_id(changed), ids[0]);
     }
 
     #[test]

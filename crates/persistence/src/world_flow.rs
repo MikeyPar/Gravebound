@@ -147,6 +147,12 @@ impl<'pool> WorldFlowWrite<'pool> {
         &mut self.transaction
     }
 
+    /// Explicitly releases the serializable aggregate locks without publishing staged state.
+    /// Two-phase live-authority preparation uses this boundary before awaiting an actor.
+    pub async fn rollback(self) -> Result<(), PersistenceError> {
+        self.transaction.rollback().await
+    }
+
     pub async fn commit<T>(
         mut self,
         result: T,

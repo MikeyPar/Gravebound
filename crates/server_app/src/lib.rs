@@ -13,6 +13,7 @@ mod caldus_victory;
 mod combat_factory;
 mod core_journey_world_flow;
 mod core_lifecycle;
+mod core_private_world_flow;
 mod core_recall_outbox;
 mod core_recall_runtime;
 mod core_terminal_coordinator;
@@ -77,6 +78,12 @@ pub use core_lifecycle::{
     CoreCheckpointBinding, CoreCheckpointServiceError, CoreDangerCheckpointRepository,
     CoreDangerCheckpointService, CoreLifeKey, CoreLiveBindingId, CoreLiveCharacter,
     CoreLiveDirectory, CoreLiveError, CoreResumeOutcome, DANGER_CHECKPOINT_INTERVAL_TICKS,
+};
+pub use core_private_world_flow::{
+    CoreBellPortalAbortReason, CoreBellPortalAuthority, CoreBellPortalBinding,
+    CoreBellPortalPermit, CoreBellPortalPermitLease, CoreBellPortalRejection,
+    CoreBellPortalTransition, CorePrivateWorldFlowRouter, DisabledCoreBellPortalAuthority,
+    DisabledCoreBellPortalPermitLease,
 };
 pub use core_recall_outbox::{
     CORE_RECALL_COMPLETION_OUTBOX_CAPACITY, CoreRecallCompletionDelivery,
@@ -245,7 +252,9 @@ pub use terminal_arbiter::{
     TerminalBinding, TerminalCandidate, TerminalKind, TerminalValidationError,
 };
 pub use world_flow_coordinator::{
-    DormantWorldFlowPlanner, PostgresDormantWorldFlowCoordinator, WorldFlowIdGenerator,
+    Blake3WorldFlowIds, CorePrivateWorldFlowPlanner, DormantWorldFlowPlanner,
+    PostgresCorePrivateWorldFlowCoordinator, PostgresDormantWorldFlowCoordinator,
+    WorldFlowIdGenerator, WorldFlowIdentityMaterial,
 };
 pub use world_flow_gate::{
     CoreWorldFlowAuthority, PostgresWorldFlowLocationRepository, WorldFlowGateService,
