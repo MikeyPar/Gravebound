@@ -1,7 +1,8 @@
 //! Reusable native Bevy surface for durable death summaries and the Hall Memorial Wall.
 //!
 //! This module consumes renderer-independent `death_view` projections. It never reconstructs a
-//! stored death, authors a mutation, or enables successor creation. Authority:
+//! stored death or authors a mutation. Successor creation becomes visible only when the caller
+//! supplies the dedicated recovery model and its opaque durable-terminal proof agrees. Authority:
 //! `Gravebound_Production_GDD_v1_Canonical.md` (`DTH-020`, `DTH-021`, `UI-001`, `UI-002`,
 //! `UI-009`-`UI-011`, `UI-030`), `Gravebound_Content_Production_Spec_v1.md`
 //! (`CONT-HUB-001`, `CONT-HUB-002`, `CONT-LOC-001`), and
@@ -23,7 +24,7 @@ use crate::{
     DeathSourcePortraitPresentation, DeathSummaryAction, DeathSummaryActionPresentation,
     DeathSummaryActionState, DeathSummaryContext, DeathSummaryPresentation, DeathViewClientModel,
     DeathViewFailure, DeathViewUiCopy, MemorialDetailPhase, MemorialEntryPresentation,
-    MemorialListPhase, TerminalDeathPhase,
+    MemorialListPhase, SuccessorRecoveryClientModel, TerminalDeathPhase,
 };
 
 pub const DEATH_PORTRAIT_RUNTIME_PATH: &str = "core/death/core_death_portraits.runtime.png";
@@ -243,6 +244,35 @@ impl DeathUiSnapshot {
             load_older_memorials: DeathUiAvailability::Unavailable,
             close: DeathUiAvailability::Unavailable,
         })
+    }
+
+    /// Builds the terminal surface and enables its primary successor action only through the
+    /// negotiated recovery model's matching opaque durable-summary authority.
+    ///
+    /// The ordinary constructor remains fail-closed, and Memorial projections have no API that
+    /// can call this path with historical death data.
+    pub fn terminal_with_successor(
+        model: &DeathViewClientModel,
+        recovery: &SuccessorRecoveryClientModel,
+    ) -> Result<Self, DeathUiSnapshotError> {
+        let mut snapshot = Self::terminal(model)?;
+        let Some(authority) = model.terminal_successor_authority() else {
+            return Ok(snapshot);
+        };
+        if !recovery.action_available(authority) {
+            return Ok(snapshot);
+        }
+        let primary = snapshot
+            .summary
+            .as_mut()
+            .map(|summary| &mut summary.actions.primary)
+            .ok_or(DeathUiSnapshotError::InvalidSuccessorActionContract)?;
+        if primary.action != DeathSummaryAction::CreateSuccessor {
+            return Err(DeathUiSnapshotError::InvalidSuccessorActionContract);
+        }
+        primary.state = DeathSummaryActionState::Enabled;
+        primary.unavailable_detail = None;
+        Ok(snapshot)
     }
 
     pub fn memorial_list(model: &DeathViewClientModel) -> Result<Self, DeathUiSnapshotError> {
@@ -565,6 +595,8 @@ pub enum DeathUiSnapshotError {
     SurfaceNotOpen,
     #[error("summary context does not match its native surface")]
     InvalidSummaryContext,
+    #[error("terminal summary has an invalid successor-action contract")]
+    InvalidSuccessorActionContract,
     #[error("native death layout settings are invalid")]
     InvalidLayout,
     #[error("native death portrait asset has no validated atlas mapping: {0}")]

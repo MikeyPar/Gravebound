@@ -677,6 +677,11 @@ fn memorial_entries(revision: &DeathViewContentRevisionV1) -> Vec<DeathMemorialE
 
 #[cfg(test)]
 mod tests {
+    use protocol::{
+        CORE_SUCCESSOR_FEATURE_FLAG, M03_CORE_DEV_BUILD_ID, PROTOCOL_MAJOR, PROTOCOL_MINOR,
+        SIMULATION_HZ, SNAPSHOT_HZ, SUCCESSOR_CONTENT_ID_MAX_BYTES, ServerHello, WireText,
+    };
+
     use super::*;
 
     fn catalog() -> CoreDevelopmentDeathView {
@@ -684,6 +689,47 @@ mod tests {
             &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../content"),
         )
         .unwrap()
+    }
+
+    fn successor_hello() -> ServerHello {
+        ServerHello {
+            session_id: WireText::new("successor-native-action-test").unwrap(),
+            protocol_major: PROTOCOL_MAJOR,
+            protocol_minor: PROTOCOL_MINOR,
+            required_client_build: WireText::new(M03_CORE_DEV_BUILD_ID).unwrap(),
+            content_bundle_version: WireText::new("core-test").unwrap(),
+            server_tick_rate: SIMULATION_HZ,
+            snapshot_rate: SNAPSHOT_HZ,
+            region_id: WireText::new("local").unwrap(),
+            feature_flags: vec![WireText::new(CORE_SUCCESSOR_FEATURE_FLAG).unwrap()],
+        }
+    }
+
+    #[test]
+    fn native_primary_action_requires_matching_durable_recovery_authority() {
+        let catalog = catalog();
+        let content_revision = WireText::<SUCCESSOR_CONTENT_ID_MAX_BYTES>::new(
+            catalog.item_content_revision().to_owned(),
+        )
+        .unwrap();
+        let terminal_model = ready_terminal_model(catalog).unwrap();
+        let mut recovery =
+            crate::SuccessorRecoveryClientModel::new(&successor_hello(), content_revision);
+
+        let gated = DeathUiSnapshot::terminal_with_successor(&terminal_model, &recovery).unwrap();
+        assert!(!gated.actions()[0].enabled);
+
+        let authority = terminal_model.terminal_successor_authority().unwrap();
+        recovery.observe_terminal_summary(authority).unwrap();
+        let ready = DeathUiSnapshot::terminal_with_successor(&terminal_model, &recovery).unwrap();
+        assert_eq!(
+            ready.actions()[0].action,
+            DeathUiAction::Summary(DeathSummaryAction::CreateSuccessor)
+        );
+        assert!(ready.actions()[0].enabled);
+        let primary = &ready.summary.as_ref().unwrap().actions.primary;
+        assert!(primary.state.is_enabled());
+        assert!(primary.unavailable_detail.is_none());
     }
 
     #[test]
