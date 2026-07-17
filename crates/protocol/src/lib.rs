@@ -16,6 +16,7 @@ mod oath;
 mod progression;
 mod resolution_hold;
 mod safe_inventory;
+mod successor;
 mod terminal_inventory;
 mod world_flow;
 
@@ -40,6 +41,7 @@ pub use codec::{
     DATAGRAM_FRAME_LIMIT, FRAME_HEADER_BYTES, RELIABLE_FRAME_LIMIT, WireCodecError, decode_frame,
     encode_frame, encode_m02_compatibility_frame, encode_protocol_1_12_compatibility_frame,
     encode_protocol_1_14_compatibility_frame, encode_protocol_1_15_compatibility_frame,
+    encode_protocol_1_16_compatibility_frame,
 };
 pub use death_view::{
     DEATH_SUMMARY_REVISION, DEATH_VIEW_CHARACTER_NAME_MAX_BYTES, DEATH_VIEW_DIGEST_BYTES,
@@ -103,6 +105,13 @@ pub use safe_inventory::{
     SafeInventoryResultCodeV1, SafeInventoryTransferFrameV1, SafeInventoryTransferKindV1,
     SafeInventoryTransferPayloadV1, SafeInventoryTransferResultV1, SafeInventoryValidationError,
 };
+pub use successor::{
+    CORE_SUCCESSOR_BASE_SILHOUETTE_ID, SUCCESSOR_CONTENT_ID_MAX_BYTES, SUCCESSOR_ID_BYTES,
+    SUCCESSOR_RESULT_HASH_BYTES, SUCCESSOR_SCHEMA_VERSION, SUCCESSOR_STARTER_ITEM_COUNT,
+    StoredSuccessorResultV1, SuccessorAppearanceSnapshotV1, SuccessorCreateFrameV1,
+    SuccessorCreatePayloadV1, SuccessorCreateResultV1, SuccessorRejectionCodeV1,
+    SuccessorStarterItemsV1, SuccessorValidationError, SuccessorVersionVectorV1,
+};
 pub use terminal_inventory::{
     EXTRACTION_PLACEMENT_CAPACITY, ExtractionCommitFrameV1, ExtractionCommitPayloadV1,
     ExtractionCommitResultV1, ExtractionDestinationV1, ExtractionMaterialCreditV1,
@@ -127,7 +136,9 @@ use thiserror::Error;
 /// First incompatible protocol generation.
 pub const PROTOCOL_MAJOR: u16 = 1;
 /// Backward-compatible feature generation within [`PROTOCOL_MAJOR`].
-pub const PROTOCOL_MINOR: u16 = RESOLUTION_HOLD_PROTOCOL_MINOR;
+pub const PROTOCOL_MINOR: u16 = SUCCESSOR_PROTOCOL_MINOR;
+/// Exact M03 successor recovery generation.
+pub const SUCCESSOR_PROTOCOL_MINOR: u16 = 17;
 /// Exact minimum `ResolutionHold` recovery generation.
 pub const RESOLUTION_HOLD_PROTOCOL_MINOR: u16 = 16;
 /// Exact successful-extraction and Emergency Recall generation.
@@ -182,6 +193,8 @@ pub const CORE_EXTRACTION_TERMINAL_FEATURE_FLAG: &str = "core_extraction_termina
 pub const CORE_RECALL_TERMINAL_FEATURE_FLAG: &str = "core_emergency_recall_v1";
 /// Advertises the authenticated minimum `ResolutionHold` query and mutation surface.
 pub const CORE_RESOLUTION_HOLD_FEATURE_FLAG: &str = "core_resolution_hold_v1";
+/// Advertises authenticated, exactly-once M03 successor creation.
+pub const CORE_SUCCESSOR_FEATURE_FLAG: &str = "core_successor_v1";
 /// Build admitted by the explicit wipeable Core identity development endpoint.
 pub const M03_CORE_DEV_BUILD_ID: &str = "m03-core-dev-identity-1";
 /// Non-promotable content target label advertised by the Core identity endpoint.
@@ -382,8 +395,9 @@ mod tests {
     }
 
     #[test]
-    fn resolution_hold_appends_protocol_1_16_and_explicit_feature_negotiation() {
-        assert_eq!(PROTOCOL_MINOR, 16);
+    fn successor_appends_protocol_1_17_and_explicit_feature_negotiation() {
+        assert_eq!(PROTOCOL_MINOR, 17);
+        assert_eq!(SUCCESSOR_PROTOCOL_MINOR, 17);
         assert_eq!(RESOLUTION_HOLD_PROTOCOL_MINOR, 16);
         assert_eq!(TERMINAL_INVENTORY_PROTOCOL_MINOR, 15);
         assert_eq!(DEATH_VIEW_PROTOCOL_MINOR, 14);
@@ -393,6 +407,7 @@ mod tests {
             CORE_EXTRACTION_TERMINAL_FEATURE_FLAG,
             CORE_RECALL_TERMINAL_FEATURE_FLAG,
             CORE_RESOLUTION_HOLD_FEATURE_FLAG,
+            CORE_SUCCESSOR_FEATURE_FLAG,
         ] {
             assert!(WireText::<{ crate::handshake::FEATURE_FLAG_MAX_BYTES }>::new(feature).is_ok());
         }

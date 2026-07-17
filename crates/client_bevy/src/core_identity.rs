@@ -1548,6 +1548,7 @@ const fn account_error_code(error: AccountErrorCode) -> &'static str {
         AccountErrorCode::ContentMismatch => "content_mismatch",
         AccountErrorCode::RateLimited => "rate_limited",
         AccountErrorCode::ServiceUnavailable => "service_unavailable",
+        AccountErrorCode::SuccessorResolutionRequired => "successor_resolution_required",
     }
 }
 

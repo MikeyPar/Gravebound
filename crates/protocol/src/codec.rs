@@ -3,7 +3,8 @@ use thiserror::Error;
 
 use crate::{
     DEATH_VIEW_PROTOCOL_MINOR, M02_PROTOCOL_MINOR, MessageKind, PROTOCOL_MAJOR, ProtocolVersion,
-    SAFE_INVENTORY_PROTOCOL_MINOR, TERMINAL_INVENTORY_PROTOCOL_MINOR, WireMessage,
+    RESOLUTION_HOLD_PROTOCOL_MINOR, SAFE_INVENTORY_PROTOCOL_MINOR,
+    TERMINAL_INVENTORY_PROTOCOL_MINOR, WireMessage,
 };
 
 const MAGIC: [u8; 4] = *b"GBN1";
@@ -20,6 +21,7 @@ pub fn encode_frame(message: &WireMessage) -> Result<Vec<u8>, WireCodecError> {
 pub fn encode_m02_compatibility_frame(message: &WireMessage) -> Result<Vec<u8>, WireCodecError> {
     if message_uses_death_view(message)
         || message_uses_terminal_inventory(message)
+        || message_uses_successor(message)
         || matches!(
             message.kind(),
             MessageKind::AccountBootstrapFrame
@@ -51,7 +53,10 @@ pub fn encode_m02_compatibility_frame(message: &WireMessage) -> Result<Vec<u8>, 
 pub fn encode_protocol_1_12_compatibility_frame(
     message: &WireMessage,
 ) -> Result<Vec<u8>, WireCodecError> {
-    if message_uses_death_view(message) || message_uses_terminal_inventory(message) {
+    if message_uses_death_view(message)
+        || message_uses_terminal_inventory(message)
+        || message_uses_successor(message)
+    {
         return Err(WireCodecError::MessageUnavailableAtVersion);
     }
     encode_frame_for_version(
@@ -68,7 +73,7 @@ pub fn encode_protocol_1_12_compatibility_frame(
 pub fn encode_protocol_1_14_compatibility_frame(
     message: &WireMessage,
 ) -> Result<Vec<u8>, WireCodecError> {
-    if message_uses_terminal_inventory(message) {
+    if message_uses_terminal_inventory(message) || message_uses_successor(message) {
         return Err(WireCodecError::MessageUnavailableAtVersion);
     }
     encode_frame_for_version(
@@ -85,7 +90,7 @@ pub fn encode_protocol_1_14_compatibility_frame(
 pub fn encode_protocol_1_15_compatibility_frame(
     message: &WireMessage,
 ) -> Result<Vec<u8>, WireCodecError> {
-    if message_uses_resolution_hold(message) {
+    if message_uses_resolution_hold(message) || message_uses_successor(message) {
         return Err(WireCodecError::MessageUnavailableAtVersion);
     }
     encode_frame_for_version(
@@ -93,6 +98,23 @@ pub fn encode_protocol_1_15_compatibility_frame(
         ProtocolVersion {
             major: PROTOCOL_MAJOR,
             minor: TERMINAL_INVENTORY_PROTOCOL_MINOR,
+        },
+    )
+}
+
+/// Reproduces protocol 1.16 bytes for immutable `ResolutionHold` and earlier compatibility
+/// fixtures. Successor creation was appended in 1.17.
+pub fn encode_protocol_1_16_compatibility_frame(
+    message: &WireMessage,
+) -> Result<Vec<u8>, WireCodecError> {
+    if message_uses_successor(message) {
+        return Err(WireCodecError::MessageUnavailableAtVersion);
+    }
+    encode_frame_for_version(
+        message,
+        ProtocolVersion {
+            major: PROTOCOL_MAJOR,
+            minor: RESOLUTION_HOLD_PROTOCOL_MINOR,
         },
     )
 }
@@ -133,6 +155,17 @@ const fn message_uses_resolution_hold(message: &WireMessage) -> bool {
             | WireMessage::ReliableEvent(crate::ReliableEventFrame {
                 event: crate::ReliableEvent::ResolutionHoldQueryResult(_)
                     | crate::ReliableEvent::ResolutionHoldMutationResult(_),
+                ..
+            })
+    )
+}
+
+const fn message_uses_successor(message: &WireMessage) -> bool {
+    matches!(
+        message,
+        WireMessage::SuccessorCreateFrame(_)
+            | WireMessage::ReliableEvent(crate::ReliableEventFrame {
+                event: crate::ReliableEvent::SuccessorCreateResult(_),
                 ..
             })
     )
@@ -233,6 +266,7 @@ const fn message_kind_byte(kind: MessageKind) -> u8 {
         MessageKind::RecallFrame => 20,
         MessageKind::ResolutionHoldQueryFrame => 21,
         MessageKind::ResolutionHoldMutationFrame => 22,
+        MessageKind::SuccessorCreateFrame => 23,
     }
 }
 
@@ -260,6 +294,7 @@ const fn message_kind_from_byte(value: u8) -> Result<MessageKind, WireCodecError
         20 => Ok(MessageKind::RecallFrame),
         21 => Ok(MessageKind::ResolutionHoldQueryFrame),
         22 => Ok(MessageKind::ResolutionHoldMutationFrame),
+        23 => Ok(MessageKind::SuccessorCreateFrame),
         other => Err(WireCodecError::UnknownMessageKind(other)),
     }
 }
@@ -458,7 +493,7 @@ mod tests {
         let frame = encode_frame(&input_message()).unwrap();
         assert!(frame.len() <= DATAGRAM_FRAME_LIMIT);
         assert_eq!(decode_frame(&frame).unwrap(), input_message());
-        assert_eq!(u16::from_le_bytes([frame[6], frame[7]]), 16);
+        assert_eq!(u16::from_le_bytes([frame[6], frame[7]]), 17);
         let protocol_1_14 = encode_protocol_1_14_compatibility_frame(&input_message()).unwrap();
         assert_eq!(
             blake3::hash(&protocol_1_14).to_hex().to_string(),
@@ -680,7 +715,7 @@ mod tests {
         });
 
         let frame = encode_frame(&transfer).unwrap();
-        assert_eq!(u16::from_le_bytes([frame[6], frame[7]]), 16);
+        assert_eq!(u16::from_le_bytes([frame[6], frame[7]]), 17);
         assert_eq!(decode_frame(&frame), Ok(transfer.clone()));
 
         let compatibility = encode_protocol_1_12_compatibility_frame(&transfer).unwrap();
@@ -704,7 +739,7 @@ mod tests {
                 payload,
             });
         let frame = encode_frame(&transfer).unwrap();
-        assert_eq!(u16::from_le_bytes([frame[6], frame[7]]), 16);
+        assert_eq!(u16::from_le_bytes([frame[6], frame[7]]), 17);
         assert_eq!(frame[8], 17);
         assert_eq!(decode_frame(&frame), Ok(transfer.clone()));
         let compatibility = encode_protocol_1_12_compatibility_frame(&transfer).unwrap();
@@ -755,7 +790,7 @@ mod tests {
             },
         });
         let frame = encode_frame(&request).unwrap();
-        assert_eq!(u16::from_le_bytes([frame[6], frame[7]]), 16);
+        assert_eq!(u16::from_le_bytes([frame[6], frame[7]]), 17);
         assert_eq!(frame[8], 18);
         assert_eq!(decode_frame(&frame), Ok(request.clone()));
         let compatibility = encode_protocol_1_14_compatibility_frame(&request).unwrap();
@@ -803,7 +838,7 @@ mod tests {
     }
 
     #[test]
-    fn append_only_message_kind_bytes_one_through_twenty_are_unchanged() {
+    fn append_only_message_kind_bytes_one_through_twenty_two_are_unchanged() {
         let legacy = [
             MessageKind::ClientHello,
             MessageKind::HandshakeResponse,
@@ -837,6 +872,7 @@ mod tests {
             message_kind_byte(MessageKind::ResolutionHoldMutationFrame),
             22
         );
+        assert_eq!(message_kind_byte(MessageKind::SuccessorCreateFrame), 23);
     }
 
     #[test]
@@ -854,7 +890,7 @@ mod tests {
         let extraction_frame = encode_frame(&extraction).unwrap();
         assert_eq!(
             u16::from_le_bytes([extraction_frame[6], extraction_frame[7]]),
-            16
+            17
         );
         assert_eq!(extraction_frame[8], 19);
         assert_eq!(decode_frame(&extraction_frame), Ok(extraction.clone()));
@@ -971,7 +1007,7 @@ mod tests {
             character_id: [2; 16],
         });
         let query_frame = encode_frame(&query).unwrap();
-        assert_eq!(u16::from_le_bytes([query_frame[6], query_frame[7]]), 16);
+        assert_eq!(u16::from_le_bytes([query_frame[6], query_frame[7]]), 17);
         assert_eq!(query_frame[8], 21);
         assert_eq!(query.channel(), crate::NetworkChannel::Control);
         assert_eq!(decode_frame(&query_frame), Ok(query.clone()));
@@ -979,6 +1015,8 @@ mod tests {
             encode_protocol_1_15_compatibility_frame(&query),
             Err(WireCodecError::MessageUnavailableAtVersion)
         );
+        let query_1_16 = encode_protocol_1_16_compatibility_frame(&query).unwrap();
+        assert_eq!(u16::from_le_bytes([query_1_16[6], query_1_16[7]]), 16);
 
         let payload = crate::ResolutionHoldMutationPayloadV1 {
             extraction_id: [3; 16],
@@ -1011,6 +1049,7 @@ mod tests {
             encode_protocol_1_15_compatibility_frame(&mutation),
             Err(WireCodecError::MessageUnavailableAtVersion)
         );
+        let mutation_1_16 = encode_protocol_1_16_compatibility_frame(&mutation).unwrap();
 
         let query_result = WireMessage::ReliableEvent(crate::ReliableEventFrame {
             sequence: 1,
@@ -1034,6 +1073,7 @@ mod tests {
         let query_result_frame = encode_frame(&query_result).unwrap();
         assert_eq!(decode_frame(&query_result_frame), Ok(query_result.clone()));
         assert_eq!(query_result.channel(), crate::NetworkChannel::Control);
+        let query_result_1_16 = encode_protocol_1_16_compatibility_frame(&query_result).unwrap();
 
         let mutation_result = WireMessage::ReliableEvent(crate::ReliableEventFrame {
             sequence: 2,
@@ -1056,19 +1096,108 @@ mod tests {
             Ok(mutation_result.clone())
         );
         assert_eq!(mutation_result.channel(), crate::NetworkChannel::Mutation);
+        let mutation_result_1_16 =
+            encode_protocol_1_16_compatibility_frame(&mutation_result).unwrap();
 
         assert_eq!(
             [
-                blake3::hash(&query_frame).to_hex().to_string(),
-                blake3::hash(&mutation_frame).to_hex().to_string(),
-                blake3::hash(&query_result_frame).to_hex().to_string(),
-                blake3::hash(&mutation_result_frame).to_hex().to_string(),
+                blake3::hash(&query_1_16).to_hex().to_string(),
+                blake3::hash(&mutation_1_16).to_hex().to_string(),
+                blake3::hash(&query_result_1_16).to_hex().to_string(),
+                blake3::hash(&mutation_result_1_16).to_hex().to_string(),
             ],
             [
                 "0e64fa2dc734acc95c218676849e1565fae6b3938aacc1dfa6b2befa7026e91d".to_owned(),
                 "f1a3a18576499596470d7d21320023133acc9a48debd773cdce5b6491c638049".to_owned(),
                 "b1a62ad64ec9629ab769cf808b41bd4d4660a29ba1a3325ffd672f776b310dfe".to_owned(),
                 "d44d322b359d0760cfc2b69e131e8932a693bd80414ffa14bad28482794f4e87".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn protocol_1_17_appends_bounded_successor_frame_and_result() {
+        let payload = crate::SuccessorCreatePayloadV1 {
+            death_id: [2; crate::SUCCESSOR_ID_BYTES],
+            content_revision: WireText::new("core-dev.blake3.successor-codec-fixture").unwrap(),
+        };
+        let request = WireMessage::SuccessorCreateFrame(crate::SuccessorCreateFrameV1 {
+            schema_version: crate::SUCCESSOR_SCHEMA_VERSION,
+            sequence: 23,
+            mutation_id: [1; crate::MUTATION_ID_BYTES],
+            payload_hash: payload.canonical_hash(),
+            payload,
+        });
+        let request_frame = encode_frame(&request).unwrap();
+        assert!(request_frame.len() <= RELIABLE_FRAME_LIMIT);
+        assert_eq!(u16::from_le_bytes([request_frame[6], request_frame[7]]), 17);
+        assert_eq!(request_frame[8], 23);
+        assert_eq!(request.channel(), crate::NetworkChannel::Mutation);
+        assert_eq!(decode_frame(&request_frame), Ok(request.clone()));
+        assert_eq!(
+            encode_protocol_1_16_compatibility_frame(&request),
+            Err(WireCodecError::MessageUnavailableAtVersion)
+        );
+
+        let mut stored = crate::StoredSuccessorResultV1 {
+            mutation_id: [1; crate::MUTATION_ID_BYTES],
+            death_id: [2; crate::SUCCESSOR_ID_BYTES],
+            successor_id: [3; crate::CHARACTER_ID_BYTES],
+            receipt_id: [4; crate::SUCCESSOR_ID_BYTES],
+            former_roster_ordinal: 1,
+            class_id: WireText::new(crate::GRAVE_ARBALIST_CLASS_ID).unwrap(),
+            appearance: crate::SuccessorAppearanceSnapshotV1::CoreBaseSilhouette,
+            starter_items: crate::SuccessorStarterItemsV1 {
+                weapon_uid: [5; crate::SUCCESSOR_ID_BYTES],
+                relic_uid: [6; crate::SUCCESSOR_ID_BYTES],
+                tonic_unit_uids: [
+                    [7; crate::SUCCESSOR_ID_BYTES],
+                    [8; crate::SUCCESSOR_ID_BYTES],
+                ],
+            },
+            versions: crate::SuccessorVersionVectorV1 {
+                account: 2,
+                character: 1,
+                progression: 1,
+                world: 1,
+                inventory: 1,
+                life_metrics: 1,
+                oath_bargain: 1,
+            },
+            content_revision: WireText::new("core-dev.blake3.successor-codec-fixture").unwrap(),
+            selected_character_id: [3; crate::CHARACTER_ID_BYTES],
+            result_hash: [0; crate::SUCCESSOR_RESULT_HASH_BYTES],
+        };
+        stored.result_hash = stored.canonical_result_hash();
+        let result = WireMessage::ReliableEvent(crate::ReliableEventFrame {
+            sequence: 24,
+            server_tick: 300,
+            event: crate::ReliableEvent::SuccessorCreateResult(Box::new(
+                crate::SuccessorCreateResultV1::Stored {
+                    schema_version: crate::SUCCESSOR_SCHEMA_VERSION,
+                    request_sequence: 23,
+                    replayed: false,
+                    result: Box::new(stored),
+                },
+            )),
+        });
+        let result_frame = encode_frame(&result).unwrap();
+        assert!(result_frame.len() <= RELIABLE_FRAME_LIMIT);
+        assert_eq!(result.channel(), crate::NetworkChannel::Mutation);
+        assert_eq!(decode_frame(&result_frame), Ok(result.clone()));
+        assert_eq!(
+            encode_protocol_1_16_compatibility_frame(&result),
+            Err(WireCodecError::MessageUnavailableAtVersion)
+        );
+
+        assert_eq!(
+            [
+                blake3::hash(&request_frame).to_hex().to_string(),
+                blake3::hash(&result_frame).to_hex().to_string(),
+            ],
+            [
+                "a9d6ab9782a8fded68eaf13c495f055b767832a3d1828cf5e70cf9ad2c1210c1".to_owned(),
+                "e6637983577e1c06984fe499b58892964220451a054cfe07260a8e77895149cb".to_owned(),
             ]
         );
     }
@@ -1101,10 +1230,10 @@ mod tests {
         );
 
         let mut unknown_kind = valid;
-        unknown_kind[8] = 23;
+        unknown_kind[8] = 24;
         assert_eq!(
             decode_frame(&unknown_kind),
-            Err(WireCodecError::UnknownMessageKind(23))
+            Err(WireCodecError::UnknownMessageKind(24))
         );
     }
 

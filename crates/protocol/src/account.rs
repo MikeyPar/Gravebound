@@ -229,6 +229,7 @@ pub enum AccountErrorCode {
     ContentMismatch,
     RateLimited,
     ServiceUnavailable,
+    SuccessorResolutionRequired,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -408,6 +409,39 @@ mod tests {
         };
         assert_eq!(create.canonical_hash(), create.canonical_hash());
         assert_ne!(create.canonical_hash(), select.canonical_hash());
+    }
+
+    #[test]
+    fn successor_resolution_required_appends_without_renumbering_account_errors() {
+        let legacy = [
+            AccountErrorCode::Unauthenticated,
+            AccountErrorCode::ProductionNamespaceForbidden,
+            AccountErrorCode::AccountMismatch,
+            AccountErrorCode::CharacterNotFound,
+            AccountErrorCode::CharacterNotOwned,
+            AccountErrorCode::CharacterDead,
+            AccountErrorCode::ClassDisabled,
+            AccountErrorCode::AppearanceUnavailable,
+            AccountErrorCode::InvalidName,
+            AccountErrorCode::CharacterSlotFull,
+            AccountErrorCode::StateVersionMismatch,
+            AccountErrorCode::IdempotencyConflict,
+            AccountErrorCode::PayloadHashMismatch,
+            AccountErrorCode::IssuedAtInvalid,
+            AccountErrorCode::ContentMismatch,
+            AccountErrorCode::RateLimited,
+            AccountErrorCode::ServiceUnavailable,
+        ];
+        for (discriminant, code) in legacy.into_iter().enumerate() {
+            assert_eq!(
+                postcard::to_stdvec(&code).unwrap(),
+                vec![u8::try_from(discriminant).unwrap()]
+            );
+        }
+        assert_eq!(
+            postcard::to_stdvec(&AccountErrorCode::SuccessorResolutionRequired).unwrap(),
+            vec![17]
+        );
     }
 
     #[test]

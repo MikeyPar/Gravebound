@@ -12,7 +12,7 @@ use crate::{
     ProgressionQueryFrame, ProgressionResult, RecallFrameV1, RecallResultV1,
     ResolutionHoldMutationFrameV1, ResolutionHoldMutationResultV1, ResolutionHoldQueryFrameV1,
     ResolutionHoldQueryResultV1, SafeInventoryTransferFrameV1, SafeInventoryTransferResultV1,
-    WireText, WorldFlowFrame, WorldFlowResult,
+    SuccessorCreateFrameV1, SuccessorCreateResultV1, WireText, WorldFlowFrame, WorldFlowResult,
 };
 
 pub const FIXED_VECTOR_SCALE: i16 = 1_000;
@@ -48,6 +48,7 @@ pub enum MessageKind {
     RecallFrame,
     ResolutionHoldQueryFrame,
     ResolutionHoldMutationFrame,
+    SuccessorCreateFrame,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -455,6 +456,7 @@ pub enum ReliableEvent {
     RecallResult(Box<RecallResultV1>),
     ResolutionHoldQueryResult(Box<ResolutionHoldQueryResultV1>),
     ResolutionHoldMutationResult(Box<ResolutionHoldMutationResultV1>),
+    SuccessorCreateResult(Box<SuccessorCreateResultV1>),
 }
 
 impl ReliableEvent {
@@ -469,7 +471,8 @@ impl ReliableEvent {
             | Self::BargainDecisionResult(_)
             | Self::SafeInventoryTransferResult(_)
             | Self::ExtractionCommitResult(_)
-            | Self::ResolutionHoldMutationResult(_) => NetworkChannel::Mutation,
+            | Self::ResolutionHoldMutationResult(_)
+            | Self::SuccessorCreateResult(_) => NetworkChannel::Mutation,
             Self::Control(_)
             | Self::AccountBootstrapResult(_)
             | Self::WorldFlowResult(_)
@@ -534,6 +537,9 @@ impl ReliableEvent {
             Self::ResolutionHoldMutationResult(result) => result
                 .validate()
                 .map_err(|_| MessageValidationError::ResolutionHold),
+            Self::SuccessorCreateResult(result) => result
+                .validate()
+                .map_err(|_| MessageValidationError::Successor),
             _ => Ok(()),
         }
     }
@@ -580,6 +586,7 @@ pub enum WireMessage {
     RecallFrame(RecallFrameV1),
     ResolutionHoldQueryFrame(ResolutionHoldQueryFrameV1),
     ResolutionHoldMutationFrame(ResolutionHoldMutationFrameV1),
+    SuccessorCreateFrame(SuccessorCreateFrameV1),
 }
 
 impl WireMessage {
@@ -608,6 +615,7 @@ impl WireMessage {
             Self::RecallFrame(_) => MessageKind::RecallFrame,
             Self::ResolutionHoldQueryFrame(_) => MessageKind::ResolutionHoldQueryFrame,
             Self::ResolutionHoldMutationFrame(_) => MessageKind::ResolutionHoldMutationFrame,
+            Self::SuccessorCreateFrame(_) => MessageKind::SuccessorCreateFrame,
         }
     }
 
@@ -634,7 +642,8 @@ impl WireMessage {
             | Self::BargainDecisionFrame(_)
             | Self::SafeInventoryTransferFrame(_)
             | Self::ExtractionCommitFrame(_)
-            | Self::ResolutionHoldMutationFrame(_) => NetworkChannel::Mutation,
+            | Self::ResolutionHoldMutationFrame(_)
+            | Self::SuccessorCreateFrame(_) => NetworkChannel::Mutation,
         }
     }
 
@@ -699,6 +708,9 @@ impl WireMessage {
             Self::ResolutionHoldMutationFrame(value) => value
                 .validate()
                 .map_err(|_| MessageValidationError::ResolutionHold),
+            Self::SuccessorCreateFrame(value) => value
+                .validate()
+                .map_err(|_| MessageValidationError::Successor),
         }
     }
 }
@@ -723,6 +735,8 @@ pub enum MessageValidationError {
     TerminalInventory,
     #[error("ResolutionHold message failed semantic validation")]
     ResolutionHold,
+    #[error("successor message failed semantic validation")]
+    Successor,
     #[error("message sequence must be nonzero")]
     ZeroSequence,
     #[error("fixed-point vector component must remain within -1000..=1000")]
