@@ -29,11 +29,12 @@ use sim_content::{
 };
 
 use crate::{
-    DeathSummaryAction, DeathUiAction, DeathUiCommand, DeathUiConfig, DeathUiRenderReadiness,
-    DeathUiSnapshot, NativeDeathView, NativeDeathViewPlugin, NativeSuccessorRecoveryPlugin,
-    NativeSuccessorRecoveryView, SuccessorRecoveryClientModel, SuccessorRecoveryPhase,
-    SuccessorRecoveryUiAction, SuccessorRecoveryUiCommand, SuccessorRecoveryUiConfig,
-    SuccessorRecoveryUiReadiness, SuccessorRecoveryUiSnapshot, validate_death_ui_assets,
+    DeathSummaryAction, DeathUiAction, DeathUiCommand, DeathUiConfig, DeathUiFocusRequest,
+    DeathUiRenderReadiness, DeathUiSnapshot, NativeDeathView, NativeDeathViewPlugin,
+    NativeSuccessorRecoveryPlugin, NativeSuccessorRecoveryView, SuccessorRecoveryClientModel,
+    SuccessorRecoveryPhase, SuccessorRecoveryUiAction, SuccessorRecoveryUiCommand,
+    SuccessorRecoveryUiConfig, SuccessorRecoveryUiReadiness, SuccessorRecoveryUiSnapshot,
+    validate_death_ui_assets,
 };
 
 const EVIDENCE_SETTLE_FRAMES: u8 = 90;
@@ -114,6 +115,12 @@ struct BuiltShowcase {
 #[derive(Debug, Resource)]
 struct ScreenshotRequest(PathBuf);
 
+#[derive(Debug, Resource)]
+struct ShowcaseInitialDeathFocus {
+    enabled: bool,
+    issued: bool,
+}
+
 #[derive(Debug, Default)]
 struct CaptureProgress {
     settled_frames: u8,
@@ -151,6 +158,10 @@ pub fn run_core_successor_recovery_showcase(
     )
     .insert_resource(ClearColor(Color::srgb_u8(5, 7, 9)))
     .insert_resource(built.runtime)
+    .insert_resource(ShowcaseInitialDeathFocus {
+        enabled: config.state == CoreSuccessorRecoveryShowcaseState::DeathSummary,
+        issued: false,
+    })
     .add_plugins(
         crate::gravebound_default_plugins()
             .set(ImagePlugin::default_nearest())
@@ -170,6 +181,7 @@ pub fn run_core_successor_recovery_showcase(
     .add_systems(
         Update,
         (
+            apply_initial_death_focus,
             handle_death_commands,
             handle_successor_commands,
             advance_fixture_authority,
@@ -194,6 +206,18 @@ pub fn run_core_successor_recovery_showcase(
 
 fn spawn_camera(mut commands: Commands) {
     commands.spawn((Camera2d, IsDefaultUiCamera, BoxShadowSamples(6)));
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn apply_initial_death_focus(
+    readiness: Res<DeathUiRenderReadiness>,
+    mut initial: ResMut<ShowcaseInitialDeathFocus>,
+    mut requests: MessageWriter<DeathUiFocusRequest>,
+) {
+    if initial.enabled && !initial.issued && readiness.is_ready() {
+        requests.write(DeathUiFocusRequest::Next);
+        initial.issued = true;
+    }
 }
 
 fn build_showcase(
