@@ -11,13 +11,13 @@ use persistence::{
     DurableEchoEnvelopeV1, DurableEchoOutcomeV1, DurableEchoRecordV1, DurableEchoStateV1,
     DurableEchoTransitionReasonV1, DurableEchoTransitionV1, DurableEquipmentSlotV1,
     DurableMemorialRecordV1, DurableNetworkStateV1, DurableOrderedContentIdV1,
-    DurableRecallStateV1, DurableSummaryDamageReferenceV1, DurableSummaryProjectionEntryV1,
-    DurableSummaryProjectionKindV1, DurableSummaryProjectionsV1, DurableTraceStatusV1,
-    LiveDamageTraceCauseV1, LiveDamageTraceContentAuthorityV1, LiveDamageTraceDamageTypeV1,
-    LiveDamageTraceDangerAuthorityV1, LiveDamageTraceEntryV1, LiveDamageTraceNetworkStateV1,
-    LiveDamageTraceRecallStateV1, LiveDamageTraceStatusV1, LiveDamageTraceTickCommandV1,
-    LiveDamageTraceTickRequestV1, LiveDamageTraceTickTransactionV1, PersistenceConfig,
-    PersistenceError, PostgresPersistence, StoredLiveDamageTraceSnapshotEntryV1,
+    DurableRecallStateV1, DurableSuccessorPresetV1, DurableSummaryDamageReferenceV1,
+    DurableSummaryProjectionEntryV1, DurableSummaryProjectionKindV1, DurableSummaryProjectionsV1,
+    DurableTraceStatusV1, LiveDamageTraceCauseV1, LiveDamageTraceContentAuthorityV1,
+    LiveDamageTraceDamageTypeV1, LiveDamageTraceDangerAuthorityV1, LiveDamageTraceEntryV1,
+    LiveDamageTraceNetworkStateV1, LiveDamageTraceRecallStateV1, LiveDamageTraceStatusV1,
+    LiveDamageTraceTickCommandV1, LiveDamageTraceTickRequestV1, LiveDamageTraceTickTransactionV1,
+    PersistenceConfig, PersistenceError, PostgresPersistence, StoredLiveDamageTraceSnapshotEntryV1,
     WIPEABLE_CORE_NAMESPACE, canonical_death_terminal_payload_hash_v1,
     derive_durable_death_item_ledger_event_id, stage_danger_entry_ash_wallet_restore_v3,
     stage_danger_entry_inventory_restore_v3, stage_danger_entry_life_metrics_restore_v3,
@@ -28,14 +28,20 @@ use sqlx::Row;
 
 const ACCOUNT_ID: [u8; 16] = [230; 16];
 const CHARACTER_ID: [u8; 16] = [231; 16];
+const SECOND_CHARACTER_ID: [u8; 16] = [201; 16];
 const LINEAGE_ID: [u8; 16] = [232; 16];
+const SECOND_LINEAGE_ID: [u8; 16] = [202; 16];
 const RESTORE_POINT_ID: [u8; 16] = [233; 16];
+const SECOND_RESTORE_POINT_ID: [u8; 16] = [203; 16];
 const INSTANCE_ID: [u8; 16] = [234; 16];
+const SECOND_INSTANCE_ID: [u8; 16] = [204; 16];
 const ITEM_UID: [u8; 16] = [235; 16];
 const CHARACTER_SAFE_ITEM_UID: [u8; 16] = [241; 16];
 const VAULT_ITEM_UID: [u8; 16] = [242; 16];
 const ENTRY_MUTATION_ID: [u8; 16] = [237; 16];
+const SECOND_ENTRY_MUTATION_ID: [u8; 16] = [205; 16];
 const DEED_REWARD_ID: [u8; 16] = [238; 16];
+const SECOND_DEED_REWARD_ID: [u8; 16] = [206; 16];
 const MATERIAL_ID: &str = "material.bell_brass";
 const ITEM_TEMPLATE_ID: &str = "item.weapon.crossbow.pine_crossbow";
 const DEED_ID: &str = "deed.core.sir_caldus_defeated";
@@ -45,6 +51,8 @@ const LOCALIZATION_BLAKE3: &str = CORE_WORLD_LOCALIZATION_BLAKE3;
 const ISSUED_AT_UNIX_MS: u64 = 1;
 const NONLETHAL_TRACE_TICK_ID: [u8; 16] = [239; 16];
 const LETHAL_TRACE_TICK_ID: [u8; 16] = [240; 16];
+const SECOND_NONLETHAL_TRACE_TICK_ID: [u8; 16] = [207; 16];
+const SECOND_LETHAL_TRACE_TICK_ID: [u8; 16] = [208; 16];
 const SOURCE_SIM_ENTITY_ID: u64 = 81;
 
 #[derive(Clone, Copy)]
@@ -80,6 +88,22 @@ impl RequestIds {
             death_id: uuid_v7(46),
             echo_id: uuid_v7(47),
             mutation_id: [48; 16],
+        }
+    }
+
+    fn secondary() -> Self {
+        Self {
+            death_id: uuid_v7(51),
+            echo_id: uuid_v7(52),
+            mutation_id: [53; 16],
+        }
+    }
+
+    fn incident() -> Self {
+        Self {
+            death_id: uuid_v7(54),
+            echo_id: uuid_v7(55),
+            mutation_id: [56; 16],
         }
     }
 }
@@ -467,6 +491,232 @@ async fn reset_fixture_with_custody(persistence: &PostgresPersistence, custody: 
     transaction.commit().await.unwrap();
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the second-slot fixture keeps supersession and provenance evidence explicit"
+)]
+async fn stage_second_zero_custody_character(persistence: &PostgresPersistence) {
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    sqlx::query(
+        "INSERT INTO characters (namespace_id,account_id,character_id,roster_ordinal,class_id, \
+         level,oath_id,life_state,security_state,character_state_version) \
+         VALUES ($1,$2,$3,2,'class.grave_arbalist',10,NULL,0,0,1)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(SECOND_CHARACTER_ID.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO character_progression (namespace_id,account_id,character_id,total_xp,level, \
+         current_health,progression_version) VALUES ($1,$2,$3,2700,10,120,1)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(SECOND_CHARACTER_ID.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO character_inventories (namespace_id,account_id,character_id,inventory_version) \
+         VALUES ($1,$2,$3,1)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(SECOND_CHARACTER_ID.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO character_oath_bargain_state (namespace_id,account_id,character_id, \
+         earned_bargain_slots,oath_bargain_version) VALUES ($1,$2,$3,0,1)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(SECOND_CHARACTER_ID.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO character_instance_lineages (namespace_id,account_id,character_id,lineage_id, \
+         content_id,layout_id,lineage_state,records_blake3,assets_blake3,localization_blake3) \
+         VALUES ($1,$2,$3,$4,'world.core_microrealm_01','layout.core_private_life_01',0,$5,$6,$7)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(SECOND_CHARACTER_ID.as_slice())
+    .bind(SECOND_LINEAGE_ID.as_slice())
+    .bind(CORE_WORLD_RECORDS_BLAKE3)
+    .bind(CORE_WORLD_ASSETS_BLAKE3)
+    .bind(CORE_WORLD_LOCALIZATION_BLAKE3)
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO character_entry_restore_points (namespace_id,account_id,character_id, \
+         restore_point_id,lineage_id,source_location_id,restore_location_id, \
+         snapshot_contract_version,account_version,character_version,progression_version, \
+         inventory_version,oath_bargain_version,life_metrics_version,ash_wallet_version, \
+         component_mask,composite_digest,restore_state,records_blake3,assets_blake3, \
+         localization_blake3) VALUES ($1,$2,$3,$4,$5,'hub.lantern_halls_01', \
+         'hub.lantern_halls_01',3,1,1,1,1,1,1,1,31,$6,0,$7,$8,$9)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(SECOND_CHARACTER_ID.as_slice())
+    .bind(SECOND_RESTORE_POINT_ID.as_slice())
+    .bind(SECOND_LINEAGE_ID.as_slice())
+    .bind([101_u8; 32].as_slice())
+    .bind(CORE_WORLD_RECORDS_BLAKE3)
+    .bind(CORE_WORLD_ASSETS_BLAKE3)
+    .bind(CORE_WORLD_LOCALIZATION_BLAKE3)
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO entry_restore_progression_v3 (namespace_id,account_id,character_id, \
+         restore_point_id,level,total_xp,current_health,progression_version,component_digest) \
+         VALUES ($1,$2,$3,$4,10,2700,120,1,$5)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(SECOND_CHARACTER_ID.as_slice())
+    .bind(SECOND_RESTORE_POINT_ID.as_slice())
+    .bind([102_u8; 32].as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO entry_restore_progression_v1 (namespace_id,account_id,character_id, \
+         restore_point_id,level,total_xp,current_health,progression_version) \
+         VALUES ($1,$2,$3,$4,10,2700,120,1)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(SECOND_CHARACTER_ID.as_slice())
+    .bind(SECOND_RESTORE_POINT_ID.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    let staged_inventory = stage_danger_entry_inventory_restore_v3(
+        &mut transaction,
+        ACCOUNT_ID,
+        SECOND_CHARACTER_ID,
+        SECOND_RESTORE_POINT_ID,
+        SECOND_ENTRY_MUTATION_ID,
+        0,
+    )
+    .await
+    .unwrap();
+    assert_eq!(staged_inventory.post_inventory_version, 1);
+    assert!(staged_inventory.items.is_empty());
+    stage_danger_entry_oath_bargain_restore_v3(
+        &mut transaction,
+        ACCOUNT_ID,
+        SECOND_CHARACTER_ID,
+        SECOND_RESTORE_POINT_ID,
+    )
+    .await
+    .unwrap();
+    stage_danger_entry_life_metrics_restore_v3(
+        &mut transaction,
+        ACCOUNT_ID,
+        SECOND_CHARACTER_ID,
+        SECOND_RESTORE_POINT_ID,
+    )
+    .await
+    .unwrap();
+    stage_danger_entry_ash_wallet_restore_v3(
+        &mut transaction,
+        ACCOUNT_ID,
+        SECOND_CHARACTER_ID,
+        SECOND_RESTORE_POINT_ID,
+    )
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO character_world_locations (namespace_id,account_id,character_id, \
+         character_version,location_kind,location_content_id,instance_lineage_id, \
+         entry_restore_point_id) VALUES ($1,$2,$3,2,2,'world.core_microrealm_01',$4,$5)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(SECOND_CHARACTER_ID.as_slice())
+    .bind(SECOND_LINEAGE_ID.as_slice())
+    .bind(SECOND_RESTORE_POINT_ID.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE characters SET character_state_version=2 WHERE namespace_id=$1 \
+         AND account_id=$2 AND character_id=$3",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(SECOND_CHARACTER_ID.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE character_progression SET current_health=50,progression_version=2 \
+         WHERE namespace_id=$1 AND account_id=$2 AND character_id=$3",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(SECOND_CHARACTER_ID.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE character_life_metrics SET lifetime_ticks=19990,permadeath_combat_ticks=17990, \
+         life_metrics_version=2 WHERE namespace_id=$1 AND account_id=$2 AND character_id=$3",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(SECOND_CHARACTER_ID.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    let checkpoint_payload = [2_u8];
+    let checkpoint_payload_digest = blake3::hash(&checkpoint_payload);
+    sqlx::query(
+        "INSERT INTO character_danger_checkpoints (namespace_id,account_id,character_id, \
+         lineage_id,checkpoint_tick,component_mask,composite_digest,character_version, \
+         progression_version,inventory_version,oath_bargain_version,records_blake3, \
+         assets_blake3,localization_blake3,checkpoint_schema_version,checkpoint_payload, \
+         checkpoint_payload_digest) VALUES ($1,$2,$3,$4,19990,15,$5,2,2,1,1,$6,$7,$8,1,$9,$10)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(SECOND_CHARACTER_ID.as_slice())
+    .bind(SECOND_LINEAGE_ID.as_slice())
+    .bind([104_u8; 32].as_slice())
+    .bind(CORE_WORLD_RECORDS_BLAKE3)
+    .bind(CORE_WORLD_ASSETS_BLAKE3)
+    .bind(CORE_WORLD_LOCALIZATION_BLAKE3)
+    .bind(checkpoint_payload.as_slice())
+    .bind(checkpoint_payload_digest.as_bytes().as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO character_life_deeds (namespace_id,account_id,character_id,deed_id, \
+         reward_event_id,source_content_id,deed_kind,achieved_tick,content_revision) \
+         VALUES ($1,$2,$3,$4,$5,'boss.sir_caldus',0,19000,$6)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(SECOND_CHARACTER_ID.as_slice())
+    .bind(DEED_ID)
+    .bind(SECOND_DEED_REWARD_ID.as_slice())
+    .bind(CORE_ITEM_CONTENT_REVISION)
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    transaction.commit().await.unwrap();
+}
+
 async fn promote_fixture_lineage_to_active(persistence: &PostgresPersistence) {
     let mut transaction = persistence.begin_transaction().await.unwrap();
     let changed = sqlx::query(
@@ -809,6 +1059,41 @@ fn zero_custody_request(ids: RequestIds) -> DurableDeathCommitRequestV1 {
     DurableDeathCommitRequestV1::seal(plan, ISSUED_AT_UNIX_MS).unwrap()
 }
 
+fn second_zero_custody_request(
+    ids: RequestIds,
+    provenance: DurableDeathProvenanceV1,
+) -> DurableDeathCommitRequestV1 {
+    let mut plan = zero_custody_request(ids).plan;
+    plan.event.character_id = SECOND_CHARACTER_ID;
+    plan.event.former_roster_ordinal = 2;
+    plan.event.instance_id = SECOND_INSTANCE_ID;
+    plan.event.lineage_id = SECOND_LINEAGE_ID;
+    plan.event.restore_point_id = SECOND_RESTORE_POINT_ID;
+    plan.event.versions.account = DeathVersionAdvanceV1 { pre: 2, post: 3 };
+    plan.event.provenance = provenance;
+    if provenance == DurableDeathProvenanceV1::OrdinaryGameplay {
+        let echo = plan
+            .echo
+            .as_mut()
+            .expect("later ordinary death retains the mandatory Echo projector");
+        echo.created.state = DurableEchoStateV1::Dormant;
+        echo.created.snapshot_digest = echo.created.expected_snapshot_digest().unwrap();
+        echo.preexisting_available_echo_id = Some(RequestIds::primary().echo_id);
+        echo.promotion = None;
+        plan.summary.echo_outcome = DurableEchoOutcomeV1::Dormant;
+        plan.summary.snapshot_digest = plan.summary.expected_snapshot_digest().unwrap();
+        plan.memorial.summary_snapshot_digest = plan.summary.snapshot_digest;
+        plan.memorial.presentation_digest = plan.memorial.expected_presentation_digest().unwrap();
+    } else {
+        plan.echo = None;
+        plan.summary.echo_outcome = DurableEchoOutcomeV1::NotEligible;
+        plan.summary.snapshot_digest = plan.summary.expected_snapshot_digest().unwrap();
+        plan.memorial.summary_snapshot_digest = plan.summary.snapshot_digest;
+        plan.memorial.presentation_digest = plan.memorial.expected_presentation_digest().unwrap();
+    }
+    DurableDeathCommitRequestV1::seal(plan, ISSUED_AT_UNIX_MS).unwrap()
+}
+
 /// Hosted lethal evidence required jointly by canonical GDD `DTH-001`, Content Spec
 /// `CONT-ECHO-009`, and Roadmap `GB-M03-02`/`06`/`13`. The first tick is committed through the
 /// production live repository; the lethal suffix remains sealed for the atomic death writer.
@@ -839,17 +1124,24 @@ async fn seed_hosted_death_trace(
     persistence: &PostgresPersistence,
     death: &DurableDeathCommitRequestV1,
 ) -> HostedDeathTraceEvidence {
+    let event = &death.plan.event;
+    let (nonlethal_trace_tick_id, lethal_trace_tick_id) =
+        if event.character_id == SECOND_CHARACTER_ID {
+            (SECOND_NONLETHAL_TRACE_TICK_ID, SECOND_LETHAL_TRACE_TICK_ID)
+        } else {
+            (NONLETHAL_TRACE_TICK_ID, LETHAL_TRACE_TICK_ID)
+        };
     let danger = LiveDamageTraceDangerAuthorityV1 {
-        lineage_id: LINEAGE_ID,
-        restore_point_id: RESTORE_POINT_ID,
+        lineage_id: event.lineage_id,
+        restore_point_id: event.restore_point_id,
         checkpoint_tick: 19_990,
     };
     let content = LiveDamageTraceContentAuthorityV1::core();
     let nonlethal_entry = live_trace_entry(&death.plan.trace[0]);
     let nonlethal_request = LiveDamageTraceTickRequestV1::seal(LiveDamageTraceTickCommandV1 {
-        account_id: ACCOUNT_ID,
-        character_id: CHARACTER_ID,
-        trace_tick_id: NONLETHAL_TRACE_TICK_ID,
+        account_id: event.account_id,
+        character_id: event.character_id,
+        trace_tick_id: nonlethal_trace_tick_id,
         expected_character_version: death.plan.event.versions.character.pre,
         expected_previous: None,
         event_tick: death.plan.trace[0].event_tick,
@@ -871,7 +1163,7 @@ async fn seed_hosted_death_trace(
     };
 
     let snapshot = persistence
-        .load_live_damage_trace_snapshot_v1(ACCOUNT_ID, CHARACTER_ID)
+        .load_live_damage_trace_snapshot_v1(event.account_id, event.character_id)
         .await
         .unwrap();
     assert_eq!(
@@ -885,9 +1177,9 @@ async fn seed_hosted_death_trace(
 
     let lethal_entry = live_trace_entry(death.plan.trace.last().unwrap());
     let lethal_request = LiveDamageTraceTickRequestV1::seal(LiveDamageTraceTickCommandV1 {
-        account_id: ACCOUNT_ID,
-        character_id: CHARACTER_ID,
-        trace_tick_id: LETHAL_TRACE_TICK_ID,
+        account_id: event.account_id,
+        character_id: event.character_id,
+        trace_tick_id: lethal_trace_tick_id,
         expected_character_version: death.plan.event.versions.character.pre,
         expected_previous: Some(head),
         event_tick: death.plan.event.death_tick,
@@ -899,7 +1191,7 @@ async fn seed_hosted_death_trace(
     .unwrap();
     let mut full_window = snapshot.entries;
     full_window.push(StoredLiveDamageTraceSnapshotEntryV1 {
-        trace_tick_id: LETHAL_TRACE_TICK_ID,
+        trace_tick_id: lethal_trace_tick_id,
         event_tick: death.plan.event.death_tick,
         entry: lethal_entry,
     });
@@ -1002,6 +1294,10 @@ fn derived_id(context: &str, parts: &[&[u8]]) -> [u8; 16] {
     value
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the explicit table allowlist keeps every terminal-graph count query auditable"
+)]
 async fn count(persistence: &PostgresPersistence, table: &str) -> i64 {
     let query = match table {
         "accounts" => "SELECT count(*) FROM accounts WHERE namespace_id=$1 AND account_id=$2",
@@ -1067,6 +1363,14 @@ async fn count(persistence: &PostgresPersistence, table: &str) -> i64 {
              JOIN death_events AS death USING (namespace_id,death_id) \
              WHERE outbox.namespace_id=$1 AND death.account_id=$2"
         }
+        "death_successor_presets_v1" => {
+            "SELECT count(*) FROM death_successor_presets_v1 \
+             WHERE namespace_id=$1 AND account_id=$2"
+        }
+        "successor_roster_reservations_v1" => {
+            "SELECT count(*) FROM successor_roster_reservations_v1 \
+             WHERE namespace_id=$1 AND account_id=$2"
+        }
         "character_live_damage_trace_ingest_receipts_v1" => {
             "SELECT count(*) FROM character_live_damage_trace_ingest_receipts_v1 \
              WHERE namespace_id=$1 AND account_id=$2"
@@ -1100,6 +1404,112 @@ async fn count(persistence: &PostgresPersistence, table: &str) -> i64 {
         .unwrap();
     transaction.rollback().await.unwrap();
     value
+}
+
+async fn assert_successor_death_authority(
+    persistence: &PostgresPersistence,
+    death: &DurableDeathCommitRequestV1,
+    expected_reservation_state: i16,
+    expected_superseded_by_death_id: Option<[u8; 16]>,
+) {
+    // Authorities: Production GDD DTH-020/021 and TECH-021/023, Content Spec
+    // CONT-CATALOG-003, and Roadmap GB-M03-07 require the immutable preset and roster
+    // reservation to be part of the committed ordinary-death graph, never reconstructed later.
+    let expected = DurableSuccessorPresetV1::from_death_plan(&death.plan)
+        .unwrap()
+        .expect("ordinary death carries universal successor authority");
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let row = sqlx::query(
+        "SELECT preset.former_character_id,preset.preset_revision, \
+                preset.former_roster_ordinal,preset.class_id,preset.appearance_kind, \
+                preset.base_silhouette_id,preset.content_revision,preset.preset_hash, \
+                reservation.reservation_state,reservation.superseded_by_death_id, \
+                preset.created_at = reservation.reserved_at AS one_commit_timestamp \
+         FROM death_successor_presets_v1 AS preset \
+         JOIN successor_roster_reservations_v1 AS reservation \
+           USING (namespace_id,account_id,death_id,former_roster_ordinal) \
+         WHERE preset.namespace_id=$1 AND preset.account_id=$2 AND preset.death_id=$3",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(death.plan.event.account_id.as_slice())
+    .bind(death.plan.event.death_id.as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    assert_eq!(
+        row.get::<Vec<u8>, _>("former_character_id"),
+        expected.former_character_id
+    );
+    assert_eq!(row.get::<i16, _>("preset_revision"), 1);
+    assert_eq!(
+        row.get::<i16, _>("former_roster_ordinal"),
+        i16::from(expected.former_roster_ordinal)
+    );
+    assert_eq!(row.get::<String, _>("class_id"), expected.class_id);
+    assert_eq!(
+        row.get::<i16, _>("appearance_kind"),
+        i16::try_from(expected.appearance_kind).unwrap()
+    );
+    assert_eq!(
+        row.get::<String, _>("base_silhouette_id"),
+        expected.base_silhouette_id
+    );
+    assert_eq!(
+        row.get::<String, _>("content_revision"),
+        expected.content_revision
+    );
+    assert_eq!(row.get::<Vec<u8>, _>("preset_hash"), expected.preset_hash);
+    assert_eq!(
+        row.get::<i16, _>("reservation_state"),
+        expected_reservation_state
+    );
+    assert_eq!(
+        row.get::<Option<Vec<u8>>, _>("superseded_by_death_id"),
+        expected_superseded_by_death_id.map(Vec::from)
+    );
+    assert!(row.get::<bool, _>("one_commit_timestamp"));
+    transaction.rollback().await.unwrap();
+}
+
+async fn assert_no_successor_death_authority(
+    persistence: &PostgresPersistence,
+    death_id: [u8; 16],
+) {
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let counts = sqlx::query(
+        "SELECT \
+            (SELECT count(*) FROM death_successor_presets_v1 \
+             WHERE namespace_id=$1 AND account_id=$2 AND death_id=$3) AS preset_count, \
+            (SELECT count(*) FROM successor_roster_reservations_v1 \
+             WHERE namespace_id=$1 AND account_id=$2 AND death_id=$3) AS reservation_count",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(death_id.as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    assert_eq!(counts.get::<i64, _>("preset_count"), 0);
+    assert_eq!(counts.get::<i64, _>("reservation_count"), 0);
+    transaction.rollback().await.unwrap();
+}
+
+async fn select_second_character_after_primary_death(persistence: &PostgresPersistence) {
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let changed = sqlx::query(
+        "UPDATE accounts SET selected_character_id=$1 \
+         WHERE namespace_id=$2 AND account_id=$3 AND state_version=2 \
+           AND selected_character_id IS NULL",
+    )
+    .bind(SECOND_CHARACTER_ID.as_slice())
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap()
+    .rows_affected();
+    assert_eq!(changed, 1);
+    transaction.commit().await.unwrap();
 }
 
 async fn assert_death_closed_lineage(connection: &mut sqlx::PgConnection) {
@@ -1296,6 +1706,8 @@ async fn assert_complete_graph(persistence: &PostgresPersistence, ids: RequestId
         ("echo_records", 1),
         ("echo_state_transitions", 2),
         ("death_outbox_events", 3),
+        ("death_successor_presets_v1", 1),
+        ("successor_roster_reservations_v1", 1),
         ("character_live_damage_trace_ingest_receipts_v1", 2),
         ("death_live_trace_sets_v1", 1),
         ("death_live_trace_receipt_links_v1", 2),
@@ -1304,6 +1716,7 @@ async fn assert_complete_graph(persistence: &PostgresPersistence, ids: RequestId
     ] {
         assert_eq!(count(persistence, table).await, expected, "{table}");
     }
+    assert_successor_death_authority(persistence, &request(ids), 0, None).await;
 }
 
 async fn assert_zero_custody_complete_graph(persistence: &PostgresPersistence, ids: RequestIds) {
@@ -1359,6 +1772,8 @@ async fn assert_zero_custody_complete_graph(persistence: &PostgresPersistence, i
         ("echo_records", 1),
         ("echo_state_transitions", 2),
         ("death_outbox_events", 3),
+        ("death_successor_presets_v1", 1),
+        ("successor_roster_reservations_v1", 1),
         ("character_live_damage_trace_ingest_receipts_v1", 2),
         ("death_live_trace_sets_v1", 1),
         ("death_live_trace_receipt_links_v1", 2),
@@ -1367,6 +1782,7 @@ async fn assert_zero_custody_complete_graph(persistence: &PostgresPersistence, i
     ] {
         assert_eq!(count(persistence, table).await, expected, "{table}");
     }
+    assert_successor_death_authority(persistence, &zero_custody_request(ids), 0, None).await;
 
     let latest = persistence
         .load_latest_committed_death_view(ACCOUNT_ID)
@@ -1413,6 +1829,8 @@ async fn assert_rollback_pristine(persistence: &PostgresPersistence) {
         ("death_mutation_results", 0),
         ("death_audit_events", 0),
         ("death_outbox_events", 0),
+        ("death_successor_presets_v1", 0),
+        ("successor_roster_reservations_v1", 0),
         ("echo_records", 0),
         ("echo_state_transitions", 0),
         ("character_live_damage_trace_ingest_receipts_v1", 1),
@@ -2123,7 +2541,7 @@ struct DurableDeathFaultBoundary {
     timing: FaultTriggerTiming,
 }
 
-const DURABLE_DEATH_FAULT_BOUNDARIES: [DurableDeathFaultBoundary; 7] = [
+const DURABLE_DEATH_FAULT_BOUNDARIES: [DurableDeathFaultBoundary; 9] = [
     DurableDeathFaultBoundary {
         label: "bargain cleanup",
         table: "character_oath_bargain_state",
@@ -2138,6 +2556,22 @@ const DURABLE_DEATH_FAULT_BOUNDARIES: [DurableDeathFaultBoundary; 7] = [
         timing: FaultTriggerTiming::Before {
             operation: "INSERT",
             predicate: Some("NEW.terminal_death_id IS NOT NULL"),
+        },
+    },
+    DurableDeathFaultBoundary {
+        label: "successor preset",
+        table: "death_successor_presets_v1",
+        timing: FaultTriggerTiming::Before {
+            operation: "INSERT",
+            predicate: None,
+        },
+    },
+    DurableDeathFaultBoundary {
+        label: "successor reservation",
+        table: "successor_roster_reservations_v1",
+        timing: FaultTriggerTiming::Before {
+            operation: "INSERT",
+            predicate: None,
         },
     },
     DurableDeathFaultBoundary {
@@ -2959,6 +3393,125 @@ async fn qualifying_zero_custody_death_commits_complete_graph_and_replays_exactl
         committed_signature
     );
     assert_zero_custody_complete_graph(&persistence, RequestIds::primary()).await;
+    persistence.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires explicitly authorized disposable PostgreSQL"]
+async fn later_ordinary_death_supersedes_the_prior_successor_reservation() {
+    // Authorities: Production GDD DTH-020/021 and UI-007-009, Content Spec
+    // CONT-CATALOG-003, and Roadmap GB-M03-07 require the latest unconsumed ordinary death to own
+    // the exact reusable roster slot without manufacturing a second active reservation.
+    let persistence = disposable_database().await;
+    let content = content_authority();
+    reset_zero_custody_fixture(&persistence).await;
+    stage_second_zero_custody_character(&persistence).await;
+
+    let primary = zero_custody_request(RequestIds::primary());
+    let primary_evidence = seed_hosted_death_trace(&persistence, &primary).await;
+    let primary_promotion = primary_evidence.promotion_for(&primary);
+    let primary_fresh = persistence
+        .transact_durable_death(&primary, &content, &primary_promotion)
+        .await
+        .unwrap();
+    assert!(matches!(primary_fresh, DurableDeathTransactionV1::Fresh(_)));
+    assert_successor_death_authority(&persistence, &primary, 0, None).await;
+    select_second_character_after_primary_death(&persistence).await;
+
+    let secondary = second_zero_custody_request(
+        RequestIds::secondary(),
+        DurableDeathProvenanceV1::OrdinaryGameplay,
+    );
+    let secondary_evidence = seed_hosted_death_trace(&persistence, &secondary).await;
+    let secondary_promotion = secondary_evidence.promotion_for(&secondary);
+    let secondary_fresh = persistence
+        .transact_durable_death(&secondary, &content, &secondary_promotion)
+        .await
+        .unwrap();
+    assert!(matches!(
+        secondary_fresh,
+        DurableDeathTransactionV1::Fresh(_)
+    ));
+    assert_successor_death_authority(
+        &persistence,
+        &primary,
+        2,
+        Some(RequestIds::secondary().death_id),
+    )
+    .await;
+    assert_successor_death_authority(&persistence, &secondary, 0, None).await;
+    assert_eq!(count(&persistence, "death_successor_presets_v1").await, 2);
+    assert_eq!(
+        count(&persistence, "successor_roster_reservations_v1").await,
+        2
+    );
+
+    let replay = persistence
+        .transact_durable_death(&secondary, &content, &secondary_promotion)
+        .await
+        .unwrap();
+    assert!(replay.is_replay());
+    assert_eq!(replay.result(), secondary_fresh.result());
+    assert_successor_death_authority(
+        &persistence,
+        &primary,
+        2,
+        Some(RequestIds::secondary().death_id),
+    )
+    .await;
+    assert_successor_death_authority(&persistence, &secondary, 0, None).await;
+    persistence.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires explicitly authorized disposable PostgreSQL"]
+async fn incident_and_administrative_deaths_preserve_prior_successor_authority() {
+    // The same three authorities and accepted SPEC-CONFLICT-031 reserve successor recovery for
+    // normal player-visible deaths. Incident/admin records remain durable but may neither mint nor
+    // supersede that authority.
+    let persistence = disposable_database().await;
+    let content = content_authority();
+    for provenance in [
+        DurableDeathProvenanceV1::VerifiedServerIncident,
+        DurableDeathProvenanceV1::AdministrativeAction,
+    ] {
+        reset_zero_custody_fixture(&persistence).await;
+        stage_second_zero_custody_character(&persistence).await;
+        let primary = zero_custody_request(RequestIds::primary());
+        let primary_evidence = seed_hosted_death_trace(&persistence, &primary).await;
+        let primary_promotion = primary_evidence.promotion_for(&primary);
+        persistence
+            .transact_durable_death(&primary, &content, &primary_promotion)
+            .await
+            .unwrap();
+        assert_successor_death_authority(&persistence, &primary, 0, None).await;
+        select_second_character_after_primary_death(&persistence).await;
+
+        let nonordinary = second_zero_custody_request(RequestIds::incident(), provenance);
+        let evidence = seed_hosted_death_trace(&persistence, &nonordinary).await;
+        let promotion = evidence.promotion_for(&nonordinary);
+        let fresh = persistence
+            .transact_durable_death(&nonordinary, &content, &promotion)
+            .await
+            .unwrap();
+        assert!(matches!(fresh, DurableDeathTransactionV1::Fresh(_)));
+        assert_successor_death_authority(&persistence, &primary, 0, None).await;
+        assert_no_successor_death_authority(&persistence, nonordinary.plan.event.death_id).await;
+        assert_eq!(count(&persistence, "death_successor_presets_v1").await, 1);
+        assert_eq!(
+            count(&persistence, "successor_roster_reservations_v1").await,
+            1
+        );
+
+        let replay = persistence
+            .transact_durable_death(&nonordinary, &content, &promotion)
+            .await
+            .unwrap();
+        assert!(replay.is_replay());
+        assert_eq!(replay.result(), fresh.result());
+        assert_successor_death_authority(&persistence, &primary, 0, None).await;
+        assert_no_successor_death_authority(&persistence, nonordinary.plan.event.death_id).await;
+    }
     persistence.close().await;
 }
 

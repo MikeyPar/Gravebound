@@ -16,7 +16,7 @@ use crate::{
     DurableDeathCommitRequestV1, DurableDeathContentAuthorityV1, DurableDeathProvenanceV1,
     DurableDeathTraceEntryProvenanceV1, DurableDeathTracePromotionV1, DurableDestructionEntryV1,
     DurableDestructionLocationV1, DurableEchoEnvelopeV1, DurableEchoOutcomeV1, DurableEchoStateV1,
-    DurableEquipmentSlotV1, DurableNetworkStateV1, DurableRecallStateV1,
+    DurableEquipmentSlotV1, DurableNetworkStateV1, DurableRecallStateV1, DurableSuccessorPresetV1,
     DurableSummaryProjectionEntryV1, DurableSummaryProjectionKindV1,
     LiveDamageTraceContentAuthorityV1, LiveDamageTraceDangerAuthorityV1, PersistenceError,
     PersistenceTransaction, PostgresPersistence, StoredCommittedDeathResultV1,
@@ -88,6 +88,12 @@ impl DurableDeathTransactionV1 {
 struct AccountLock {
     version: u64,
     selected_character_id: Option<[u8; 16]>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ActiveSuccessorReservationLock {
+    death_id: [u8; 16],
+    former_roster_ordinal: u8,
 }
 
 #[derive(Debug)]
@@ -364,6 +370,11 @@ impl PostgresPersistence {
         {
             return finish_conflict(transaction, request, &stored).await;
         }
+        let active_successor_reservation = lock_active_successor_reservation(
+            transaction.connection(),
+            request.plan.event.account_id,
+        )
+        .await?;
 
         let committed_at_unix_ms = transaction_timestamp_ms(transaction.connection()).await?;
         let mut committed_request = request.clone();
@@ -426,6 +437,12 @@ impl PostgresPersistence {
         destroy_items(transaction.connection(), plan).await?;
         destroy_materials(transaction.connection(), plan).await?;
         insert_death_event(transaction.connection(), &committed_request).await?;
+        write_successor_death_authority(
+            transaction.connection(),
+            plan,
+            active_successor_reservation,
+        )
+        .await?;
         finalize_character_identity(transaction.connection(), plan).await?;
         insert_trace(transaction.connection(), plan).await?;
         insert_live_trace_promotion(transaction.connection(), plan, promotion, &live_window)
@@ -501,6 +518,35 @@ async fn lock_account(
         version: positive(row.try_get("state_version")?)?,
         selected_character_id: optional_id(row.try_get("selected_character_id")?)?,
     })
+}
+
+/// Locks the account's one unresolved normal-death reservation after replay checks.
+///
+/// The account row is already locked, so concurrent deaths and successor creation share the
+/// canonical account -> reservation order and cannot publish two active reservations.
+async fn lock_active_successor_reservation(
+    connection: &mut PgConnection,
+    account_id: [u8; 16],
+) -> Result<Option<ActiveSuccessorReservationLock>, PersistenceError> {
+    let row = sqlx::query(
+        "SELECT death_id, former_roster_ordinal FROM successor_roster_reservations_v1 \
+         WHERE namespace_id=$1 AND account_id=$2 AND reservation_state=0 FOR UPDATE",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .fetch_optional(connection)
+    .await?;
+    row.map(|row| {
+        let former_roster_ordinal = u8_value(row.try_get("former_roster_ordinal")?)?;
+        if !(1..=2).contains(&former_roster_ordinal) {
+            return Err(PersistenceError::CorruptStoredDurableDeath);
+        }
+        Ok(ActiveSuccessorReservationLock {
+            death_id: exact_id(row.try_get("death_id")?)?,
+            former_roster_ordinal,
+        })
+    })
+    .transpose()
 }
 
 async fn lock_character(
@@ -1635,6 +1681,75 @@ async fn insert_death_event(
     .bind(i64_value(event.versions.oath_bargain.pre)?)
     .bind(i64_value(event.versions.oath_bargain.post)?)
     .bind(death_provenance(event.provenance))
+    .execute(connection)
+    .await?;
+    Ok(())
+}
+
+/// Publishes the immutable successor preset and newest-reservation transition inside death.
+///
+/// Only ordinary gameplay death creates successor authority. A later ordinary death supersedes
+/// the prior active reservation; incident and administrative provenance leave it untouched.
+async fn write_successor_death_authority(
+    connection: &mut PgConnection,
+    plan: &AuthoritativeDeathPlanV1,
+    active: Option<ActiveSuccessorReservationLock>,
+) -> Result<(), PersistenceError> {
+    let Some(preset) = DurableSuccessorPresetV1::from_death_plan(plan)? else {
+        return Ok(());
+    };
+    if active.is_some_and(|reservation| reservation.death_id == preset.death_id) {
+        return Err(PersistenceError::CorruptStoredDurableDeath);
+    }
+
+    sqlx::query(
+        "INSERT INTO death_successor_presets_v1 (namespace_id, account_id, \
+             former_character_id, death_id, preset_revision, former_roster_ordinal, class_id, \
+             appearance_kind, base_silhouette_id, content_revision, preset_hash, created_at) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,transaction_timestamp())",
+    )
+    .bind(&preset.namespace_id)
+    .bind(preset.account_id.as_slice())
+    .bind(preset.former_character_id.as_slice())
+    .bind(preset.death_id.as_slice())
+    .bind(i16_value(crate::SUCCESSOR_PRESET_REVISION_V1)?)
+    .bind(i16::from(preset.former_roster_ordinal))
+    .bind(&preset.class_id)
+    .bind(i16_value(preset.appearance_kind)?)
+    .bind(&preset.base_silhouette_id)
+    .bind(&preset.content_revision)
+    .bind(preset.preset_hash.as_slice())
+    .execute(&mut *connection)
+    .await?;
+
+    if let Some(previous) = active {
+        expect_one(
+            sqlx::query(
+                "UPDATE successor_roster_reservations_v1 SET reservation_state=2, \
+                     superseded_by_death_id=$1, superseded_at=transaction_timestamp() \
+                 WHERE namespace_id=$2 AND account_id=$3 AND death_id=$4 \
+                   AND former_roster_ordinal=$5 AND reservation_state=0",
+            )
+            .bind(preset.death_id.as_slice())
+            .bind(&preset.namespace_id)
+            .bind(preset.account_id.as_slice())
+            .bind(previous.death_id.as_slice())
+            .bind(i16::from(previous.former_roster_ordinal))
+            .execute(&mut *connection)
+            .await?
+            .rows_affected(),
+        )?;
+    }
+
+    sqlx::query(
+        "INSERT INTO successor_roster_reservations_v1 (namespace_id, account_id, death_id, \
+             former_roster_ordinal, reservation_state, reserved_at) \
+         VALUES ($1,$2,$3,$4,0,transaction_timestamp())",
+    )
+    .bind(&preset.namespace_id)
+    .bind(preset.account_id.as_slice())
+    .bind(preset.death_id.as_slice())
+    .bind(i16::from(preset.former_roster_ordinal))
     .execute(connection)
     .await?;
     Ok(())

@@ -51,6 +51,7 @@ mod resolution_hold;
 mod resolution_hold_repository;
 mod reward;
 mod safe_inventory;
+mod successor;
 mod world_flow;
 
 pub use ash_wallet::{
@@ -258,6 +259,10 @@ pub use safe_inventory::{
     StoredSafeInventoryResult, StoredSafeInventorySnapshot, load_world_flow_safe_inventory,
     stage_world_flow_safe_inventory_preflight,
 };
+pub use successor::{
+    CORE_SUCCESSOR_BASE_SILHOUETTE_ID, CORE_SUCCESSOR_CLASS_ID, DurableSuccessorPresetV1,
+    SUCCESSOR_APPEARANCE_KIND_CORE_BASE_SILHOUETTE, SUCCESSOR_PRESET_REVISION_V1,
+};
 pub use world_flow::{
     StoredDangerEntryRootV3, StoredSafeArrival, StoredWorldFlowCharacter,
     StoredWorldFlowRevisionV1, StoredWorldLocation, StoredWorldTransferReceipt, WorldFlowBegin,
@@ -268,7 +273,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 59;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 60;
 const DISPOSABLE_DATABASE_RESET_SQL: &str = "TRUNCATE TABLE accounts, caldus_victory_exits CASCADE";
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -1733,7 +1738,7 @@ mod tests {
     #[test]
     fn deferred_death_graph_consumes_provenance_without_forking_its_closure() {
         assert_eq!(
-            EXPECTED_SCHEMA_VERSION, 59,
+            EXPECTED_SCHEMA_VERSION, 60,
             "readiness must advance with the latest published migration"
         );
         let migration = include_str!("../../../migrations/0054_death_provenance_echo_closure.sql");
@@ -1816,7 +1821,7 @@ mod tests {
     #[test]
     fn atomic_extraction_terminal_is_normalized_replay_first_and_fail_closed() {
         assert_eq!(
-            EXPECTED_SCHEMA_VERSION, 59,
+            EXPECTED_SCHEMA_VERSION, 60,
             "readiness must advance with the latest published terminal migration"
         );
         let migration = include_str!("../../../migrations/0056_atomic_extraction_terminal_v1.sql");
@@ -1869,7 +1874,7 @@ mod tests {
     #[test]
     fn atomic_recall_terminal_is_normalized_clock_complete_and_fail_closed() {
         assert_eq!(
-            EXPECTED_SCHEMA_VERSION, 59,
+            EXPECTED_SCHEMA_VERSION, 60,
             "readiness must advance with the atomic Recall terminal migration"
         );
         let migration = include_str!("../../../migrations/0057_atomic_recall_terminal_v1.sql");
@@ -1961,7 +1966,7 @@ mod tests {
     #[test]
     fn resolution_hold_recovery_is_whole_stack_replay_first_and_fail_closed() {
         assert_eq!(
-            EXPECTED_SCHEMA_VERSION, 59,
+            EXPECTED_SCHEMA_VERSION, 60,
             "readiness must advance with the ResolutionHold recovery migration"
         );
         let migration = include_str!("../../../migrations/0059_resolution_hold_recovery_v1.sql");
@@ -2018,6 +2023,63 @@ mod tests {
             assert!(
                 !migration.contains(prohibited),
                 "ResolutionHold recovery migration leaked {prohibited}"
+            );
+        }
+    }
+
+    #[test]
+    fn successor_recovery_authority_is_atomic_reserved_and_append_only() {
+        assert_eq!(
+            EXPECTED_SCHEMA_VERSION, 60,
+            "readiness must advance with the successor recovery migration"
+        );
+        let migration =
+            include_str!("../../../migrations/0060_successor_recovery_authority_v1.sql");
+        for required in [
+            "Gravebound_Production_GDD_v1_Canonical.md",
+            "Gravebound_Content_Production_Spec_v1.md",
+            "Gravebound_Development_Roadmap_v1.md",
+            "SPEC-CONFLICT-031",
+            "0060 requires no preexisting death rows",
+            "death_successor_presets_v1",
+            "successor_roster_reservations_v1",
+            "successor_mutation_results_v1",
+            "successor_creation_receipts_v1",
+            "successor_mutation_audit_events_v1",
+            "successor_mutation_conflict_audits_v1",
+            "successor_mutation_outbox_events_v1",
+            "reservation_state = 0",
+            "reservation_state = 1",
+            "reservation_state = 2",
+            "one_active_successor_reservation_v1",
+            "class_id = 'class.grave_arbalist'",
+            "base_silhouette_id = 'sprite.class.grave_arbalist'",
+            "preset_hash BYTEA NOT NULL",
+            "protocol_minor = 17",
+            "initializer_revision = 'starter.core-dev.v1'",
+            "receipt.item_content_revision = NEW.content_revision",
+            "item_count = 4",
+            "enforce_complete_death_successor_authority_v1",
+            "enforce_complete_successor_mutation_v1",
+            "complete_reserved_character_insert_v1",
+            "successor_resolution_required",
+            "successor outbox permits only first publication",
+            "published migration history is never dropped or rewritten",
+        ] {
+            assert!(migration.contains(required), "migration omitted {required}");
+        }
+        for prohibited in [
+            "DROP TABLE",
+            "TRUNCATE",
+            "DELETE FROM",
+            "JSON",
+            "JSONB",
+            "FLOAT",
+            "DOUBLE PRECISION",
+        ] {
+            assert!(
+                !migration.contains(prohibited),
+                "successor recovery migration leaked {prohibited}"
             );
         }
     }

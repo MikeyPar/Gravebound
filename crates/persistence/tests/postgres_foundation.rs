@@ -84,6 +84,7 @@ const EXPECTED_PUBLIC_TABLES: &[&str] = &[
     "death_live_trace_sets_v1",
     "death_mutation_results",
     "death_outbox_events",
+    "death_successor_presets_v1",
     "death_summary_bargains",
     "death_summary_damage_entries",
     "death_summary_projection_entries",
@@ -131,6 +132,12 @@ const EXPECTED_PUBLIC_TABLES: &[&str] = &[
     "safe_inventory_mutations",
     "safe_inventory_placements",
     "starter_initializer_results",
+    "successor_creation_receipts_v1",
+    "successor_mutation_audit_events_v1",
+    "successor_mutation_conflict_audits_v1",
+    "successor_mutation_outbox_events_v1",
+    "successor_mutation_results_v1",
+    "successor_roster_reservations_v1",
 ];
 
 async fn disposable_database() -> PostgresPersistence {
