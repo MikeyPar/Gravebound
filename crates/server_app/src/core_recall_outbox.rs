@@ -13,7 +13,7 @@
 
 use protocol::{CharacterLocationSnapshot, ReliableEvent, ReliableEventFrame};
 use thiserror::Error;
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex, MutexGuard, mpsc};
 
 use crate::{
     CoreRecallTerminalTickOutcome, ProductionRecallExecutionError, ProductionRecallPublishedV1,
@@ -41,6 +41,27 @@ pub struct CoreReliableSequence {
 pub struct CoreRecallCompletionDelivery {
     pub frame: ReliableEventFrame,
     pub hall: CharacterLocationSnapshot,
+}
+
+/// One connection's reliable-event writer. Client responses and server-generated completion
+/// pushes take the same sequence mutex only after a stream/publication is ready, so neither can
+/// reserve a sequence while waiting indefinitely for the other producer.
+#[derive(Debug)]
+pub struct CoreRecallReliableWriter {
+    connection: quinn::Connection,
+    sequence: Mutex<CoreReliableSequence>,
+}
+
+pub struct CoreRecallResponsePermit<'a> {
+    _sequence_guard: MutexGuard<'a, CoreReliableSequence>,
+    sequence: u32,
+}
+
+impl CoreRecallResponsePermit<'_> {
+    #[must_use]
+    pub const fn sequence(&self) -> u32 {
+        self.sequence
+    }
 }
 
 #[derive(Debug, Error)]
@@ -139,7 +160,90 @@ impl CoreReliableSequence {
     }
 }
 
+impl CoreRecallReliableWriter {
+    #[must_use]
+    pub fn new(connection: quinn::Connection) -> Self {
+        Self {
+            connection,
+            sequence: Mutex::new(CoreReliableSequence::new()),
+        }
+    }
+
+    #[must_use]
+    pub const fn connection(&self) -> &quinn::Connection {
+        &self.connection
+    }
+
+    /// Reserves one response sequence after the caller has accepted a concrete request stream.
+    /// Retaining the permit through response delivery serializes it with server pushes.
+    pub async fn begin_response(
+        &self,
+    ) -> Result<CoreRecallResponsePermit<'_>, CoreRecallOutboxError> {
+        let mut sequence_guard = self.sequence.lock().await;
+        let sequence = sequence_guard.next_sequence()?;
+        Ok(CoreRecallResponsePermit {
+            _sequence_guard: sequence_guard,
+            sequence,
+        })
+    }
+
+    /// Delivers one already committed publication while holding the same sequence authority used
+    /// by client-request responses. Transport loss never changes its durable replay state.
+    pub async fn send_publication(
+        &self,
+        published: ProductionRecallPublishedV1,
+    ) -> Result<CoreRecallCompletionDelivery, CoreRecallOutboxError> {
+        published
+            .validate()
+            .map_err(CoreRecallOutboxError::InvalidPublication)?;
+        let server_tick = published
+            .completion_tick()
+            .map_err(CoreRecallOutboxError::InvalidPublication)?;
+        let mut sequence = self.sequence.lock().await;
+        let frame = sequence.frame(
+            server_tick,
+            ReliableEvent::RecallResult(Box::new(published.result)),
+        )?;
+        send_server_reliable_event(&self.connection, &frame)
+            .await
+            .map_err(CoreRecallOutboxError::Transport)?;
+        Ok(CoreRecallCompletionDelivery {
+            frame,
+            hall: published.hall,
+        })
+    }
+
+    #[must_use]
+    pub async fn last_sequence(&self) -> u32 {
+        self.sequence.lock().await.last_sequence()
+    }
+}
+
 impl CoreRecallCompletionInbox {
+    pub fn close(&mut self) {
+        self.receiver.close();
+    }
+
+    #[must_use]
+    pub fn queued_publication_count(&self) -> usize {
+        self.receiver.len()
+    }
+
+    pub async fn receive_next(&mut self) -> Option<ProductionRecallPublishedV1> {
+        self.receiver.recv().await
+    }
+
+    /// Closes the per-session queue and discards any undelivered publications. Every value is
+    /// already durable and remains recoverable by exact actor/repository replay.
+    pub fn retire_undelivered(&mut self) -> usize {
+        self.close();
+        let mut retired = 0_usize;
+        while self.receiver.try_recv().is_ok() {
+            retired = retired.saturating_add(1);
+        }
+        retired
+    }
+
     /// Sends the next committed completion on a server-initiated QUIC stream. `Ok(None)` means
     /// every producer handle has retired and no queued completion remains.
     pub async fn send_next(
@@ -249,6 +353,24 @@ mod tests {
 
         let (outbox, inbox) = core_recall_completion_outbox();
         drop(inbox);
+        assert!(matches!(
+            outbox.try_publish(published()),
+            Err(CoreRecallOutboxError::SessionUnavailable)
+        ));
+
+        let (outbox, mut inbox) = core_recall_completion_outbox();
+        for _ in 0..CORE_RECALL_COMPLETION_OUTBOX_CAPACITY {
+            outbox.try_publish(published()).unwrap();
+        }
+        assert_eq!(
+            inbox.queued_publication_count(),
+            CORE_RECALL_COMPLETION_OUTBOX_CAPACITY
+        );
+        assert_eq!(
+            inbox.retire_undelivered(),
+            CORE_RECALL_COMPLETION_OUTBOX_CAPACITY
+        );
+        assert_eq!(inbox.queued_publication_count(), 0);
         assert!(matches!(
             outbox.try_publish(published()),
             Err(CoreRecallOutboxError::SessionUnavailable)

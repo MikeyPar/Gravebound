@@ -80,7 +80,8 @@ pub use core_lifecycle::{
 pub use core_recall_outbox::{
     CORE_RECALL_COMPLETION_OUTBOX_CAPACITY, CoreRecallCompletionDelivery,
     CoreRecallCompletionInbox, CoreRecallCompletionOutbox, CoreRecallOutboxError,
-    CoreReliableSequence, core_recall_completion_outbox,
+    CoreRecallReliableWriter, CoreRecallResponsePermit, CoreReliableSequence,
+    core_recall_completion_outbox,
 };
 pub use core_recall_runtime::{
     CoreRecallActorDirectory, CoreRecallAuthoritativeTick, CoreRecallConnectionAuthority,
