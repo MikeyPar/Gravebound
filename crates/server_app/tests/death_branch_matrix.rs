@@ -566,7 +566,12 @@ async fn durable_death_echo_branch_matrix_over_real_quic_and_postgresql() {
     samples.push(sample);
 
     persistence.reset_disposable_identity_data().await.unwrap();
+    let existing_available =
+        durable_death_fixture::DurableDeathScenarioV1::secondary_with_existing_available(
+            self_promotion.identity.echo_id,
+        );
     durable_death_fixture::seed_danger_root_for(&persistence, &self_promotion).await;
+    durable_death_fixture::precreate_living_character_for(&persistence, &existing_available).await;
     let predecessor =
         durable_death_fixture::prepare_death_for(persistence.clone(), &self_promotion).await;
     let (_, predecessor_result, _) = commit_prepared(&persistence, &predecessor).await;
@@ -574,10 +579,6 @@ async fn durable_death_echo_branch_matrix_over_real_quic_and_postgresql() {
         predecessor_result.echo_outcome,
         persistence::DurableEchoOutcomeV1::Available
     );
-    let existing_available =
-        durable_death_fixture::DurableDeathScenarioV1::secondary_with_existing_available(
-            self_promotion.identity.echo_id,
-        );
     let (sample, fixture) = Box::pin(run_branch(
         &persistence,
         &presentation,

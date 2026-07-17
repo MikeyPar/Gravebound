@@ -163,6 +163,8 @@ pub struct DurableDeathScenarioV1 {
     pub account_id: [u8; 16],
     pub identity: DurableDeathFixtureIdentityV1,
     pub reset_account: bool,
+    pub character_precreated: bool,
+    pub roster_ordinal: u8,
     pub account_pre_version: u64,
     pub inventory_pre_version: u64,
     pub level: u8,
@@ -180,6 +182,8 @@ impl DurableDeathScenarioV1 {
             account_id: ACCOUNT_ID,
             identity: PRIMARY_IDENTITY,
             reset_account: true,
+            character_precreated: false,
+            roster_ordinal: 1,
             account_pre_version: 1,
             inventory_pre_version: 2,
             level: 10,
@@ -201,6 +205,8 @@ impl DurableDeathScenarioV1 {
             account_id: ACCOUNT_ID,
             identity: SECONDARY_IDENTITY,
             reset_account: false,
+            character_precreated: true,
+            roster_ordinal: 2,
             account_pre_version: 2,
             inventory_pre_version: 2,
             level: 10,
@@ -222,6 +228,8 @@ impl DurableDeathScenarioV1 {
             account_id: PARALLEL_ACCOUNT_ID,
             identity: PARALLEL_IDENTITY,
             reset_account: true,
+            character_precreated: false,
+            roster_ordinal: 1,
             account_pre_version: 1,
             inventory_pre_version: 2,
             level: 10,
@@ -277,6 +285,44 @@ pub fn death_view_revision() -> DeathViewContentRevisionV1 {
 )]
 pub async fn seed_danger_root(persistence: &PostgresPersistence) {
     seed_danger_root_for(persistence, &DurableDeathScenarioV1::primary_eligible()).await;
+}
+
+/// Adds the second living roster identity before a predecessor death reserves successor recovery.
+/// The remaining aggregate roots are initialized only when that already-living identity is later
+/// selected for the hosted existing-Available Echo branch.
+#[allow(
+    dead_code,
+    reason = "only the hosted branch-matrix integration target needs a pre-existing second life"
+)]
+pub async fn precreate_living_character_for(
+    persistence: &PostgresPersistence,
+    scenario: &DurableDeathScenarioV1,
+) {
+    assert!(scenario.character_precreated);
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let account_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM accounts WHERE namespace_id=$1 AND account_id=$2)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(scenario.account_id.as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    assert!(account_exists);
+    sqlx::query(
+        "INSERT INTO characters (namespace_id,account_id,character_id,roster_ordinal,class_id, \
+         level,oath_id,life_state,security_state,character_state_version) \
+         VALUES ($1,$2,$3,$4,'class.grave_arbalist',$5,NULL,0,0,1)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(scenario.account_id.as_slice())
+    .bind(scenario.identity.character_id.as_slice())
+    .bind(i16::from(scenario.roster_ordinal))
+    .bind(i16::from(scenario.level))
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    transaction.commit().await.unwrap();
 }
 
 #[allow(
@@ -335,18 +381,44 @@ pub async fn seed_danger_root_for(
             (i64::try_from(scenario.account_pre_version).unwrap(), None)
         );
     }
-    sqlx::query(
-        "INSERT INTO characters (namespace_id,account_id,character_id,roster_ordinal,class_id, \
-         level,oath_id,life_state,security_state,character_state_version) \
-         VALUES ($1,$2,$3,1,'class.grave_arbalist',$4,NULL,0,0,1)",
-    )
-    .bind(WIPEABLE_CORE_NAMESPACE)
-    .bind(account_id.as_slice())
-    .bind(identity.character_id.as_slice())
-    .bind(i16::from(scenario.level))
-    .execute(transaction.connection())
-    .await
-    .unwrap();
+    if scenario.character_precreated {
+        let character: (i16, String, i16, i16, i16, i64) = sqlx::query_as(
+            "SELECT roster_ordinal,class_id,level,life_state,security_state, \
+             character_state_version FROM characters WHERE namespace_id=$1 AND account_id=$2 \
+             AND character_id=$3 FOR UPDATE",
+        )
+        .bind(WIPEABLE_CORE_NAMESPACE)
+        .bind(account_id.as_slice())
+        .bind(identity.character_id.as_slice())
+        .fetch_one(transaction.connection())
+        .await
+        .unwrap();
+        assert_eq!(
+            character,
+            (
+                i16::from(scenario.roster_ordinal),
+                "class.grave_arbalist".to_owned(),
+                i16::from(scenario.level),
+                0,
+                0,
+                1,
+            )
+        );
+    } else {
+        sqlx::query(
+            "INSERT INTO characters (namespace_id,account_id,character_id,roster_ordinal,class_id, \
+             level,oath_id,life_state,security_state,character_state_version) \
+             VALUES ($1,$2,$3,$4,'class.grave_arbalist',$5,NULL,0,0,1)",
+        )
+        .bind(WIPEABLE_CORE_NAMESPACE)
+        .bind(account_id.as_slice())
+        .bind(identity.character_id.as_slice())
+        .bind(i16::from(scenario.roster_ordinal))
+        .bind(i16::from(scenario.level))
+        .execute(transaction.connection())
+        .await
+        .unwrap();
+    }
     sqlx::query(
         "UPDATE accounts SET selected_character_id=$1 WHERE namespace_id=$2 AND account_id=$3",
     )
@@ -854,7 +926,7 @@ pub async fn prepare_death_for_with_custody(
         mutation: DeathMutationAuthority {
             authenticated_account: authenticated_account_for(account_id),
             selected_character_id: identity.character_id,
-            former_roster_ordinal: 1,
+            former_roster_ordinal: scenario.roster_ordinal,
             mutation_id: identity.death_mutation_id,
             death_id: identity.death_id,
             issued_at_unix_ms: ISSUED_AT_UNIX_MS,
