@@ -2809,7 +2809,9 @@ async fn successor_child_process_serves_stored_replay_over_real_quic() {
                     && result.death_id == durable_death_fixture::PRIMARY_IDENTITY.death_id
             )
     ));
-    server.close(0_u32.into(), b"successor child replay complete");
+    let _client_close = tokio::time::timeout(SUCCESSOR_SESSION_TIMEOUT, server.closed())
+        .await
+        .expect("successor child client must close the verified connection within thirty seconds");
     drop(server);
     endpoint.close(0_u32.into(), b"successor child replay complete");
     tokio::time::timeout(SUCCESSOR_TEARDOWN_TIMEOUT, endpoint.wait_idle())
