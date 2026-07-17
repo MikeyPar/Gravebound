@@ -8,6 +8,7 @@ mod account;
 mod bargain;
 mod bounded;
 mod codec;
+mod core_private_route;
 mod death_view;
 mod field_equipment;
 mod handshake;
@@ -41,7 +42,13 @@ pub use codec::{
     DATAGRAM_FRAME_LIMIT, FRAME_HEADER_BYTES, RELIABLE_FRAME_LIMIT, WireCodecError, decode_frame,
     encode_frame, encode_m02_compatibility_frame, encode_protocol_1_12_compatibility_frame,
     encode_protocol_1_14_compatibility_frame, encode_protocol_1_15_compatibility_frame,
-    encode_protocol_1_16_compatibility_frame,
+    encode_protocol_1_16_compatibility_frame, encode_protocol_1_17_compatibility_frame,
+};
+pub use core_private_route::{
+    CORE_PRIVATE_ROUTE_SCHEMA_VERSION, CorePrivateRouteAvailabilityV1,
+    CorePrivateRouteContentRevisionV1, CorePrivateRoutePhaseV1, CorePrivateRouteReadinessV1,
+    CorePrivateRouteRoomV1, CorePrivateRouteSceneV1, CorePrivateRouteStateV1,
+    CorePrivateRouteValidationError,
 };
 pub use death_view::{
     DEATH_SUMMARY_REVISION, DEATH_VIEW_CHARACTER_NAME_MAX_BYTES, DEATH_VIEW_DIGEST_BYTES,
@@ -136,7 +143,9 @@ use thiserror::Error;
 /// First incompatible protocol generation.
 pub const PROTOCOL_MAJOR: u16 = 1;
 /// Backward-compatible feature generation within [`PROTOCOL_MAJOR`].
-pub const PROTOCOL_MINOR: u16 = SUCCESSOR_PROTOCOL_MINOR;
+pub const PROTOCOL_MINOR: u16 = CORE_PRIVATE_ROUTE_PROTOCOL_MINOR;
+/// Exact ordinary Core private-route projection generation.
+pub const CORE_PRIVATE_ROUTE_PROTOCOL_MINOR: u16 = 18;
 /// Exact M03 successor recovery generation.
 pub const SUCCESSOR_PROTOCOL_MINOR: u16 = 17;
 /// Exact minimum `ResolutionHold` recovery generation.
@@ -395,8 +404,9 @@ mod tests {
     }
 
     #[test]
-    fn successor_appends_protocol_1_17_and_explicit_feature_negotiation() {
-        assert_eq!(PROTOCOL_MINOR, 17);
+    fn private_route_appends_protocol_1_18_and_reuses_truthful_route_negotiation() {
+        assert_eq!(PROTOCOL_MINOR, 18);
+        assert_eq!(CORE_PRIVATE_ROUTE_PROTOCOL_MINOR, 18);
         assert_eq!(SUCCESSOR_PROTOCOL_MINOR, 17);
         assert_eq!(RESOLUTION_HOLD_PROTOCOL_MINOR, 16);
         assert_eq!(TERMINAL_INVENTORY_PROTOCOL_MINOR, 15);
@@ -408,6 +418,7 @@ mod tests {
             CORE_RECALL_TERMINAL_FEATURE_FLAG,
             CORE_RESOLUTION_HOLD_FEATURE_FLAG,
             CORE_SUCCESSOR_FEATURE_FLAG,
+            CORE_WORLD_FLOW_FEATURE_FLAG,
         ] {
             assert!(WireText::<{ crate::handshake::FEATURE_FLAG_MAX_BYTES }>::new(feature).is_ok());
         }

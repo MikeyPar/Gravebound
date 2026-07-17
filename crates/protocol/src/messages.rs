@@ -6,10 +6,10 @@ use thiserror::Error;
 use crate::{
     AccountBootstrapFrame, AccountBootstrapResult, BargainDecisionFrame, BargainDecisionResult,
     BargainViewFrame, BargainViewResult, CharacterMutationFrame, CharacterMutationResult,
-    ClientHello, DeathViewFrameV1, DeathViewResultV1, ExtractionCommitFrameV1,
-    ExtractionCommitResultV1, HandshakeResponse, InitialOathSelectionFrame,
-    InitialOathSelectionResult, NetworkChannel, OathViewFrame, OathViewResult,
-    ProgressionQueryFrame, ProgressionResult, RecallFrameV1, RecallResultV1,
+    ClientHello, CorePrivateRouteStateV1, DeathViewFrameV1, DeathViewResultV1,
+    ExtractionCommitFrameV1, ExtractionCommitResultV1, HandshakeResponse,
+    InitialOathSelectionFrame, InitialOathSelectionResult, NetworkChannel, OathViewFrame,
+    OathViewResult, ProgressionQueryFrame, ProgressionResult, RecallFrameV1, RecallResultV1,
     ResolutionHoldMutationFrameV1, ResolutionHoldMutationResultV1, ResolutionHoldQueryFrameV1,
     ResolutionHoldQueryResultV1, SafeInventoryTransferFrameV1, SafeInventoryTransferResultV1,
     SuccessorCreateFrameV1, SuccessorCreateResultV1, WireText, WorldFlowFrame, WorldFlowResult,
@@ -457,6 +457,7 @@ pub enum ReliableEvent {
     ResolutionHoldQueryResult(Box<ResolutionHoldQueryResultV1>),
     ResolutionHoldMutationResult(Box<ResolutionHoldMutationResultV1>),
     SuccessorCreateResult(Box<SuccessorCreateResultV1>),
+    CorePrivateRouteState(Box<CorePrivateRouteStateV1>),
 }
 
 impl ReliableEvent {
@@ -480,7 +481,8 @@ impl ReliableEvent {
             | Self::OathViewResult(_)
             | Self::BargainViewResult(_)
             | Self::DeathViewResult(_)
-            | Self::ResolutionHoldQueryResult(_) => NetworkChannel::Control,
+            | Self::ResolutionHoldQueryResult(_)
+            | Self::CorePrivateRouteState(_) => NetworkChannel::Control,
             Self::SocialPing { .. } => NetworkChannel::Social,
         }
     }
@@ -540,6 +542,9 @@ impl ReliableEvent {
             Self::SuccessorCreateResult(result) => result
                 .validate()
                 .map_err(|_| MessageValidationError::Successor),
+            Self::CorePrivateRouteState(state) => state
+                .validate()
+                .map_err(|_| MessageValidationError::CorePrivateRoute),
             _ => Ok(()),
         }
     }
@@ -737,6 +742,8 @@ pub enum MessageValidationError {
     ResolutionHold,
     #[error("successor message failed semantic validation")]
     Successor,
+    #[error("Core private-route projection failed semantic validation")]
+    CorePrivateRoute,
     #[error("message sequence must be nonzero")]
     ZeroSequence,
     #[error("fixed-point vector component must remain within -1000..=1000")]

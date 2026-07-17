@@ -3,7 +3,7 @@ use thiserror::Error;
 
 use crate::{
     DEATH_VIEW_PROTOCOL_MINOR, M02_PROTOCOL_MINOR, MessageKind, PROTOCOL_MAJOR, ProtocolVersion,
-    RESOLUTION_HOLD_PROTOCOL_MINOR, SAFE_INVENTORY_PROTOCOL_MINOR,
+    RESOLUTION_HOLD_PROTOCOL_MINOR, SAFE_INVENTORY_PROTOCOL_MINOR, SUCCESSOR_PROTOCOL_MINOR,
     TERMINAL_INVENTORY_PROTOCOL_MINOR, WireMessage,
 };
 
@@ -22,6 +22,7 @@ pub fn encode_m02_compatibility_frame(message: &WireMessage) -> Result<Vec<u8>, 
     if message_uses_death_view(message)
         || message_uses_terminal_inventory(message)
         || message_uses_successor(message)
+        || message_uses_core_private_route(message)
         || matches!(
             message.kind(),
             MessageKind::AccountBootstrapFrame
@@ -56,6 +57,7 @@ pub fn encode_protocol_1_12_compatibility_frame(
     if message_uses_death_view(message)
         || message_uses_terminal_inventory(message)
         || message_uses_successor(message)
+        || message_uses_core_private_route(message)
     {
         return Err(WireCodecError::MessageUnavailableAtVersion);
     }
@@ -73,7 +75,10 @@ pub fn encode_protocol_1_12_compatibility_frame(
 pub fn encode_protocol_1_14_compatibility_frame(
     message: &WireMessage,
 ) -> Result<Vec<u8>, WireCodecError> {
-    if message_uses_terminal_inventory(message) || message_uses_successor(message) {
+    if message_uses_terminal_inventory(message)
+        || message_uses_successor(message)
+        || message_uses_core_private_route(message)
+    {
         return Err(WireCodecError::MessageUnavailableAtVersion);
     }
     encode_frame_for_version(
@@ -90,7 +95,10 @@ pub fn encode_protocol_1_14_compatibility_frame(
 pub fn encode_protocol_1_15_compatibility_frame(
     message: &WireMessage,
 ) -> Result<Vec<u8>, WireCodecError> {
-    if message_uses_resolution_hold(message) || message_uses_successor(message) {
+    if message_uses_resolution_hold(message)
+        || message_uses_successor(message)
+        || message_uses_core_private_route(message)
+    {
         return Err(WireCodecError::MessageUnavailableAtVersion);
     }
     encode_frame_for_version(
@@ -107,7 +115,7 @@ pub fn encode_protocol_1_15_compatibility_frame(
 pub fn encode_protocol_1_16_compatibility_frame(
     message: &WireMessage,
 ) -> Result<Vec<u8>, WireCodecError> {
-    if message_uses_successor(message) {
+    if message_uses_successor(message) || message_uses_core_private_route(message) {
         return Err(WireCodecError::MessageUnavailableAtVersion);
     }
     encode_frame_for_version(
@@ -115,6 +123,23 @@ pub fn encode_protocol_1_16_compatibility_frame(
         ProtocolVersion {
             major: PROTOCOL_MAJOR,
             minor: RESOLUTION_HOLD_PROTOCOL_MINOR,
+        },
+    )
+}
+
+/// Reproduces protocol 1.17 bytes for immutable successor and earlier compatibility fixtures.
+/// The normal Core private-route projection was appended in 1.18.
+pub fn encode_protocol_1_17_compatibility_frame(
+    message: &WireMessage,
+) -> Result<Vec<u8>, WireCodecError> {
+    if message_uses_core_private_route(message) {
+        return Err(WireCodecError::MessageUnavailableAtVersion);
+    }
+    encode_frame_for_version(
+        message,
+        ProtocolVersion {
+            major: PROTOCOL_MAJOR,
+            minor: SUCCESSOR_PROTOCOL_MINOR,
         },
     )
 }
@@ -168,6 +193,16 @@ const fn message_uses_successor(message: &WireMessage) -> bool {
                 event: crate::ReliableEvent::SuccessorCreateResult(_),
                 ..
             })
+    )
+}
+
+const fn message_uses_core_private_route(message: &WireMessage) -> bool {
+    matches!(
+        message,
+        WireMessage::ReliableEvent(crate::ReliableEventFrame {
+            event: crate::ReliableEvent::CorePrivateRouteState(_),
+            ..
+        })
     )
 }
 
@@ -493,7 +528,10 @@ mod tests {
         let frame = encode_frame(&input_message()).unwrap();
         assert!(frame.len() <= DATAGRAM_FRAME_LIMIT);
         assert_eq!(decode_frame(&frame).unwrap(), input_message());
-        assert_eq!(u16::from_le_bytes([frame[6], frame[7]]), 17);
+        assert_eq!(
+            u16::from_le_bytes([frame[6], frame[7]]),
+            crate::PROTOCOL_MINOR
+        );
         let protocol_1_14 = encode_protocol_1_14_compatibility_frame(&input_message()).unwrap();
         assert_eq!(
             blake3::hash(&protocol_1_14).to_hex().to_string(),
@@ -715,7 +753,10 @@ mod tests {
         });
 
         let frame = encode_frame(&transfer).unwrap();
-        assert_eq!(u16::from_le_bytes([frame[6], frame[7]]), 17);
+        assert_eq!(
+            u16::from_le_bytes([frame[6], frame[7]]),
+            crate::PROTOCOL_MINOR
+        );
         assert_eq!(decode_frame(&frame), Ok(transfer.clone()));
 
         let compatibility = encode_protocol_1_12_compatibility_frame(&transfer).unwrap();
@@ -739,7 +780,10 @@ mod tests {
                 payload,
             });
         let frame = encode_frame(&transfer).unwrap();
-        assert_eq!(u16::from_le_bytes([frame[6], frame[7]]), 17);
+        assert_eq!(
+            u16::from_le_bytes([frame[6], frame[7]]),
+            crate::PROTOCOL_MINOR
+        );
         assert_eq!(frame[8], 17);
         assert_eq!(decode_frame(&frame), Ok(transfer.clone()));
         let compatibility = encode_protocol_1_12_compatibility_frame(&transfer).unwrap();
@@ -790,7 +834,10 @@ mod tests {
             },
         });
         let frame = encode_frame(&request).unwrap();
-        assert_eq!(u16::from_le_bytes([frame[6], frame[7]]), 17);
+        assert_eq!(
+            u16::from_le_bytes([frame[6], frame[7]]),
+            crate::PROTOCOL_MINOR
+        );
         assert_eq!(frame[8], 18);
         assert_eq!(decode_frame(&frame), Ok(request.clone()));
         let compatibility = encode_protocol_1_14_compatibility_frame(&request).unwrap();
@@ -838,7 +885,7 @@ mod tests {
     }
 
     #[test]
-    fn append_only_message_kind_bytes_one_through_twenty_two_are_unchanged() {
+    fn append_only_message_kind_bytes_one_through_twenty_three_are_unchanged() {
         let legacy = [
             MessageKind::ClientHello,
             MessageKind::HandshakeResponse,
@@ -890,7 +937,7 @@ mod tests {
         let extraction_frame = encode_frame(&extraction).unwrap();
         assert_eq!(
             u16::from_le_bytes([extraction_frame[6], extraction_frame[7]]),
-            17
+            crate::PROTOCOL_MINOR
         );
         assert_eq!(extraction_frame[8], 19);
         assert_eq!(decode_frame(&extraction_frame), Ok(extraction.clone()));
@@ -1007,7 +1054,10 @@ mod tests {
             character_id: [2; 16],
         });
         let query_frame = encode_frame(&query).unwrap();
-        assert_eq!(u16::from_le_bytes([query_frame[6], query_frame[7]]), 17);
+        assert_eq!(
+            u16::from_le_bytes([query_frame[6], query_frame[7]]),
+            crate::PROTOCOL_MINOR
+        );
         assert_eq!(query_frame[8], 21);
         assert_eq!(query.channel(), crate::NetworkChannel::Control);
         assert_eq!(decode_frame(&query_frame), Ok(query.clone()));
@@ -1130,10 +1180,18 @@ mod tests {
         });
         let request_frame = encode_frame(&request).unwrap();
         assert!(request_frame.len() <= RELIABLE_FRAME_LIMIT);
-        assert_eq!(u16::from_le_bytes([request_frame[6], request_frame[7]]), 17);
+        assert_eq!(
+            u16::from_le_bytes([request_frame[6], request_frame[7]]),
+            crate::CORE_PRIVATE_ROUTE_PROTOCOL_MINOR
+        );
         assert_eq!(request_frame[8], 23);
         assert_eq!(request.channel(), crate::NetworkChannel::Mutation);
         assert_eq!(decode_frame(&request_frame), Ok(request.clone()));
+        let request_1_17 = encode_protocol_1_17_compatibility_frame(&request).unwrap();
+        assert_eq!(
+            u16::from_le_bytes([request_1_17[6], request_1_17[7]]),
+            crate::SUCCESSOR_PROTOCOL_MINOR
+        );
         assert_eq!(
             encode_protocol_1_16_compatibility_frame(&request),
             Err(WireCodecError::MessageUnavailableAtVersion)
@@ -1185,6 +1243,7 @@ mod tests {
         assert!(result_frame.len() <= RELIABLE_FRAME_LIMIT);
         assert_eq!(result.channel(), crate::NetworkChannel::Mutation);
         assert_eq!(decode_frame(&result_frame), Ok(result.clone()));
+        let result_1_17 = encode_protocol_1_17_compatibility_frame(&result).unwrap();
         assert_eq!(
             encode_protocol_1_16_compatibility_frame(&result),
             Err(WireCodecError::MessageUnavailableAtVersion)
@@ -1192,13 +1251,76 @@ mod tests {
 
         assert_eq!(
             [
-                blake3::hash(&request_frame).to_hex().to_string(),
-                blake3::hash(&result_frame).to_hex().to_string(),
+                blake3::hash(&request_1_17).to_hex().to_string(),
+                blake3::hash(&result_1_17).to_hex().to_string(),
             ],
             [
                 "a9d6ab9782a8fded68eaf13c495f055b767832a3d1828cf5e70cf9ad2c1210c1".to_owned(),
                 "e6637983577e1c06984fe499b58892964220451a054cfe07260a8e77895149cb".to_owned(),
             ]
+        );
+    }
+
+    #[test]
+    fn protocol_1_18_appends_server_only_bounded_private_route_projection() {
+        let phase = crate::CorePrivateRoutePhaseV1::BossExitReady;
+        let state = crate::CorePrivateRouteStateV1 {
+            schema_version: crate::CORE_PRIVATE_ROUTE_SCHEMA_VERSION,
+            character_id: [1; crate::CHARACTER_ID_BYTES],
+            character_version: 17,
+            content_revision: crate::CorePrivateRouteContentRevisionV1 {
+                records_blake3: ManifestHash::new("4".repeat(64)).unwrap(),
+                assets_blake3: ManifestHash::new("5".repeat(64)).unwrap(),
+                localization_blake3: ManifestHash::new("6".repeat(64)).unwrap(),
+            },
+            actor_generation: 9,
+            state_version: 41,
+            instance_lineage_id: Some([2; crate::INSTANCE_LINEAGE_ID_BYTES]),
+            scene: crate::CorePrivateRouteSceneV1::BellSepulcher,
+            room: Some(crate::CorePrivateRouteRoomV1::CaldusArenaB6),
+            phase,
+            readiness: crate::CorePrivateRouteReadinessV1::canonical(phase),
+        };
+        let event = crate::ReliableEvent::CorePrivateRouteState(Box::new(state));
+        let event_bytes = postcard::to_stdvec(&event).unwrap();
+        assert_eq!(
+            event_bytes[0], 20,
+            "new reliable event must remain tail discriminant 20"
+        );
+
+        let message = WireMessage::ReliableEvent(crate::ReliableEventFrame {
+            sequence: 25,
+            server_tick: 600,
+            event,
+        });
+        let frame = encode_frame(&message).unwrap();
+        assert!(frame.len() <= RELIABLE_FRAME_LIMIT);
+        assert_eq!(
+            u16::from_le_bytes([frame[6], frame[7]]),
+            crate::CORE_PRIVATE_ROUTE_PROTOCOL_MINOR
+        );
+        assert_eq!(frame[8], message_kind_byte(MessageKind::ReliableEvent));
+        assert_eq!(message.channel(), crate::NetworkChannel::Control);
+        assert_eq!(decode_frame(&frame), Ok(message.clone()));
+        assert_eq!(
+            encode_protocol_1_17_compatibility_frame(&message),
+            Err(WireCodecError::MessageUnavailableAtVersion)
+        );
+        assert_eq!(
+            blake3::hash(&frame).to_hex().to_string(),
+            "e3bf316608b5749e4ccb3bd02653690b70a6c15a5445e63dd0382e6b4a0c9770"
+        );
+
+        let WireMessage::ReliableEvent(mut invalid) = message else {
+            unreachable!();
+        };
+        let crate::ReliableEvent::CorePrivateRouteState(state) = &mut invalid.event else {
+            unreachable!();
+        };
+        state.readiness.extraction_available = crate::CorePrivateRouteAvailabilityV1::Unavailable;
+        assert_eq!(
+            encode_frame(&WireMessage::ReliableEvent(invalid)),
+            Err(WireCodecError::InvalidMessage)
         );
     }
 
