@@ -601,6 +601,7 @@ pub async fn serve_core_reliable<R, C, G, E, W, P, D, OC, BC, RA>(
     oath: &CoreOathSelectionAuthority<OC>,
     bargain: &CoreBargainAuthority<BC>,
     safe_inventory: &CoreSafeInventoryAuthority,
+    resolution_hold: &CoreResolutionHoldAuthority,
     extraction: &CoreExtractionTerminalAuthority,
     recall: &RA,
     authenticated: AuthenticatedAccount,
@@ -669,6 +670,16 @@ where
             protocol::ReliableEvent::SafeInventoryTransferResult(
                 safe_inventory.transfer(authenticated, &frame).await,
             )
+        }
+        WireMessage::ResolutionHoldQueryFrame(frame) => {
+            protocol::ReliableEvent::ResolutionHoldQueryResult(Box::new(
+                resolution_hold.query(authenticated, &frame).await,
+            ))
+        }
+        WireMessage::ResolutionHoldMutationFrame(frame) => {
+            protocol::ReliableEvent::ResolutionHoldMutationResult(Box::new(
+                resolution_hold.mutate(authenticated, &frame).await,
+            ))
         }
         WireMessage::ExtractionCommitFrame(frame) => {
             protocol::ReliableEvent::ExtractionCommitResult(Box::new(

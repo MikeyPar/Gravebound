@@ -27,8 +27,11 @@ use protocol::{
     AuthTicket, CharacterLocation, CharacterLocationSnapshot, ClientHello, Compression,
     DEATH_VIEW_SCHEMA_VERSION, DeathViewFrameV1, DeathViewRequestV1, DeathViewResultV1,
     ExtractionCommitFrameV1, ExtractionCommitPayloadV1, ExtractionCommitResultV1,
-    HandshakeResponse, ManifestHash, Platform, ProtocolVersion, RecallFrameV1, RecallIntentV1,
-    RecallResultV1, RecallTerminalTriggerV1, ReliableEvent, SafeArrival,
+    HandshakeResponse, ManifestHash, Platform, ProtocolVersion, RESOLUTION_HOLD_SCHEMA_VERSION,
+    RecallFrameV1, RecallIntentV1, RecallResultV1, RecallTerminalTriggerV1, ReliableEvent,
+    ResolutionHoldActionV1, ResolutionHoldMutationFrameV1, ResolutionHoldMutationPayloadV1,
+    ResolutionHoldMutationResultV1, ResolutionHoldQueryFrameV1, ResolutionHoldQueryResultV1,
+    ResolutionHoldRejectionCodeV1, ResolutionHoldVersionsV1, SafeArrival,
     StoredRecallTerminalResultV1, TERMINAL_HALL_CONTENT_ID, TERMINAL_INVENTORY_SCHEMA_VERSION,
     TerminalExpectedVersionsV1, TerminalInventoryRejectionCodeV1, TerminalVersionAdvanceV1,
     TerminalVersionVectorV1, WireText, WorldFlowContentRevisionV1, WorldFlowFrame,
@@ -43,9 +46,9 @@ use server_app::{
     CharacterIdGenerator, CoreBargainAuthority, CoreExtractionTerminalAuthority,
     CoreIdentityServerConfig, CoreIdentityServerReport, CoreNonTerminalAdmission,
     CoreOathSelectionAuthority, CoreRecallTerminalAuthority, CoreRecallTerminalTickOutcome,
-    CoreReliableSequence, CoreSafeInventoryAuthority, CoreTerminalCoordinator,
-    CoreTerminalEvaluation, CoreTerminalOtherEvaluationsV1, CoreTerminalProducer,
-    CoreTerminalTickSeal, DeathViewService, DisabledDeathViewRepository,
+    CoreReliableSequence, CoreResolutionHoldAuthority, CoreSafeInventoryAuthority,
+    CoreTerminalCoordinator, CoreTerminalEvaluation, CoreTerminalOtherEvaluationsV1,
+    CoreTerminalProducer, CoreTerminalTickSeal, DeathViewService, DisabledDeathViewRepository,
     DisabledProgressionQueryRepository, DisposableCoreJourneyWorldFlow, DurableDeathExecutionError,
     DurableDeathExecutionService, HandshakePolicy, IdentityClock, IdentityService,
     InMemoryAccountRepository, NoopIdentityEventSink, PostgresAccountRepository,
@@ -726,6 +729,38 @@ fn disabled_recall_frame() -> RecallFrameV1 {
     }
 }
 
+fn disabled_resolution_hold_frames() -> (ResolutionHoldQueryFrameV1, ResolutionHoldMutationFrameV1)
+{
+    let query = ResolutionHoldQueryFrameV1 {
+        schema_version: RESOLUTION_HOLD_SCHEMA_VERSION,
+        sequence: 2,
+        character_id: [63; 16],
+    };
+    let payload = ResolutionHoldMutationPayloadV1 {
+        extraction_id: [64; 16],
+        stack_index: 0,
+        action: ResolutionHoldActionV1::Move,
+        expected_versions: ResolutionHoldVersionsV1 {
+            account: 1,
+            character: 2,
+            world: 2,
+            inventory: 3,
+        },
+        content_revision: WireText::new(persistence::CORE_ITEM_CONTENT_REVISION).unwrap(),
+        expected_stack_digest: [65; 32],
+    };
+    let mutation = ResolutionHoldMutationFrameV1 {
+        schema_version: RESOLUTION_HOLD_SCHEMA_VERSION,
+        sequence: 3,
+        mutation_id: [66; 16],
+        character_id: [63; 16],
+        issued_at_unix_millis: 1,
+        payload_hash: payload.canonical_hash(),
+        payload,
+    };
+    (query, mutation)
+}
+
 fn production_death_view_hello() -> ClientHello {
     let (_, source_report) = sim_content::load_and_validate(&content_root()).unwrap();
     ClientHello {
@@ -885,6 +920,7 @@ async fn run_lost_death_summary_session(persistence: &PostgresPersistence) -> De
             &oath,
             &bargain,
             &safe_inventory,
+            &CoreResolutionHoldAuthority::disabled(),
             &extraction_terminal,
             &recall_terminal,
             authenticated,
@@ -905,6 +941,7 @@ async fn run_lost_death_summary_session(persistence: &PostgresPersistence) -> De
             &oath,
             &bargain,
             &safe_inventory,
+            &CoreResolutionHoldAuthority::disabled(),
             &extraction_terminal,
             &recall_terminal,
             authenticated,
@@ -1009,6 +1046,7 @@ async fn run_restarted_death_read_session(
                 &oath,
                 &bargain,
                 &safe_inventory,
+                &CoreResolutionHoldAuthority::disabled(),
                 &extraction_terminal,
                 &recall_terminal,
                 authenticated,
@@ -1243,6 +1281,7 @@ async fn run_reliable_core_journey(persistence: &PostgresPersistence) -> Duratio
                 &oath,
                 &bargain,
                 &safe_inventory,
+                &CoreResolutionHoldAuthority::disabled(),
                 &extraction_terminal,
                 &recall_terminal,
                 authenticated,
@@ -1366,7 +1405,11 @@ async fn run_reliable_core_journey(persistence: &PostgresPersistence) -> Duratio
 }
 
 #[tokio::test]
-async fn reliable_quic_rejects_disabled_extraction_before_domain_access() {
+#[allow(
+    clippy::too_many_lines,
+    reason = "one connection proves all adjacent terminal capabilities remain absent and fail closed"
+)]
+async fn reliable_quic_rejects_disabled_extraction_and_hold_before_domain_access() {
     let identity = IdentityService::new(
         InMemoryAccountRepository::default(),
         FixedAuthority,
@@ -1391,6 +1434,7 @@ async fn reliable_quic_rejects_disabled_extraction_before_domain_access() {
     let recall_terminal = CoreRecallTerminalAuthority::disabled();
     let authenticated = durable_death_fixture::authenticated_account();
     let frame = disabled_extraction_frame();
+    let (hold_query, hold_mutation) = disabled_resolution_hold_frames();
     let (server_endpoint, client_endpoint, address) = endpoints();
     let connecting = client_endpoint.connect(address, "localhost").unwrap();
     let incoming = server_endpoint.accept().await.unwrap();
@@ -1416,10 +1460,47 @@ async fn reliable_quic_rejects_disabled_extraction_before_domain_access() {
             &oath,
             &bargain,
             &safe_inventory,
+            &CoreResolutionHoldAuthority::disabled(),
             &extraction_terminal,
             &recall_terminal,
             authenticated,
             1,
+            100,
+        )
+        .await
+        .unwrap();
+        serve_core_reliable(
+            &server,
+            &identity,
+            &world_flow,
+            &progression,
+            &death_views,
+            &oath,
+            &bargain,
+            &safe_inventory,
+            &CoreResolutionHoldAuthority::disabled(),
+            &extraction_terminal,
+            &recall_terminal,
+            authenticated,
+            2,
+            100,
+        )
+        .await
+        .unwrap();
+        serve_core_reliable(
+            &server,
+            &identity,
+            &world_flow,
+            &progression,
+            &death_views,
+            &oath,
+            &bargain,
+            &safe_inventory,
+            &CoreResolutionHoldAuthority::disabled(),
+            &extraction_terminal,
+            &recall_terminal,
+            authenticated,
+            3,
             100,
         )
         .await
@@ -1439,6 +1520,12 @@ async fn reliable_quic_rejects_disabled_extraction_before_domain_access() {
                 .iter()
                 .all(|flag| flag.as_str() != protocol::CORE_EXTRACTION_TERMINAL_FEATURE_FLAG)
         );
+        assert!(
+            server_hello
+                .feature_flags
+                .iter()
+                .all(|flag| flag.as_str() != protocol::CORE_RESOLUTION_HOLD_FEATURE_FLAG)
+        );
         let event = bot_client::perform_reliable_gameplay(
             &client,
             protocol::WireMessage::ExtractionCommitFrame(frame),
@@ -1452,6 +1539,40 @@ async fn reliable_quic_rejects_disabled_extraction_before_domain_access() {
                     *result,
                     ExtractionCommitResultV1::Rejected {
                         code: TerminalInventoryRejectionCodeV1::FeatureDisabled,
+                        ..
+                    }
+                )
+        ));
+        let event = bot_client::perform_reliable_gameplay(
+            &client,
+            protocol::WireMessage::ResolutionHoldQueryFrame(hold_query),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            event.event,
+            ReliableEvent::ResolutionHoldQueryResult(result)
+                if matches!(
+                    *result,
+                    ResolutionHoldQueryResultV1::Rejected {
+                        code: ResolutionHoldRejectionCodeV1::FeatureDisabled,
+                        ..
+                    }
+                )
+        ));
+        let event = bot_client::perform_reliable_gameplay(
+            &client,
+            protocol::WireMessage::ResolutionHoldMutationFrame(hold_mutation),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            event.event,
+            ReliableEvent::ResolutionHoldMutationResult(result)
+                if matches!(
+                    *result,
+                    ResolutionHoldMutationResultV1::Rejected {
+                        code: ResolutionHoldRejectionCodeV1::FeatureDisabled,
                         ..
                     }
                 )
@@ -1515,6 +1636,7 @@ async fn reliable_quic_rejects_disabled_recall_before_domain_access() {
             &oath,
             &bargain,
             &safe_inventory,
+            &CoreResolutionHoldAuthority::disabled(),
             &extraction_terminal,
             &recall_terminal,
             authenticated,
@@ -1641,6 +1763,7 @@ async fn reliable_quic_dispatches_recall_to_one_actor_owned_channel() {
             &oath,
             &bargain,
             &safe_inventory,
+            &CoreResolutionHoldAuthority::disabled(),
             &extraction_terminal,
             &recall_handle,
             authenticated,
@@ -1658,6 +1781,7 @@ async fn reliable_quic_dispatches_recall_to_one_actor_owned_channel() {
             &oath,
             &bargain,
             &safe_inventory,
+            &CoreResolutionHoldAuthority::disabled(),
             &extraction_terminal,
             &recall_handle,
             authenticated,
@@ -1808,6 +1932,7 @@ async fn reliable_quic_pushes_committed_recall_without_a_second_client_request()
             &oath,
             &bargain,
             &safe_inventory,
+            &CoreResolutionHoldAuthority::disabled(),
             &extraction_terminal,
             &recall_handle,
             authenticated,
@@ -2009,6 +2134,7 @@ async fn reliable_quic_abandoned_recall_push_replays_on_exact_reconnect() {
             &oath,
             &bargain,
             &safe_inventory,
+            &CoreResolutionHoldAuthority::disabled(),
             &extraction_terminal,
             &recall_handle,
             authenticated,
@@ -2145,6 +2271,7 @@ async fn reliable_quic_postgres_recall_replays_after_pool_and_actor_restart() {
                 &oath,
                 &bargain,
                 &safe_inventory,
+                &CoreResolutionHoldAuthority::disabled(),
                 &extraction_terminal,
                 &recall_handle,
                 authenticated,
@@ -2363,6 +2490,7 @@ async fn reliable_quic_postgres_recall_replays_after_pool_and_actor_restart() {
                 &oath,
                 &bargain,
                 &safe_inventory,
+                &CoreResolutionHoldAuthority::disabled(),
                 &extraction_terminal,
                 &restarted_handle,
                 authenticated,
