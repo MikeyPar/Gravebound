@@ -790,7 +790,7 @@ async fn fill_all_terminal_storage(persistence: &PostgresPersistence) {
         .bind(account_version)
         .bind(character_version)
         .bind(progression_version)
-        .bind(inventory_version + 1)
+        .bind(inventory_version)
         .bind(oath_bargain_version)
         .bind(life_metrics_version)
         .bind(ash_wallet_version)
@@ -847,8 +847,8 @@ async fn fill_all_terminal_storage(persistence: &PostgresPersistence) {
             u64::try_from(inventory_version).unwrap()
         );
         assert_eq!(
-            inventory.post_inventory_version,
-            inventory.pre_inventory_version + 1
+            inventory.post_inventory_version, inventory.pre_inventory_version,
+            "an empty equipped/Belt capture must not manufacture an inventory mutation"
         );
         stage_danger_entry_oath_bargain_restore_v3(
             &mut transaction,
