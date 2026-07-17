@@ -144,7 +144,7 @@ Concept images establish mood, hierarchy, and visual language. They are not fina
 
 [`GB-M03-08`](docs/tasks/GB-M03-08.md) is complete under its [three-authority audit](docs/milestones/GB-M03-08-audit.md) and [integrated evidence](docs/evidence/GB-M03-08-integrated-evidence.md). Hosted CI [`29554811453`](https://github.com/MikeyPar/Gravebound/actions/runs/29554811453) is green for the exact audited source, including PostgreSQL, real QUIC, strict lint/tests/content validation, and optimized Windows construction.
 
-Proceed with `GB-M03-07`: persist an immutable universal successor preset, create exactly one restart-safe successor from the committed death, reuse the canonical starter initializer inside one serializable transaction, preselect the new character, and return to control in at most two confirmations. Then close parent `GB-M03-03`. Keep normal Character Select `Play`, production Realm Gate admission, Core promotion, and all M04+ features fail closed until their owning gates pass.
+Proceed with [`GB-M03-07`](docs/tasks/GB-M03-07.md) under accepted [`SPEC-CONFLICT-031`](docs/spec-conflicts/SPEC-CONFLICT-031-m03-successor-recovery-authority.md): persist an immutable universal successor preset, create exactly one restart-safe successor from the committed death, reuse the canonical starter initializer inside one serializable transaction, preselect the new character, and return to control in at most two confirmations. First add append-only protocol `1.17`/kind `23`, then migration `0060` and the atomic writer. Keep normal Character Select `Play`, production Realm Gate admission, Core promotion, and all M04+ features fail closed.
 
 ## Resolved prior handoff
 
