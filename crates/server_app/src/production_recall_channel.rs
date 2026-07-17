@@ -773,6 +773,18 @@ impl<Clock> ProductionRecallIntentActor<Clock> {
 }
 
 impl CoreRecallActorInbox {
+    /// Prevents new actor commands while allowing the owner to finish or abandon the bounded
+    /// commands already queued. Dropping the inbox after this call resolves every waiting
+    /// transport request as `SourceUnavailable` through its closed oneshot.
+    pub fn close(&mut self) {
+        self.receiver.close();
+    }
+
+    #[must_use]
+    pub fn queued_command_count(&self) -> usize {
+        self.receiver.len()
+    }
+
     /// Processes one bounded transport command inside the owning character actor's serialized
     /// turn. The actor supplies the authoritative tick; the transport fallback tick is never used
     /// for an accepted command.
@@ -784,9 +796,26 @@ impl CoreRecallActorInbox {
     where
         Clock: ProductionRecallClock,
     {
+        self.serve_next_with_tick(actor, || authoritative_tick)
+            .await
+    }
+
+    /// Resolves the authoritative tick after a command leaves the mailbox. A command can wait
+    /// across several simulation ticks, so reading the tick before `recv` would let queue latency
+    /// move gameplay authority backward.
+    pub async fn serve_next_with_tick<Clock, Tick>(
+        &mut self,
+        actor: &ProductionRecallIntentActor<Clock>,
+        authoritative_tick: Tick,
+    ) -> bool
+    where
+        Clock: ProductionRecallClock,
+        Tick: FnOnce() -> u64,
+    {
         let Some(command) = self.receiver.recv().await else {
             return false;
         };
+        let authoritative_tick = authoritative_tick();
         let result = actor
             .handle(command.authenticated, &command.frame, authoritative_tick)
             .await;

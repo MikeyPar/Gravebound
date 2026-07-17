@@ -14,6 +14,7 @@ mod combat_factory;
 mod core_journey_world_flow;
 mod core_lifecycle;
 mod core_recall_outbox;
+mod core_recall_runtime;
 mod core_terminal_coordinator;
 mod death_view_service;
 mod durable_death_execution;
@@ -80,6 +81,11 @@ pub use core_recall_outbox::{
     CORE_RECALL_COMPLETION_OUTBOX_CAPACITY, CoreRecallCompletionDelivery,
     CoreRecallCompletionInbox, CoreRecallCompletionOutbox, CoreRecallOutboxError,
     CoreReliableSequence, core_recall_completion_outbox,
+};
+pub use core_recall_runtime::{
+    CoreRecallActorDirectory, CoreRecallAuthoritativeTick, CoreRecallConnectionAuthority,
+    CoreRecallConnectionLease, CoreRecallRuntimeError, CoreRecallRuntimeReport,
+    CoreRecallTransportAttach,
 };
 pub use core_terminal_coordinator::{
     CoreNonTerminalAdmission, CoreTerminalBarrierProgress, CoreTerminalCoordinator,
