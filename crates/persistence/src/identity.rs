@@ -90,7 +90,10 @@ impl PostgresPersistence {
         let mut aggregate = load_aggregate(&mut transaction, &account_id).await?;
         let result = operation(&mut aggregate)?;
         persist_aggregate(&mut transaction, &account_id, &aggregate).await?;
-        transaction.commit().await?;
+        transaction
+            .commit()
+            .await
+            .map_err(map_identity_commit_error)?;
         Ok(result)
     }
 
@@ -111,6 +114,22 @@ impl PostgresPersistence {
         transaction.rollback().await?;
         owner.map(fixed_bytes).transpose()
     }
+}
+
+fn map_identity_commit_error(error: PersistenceError) -> PersistenceError {
+    if let PersistenceError::Database(sqlx::Error::Database(database)) = &error
+        && is_successor_resolution_required_diagnostic(
+            database.code().as_deref(),
+            database.message(),
+        )
+    {
+        return PersistenceError::SuccessorResolutionRequired;
+    }
+    error
+}
+
+fn is_successor_resolution_required_diagnostic(code: Option<&str>, message: &str) -> bool {
+    code == Some("P0001") && message == "successor_resolution_required"
 }
 
 async fn ensure_account(
@@ -380,4 +399,25 @@ fn fixed_bytes<const N: usize>(bytes: Vec<u8>) -> Result<[u8; N], PersistenceErr
     bytes
         .try_into()
         .map_err(|_| PersistenceError::CorruptStoredIdentity)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_successor_resolution_required_diagnostic;
+
+    #[test]
+    fn reserved_create_diagnostic_matching_is_exact() {
+        assert!(is_successor_resolution_required_diagnostic(
+            Some("P0001"),
+            "successor_resolution_required"
+        ));
+        assert!(!is_successor_resolution_required_diagnostic(
+            Some("40001"),
+            "successor_resolution_required"
+        ));
+        assert!(!is_successor_resolution_required_diagnostic(
+            Some("P0001"),
+            "successor mutation graph or starter publication is incomplete"
+        ));
+    }
 }

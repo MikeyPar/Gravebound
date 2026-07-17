@@ -1,3 +1,4 @@
+use sim_core::derive_starter_item_uid;
 use sqlx::Row;
 
 use crate::{PersistenceError, PostgresPersistence, WIPEABLE_CORE_NAMESPACE};
@@ -6,6 +7,8 @@ pub const STARTER_INITIALIZER_REVISION: &str = "starter.core-dev.v1";
 pub const STARTER_ITEM_COUNT: usize = 4;
 pub const CORE_ITEM_CONTENT_REVISION: &str =
     "core-dev.blake3.27818db710b7553520a162f6f8337dcd0419c459d20c6513a7e12c78fed24ebb";
+const STARTER_REQUEST_HASH_CONTEXT_V1: &str = "gravebound.starter-request.v1";
+const STARTER_RESULT_HASH_CONTEXT_V1: &str = "gravebound.starter-result.v1";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredStarterItem {
@@ -41,7 +44,7 @@ impl PostgresPersistence {
     ) -> Result<StoredStarterInitialization, PersistenceError> {
         const MAX_TRANSACTION_ATTEMPTS: u8 = 3;
 
-        validate_initializer_input(request_hash, result_hash, items)?;
+        validate_initializer_input(character_id, request_hash, result_hash, items)?;
         for attempt in 1..=MAX_TRANSACTION_ATTEMPTS {
             match self
                 .initialize_starter_items_once(
@@ -102,7 +105,7 @@ pub(crate) async fn initialize_starter_items_in_transaction(
     result_hash: [u8; 32],
     items: &[StoredStarterItem],
 ) -> Result<StoredStarterInitialization, PersistenceError> {
-    validate_initializer_input(request_hash, result_hash, items)?;
+    validate_initializer_input(character_id, request_hash, result_hash, items)?;
     let inventory_version = lock_or_create_inventory(connection, account_id, character_id).await?;
 
     if let Some(row) = sqlx::query(
@@ -126,7 +129,7 @@ pub(crate) async fn initialize_starter_items_in_transaction(
         let pre_inventory_version = row.try_get("pre_inventory_version")?;
         let post_inventory_version = row.try_get("post_inventory_version")?;
         let stored_items = load_starter_items(connection, account_id, character_id, items).await?;
-        validate_initializer_input(stored_request, stored_result, &stored_items)?;
+        validate_initializer_input(character_id, stored_request, stored_result, &stored_items)?;
         if stored_result != result_hash || stored_items != items {
             return Err(PersistenceError::CorruptStoredItems);
         }
@@ -325,12 +328,52 @@ fn starter_content_revision(item: &StoredStarterItem) -> Result<&'static str, Pe
     Ok(CORE_ITEM_CONTENT_REVISION)
 }
 
-fn validate_initializer_input(
+/// Derives the stable request digest for the exact Core starter initializer authority.
+pub fn canonical_starter_request_hash_v1(
+    character_id: [u8; 16],
+) -> Result<[u8; 32], PersistenceError> {
+    canonical_starter_hash(
+        STARTER_REQUEST_HASH_CONTEXT_V1,
+        &[
+            character_id.as_slice(),
+            STARTER_INITIALIZER_REVISION.as_bytes(),
+            CORE_ITEM_CONTENT_REVISION.as_bytes(),
+        ],
+    )
+}
+
+/// Derives the stable result digest for the ordered four-unit Core starter graph.
+pub fn canonical_starter_result_hash_v1(
+    request_hash: [u8; 32],
+    items: &[StoredStarterItem],
+) -> Result<[u8; 32], PersistenceError> {
+    let mut material = Vec::with_capacity(1 + items.len() * 6);
+    material.push(request_hash.to_vec());
+    for item in items {
+        material.extend([
+            item.item_uid.to_vec(),
+            item.template_id.as_bytes().to_vec(),
+            item.roll_index.to_le_bytes().to_vec(),
+            item.unit_ordinal.to_le_bytes().to_vec(),
+            item.location_kind.to_le_bytes().to_vec(),
+            item.slot_index.to_le_bytes().to_vec(),
+        ]);
+    }
+    let fields = material.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    canonical_starter_hash(STARTER_RESULT_HASH_CONTEXT_V1, &fields)
+}
+
+pub(crate) fn validate_initializer_input(
+    character_id: [u8; 16],
     request_hash: [u8; 32],
     result_hash: [u8; 32],
     items: &[StoredStarterItem],
 ) -> Result<(), PersistenceError> {
-    if request_hash == [0; 32] || result_hash == [0; 32] || items.len() != STARTER_ITEM_COUNT {
+    if character_id == [0; 16]
+        || items.len() != STARTER_ITEM_COUNT
+        || request_hash != canonical_starter_request_hash_v1(character_id)?
+        || result_hash != canonical_starter_result_hash_v1(request_hash, items)?
+    {
         return Err(PersistenceError::CorruptStoredItems);
     }
     for item in items {
@@ -343,7 +386,17 @@ fn validate_initializer_input(
         ("consumable.red_tonic", 1, 1, 0, 2, 1),
     ];
     for (item, (template, kind, location, slot, roll, unit)) in items.iter().zip(expected) {
+        let expected_uid = derive_starter_item_uid(
+            character_id,
+            STARTER_INITIALIZER_REVISION,
+            template,
+            u16::try_from(unit).map_err(|_| PersistenceError::CorruptStoredItems)?,
+        )
+        .map_err(|_| PersistenceError::CorruptStoredItems)?
+        .bytes();
         if item.template_id != template
+            || item.item_uid != expected_uid
+            || item.ledger_event_id != item.item_uid
             || item.item_kind != kind
             || item.location_kind != location
             || item.slot_index != slot
@@ -364,6 +417,17 @@ fn validate_initializer_input(
         return Err(PersistenceError::CorruptStoredItems);
     }
     Ok(())
+}
+
+fn canonical_starter_hash(context: &str, fields: &[&[u8]]) -> Result<[u8; 32], PersistenceError> {
+    let mut bytes = Vec::new();
+    for field in fields {
+        let length =
+            u32::try_from(field.len()).map_err(|_| PersistenceError::CorruptStoredItems)?;
+        bytes.extend_from_slice(&length.to_le_bytes());
+        bytes.extend_from_slice(field);
+    }
+    Ok(blake3::derive_key(context, &bytes))
 }
 
 fn validate_starter_item(item: &StoredStarterItem) -> Result<(), PersistenceError> {
@@ -389,67 +453,107 @@ fn fixed_bytes<const N: usize>(bytes: Vec<u8>) -> Result<[u8; N], PersistenceErr
 mod tests {
     use super::*;
 
-    fn starter_items() -> Vec<StoredStarterItem> {
-        vec![
-            StoredStarterItem {
-                item_uid: [1; 16],
-                ledger_event_id: [11; 16],
-                template_id: "item.weapon.crossbow.pine_crossbow".to_owned(),
-                item_kind: 0,
-                item_level: Some(1),
-                rarity: Some(0),
-                roll_index: 0,
-                unit_ordinal: 0,
-                location_kind: 0,
-                slot_index: 0,
-            },
-            StoredStarterItem {
-                item_uid: [2; 16],
-                ledger_event_id: [12; 16],
-                template_id: "item.relic.arbalist.cracked_mark_lens".to_owned(),
-                item_kind: 0,
-                item_level: Some(1),
-                rarity: Some(0),
-                roll_index: 1,
-                unit_ordinal: 0,
-                location_kind: 0,
-                slot_index: 1,
-            },
-            StoredStarterItem {
-                item_uid: [3; 16],
-                ledger_event_id: [13; 16],
-                template_id: "consumable.red_tonic".to_owned(),
-                item_kind: 1,
-                item_level: None,
-                rarity: None,
-                roll_index: 2,
-                unit_ordinal: 0,
-                location_kind: 1,
-                slot_index: 0,
-            },
-            StoredStarterItem {
-                item_uid: [4; 16],
-                ledger_event_id: [14; 16],
-                template_id: "consumable.red_tonic".to_owned(),
-                item_kind: 1,
-                item_level: None,
-                rarity: None,
-                roll_index: 2,
-                unit_ordinal: 1,
-                location_kind: 1,
-                slot_index: 0,
-            },
+    fn starter_items(character_id: [u8; 16]) -> Vec<StoredStarterItem> {
+        [
+            (
+                "item.weapon.crossbow.pine_crossbow",
+                0_i16,
+                Some(1_i16),
+                Some(0_i16),
+                0_i32,
+                0_i32,
+                0_i16,
+                0_i16,
+            ),
+            (
+                "item.relic.arbalist.cracked_mark_lens",
+                0,
+                Some(1),
+                Some(0),
+                1,
+                0,
+                0,
+                1,
+            ),
+            ("consumable.red_tonic", 1, None, None, 2, 0, 1, 0),
+            ("consumable.red_tonic", 1, None, None, 2, 1, 1, 0),
         ]
+        .into_iter()
+        .map(
+            |(
+                template_id,
+                item_kind,
+                item_level,
+                rarity,
+                roll_index,
+                unit_ordinal,
+                location_kind,
+                slot_index,
+            )| {
+                let item_uid = derive_starter_item_uid(
+                    character_id,
+                    STARTER_INITIALIZER_REVISION,
+                    template_id,
+                    u16::try_from(unit_ordinal).unwrap(),
+                )
+                .unwrap()
+                .bytes();
+                StoredStarterItem {
+                    item_uid,
+                    ledger_event_id: item_uid,
+                    template_id: template_id.to_owned(),
+                    item_kind,
+                    item_level,
+                    rarity,
+                    roll_index,
+                    unit_ordinal,
+                    location_kind,
+                    slot_index,
+                }
+            },
+        )
+        .collect()
     }
 
     #[test]
-    fn starter_shape_is_exact_and_unit_normalized() {
-        let mut items = starter_items();
-        assert!(validate_initializer_input([1; 32], [2; 32], &items).is_ok());
+    fn starter_shape_hashes_identities_and_units_are_exact() {
+        let character_id = [0x31; 16];
+        let request_hash = canonical_starter_request_hash_v1(character_id).unwrap();
+        let mut items = starter_items(character_id);
+        let result_hash = canonical_starter_result_hash_v1(request_hash, &items).unwrap();
+        assert!(
+            validate_initializer_input(character_id, request_hash, result_hash, &items).is_ok()
+        );
+
+        let mut altered_hash = request_hash;
+        altered_hash[0] ^= 1;
+        assert!(
+            validate_initializer_input(character_id, altered_hash, result_hash, &items).is_err()
+        );
+
+        let mut altered_hash = result_hash;
+        altered_hash[0] ^= 1;
+        assert!(
+            validate_initializer_input(character_id, request_hash, altered_hash, &items).is_err()
+        );
+
+        items[0].ledger_event_id[0] ^= 1;
+        let altered_result = canonical_starter_result_hash_v1(request_hash, &items).unwrap();
+        assert!(
+            validate_initializer_input(character_id, request_hash, altered_result, &items).is_err()
+        );
+
+        items = starter_items(character_id);
         items[3].unit_ordinal = 0;
-        assert!(validate_initializer_input([1; 32], [2; 32], &items).is_err());
-        items = starter_items();
+        let altered_result = canonical_starter_result_hash_v1(request_hash, &items).unwrap();
+        assert!(
+            validate_initializer_input(character_id, request_hash, altered_result, &items).is_err()
+        );
+        items = starter_items(character_id);
         items[2].slot_index = 1;
-        assert!(validate_initializer_input([1; 32], [2; 32], &items).is_err());
+        let altered_result = canonical_starter_result_hash_v1(request_hash, &items).unwrap();
+        assert!(
+            validate_initializer_input(character_id, request_hash, altered_result, &items).is_err()
+        );
     }
 }

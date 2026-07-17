@@ -52,6 +52,7 @@ mod resolution_hold_repository;
 mod reward;
 mod safe_inventory;
 mod successor;
+mod successor_repository;
 mod world_flow;
 
 pub use ash_wallet::{
@@ -172,7 +173,8 @@ pub use ground_expiry::{MAX_GROUND_EXPIRY_BATCH, StoredGroundExpiry, StoredGroun
 pub use identity::{StoredCharacter, StoredIdentityAggregate, StoredMutation};
 pub use items::{
     CORE_ITEM_CONTENT_REVISION, STARTER_INITIALIZER_REVISION, STARTER_ITEM_COUNT,
-    StoredStarterInitialization, StoredStarterItem,
+    StoredStarterInitialization, StoredStarterItem, canonical_starter_request_hash_v1,
+    canonical_starter_result_hash_v1,
 };
 pub use life_clock_repository::{
     LifeClockCheckpointCommandV1, LifeClockCheckpointRequestV1, LifeClockCheckpointTransactionV1,
@@ -261,7 +263,11 @@ pub use safe_inventory::{
 };
 pub use successor::{
     CORE_SUCCESSOR_BASE_SILHOUETTE_ID, CORE_SUCCESSOR_CLASS_ID, DurableSuccessorPresetV1,
-    SUCCESSOR_APPEARANCE_KIND_CORE_BASE_SILHOUETTE, SUCCESSOR_PRESET_REVISION_V1,
+    SUCCESSOR_APPEARANCE_KIND_CORE_BASE_SILHOUETTE, SUCCESSOR_CONTRACT_VERSION_V1,
+    SUCCESSOR_PRESET_REVISION_V1, SUCCESSOR_PROTOCOL_MAJOR_V1, SUCCESSOR_PROTOCOL_MINOR_V1,
+    StoredSuccessorAppearanceV1, StoredSuccessorResultV1, StoredSuccessorStarterItemsV1,
+    StoredSuccessorVersionsV1, SuccessorCreateRequestV1, SuccessorCreateTransactionV1,
+    derive_successor_character_id_v1, derive_successor_receipt_id_v1,
 };
 pub use world_flow::{
     StoredDangerEntryRootV3, StoredSafeArrival, StoredWorldFlowCharacter,
@@ -426,6 +432,26 @@ pub enum PersistenceError {
     ItemCharacterNotFound,
     #[error("stored item state violates the approved durable item contract")]
     CorruptStoredItems,
+    #[error("stored successor authority violates the approved durable recovery contract")]
+    CorruptStoredSuccessor,
+    #[error("successor request reused a stored mutation identity with changed material")]
+    SuccessorIdempotencyConflict,
+    #[error("successor death authority does not exist for the authenticated account")]
+    SuccessorDeathNotFound,
+    #[error("death exists but is not legal ordinary terminal successor authority")]
+    SuccessorDeathNotTerminal,
+    #[error("successor death authority belongs to another account")]
+    SuccessorForeignAuthority,
+    #[error("successor death authority was superseded by a later ordinary death")]
+    SuccessorDeathSuperseded,
+    #[error("successor death authority was already consumed")]
+    SuccessorAlreadyConsumed,
+    #[error("successor reserved roster ordinal is occupied or inconsistent")]
+    SuccessorSlotConflict,
+    #[error("successor request content does not match committed death authority")]
+    SuccessorContentMismatch,
+    #[error("ordinary character creation is blocked by an active successor reservation")]
+    SuccessorResolutionRequired,
     #[error("item request ID was reused with different canonical material")]
     ItemIdempotencyConflict,
     #[error("field equipment command expected a different inventory or item version")]

@@ -108,6 +108,7 @@ jobs:
           cargo test --locked -p persistence --test postgres_recall_terminal -- --ignored --test-threads=1 --nocapture
           cargo test --locked -p persistence --test postgres_durable_death -- --ignored --test-threads=1 --nocapture
           cargo test --locked -p persistence --test postgres_live_death_evidence -- --ignored --test-threads=1 --nocapture
+          cargo test --locked -p server_app --test postgres_successor -- --ignored --test-threads=1 --nocapture
           cargo test --locked -p server_app --test postgres_progression_restore -- --ignored --test-threads=1
           cargo test --locked -p server_app --test postgres_world_flow -- --ignored --test-threads=1
           cargo test --locked -p server_app --test postgres_danger_crash_restore -- --ignored --test-threads=1

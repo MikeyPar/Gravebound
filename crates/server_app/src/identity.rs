@@ -134,6 +134,8 @@ impl AccountAggregate {
 pub enum AccountRepositoryError {
     #[error("account repository is unavailable")]
     Unavailable,
+    #[error("ordinary character creation requires successor resolution")]
+    SuccessorResolutionRequired,
 }
 
 /// Single-writer aggregate interface. The operation executes under one account writer lock.
@@ -296,7 +298,7 @@ impl AccountRepository for PostgresAccountRepository {
                 },
             )
             .await
-            .map_err(|_| AccountRepositoryError::Unavailable)
+            .map_err(|error| map_account_repository_error(&error))
     }
 
     async fn character_owner(
@@ -326,6 +328,15 @@ impl AccountRepository for PostgresAccountRepository {
             .map_err(|_| AccountRepositoryError::Unavailable)?;
         }
         Ok(())
+    }
+}
+
+fn map_account_repository_error(error: &persistence::PersistenceError) -> AccountRepositoryError {
+    match error {
+        persistence::PersistenceError::SuccessorResolutionRequired => {
+            AccountRepositoryError::SuccessorResolutionRequired
+        }
+        _ => AccountRepositoryError::Unavailable,
     }
 }
 
@@ -590,9 +601,16 @@ where
                 self.apply_mutation(aggregate, frame, foreign_owner.is_some())
             })
             .await;
-        let result = result.unwrap_or_else(|_| {
-            result_without_snapshot(frame.mutation_id, AccountErrorCode::ServiceUnavailable)
-        });
+        let result = match result {
+            Ok(result) => result,
+            Err(AccountRepositoryError::SuccessorResolutionRequired) => result_without_snapshot(
+                frame.mutation_id,
+                AccountErrorCode::SuccessorResolutionRequired,
+            ),
+            Err(AccountRepositoryError::Unavailable) => {
+                result_without_snapshot(frame.mutation_id, AccountErrorCode::ServiceUnavailable)
+            }
+        };
         let Some(snapshot) = result.snapshot.as_ref() else {
             return result;
         };

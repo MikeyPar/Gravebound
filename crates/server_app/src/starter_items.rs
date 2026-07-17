@@ -1,13 +1,14 @@
 pub use persistence::CORE_ITEM_CONTENT_REVISION;
-use persistence::{STARTER_INITIALIZER_REVISION, StoredStarterInitialization, StoredStarterItem};
+use persistence::{
+    STARTER_INITIALIZER_REVISION, StoredStarterInitialization, StoredStarterItem,
+    canonical_starter_request_hash_v1, canonical_starter_result_hash_v1,
+};
 use sim_core::derive_starter_item_uid;
 use thiserror::Error;
 
 pub const STARTER_WEAPON_ID: &str = "item.weapon.crossbow.pine_crossbow";
 pub const STARTER_RELIC_ID: &str = "item.relic.arbalist.cracked_mark_lens";
 pub const STARTER_TONIC_ID: &str = "consumable.red_tonic";
-const STARTER_REQUEST_CONTEXT: &str = "gravebound.starter-request.v1";
-const STARTER_RESULT_CONTEXT: &str = "gravebound.starter-result.v1";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StarterItemPlan {
@@ -79,30 +80,10 @@ impl StarterItemPlan {
                 },
             )
             .collect::<Result<Vec<_>, StarterItemError>>()?;
-        let request_hash = canonical_hash(
-            STARTER_REQUEST_CONTEXT,
-            &[
-                character_id.as_slice(),
-                STARTER_INITIALIZER_REVISION.as_bytes(),
-                CORE_ITEM_CONTENT_REVISION.as_bytes(),
-            ],
-        )?;
-        let mut result_material = vec![request_hash.to_vec()];
-        for item in &items {
-            result_material.extend([
-                item.item_uid.to_vec(),
-                item.template_id.as_bytes().to_vec(),
-                item.roll_index.to_le_bytes().to_vec(),
-                item.unit_ordinal.to_le_bytes().to_vec(),
-                item.location_kind.to_le_bytes().to_vec(),
-                item.slot_index.to_le_bytes().to_vec(),
-            ]);
-        }
-        let result_fields = result_material
-            .iter()
-            .map(Vec::as_slice)
-            .collect::<Vec<_>>();
-        let result_hash = canonical_hash(STARTER_RESULT_CONTEXT, &result_fields)?;
+        let request_hash = canonical_starter_request_hash_v1(character_id)
+            .map_err(|_| StarterItemError::Identity)?;
+        let result_hash = canonical_starter_result_hash_v1(request_hash, &items)
+            .map_err(|_| StarterItemError::Identity)?;
         Ok(Self {
             request_hash,
             result_hash,
@@ -127,16 +108,6 @@ pub async fn initialize_postgres_starter(
         )
         .await
         .map_err(|_| StarterItemError::Persistence)
-}
-
-fn canonical_hash(context: &str, fields: &[&[u8]]) -> Result<[u8; 32], StarterItemError> {
-    let mut bytes = Vec::new();
-    for field in fields {
-        let length = u32::try_from(field.len()).map_err(|_| StarterItemError::Identity)?;
-        bytes.extend_from_slice(&length.to_le_bytes());
-        bytes.extend_from_slice(field);
-    }
-    Ok(blake3::derive_key(context, &bytes))
 }
 
 #[cfg(test)]
@@ -168,5 +139,89 @@ mod tests {
                 .unwrap()
                 .result_hash
         );
+    }
+
+    #[test]
+    fn successor_hashes_match_the_append_only_protocol_contract() {
+        let account_id = [0x41; 16];
+        let death_id = [0x42; 16];
+        let mutation_id = [0x43; 16];
+        let successor_id =
+            persistence::derive_successor_character_id_v1(account_id, death_id, mutation_id);
+        let receipt_id = persistence::derive_successor_receipt_id_v1(
+            account_id,
+            death_id,
+            mutation_id,
+            successor_id,
+        );
+        let payload = protocol::SuccessorCreatePayloadV1 {
+            death_id,
+            content_revision: protocol::WireText::new(CORE_ITEM_CONTENT_REVISION).unwrap(),
+        };
+        let starter = StarterItemPlan::for_character(successor_id).unwrap();
+        let request = persistence::SuccessorCreateRequestV1 {
+            contract_version: persistence::SUCCESSOR_CONTRACT_VERSION_V1,
+            namespace_id: persistence::WIPEABLE_CORE_NAMESPACE.to_owned(),
+            account_id,
+            mutation_id,
+            death_id,
+            successor_id,
+            receipt_id,
+            canonical_request_hash: payload.canonical_hash(),
+            content_revision: CORE_ITEM_CONTENT_REVISION.to_owned(),
+            starter_request_hash: starter.request_hash,
+            starter_result_hash: starter.result_hash,
+            starter_items: starter.items,
+        };
+        request.validate().unwrap();
+        assert_eq!(
+            request.expected_request_hash().unwrap(),
+            payload.canonical_hash()
+        );
+
+        let mut preset = persistence::DurableSuccessorPresetV1 {
+            namespace_id: persistence::WIPEABLE_CORE_NAMESPACE.to_owned(),
+            account_id,
+            former_character_id: [0x44; 16],
+            death_id,
+            former_roster_ordinal: 1,
+            class_id: persistence::CORE_SUCCESSOR_CLASS_ID.to_owned(),
+            appearance_kind: persistence::SUCCESSOR_APPEARANCE_KIND_CORE_BASE_SILHOUETTE,
+            base_silhouette_id: persistence::CORE_SUCCESSOR_BASE_SILHOUETTE_ID.to_owned(),
+            content_revision: CORE_ITEM_CONTENT_REVISION.to_owned(),
+            created_at_unix_ms: 1,
+            preset_hash: [0; 32],
+        };
+        preset.preset_hash = preset.expected_hash().unwrap();
+        let stored =
+            persistence::StoredSuccessorResultV1::from_request(&request, &preset, 3).unwrap();
+        let wire = protocol::StoredSuccessorResultV1 {
+            mutation_id: stored.mutation_id,
+            death_id: stored.death_id,
+            successor_id: stored.successor_id,
+            receipt_id: stored.receipt_id,
+            former_roster_ordinal: stored.former_roster_ordinal,
+            class_id: protocol::WireText::new(stored.class_id.clone()).unwrap(),
+            appearance: protocol::SuccessorAppearanceSnapshotV1::CoreBaseSilhouette,
+            starter_items: protocol::SuccessorStarterItemsV1 {
+                weapon_uid: stored.starter_items.weapon_uid,
+                relic_uid: stored.starter_items.relic_uid,
+                tonic_unit_uids: stored.starter_items.tonic_unit_uids,
+            },
+            versions: protocol::SuccessorVersionVectorV1 {
+                account: stored.versions.account,
+                character: stored.versions.character,
+                progression: stored.versions.progression,
+                world: stored.versions.world,
+                inventory: stored.versions.inventory,
+                life_metrics: stored.versions.life_metrics,
+                oath_bargain: stored.versions.oath_bargain,
+            },
+            content_revision: protocol::WireText::new(stored.content_revision.clone()).unwrap(),
+            selected_character_id: stored.selected_character_id,
+            result_hash: stored.result_hash,
+        };
+        wire.validate().unwrap();
+        assert_eq!(wire.canonical_result_hash(), stored.result_hash);
     }
 }
