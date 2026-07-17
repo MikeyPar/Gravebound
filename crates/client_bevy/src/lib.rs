@@ -143,11 +143,13 @@ pub use resolution_hold::{
     ResolutionHoldClientModel, ResolutionHoldClientPhase, ResolutionHoldRetryDirective,
 };
 pub use resolution_hold_ui::{
-    RESOLUTION_HOLD_MAX_UI_SCALE_PERCENT, RESOLUTION_HOLD_MIN_UI_SCALE_PERCENT,
-    RESOLUTION_HOLD_MIN_VIEW_HEIGHT, RESOLUTION_HOLD_MIN_VIEW_WIDTH, ResolutionHoldDestroyReview,
-    ResolutionHoldUiAction, ResolutionHoldUiActionEmphasis, ResolutionHoldUiActionSpec,
+    NativeResolutionHoldPlugin, NativeResolutionHoldView, RESOLUTION_HOLD_MAX_UI_SCALE_PERCENT,
+    RESOLUTION_HOLD_MIN_UI_SCALE_PERCENT, RESOLUTION_HOLD_MIN_VIEW_HEIGHT,
+    RESOLUTION_HOLD_MIN_VIEW_WIDTH, ResolutionHoldDestroyReview, ResolutionHoldUiAction,
+    ResolutionHoldUiActionEmphasis, ResolutionHoldUiActionSpec, ResolutionHoldUiCommand,
     ResolutionHoldUiConfig, ResolutionHoldUiCopy, ResolutionHoldUiEntry, ResolutionHoldUiError,
-    ResolutionHoldUiLayoutMode, ResolutionHoldUiMetrics, ResolutionHoldUiSnapshot,
+    ResolutionHoldUiFocusOrder, ResolutionHoldUiFocusState, ResolutionHoldUiLayoutMode,
+    ResolutionHoldUiMetrics, ResolutionHoldUiScrollState, ResolutionHoldUiSnapshot,
     ResolutionHoldUiStatus, ResolutionHoldUiTone,
 };
 
