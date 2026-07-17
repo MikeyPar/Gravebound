@@ -34,6 +34,7 @@ mod oath_ui;
 mod player;
 mod progression_hud;
 mod resolution_hold;
+mod resolution_hold_ui;
 mod stress_benchmark;
 mod telemetry;
 
@@ -140,6 +141,14 @@ pub use player::{CAMERA_RESPONSE_SECONDS, MovementBindings, critically_damped_st
 pub use resolution_hold::{
     ResolutionHoldApplyOutcome, ResolutionHoldClientError, ResolutionHoldClientFailure,
     ResolutionHoldClientModel, ResolutionHoldClientPhase, ResolutionHoldRetryDirective,
+};
+pub use resolution_hold_ui::{
+    RESOLUTION_HOLD_MAX_UI_SCALE_PERCENT, RESOLUTION_HOLD_MIN_UI_SCALE_PERCENT,
+    RESOLUTION_HOLD_MIN_VIEW_HEIGHT, RESOLUTION_HOLD_MIN_VIEW_WIDTH, ResolutionHoldDestroyReview,
+    ResolutionHoldUiAction, ResolutionHoldUiActionEmphasis, ResolutionHoldUiActionSpec,
+    ResolutionHoldUiConfig, ResolutionHoldUiCopy, ResolutionHoldUiEntry, ResolutionHoldUiError,
+    ResolutionHoldUiLayoutMode, ResolutionHoldUiMetrics, ResolutionHoldUiSnapshot,
+    ResolutionHoldUiStatus, ResolutionHoldUiTone,
 };
 
 const WINDOW_TITLE: &str = "Gravebound - LocalLab";
