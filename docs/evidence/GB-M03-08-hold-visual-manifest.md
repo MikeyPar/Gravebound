@@ -46,4 +46,4 @@ Reduced effects preserves the same retry authority and exact request identity:
 
 ## Scope boundary
 
-These captures prove native presentation and the client-side model/projection contract. They do not enable normal Character Select, Hall departure, Realm Gate admission, production terminal mutation, Core promotion, or any M04+ feature. PostgreSQL/real-QUIC same-tick precedence and shutdown/residue evidence remain separate `GB-M03-08` gates.
+These captures prove native presentation and the client-side model/projection contract. The separate PostgreSQL/real-QUIC precedence, restart, and shutdown/residue gates are closed in [`GB-M03-08-integrated-evidence.md`](GB-M03-08-integrated-evidence.md). Normal Character Select, Hall departure, Realm Gate admission, Core promotion, and every M04+ feature remain disabled for their owning packages.

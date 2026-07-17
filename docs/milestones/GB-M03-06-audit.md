@@ -33,8 +33,8 @@
 
 ## Deferred ownership
 
-Successor recovery (`GB-M03-07`), successful extraction/Emergency Recall (`GB-M03-08`), telemetry (`09`), support (`10`), platform (`14`), the complete route, final 25 loops, and private-cohort metrics remain open.
+Successful extraction/Emergency Recall is closed under [`GB-M03-08-audit.md`](GB-M03-08-audit.md). Successor recovery (`GB-M03-07`), telemetry (`09`), support (`10`), platform (`14`), the complete route, final 25 loops, and private-cohort metrics remain open.
 
 ## Handoff
 
-Parent `GB-M03-06` is closed. Proceed directly to `GB-M03-08`, then `GB-M03-07`, before enabling or auditing the normal Character Select-to-Hall-to-danger loop.
+Parent `GB-M03-06` and `GB-M03-08` are closed. Proceed directly to `GB-M03-07` before enabling or auditing the normal Character Select-to-Hall-to-danger loop.

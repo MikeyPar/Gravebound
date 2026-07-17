@@ -34,7 +34,7 @@
 
 ## Deferred ownership
 
-`GB-M03-07` successor recovery, `GB-M03-08` extraction/Recall, normal route admission, the final 25 complete loops, death-to-successor metrics, human comprehension cohort, telemetry, support, platform/Steamworks, and M04+ content remain open.
+Extraction/Recall is closed under [`GB-M03-08-audit.md`](GB-M03-08-audit.md). `GB-M03-07` successor recovery, normal route admission, the final 25 complete loops, death-to-successor metrics, human comprehension cohort, telemetry, support, platform/Steamworks, and M04+ content remain open.
 
 ## Handoff
 

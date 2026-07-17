@@ -39,7 +39,7 @@ Approved [`SPEC-CONFLICT-009`](../spec-conflicts/SPEC-CONFLICT-009-m03-death-mem
 
 ## Deferred ownership
 
-`GB-M03-06E` owns the complete real-QUIC/PostgreSQL canonical signature, exact crash-boundary matrix, cross-process performance/resource evidence, and joint `06`/`02D`/`13` audits. `GB-M03-07` owns successor persistence and the two-confirmation handoff. `GB-M03-08` owns extraction and Emergency Recall. The final M03 route, 25 complete private-loop journeys, human comprehension/fairness metrics, telemetry, support, and platform gates remain open.
+`GB-M03-06E` and `GB-M03-08` now close death/Echo/Memorial plus extraction/Recall under complete hosted evidence. `GB-M03-07` owns successor persistence and the two-confirmation handoff. The final M03 route, 25 complete private-loop journeys, human comprehension/fairness metrics, telemetry, support, and platform gates remain open.
 
 ## Handoff
 

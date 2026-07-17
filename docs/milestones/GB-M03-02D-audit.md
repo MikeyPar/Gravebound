@@ -34,7 +34,7 @@ Approved [`SPEC-CONFLICT-009`](../spec-conflicts/SPEC-CONFLICT-009-m03-death-mem
 
 ## Deferred ownership
 
-Cause/clock/trace selection belongs to `GB-M03-06B`; terminal destruction semantics to `06C`; native summary/Memorial presentation to completed `06D`; successor to `GB-M03-07`; extraction/Recall to `GB-M03-08`; telemetry/support/platform and final cohort gates remain open.
+Cause/clock/trace selection, terminal destruction, native summary/Memorial, and extraction/Recall are closed by their owning audited packages. Successor recovery belongs to `GB-M03-07`; telemetry/support/platform and final cohort gates remain open.
 
 ## Handoff
 

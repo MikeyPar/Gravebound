@@ -32,8 +32,8 @@
 
 ## Deferred ownership
 
-`GB-M03-08` owns production extraction/Recall writers and their live repository competition. Successor, Requiem encounters, telemetry, support, platform, and normal route admission remain open.
+Production extraction/Recall writers and their live repository competition are closed under [`GB-M03-08-audit.md`](GB-M03-08-audit.md). Successor, Requiem encounters, telemetry, support, platform, and normal route admission remain open.
 
 ## Handoff
 
-`GB-M03-06C` is closed. Its terminal journal/arbiter remains the shared seam for `GB-M03-08` without reopening death authority.
+`GB-M03-06C` is closed. Its terminal journal/arbiter remains the audited shared seam consumed by completed `GB-M03-08` without reopening death authority.
