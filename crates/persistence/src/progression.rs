@@ -7,8 +7,9 @@
 use sqlx::Row;
 
 use crate::{
-    PersistenceError, PostgresPersistence, StagedBargainMilestone, StoredAshWallet,
-    StoredBargainMilestoneLife, WIPEABLE_CORE_NAMESPACE,
+    PersistenceError, PostgresPersistence, StagedBargainMilestone, StoredActiveDangerAuthorityV1,
+    StoredAshWallet, StoredBargainMilestoneLife, WIPEABLE_CORE_NAMESPACE,
+    active_danger_authority::validate_active_danger_after_account_lock,
     ash_wallet::lock_ash_wallet_on_connection,
     bargain_milestone::{
         BargainMilestoneBinding, lock_bargain_milestone_life, persist_bargain_milestone,
@@ -272,6 +273,7 @@ impl PostgresPersistence {
                     reward_event_id,
                     boss_id,
                     contract,
+                    None,
                     &mut operation,
                 )
                 .await
@@ -285,6 +287,53 @@ impl PostgresPersistence {
         unreachable!("bounded progression transaction loop always returns")
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the danger binding is explicit beside the pre-existing progression transaction authority"
+    )]
+    pub async fn transact_progression_award_in_active_danger<T, F>(
+        &self,
+        account_id: [u8; ID_BYTES],
+        character_id: [u8; ID_BYTES],
+        reward_event_id: [u8; ID_BYTES],
+        boss_id: Option<&str>,
+        contract: &StoredProgressionContract,
+        authority: StoredActiveDangerAuthorityV1,
+        mut operation: F,
+    ) -> Result<ProgressionAwardTransaction<T>, PersistenceError>
+    where
+        T: Send,
+        F: FnMut(&mut ProgressionAwardTransactionState) -> Result<T, PersistenceError> + Send,
+    {
+        const MAX_SERIALIZATION_ATTEMPTS: u8 = 3;
+
+        authority.validate()?;
+        for attempt in 1..=MAX_SERIALIZATION_ATTEMPTS {
+            match self
+                .transact_progression_award_once(
+                    account_id,
+                    character_id,
+                    reward_event_id,
+                    boss_id,
+                    contract,
+                    Some(authority),
+                    &mut operation,
+                )
+                .await
+            {
+                Err(error)
+                    if attempt < MAX_SERIALIZATION_ATTEMPTS
+                        && crate::is_retryable_transaction_failure(&error) => {}
+                result => return result,
+            }
+        }
+        unreachable!("bounded progression transaction loop always returns")
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one internal transaction boundary carries the optional danger authority without hidden mutable state"
+    )]
     async fn transact_progression_award_once<T, F>(
         &self,
         account_id: [u8; ID_BYTES],
@@ -292,6 +341,7 @@ impl PostgresPersistence {
         reward_event_id: [u8; ID_BYTES],
         boss_id: Option<&str>,
         contract: &StoredProgressionContract,
+        authority: Option<StoredActiveDangerAuthorityV1>,
         operation: &mut F,
     ) -> Result<ProgressionAwardTransaction<T>, PersistenceError>
     where
@@ -320,6 +370,12 @@ impl PostgresPersistence {
             }
             None => None,
         };
+        if let Some(authority) = authority {
+            if authority.account_id != account_id || authority.character_id != character_id {
+                return Err(PersistenceError::ActiveDangerAuthorityBindingMismatch);
+            }
+            validate_active_danger_after_account_lock(transaction.connection(), authority).await?;
+        }
         let (locked_character, location, initial_progression) = lock_fresh_award_aggregates(
             transaction.connection(),
             &account_id,

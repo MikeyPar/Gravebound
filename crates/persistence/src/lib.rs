@@ -11,6 +11,7 @@ use sqlx::{
 };
 use thiserror::Error;
 
+mod active_danger_authority;
 mod ash_wallet;
 mod bargain;
 mod bargain_cleanup;
@@ -58,6 +59,7 @@ mod successor;
 mod successor_repository;
 mod world_flow;
 
+pub use active_danger_authority::StoredActiveDangerAuthorityV1;
 pub use ash_wallet::{
     ASH_CURRENCY_ID, ASH_WALLET_CAP, AshMutationCode, AshMutationKind, AshMutationRequest,
     AshWalletTransaction, StoredAshMutationResult, StoredAshWallet,
@@ -534,6 +536,12 @@ pub enum PersistenceError {
     BargainSelectionEventRequired,
     #[error("authoritative reward planning failed before commit")]
     RewardPlanningFailed,
+    #[error("active danger authority contains an invalid identity")]
+    InvalidActiveDangerAuthority,
+    #[error("fresh danger-bound mutation does not match the selected living active root")]
+    ActiveDangerAuthorityBindingMismatch,
+    #[error("fresh danger-bound mutation lost authority to a committed terminal outcome")]
+    ActiveDangerAuthoritySuperseded,
     #[error("stored danger checkpoint violates its bounded durable contract")]
     CorruptStoredDangerCheckpoint,
     #[error("danger checkpoint character or aggregate binding does not exist")]

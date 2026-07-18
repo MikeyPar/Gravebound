@@ -3,8 +3,8 @@ use std::path::Path;
 use content_schema::ProductionItemRarity;
 use persistence::{
     PersistenceError, PostgresPersistence, RewardPlanningState, RewardTransaction,
-    StoredRewardCommit, StoredRewardEntry, StoredRewardItem, StoredRewardOutcome,
-    StoredRewardRequest,
+    StoredActiveDangerAuthorityV1, StoredRewardCommit, StoredRewardEntry, StoredRewardItem,
+    StoredRewardOutcome, StoredRewardRequest,
 };
 use serde::{Deserialize, Serialize};
 use sim_content::{
@@ -101,6 +101,22 @@ impl PostgresRewardService {
         &self,
         context: RewardGrantContext<'_>,
     ) -> Result<RewardGrantTransaction, RewardGrantError> {
+        self.grant_inner(context, None).await
+    }
+
+    pub async fn grant_in_active_danger(
+        &self,
+        context: RewardGrantContext<'_>,
+        authority: StoredActiveDangerAuthorityV1,
+    ) -> Result<RewardGrantTransaction, RewardGrantError> {
+        self.grant_inner(context, Some(authority)).await
+    }
+
+    async fn grant_inner(
+        &self,
+        context: RewardGrantContext<'_>,
+        authority: Option<StoredActiveDangerAuthorityV1>,
+    ) -> Result<RewardGrantTransaction, RewardGrantError> {
         let seed_material = RewardSeedMaterial {
             reward_request_id: context.reward_request_id,
             character_id: context.character_id,
@@ -120,13 +136,18 @@ impl PostgresRewardService {
                 .canonical_request_hash()
                 .map_err(|_| RewardGrantError::InvalidRequest)?,
         };
-        let transaction = self
-            .persistence
-            .transact_reward(request, |state| {
-                self.plan_fresh(&context, &seed_material, state)
-                    .map_err(|_| PersistenceError::RewardPlanningFailed)
-            })
-            .await?;
+        let planner = |state: &RewardPlanningState| {
+            self.plan_fresh(&context, &seed_material, state)
+                .map_err(|_| PersistenceError::RewardPlanningFailed)
+        };
+        let transaction = match authority {
+            Some(authority) => {
+                self.persistence
+                    .transact_reward_in_active_danger(request, authority, planner)
+                    .await?
+            }
+            None => self.persistence.transact_reward(request, planner).await?,
+        };
         Ok(match transaction {
             RewardTransaction::Fresh {
                 service_result,

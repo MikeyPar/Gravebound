@@ -254,6 +254,7 @@ impl CoreCaldusRewardAuthority for PostgresCaldusVictoryCoordinator {
             let committed = self
                 .commit(
                     handoff.instance_lineage_id(),
+                    handoff.entry_restore_point_id(),
                     handoff.lock(),
                     handoff.active_duration_ticks(),
                     handoff.defeat_tick().0,

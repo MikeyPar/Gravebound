@@ -2,7 +2,12 @@ use std::collections::BTreeSet;
 
 use sqlx::Row;
 
-use crate::{PersistenceError, PostgresPersistence, WIPEABLE_CORE_NAMESPACE};
+use crate::{
+    PersistenceError, PostgresPersistence, StoredActiveDangerAuthorityV1, WIPEABLE_CORE_NAMESPACE,
+    active_danger_authority::{
+        lock_active_danger_account, validate_active_danger_after_account_lock,
+    },
+};
 
 const MAX_REWARD_ITEMS: usize = 64;
 
@@ -103,19 +108,65 @@ impl PostgresPersistence {
     where
         T: Send,
     {
+        self.transact_reward_inner(request, None, planner).await
+    }
+
+    pub async fn transact_reward_in_active_danger<T>(
+        &self,
+        request: StoredRewardRequest,
+        authority: StoredActiveDangerAuthorityV1,
+        planner: impl FnOnce(&RewardPlanningState) -> Result<(T, StoredRewardCommit), PersistenceError>,
+    ) -> Result<RewardTransaction<T>, PersistenceError>
+    where
+        T: Send,
+    {
+        authority.validate()?;
+        self.transact_reward_inner(request, Some(authority), planner)
+            .await
+    }
+
+    async fn transact_reward_inner<T>(
+        &self,
+        request: StoredRewardRequest,
+        authority: Option<StoredActiveDangerAuthorityV1>,
+        planner: impl FnOnce(&RewardPlanningState) -> Result<(T, StoredRewardCommit), PersistenceError>,
+    ) -> Result<RewardTransaction<T>, PersistenceError>
+    where
+        T: Send,
+    {
         validate_request(&request)?;
         let mut transaction = self.begin_transaction().await?;
-        let inventory_version = super::items::lock_or_create_inventory(
-            transaction.connection(),
-            request.account_id,
-            request.character_id,
-        )
-        .await?;
-
-        if let Some(outcome) = load_replay(transaction.connection(), &request).await? {
-            transaction.rollback().await?;
-            return Ok(RewardTransaction::Replay(outcome));
-        }
+        let inventory_version = if let Some(authority) = authority {
+            if authority.account_id != request.account_id
+                || authority.character_id != request.character_id
+            {
+                return Err(PersistenceError::ActiveDangerAuthorityBindingMismatch);
+            }
+            lock_active_danger_account(transaction.connection(), authority).await?;
+            if let Some(outcome) = load_replay(transaction.connection(), &request).await? {
+                transaction.rollback().await?;
+                return Ok(RewardTransaction::Replay(outcome));
+            }
+            validate_active_danger_after_account_lock(transaction.connection(), authority).await?;
+            super::items::lock_or_create_inventory(
+                transaction.connection(),
+                request.account_id,
+                request.character_id,
+            )
+            .await?
+        } else {
+            let inventory_version = super::items::lock_or_create_inventory(
+                transaction.connection(),
+                request.account_id,
+                request.character_id,
+            )
+            .await?;
+            if let Some(outcome) = load_replay(transaction.connection(), &request).await? {
+                transaction.rollback().await?;
+                return Ok(RewardTransaction::Replay(outcome));
+            }
+            inventory_version
+        };
 
         reserve_request(transaction.connection(), &request, inventory_version).await?;
         let planning_state = RewardPlanningState {

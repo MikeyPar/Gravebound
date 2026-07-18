@@ -595,6 +595,7 @@ async fn commit_caldus_fixture(persistence: &PostgresPersistence) -> ([u8; 16], 
     victory
         .commit(
             LINEAGE_ID,
+            RESTORE_ID,
             &lock,
             5_400,
             9_000,

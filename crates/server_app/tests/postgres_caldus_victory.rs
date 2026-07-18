@@ -79,6 +79,10 @@ fn lock(entity: u64, attempt_ordinal: u32) -> CoreBossParticipantLock {
     }
 }
 
+fn restore_id(lineage_id: [u8; 16]) -> [u8; 16] {
+    [lineage_id[0].wrapping_add(1); 16]
+}
+
 fn progression_revision() -> ManifestHash {
     let progression = sim_content::load_core_development_progression(&content_root()).unwrap();
     ManifestHash::new(progression.hashes().records_blake3.clone()).unwrap()
@@ -274,6 +278,14 @@ async fn reset_fixture(
     .await
     .unwrap();
     transaction.commit().await.unwrap();
+    stage_danger_binding(
+        persistence,
+        account_id,
+        character_id,
+        lineage_id,
+        restore_id(lineage_id),
+    )
+    .await;
 }
 
 async fn exit_count(persistence: &PostgresPersistence, encounter_id: [u8; 16]) -> i64 {
@@ -535,6 +547,46 @@ async fn stage_danger_binding(
     transaction.commit().await.unwrap();
 }
 
+async fn close_danger_authority(
+    persistence: &PostgresPersistence,
+    account_id: [u8; 16],
+    character_id: [u8; 16],
+    lineage_id: [u8; 16],
+    restore_id: [u8; 16],
+) {
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    sqlx::query("SELECT 1 FROM accounts WHERE namespace_id=$1 AND account_id=$2 FOR UPDATE")
+        .bind(WIPEABLE_CORE_NAMESPACE)
+        .bind(account_id.as_slice())
+        .execute(transaction.connection())
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE character_entry_restore_points SET restore_state=1,
+         consumed_at=transaction_timestamp() WHERE namespace_id=$1 AND account_id=$2
+         AND character_id=$3 AND restore_point_id=$4 AND restore_state=0",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
+    .bind(restore_id.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE character_instance_lineages SET lineage_state=2,closed_at=transaction_timestamp()
+         WHERE namespace_id=$1 AND account_id=$2 AND character_id=$3 AND lineage_id=$4",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
+    .bind(lineage_id.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    transaction.commit().await.unwrap();
+}
+
 fn extraction_transfer(
     mutation_id: [u8; 16],
     character_id: [u8; 16],
@@ -604,6 +656,7 @@ async fn caldus_victory_fresh_replay_and_payload_conflict_are_durable() {
     let fresh = coordinator
         .commit(
             lineage_id,
+            restore_id(lineage_id),
             &lock,
             ACTIVE_TICKS,
             CURRENT_TICK,
@@ -642,6 +695,7 @@ async fn caldus_victory_fresh_replay_and_payload_conflict_are_durable() {
     let replay = coordinator
         .commit(
             lineage_id,
+            restore_id(lineage_id),
             &lock,
             ACTIVE_TICKS,
             CURRENT_TICK,
@@ -665,6 +719,7 @@ async fn caldus_victory_fresh_replay_and_payload_conflict_are_durable() {
     let conflict = coordinator
         .commit(
             lineage_id,
+            restore_id(lineage_id),
             &lock,
             ACTIVE_TICKS,
             CURRENT_TICK,
@@ -725,6 +780,12 @@ async fn caldus_victory_partial_item_terminal_blocks_exit_then_converges() {
             reward_result_hash: durable.result_hash,
             progression_payload_hash: progression_payload(&owner).canonical_hash(),
         }],
+        danger_authorities: vec![persistence::StoredActiveDangerAuthorityV1 {
+            account_id,
+            character_id,
+            instance_lineage_id: lineage_id,
+            entry_restore_point_id: restore_id(lineage_id),
+        }],
     };
     assert!(matches!(
         persistence.commit_caldus_victory_exit(&partial_exit).await,
@@ -736,7 +797,14 @@ async fn caldus_victory_partial_item_terminal_blocks_exit_then_converges() {
     );
 
     let recovered = coordinator
-        .commit(lineage_id, &lock, ACTIVE_TICKS, CURRENT_TICK, &[owner])
+        .commit(
+            lineage_id,
+            restore_id(lineage_id),
+            &lock,
+            ACTIVE_TICKS,
+            CURRENT_TICK,
+            &[owner],
+        )
         .await
         .unwrap();
     assert!(!recovered.exit.replayed);
@@ -748,6 +816,128 @@ async fn caldus_victory_partial_item_terminal_blocks_exit_then_converges() {
     assert_eq!(
         exit_count(&persistence, identities.encounter_id.bytes()).await,
         1
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires explicitly authorized disposable PostgreSQL"]
+async fn terminal_winner_blocks_fresh_caldus_progression_and_exit_but_not_reward_replay() {
+    let persistence = disposable_database().await;
+    let account_id = [201; 16];
+    let character_id = [202; 16];
+    let lineage_id = [203; 16];
+    let lock = lock(204, 1);
+    reset_fixture(&persistence, account_id, character_id, lineage_id, &lock).await;
+    let (rewards, _, coordinator) = services(&persistence);
+    let owner = owner(account_id, character_id, 204);
+    let identities = CoreCaldusVictoryIdentities::derive(lineage_id, &lock).unwrap();
+    let reward_request_id = identities.reward_for(owner.participant).unwrap().bytes();
+    let context = RewardGrantContext {
+        reward_request_id,
+        account_id,
+        character_id,
+        source_instance_id: identities.encounter_id.bytes(),
+        reward_table_id: "reward.boss_caldus",
+        current_tick: CURRENT_TICK,
+    };
+    let authority = persistence::StoredActiveDangerAuthorityV1 {
+        account_id,
+        character_id,
+        instance_lineage_id: lineage_id,
+        entry_restore_point_id: restore_id(lineage_id),
+    };
+    assert!(matches!(
+        rewards
+            .grant_in_active_danger(context, authority)
+            .await
+            .unwrap(),
+        RewardGrantTransaction::Fresh { .. }
+    ));
+    close_danger_authority(
+        &persistence,
+        account_id,
+        character_id,
+        lineage_id,
+        restore_id(lineage_id),
+    )
+    .await;
+    assert!(matches!(
+        rewards
+            .grant_in_active_danger(context, authority)
+            .await
+            .unwrap(),
+        RewardGrantTransaction::Replay { .. }
+    ));
+    assert!(matches!(
+        coordinator
+            .commit(
+                lineage_id,
+                restore_id(lineage_id),
+                &lock,
+                ACTIVE_TICKS,
+                CURRENT_TICK,
+                &[owner],
+            )
+            .await,
+        Err(CaldusVictoryCoordinatorError::Persistence(
+            PersistenceError::ActiveDangerAuthoritySuperseded
+        ))
+    ));
+    assert_eq!(
+        exit_count(&persistence, identities.encounter_id.bytes()).await,
+        0
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires explicitly authorized disposable PostgreSQL"]
+async fn complete_caldus_result_replays_exactly_after_terminal_winner() {
+    let persistence = disposable_database().await;
+    let account_id = [211; 16];
+    let character_id = [212; 16];
+    let lineage_id = [213; 16];
+    let lock = lock(214, 1);
+    reset_fixture(&persistence, account_id, character_id, lineage_id, &lock).await;
+    let (_, _, coordinator) = services(&persistence);
+    let owner = owner(account_id, character_id, 214);
+    let fresh = coordinator
+        .commit(
+            lineage_id,
+            restore_id(lineage_id),
+            &lock,
+            ACTIVE_TICKS,
+            CURRENT_TICK,
+            std::slice::from_ref(&owner),
+        )
+        .await
+        .unwrap();
+    close_danger_authority(
+        &persistence,
+        account_id,
+        character_id,
+        lineage_id,
+        restore_id(lineage_id),
+    )
+    .await;
+    let replay = coordinator
+        .commit(
+            lineage_id,
+            restore_id(lineage_id),
+            &lock,
+            ACTIVE_TICKS,
+            CURRENT_TICK,
+            &[owner],
+        )
+        .await
+        .unwrap();
+    assert!(replay.exit.replayed);
+    assert!(matches!(
+        replay.owners[0].reward,
+        RewardGrantTransaction::Replay { .. }
+    ));
+    assert_eq!(
+        fresh.exit.canonical_request_hash,
+        replay.exit.canonical_request_hash
     );
 }
 
@@ -765,19 +955,12 @@ async fn caldus_committed_receipt_supersedes_restore_and_transfers_once_to_hall_
     let restore_id = [164; 16];
     let lock = lock(165, 1);
     reset_fixture(&persistence, account_id, character_id, lineage_id, &lock).await;
-    stage_danger_binding(
-        &persistence,
-        account_id,
-        character_id,
-        lineage_id,
-        restore_id,
-    )
-    .await;
     let (_, _, victory_coordinator) = services(&persistence);
     let owner = owner(account_id, character_id, 165);
     let victory = victory_coordinator
         .commit(
             lineage_id,
+            restore_id,
             &lock,
             ACTIVE_TICKS,
             CURRENT_TICK,
@@ -1008,18 +1191,11 @@ async fn another_terminal_between_request_and_receipt_supersedes_caldus_extracti
     let restore_id = [174; 16];
     let lock = lock(175, 1);
     reset_fixture(&persistence, account_id, character_id, lineage_id, &lock).await;
-    stage_danger_binding(
-        &persistence,
-        account_id,
-        character_id,
-        lineage_id,
-        restore_id,
-    )
-    .await;
     let (_, _, coordinator) = services(&persistence);
     coordinator
         .commit(
             lineage_id,
+            restore_id,
             &lock,
             ACTIVE_TICKS,
             CURRENT_TICK,
@@ -1105,14 +1281,6 @@ async fn live_caldus_intent_uses_the_route_permit_and_postgres_planner_across_re
     let lock = lock(186, 1);
     let participant = lock.participants[0];
     reset_fixture(&persistence, account_id, character_id, lineage_id, &lock).await;
-    stage_danger_binding(
-        &persistence,
-        account_id,
-        character_id,
-        lineage_id,
-        restore_id,
-    )
-    .await;
 
     let authenticated = AuthenticatedAccount {
         account_id: AccountId::new(account_id).unwrap(),
@@ -1122,6 +1290,7 @@ async fn live_caldus_intent_uses_the_route_permit_and_postgres_planner_across_re
     let victory = victory_coordinator
         .commit(
             lineage_id,
+            restore_id,
             &lock,
             ACTIVE_TICKS,
             CURRENT_TICK,

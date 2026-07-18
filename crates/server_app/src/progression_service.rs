@@ -2,10 +2,11 @@
 
 use persistence::{
     PersistenceError, PostgresPersistence, ProgressionAwardTransaction,
-    ProgressionAwardTransactionState, StoredBargainMilestoneResult, StoredBossFirstClear,
-    StoredBossFirstClearState, StoredEncounterLifeState, StoredEncounterRecallState,
-    StoredEncounterTrustState, StoredEncounterXpEvidence, StoredOrdinaryXpEvidence,
-    StoredProgression, StoredProgressionContract, StoredXpAwardResult, StoredXpEligibilityEvidence,
+    ProgressionAwardTransactionState, StoredActiveDangerAuthorityV1, StoredBargainMilestoneResult,
+    StoredBossFirstClear, StoredBossFirstClearState, StoredEncounterLifeState,
+    StoredEncounterRecallState, StoredEncounterTrustState, StoredEncounterXpEvidence,
+    StoredOrdinaryXpEvidence, StoredProgression, StoredProgressionContract, StoredXpAwardResult,
+    StoredXpEligibilityEvidence,
 };
 use protocol::ManifestHash;
 use sim_core::{
@@ -63,6 +64,43 @@ impl PostgresProgressionAwardService {
     }
 
     pub async fn award(
+        &self,
+        authenticated: AuthenticatedAccount,
+        command: &ProgressionAwardCommand,
+    ) -> ProgressionAwardOutcome {
+        self.award_inner(authenticated, command).await
+    }
+
+    pub(crate) async fn award_in_active_danger(
+        &self,
+        authenticated: AuthenticatedAccount,
+        command: &ProgressionAwardCommand,
+        authority: StoredActiveDangerAuthorityV1,
+    ) -> Result<ProgressionAwardOutcome, PersistenceError> {
+        if authenticated.namespace != AuthenticatedNamespace::WipeableTest {
+            return Err(PersistenceError::ActiveDangerAuthorityBindingMismatch);
+        }
+        let account_id = authenticated.account_id.as_bytes();
+        let transaction = self
+            .persistence
+            .transact_progression_award_in_active_danger(
+                account_id,
+                command.payload.character_id,
+                command.reward_event_id,
+                self.rules
+                    .first_clear_boss_id_for_source(&command.payload.source_content_id),
+                &self.contract,
+                authority,
+                |state| self.plan_and_stage(state, command, account_id),
+            )
+            .await?;
+        Ok(match transaction {
+            ProgressionAwardTransaction::Committed(outcome) => outcome,
+            ProgressionAwardTransaction::Replayed(stored) => self.replay(command, &stored),
+        })
+    }
+
+    async fn award_inner(
         &self,
         authenticated: AuthenticatedAccount,
         command: &ProgressionAwardCommand,

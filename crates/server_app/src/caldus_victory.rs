@@ -7,7 +7,8 @@
 use std::path::Path;
 
 use persistence::{
-    CaldusVictoryExitCommit, PostgresPersistence, StoredCaldusVictoryExit, StoredCaldusVictoryOwner,
+    CaldusVictoryExitCommit, PostgresPersistence, StoredActiveDangerAuthorityV1,
+    StoredCaldusVictoryExit, StoredCaldusVictoryOwner,
 };
 use protocol::ManifestHash;
 use sim_core::{
@@ -108,6 +109,7 @@ impl PostgresCaldusVictoryCoordinator {
     pub async fn commit(
         &self,
         instance_lineage_id: [u8; 16],
+        entry_restore_point_id: [u8; 16],
         lock: &CoreBossParticipantLock,
         active_duration_ticks: u32,
         current_tick: u64,
@@ -134,16 +136,21 @@ impl PostgresCaldusVictoryCoordinator {
                 .ok_or(CaldusVictoryCoordinatorError::IdentityMismatch)?
                 .bytes();
             let account_id = owner.authenticated.account_id.as_bytes();
+            let danger_authority =
+                danger_authority(owner, instance_lineage_id, entry_restore_point_id);
             let reward = self
                 .rewards
-                .grant(RewardGrantContext {
-                    reward_request_id: request_id,
-                    account_id,
-                    character_id: owner.character_id,
-                    source_instance_id: identities.encounter_id.bytes(),
-                    reward_table_id: CALDUS_REWARD_ID,
-                    current_tick,
-                })
+                .grant_in_active_danger(
+                    RewardGrantContext {
+                        reward_request_id: request_id,
+                        account_id,
+                        character_id: owner.character_id,
+                        source_instance_id: identities.encounter_id.bytes(),
+                        reward_table_id: CALDUS_REWARD_ID,
+                        current_tick,
+                    },
+                    danger_authority,
+                )
                 .await?;
             let progression_command = progression_command(
                 owner,
@@ -153,8 +160,8 @@ impl PostgresCaldusVictoryCoordinator {
             );
             let progression = self
                 .progression
-                .award(owner.authenticated, &progression_command)
-                .await;
+                .award_in_active_danger(owner.authenticated, &progression_command, danger_authority)
+                .await?;
             if progression.code != ProgressionAwardCode::Accepted {
                 return Err(CaldusVictoryCoordinatorError::ProgressionNotCommitted(
                     progression.code,
@@ -187,6 +194,14 @@ impl PostgresCaldusVictoryCoordinator {
                 attempt_ordinal: lock.attempt_ordinal,
                 exit_instance_id: identities.exit_instance_id.bytes(),
                 owners: exit_owners,
+                danger_authorities: owners
+                    .iter()
+                    .zip(&eligibility)
+                    .filter(|(_, decision)| decision.eligible)
+                    .map(|(owner, _)| {
+                        danger_authority(owner, instance_lineage_id, entry_restore_point_id)
+                    })
+                    .collect(),
             })
             .await?;
         Ok(CaldusVictoryCommitResult {
@@ -195,6 +210,19 @@ impl PostgresCaldusVictoryCoordinator {
             owners: committed_owners,
             exit,
         })
+    }
+}
+
+fn danger_authority(
+    owner: &CaldusVictoryOwnerCommand,
+    instance_lineage_id: [u8; 16],
+    entry_restore_point_id: [u8; 16],
+) -> StoredActiveDangerAuthorityV1 {
+    StoredActiveDangerAuthorityV1 {
+        account_id: owner.authenticated.account_id.as_bytes(),
+        character_id: owner.character_id,
+        instance_lineage_id,
+        entry_restore_point_id,
     }
 }
 

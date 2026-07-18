@@ -1,6 +1,11 @@
 use sqlx::Row;
 
-use crate::{PersistenceError, PostgresPersistence, WIPEABLE_CORE_NAMESPACE};
+use crate::{
+    PersistenceError, PostgresPersistence, StoredActiveDangerAuthorityV1, WIPEABLE_CORE_NAMESPACE,
+    active_danger_authority::{
+        lock_active_danger_account, validate_active_danger_after_account_lock,
+    },
+};
 
 const ID_BYTES: usize = 16;
 const HASH_BYTES: usize = 32;
@@ -24,6 +29,7 @@ pub struct CaldusVictoryExitCommit {
     pub attempt_ordinal: u32,
     pub exit_instance_id: [u8; ID_BYTES],
     pub owners: Vec<StoredCaldusVictoryOwner>,
+    pub danger_authorities: Vec<StoredActiveDangerAuthorityV1>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,6 +51,11 @@ impl PostgresPersistence {
         validate_commit(commit)?;
         let canonical_request_hash = canonical_hash(commit)?;
         let mut transaction = self.begin_transaction().await?;
+        let mut danger_authorities = commit.danger_authorities.clone();
+        danger_authorities.sort_unstable_by_key(|authority| authority.account_id);
+        for authority in &danger_authorities {
+            lock_active_danger_account(transaction.connection(), *authority).await?;
+        }
         let lock_key = i64::from_le_bytes(
             commit.encounter_id[..8]
                 .try_into()
@@ -63,6 +74,9 @@ impl PostgresPersistence {
         {
             transaction.rollback().await?;
             return Ok(existing);
+        }
+        for authority in &commit.danger_authorities {
+            validate_active_danger_after_account_lock(transaction.connection(), *authority).await?;
         }
         for owner in &commit.owners {
             verify_terminal_owner(transaction.connection(), owner).await?;
@@ -236,11 +250,12 @@ fn validate_commit(commit: &CaldusVictoryExitCommit) -> Result<(), PersistenceEr
         || commit.attempt_ordinal == 0
         || commit.owners.is_empty()
         || commit.owners.len() > MAX_OWNERS
+        || commit.danger_authorities.len() != commit.owners.len()
     {
         return Err(PersistenceError::CorruptCaldusVictory);
     }
     let mut previous = None;
-    for owner in &commit.owners {
+    for (owner, authority) in commit.owners.iter().zip(&commit.danger_authorities) {
         if owner.party_slot >= 8
             || owner.participant_entity_id == 0
             || all_zero(&owner.account_id)
@@ -248,6 +263,10 @@ fn validate_commit(commit: &CaldusVictoryExitCommit) -> Result<(), PersistenceEr
             || all_zero(&owner.reward_request_id)
             || all_zero(&owner.reward_result_hash)
             || all_zero(&owner.progression_payload_hash)
+            || authority.account_id != owner.account_id
+            || authority.character_id != owner.character_id
+            || authority.instance_lineage_id != commit.instance_lineage_id
+            || authority.validate().is_err()
             || previous.is_some_and(|slot| owner.party_slot <= slot)
         {
             return Err(PersistenceError::CorruptCaldusVictory);
@@ -272,6 +291,9 @@ fn canonical_hash(commit: &CaldusVictoryExitCommit) -> Result<[u8; HASH_BYTES], 
         update_field(&mut hasher, &owner.reward_request_id)?;
         update_field(&mut hasher, &owner.reward_result_hash)?;
         update_field(&mut hasher, &owner.progression_payload_hash)?;
+    }
+    for authority in &commit.danger_authorities {
+        update_field(&mut hasher, &authority.entry_restore_point_id)?;
     }
     Ok(*hasher.finalize().as_bytes())
 }
@@ -316,6 +338,20 @@ mod tests {
             attempt_ordinal: 1,
             exit_instance_id: [3; 16],
             owners: vec![owner(0), owner(1)],
+            danger_authorities: vec![
+                StoredActiveDangerAuthorityV1 {
+                    account_id: [1; 16],
+                    character_id: [11; 16],
+                    instance_lineage_id: [2; 16],
+                    entry_restore_point_id: [41; 16],
+                },
+                StoredActiveDangerAuthorityV1 {
+                    account_id: [2; 16],
+                    character_id: [12; 16],
+                    instance_lineage_id: [2; 16],
+                    entry_restore_point_id: [42; 16],
+                },
+            ],
         }
     }
 
@@ -332,12 +368,24 @@ mod tests {
             canonical_hash(&original).unwrap(),
             canonical_hash(&changed).unwrap()
         );
+        let mut changed = original.clone();
+        changed.danger_authorities[1].entry_restore_point_id[0] ^= 1;
+        assert_ne!(
+            canonical_hash(&original).unwrap(),
+            canonical_hash(&changed).unwrap()
+        );
     }
 
     #[test]
     fn invalid_empty_duplicate_or_zero_owner_material_fails_closed() {
         let mut invalid = commit();
         invalid.owners.clear();
+        assert!(matches!(
+            validate_commit(&invalid),
+            Err(PersistenceError::CorruptCaldusVictory)
+        ));
+        let mut invalid = commit();
+        invalid.danger_authorities[0].character_id[0] ^= 1;
         assert!(matches!(
             validate_commit(&invalid),
             Err(PersistenceError::CorruptCaldusVictory)
