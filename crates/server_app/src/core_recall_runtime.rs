@@ -72,6 +72,17 @@ pub struct CoreRecallActorRegistration {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CoreRecallActorRetirementReport {
+    pub served_actor_commands: u64,
+    pub abandoned_actor_commands: u64,
+    pub delivered_completion_publications: u64,
+    pub undelivered_completion_publications: u64,
+    pub abandoned_completion_publications: u64,
+    pub detached_transport_binding: bool,
+    pub zero_residue: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CoreRecallRuntimeReport {
     pub served_actor_commands: u64,
     pub abandoned_actor_commands: u64,
@@ -95,6 +106,10 @@ pub enum CoreRecallRuntimeError {
     ActorAlreadyRegistered,
     #[error("Core Recall actor is not registered for this account")]
     ActorUnavailable,
+    #[error("Core Recall reliable writer is unavailable")]
+    ReliableWriterUnavailable,
+    #[error("Core Recall reliable writer is already attached")]
+    ReliableWriterAlreadyAttached,
     #[error("Core Recall runtime shutdown has not started")]
     ShutdownNotStarted,
     #[error("Core Recall actor task failed")]
@@ -225,10 +240,36 @@ where
         authenticated: AuthenticatedAccount,
         connection: quinn::Connection,
     ) -> Result<CoreRecallTransportAttach, CoreRecallRuntimeError> {
+        self.attach_reliable_writer(
+            authenticated,
+            Arc::new(CoreRecallReliableWriter::new(connection)),
+        )
+        .await
+    }
+
+    /// Binds Recall authority to the reliable writer already owned by the account session.
+    /// Identity responses, route projections, extraction results, and Recall publications must
+    /// use this same sequence space. Passing an already attached or retired writer fails before
+    /// allocating a new Recall transport generation.
+    pub async fn attach_reliable_writer(
+        &self,
+        authenticated: AuthenticatedAccount,
+        writer: Arc<CoreRecallReliableWriter>,
+    ) -> Result<CoreRecallTransportAttach, CoreRecallRuntimeError> {
+        if !writer.is_available() {
+            return Err(CoreRecallRuntimeError::ReliableWriterUnavailable);
+        }
         let account_id = authenticated.account_id.as_bytes();
         let mut state = self.state.lock().await;
         if !state.accepting {
             return Err(CoreRecallRuntimeError::Retired);
+        }
+        if state
+            .transports
+            .values()
+            .any(|active| Arc::ptr_eq(&active.writer, &writer))
+        {
+            return Err(CoreRecallRuntimeError::ReliableWriterAlreadyAttached);
         }
         let entry = state
             .actors
@@ -249,13 +290,7 @@ where
         };
         let invalidated_connection = state
             .transports
-            .insert(
-                account_id,
-                ActiveRecallTransport {
-                    lease,
-                    writer: Arc::new(CoreRecallReliableWriter::new(connection)),
-                },
-            )
+            .insert(account_id, ActiveRecallTransport { lease, writer })
             .map(|active| {
                 active.writer.retire(
                     TRANSPORT_REPLACED_CLOSE_CODE,
@@ -324,6 +359,67 @@ where
             .await?;
         state.transports.remove(&lease.account_id);
         Ok(outcome)
+    }
+
+    /// Retires one danger actor after its terminal transition has completed. The shared writer is
+    /// only detached from Recall; it remains owned by the private-life session for the resulting
+    /// Hall or Character Select projection.
+    pub async fn retire_actor(
+        &self,
+        authenticated: AuthenticatedAccount,
+    ) -> Result<CoreRecallActorRetirementReport, CoreRecallRuntimeError> {
+        let account_id = authenticated.account_id.as_bytes();
+        let (mut entry, detached_transport_binding) = {
+            let mut state = self.state.lock().await;
+            if !state.accepting {
+                return Err(CoreRecallRuntimeError::Retired);
+            }
+            let entry = state
+                .actors
+                .remove(&account_id)
+                .ok_or(CoreRecallRuntimeError::ActorUnavailable)?;
+            if entry.authenticated != authenticated {
+                state.actors.insert(account_id, entry);
+                return Err(CoreRecallRuntimeError::InvalidActorBinding);
+            }
+            let detached_transport_binding = state.transports.remove(&account_id).is_some();
+            (entry, detached_transport_binding)
+        };
+
+        entry.lifecycle.retire_for_shutdown().await;
+        if let Some(shutdown) = entry.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        if let Some(shutdown) = entry.completion_shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        let actor = entry
+            .actor_task
+            .take()
+            .ok_or(CoreRecallRuntimeError::ActorUnavailable)?
+            .await
+            .map_err(CoreRecallRuntimeError::ActorTaskFailed)?;
+        let completion = entry
+            .completion_task
+            .take()
+            .ok_or(CoreRecallRuntimeError::ActorUnavailable)?
+            .await
+            .map_err(CoreRecallRuntimeError::ActorTaskFailed)?;
+        let directory_has_zero_residue = {
+            let state = self.state.lock().await;
+            !state.actors.contains_key(&account_id) && !state.transports.contains_key(&account_id)
+        };
+        Ok(CoreRecallActorRetirementReport {
+            served_actor_commands: actor.served,
+            abandoned_actor_commands: actor.abandoned,
+            delivered_completion_publications: completion.delivered,
+            undelivered_completion_publications: completion.undelivered,
+            abandoned_completion_publications: completion.abandoned,
+            detached_transport_binding,
+            zero_residue: entry.actor_task.is_none()
+                && entry.completion_task.is_none()
+                && directory_has_zero_residue,
+        })
     }
 
     /// Stops accepting work and closes actor inboxes before network workers are joined. Returned
@@ -772,17 +868,14 @@ mod tests {
             .await
             .unwrap();
         let (server_endpoint, client_endpoint, client, server) = live_connection_pair().await;
-        let attached = directory
-            .attach_transport(authenticated(), server)
-            .await
-            .unwrap();
-        let writer = directory.reliable_writer(attached.lease).await.unwrap();
+        let session_writer = Arc::new(CoreRecallReliableWriter::new(server));
         let (mut client_send, mut client_receive) = client.open_bi().await.unwrap();
         client_send.write_all(&[1]).await.unwrap();
         client_send.finish().unwrap();
-        let (server_send, mut server_receive) = writer.connection().accept_bi().await.unwrap();
+        let (server_send, mut server_receive) =
+            session_writer.connection().accept_bi().await.unwrap();
         assert_eq!(server_receive.read_to_end(1).await.unwrap(), vec![1]);
-        let response = writer
+        let response = session_writer
             .send_response(
                 server_send,
                 111,
@@ -805,6 +898,13 @@ mod tests {
         };
         assert_eq!(received_response, response);
 
+        let attached = directory
+            .attach_reliable_writer(authenticated(), Arc::clone(&session_writer))
+            .await
+            .unwrap();
+        let recall_writer = directory.reliable_writer(attached.lease).await.unwrap();
+        assert!(Arc::ptr_eq(&session_writer, &recall_writer));
+
         registration
             .completion_outbox
             .try_publish(publication())
@@ -823,7 +923,7 @@ mod tests {
             ReliableEvent::RecallResult(result)
                 if matches!(*result, RecallResultV1::Stored { replayed: false, .. })
         ));
-        assert_eq!(writer.last_sequence().await, 2);
+        assert_eq!(session_writer.last_sequence().await, 2);
 
         for connection in directory.begin_shutdown().await {
             connection.close(0_u32.into(), b"test shutdown");

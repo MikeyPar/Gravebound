@@ -14,6 +14,7 @@ mod combat_factory;
 mod core_journey_world_flow;
 mod core_lifecycle;
 mod core_private_life_foundation;
+mod core_private_life_session;
 mod core_private_route_actor;
 mod core_private_world_flow;
 mod core_recall_outbox;
@@ -83,6 +84,11 @@ pub use core_lifecycle::{
     CoreDangerCheckpointService, CoreLifeKey, CoreLiveBindingId, CoreLiveCharacter,
     CoreLiveDirectory, CoreLiveError, CoreResumeOutcome, DANGER_CHECKPOINT_INTERVAL_TICKS,
 };
+pub use core_private_life_session::{
+    CorePrivateLifeSessionDirectory, CorePrivateLifeSessionError, CorePrivateLifeSessionReport,
+    CorePrivateLifeSessionSnapshot, CorePrivateLifeTransportAttach, CorePrivateLifeTransportDetach,
+    CorePrivateLifeTransportGeneration, CorePrivateLifeTransportLease,
+};
 pub use core_private_route_actor::{
     CORE_PRIVATE_ROUTE_ACTOR_MAILBOX_CAPACITY, CorePrivateRouteActor, CorePrivateRouteActorAdvance,
     CorePrivateRouteActorDirectory, CorePrivateRouteActorError, CorePrivateRouteActorLease,
@@ -102,9 +108,9 @@ pub use core_recall_outbox::{
     core_recall_completion_outbox, send_recall_publication,
 };
 pub use core_recall_runtime::{
-    CoreRecallActorDirectory, CoreRecallActorRegistration, CoreRecallAuthoritativeTick,
-    CoreRecallConnectionAuthority, CoreRecallConnectionLease, CoreRecallRuntimeError,
-    CoreRecallRuntimeReport, CoreRecallTransportAttach,
+    CoreRecallActorDirectory, CoreRecallActorRegistration, CoreRecallActorRetirementReport,
+    CoreRecallAuthoritativeTick, CoreRecallConnectionAuthority, CoreRecallConnectionLease,
+    CoreRecallRuntimeError, CoreRecallRuntimeReport, CoreRecallTransportAttach,
 };
 pub use core_reliable_writer::{
     CORE_RELIABLE_WRITE_UNCERTAIN_CLOSE_CODE, CoreReliableWriter, CoreReliableWriterError,
