@@ -209,10 +209,7 @@ impl CorePrivateRouteActor {
                 CorePrivateRoutePhaseV1::BossIntroduction,
                 CorePrivateRoutePhaseV1::BossPhaseOne,
             )?,
-            CorePrivateRouteActorAdvance::BossBreakToTwo => self.boss_phase(
-                CorePrivateRoutePhaseV1::BossPhaseOne,
-                CorePrivateRoutePhaseV1::BossBreakToTwo,
-            )?,
+            CorePrivateRouteActorAdvance::BossBreakToTwo => self.boss_break_to_two()?,
             CorePrivateRouteActorAdvance::BossPhaseTwo => self.boss_phase(
                 CorePrivateRoutePhaseV1::BossBreakToTwo,
                 CorePrivateRoutePhaseV1::BossPhaseTwo,
@@ -465,7 +462,8 @@ impl CorePrivateRouteActor {
             || self.state.room != Some(CorePrivateRouteRoomV1::CaldusArenaB6)
             || !matches!(
                 self.state.phase,
-                CorePrivateRoutePhaseV1::BossPhaseOne
+                CorePrivateRoutePhaseV1::BossIntroduction
+                    | CorePrivateRoutePhaseV1::BossPhaseOne
                     | CorePrivateRoutePhaseV1::BossBreakToTwo
                     | CorePrivateRoutePhaseV1::BossPhaseTwo
                     | CorePrivateRoutePhaseV1::BossBreakToThree
@@ -477,6 +475,22 @@ impl CorePrivateRouteActor {
         self.replace_position(
             self.state.character_version,
             self.position_with_phase(CorePrivateRoutePhaseV1::BossDefeated),
+        )
+    }
+
+    fn boss_break_to_two(&mut self) -> Result<(), CorePrivateRouteActorError> {
+        if self.state.scene != CorePrivateRouteSceneV1::BellSepulcher
+            || self.state.room != Some(CorePrivateRouteRoomV1::CaldusArenaB6)
+            || !matches!(
+                self.state.phase,
+                CorePrivateRoutePhaseV1::BossIntroduction | CorePrivateRoutePhaseV1::BossPhaseOne
+            )
+        {
+            return Err(CorePrivateRouteActorError::InvalidTransition);
+        }
+        self.replace_position(
+            self.state.character_version,
+            self.position_with_phase(CorePrivateRoutePhaseV1::BossBreakToTwo),
         )
     }
 

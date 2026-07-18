@@ -82,6 +82,7 @@ pub struct CorePrivateCaldusStagingHandoff {
     pub(crate) content_revision: CorePrivateRouteContentRevisionV1,
     pub(crate) combat_envelope: CoreCharacterCombatEnvelope,
     pub(crate) participant: sim_core::NormalWaveHandoff,
+    pub(crate) arena: sim_core::ArenaGeometry,
     pub(crate) tick: Tick,
 }
 
@@ -113,6 +114,11 @@ impl CorePrivateCaldusStagingHandoff {
     #[must_use]
     pub fn player(&self) -> &sim_core::EnemyLabPlayer {
         &self.participant.player
+    }
+
+    #[must_use]
+    pub const fn arena(&self) -> &sim_core::ArenaGeometry {
+        &self.arena
     }
 }
 
@@ -222,6 +228,11 @@ impl CorePrivateFixedDungeonRuntime {
         {
             return Err(CorePrivateFixedDungeonRuntimeError::InvalidComposition);
         }
+        let arena = self
+            .combat
+            .arena()
+            .cloned()
+            .ok_or(CorePrivateFixedDungeonRuntimeError::InvalidComposition)?;
         let participant = self.combat.into_boss_handoff()?;
         Ok(CorePrivateCaldusStagingHandoff {
             route_directory: self.route_directory,
@@ -229,6 +240,7 @@ impl CorePrivateFixedDungeonRuntime {
             content_revision: self.content_revision,
             combat_envelope: self.combat_envelope,
             participant,
+            arena,
             tick: self.tick,
         })
     }
@@ -493,6 +505,9 @@ fn movement_for_combat(
     combat: &sim_content::CoreFixedDungeonCombat,
     envelope: &CoreCharacterCombatEnvelope,
 ) -> Result<Option<PlayerMovementState>, CorePrivateFixedDungeonRuntimeError> {
+    if combat.node() == sim_content::CoreFixedDungeonNode::CaldusArenaB6 {
+        return Ok(None);
+    }
     let Some(arena) = combat.arena() else {
         return Ok(None);
     };

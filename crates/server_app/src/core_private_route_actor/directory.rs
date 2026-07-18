@@ -1451,12 +1451,15 @@ fn boss_advances(
         (Phase::BossStaging, Phase::BossReadyCountdown) => Advance::BossReadyCountdown,
         (Phase::BossReadyCountdown, Phase::BossIntroduction) => Advance::BossIntroduction,
         (Phase::BossIntroduction, Phase::BossPhaseOne) => Advance::BossPhaseOne,
-        (Phase::BossPhaseOne, Phase::BossBreakToTwo) => Advance::BossBreakToTwo,
+        (Phase::BossIntroduction | Phase::BossPhaseOne, Phase::BossBreakToTwo) => {
+            Advance::BossBreakToTwo
+        }
         (Phase::BossBreakToTwo, Phase::BossPhaseTwo) => Advance::BossPhaseTwo,
         (Phase::BossPhaseTwo, Phase::BossBreakToThree) => Advance::BossBreakToThree,
         (Phase::BossBreakToThree, Phase::BossPhaseThree) => Advance::BossPhaseThree,
         (
-            Phase::BossPhaseOne
+            Phase::BossIntroduction
+            | Phase::BossPhaseOne
             | Phase::BossBreakToTwo
             | Phase::BossPhaseTwo
             | Phase::BossBreakToThree

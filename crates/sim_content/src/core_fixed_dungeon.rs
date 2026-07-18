@@ -95,6 +95,7 @@ struct CoreFixedDungeonPlans {
     b2: CoreFixedRoomEncounterPlan,
     b3: CoreFixedRoomEncounterPlan,
     b5: CoreFixedRoomEncounterPlan,
+    b6: ArenaGeometry,
 }
 
 impl CoreFixedDungeonPlans {
@@ -117,7 +118,10 @@ impl CoreFixedDungeonPlans {
         {
             return Err(CoreFixedDungeonError::DefinitionDrift);
         }
-        Ok(Self { b1, b2, b3, b5 })
+        let b6 = content
+            .compile_caldus_arena()
+            .map_err(|_| CoreFixedDungeonError::DefinitionDrift)?;
+        Ok(Self { b1, b2, b3, b5, b6 })
     }
 
     const fn arena(&self, node: CoreFixedDungeonNode) -> Option<&ArenaGeometry> {
@@ -126,9 +130,8 @@ impl CoreFixedDungeonPlans {
             CoreFixedDungeonNode::BellNaveB2 => Some(self.b2.arena()),
             CoreFixedDungeonNode::BellKnightB3 => Some(self.b3.arena()),
             CoreFixedDungeonNode::BellBridgeB5 => Some(self.b5.arena()),
-            CoreFixedDungeonNode::BellVestibuleB0
-            | CoreFixedDungeonNode::BellRestB4
-            | CoreFixedDungeonNode::CaldusArenaB6 => None,
+            CoreFixedDungeonNode::CaldusArenaB6 => Some(&self.b6),
+            CoreFixedDungeonNode::BellVestibuleB0 | CoreFixedDungeonNode::BellRestB4 => None,
         }
     }
 }

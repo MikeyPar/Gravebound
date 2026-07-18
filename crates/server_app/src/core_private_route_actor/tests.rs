@@ -372,7 +372,7 @@ async fn boss_authority_cas_is_atomic_replay_safe_and_resettable_before_defeat()
     for target in [
         CorePrivateRoutePhaseV1::BossReadyCountdown,
         CorePrivateRoutePhaseV1::BossIntroduction,
-        CorePrivateRoutePhaseV1::BossPhaseOne,
+        CorePrivateRoutePhaseV1::BossBreakToTwo,
         CorePrivateRoutePhaseV1::BossDefeated,
     ] {
         phase = commit_boss_phase(&directory, lease, phase.state_version, target).await;
