@@ -60,7 +60,6 @@ pub enum CorePrivateRouteActorAdvance {
     BossPhaseThree,
     BossDefeated,
     BossExitReady,
-    TerminalPending,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -231,8 +230,17 @@ impl CorePrivateRouteActor {
                 CorePrivateRoutePhaseV1::BossDefeated,
                 CorePrivateRoutePhaseV1::BossExitReady,
             )?,
-            CorePrivateRouteActorAdvance::TerminalPending => self.terminal_pending()?,
         }
+        Ok(&self.state)
+    }
+
+    /// Revokes ordinary route control after the directory has atomically reserved one terminal
+    /// operation. Keeping this transition out of [`CorePrivateRouteActorAdvance`] prevents server
+    /// callers from entering `TerminalPending` without the generation-pinned reservation.
+    pub(super) fn begin_extraction_terminal(
+        &mut self,
+    ) -> Result<&CorePrivateRouteStateV1, CorePrivateRouteActorError> {
+        self.terminal_pending()?;
         Ok(&self.state)
     }
 

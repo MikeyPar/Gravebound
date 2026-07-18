@@ -5,7 +5,8 @@ use protocol::{
 
 use super::{
     CorePrivateRouteActorAdvance, CorePrivateRouteActorDirectory, CorePrivateRouteActorPosition,
-    CorePrivateRouteActorSeed, CorePrivateRouteRuntimeError,
+    CorePrivateRouteActorSeed, CorePrivateRouteExtractionBinding,
+    CorePrivateRouteExtractionExitBinding, CorePrivateRouteRuntimeError,
 };
 use crate::{
     AccountId, AuthenticatedAccount, AuthenticatedNamespace, CoreBellPortalAuthority,
@@ -65,6 +66,30 @@ fn binding(character_version: u64) -> CoreBellPortalBinding {
         character_version,
         content_revision: world_revision(),
     }
+}
+
+fn extraction_exit_binding() -> CorePrivateRouteExtractionExitBinding {
+    CorePrivateRouteExtractionExitBinding::new([7; 16], [8; 16], [9; 16], [10; 16], [11; 16])
+        .expect("server-owned exit identities are well formed")
+}
+
+fn changed_extraction_exit_binding() -> CorePrivateRouteExtractionExitBinding {
+    CorePrivateRouteExtractionExitBinding::new([7; 16], [8; 16], [12; 16], [10; 16], [11; 16])
+        .expect("changed request remains structurally valid")
+}
+
+fn extraction_binding(
+    accepted_route: protocol::CorePrivateRouteStateV1,
+    exit: CorePrivateRouteExtractionExitBinding,
+) -> CorePrivateRouteExtractionBinding {
+    CorePrivateRouteExtractionBinding::new(
+        ACCOUNT_ID,
+        accepted_route,
+        world_revision(),
+        RESTORE_ID,
+        exit,
+    )
+    .expect("BossExitReady authority is well formed")
 }
 
 async fn clear_microrealm(
@@ -137,30 +162,10 @@ async fn clear_current_room(
     }
 }
 
-#[tokio::test]
-async fn actor_trace_is_exactly_hall_microrealm_b0_through_b6_terminal() {
-    let directory = CorePrivateRouteActorDirectory::new();
-    let lease = directory
-        .register_actor(authenticated(), hall_seed(CHARACTER_ID, 1), 11)
-        .expect("actor registers");
-
-    assert!(matches!(
-        directory
-            .advance(lease, CorePrivateRouteActorAdvance::MicrorealmActive)
-            .await,
-        Err(CorePrivateRouteRuntimeError::Actor(
-            super::CorePrivateRouteActorError::InvalidTransition
-        ))
-    ));
-    commit_bell_entry(&directory, lease).await;
-    let vestibule = directory.snapshot(lease).expect("snapshot");
-    assert_eq!(
-        vestibule.room,
-        Some(CorePrivateRouteRoomV1::BellVestibuleB0)
-    );
-    assert_eq!(vestibule.phase, CorePrivateRoutePhaseV1::DungeonVestibule);
-    assert_eq!(vestibule.character_version, 3);
-
+async fn advance_bell_to_boss_exit_ready(
+    directory: &CorePrivateRouteActorDirectory,
+    lease: super::CorePrivateRouteActorLease,
+) -> protocol::CorePrivateRouteStateV1 {
     for room in [
         CorePrivateRouteRoomV1::BellCrossB1,
         CorePrivateRouteRoomV1::BellNaveB2,
@@ -170,7 +175,7 @@ async fn actor_trace_is_exactly_hall_microrealm_b0_through_b6_terminal() {
             .advance(lease, CorePrivateRouteActorAdvance::EnterCombatRoom(room))
             .await
             .expect("next exact combat room opens");
-        clear_current_room(&directory, lease).await;
+        clear_current_room(directory, lease).await;
     }
     directory
         .advance(lease, CorePrivateRouteActorAdvance::EnterRest)
@@ -183,7 +188,7 @@ async fn actor_trace_is_exactly_hall_microrealm_b0_through_b6_terminal() {
         )
         .await
         .expect("B5 follows rest");
-    clear_current_room(&directory, lease).await;
+    clear_current_room(directory, lease).await;
     directory
         .advance(lease, CorePrivateRouteActorAdvance::EnterBoss)
         .await
@@ -217,10 +222,53 @@ async fn actor_trace_is_exactly_hall_microrealm_b0_through_b6_terminal() {
         exit_ready.readiness.extraction_available,
         CorePrivateRouteAvailabilityV1::Available
     );
-    directory
-        .advance(lease, CorePrivateRouteActorAdvance::TerminalPending)
+    exit_ready
+}
+
+async fn reach_boss_exit_ready(
+    directory: &CorePrivateRouteActorDirectory,
+    lease: super::CorePrivateRouteActorLease,
+) -> protocol::CorePrivateRouteStateV1 {
+    commit_bell_entry(directory, lease).await;
+    advance_bell_to_boss_exit_ready(directory, lease).await
+}
+
+#[tokio::test]
+async fn actor_trace_is_exactly_hall_microrealm_b0_through_b6_terminal() {
+    let directory = CorePrivateRouteActorDirectory::new();
+    let lease = directory
+        .register_actor(authenticated(), hall_seed(CHARACTER_ID, 1), 11)
+        .expect("actor registers");
+
+    assert!(matches!(
+        directory
+            .advance(lease, CorePrivateRouteActorAdvance::MicrorealmActive)
+            .await,
+        Err(CorePrivateRouteRuntimeError::Actor(
+            super::CorePrivateRouteActorError::InvalidTransition
+        ))
+    ));
+    commit_bell_entry(&directory, lease).await;
+    let vestibule = directory.snapshot(lease).expect("snapshot");
+    assert_eq!(
+        vestibule.room,
+        Some(CorePrivateRouteRoomV1::BellVestibuleB0)
+    );
+    assert_eq!(vestibule.phase, CorePrivateRoutePhaseV1::DungeonVestibule);
+    assert_eq!(vestibule.character_version, 3);
+
+    let exit_ready = advance_bell_to_boss_exit_ready(&directory, lease).await;
+    let permit = directory
+        .prepare_extraction_terminal(
+            lease,
+            extraction_binding(exit_ready, extraction_exit_binding()),
+        )
         .await
         .expect("terminal barrier revokes control");
+    directory
+        .revalidate_extraction_terminal(lease, &permit)
+        .await
+        .expect("current permit revalidates before publication");
     assert_eq!(
         directory
             .snapshot(lease)
@@ -237,6 +285,233 @@ async fn actor_trace_is_exactly_hall_microrealm_b0_through_b6_terminal() {
             .expect("shutdown")
             .zero_residue
     );
+}
+
+#[tokio::test]
+async fn extraction_reservation_is_atomic_idempotent_and_pins_paired_authority() {
+    let directory = CorePrivateRouteActorDirectory::new();
+    let lease = directory
+        .register_actor(authenticated(), hall_seed(CHARACTER_ID, 1), 12)
+        .expect("actor registers");
+    let accepted = reach_boss_exit_ready(&directory, lease).await;
+    let accepted_version = accepted.state_version;
+    let binding = extraction_binding(accepted.clone(), extraction_exit_binding());
+
+    let permit = directory
+        .prepare_extraction_terminal(lease, binding.clone())
+        .await
+        .expect("BossExitReady actor reserves the extraction terminal");
+    assert_ne!(permit.permit_id(), [0; 16]);
+    assert_eq!(permit.actor_generation(), lease.actor_generation());
+    assert_eq!(permit.accepted_route_state_version(), accepted_version);
+    assert_eq!(
+        permit.terminal_pending_route_state_version(),
+        accepted_version + 1
+    );
+    assert_eq!(permit.route_content_revision(), &route_revision());
+    assert_eq!(permit.world_flow_revision(), &world_revision());
+    assert_eq!(permit.binding().account_id(), ACCOUNT_ID);
+    assert_eq!(permit.binding().accepted_route(), &accepted);
+    assert_eq!(permit.binding().exit().extraction_request_id(), [9; 16]);
+
+    let replay = directory
+        .prepare_extraction_terminal(lease, binding.clone())
+        .await
+        .expect("exact prepare replay returns the actor-owned reservation");
+    assert_eq!(replay, permit);
+    directory
+        .revalidate_extraction_terminal(lease, &permit)
+        .await
+        .expect("permit remains current before prepared/result publication");
+    assert_eq!(
+        directory
+            .snapshot(lease)
+            .expect("terminal projection")
+            .phase,
+        CorePrivateRoutePhaseV1::TerminalPending
+    );
+    assert!(matches!(
+        directory
+            .advance(lease, CorePrivateRouteActorAdvance::BossExitReady)
+            .await,
+        Err(CorePrivateRouteRuntimeError::TerminalInProgress)
+    ));
+
+    let changed = extraction_binding(accepted, changed_extraction_exit_binding());
+    assert!(matches!(
+        directory.prepare_extraction_terminal(lease, changed).await,
+        Err(CorePrivateRouteRuntimeError::TerminalReservationConflict)
+    ));
+
+    directory.begin_shutdown();
+    let report = directory.finish_shutdown().await.expect("shutdown");
+    assert!(report.zero_residue);
+    assert_eq!(report.remaining_terminal_reservations, 0);
+    assert_eq!(report.remaining_actor_tasks, 0);
+}
+
+#[tokio::test]
+async fn extraction_prepare_rejects_stale_or_mixed_actor_authority_without_residue() {
+    let directory = CorePrivateRouteActorDirectory::new();
+    let lease = directory
+        .register_actor(authenticated(), hall_seed(CHARACTER_ID, 1), 13)
+        .expect("actor registers");
+    let accepted = reach_boss_exit_ready(&directory, lease).await;
+
+    let mut stale_state = accepted.clone();
+    stale_state.state_version += 1;
+    assert!(matches!(
+        directory
+            .prepare_extraction_terminal(
+                lease,
+                extraction_binding(stale_state, extraction_exit_binding()),
+            )
+            .await,
+        Err(CorePrivateRouteRuntimeError::StaleRouteState)
+    ));
+
+    let mut wrong_route_content = accepted.clone();
+    wrong_route_content.content_revision.records_blake3 = hash('1');
+    assert!(matches!(
+        directory
+            .prepare_extraction_terminal(
+                lease,
+                extraction_binding(wrong_route_content, extraction_exit_binding()),
+            )
+            .await,
+        Err(CorePrivateRouteRuntimeError::ContentAuthorityMismatch)
+    ));
+
+    let wrong_world_content = WorldFlowContentRevisionV1 {
+        records_blake3: hash('2'),
+        assets_blake3: hash('3'),
+        localization_blake3: hash('4'),
+    };
+    let mixed_content = CorePrivateRouteExtractionBinding::new(
+        ACCOUNT_ID,
+        accepted.clone(),
+        wrong_world_content,
+        RESTORE_ID,
+        extraction_exit_binding(),
+    )
+    .expect("mixed content is structurally valid but not actor authority");
+    assert!(matches!(
+        directory
+            .prepare_extraction_terminal(lease, mixed_content)
+            .await,
+        Err(CorePrivateRouteRuntimeError::ContentAuthorityMismatch)
+    ));
+
+    let mut stale_generation = accepted.clone();
+    stale_generation.actor_generation += 1;
+    assert!(matches!(
+        directory
+            .prepare_extraction_terminal(
+                lease,
+                extraction_binding(stale_generation, extraction_exit_binding()),
+            )
+            .await,
+        Err(CorePrivateRouteRuntimeError::StaleGeneration)
+    ));
+
+    let foreign_account = CorePrivateRouteExtractionBinding::new(
+        [99; 16],
+        accepted.clone(),
+        world_revision(),
+        RESTORE_ID,
+        extraction_exit_binding(),
+    )
+    .expect("foreign account remains structurally valid");
+    assert!(matches!(
+        directory
+            .prepare_extraction_terminal(lease, foreign_account)
+            .await,
+        Err(CorePrivateRouteRuntimeError::InvalidExtractionBinding)
+    ));
+    assert!(matches!(
+        CorePrivateRouteExtractionExitBinding::new([7; 16], [7; 16], [9; 16], [10; 16], [11; 16]),
+        Err(CorePrivateRouteRuntimeError::InvalidExtractionBinding)
+    ));
+
+    directory
+        .prepare_extraction_terminal(
+            lease,
+            extraction_binding(accepted, extraction_exit_binding()),
+        )
+        .await
+        .expect("rejected authority never strands a reservation or advances state");
+    directory.begin_shutdown();
+    let report = directory.finish_shutdown().await.expect("shutdown");
+    assert!(report.zero_residue);
+    assert_eq!(report.remaining_terminal_reservations, 0);
+}
+
+#[tokio::test]
+async fn retirement_and_shutdown_invalidate_terminal_permits_and_drain_workers() {
+    let directory = CorePrivateRouteActorDirectory::new();
+    let lease = directory
+        .register_actor(authenticated(), hall_seed(CHARACTER_ID, 1), 14)
+        .expect("actor registers");
+    let accepted = reach_boss_exit_ready(&directory, lease).await;
+    let permit = directory
+        .prepare_extraction_terminal(
+            lease,
+            extraction_binding(accepted, extraction_exit_binding()),
+        )
+        .await
+        .expect("terminal reserves");
+    directory
+        .retire_actor(lease)
+        .await
+        .expect("terminal retirement invalidates the in-memory reservation");
+    assert!(matches!(
+        directory
+            .revalidate_extraction_terminal(lease, &permit)
+            .await,
+        Err(CorePrivateRouteRuntimeError::ActorUnavailable)
+    ));
+    let replacement = directory
+        .register_actor(authenticated(), hall_seed(CHARACTER_ID, 3), 15)
+        .expect("only a higher persistent generation replaces the retired actor");
+    assert!(matches!(
+        directory
+            .revalidate_extraction_terminal(lease, &permit)
+            .await,
+        Err(CorePrivateRouteRuntimeError::StaleGeneration)
+    ));
+    assert_eq!(replacement.actor_generation(), 15);
+    directory.begin_shutdown();
+    let report = directory.finish_shutdown().await.expect("shutdown");
+    assert!(report.zero_residue);
+    assert_eq!(report.remaining_terminal_reservations, 0);
+    assert_eq!(report.remaining_actor_tasks, 0);
+
+    let shutdown_directory = CorePrivateRouteActorDirectory::new();
+    let shutdown_lease = shutdown_directory
+        .register_actor(authenticated(), hall_seed(CHARACTER_ID, 1), 16)
+        .expect("actor registers");
+    let accepted = reach_boss_exit_ready(&shutdown_directory, shutdown_lease).await;
+    let shutdown_permit = shutdown_directory
+        .prepare_extraction_terminal(
+            shutdown_lease,
+            extraction_binding(accepted, extraction_exit_binding()),
+        )
+        .await
+        .expect("terminal reserves");
+    shutdown_directory.begin_shutdown();
+    assert!(matches!(
+        shutdown_directory
+            .revalidate_extraction_terminal(shutdown_lease, &shutdown_permit)
+            .await,
+        Err(CorePrivateRouteRuntimeError::Retired)
+    ));
+    let report = shutdown_directory
+        .finish_shutdown()
+        .await
+        .expect("shutdown");
+    assert!(report.zero_residue);
+    assert_eq!(report.remaining_terminal_reservations, 0);
+    assert_eq!(report.remaining_actor_tasks, 0);
 }
 
 #[tokio::test]
@@ -264,14 +539,12 @@ async fn bell_reservation_is_exclusive_pins_state_and_drop_releases_synchronousl
         Err(CoreBellPortalRejection::TransferInProgress)
     ));
     assert!(matches!(
-        directory
-            .advance(lease, CorePrivateRouteActorAdvance::TerminalPending)
-            .await,
+        directory.set_bell_portal_in_range(lease, false).await,
         Err(CorePrivateRouteRuntimeError::TransferInProgress)
     ));
     drop(permit);
     directory
-        .advance(lease, CorePrivateRouteActorAdvance::TerminalPending)
+        .set_bell_portal_in_range(lease, false)
         .await
         .expect("lease Drop releases before any asynchronous cleanup");
 
@@ -402,6 +675,7 @@ async fn explicit_persistent_generation_floor_blocks_aba_and_one_account_has_one
     assert_eq!(report.remaining_actor_tasks, 0);
     assert_eq!(report.remaining_registered_actors, 0);
     assert_eq!(report.remaining_portal_reservations, 0);
+    assert_eq!(report.remaining_terminal_reservations, 0);
 }
 
 #[tokio::test]

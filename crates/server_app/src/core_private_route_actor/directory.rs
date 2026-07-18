@@ -4,7 +4,10 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 
-use protocol::{CorePrivateRoutePhaseV1, CorePrivateRouteSceneV1, CorePrivateRouteStateV1};
+use protocol::{
+    CorePrivateRouteContentRevisionV1, CorePrivateRoutePhaseV1, CorePrivateRouteRoomV1,
+    CorePrivateRouteSceneV1, CorePrivateRouteStateV1, WorldFlowContentRevisionV1,
+};
 use thiserror::Error;
 use tokio::{
     sync::{mpsc, oneshot},
@@ -19,6 +22,9 @@ use crate::{
 };
 
 pub const CORE_PRIVATE_ROUTE_ACTOR_MAILBOX_CAPACITY: usize = 64;
+
+const EXTRACTION_PERMIT_CONTEXT: &str =
+    "gravebound.core-private-route.extraction-terminal-permit.v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct CorePrivateRouteActorKey {
@@ -49,6 +55,192 @@ impl CorePrivateRouteActorLease {
     }
 }
 
+/// Stable server-issued Sir Caldus exit identities admitted by the private-route actor.
+///
+/// Fields remain private so client material cannot be promoted into exit authority. The caller
+/// must first obtain these identities from the committed reward/exit owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CorePrivateRouteExtractionExitBinding {
+    encounter: [u8; 16],
+    exit_instance: [u8; 16],
+    extraction_request: [u8; 16],
+    extraction_receipt: [u8; 16],
+    terminal: [u8; 16],
+}
+
+impl CorePrivateRouteExtractionExitBinding {
+    pub fn new(
+        encounter_id: [u8; 16],
+        exit_instance_id: [u8; 16],
+        extraction_request_id: [u8; 16],
+        extraction_receipt_id: [u8; 16],
+        terminal_id: [u8; 16],
+    ) -> Result<Self, CorePrivateRouteRuntimeError> {
+        let identities = [
+            encounter_id,
+            exit_instance_id,
+            extraction_request_id,
+            extraction_receipt_id,
+            terminal_id,
+        ];
+        if identities.contains(&[0; 16]) || !pairwise_distinct(&identities) {
+            return Err(CorePrivateRouteRuntimeError::InvalidExtractionBinding);
+        }
+        Ok(Self {
+            encounter: encounter_id,
+            exit_instance: exit_instance_id,
+            extraction_request: extraction_request_id,
+            extraction_receipt: extraction_receipt_id,
+            terminal: terminal_id,
+        })
+    }
+
+    #[must_use]
+    pub const fn encounter_id(&self) -> [u8; 16] {
+        self.encounter
+    }
+
+    #[must_use]
+    pub const fn exit_instance_id(&self) -> [u8; 16] {
+        self.exit_instance
+    }
+
+    #[must_use]
+    pub const fn extraction_request_id(&self) -> [u8; 16] {
+        self.extraction_request
+    }
+
+    #[must_use]
+    pub const fn extraction_receipt_id(&self) -> [u8; 16] {
+        self.extraction_receipt
+    }
+
+    #[must_use]
+    pub const fn terminal_id(&self) -> [u8; 16] {
+        self.terminal
+    }
+}
+
+/// Complete pre-terminal actor and durable-exit authority supplied by server-owned systems.
+///
+/// The directory compares the complete route snapshot and its paired world-flow revision under
+/// the actor lock. A caller cannot mix a stale generation, state version, content revision, or
+/// lineage with a current exit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CorePrivateRouteExtractionBinding {
+    account_id: [u8; 16],
+    accepted_route: CorePrivateRouteStateV1,
+    world_flow_revision: WorldFlowContentRevisionV1,
+    entry_restore_point_id: [u8; 16],
+    exit: CorePrivateRouteExtractionExitBinding,
+}
+
+impl CorePrivateRouteExtractionBinding {
+    pub fn new(
+        account_id: [u8; 16],
+        accepted_route: CorePrivateRouteStateV1,
+        world_flow_revision: WorldFlowContentRevisionV1,
+        entry_restore_point_id: [u8; 16],
+        exit: CorePrivateRouteExtractionExitBinding,
+    ) -> Result<Self, CorePrivateRouteRuntimeError> {
+        if account_id == [0; 16]
+            || entry_restore_point_id == [0; 16]
+            || accepted_route.validate().is_err()
+            || accepted_route.scene != CorePrivateRouteSceneV1::BellSepulcher
+            || accepted_route.room != Some(CorePrivateRouteRoomV1::CaldusArenaB6)
+            || accepted_route.phase != CorePrivateRoutePhaseV1::BossExitReady
+            || !accepted_route.readiness.extraction_available.is_available()
+            || accepted_route
+                .instance_lineage_id
+                .is_none_or(|lineage| lineage == [0; 16])
+            || zero_world_flow_revision(&world_flow_revision)
+        {
+            return Err(CorePrivateRouteRuntimeError::InvalidExtractionBinding);
+        }
+        Ok(Self {
+            account_id,
+            accepted_route,
+            world_flow_revision,
+            entry_restore_point_id,
+            exit,
+        })
+    }
+
+    #[must_use]
+    pub const fn account_id(&self) -> [u8; 16] {
+        self.account_id
+    }
+
+    #[must_use]
+    pub const fn accepted_route(&self) -> &CorePrivateRouteStateV1 {
+        &self.accepted_route
+    }
+
+    #[must_use]
+    pub const fn world_flow_revision(&self) -> &WorldFlowContentRevisionV1 {
+        &self.world_flow_revision
+    }
+
+    #[must_use]
+    pub const fn entry_restore_point_id(&self) -> [u8; 16] {
+        self.entry_restore_point_id
+    }
+
+    #[must_use]
+    pub const fn exit(&self) -> &CorePrivateRouteExtractionExitBinding {
+        &self.exit
+    }
+}
+
+/// Opaque reservation proving one exact actor generation entered `TerminalPending`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CorePrivateRouteExtractionPermit {
+    permit_id: [u8; 16],
+    binding: CorePrivateRouteExtractionBinding,
+    actor_generation: u64,
+    accepted_route_state_version: u64,
+    terminal_pending_route_state_version: u64,
+    route_content_revision: CorePrivateRouteContentRevisionV1,
+    world_flow_revision: WorldFlowContentRevisionV1,
+}
+
+impl CorePrivateRouteExtractionPermit {
+    #[must_use]
+    pub const fn permit_id(&self) -> [u8; 16] {
+        self.permit_id
+    }
+
+    #[must_use]
+    pub const fn binding(&self) -> &CorePrivateRouteExtractionBinding {
+        &self.binding
+    }
+
+    #[must_use]
+    pub const fn actor_generation(&self) -> u64 {
+        self.actor_generation
+    }
+
+    #[must_use]
+    pub const fn accepted_route_state_version(&self) -> u64 {
+        self.accepted_route_state_version
+    }
+
+    #[must_use]
+    pub const fn terminal_pending_route_state_version(&self) -> u64 {
+        self.terminal_pending_route_state_version
+    }
+
+    #[must_use]
+    pub const fn route_content_revision(&self) -> &CorePrivateRouteContentRevisionV1 {
+        &self.route_content_revision
+    }
+
+    #[must_use]
+    pub const fn world_flow_revision(&self) -> &WorldFlowContentRevisionV1 {
+        &self.world_flow_revision
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CorePrivateRouteRuntimeReport {
     pub served_actor_commands: u64,
@@ -56,12 +248,14 @@ pub struct CorePrivateRouteRuntimeReport {
     pub remaining_actor_tasks: usize,
     pub remaining_registered_actors: usize,
     pub remaining_portal_reservations: usize,
+    pub remaining_terminal_reservations: usize,
     pub zero_residue: bool,
 }
 
 struct CorePrivateRouteActorControl {
     actor: CorePrivateRouteActor,
-    reservation: Option<CoreBellPortalPermit>,
+    bell_reservation: Option<CoreBellPortalPermit>,
+    terminal_reservation: Option<CorePrivateRouteExtractionPermit>,
     retired: bool,
 }
 
@@ -91,6 +285,15 @@ enum CorePrivateRouteActorCommand {
     ReconcileBellPortal {
         transition: CoreBellPortalTransition,
         reply: oneshot::Sender<Result<(), CoreBellPortalRejection>>,
+    },
+    PrepareExtractionTerminal {
+        binding: CorePrivateRouteExtractionBinding,
+        reply:
+            oneshot::Sender<Result<CorePrivateRouteExtractionPermit, CorePrivateRouteRuntimeError>>,
+    },
+    RevalidateExtractionTerminal {
+        permit: CorePrivateRouteExtractionPermit,
+        reply: oneshot::Sender<Result<(), CorePrivateRouteRuntimeError>>,
     },
 }
 
@@ -164,6 +367,34 @@ impl CorePrivateRouteActorHandle {
         receive
             .await
             .map_err(|_| CoreBellPortalRejection::InstanceUnavailable)?
+    }
+
+    async fn prepare_extraction_terminal(
+        &self,
+        binding: CorePrivateRouteExtractionBinding,
+    ) -> Result<CorePrivateRouteExtractionPermit, CorePrivateRouteRuntimeError> {
+        let (reply, receive) = oneshot::channel();
+        self.commands
+            .send(CorePrivateRouteActorCommand::PrepareExtractionTerminal { binding, reply })
+            .await
+            .map_err(|_| CorePrivateRouteRuntimeError::ActorUnavailable)?;
+        receive
+            .await
+            .map_err(|_| CorePrivateRouteRuntimeError::ActorUnavailable)?
+    }
+
+    async fn revalidate_extraction_terminal(
+        &self,
+        permit: CorePrivateRouteExtractionPermit,
+    ) -> Result<(), CorePrivateRouteRuntimeError> {
+        let (reply, receive) = oneshot::channel();
+        self.commands
+            .send(CorePrivateRouteActorCommand::RevalidateExtractionTerminal { permit, reply })
+            .await
+            .map_err(|_| CorePrivateRouteRuntimeError::ActorUnavailable)?;
+        receive
+            .await
+            .map_err(|_| CorePrivateRouteRuntimeError::ActorUnavailable)?
     }
 }
 
@@ -275,7 +506,8 @@ impl CorePrivateRouteActorDirectory {
         }
         let control = Arc::new(Mutex::new(CorePrivateRouteActorControl {
             actor,
-            reservation: None,
+            bell_reservation: None,
+            terminal_reservation: None,
             retired: false,
         }));
         let (commands, inbox) = mpsc::channel(CORE_PRIVATE_ROUTE_ACTOR_MAILBOX_CAPACITY);
@@ -317,6 +549,33 @@ impl CorePrivateRouteActorDirectory {
             .await
     }
 
+    /// Atomically reserves one exact successful-extraction authority and revokes ordinary route
+    /// control. Exact replay returns the same permit; changed material cannot replace it.
+    pub async fn prepare_extraction_terminal(
+        &self,
+        lease: CorePrivateRouteActorLease,
+        binding: CorePrivateRouteExtractionBinding,
+    ) -> Result<CorePrivateRouteExtractionPermit, CorePrivateRouteRuntimeError> {
+        validate_extraction_lease_binding(lease, &binding)?;
+        self.actor_handle(lease)?
+            .prepare_extraction_terminal(binding)
+            .await
+    }
+
+    /// Revalidates the opaque reservation immediately before an in-process prepared candidate or
+    /// committed result is published. Retirement, replacement, content drift, or state movement
+    /// invalidates the permit.
+    pub async fn revalidate_extraction_terminal(
+        &self,
+        lease: CorePrivateRouteActorLease,
+        permit: &CorePrivateRouteExtractionPermit,
+    ) -> Result<(), CorePrivateRouteRuntimeError> {
+        validate_extraction_lease_binding(lease, permit.binding())?;
+        self.actor_handle(lease)?
+            .revalidate_extraction_terminal(permit.clone())
+            .await
+    }
+
     pub fn snapshot(
         &self,
         lease: CorePrivateRouteActorLease,
@@ -347,10 +606,11 @@ impl CorePrivateRouteActorDirectory {
                 if control.actor.projection().actor_generation != lease.actor_generation {
                     return Err(CorePrivateRouteRuntimeError::StaleGeneration);
                 }
-                if control.reservation.is_some() {
+                if control.bell_reservation.is_some() {
                     return Err(CorePrivateRouteRuntimeError::TransferInProgress);
                 }
                 control.retired = true;
+                control.terminal_reservation = None;
             }
             let entry = state
                 .actors
@@ -381,9 +641,9 @@ impl CorePrivateRouteActorDirectory {
         Ok(())
     }
 
-    /// Closes admission and retires every actor before connection workers are joined. Any Bell
-    /// permit still held by a world-flow task becomes unusable and will reconcile from the durable
-    /// receipt after restart rather than preserving an in-memory danger actor.
+    /// Closes admission and retires every actor before connection workers are joined. Any Bell or
+    /// terminal permit becomes unusable; durable outcomes reconcile after restart, while an
+    /// uncommitted terminal intent follows the ordinary crash-restore contract.
     pub fn begin_shutdown(&self) {
         let mut state = lock(&self.inner.state);
         state.accepting = false;
@@ -394,7 +654,8 @@ impl CorePrivateRouteActorDirectory {
             let generation = {
                 let mut control = lock(&entry.control);
                 control.retired = true;
-                control.reservation = None;
+                control.bell_reservation = None;
+                control.terminal_reservation = None;
                 control.actor.projection().actor_generation
             };
             state
@@ -436,7 +697,12 @@ impl CorePrivateRouteActorDirectory {
         let remaining_portal_reservations = state
             .actors
             .values()
-            .filter(|entry| lock(&entry.control).reservation.is_some())
+            .filter(|entry| lock(&entry.control).bell_reservation.is_some())
+            .count();
+        let remaining_terminal_reservations = state
+            .actors
+            .values()
+            .filter(|entry| lock(&entry.control).terminal_reservation.is_some())
             .count();
         let report = CorePrivateRouteRuntimeReport {
             served_actor_commands: state.served_actor_commands,
@@ -444,10 +710,12 @@ impl CorePrivateRouteActorDirectory {
             remaining_actor_tasks: state.retired_tasks.len(),
             remaining_registered_actors: state.actors.len(),
             remaining_portal_reservations,
+            remaining_terminal_reservations,
             zero_residue: state.retired_tasks.is_empty()
                 && state.actors.is_empty()
                 && state.active_account.is_empty()
-                && remaining_portal_reservations == 0,
+                && remaining_portal_reservations == 0
+                && remaining_terminal_reservations == 0,
         };
         Ok(report)
     }
@@ -649,6 +917,14 @@ async fn serve_actor_mailbox(
             CorePrivateRouteActorCommand::ReconcileBellPortal { transition, reply } => {
                 let _ = reply.send(handle_reconcile_bell_portal(&control, &transition));
             }
+            CorePrivateRouteActorCommand::PrepareExtractionTerminal { binding, reply } => {
+                // A lost transport response must not reopen control. Exact replay reconstructs the
+                // same permit from the actor-owned reservation.
+                let _ = reply.send(handle_prepare_extraction_terminal(&control, binding));
+            }
+            CorePrivateRouteActorCommand::RevalidateExtractionTerminal { permit, reply } => {
+                let _ = reply.send(handle_revalidate_extraction_terminal(&control, &permit));
+            }
         }
     }
     let mut abandoned = 0_u64;
@@ -666,6 +942,12 @@ async fn serve_actor_mailbox(
             | CorePrivateRouteActorCommand::ReconcileBellPortal { reply, .. } => {
                 let _ = reply.send(Err(CoreBellPortalRejection::InstanceUnavailable));
             }
+            CorePrivateRouteActorCommand::PrepareExtractionTerminal { reply, .. } => {
+                let _ = reply.send(Err(CorePrivateRouteRuntimeError::Retired));
+            }
+            CorePrivateRouteActorCommand::RevalidateExtractionTerminal { reply, .. } => {
+                let _ = reply.send(Err(CorePrivateRouteRuntimeError::Retired));
+            }
         }
     }
     CorePrivateRouteActorTaskReport { served, abandoned }
@@ -679,8 +961,11 @@ fn handle_advance(
     if control.retired {
         return Err(CorePrivateRouteRuntimeError::Retired);
     }
-    if control.reservation.is_some() {
+    if control.bell_reservation.is_some() {
         return Err(CorePrivateRouteRuntimeError::TransferInProgress);
+    }
+    if control.terminal_reservation.is_some() {
+        return Err(CorePrivateRouteRuntimeError::TerminalInProgress);
     }
     control.actor.advance(advance).cloned().map_err(Into::into)
 }
@@ -693,8 +978,11 @@ fn handle_portal_range(
     if control.retired {
         return Err(CorePrivateRouteRuntimeError::Retired);
     }
-    if control.reservation.is_some() {
+    if control.bell_reservation.is_some() {
         return Err(CorePrivateRouteRuntimeError::TransferInProgress);
+    }
+    if control.terminal_reservation.is_some() {
+        return Err(CorePrivateRouteRuntimeError::TerminalInProgress);
     }
     control.actor.set_bell_portal_in_range(in_range)?;
     Ok(control.actor.projection().clone())
@@ -726,7 +1014,7 @@ fn handle_prepare_bell_portal(
     if !control.actor.bell_portal_in_range() {
         return Err(CoreBellPortalRejection::OutOfRange);
     }
-    if control.reservation.is_some() {
+    if control.bell_reservation.is_some() || control.terminal_reservation.is_some() {
         return Err(CoreBellPortalRejection::TransferInProgress);
     }
     let permit = CoreBellPortalPermit {
@@ -735,7 +1023,7 @@ fn handle_prepare_bell_portal(
         route_state_version: projection.state_version,
         binding,
     };
-    control.reservation = Some(permit.clone());
+    control.bell_reservation = Some(permit.clone());
     Ok(permit)
 }
 
@@ -749,7 +1037,8 @@ fn handle_commit_bell_portal(
     }
     let mut control = lock(control);
     if control.retired
-        || control.reservation.as_ref() != Some(permit)
+        || control.bell_reservation.as_ref() != Some(permit)
+        || control.terminal_reservation.is_some()
         || control.actor.projection().actor_generation != permit.actor_generation
         || control.actor.projection().state_version != permit.route_state_version
     {
@@ -759,7 +1048,7 @@ fn handle_commit_bell_portal(
         .actor
         .commit_bell_portal(transition.destination_character_version)
         .map_err(|_| CoreBellPortalRejection::ServiceUnavailable)?;
-    control.reservation = None;
+    control.bell_reservation = None;
     Ok(())
 }
 
@@ -776,11 +1065,14 @@ fn handle_reconcile_bell_portal(
     {
         return Err(CoreBellPortalRejection::InstanceUnavailable);
     }
-    if let Some(reservation) = &control.reservation {
+    if control.terminal_reservation.is_some() {
+        return Err(CoreBellPortalRejection::InstanceUnavailable);
+    }
+    if let Some(reservation) = &control.bell_reservation {
         if reservation.binding != transition.binding {
             return Err(CoreBellPortalRejection::TransferInProgress);
         }
-        control.reservation = None;
+        control.bell_reservation = None;
     }
     let projection = control.actor.projection();
     if projection.character_version > transition.destination_character_version {
@@ -805,14 +1097,254 @@ fn handle_reconcile_bell_portal(
     Ok(())
 }
 
+fn handle_prepare_extraction_terminal(
+    control: &Mutex<CorePrivateRouteActorControl>,
+    binding: CorePrivateRouteExtractionBinding,
+) -> Result<CorePrivateRouteExtractionPermit, CorePrivateRouteRuntimeError> {
+    let mut control = lock(control);
+    if control.retired {
+        return Err(CorePrivateRouteRuntimeError::Retired);
+    }
+    if let Some(existing) = control.terminal_reservation.as_ref() {
+        if existing.binding() != &binding {
+            return Err(CorePrivateRouteRuntimeError::TerminalReservationConflict);
+        }
+        validate_extraction_permit(&control, existing)?;
+        return Ok(existing.clone());
+    }
+    if control.bell_reservation.is_some() {
+        return Err(CorePrivateRouteRuntimeError::TransferInProgress);
+    }
+
+    let projection = control.actor.projection();
+    let accepted = binding.accepted_route();
+    if projection.actor_generation != accepted.actor_generation {
+        return Err(CorePrivateRouteRuntimeError::StaleGeneration);
+    }
+    if projection.content_revision != accepted.content_revision
+        || control.actor.world_flow_revision() != binding.world_flow_revision()
+    {
+        return Err(CorePrivateRouteRuntimeError::ContentAuthorityMismatch);
+    }
+    if projection.state_version != accepted.state_version || projection != accepted {
+        return Err(CorePrivateRouteRuntimeError::StaleRouteState);
+    }
+    if projection.scene != CorePrivateRouteSceneV1::BellSepulcher
+        || projection.room != Some(CorePrivateRouteRoomV1::CaldusArenaB6)
+        || projection.phase != CorePrivateRoutePhaseV1::BossExitReady
+        || !projection.readiness.extraction_available.is_available()
+    {
+        return Err(CorePrivateRouteRuntimeError::ExtractionNotReady);
+    }
+
+    let actor_generation = projection.actor_generation;
+    let accepted_route_state_version = projection.state_version;
+    let character_version = projection.character_version;
+    let route_content_revision = projection.content_revision.clone();
+    let world_flow_revision = control.actor.world_flow_revision().clone();
+    let terminal_pending_route_state_version = accepted_route_state_version
+        .checked_add(1)
+        .ok_or(CorePrivateRouteRuntimeError::StaleRouteState)?;
+    let actor_before_terminal = control.actor.clone();
+    let pending = match control.actor.begin_extraction_terminal() {
+        Ok(pending) => pending.clone(),
+        Err(error) => {
+            control.actor = actor_before_terminal;
+            return Err(error.into());
+        }
+    };
+    if pending.actor_generation != actor_generation
+        || pending.state_version != terminal_pending_route_state_version
+        || pending.character_version != character_version
+        || pending.character_id != binding.accepted_route().character_id
+        || pending.instance_lineage_id != binding.accepted_route().instance_lineage_id
+        || pending.scene != CorePrivateRouteSceneV1::BellSepulcher
+        || pending.room != Some(CorePrivateRouteRoomV1::CaldusArenaB6)
+        || pending.phase != CorePrivateRoutePhaseV1::TerminalPending
+    {
+        control.actor = actor_before_terminal;
+        return Err(CorePrivateRouteRuntimeError::StaleRouteState);
+    }
+    let permit = CorePrivateRouteExtractionPermit {
+        permit_id: derive_extraction_permit_id(
+            &binding,
+            actor_generation,
+            accepted_route_state_version,
+            terminal_pending_route_state_version,
+        ),
+        binding,
+        actor_generation,
+        accepted_route_state_version,
+        terminal_pending_route_state_version,
+        route_content_revision,
+        world_flow_revision,
+    };
+    control.terminal_reservation = Some(permit.clone());
+    Ok(permit)
+}
+
+fn handle_revalidate_extraction_terminal(
+    control: &Mutex<CorePrivateRouteActorControl>,
+    permit: &CorePrivateRouteExtractionPermit,
+) -> Result<(), CorePrivateRouteRuntimeError> {
+    let control = lock(control);
+    validate_extraction_permit(&control, permit)
+}
+
+fn validate_extraction_permit(
+    control: &CorePrivateRouteActorControl,
+    permit: &CorePrivateRouteExtractionPermit,
+) -> Result<(), CorePrivateRouteRuntimeError> {
+    if control.retired {
+        return Err(CorePrivateRouteRuntimeError::Retired);
+    }
+    if control.terminal_reservation.as_ref() != Some(permit) {
+        return Err(CorePrivateRouteRuntimeError::TerminalReservationConflict);
+    }
+    let projection = control.actor.projection();
+    if projection.actor_generation != permit.actor_generation {
+        return Err(CorePrivateRouteRuntimeError::StaleGeneration);
+    }
+    if projection.content_revision != permit.route_content_revision
+        || control.actor.world_flow_revision() != &permit.world_flow_revision
+    {
+        return Err(CorePrivateRouteRuntimeError::ContentAuthorityMismatch);
+    }
+    if projection.state_version != permit.terminal_pending_route_state_version
+        || permit.accepted_route_state_version.checked_add(1)
+            != Some(permit.terminal_pending_route_state_version)
+        || projection.character_id != permit.binding.accepted_route().character_id
+        || projection.character_version != permit.binding.accepted_route().character_version
+        || projection.instance_lineage_id != permit.binding.accepted_route().instance_lineage_id
+        || projection.scene != CorePrivateRouteSceneV1::BellSepulcher
+        || projection.room != Some(CorePrivateRouteRoomV1::CaldusArenaB6)
+        || projection.phase != CorePrivateRoutePhaseV1::TerminalPending
+    {
+        return Err(CorePrivateRouteRuntimeError::StaleRouteState);
+    }
+    Ok(())
+}
+
 fn release_bell_reservation(
     control: &Mutex<CorePrivateRouteActorControl>,
     permit: &CoreBellPortalPermit,
 ) {
     let mut control = lock(control);
-    if control.reservation.as_ref() == Some(permit) {
-        control.reservation = None;
+    if control.bell_reservation.as_ref() == Some(permit) {
+        control.bell_reservation = None;
     }
+}
+
+fn validate_extraction_lease_binding(
+    lease: CorePrivateRouteActorLease,
+    binding: &CorePrivateRouteExtractionBinding,
+) -> Result<(), CorePrivateRouteRuntimeError> {
+    if binding.account_id() != lease.account_id()
+        || binding.accepted_route().character_id != lease.character_id()
+    {
+        return Err(CorePrivateRouteRuntimeError::InvalidExtractionBinding);
+    }
+    if binding.accepted_route().actor_generation != lease.actor_generation() {
+        return Err(CorePrivateRouteRuntimeError::StaleGeneration);
+    }
+    Ok(())
+}
+
+fn derive_extraction_permit_id(
+    binding: &CorePrivateRouteExtractionBinding,
+    actor_generation: u64,
+    accepted_route_state_version: u64,
+    terminal_pending_route_state_version: u64,
+) -> [u8; 16] {
+    let mut hasher = blake3::Hasher::new_derive_key(EXTRACTION_PERMIT_CONTEXT);
+    let lineage_id = binding
+        .accepted_route()
+        .instance_lineage_id
+        .expect("validated extraction binding has one lineage");
+    let actor_generation = actor_generation.to_le_bytes();
+    let accepted_route_state_version = accepted_route_state_version.to_le_bytes();
+    let terminal_pending_route_state_version = terminal_pending_route_state_version.to_le_bytes();
+    let account_id = binding.account_id();
+    let character_id = binding.accepted_route().character_id;
+    let entry_restore_point_id = binding.entry_restore_point_id();
+    let encounter_id = binding.exit().encounter_id();
+    let exit_instance_id = binding.exit().exit_instance_id();
+    let extraction_request_id = binding.exit().extraction_request_id();
+    let extraction_receipt_id = binding.exit().extraction_receipt_id();
+    let terminal_id = binding.exit().terminal_id();
+    for part in [
+        account_id.as_slice(),
+        character_id.as_slice(),
+        lineage_id.as_slice(),
+        entry_restore_point_id.as_slice(),
+        encounter_id.as_slice(),
+        exit_instance_id.as_slice(),
+        extraction_request_id.as_slice(),
+        extraction_receipt_id.as_slice(),
+        terminal_id.as_slice(),
+        actor_generation.as_slice(),
+        accepted_route_state_version.as_slice(),
+        terminal_pending_route_state_version.as_slice(),
+        binding
+            .accepted_route()
+            .content_revision
+            .records_blake3
+            .as_str()
+            .as_bytes(),
+        binding
+            .accepted_route()
+            .content_revision
+            .assets_blake3
+            .as_str()
+            .as_bytes(),
+        binding
+            .accepted_route()
+            .content_revision
+            .localization_blake3
+            .as_str()
+            .as_bytes(),
+        binding
+            .world_flow_revision()
+            .records_blake3
+            .as_str()
+            .as_bytes(),
+        binding
+            .world_flow_revision()
+            .assets_blake3
+            .as_str()
+            .as_bytes(),
+        binding
+            .world_flow_revision()
+            .localization_blake3
+            .as_str()
+            .as_bytes(),
+    ] {
+        hasher.update(&(part.len() as u64).to_le_bytes());
+        hasher.update(part);
+    }
+    let mut permit_id = [0; 16];
+    permit_id.copy_from_slice(&hasher.finalize().as_bytes()[..16]);
+    if permit_id == [0; 16] {
+        permit_id[15] = 1;
+    }
+    permit_id
+}
+
+fn pairwise_distinct(identities: &[[u8; 16]]) -> bool {
+    identities
+        .iter()
+        .enumerate()
+        .all(|(index, identity)| !identities[index + 1..].contains(identity))
+}
+
+fn zero_world_flow_revision(revision: &WorldFlowContentRevisionV1) -> bool {
+    [
+        &revision.records_blake3,
+        &revision.assets_blake3,
+        &revision.localization_blake3,
+    ]
+    .into_iter()
+    .any(|hash| hash.as_str().bytes().all(|byte| byte == b'0'))
 }
 
 fn derive_permit_id(
@@ -867,6 +1399,18 @@ pub enum CorePrivateRouteRuntimeError {
     ActorUnavailable,
     #[error("private-route actor generation is stale")]
     StaleGeneration,
+    #[error("private-route extraction binding is invalid")]
+    InvalidExtractionBinding,
+    #[error("private-route extraction content authority does not match the actor")]
+    ContentAuthorityMismatch,
+    #[error("private-route extraction state authority is stale")]
+    StaleRouteState,
+    #[error("private-route extraction is not ready")]
+    ExtractionNotReady,
+    #[error("a terminal operation pins the current actor generation")]
+    TerminalInProgress,
+    #[error("another terminal reservation already owns this actor generation")]
+    TerminalReservationConflict,
     #[error("a Bell transfer pins the current actor generation")]
     TransferInProgress,
     #[error("private-route runtime requires an active Tokio runtime")]

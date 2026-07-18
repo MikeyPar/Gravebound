@@ -15,8 +15,9 @@ mod tests;
 
 pub use directory::{
     CORE_PRIVATE_ROUTE_ACTOR_MAILBOX_CAPACITY, CorePrivateRouteActorDirectory,
-    CorePrivateRouteActorLease, CorePrivateRouteBellPermitLease, CorePrivateRouteRuntimeError,
-    CorePrivateRouteRuntimeReport,
+    CorePrivateRouteActorLease, CorePrivateRouteBellPermitLease, CorePrivateRouteExtractionBinding,
+    CorePrivateRouteExtractionExitBinding, CorePrivateRouteExtractionPermit,
+    CorePrivateRouteRuntimeError, CorePrivateRouteRuntimeReport,
 };
 pub use state::{
     CorePrivateRouteActor, CorePrivateRouteActorAdvance, CorePrivateRouteActorError,
