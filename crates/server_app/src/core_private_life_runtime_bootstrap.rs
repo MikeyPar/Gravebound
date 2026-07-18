@@ -104,12 +104,10 @@ pub enum CorePrivateLifeBootstrapDisposition {
     ExtractionCommitted {
         terminal: Box<StoredCommittedExtractionTerminalV1>,
         hall: StoredPrivateLifeHallV1,
-        route: Option<CorePrivateRouteActorLease>,
     },
     RecallCommitted {
         terminal: Box<StoredCommittedRecallTerminalV1>,
         hall: StoredPrivateLifeHallV1,
-        route: CorePrivateRouteActorLease,
     },
 }
 
@@ -507,25 +505,12 @@ where
                 Ok(CorePrivateLifeBootstrapDisposition::DeathCommitted { terminal })
             }
             StoredPrivateLifeBootstrapStateV1::ExtractionCommitted { hall, terminal } => {
-                let route = if hall.resolution_hold.storage_resolution_required {
-                    self.require_no_retained_route(authenticated.account_id.as_bytes())?;
-                    None
-                } else {
-                    Some(self.ensure_hall_actor(authenticated, &hall).await?)
-                };
-                Ok(CorePrivateLifeBootstrapDisposition::ExtractionCommitted {
-                    terminal,
-                    hall,
-                    route,
-                })
+                self.require_no_retained_route(authenticated.account_id.as_bytes())?;
+                Ok(CorePrivateLifeBootstrapDisposition::ExtractionCommitted { terminal, hall })
             }
             StoredPrivateLifeBootstrapStateV1::RecallCommitted { hall, terminal } => {
-                let route = self.ensure_hall_actor(authenticated, &hall).await?;
-                Ok(CorePrivateLifeBootstrapDisposition::RecallCommitted {
-                    terminal,
-                    hall,
-                    route,
-                })
+                self.require_no_retained_route(authenticated.account_id.as_bytes())?;
+                Ok(CorePrivateLifeBootstrapDisposition::RecallCommitted { terminal, hall })
             }
         }
     }
