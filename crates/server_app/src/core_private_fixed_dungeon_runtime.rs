@@ -17,9 +17,10 @@ use sim_core::{
 use thiserror::Error;
 
 use crate::{
-    CoreBellPortalTransition, CoreCharacterCombatEnvelope, CoreDurableBargainRestResolution,
-    CorePrivateMicrorealmInput, CorePrivateMicrorealmRuntime, CorePrivateMicrorealmRuntimeError,
-    CorePrivateRouteActorDirectory, CorePrivateRouteActorLease, CorePrivateRouteRuntimeError,
+    CoreBellPortalTransition, CoreCharacterCombatEnvelope, CoreDurableB3RewardCommit,
+    CoreDurableBargainRestResolution, CorePrivateMicrorealmInput, CorePrivateMicrorealmRuntime,
+    CorePrivateMicrorealmRuntimeError, CorePrivateRouteActorDirectory, CorePrivateRouteActorLease,
+    CorePrivateRouteRuntimeError,
     core_private_combat_frame::{core_player_movement_config, step_live_player_combat},
     core_private_microrealm_runtime::CorePrivateMicrorealmDungeonHandoff,
 };
@@ -47,6 +48,17 @@ pub struct CorePrivateFixedDungeonRestCommit {
     pub oath_bargain_version: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CorePrivateFixedDungeonB3RewardCommit {
+    pub route: CorePrivateRouteStateV1,
+    pub receipt: sim_content::CoreB3RewardReceipt,
+    pub reward_event_id: [u8; 16],
+    pub reward_result_hash: [u8; 32],
+    pub progression_payload_hash: [u8; 32],
+    pub bargain_offer_id: Option<[u8; 16]>,
+    pub has_no_offer_resolution: bool,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct CorePrivateFixedDungeonLiveRoomFrame {
     pub input_sequence: u64,
@@ -68,6 +80,7 @@ pub struct CorePrivateFixedDungeonRuntime {
     combat: sim_content::CoreFixedDungeonCombat,
     movement: Option<PlayerMovementState>,
     tick: Tick,
+    last_reward_activity_sequence: u64,
 }
 
 impl CorePrivateFixedDungeonRuntime {
@@ -114,6 +127,7 @@ impl CorePrivateFixedDungeonRuntime {
             combat,
             movement: None,
             tick: handoff.final_tick,
+            last_reward_activity_sequence: 0,
         })
     }
 
@@ -145,6 +159,11 @@ impl CorePrivateFixedDungeonRuntime {
     #[must_use]
     pub fn room_phase(&self) -> Option<FixedRoomPhase> {
         self.combat.room_phase()
+    }
+
+    #[must_use]
+    pub fn pending_b3_reward_handoff(&self) -> Option<&sim_content::CoreB3RewardHandoff> {
+        self.combat.pending_b3_reward_handoff()
     }
 
     pub async fn advance(
@@ -211,6 +230,50 @@ impl CorePrivateFixedDungeonRuntime {
         })
     }
 
+    /// Applies only the opaque result returned after both the item reward and progression/
+    /// milestone terminal are durable. The exact simulation handoff remains the comparison key;
+    /// first application shares the route CAS, while exact retry is read-only.
+    pub async fn commit_b3_reward(
+        &mut self,
+        durable: &CoreDurableB3RewardCommit,
+    ) -> Result<CorePrivateFixedDungeonB3RewardCommit, CorePrivateFixedDungeonRuntimeError> {
+        let route_before = self.route_directory.snapshot(self.route_lease)?;
+        self.validate_route_authority(&route_before)?;
+        if self.combat.node() != sim_content::CoreFixedDungeonNode::BellKnightB3
+            || durable.account_id() != self.account_id()
+            || durable.character_id() != self.character_id()
+            || route_before.instance_lineage_id != Some(durable.instance_lineage_id())
+            || self.tick.0 < durable.handoff().reward_due_tick.0
+        {
+            return Err(CorePrivateFixedDungeonRuntimeError::B3RewardAuthorityMismatch);
+        }
+        let mut staged = self.combat.clone();
+        let receipt = staged.acknowledge_b3_reward(durable.handoff())?;
+        let route = if receipt == sim_content::CoreB3RewardReceipt::Committed {
+            let (room, phase) = route_position(staged.node(), staged.room_phase())?;
+            self.route_directory
+                .apply_fixed_dungeon_authority(
+                    self.route_lease,
+                    route_before.state_version,
+                    room,
+                    phase,
+                )
+                .await?
+        } else {
+            route_before
+        };
+        self.combat = staged;
+        Ok(CorePrivateFixedDungeonB3RewardCommit {
+            route,
+            receipt,
+            reward_event_id: durable.reward_event_id(),
+            reward_result_hash: durable.reward_result_hash(),
+            progression_payload_hash: durable.progression_payload_hash(),
+            bargain_offer_id: durable.bargain_offer_id(),
+            has_no_offer_resolution: durable.no_offer_resolution().is_some(),
+        })
+    }
+
     /// Generates one complete room frame from retained player intent. Movement, player attacks,
     /// hostile room simulation, lifecycle, route CAS, and local state commit share one staged
     /// transaction; client input cannot author combat results or room authority.
@@ -252,6 +315,8 @@ impl CorePrivateFixedDungeonRuntime {
                 .current_health()
                 != 0,
         );
+        let (reward_participation, reward_trust_state) =
+            fixed_room_reward_authority(&input, living_inside, self.last_reward_activity_sequence)?;
         let room_input = sim_content::CoreImmutableFixedRoomInput {
             crossed_activation_boundary: matches!(
                 staged_combat.room_phase(),
@@ -260,6 +325,15 @@ impl CorePrivateFixedDungeonRuntime {
             living_inside,
             living_party_outside: 0,
             doorway_hurtbox_blocked: false,
+            reward_life_state: if living_inside > 0 {
+                sim_core::RewardLifeState::Living
+            } else {
+                sim_core::RewardLifeState::Dead
+            },
+            // A completed Recall retires this sole danger task before another room frame can run.
+            reward_recall_state: sim_core::RewardRecallState::Eligible,
+            reward_trust_state,
+            reward_participation,
             combat_step: Some(combat_step.clone()),
         };
         let step = staged_combat.step_room(tick, &room_input)?;
@@ -279,6 +353,7 @@ impl CorePrivateFixedDungeonRuntime {
         self.combat = staged_combat;
         self.movement = Some(staged_movement);
         self.tick = tick;
+        self.last_reward_activity_sequence = input.reward_activity_sequence;
         Ok(CorePrivateFixedDungeonLiveRoomFrame {
             input_sequence: input.input_sequence,
             tick,
@@ -361,6 +436,40 @@ fn movement_for_combat(
     Ok(Some(movement))
 }
 
+fn fixed_room_reward_authority(
+    input: &CorePrivateMicrorealmInput,
+    living_inside: u16,
+    last_activity_sequence: u64,
+) -> Result<
+    (
+        sim_content::CoreRewardParticipation,
+        sim_core::RewardTrustState,
+    ),
+    CorePrivateFixedDungeonRuntimeError,
+> {
+    if input.reward_activity_sequence < last_activity_sequence {
+        return Err(CorePrivateFixedDungeonRuntimeError::RewardActivitySequenceRegressed);
+    }
+    let present = living_inside > 0 && input.reward_session_active;
+    let active = present
+        && (input.reward_activity_sequence > last_activity_sequence
+            || input.movement != sim_core::MovementAction::default()
+            || input.primary_held);
+    let participation = if active {
+        sim_content::CoreRewardParticipation::PresentActive
+    } else if present {
+        sim_content::CoreRewardParticipation::PresentInactive
+    } else {
+        sim_content::CoreRewardParticipation::Absent
+    };
+    let trust = if input.reward_session_active && input.reward_trust_valid {
+        sim_core::RewardTrustState::Valid
+    } else {
+        sim_core::RewardTrustState::InvalidSession
+    };
+    Ok((participation, trust))
+}
+
 fn route_position(
     node: sim_content::CoreFixedDungeonNode,
     room_phase: Option<FixedRoomPhase>,
@@ -415,10 +524,14 @@ pub enum CorePrivateFixedDungeonRuntimeError {
     RouteAuthorityMismatch,
     #[error("durable Bargain result does not belong to this B4 route authority")]
     BargainAuthorityMismatch,
+    #[error("durable B3 reward result does not belong to this Sepulcher Knight route authority")]
+    B3RewardAuthorityMismatch,
     #[error("live Core fixed-dungeon run-local tick exhausted")]
     TickExhausted,
     #[error("live Core fixed-dungeon combat tick does not match the server-owned frame")]
     CombatTickMismatch,
+    #[error("live Core fixed-dungeon reward activity sequence regressed")]
+    RewardActivitySequenceRegressed,
     #[error("live Core fixed-dungeon room movement is unavailable")]
     RoomMovementUnavailable,
     #[error(transparent)]
@@ -553,6 +666,9 @@ mod tests {
             primary_sequence: 0,
             ability_1_sequence: 0,
             ability_2_sequence: 0,
+            reward_session_active: true,
+            reward_trust_valid: true,
+            reward_activity_sequence: sequence.max(1),
         }
     }
 
@@ -562,6 +678,10 @@ mod tests {
             living_inside: 1,
             living_party_outside: 0,
             doorway_hurtbox_blocked: false,
+            reward_life_state: sim_core::RewardLifeState::Living,
+            reward_recall_state: sim_core::RewardRecallState::Eligible,
+            reward_trust_state: sim_core::RewardTrustState::Valid,
+            reward_participation: sim_content::CoreRewardParticipation::PresentActive,
             combat_step: Some(CombatStep {
                 tick,
                 ..CombatStep::default()
@@ -602,7 +722,9 @@ mod tests {
         combat
     }
 
-    async fn clear_current_room(runtime: &mut CorePrivateFixedDungeonRuntime) {
+    async fn clear_current_room(
+        runtime: &mut CorePrivateFixedDungeonRuntime,
+    ) -> Option<sim_content::CoreB3RewardHandoff> {
         let crossed = runtime.tick().checked_next().unwrap();
         runtime
             .step_room(&room_input(crossed, true))
@@ -633,6 +755,12 @@ mod tests {
         input.combat_step = Some(lethal_step(tick, &targets));
         let clear = runtime.step_room(&input).await.expect("clear room");
         assert_eq!(clear.step.phase_after(), FixedRoomPhase::Quiet);
+        let reward = match clear.step {
+            sim_content::CoreFixedDungeonRoomStep::B3(step) => step.reward_handoff,
+            sim_content::CoreFixedDungeonRoomStep::B1(_)
+            | sim_content::CoreFixedDungeonRoomStep::B2(_)
+            | sim_content::CoreFixedDungeonRoomStep::B5(_) => None,
+        };
         for _ in 1..=60 {
             let tick = runtime.tick().checked_next().unwrap();
             runtime
@@ -641,6 +769,7 @@ mod tests {
                 .expect("quiet progression");
         }
         assert_eq!(runtime.room_phase(), Some(FixedRoomPhase::Cleared));
+        reward
     }
 
     fn no_offer(lineage: [u8; 16]) -> CoreDurableBargainRestResolution {
@@ -763,11 +892,43 @@ mod tests {
     async fn durable_b4_resolution_is_lineage_bound_replay_safe_and_advances_to_b5() {
         let (directory, _, mut runtime) = fixture_at(Tick(0));
         runtime.advance().await.expect("enter B1");
-        clear_current_room(&mut runtime).await;
+        let _ = clear_current_room(&mut runtime).await;
         runtime.advance().await.expect("enter B2");
-        clear_current_room(&mut runtime).await;
+        let _ = clear_current_room(&mut runtime).await;
         runtime.advance().await.expect("enter B3");
-        clear_current_room(&mut runtime).await;
+        let reward = clear_current_room(&mut runtime)
+            .await
+            .expect("B3 reward handoff");
+        assert!(runtime.advance().await.is_err());
+        let foreign_reward = CoreDurableB3RewardCommit::test_fixture(
+            authenticated(),
+            CHARACTER_ID,
+            [0xFE; 16],
+            reward.clone(),
+        );
+        assert!(matches!(
+            runtime.commit_b3_reward(&foreign_reward).await,
+            Err(CorePrivateFixedDungeonRuntimeError::B3RewardAuthorityMismatch)
+        ));
+        let durable_reward = CoreDurableB3RewardCommit::test_fixture(
+            authenticated(),
+            CHARACTER_ID,
+            LINEAGE_ID,
+            reward,
+        );
+        let committed = runtime
+            .commit_b3_reward(&durable_reward)
+            .await
+            .expect("durable B3 reward");
+        assert_eq!(
+            committed.receipt,
+            sim_content::CoreB3RewardReceipt::Committed
+        );
+        let replay = runtime
+            .commit_b3_reward(&durable_reward)
+            .await
+            .expect("B3 reward replay");
+        assert_eq!(replay.receipt, sim_content::CoreB3RewardReceipt::Replayed);
         runtime.advance().await.expect("enter B4");
 
         let before = directory.snapshot(runtime.route_lease()).unwrap();

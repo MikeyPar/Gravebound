@@ -14,6 +14,7 @@ use crate::{ProgressionAwardCode, ProgressionAwardCommand, ProgressionAwardPlan}
 const OFFER_CREATED: i16 = 0;
 const OFFER_UNAVAILABLE_WITH_ASH: i16 = 1;
 const NO_SLOT_ASH: i16 = 2;
+const NO_OFFER_NOT_QUALIFIED: i16 = 3;
 const OPEN_OFFER_STATE: i16 = 0;
 const UNAVAILABLE_OFFER_STATE: i16 = 3;
 const FALLBACK_ASH: i32 = 10;
@@ -31,6 +32,7 @@ pub(crate) struct CoreBargainMilestonePlanner {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct CoreBargainMilestoneReceipt {
     result_code: i16,
+    milestone_eligible: bool,
     offer_id: Option<[u8; 16]>,
     candidate_ids: Vec<String>,
     ash_awarded: i32,
@@ -71,13 +73,11 @@ impl CoreBargainMilestonePlanner {
         pre_award_level: u16,
         plan: &ProgressionAwardPlan,
     ) -> Result<(), PersistenceError> {
-        if !qualifies(
+        if !is_core_b3_disposition(
             plan.outcome.code,
             &command.payload.source_content_id,
-            pre_award_level,
             state.location.location_kind,
             state.location.layout_id.as_deref(),
-            state.bargain_life.core_milestone_awarded,
         ) {
             return Ok(());
         }
@@ -89,9 +89,61 @@ impl CoreBargainMilestonePlanner {
             .location
             .entry_restore_point_id
             .ok_or(PersistenceError::CorruptStoredBargain)?;
-        state.new_bargain_milestone =
-            Some(self.build_staged(state, command, lineage_id, restore_point_id)?);
+        state.new_bargain_milestone = Some(
+            if qualifies_milestone(pre_award_level, state.bargain_life.core_milestone_awarded) {
+                self.build_staged(state, command, lineage_id, restore_point_id)?
+            } else {
+                Self::build_no_offer_disposition(state, command, lineage_id, restore_point_id)?
+            },
+        );
         Ok(())
+    }
+
+    fn build_no_offer_disposition(
+        state: &ProgressionAwardTransactionState,
+        command: &ProgressionAwardCommand,
+        lineage_id: [u8; 16],
+        restore_point_id: [u8; 16],
+    ) -> Result<StagedBargainMilestone, PersistenceError> {
+        let account_id = state
+            .new_result
+            .as_ref()
+            .ok_or(PersistenceError::ProgressionAwardResultRequired)?
+            .account_id;
+        let receipt = CoreBargainMilestoneReceipt {
+            result_code: NO_OFFER_NOT_QUALIFIED,
+            milestone_eligible: false,
+            offer_id: None,
+            candidate_ids: Vec::new(),
+            ash_awarded: 0,
+            earned_bargain_slots: state.bargain_life.earned_bargain_slots,
+            oath_bargain_version: state.bargain_life.oath_bargain_version,
+        };
+        Ok(StagedBargainMilestone {
+            life: state.bargain_life.clone(),
+            result: StoredBargainMilestoneResult {
+                account_id,
+                character_id: command.payload.character_id,
+                source_reward_event_id: command.reward_event_id,
+                payload_hash: command.payload_hash,
+                result_code: NO_OFFER_NOT_QUALIFIED,
+                pre_oath_bargain_version: state.bargain_life.oath_bargain_version,
+                post_oath_bargain_version: state.bargain_life.oath_bargain_version,
+                pre_earned_bargain_slots: state.bargain_life.earned_bargain_slots,
+                post_earned_bargain_slots: state.bargain_life.earned_bargain_slots,
+                offer_id: None,
+                ash_mutation_id: None,
+                milestone_id: CORE_BARGAIN_MILESTONE_ID.into(),
+                source_content_id: CORE_BARGAIN_SOURCE_ID.into(),
+                source_layout_id: CORE_BARGAIN_LAYOUT_ID.into(),
+                instance_lineage_id: lineage_id,
+                entry_restore_point_id: restore_point_id,
+                result_payload: postcard::to_stdvec(&receipt)
+                    .map_err(|_| PersistenceError::CorruptStoredBargain)?,
+            },
+            offer: None,
+            ash_request: None,
+        })
     }
 
     fn build_staged(
@@ -161,6 +213,7 @@ impl CoreBargainMilestonePlanner {
         });
         let receipt = CoreBargainMilestoneReceipt {
             result_code,
+            milestone_eligible: true,
             offer_id: offer.as_ref().map(|value| value.offer_id),
             candidate_ids: scored
                 .iter()
@@ -267,20 +320,20 @@ impl CoreBargainMilestonePlanner {
     }
 }
 
-fn qualifies(
+fn is_core_b3_disposition(
     code: ProgressionAwardCode,
     source_content_id: &str,
-    pre_award_level: u16,
     location_kind: i16,
     layout_id: Option<&str>,
-    already_awarded: bool,
 ) -> bool {
     code == ProgressionAwardCode::Accepted
         && source_content_id == CORE_BARGAIN_SOURCE_ID
-        && pre_award_level >= 5
         && location_kind == 2
         && layout_id == Some(CORE_BARGAIN_LAYOUT_ID)
-        && !already_awarded
+}
+
+const fn qualifies_milestone(pre_award_level: u16, already_awarded: bool) -> bool {
+    pre_award_level >= 5 && !already_awarded
 }
 
 #[cfg(test)]
@@ -305,65 +358,42 @@ mod tests {
     }
 
     #[test]
-    fn core_predicate_uses_pre_award_level_and_exact_source_layout_once() {
+    fn core_predicate_records_every_accepted_b3_and_qualifies_level_five_once() {
         let exact = || {
-            qualifies(
+            is_core_b3_disposition(
                 ProgressionAwardCode::Accepted,
                 CORE_BARGAIN_SOURCE_ID,
-                5,
                 2,
                 Some(CORE_BARGAIN_LAYOUT_ID),
-                false,
             )
         };
         assert!(exact());
-        assert!(!qualifies(
-            ProgressionAwardCode::Accepted,
-            CORE_BARGAIN_SOURCE_ID,
-            4,
-            2,
-            Some(CORE_BARGAIN_LAYOUT_ID),
-            false,
-        ));
-        assert!(!qualifies(
-            ProgressionAwardCode::NotEligible,
-            CORE_BARGAIN_SOURCE_ID,
-            5,
-            2,
-            Some(CORE_BARGAIN_LAYOUT_ID),
-            false,
-        ));
-        assert!(!qualifies(
+        assert!(qualifies_milestone(5, false));
+        assert!(!qualifies_milestone(4, false));
+        assert!(!qualifies_milestone(5, true));
+        assert!(!is_core_b3_disposition(
             ProgressionAwardCode::Accepted,
             "boss.sir_caldus",
-            5,
             2,
             Some(CORE_BARGAIN_LAYOUT_ID),
-            false,
         ));
-        assert!(!qualifies(
+        assert!(!is_core_b3_disposition(
+            ProgressionAwardCode::NotEligible,
+            CORE_BARGAIN_SOURCE_ID,
+            2,
+            Some(CORE_BARGAIN_LAYOUT_ID),
+        ));
+        assert!(!is_core_b3_disposition(
             ProgressionAwardCode::Accepted,
             CORE_BARGAIN_SOURCE_ID,
-            5,
             1,
             Some(CORE_BARGAIN_LAYOUT_ID),
-            false,
         ));
-        assert!(!qualifies(
+        assert!(!is_core_b3_disposition(
             ProgressionAwardCode::Accepted,
             CORE_BARGAIN_SOURCE_ID,
-            5,
             2,
             Some("layout.core_private_life_02"),
-            false,
-        ));
-        assert!(!qualifies(
-            ProgressionAwardCode::Accepted,
-            CORE_BARGAIN_SOURCE_ID,
-            5,
-            2,
-            Some(CORE_BARGAIN_LAYOUT_ID),
-            true,
         ));
     }
 }

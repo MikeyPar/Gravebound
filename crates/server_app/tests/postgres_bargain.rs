@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeSet,
+    path::{Path, PathBuf},
+};
 
 use persistence::{
     BargainDeclinedEventV1, BargainLifeCleanupCommand, BargainLifeCleanupEventV1,
@@ -12,11 +15,15 @@ use protocol::{
 };
 use server_app::{
     AccountId, AuthenticatedAccount, AuthenticatedNamespace, EntryCaptureContext,
-    EntryRestoreProvider, IdentityClock, PostgresBargainService, PostgresProgressionAwardService,
-    PostgresProgressionRestoreProvider, ProgressionAwardCode, ProgressionAwardCommand,
-    ProgressionAwardEvidence, ProgressionAwardPayload,
+    EntryRestoreProvider, IdentityClock, PostgresBargainService, PostgresCoreB3RewardCoordinator,
+    PostgresProgressionAwardService, PostgresProgressionRestoreProvider, PostgresRewardService,
+    ProgressionAwardCode, ProgressionAwardCommand, ProgressionAwardEvidence,
+    ProgressionAwardPayload, SecretRewardEpoch,
 };
-use sim_core::{EncounterXpEvidence, RewardLifeState, RewardRecallState, RewardTrustState};
+use sim_core::{
+    EncounterXpEvidence, EntityId, RewardLifeState, RewardRecallState, RewardTrustState,
+    SpawnInstanceId, Tick,
+};
 use sqlx::Row;
 
 const SELECT_ACCOUNT_ID: [u8; 16] = [111; 16];
@@ -32,6 +39,24 @@ const REFUSE_RESTORE_ID: [u8; 16] = [123; 16];
 const REFUSE_LINEAGE_ID: [u8; 16] = [124; 16];
 const REFUSE_REWARD_ID: [u8; 16] = [125; 16];
 const REFUSE_MUTATION_ID: [u8; 16] = [126; 16];
+
+const B3_FIXTURE: FixtureIds = FixtureIds {
+    account: [131; 16],
+    character: [132; 16],
+    restore: [133; 16],
+    lineage: [134; 16],
+    reward: [135; 16],
+    mutation: [136; 16],
+};
+
+const B3_LOW_FIXTURE: FixtureIds = FixtureIds {
+    account: [141; 16],
+    character: [142; 16],
+    restore: [143; 16],
+    lineage: [144; 16],
+    reward: [145; 16],
+    mutation: [146; 16],
+};
 
 const CORE_LAYOUT_ID: &str = "layout.core_private_life_01";
 const CORE_SOURCE_ID: &str = "miniboss.sepulcher_knight";
@@ -204,6 +229,115 @@ async fn reset_level_five_fixture(persistence: &PostgresPersistence, ids: Fixtur
     .await
     .unwrap();
     transaction.commit().await.unwrap();
+}
+
+async fn lower_fixture_to_level_four(persistence: &PostgresPersistence, ids: FixtureIds) {
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    sqlx::query(
+        "UPDATE characters SET level = 4 WHERE namespace_id = $1 AND account_id = $2 \
+         AND character_id = $3",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ids.account.as_slice())
+    .bind(ids.character.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE character_progression SET total_xp = 400, level = 4, current_health = 128 \
+         WHERE namespace_id = $1 AND account_id = $2 AND character_id = $3",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ids.account.as_slice())
+    .bind(ids.character.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    transaction.commit().await.unwrap();
+}
+
+fn b3_handoff(run_ordinal: u32) -> sim_content::CoreB3RewardHandoff {
+    sim_content::CoreB3RewardHandoff {
+        activation_ordinal: 1,
+        instance_id: SpawnInstanceId {
+            run_ordinal,
+            spawn_ordinal: 76,
+        },
+        actor_id: EntityId::new(1_000).unwrap(),
+        participant_id: EntityId::new(9_000).unwrap(),
+        death_tick: Tick(1_000),
+        reward_due_tick: Tick(1_008),
+        reward_profile_id: "reward.miniboss_t1".into(),
+        xp_profile_id: "xp.miniboss_t1".into(),
+        active_ticks: 120,
+        present_ticks: 120,
+        direct_damage: 1_600,
+        reference_health: 1_600,
+        longest_inactivity_ticks: 0,
+        life_state: RewardLifeState::Living,
+        recall_state: RewardRecallState::Eligible,
+        trust_state: RewardTrustState::Valid,
+    }
+}
+
+fn b3_coordinator(
+    persistence: &PostgresPersistence,
+    progression_content: &sim_content::CoreDevelopmentProgression,
+    oath_bargain: &sim_content::CompiledOathBargainCatalog,
+) -> PostgresCoreB3RewardCoordinator {
+    let rewards = PostgresRewardService::load(
+        persistence.clone(),
+        &content_root(),
+        SecretRewardEpoch::new("core-b3-hosted-v1", [0x5a; 32]).unwrap(),
+    )
+    .unwrap();
+    let progression = PostgresProgressionAwardService::new(
+        persistence.clone(),
+        progression_content,
+        oath_bargain,
+    )
+    .unwrap();
+    PostgresCoreB3RewardCoordinator::new(rewards, progression)
+}
+
+async fn assert_b3_reward_items(
+    persistence: &PostgresPersistence,
+    ids: FixtureIds,
+    reward_event_id: [u8; 16],
+) {
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let reward_items = sqlx::query(
+        "SELECT item_uid, creation_request_id, item_kind, item_level, rarity, security_state, \
+                location_kind, provenance_kind FROM item_instances WHERE namespace_id = $1 \
+         AND account_id = $2 AND character_id = $3 AND creation_kind = 1 \
+         AND creation_request_id = $4 ORDER BY roll_index, unit_ordinal",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ids.account.as_slice())
+    .bind(ids.character.as_slice())
+    .bind(reward_event_id.as_slice())
+    .fetch_all(transaction.connection())
+    .await
+    .unwrap();
+    transaction.rollback().await.unwrap();
+    assert!((1..=2).contains(&reward_items.len()));
+    let item_ids = reward_items
+        .iter()
+        .map(|row| row.get::<Vec<u8>, _>("item_uid"))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(item_ids.len(), reward_items.len());
+    for row in reward_items {
+        assert_eq!(
+            row.get::<Vec<u8>, _>("creation_request_id"),
+            reward_event_id
+        );
+        assert_eq!(row.get::<i16, _>("item_kind"), 0);
+        assert!((1..=10).contains(&row.get::<i16, _>("item_level")));
+        assert_eq!(row.get::<i16, _>("rarity"), 1);
+        assert_eq!(row.get::<i16, _>("security_state"), 2);
+        assert!(matches!(row.get::<i16, _>("location_kind"), 2 | 3));
+        assert_eq!(row.get::<i16, _>("provenance_kind"), 1);
+    }
 }
 
 #[allow(
@@ -421,6 +555,19 @@ async fn create_offer(
     assert_eq!(first.code, ProgressionAwardCode::Accepted);
     assert_eq!(first.applied_xp, 120);
     assert_eq!(first.projection.as_ref().unwrap().level, 5);
+    let authority = awards
+        .award_with_milestone(authenticated(ids), &award)
+        .await;
+    assert_eq!(authority.outcome, first);
+    let milestone = authority
+        .bargain_milestone
+        .expect("replayed progression returns immutable milestone");
+    assert_eq!(milestone.source_reward_event_id, ids.reward);
+    assert_eq!(milestone.character_id, ids.character);
+    assert_eq!(milestone.instance_lineage_id, ids.lineage);
+    assert_eq!(milestone.payload_hash, award.payload_hash);
+    assert_eq!(milestone.result_code, 0);
+    assert_eq!(milestone.offer_id, Some(ids.reward));
 
     let revision = bargain_revision(&oath_bargain);
     (oath_bargain, revision)
@@ -832,6 +979,112 @@ async fn assert_life_cleanup_participant(
             expected_event_payload
         )
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires explicitly authorized disposable PostgreSQL"]
+async fn postgres_b3_coordinator_commits_reward_progression_and_milestone_then_replays() {
+    let persistence = disposable_database().await;
+    reset_level_five_fixture(&persistence, B3_FIXTURE).await;
+    let progression_content =
+        sim_content::load_core_development_progression(&content_root()).unwrap();
+    let oath_bargain = sim_content::load_core_development_oaths_bargains(&content_root()).unwrap();
+    let restores = PostgresProgressionRestoreProvider::new(&progression_content).unwrap();
+    begin_core_danger_entry(&persistence, &restores, B3_FIXTURE).await;
+    let coordinator = b3_coordinator(&persistence, &progression_content, &oath_bargain);
+    let handoff = b3_handoff(7);
+    let first = coordinator
+        .commit(
+            authenticated(B3_FIXTURE),
+            B3_FIXTURE.character,
+            B3_FIXTURE.lineage,
+            1_008,
+            &handoff,
+        )
+        .await
+        .unwrap();
+    assert!(!first.reward_replayed());
+    assert_eq!(first.progression().code, ProgressionAwardCode::Accepted);
+    assert_eq!(first.progression().base_xp, 120);
+    assert_eq!(first.bargain_offer_id(), Some(first.reward_event_id()));
+    assert!(first.no_offer_resolution().is_none());
+    assert_b3_reward_items(&persistence, B3_FIXTURE, first.reward_event_id()).await;
+
+    drop(coordinator);
+    let restarted = b3_coordinator(&persistence, &progression_content, &oath_bargain);
+    let replay = restarted
+        .commit(
+            authenticated(B3_FIXTURE),
+            B3_FIXTURE.character,
+            B3_FIXTURE.lineage,
+            1_008,
+            &handoff,
+        )
+        .await
+        .unwrap();
+    assert!(replay.reward_replayed());
+    assert_eq!(replay.reward_event_id(), first.reward_event_id());
+    assert_eq!(replay.source_instance_id(), first.source_instance_id());
+    assert_eq!(replay.reward_result_hash(), first.reward_result_hash());
+    assert_eq!(
+        replay.progression_payload_hash(),
+        first.progression_payload_hash()
+    );
+    assert_eq!(replay.progression(), first.progression());
+    assert_eq!(replay.bargain_offer_id(), first.bargain_offer_id());
+
+    reset_level_five_fixture(&persistence, B3_LOW_FIXTURE).await;
+    lower_fixture_to_level_four(&persistence, B3_LOW_FIXTURE).await;
+    begin_core_danger_entry(&persistence, &restores, B3_LOW_FIXTURE).await;
+    let low_handoff = b3_handoff(8);
+    let low = restarted
+        .commit(
+            authenticated(B3_LOW_FIXTURE),
+            B3_LOW_FIXTURE.character,
+            B3_LOW_FIXTURE.lineage,
+            1_008,
+            &low_handoff,
+        )
+        .await
+        .unwrap();
+    assert_eq!(low.progression().code, ProgressionAwardCode::Accepted);
+    assert_eq!(low.progression().base_xp, 120);
+    assert!(low.bargain_offer_id().is_none());
+    assert_eq!(
+        low.no_offer_resolution().unwrap().resolution(),
+        sim_content::CoreFixedDungeonRestResolution::NoOffer
+    );
+
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let counts: (i64, i64, i64) = sqlx::query_as(
+        "SELECT \
+           (SELECT count(*) FROM reward_requests WHERE namespace_id = $1 AND account_id = $2), \
+           (SELECT count(*) FROM character_xp_award_results WHERE namespace_id = $1 AND account_id = $2), \
+           (SELECT count(*) FROM bargain_milestone_results WHERE namespace_id = $1 AND account_id = $2)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(B3_FIXTURE.account.as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    transaction.rollback().await.unwrap();
+    assert_eq!(counts, (1, 1, 1));
+
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let low_disposition: (i16, i64, i64, i64) = sqlx::query_as(
+        "SELECT result_code, pre_oath_bargain_version, post_oath_bargain_version, \
+                (SELECT count(*) FROM bargain_offers WHERE namespace_id = $1 AND account_id = $2) \
+         FROM bargain_milestone_results WHERE namespace_id = $1 AND account_id = $2 \
+         AND source_reward_event_id = $3",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(B3_LOW_FIXTURE.account.as_slice())
+    .bind(low.reward_event_id().as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    transaction.rollback().await.unwrap();
+    assert_eq!(low_disposition, (3, 1, 1, 0));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

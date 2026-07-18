@@ -11,6 +11,7 @@ mod caldus_extraction;
 mod caldus_instance_presentation;
 mod caldus_victory;
 mod combat_factory;
+mod core_b3_reward;
 mod core_extraction_runtime;
 mod core_journey_world_flow;
 mod core_lifecycle;
@@ -86,6 +87,9 @@ pub use combat_factory::{
     CoreCharacterCombat, CoreCharacterCombatCompiler, CoreCharacterCombatEnvelope,
     CoreCharacterCombatFactory, CoreCombatFactoryError,
 };
+pub use core_b3_reward::{
+    CoreB3RewardCoordinatorError, CoreDurableB3RewardCommit, PostgresCoreB3RewardCoordinator,
+};
 pub use core_extraction_runtime::{
     CoreExtractionActorDirectory, CoreExtractionActorLease, CoreExtractionActorRetirementReport,
     CoreExtractionAuthoritativeTick, CoreExtractionConnectionAuthority,
@@ -102,9 +106,10 @@ pub use core_lifecycle::{
     CoreLiveDirectory, CoreLiveError, CoreResumeOutcome, DANGER_CHECKPOINT_INTERVAL_TICKS,
 };
 pub use core_private_fixed_dungeon_runtime::{
-    CorePrivateFixedDungeonAdvance, CorePrivateFixedDungeonLiveRoomFrame,
-    CorePrivateFixedDungeonRestCommit, CorePrivateFixedDungeonRoomFrame,
-    CorePrivateFixedDungeonRuntime, CorePrivateFixedDungeonRuntimeError,
+    CorePrivateFixedDungeonAdvance, CorePrivateFixedDungeonB3RewardCommit,
+    CorePrivateFixedDungeonLiveRoomFrame, CorePrivateFixedDungeonRestCommit,
+    CorePrivateFixedDungeonRoomFrame, CorePrivateFixedDungeonRuntime,
+    CorePrivateFixedDungeonRuntimeError,
 };
 pub use core_private_life_runtime_bootstrap::{
     CorePrivateLifeBootstrapDisposition, CorePrivateLifeBootstrapError,
@@ -275,7 +280,7 @@ pub use progression_query::{
     ProgressionQuerySnapshot,
 };
 pub use progression_restore_provider::PostgresProgressionRestoreProvider;
-pub use progression_service::PostgresProgressionAwardService;
+pub use progression_service::{PostgresProgressionAwardService, ProgressionAwardAuthorityResult};
 pub use resolution_hold_service::{
     CoreResolutionHoldAuthority, CoreResolutionHoldIntentAuthority, PostgresResolutionHoldService,
     ResolutionHoldRepository, ResolutionHoldService, ResolutionHoldServiceError,

@@ -182,12 +182,37 @@ fn instantiate_immutable_fixed_room_cohort_at_ordinal(
     .map_err(Into::into)
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoreRewardParticipation {
+    Absent,
+    PresentInactive,
+    PresentActive,
+}
+
+impl CoreRewardParticipation {
+    #[must_use]
+    pub const fn is_present(self) -> bool {
+        !matches!(self, Self::Absent)
+    }
+
+    #[must_use]
+    pub const fn is_active(self) -> bool {
+        matches!(self, Self::PresentActive)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct CoreImmutableFixedRoomInput {
     pub crossed_activation_boundary: bool,
     pub living_inside: u16,
     pub living_party_outside: u16,
     pub doorway_hurtbox_blocked: bool,
+    /// Server-owned reward state for the session participant. Fixed-room simulations record this
+    /// at terminal reward time; clients never author eligibility material.
+    pub reward_life_state: sim_core::RewardLifeState,
+    pub reward_recall_state: sim_core::RewardRecallState,
+    pub reward_trust_state: sim_core::RewardTrustState,
+    pub reward_participation: CoreRewardParticipation,
     pub combat_step: Option<CombatStep>,
 }
 
@@ -1415,6 +1440,18 @@ mod tests {
             living_inside,
             living_party_outside: u16::from(living_inside == 0),
             doorway_hurtbox_blocked: false,
+            reward_life_state: if living_inside > 0 {
+                sim_core::RewardLifeState::Living
+            } else {
+                sim_core::RewardLifeState::Dead
+            },
+            reward_recall_state: sim_core::RewardRecallState::Eligible,
+            reward_trust_state: sim_core::RewardTrustState::Valid,
+            reward_participation: if living_inside > 0 {
+                CoreRewardParticipation::PresentActive
+            } else {
+                CoreRewardParticipation::Absent
+            },
             combat_step: (living_inside > 0).then_some(CombatStep {
                 tick: Tick(tick),
                 ..CombatStep::default()

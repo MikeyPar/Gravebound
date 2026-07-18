@@ -299,7 +299,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 63;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 64;
 const DISPOSABLE_DATABASE_RESET_SQL: &str = "TRUNCATE TABLE accounts, caldus_victory_exits CASCADE";
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -1800,7 +1800,7 @@ mod tests {
     #[test]
     fn deferred_death_graph_consumes_provenance_without_forking_its_closure() {
         assert_eq!(
-            EXPECTED_SCHEMA_VERSION, 63,
+            EXPECTED_SCHEMA_VERSION, 64,
             "readiness must advance with the latest published migration"
         );
         let migration = include_str!("../../../migrations/0054_death_provenance_echo_closure.sql");
@@ -1883,7 +1883,7 @@ mod tests {
     #[test]
     fn atomic_extraction_terminal_is_normalized_replay_first_and_fail_closed() {
         assert_eq!(
-            EXPECTED_SCHEMA_VERSION, 63,
+            EXPECTED_SCHEMA_VERSION, 64,
             "readiness must advance with the latest published terminal migration"
         );
         let migration = include_str!("../../../migrations/0056_atomic_extraction_terminal_v1.sql");
@@ -1936,7 +1936,7 @@ mod tests {
     #[test]
     fn atomic_recall_terminal_is_normalized_clock_complete_and_fail_closed() {
         assert_eq!(
-            EXPECTED_SCHEMA_VERSION, 63,
+            EXPECTED_SCHEMA_VERSION, 64,
             "readiness must advance with the atomic Recall terminal migration"
         );
         let migration = include_str!("../../../migrations/0057_atomic_recall_terminal_v1.sql");
@@ -2028,7 +2028,7 @@ mod tests {
     #[test]
     fn resolution_hold_recovery_is_whole_stack_replay_first_and_fail_closed() {
         assert_eq!(
-            EXPECTED_SCHEMA_VERSION, 63,
+            EXPECTED_SCHEMA_VERSION, 64,
             "readiness must advance with the ResolutionHold recovery migration"
         );
         let migration = include_str!("../../../migrations/0059_resolution_hold_recovery_v1.sql");
@@ -2092,7 +2092,7 @@ mod tests {
     #[test]
     fn successor_recovery_authority_is_atomic_reserved_and_append_only() {
         assert_eq!(
-            EXPECTED_SCHEMA_VERSION, 63,
+            EXPECTED_SCHEMA_VERSION, 64,
             "readiness must advance with the successor recovery migration"
         );
         let migration =
@@ -2222,7 +2222,7 @@ mod tests {
     #[test]
     fn private_route_actor_generations_are_persistent_monotonic_and_audited() {
         assert_eq!(
-            EXPECTED_SCHEMA_VERSION, 63,
+            EXPECTED_SCHEMA_VERSION, 64,
             "readiness must advance with private-route actor generation authority"
         );
         let migration =
@@ -2267,7 +2267,7 @@ mod tests {
     #[test]
     fn production_extraction_intent_is_replay_first_and_conflict_audited() {
         assert_eq!(
-            EXPECTED_SCHEMA_VERSION, 63,
+            EXPECTED_SCHEMA_VERSION, 64,
             "readiness must advance with durable extraction-intent acceptance"
         );
         let migration =
@@ -2301,6 +2301,35 @@ mod tests {
             assert!(
                 !migration.contains(prohibited),
                 "extraction-intent migration leaked {prohibited}"
+            );
+        }
+    }
+
+    #[test]
+    fn b3_no_offer_disposition_is_forward_only_replayable_and_does_not_consume_milestone() {
+        assert_eq!(
+            EXPECTED_SCHEMA_VERSION, 64,
+            "readiness must advance with the durable B3 no-offer disposition"
+        );
+        let migration = include_str!("../../../migrations/0064_b3_no_offer_disposition_v1.sql");
+        for required in [
+            "every accepted Core B3 progression receipt",
+            "result_code BETWEEN 0 AND 3",
+            "result_code = 3",
+            "post_oath_bargain_version = pre_oath_bargain_version",
+            "offer_id IS NULL AND ash_mutation_id IS NULL",
+            "result_code IN (2, 3)",
+            "CREATE UNIQUE INDEX bargain_milestone_once_per_life",
+            "WHERE result_code BETWEEN 0 AND 2",
+            "wipeable Core namespace",
+            "live downgrade is intentionally unsupported",
+        ] {
+            assert!(migration.contains(required), "migration omitted {required}");
+        }
+        for prohibited in ["DROP TABLE", "TRUNCATE", "DELETE FROM", "JSON", "JSONB"] {
+            assert!(
+                !migration.contains(prohibited),
+                "B3 disposition migration leaked {prohibited}"
             );
         }
     }

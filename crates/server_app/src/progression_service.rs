@@ -2,17 +2,21 @@
 
 use persistence::{
     PersistenceError, PostgresPersistence, ProgressionAwardTransaction,
-    ProgressionAwardTransactionState, StoredBossFirstClear, StoredBossFirstClearState,
-    StoredEncounterLifeState, StoredEncounterRecallState, StoredEncounterTrustState,
-    StoredEncounterXpEvidence, StoredOrdinaryXpEvidence, StoredProgression,
-    StoredProgressionContract, StoredXpAwardResult, StoredXpEligibilityEvidence,
+    ProgressionAwardTransactionState, StoredBargainMilestoneResult, StoredBossFirstClear,
+    StoredBossFirstClearState, StoredEncounterLifeState, StoredEncounterRecallState,
+    StoredEncounterTrustState, StoredEncounterXpEvidence, StoredOrdinaryXpEvidence,
+    StoredProgression, StoredProgressionContract, StoredXpAwardResult, StoredXpEligibilityEvidence,
 };
-use sim_core::{CoreProgressionState, RewardLifeState, RewardRecallState, RewardTrustState};
+use protocol::ManifestHash;
+use sim_core::{
+    CoreProgressionState, EncounterXpEvidence, RewardLifeState, RewardRecallState, RewardTrustState,
+};
 
 use crate::{
     AuthenticatedAccount, AuthenticatedNamespace, CoreProgressionRules, ProgressionAwardCode,
     ProgressionAwardCommand, ProgressionAwardContext, ProgressionAwardEvidence,
-    ProgressionAwardOutcome, ProgressionAwardPlan, bargain_milestone::CoreBargainMilestonePlanner,
+    ProgressionAwardOutcome, ProgressionAwardPayload, ProgressionAwardPlan,
+    bargain_milestone::CoreBargainMilestonePlanner,
 };
 
 #[derive(Debug, Clone)]
@@ -21,6 +25,16 @@ pub struct PostgresProgressionAwardService {
     rules: CoreProgressionRules,
     contract: StoredProgressionContract,
     bargain_milestone: CoreBargainMilestonePlanner,
+}
+
+/// Server-only progression terminal with the immutable Core Bargain milestone row produced by
+/// the same serializable transaction. Ordinary callers keep using [`Self::award`]; encounter
+/// coordinators use this shape so a B4 offer can never be inferred from mutable life state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProgressionAwardAuthorityResult {
+    pub outcome: ProgressionAwardOutcome,
+    pub payload_hash: [u8; 32],
+    pub bargain_milestone: Option<StoredBargainMilestoneResult>,
 }
 
 impl PostgresProgressionAwardService {
@@ -82,6 +96,168 @@ impl PostgresProgressionAwardService {
             }
             Err(_) => terminal_outcome(command, ProgressionAwardCode::ServiceUnavailable),
         }
+    }
+
+    pub async fn award_with_milestone(
+        &self,
+        authenticated: AuthenticatedAccount,
+        command: &ProgressionAwardCommand,
+    ) -> ProgressionAwardAuthorityResult {
+        if authenticated.namespace != AuthenticatedNamespace::WipeableTest {
+            return authority_terminal(command, ProgressionAwardCode::ServiceUnavailable);
+        }
+        let boss_id = self
+            .rules
+            .first_clear_boss_id_for_source(&command.payload.source_content_id);
+        let account_id = authenticated.account_id.as_bytes();
+        let transaction = self
+            .persistence
+            .transact_progression_award(
+                account_id,
+                command.payload.character_id,
+                command.reward_event_id,
+                boss_id,
+                &self.contract,
+                |state| {
+                    let outcome = self.plan_and_stage(state, command, account_id)?;
+                    Ok(ProgressionAwardAuthorityResult {
+                        outcome,
+                        payload_hash: command.payload_hash,
+                        bargain_milestone: state
+                            .new_bargain_milestone
+                            .as_ref()
+                            .map(|staged| staged.result.clone()),
+                    })
+                },
+            )
+            .await;
+        match transaction {
+            Ok(ProgressionAwardTransaction::Committed(result)) => result,
+            Ok(ProgressionAwardTransaction::Replayed(stored)) => {
+                let outcome = self.replay(command, &stored);
+                if outcome.code != ProgressionAwardCode::Accepted {
+                    return ProgressionAwardAuthorityResult {
+                        outcome,
+                        payload_hash: command.payload_hash,
+                        bargain_milestone: None,
+                    };
+                }
+                match self
+                    .persistence
+                    .bargain_milestone_result(account_id, command.reward_event_id)
+                    .await
+                {
+                    Ok(bargain_milestone) => ProgressionAwardAuthorityResult {
+                        outcome,
+                        payload_hash: command.payload_hash,
+                        bargain_milestone,
+                    },
+                    Err(_) => authority_terminal(command, ProgressionAwardCode::ServiceUnavailable),
+                }
+            }
+            Err(PersistenceError::ProgressionCharacterNotFound) => {
+                authority_terminal(command, ProgressionAwardCode::CharacterNotFound)
+            }
+            Err(PersistenceError::ProgressionCharacterDead) => {
+                authority_terminal(command, ProgressionAwardCode::CharacterDead)
+            }
+            Err(_) => authority_terminal(command, ProgressionAwardCode::ServiceUnavailable),
+        }
+    }
+
+    /// Commits one server-owned encounter award while constructing its expected progression
+    /// version under the same account/character/progression locks used by the mutation. This
+    /// avoids persisting a stale-version terminal between an unlocked snapshot and the award.
+    /// Replay reconstructs the exact original command from the immutable receipt.
+    pub(crate) async fn award_server_encounter_with_milestone(
+        &self,
+        authenticated: AuthenticatedAccount,
+        reward_event_id: [u8; 16],
+        character_id: [u8; 16],
+        source_content_id: &str,
+        evidence: EncounterXpEvidence,
+    ) -> Result<ProgressionAwardAuthorityResult, PersistenceError> {
+        if authenticated.namespace != AuthenticatedNamespace::WipeableTest {
+            return Err(PersistenceError::CorruptStoredProgression);
+        }
+        let account_id = authenticated.account_id.as_bytes();
+        let boss_id = self.rules.first_clear_boss_id_for_source(source_content_id);
+        let transaction = self
+            .persistence
+            .transact_progression_award(
+                account_id,
+                character_id,
+                reward_event_id,
+                boss_id,
+                &self.contract,
+                |state| {
+                    let command = self.locked_encounter_command(
+                        state,
+                        reward_event_id,
+                        character_id,
+                        source_content_id,
+                        evidence,
+                    )?;
+                    let outcome = self.plan_and_stage(state, &command, account_id)?;
+                    Ok(ProgressionAwardAuthorityResult {
+                        outcome,
+                        payload_hash: command.payload_hash,
+                        bargain_milestone: state
+                            .new_bargain_milestone
+                            .as_ref()
+                            .map(|staged| staged.result.clone()),
+                    })
+                },
+            )
+            .await?;
+        match transaction {
+            ProgressionAwardTransaction::Committed(result) => Ok(result),
+            ProgressionAwardTransaction::Replayed(stored) => {
+                let command = replay_encounter_command(
+                    &stored,
+                    reward_event_id,
+                    character_id,
+                    source_content_id,
+                    evidence,
+                )?;
+                let outcome = self.replay(&command, &stored);
+                let bargain_milestone = if outcome.code == ProgressionAwardCode::Accepted {
+                    self.persistence
+                        .bargain_milestone_result(account_id, reward_event_id)
+                        .await?
+                } else {
+                    None
+                };
+                Ok(ProgressionAwardAuthorityResult {
+                    outcome,
+                    payload_hash: command.payload_hash,
+                    bargain_milestone,
+                })
+            }
+        }
+    }
+
+    fn locked_encounter_command(
+        &self,
+        state: &ProgressionAwardTransactionState,
+        reward_event_id: [u8; 16],
+        character_id: [u8; 16],
+        source_content_id: &str,
+        evidence: EncounterXpEvidence,
+    ) -> Result<ProgressionAwardCommand, PersistenceError> {
+        let payload = ProgressionAwardPayload {
+            character_id,
+            expected_progression_version: u64::try_from(state.progression.progression_version)
+                .map_err(|_| PersistenceError::CorruptStoredProgression)?,
+            source_content_id: source_content_id.to_owned(),
+            progression_content_revision: self.rules.records_revision().clone(),
+            evidence: ProgressionAwardEvidence::Encounter(evidence),
+        };
+        Ok(ProgressionAwardCommand {
+            reward_event_id,
+            payload_hash: payload.canonical_hash(),
+            payload,
+        })
     }
 
     fn replay(
@@ -257,6 +433,81 @@ fn stored_evidence(
     }
 }
 
+fn encounter_evidence_from_stored(
+    stored: &StoredXpEligibilityEvidence,
+) -> Result<EncounterXpEvidence, PersistenceError> {
+    let StoredXpEligibilityEvidence::Encounter(stored) = stored else {
+        return Err(PersistenceError::CorruptStoredProgression);
+    };
+    Ok(EncounterXpEvidence {
+        active_ticks: u64::try_from(stored.active_ticks)
+            .map_err(|_| PersistenceError::CorruptStoredProgression)?,
+        present_ticks: u64::try_from(stored.present_ticks)
+            .map_err(|_| PersistenceError::CorruptStoredProgression)?,
+        longest_inactivity_ticks: u64::try_from(stored.longest_inactivity_ticks)
+            .map_err(|_| PersistenceError::CorruptStoredProgression)?,
+        encounter_contribution_reference_health: u64::try_from(stored.reference_health)
+            .map_err(|_| PersistenceError::CorruptStoredProgression)?,
+        direct_damage: u64::try_from(stored.direct_damage)
+            .map_err(|_| PersistenceError::CorruptStoredProgression)?,
+        effective_healing_to_others: u64::try_from(stored.effective_healing)
+            .map_err(|_| PersistenceError::CorruptStoredProgression)?,
+        damage_prevented_on_others: u64::try_from(stored.damage_prevented)
+            .map_err(|_| PersistenceError::CorruptStoredProgression)?,
+        qualifying_objective_credits: u8::try_from(stored.objective_credits)
+            .map_err(|_| PersistenceError::CorruptStoredProgression)?,
+        life_state: match stored.life_state {
+            StoredEncounterLifeState::Living => RewardLifeState::Living,
+            StoredEncounterLifeState::Dead => RewardLifeState::Dead,
+        },
+        recall_state: match stored.recall_state {
+            StoredEncounterRecallState::Present => RewardRecallState::Eligible,
+            StoredEncounterRecallState::Recalled => RewardRecallState::EmergencyRecallCompleted,
+        },
+        trust_state: match stored.trust_state {
+            StoredEncounterTrustState::Valid => RewardTrustState::Valid,
+            StoredEncounterTrustState::InvalidSession => RewardTrustState::InvalidSession,
+            StoredEncounterTrustState::AntiCheatRejected => RewardTrustState::AntiCheatRejected,
+        },
+    })
+}
+
+fn replay_encounter_command(
+    stored: &StoredXpAwardResult,
+    reward_event_id: [u8; 16],
+    character_id: [u8; 16],
+    source_content_id: &str,
+    evidence: EncounterXpEvidence,
+) -> Result<ProgressionAwardCommand, PersistenceError> {
+    let stored_evidence = encounter_evidence_from_stored(&stored.evidence)?;
+    if stored.reward_event_id != reward_event_id
+        || stored.character_id != character_id
+        || stored.source_content_id != source_content_id
+        || stored_evidence != evidence
+    {
+        return Err(PersistenceError::CorruptStoredProgression);
+    }
+    let payload = ProgressionAwardPayload {
+        character_id,
+        expected_progression_version: u64::try_from(stored.pre_progression_version)
+            .map_err(|_| PersistenceError::CorruptStoredProgression)?,
+        source_content_id: source_content_id.to_owned(),
+        progression_content_revision: ManifestHash::new(
+            stored.progression_content_revision.clone(),
+        )
+        .map_err(|_| PersistenceError::CorruptStoredProgression)?,
+        evidence: ProgressionAwardEvidence::Encounter(stored_evidence),
+    };
+    if payload.canonical_hash() != stored.payload_hash {
+        return Err(PersistenceError::CorruptStoredProgression);
+    }
+    Ok(ProgressionAwardCommand {
+        reward_event_id,
+        payload_hash: stored.payload_hash,
+        payload,
+    })
+}
+
 fn from_stored_progression(
     stored: &StoredProgression,
 ) -> Result<CoreProgressionState, PersistenceError> {
@@ -283,6 +534,17 @@ fn terminal_outcome(
         applied_xp: 0,
         discarded_at_core_cap: 0,
         first_clear_awarded: false,
+    }
+}
+
+fn authority_terminal(
+    command: &ProgressionAwardCommand,
+    code: ProgressionAwardCode,
+) -> ProgressionAwardAuthorityResult {
+    ProgressionAwardAuthorityResult {
+        outcome: terminal_outcome(command, code),
+        payload_hash: command.payload_hash,
+        bargain_milestone: None,
     }
 }
 

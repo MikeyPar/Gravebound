@@ -27,7 +27,8 @@ use tokio::{
 };
 
 use crate::{
-    CoreBellPortalTransition, CoreDurableBargainRestResolution, CorePrivateFixedDungeonAdvance,
+    CoreBellPortalTransition, CoreDurableB3RewardCommit, CoreDurableBargainRestResolution,
+    CorePrivateFixedDungeonAdvance, CorePrivateFixedDungeonB3RewardCommit,
     CorePrivateFixedDungeonLiveRoomFrame, CorePrivateFixedDungeonRestCommit,
     CorePrivateFixedDungeonRuntime, CorePrivateFixedDungeonRuntimeError,
     CorePrivateMicrorealmInput, CorePrivateMicrorealmRuntime, CorePrivateMicrorealmRuntimeError,
@@ -77,11 +78,14 @@ pub struct CorePrivateMicrorealmAbilityPress {
     pub ability: CorePrivateMicrorealmAbility,
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 struct RetainedFrameInput {
     continuous: CorePrivateMicrorealmRetainedInput,
     ability_1_sequence: u32,
     ability_2_sequence: u32,
+    reward_session_active: bool,
+    reward_trust_valid: bool,
+    reward_activity_sequence: u64,
 }
 
 impl RetainedFrameInput {
@@ -94,6 +98,22 @@ impl RetainedFrameInput {
             primary_sequence: self.continuous.primary_sequence,
             ability_1_sequence: self.ability_1_sequence,
             ability_2_sequence: self.ability_2_sequence,
+            reward_session_active: self.reward_session_active,
+            reward_trust_valid: self.reward_trust_valid,
+            reward_activity_sequence: self.reward_activity_sequence,
+        }
+    }
+}
+
+impl Default for RetainedFrameInput {
+    fn default() -> Self {
+        Self {
+            continuous: CorePrivateMicrorealmRetainedInput::default(),
+            ability_1_sequence: 0,
+            ability_2_sequence: 0,
+            reward_session_active: true,
+            reward_trust_valid: true,
+            reward_activity_sequence: 1,
         }
     }
 }
@@ -227,6 +247,26 @@ impl CorePrivateMicrorealmDriverHandle {
             .map_err(CorePrivateMicrorealmDriverError::FixedDungeonRestResolution)
     }
 
+    /// Acknowledges the exact B3 simulation handoff only after both durable personal-item and
+    /// progression/milestone terminals exist. The proof is opaque and remains task-owned.
+    pub async fn commit_fixed_dungeon_b3_reward(
+        &self,
+        durable: CoreDurableB3RewardCommit,
+    ) -> Result<CorePrivateFixedDungeonB3RewardCommit, CorePrivateMicrorealmDriverError> {
+        let (result_tx, result_rx) = oneshot::channel();
+        self.fixed_advance_tx
+            .send(CorePrivateFixedDungeonControlRequest::CommitB3Reward {
+                durable: Box::new(durable),
+                result_tx,
+            })
+            .await
+            .map_err(|_| CorePrivateMicrorealmDriverError::FixedDungeonControlClosed)?;
+        result_rx
+            .await
+            .map_err(|_| CorePrivateMicrorealmDriverError::FixedDungeonControlClosed)?
+            .map_err(CorePrivateMicrorealmDriverError::FixedDungeonB3Reward)
+    }
+
     /// Replaces the single retained compact input when its client sequence is newer.
     pub fn submit_latest_input(
         &self,
@@ -256,10 +296,22 @@ impl CorePrivateMicrorealmDriverHandle {
                 },
             );
         }
+        let previous = reducer.retained.continuous;
         // Release frames in the established session wire contract may carry zero. Preserve the
         // server's maximum accepted sequence so a release cannot re-arm an already consumed shot.
         input.primary_sequence = input.primary_sequence.max(maximum_primary_sequence);
+        let meaningful_activity = input.movement != previous.movement
+            || input.aim != previous.aim
+            || input.primary_held != previous.primary_held
+            || input.primary_sequence > previous.primary_sequence;
         reducer.retained.continuous = input;
+        if meaningful_activity {
+            reducer.retained.reward_activity_sequence = reducer
+                .retained
+                .reward_activity_sequence
+                .checked_add(1)
+                .ok_or(CorePrivateMicrorealmIngressError::ActivitySequenceExhausted)?;
+        }
         self.ingress.publish_locked(&reducer);
         self.ingress
             .metrics
@@ -295,6 +347,11 @@ impl CorePrivateMicrorealmDriverHandle {
         *sequence = sequence
             .checked_add(1)
             .ok_or(CorePrivateMicrorealmIngressError::AbilitySequenceExhausted)?;
+        reducer.retained.reward_activity_sequence = reducer
+            .retained
+            .reward_activity_sequence
+            .checked_add(1)
+            .ok_or(CorePrivateMicrorealmIngressError::ActivitySequenceExhausted)?;
         reducer.last_action_sequence = press.action_sequence;
         self.ingress.publish_locked(&reducer);
         self.ingress
@@ -311,15 +368,36 @@ impl CorePrivateMicrorealmDriverHandle {
             .reducer
             .lock()
             .map_err(|_| CorePrivateMicrorealmIngressError::Unavailable)?;
-        ensure_accepting(&reducer)?;
+        let was_accepting = reducer.accepting;
         reducer.retained.continuous.movement = MovementAction::default();
         reducer.retained.continuous.primary_held = false;
+        reducer.retained.reward_session_active = false;
+        reducer.retained.reward_trust_valid = false;
         self.ingress.publish_locked(&reducer);
         self.ingress
             .metrics
             .link_lost_neutralizations
             .fetch_add(1, Ordering::Relaxed);
-        Ok(())
+        if was_accepting {
+            Ok(())
+        } else {
+            Err(CorePrivateMicrorealmIngressError::DriverFrozen)
+        }
+    }
+
+    /// Records a newly authenticated winning transport before its retained danger owner becomes
+    /// visible. Reconnect itself is a fresh activity edge; gameplay sequence watermarks remain.
+    pub(crate) fn mark_reward_session_active(&self) {
+        let mut reducer = self
+            .ingress
+            .reducer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reducer.retained.reward_session_active = true;
+        reducer.retained.reward_trust_valid = true;
+        reducer.retained.reward_activity_sequence =
+            reducer.retained.reward_activity_sequence.saturating_add(1);
+        self.ingress.publish_locked(&reducer);
     }
 
     #[must_use]
@@ -407,6 +485,11 @@ pub enum CorePrivateMicrorealmDriverState {
         committed_frames: u64,
         frame: Arc<CorePrivateFixedDungeonLiveRoomFrame>,
     },
+    FixedDungeonRewardPending {
+        committed_frames: u64,
+        frame: Arc<CorePrivateFixedDungeonLiveRoomFrame>,
+        reward_handoff: Arc<sim_content::CoreB3RewardHandoff>,
+    },
     FixedDungeonTerminalPending {
         committed_frames: u64,
         lethal_frame: Arc<CorePrivateFixedDungeonLiveRoomFrame>,
@@ -427,6 +510,7 @@ impl CorePrivateMicrorealmDriverState {
             | Self::BellResolutionPending { .. }
             | Self::FixedDungeonReady { .. }
             | Self::FixedDungeonRunning { .. }
+            | Self::FixedDungeonRewardPending { .. }
             | Self::FixedDungeonTerminalPending { .. }
             | Self::Faulted { .. } => None,
         }
@@ -503,6 +587,10 @@ enum CorePrivateFixedDungeonControlRequest {
     ResolveRest {
         durable: CoreDurableBargainRestResolution,
         result_tx: oneshot::Sender<Result<CorePrivateFixedDungeonRestCommit, String>>,
+    },
+    CommitB3Reward {
+        durable: Box<CoreDurableB3RewardCommit>,
+        result_tx: oneshot::Sender<Result<CorePrivateFixedDungeonB3RewardCommit, String>>,
     },
 }
 
@@ -660,6 +748,8 @@ pub enum CorePrivateMicrorealmIngressError {
     StaleActionSequence { last: u32, received: u32 },
     #[error("server-owned ability press sequence exhausted")]
     AbilitySequenceExhausted,
+    #[error("server-owned reward activity sequence exhausted")]
+    ActivitySequenceExhausted,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -688,6 +778,8 @@ pub enum CorePrivateMicrorealmDriverError {
     FixedDungeonAdvance(String),
     #[error("Core fixed-dungeon rest resolution failed: {0}")]
     FixedDungeonRestResolution(String),
+    #[error("Core fixed-dungeon B3 reward commit failed: {0}")]
+    FixedDungeonB3Reward(String),
 }
 
 trait MicrorealmFrameRuntime: Send + 'static {
@@ -1052,6 +1144,8 @@ async fn run_fixed_dungeon(
     let mut retained_rx = ingress.retained_tx.subscribe();
     let mut interval = fixed_driver_interval().await;
     let mut outcome = CorePrivateMicrorealmDriverOutcome::FixedDungeonReady;
+    let mut b3_reward_pending = false;
+    let mut last_fixed_frame: Option<Arc<CorePrivateFixedDungeonLiveRoomFrame>> = None;
 
     loop {
         let event = tokio::select! {
@@ -1062,7 +1156,7 @@ async fn run_fixed_dungeon(
             }
             request = handoff_rx.recv() => FixedDungeonDriverEvent::Handoff(request),
             request = fixed_advance_rx.recv() => FixedDungeonDriverEvent::Control(request),
-            deadline = interval.tick(), if runtime.room_phase().is_some() => {
+            deadline = interval.tick(), if runtime.room_phase().is_some() && !b3_reward_pending => {
                 FixedDungeonDriverEvent::Frame(deadline)
             }
         };
@@ -1146,6 +1240,45 @@ async fn run_fixed_dungeon(
                     }
                 }
             },
+            FixedDungeonDriverEvent::Control(Some(
+                CorePrivateFixedDungeonControlRequest::CommitB3Reward { durable, result_tx },
+            )) => match runtime.commit_b3_reward(&durable).await {
+                Ok(commit) => {
+                    b3_reward_pending = false;
+                    ingress.resume_accepting();
+                    interval.reset();
+                    if let Some(frame) = last_fixed_frame.clone() {
+                        observation_tx.send_replace(
+                            CorePrivateMicrorealmDriverState::FixedDungeonRunning {
+                                committed_frames,
+                                frame,
+                            },
+                        );
+                    }
+                    let _ = result_tx.send(Ok(commit));
+                }
+                Err(error) => {
+                    let message = error.to_string();
+                    let fatal = fixed_b3_reward_error_is_fatal(&error);
+                    let _ = result_tx.send(Err(message));
+                    if fatal {
+                        outcome = CorePrivateMicrorealmDriverOutcome::Faulted;
+                        ingress.stop_accepting();
+                        observation_tx.send_replace(CorePrivateMicrorealmDriverState::Faulted {
+                            committed_frames,
+                            fault: fixed_runtime_fault(&error, final_tick),
+                        });
+                        wait_for_shutdown(
+                            shutdown_rx,
+                            handoff_rx,
+                            fixed_advance_rx,
+                            "fixed dungeon cannot commit B3 reward after a route fault",
+                        )
+                        .await;
+                        break;
+                    }
+                }
+            },
             FixedDungeonDriverEvent::Frame(deadline) => {
                 let lateness = Instant::now().saturating_duration_since(deadline);
                 let missed = lateness.as_nanos() / u128::from(DRIVER_TICK_NANOS);
@@ -1176,12 +1309,27 @@ async fn run_fixed_dungeon(
                             .await;
                             break;
                         }
-                        observation_tx.send_replace(
-                            CorePrivateMicrorealmDriverState::FixedDungeonRunning {
-                                committed_frames,
-                                frame,
-                            },
-                        );
+                        last_fixed_frame = Some(Arc::clone(&frame));
+                        if let Some(reward) = runtime.pending_b3_reward_handoff()
+                            && frame.tick >= reward.reward_due_tick
+                        {
+                            b3_reward_pending = true;
+                            ingress.stop_accepting();
+                            observation_tx.send_replace(
+                                CorePrivateMicrorealmDriverState::FixedDungeonRewardPending {
+                                    committed_frames,
+                                    frame,
+                                    reward_handoff: Arc::new(reward.clone()),
+                                },
+                            );
+                        } else {
+                            observation_tx.send_replace(
+                                CorePrivateMicrorealmDriverState::FixedDungeonRunning {
+                                    committed_frames,
+                                    frame,
+                                },
+                            );
+                        }
                     }
                     Err(error) => {
                         outcome = CorePrivateMicrorealmDriverOutcome::Faulted;
@@ -1377,6 +1525,9 @@ fn reject_fixed_advance(request: CorePrivateFixedDungeonControlRequest, message:
         CorePrivateFixedDungeonControlRequest::ResolveRest { result_tx, .. } => {
             let _ = result_tx.send(Err(message.to_owned()));
         }
+        CorePrivateFixedDungeonControlRequest::CommitB3Reward { result_tx, .. } => {
+            let _ = result_tx.send(Err(message.to_owned()));
+        }
     }
 }
 
@@ -1406,8 +1557,25 @@ fn fixed_advance_error_is_fatal(error: &CorePrivateFixedDungeonRuntimeError) -> 
         error,
         CorePrivateFixedDungeonRuntimeError::Dungeon(
             sim_content::CoreFixedDungeonError::AdvanceUnavailable { .. }
-                | sim_content::CoreFixedDungeonError::RestResolutionRequired,
+                | sim_content::CoreFixedDungeonError::RestResolutionRequired
+                | sim_content::CoreFixedDungeonError::FixedRoom(
+                    sim_content::CoreFixedRoomEncounterError::RoomHandoffUnavailable,
+                ),
         )
+    )
+}
+
+fn fixed_b3_reward_error_is_fatal(error: &CorePrivateFixedDungeonRuntimeError) -> bool {
+    !matches!(
+        error,
+        CorePrivateFixedDungeonRuntimeError::B3RewardAuthorityMismatch
+            | CorePrivateFixedDungeonRuntimeError::Dungeon(
+                sim_content::CoreFixedDungeonError::B3RewardUnavailable
+                    | sim_content::CoreFixedDungeonError::FixedRoom(
+                        sim_content::CoreFixedRoomEncounterError::B3RewardUnavailable
+                            | sim_content::CoreFixedRoomEncounterError::B3RewardConflict,
+                    ),
+            )
     )
 }
 
@@ -1487,6 +1655,39 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    fn b3_reward_authority() -> CoreDurableB3RewardCommit {
+        let authenticated = crate::AuthenticatedAccount {
+            account_id: crate::AccountId::new([0x11; 16]).unwrap(),
+            namespace: crate::AuthenticatedNamespace::WipeableTest,
+        };
+        CoreDurableB3RewardCommit::test_fixture(
+            authenticated,
+            [0x22; 16],
+            [0x33; 16],
+            sim_content::CoreB3RewardHandoff {
+                activation_ordinal: 1,
+                instance_id: sim_core::SpawnInstanceId {
+                    run_ordinal: 1,
+                    spawn_ordinal: 51,
+                },
+                actor_id: sim_core::EntityId::new(100).unwrap(),
+                participant_id: sim_core::EntityId::new(900).unwrap(),
+                death_tick: Tick(100),
+                reward_due_tick: Tick(108),
+                reward_profile_id: "reward.miniboss_t1".into(),
+                xp_profile_id: "xp.miniboss_t1".into(),
+                active_ticks: 100,
+                present_ticks: 100,
+                direct_damage: 1_600,
+                reference_health: 1_600,
+                longest_inactivity_ticks: 0,
+                life_state: sim_core::RewardLifeState::Living,
+                recall_state: sim_core::RewardRecallState::Eligible,
+                trust_state: sim_core::RewardTrustState::Valid,
+            },
+        )
     }
 
     fn template_step(tick: u64) -> CorePrivateMicrorealmStep {
@@ -1609,6 +1810,14 @@ mod tests {
             Err(CorePrivateMicrorealmDriverError::FixedDungeonRestResolution(message))
                 if message == "fixed dungeon is not installed"
         ));
+        assert!(matches!(
+            driver
+                .handle()
+                .commit_fixed_dungeon_b3_reward(b3_reward_authority())
+                .await,
+            Err(CorePrivateMicrorealmDriverError::FixedDungeonB3Reward(message))
+                if message == "fixed dungeon is not installed"
+        ));
         let report = driver.shutdown().await.expect("joined shutdown");
         assert_eq!(report.committed_frames, 0);
         assert!(report.task_joined);
@@ -1664,6 +1873,49 @@ mod tests {
         assert_eq!(report.accepted_input_updates, 2);
         assert!(report.task_joined);
         assert!(!report.driver_task_live_after_join);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn no_op_packet_cadence_does_not_count_as_reward_activity() {
+        let received = Arc::new(StdMutex::new(Vec::new()));
+        let driver = spawn_driver(ScriptedRuntime::ordinary(Arc::clone(&received)));
+        let handle = driver.handle();
+        let mut observer = handle.observe();
+        tokio::task::yield_now().await;
+
+        // The production client samples every fixed update. More than the SOC-010 twenty-second
+        // limit of no-op packets must leave the server-owned activity watermark unchanged.
+        for sequence in 1..=605 {
+            handle
+                .submit_latest_input(CorePrivateMicrorealmRetainedInput {
+                    input_sequence: sequence,
+                    ..CorePrivateMicrorealmRetainedInput::default()
+                })
+                .expect("fresh no-op packet");
+            advance_one_frame(&mut observer).await;
+        }
+        handle
+            .submit_latest_input(CorePrivateMicrorealmRetainedInput {
+                input_sequence: 606,
+                movement: MovementAction::new(1, 0),
+                ..CorePrivateMicrorealmRetainedInput::default()
+            })
+            .expect("meaningful movement packet");
+        advance_one_frame(&mut observer).await;
+
+        {
+            let inputs = received.lock().expect("received");
+            assert_eq!(inputs.len(), 606);
+            assert!(
+                inputs[..605]
+                    .iter()
+                    .all(|input| input.reward_activity_sequence == 1)
+            );
+            assert_eq!(inputs[605].reward_activity_sequence, 2);
+        }
+        let report = driver.shutdown().await.expect("shutdown");
+        assert_eq!(report.accepted_input_updates, 606);
+        assert_eq!(report.committed_frames, 606);
     }
 
     #[tokio::test(start_paused = true)]
@@ -1769,22 +2021,40 @@ mod tests {
         for _ in 0..5 {
             advance_one_frame(&mut observer).await;
         }
+        handle.mark_reward_session_active();
+        advance_one_frame(&mut observer).await;
 
         {
             let inputs = received.lock().expect("received");
-            assert_eq!(inputs.len(), 6);
+            assert_eq!(inputs.len(), 7);
             assert_ne!(inputs[0].movement, MovementAction::default());
             assert!(inputs[0].primary_held);
             assert!(
-                inputs[1..]
+                inputs[1..6]
                     .iter()
                     .all(|input| input.movement == MovementAction::default() && !input.primary_held)
             );
             assert!(inputs.iter().all(|input| input.aim == AimDirection::east()));
             assert!(inputs.iter().all(|input| input.ability_1_sequence == 1));
+            assert!(inputs[0].reward_session_active);
+            assert!(inputs[0].reward_trust_valid);
+            assert!(
+                inputs[1..6]
+                    .iter()
+                    .all(|input| !input.reward_session_active && !input.reward_trust_valid)
+            );
+            assert!(inputs[1..6].iter().all(|input| {
+                input.reward_activity_sequence == inputs[0].reward_activity_sequence
+            }));
+            assert!(inputs[6].reward_session_active);
+            assert!(inputs[6].reward_trust_valid);
+            assert_eq!(
+                inputs[6].reward_activity_sequence,
+                inputs[0].reward_activity_sequence + 1
+            );
         }
         let report = driver.shutdown().await.expect("shutdown");
-        assert_eq!(report.committed_frames, 6);
+        assert_eq!(report.committed_frames, 7);
         assert_eq!(report.link_lost_neutralizations, 1);
     }
 

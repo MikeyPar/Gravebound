@@ -84,9 +84,14 @@ impl CoreDurableBargainRestResolution {
     ) -> Result<Self, PersistenceError> {
         let unavailable_offer = result.result_code == 1 && result.offer_id.is_some();
         let no_slot = result.result_code == 2 && result.offer_id.is_none();
+        let not_qualified = result.result_code == 3
+            && result.offer_id.is_none()
+            && result.ash_mutation_id.is_none()
+            && result.post_oath_bargain_version == result.pre_oath_bargain_version
+            && result.post_earned_bargain_slots == result.pre_earned_bargain_slots;
         if result.account_id != authenticated.account_id.as_bytes()
             || authenticated.namespace != AuthenticatedNamespace::WipeableTest
-            || !(unavailable_offer || no_slot)
+            || !(unavailable_offer || no_slot || not_qualified)
             || result.milestone_id != CORE_BARGAIN_MILESTONE_ID
             || result.source_content_id != CORE_BARGAIN_SOURCE_ID
             || result.source_layout_id != CORE_BARGAIN_LAYOUT_ID
@@ -906,6 +911,19 @@ mod tests {
                 .expect("durable no-offer result");
         assert_eq!(
             durable.resolution(),
+            sim_content::CoreFixedDungeonRestResolution::NoOffer
+        );
+
+        let mut disposition = result.clone();
+        disposition.result_code = 3;
+        disposition.ash_mutation_id = None;
+        let durable_disposition = CoreDurableBargainRestResolution::from_no_offer_milestone(
+            authenticated(),
+            &disposition,
+        )
+        .expect("durable below-level/already-consumed no-offer result");
+        assert_eq!(
+            durable_disposition.resolution(),
             sim_content::CoreFixedDungeonRestResolution::NoOffer
         );
 

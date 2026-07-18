@@ -16,12 +16,13 @@ use tokio::sync::Mutex;
 
 use crate::{
     AuthenticatedAccount, AuthenticatedNamespace, CoreBellPortalTransition,
-    CoreDurableBargainRestResolution, CoreExtractionActorDirectory,
+    CoreDurableB3RewardCommit, CoreDurableBargainRestResolution, CoreExtractionActorDirectory,
     CoreExtractionAuthoritativeTick, CoreExtractionConnectionLease, CoreExtractionHallProjection,
     CoreExtractionRuntimeError, CoreExtractionRuntimeReport, CoreExtractionTransportAttach,
     CoreExtractionTransportDetach, CorePrivateFixedDungeonAdvance,
-    CorePrivateFixedDungeonDriverReady, CorePrivateFixedDungeonRestCommit,
-    CorePrivateMicrorealmAbility, CorePrivateMicrorealmAbilityPress, CorePrivateMicrorealmDriver,
+    CorePrivateFixedDungeonB3RewardCommit, CorePrivateFixedDungeonDriverReady,
+    CorePrivateFixedDungeonRestCommit, CorePrivateMicrorealmAbility,
+    CorePrivateMicrorealmAbilityPress, CorePrivateMicrorealmDriver,
     CorePrivateMicrorealmDriverError, CorePrivateMicrorealmDriverHandle,
     CorePrivateMicrorealmDriverObserver, CorePrivateMicrorealmDriverReport,
     CorePrivateMicrorealmIngressError, CorePrivateMicrorealmPreparedHandoff,
@@ -679,6 +680,9 @@ where
         entry.next_generation = next_generation;
         entry.recall_lease = committed.recall.as_ref().map(|attached| attached.lease);
         entry.extraction_lease = committed.extraction.as_ref().map(|attached| attached.lease);
+        if let Some(bound) = &entry.microrealm {
+            bound.driver.handle().mark_reward_session_active();
+        }
 
         let invalidated_connection = previous.map(|active| {
             active.writer.retire(
@@ -910,6 +914,38 @@ where
         };
         handle
             .resolve_fixed_dungeon_rest(durable)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Applies a server-coordinator-produced B3 reward proof through the current transport
+    /// generation. Account binding is checked before the proof reaches the sole task; character,
+    /// lineage, tick, and exact handoff are checked again inside the runtime owner.
+    pub async fn commit_fixed_dungeon_b3_reward(
+        &self,
+        lease: CorePrivateLifeTransportLease,
+        durable: CoreDurableB3RewardCommit,
+    ) -> Result<CorePrivateFixedDungeonB3RewardCommit, CorePrivateLifeSessionError> {
+        if durable.account_id() != lease.account_id {
+            return Err(CorePrivateLifeSessionError::InvalidAccountBinding);
+        }
+        let handle = {
+            let state = self.state.lock().await;
+            let entry = state
+                .sessions
+                .get(&lease.account_id)
+                .ok_or(CorePrivateLifeSessionError::SessionUnavailable)?;
+            if entry.active.as_ref().map(|active| active.lease) != Some(lease) {
+                return Err(CorePrivateLifeSessionError::StaleTransport);
+            }
+            entry
+                .microrealm
+                .as_ref()
+                .map(|bound| bound.driver.handle())
+                .ok_or(CorePrivateLifeSessionError::MicrorealmUnavailable)?
+        };
+        handle
+            .commit_fixed_dungeon_b3_reward(durable)
             .await
             .map_err(Into::into)
     }
@@ -1255,13 +1291,13 @@ where
                 .writer
                 .retire(SESSION_DETACHED_CLOSE_CODE, SESSION_DETACHED_REASON);
         }
-        drop(state);
         if let Some(handle) = microrealm {
             match handle.neutralize_for_link_lost() {
                 Ok(()) | Err(CorePrivateMicrorealmIngressError::DriverFrozen) => {}
                 Err(error) => return Err(error.into()),
             }
         }
+        drop(state);
         Ok(CorePrivateLifeTransportDetach::Detached { recall, extraction })
     }
 

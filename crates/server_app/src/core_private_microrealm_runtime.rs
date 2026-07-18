@@ -83,6 +83,11 @@ pub struct CorePrivateMicrorealmInput {
     pub primary_sequence: u32,
     pub ability_1_sequence: u32,
     pub ability_2_sequence: u32,
+    /// Authenticated session/activity evidence carried by the sole server driver. These fields
+    /// are never decoded from gameplay frames and exist only for reward-presence accounting.
+    pub reward_session_active: bool,
+    pub reward_trust_valid: bool,
+    pub reward_activity_sequence: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -576,6 +581,9 @@ pub(crate) fn core_bell_ready_runtime_test_fixture(
                 primary_sequence: 0,
                 ability_1_sequence: 0,
                 ability_2_sequence: 0,
+                reward_session_active: true,
+                reward_trust_valid: true,
+                reward_activity_sequence: sequence,
             },
             &arena,
             &collision_world,
@@ -698,6 +706,9 @@ mod tests {
             primary_sequence: 0,
             ability_1_sequence: 0,
             ability_2_sequence: 0,
+            reward_session_active: true,
+            reward_trust_valid: true,
+            reward_activity_sequence: sequence.max(1),
         }
     }
 

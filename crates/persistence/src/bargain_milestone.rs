@@ -6,7 +6,7 @@ use sqlx::Row;
 
 use crate::{
     ASH_WALLET_CAP, AshMutationCode, AshMutationKind, AshMutationRequest, PersistenceError,
-    StoredAshWallet, StoredBargainOffer, WIPEABLE_CORE_NAMESPACE,
+    PostgresPersistence, StoredAshWallet, StoredBargainOffer, WIPEABLE_CORE_NAMESPACE,
     ash_wallet::apply_ash_mutation_on_connection, bargain::validate_offer,
     bargain_events::encode_bargain_offered,
 };
@@ -18,6 +18,7 @@ const MAX_BARGAINS: i16 = 3;
 const OFFER_CREATED: i16 = 0;
 const OFFER_UNAVAILABLE_WITH_ASH: i16 = 1;
 const NO_SLOT_ASH: i16 = 2;
+const NO_OFFER_NOT_QUALIFIED: i16 = 3;
 const OPEN_OFFER_STATE: i16 = 0;
 const UNAVAILABLE_OFFER_STATE: i16 = 3;
 const FALLBACK_ASH: i32 = 10;
@@ -63,6 +64,67 @@ pub struct StagedBargainMilestone {
     pub ash_request: Option<AshMutationRequest>,
 }
 
+impl PostgresPersistence {
+    /// Reads the immutable Core milestone result paired with a progression reward. Exact retry
+    /// coordinators use this after the progression receipt replayed; no life or offer state is
+    /// reconstructed from current mutable rows.
+    pub async fn bargain_milestone_result(
+        &self,
+        account_id: [u8; ID_BYTES],
+        source_reward_event_id: [u8; ID_BYTES],
+    ) -> Result<Option<StoredBargainMilestoneResult>, PersistenceError> {
+        if account_id == [0; ID_BYTES] || source_reward_event_id == [0; ID_BYTES] {
+            return Err(PersistenceError::CorruptStoredBargain);
+        }
+        let mut transaction = self.begin_transaction().await?;
+        let row = sqlx::query(
+            "SELECT character_id, payload_hash, result_code, pre_oath_bargain_version, \
+                    post_oath_bargain_version, pre_earned_bargain_slots, \
+                    post_earned_bargain_slots, offer_id, ash_mutation_id, milestone_id, \
+                    source_content_id, source_layout_id, instance_lineage_id, \
+                    entry_restore_point_id, result_payload \
+             FROM bargain_milestone_results \
+             WHERE namespace_id = $1 AND account_id = $2 AND source_reward_event_id = $3",
+        )
+        .bind(WIPEABLE_CORE_NAMESPACE)
+        .bind(account_id.as_slice())
+        .bind(source_reward_event_id.as_slice())
+        .fetch_optional(transaction.connection())
+        .await?;
+        transaction.rollback().await?;
+        row.map(|row| {
+            let result = StoredBargainMilestoneResult {
+                account_id,
+                character_id: fixed_bytes(row.try_get("character_id")?)?,
+                source_reward_event_id,
+                payload_hash: fixed_bytes(row.try_get("payload_hash")?)?,
+                result_code: row.try_get("result_code")?,
+                pre_oath_bargain_version: row.try_get("pre_oath_bargain_version")?,
+                post_oath_bargain_version: row.try_get("post_oath_bargain_version")?,
+                pre_earned_bargain_slots: row.try_get("pre_earned_bargain_slots")?,
+                post_earned_bargain_slots: row.try_get("post_earned_bargain_slots")?,
+                offer_id: row
+                    .try_get::<Option<Vec<u8>>, _>("offer_id")?
+                    .map(fixed_bytes)
+                    .transpose()?,
+                ash_mutation_id: row
+                    .try_get::<Option<Vec<u8>>, _>("ash_mutation_id")?
+                    .map(fixed_bytes)
+                    .transpose()?,
+                milestone_id: row.try_get("milestone_id")?,
+                source_content_id: row.try_get("source_content_id")?,
+                source_layout_id: row.try_get("source_layout_id")?,
+                instance_lineage_id: fixed_bytes(row.try_get("instance_lineage_id")?)?,
+                entry_restore_point_id: fixed_bytes(row.try_get("entry_restore_point_id")?)?,
+                result_payload: row.try_get("result_payload")?,
+            };
+            validate_result(&result)?;
+            Ok(result)
+        })
+        .transpose()
+    }
+}
+
 pub(crate) async fn lock_bargain_milestone_life(
     connection: &mut sqlx::PgConnection,
     account_id: &[u8; ID_BYTES],
@@ -89,7 +151,8 @@ pub(crate) async fn lock_bargain_milestone_life(
     .await?;
     let core_milestone_awarded = sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS (SELECT 1 FROM bargain_milestone_results WHERE namespace_id = $1 \
-         AND account_id = $2 AND character_id = $3 AND milestone_id = $4 FOR UPDATE)",
+         AND account_id = $2 AND character_id = $3 AND milestone_id = $4 \
+         AND result_code BETWEEN 0 AND 2 FOR UPDATE)",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(account_id.as_slice())
@@ -279,7 +342,8 @@ fn validate_staged(
     validate_life(&staged.life)?;
     validate_result(&staged.result)?;
     let result = &staged.result;
-    if binding.initial_life.core_milestone_awarded
+    let is_disposition_only = result.result_code == NO_OFFER_NOT_QUALIFIED;
+    if (!is_disposition_only && binding.initial_life.core_milestone_awarded)
         || result.account_id != *binding.account_id
         || result.character_id != *binding.character_id
         || result.source_reward_event_id != *binding.reward_event_id
@@ -290,7 +354,7 @@ fn validate_staged(
         || Some(&result.instance_lineage_id) != binding.instance_lineage_id
         || Some(&result.entry_restore_point_id) != binding.entry_restore_point_id
         || staged.life.active_bargain_ids != binding.initial_life.active_bargain_ids
-        || staged.life.core_milestone_awarded
+        || staged.life.core_milestone_awarded != binding.initial_life.core_milestone_awarded
         || staged.life.oath_bargain_version != result.post_oath_bargain_version
         || staged.life.earned_bargain_slots != result.post_earned_bargain_slots
     {
@@ -307,7 +371,7 @@ fn validate_staged(
                 && offer.offer_state == UNAVAILABLE_OFFER_STATE
                 && offer.candidates.is_empty()
         }
-        (NO_SLOT_ASH, None) => true,
+        (NO_SLOT_ASH | NO_OFFER_NOT_QUALIFIED, None) => true,
         _ => false,
     };
     if !offer_valid
@@ -387,6 +451,7 @@ fn validate_result(result: &StoredBargainMilestoneResult) -> Result<(), Persiste
             result.offer_id.is_none()
                 && result.ash_mutation_id == Some(result.source_reward_event_id)
         }
+        NO_OFFER_NOT_QUALIFIED => result.offer_id.is_none() && result.ash_mutation_id.is_none(),
         _ => false,
     };
     if result.account_id == [0; ID_BYTES]
@@ -412,6 +477,12 @@ fn validate_result(result: &StoredBargainMilestoneResult) -> Result<(), Persiste
         return Err(PersistenceError::CorruptStoredBargain);
     }
     Ok(())
+}
+
+fn fixed_bytes<const N: usize>(bytes: Vec<u8>) -> Result<[u8; N], PersistenceError> {
+    bytes
+        .try_into()
+        .map_err(|_| PersistenceError::CorruptStoredBargain)
 }
 
 #[cfg(test)]
@@ -447,5 +518,13 @@ mod tests {
         let mut corrupt = base;
         corrupt.post_earned_bargain_slots = 2;
         assert!(validate_result(&corrupt).is_err());
+
+        let mut disposition = unavailable;
+        disposition.result_code = NO_OFFER_NOT_QUALIFIED;
+        disposition.post_oath_bargain_version = disposition.pre_oath_bargain_version;
+        disposition.post_earned_bargain_slots = disposition.pre_earned_bargain_slots;
+        disposition.offer_id = None;
+        disposition.ash_mutation_id = None;
+        assert!(validate_result(&disposition).is_ok());
     }
 }

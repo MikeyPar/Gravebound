@@ -685,6 +685,10 @@ mod tests {
             living_inside: 1,
             living_party_outside: 0,
             doorway_hurtbox_blocked: false,
+            reward_life_state: sim_core::RewardLifeState::Living,
+            reward_recall_state: sim_core::RewardRecallState::Eligible,
+            reward_trust_state: sim_core::RewardTrustState::Valid,
+            reward_participation: crate::CoreRewardParticipation::PresentActive,
             combat_step: Some(combat_step),
         }
     }

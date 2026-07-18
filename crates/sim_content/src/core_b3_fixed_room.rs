@@ -8,8 +8,8 @@ use sim_core::{
     EnemyHealthSnapshot, EnemyHealthStep, EnemyLabPlayer, EntityId, EntityIdAllocator,
     FixedRoomEvent, FixedRoomInput, FixedRoomPhase, FixedRoomSimulation, HostileDamagePolicy,
     HostileEvent, HostileProjectile, HostileProjectileSimulation, HostileStep,
-    NormalRewardDropEvent, NormalWaveHandoff, SpawnInstanceId, Tick,
-    apply_hostile_contact_transaction_with_policy, normal_wave_entity_id,
+    NormalRewardDropEvent, NormalWaveHandoff, RewardLifeState, RewardRecallState, RewardTrustState,
+    SpawnInstanceId, Tick, apply_hostile_contact_transaction_with_policy, normal_wave_entity_id,
 };
 
 use crate::{
@@ -38,6 +38,14 @@ pub struct CoreB3RewardHandoff {
     pub reward_due_tick: Tick,
     pub reward_profile_id: String,
     pub xp_profile_id: String,
+    pub active_ticks: u64,
+    pub present_ticks: u64,
+    pub direct_damage: u64,
+    pub reference_health: u64,
+    pub longest_inactivity_ticks: u64,
+    pub life_state: RewardLifeState,
+    pub recall_state: RewardRecallState,
+    pub trust_state: RewardTrustState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,6 +83,7 @@ struct CoreB3CombatSimulation {
     instance_id: SpawnInstanceId,
     actor_id: EntityId,
     definition: CoreEnemyDefinition,
+    warning_started_at: Tick,
     activation_tick: Tick,
     introduction_ends_at: Tick,
     reward_profile_id: String,
@@ -84,6 +93,10 @@ struct CoreB3CombatSimulation {
     hostile: HostileProjectileSimulation,
     player: EnemyLabPlayer,
     damage_policy: HostileDamagePolicy,
+    direct_damage: u64,
+    present_ticks: u64,
+    current_inactivity_ticks: u64,
+    longest_inactivity_ticks: u64,
     reward_handoff: Option<CoreB3RewardHandoff>,
 }
 
@@ -132,6 +145,7 @@ impl CoreB3CombatSimulation {
             reward_profile_id: assignment.reward_profile_id.as_str().to_owned(),
             xp_profile_id: assignment.xp_profile_id.as_str().to_owned(),
             definition,
+            warning_started_at,
             activation_tick,
             introduction_ends_at,
             health,
@@ -141,6 +155,10 @@ impl CoreB3CombatSimulation {
             ),
             player: participant.player,
             damage_policy: HostileDamagePolicy::Standard,
+            direct_damage: 0,
+            present_ticks: 0,
+            current_inactivity_ticks: 0,
+            longest_inactivity_ticks: 0,
             reward_handoff: None,
         })
     }
@@ -178,10 +196,39 @@ impl CoreB3CombatSimulation {
         &mut self,
         activation_ordinal: u32,
         combat: &CombatStep,
-        participant_inside: bool,
+        input: &CoreImmutableFixedRoomInput,
     ) -> Result<CoreB3CombatStep, CoreFixedRoomEncounterError> {
+        if input.reward_participation.is_present() {
+            self.present_ticks = self
+                .present_ticks
+                .checked_add(1)
+                .ok_or(CoreFixedRoomEncounterError::IdentityOverflow)?;
+        }
+        if input.reward_participation.is_active() {
+            self.current_inactivity_ticks = 0;
+        } else {
+            self.current_inactivity_ticks = self
+                .current_inactivity_ticks
+                .checked_add(1)
+                .ok_or(CoreFixedRoomEncounterError::IdentityOverflow)?;
+            self.longest_inactivity_ticks = self
+                .longest_inactivity_ticks
+                .max(self.current_inactivity_ticks);
+        }
         let health = self.health.apply_combat_step(combat)?;
+        for event in &health.damage_events {
+            self.direct_damage = self
+                .direct_damage
+                .checked_add(u64::from(event.damage.health_damage_applied))
+                .ok_or(CoreFixedRoomEncounterError::IdentityOverflow)?;
+        }
         if let Some(death) = health.death_events.first() {
+            let active_ticks = death
+                .tick
+                .0
+                .checked_sub(self.warning_started_at.0)
+                .and_then(|ticks| ticks.checked_add(1))
+                .ok_or(CoreFixedRoomEncounterError::IdentityOverflow)?;
             self.reward_handoff = Some(CoreB3RewardHandoff {
                 activation_ordinal,
                 instance_id: self.instance_id,
@@ -191,6 +238,14 @@ impl CoreB3CombatSimulation {
                 reward_due_tick: death.reward_due_tick,
                 reward_profile_id: self.reward_profile_id.clone(),
                 xp_profile_id: self.xp_profile_id.clone(),
+                active_ticks,
+                present_ticks: self.present_ticks,
+                direct_damage: self.direct_damage,
+                reference_health: u64::from(self.definition.parameters().maximum_health),
+                longest_inactivity_ticks: self.longest_inactivity_ticks,
+                life_state: input.reward_life_state,
+                recall_state: input.reward_recall_state,
+                trust_state: input.reward_trust_state,
             });
         }
         let alive = self.snapshot()?.alive;
@@ -200,7 +255,7 @@ impl CoreB3CombatSimulation {
         let mut cleared_projectiles = Vec::new();
         let hostile_step;
         if alive {
-            let candidates = if participant_inside {
+            let candidates = if input.living_inside > 0 {
                 super::core_fixed_room_encounter::player_target_candidates(&self.player)?
             } else {
                 Vec::new()
@@ -253,7 +308,7 @@ impl CoreB3CombatSimulation {
                     | CoreKnightEvent::TargetlessReset { .. } => {}
                 }
             }
-            hostile_step = if participant_inside {
+            hostile_step = if input.living_inside > 0 {
                 self.hostile.step(
                     &self.arena,
                     &mut self.player.target,
@@ -442,7 +497,7 @@ impl CoreB3FixedRoomSimulation {
             Some(combat.step(
                 self.authority.activation_ordinal(),
                 &super::core_fixed_room_encounter::combat_input(tick, input)?,
-                input.living_inside > 0,
+                input,
             )?)
         } else {
             None
@@ -481,7 +536,7 @@ impl CoreB3FixedRoomSimulation {
                     combat_step = Some(combat.step(
                         self.authority.activation_ordinal(),
                         &super::core_fixed_room_encounter::combat_input(tick, input)?,
-                        input.living_inside > 0,
+                        input,
                     )?);
                     self.next_spawn_ordinal = self
                         .next_spawn_ordinal
@@ -609,6 +664,18 @@ mod tests {
             living_inside,
             living_party_outside: u16::from(living_inside == 0),
             doorway_hurtbox_blocked: false,
+            reward_life_state: if living_inside > 0 {
+                RewardLifeState::Living
+            } else {
+                RewardLifeState::Dead
+            },
+            reward_recall_state: RewardRecallState::Eligible,
+            reward_trust_state: RewardTrustState::Valid,
+            reward_participation: if living_inside > 0 {
+                crate::CoreRewardParticipation::PresentActive
+            } else {
+                crate::CoreRewardParticipation::Absent
+            },
             combat_step: (living_inside > 0).then_some(CombatStep {
                 tick: Tick(tick),
                 ..CombatStep::default()
@@ -772,6 +839,10 @@ mod tests {
         let mut reward_handoff = None;
         for tick in 0..=1_050 {
             let mut room_input = input(tick, 1);
+            if (100..130).contains(&tick) {
+                room_input.reward_participation = crate::CoreRewardParticipation::Absent;
+                room_input.reward_trust_state = RewardTrustState::InvalidSession;
+            }
             if tick == 1_050 {
                 room_input.combat_step = Some(lethal(actor_id.expect("spawned Knight"), tick));
             }
@@ -791,6 +862,16 @@ mod tests {
             Err(CoreFixedRoomEncounterError::RoomHandoffUnavailable)
         ));
         let reward_handoff = reward_handoff.expect("B3 reward handoff");
+        assert_eq!(
+            reward_handoff.reward_due_tick.0,
+            reward_handoff.death_tick.0 + 8
+        );
+        assert_eq!(reward_handoff.active_ticks, 1_051);
+        assert_eq!(reward_handoff.present_ticks, 1_021);
+        assert_eq!(reward_handoff.longest_inactivity_ticks, 30);
+        assert_eq!(reward_handoff.life_state, RewardLifeState::Living);
+        assert_eq!(reward_handoff.recall_state, RewardRecallState::Eligible);
+        assert_eq!(reward_handoff.trust_state, RewardTrustState::Valid);
         let mut changed = reward_handoff.clone();
         changed.reward_due_tick = Tick(changed.reward_due_tick.0 + 1);
         assert!(matches!(
