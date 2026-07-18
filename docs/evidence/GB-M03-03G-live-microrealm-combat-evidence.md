@@ -38,4 +38,4 @@ Hosted CI runs for the three implementation commits were not yet complete as [`2
 
 ## Current Next Step
 
-Drive the retained action-only microrealm owner from the session's independent 30 Hz scheduler using bounded latest-state input so ticks, hostile simulation, and danger continue without packet cadence authority. Compose Slipstep displacement through the same collision transaction, then extend the single mutable combat handoff through fixed B0-B6 rooms, rewards, pending inventory, and all five terminal producers before enabling normal admission.
+Slipstep is now composed by follow-on commits `f75c662`, `8d74ca7`, and `3c6af83`. Move input-sequence validation to session ingress and introduce one exclusive microrealm driver with one-slot latest-state input, separately reliable ability presses, a skip-not-catch-up 30 Hz interval, LinkLost neutralization with continued danger ticks, generation-safe reconnect, frame-complete freeze/shutdown, and zero residue. Then extend the single mutable combat handoff through fixed B0-B6 rooms, rewards, pending inventory, and all five terminal producers before enabling normal admission.
