@@ -31,6 +31,8 @@ Completed `GB-M03-03A`-`03F`, `04`, `05`, `06`, `07`, `08`, `12`, and `13` prove
 
 **Implementation-audit clarification (2026-07-17):** those completed packages do not by themselves prove one common per-transport reliable sequence, a normal live extraction-intent owner, a terminal-first composite bootstrap snapshot, or complete movement/combat/reward/pending-inventory ownership inside the private-life actor. Those are composition prerequisites, not evidence that can be inferred from the disposable route or isolated package tests. Capability advertisement remains false until the dedicated root constructs and verifies them together.
 
+**Implementation checkpoint (2026-07-17):** hosted CI [`29624519851`](https://github.com/MikeyPar/Gravebound/actions/runs/29624519851) closes the prerequisite identity, Bell-mailbox, and bounded client-reordering proof. Commit `71005d1` implements the single per-transport server writer locally: Core responses and Recall pushes share its private sequence, uncertain delivery retires the transport, generation-racing Recall publication retries on the winning connection, and public raw-sequence seams are removed. Hosted proof for that commit is pending. The live extraction-intent owner, terminal-first bootstrap projection, complete live actor ownership, and dedicated composition root remain open, so capability advertisement remains false.
+
 The final implementation therefore needs a composition root and live actor ownership, not a feature-flag edit.
 
 ## Decision
