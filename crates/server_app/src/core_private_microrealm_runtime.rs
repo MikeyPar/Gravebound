@@ -143,6 +143,21 @@ impl CorePrivateMicrorealmRuntime {
     }
 
     #[must_use]
+    pub const fn route_lease(&self) -> CorePrivateRouteActorLease {
+        self.route_lease
+    }
+
+    #[must_use]
+    pub const fn account_id(&self) -> [u8; 16] {
+        self.route_lease.account_id()
+    }
+
+    #[must_use]
+    pub const fn character_id(&self) -> [u8; 16] {
+        self.route_lease.character_id()
+    }
+
+    #[must_use]
     pub const fn player_position(&self) -> TilePoint {
         self.player.position()
     }

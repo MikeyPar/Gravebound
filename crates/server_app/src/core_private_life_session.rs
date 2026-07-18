@@ -16,11 +16,12 @@ use crate::{
     AuthenticatedAccount, AuthenticatedNamespace, CoreExtractionActorDirectory,
     CoreExtractionAuthoritativeTick, CoreExtractionConnectionLease, CoreExtractionHallProjection,
     CoreExtractionRuntimeError, CoreExtractionRuntimeReport, CoreExtractionTransportAttach,
-    CoreExtractionTransportDetach, CoreRecallActorDirectory, CoreRecallActorRetirementReport,
-    CoreRecallAuthoritativeTick, CoreRecallConnectionAuthority, CoreRecallConnectionLease,
-    CoreRecallRuntimeError, CoreRecallRuntimeReport, CoreRecallTransportAttach, CoreReliableWriter,
-    IdentityClock, ProductionExtractionPlanner, ProductionRecallClock,
-    ProductionRecallDetachOutcome, TRANSPORT_REPLACED_CLOSE_CODE,
+    CoreExtractionTransportDetach, CorePrivateMicrorealmRuntime, CorePrivateRouteActorLease,
+    CoreRecallActorDirectory, CoreRecallActorRetirementReport, CoreRecallAuthoritativeTick,
+    CoreRecallConnectionAuthority, CoreRecallConnectionLease, CoreRecallRuntimeError,
+    CoreRecallRuntimeReport, CoreRecallTransportAttach, CoreReliableWriter, IdentityClock,
+    ProductionExtractionPlanner, ProductionRecallClock, ProductionRecallDetachOutcome,
+    TRANSPORT_REPLACED_CLOSE_CODE,
 };
 use crate::{
     core_extraction_runtime::CoreExtractionPreparedWriterHandoff,
@@ -64,6 +65,7 @@ pub struct CorePrivateLifeTransportAttach {
     pub writer: Arc<CoreReliableWriter>,
     pub recall_lease: Option<CoreRecallConnectionLease>,
     pub extraction_lease: Option<CoreExtractionConnectionLease>,
+    pub microrealm: Option<Arc<Mutex<CorePrivateMicrorealmRuntime>>>,
     pub invalidated_connection: Option<quinn::Connection>,
 }
 
@@ -85,6 +87,7 @@ pub struct CorePrivateLifeSessionSnapshot {
     pub active_transport_count: usize,
     pub recall_bound_count: usize,
     pub extraction_bound_count: usize,
+    pub microrealm_bound_count: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,6 +96,7 @@ pub struct CorePrivateLifeSessionReport {
     pub remaining_active_transports: usize,
     pub recall: CoreRecallRuntimeReport,
     pub extraction: Option<CoreExtractionRuntimeReport>,
+    pub remaining_microrealm_bindings: usize,
     pub zero_residue: bool,
 }
 
@@ -118,6 +122,10 @@ pub enum CorePrivateLifeSessionError {
     ExtractionAlreadyBound,
     #[error("Core private-life extraction authority is not bound")]
     ExtractionNotBound,
+    #[error("Core private-life microrealm authority is already bound")]
+    MicrorealmAlreadyBound,
+    #[error("Core private-life microrealm authority is not bound")]
+    MicrorealmUnavailable,
     #[error("Core private-life dynamic writer handoff could not restore one-owner authority")]
     DynamicWriterHandoffInconsistent,
     #[error("Core private-life session shutdown has not started")]
@@ -143,6 +151,8 @@ struct SessionEntry {
     recall_lease: Option<CoreRecallConnectionLease>,
     extraction_bound: bool,
     extraction_lease: Option<CoreExtractionConnectionLease>,
+    microrealm: Option<Arc<Mutex<CorePrivateMicrorealmRuntime>>>,
+    microrealm_route_lease: Option<CorePrivateRouteActorLease>,
 }
 
 #[derive(Debug)]
@@ -519,6 +529,8 @@ where
             recall_lease: None,
             extraction_bound: false,
             extraction_lease: None,
+            microrealm: None,
+            microrealm_route_lease: None,
         });
         if entry.authenticated != authenticated {
             writer.retire(
@@ -572,6 +584,7 @@ where
             writer,
             recall_lease: entry.recall_lease,
             extraction_lease: entry.extraction_lease,
+            microrealm: entry.microrealm.clone(),
             invalidated_connection,
         })
     }
@@ -622,6 +635,87 @@ where
         entry.recall_bound = true;
         entry.recall_lease = Some(attached.lease);
         Ok(attached.lease)
+    }
+
+    /// Binds one generation-pinned live microrealm owner to the retained account session. The
+    /// owner is transport-independent: disconnect keeps it alive for `LinkLost` vulnerability, and
+    /// reconnect returns the same allocation to the winning transport generation.
+    pub async fn bind_microrealm(
+        &self,
+        lease: CorePrivateLifeTransportLease,
+        runtime: CorePrivateMicrorealmRuntime,
+    ) -> Result<Arc<Mutex<CorePrivateMicrorealmRuntime>>, CorePrivateLifeSessionError> {
+        let mut state = self.state.lock().await;
+        if !state.accepting {
+            return Err(CorePrivateLifeSessionError::Retired);
+        }
+        let entry = state
+            .sessions
+            .get_mut(&lease.account_id)
+            .ok_or(CorePrivateLifeSessionError::SessionUnavailable)?;
+        if entry.active.as_ref().map(|active| active.lease) != Some(lease) {
+            return Err(CorePrivateLifeSessionError::StaleTransport);
+        }
+        if runtime.account_id() != lease.account_id
+            || entry.authenticated.account_id.as_bytes() != runtime.account_id()
+        {
+            return Err(CorePrivateLifeSessionError::InvalidAccountBinding);
+        }
+        if entry.microrealm.is_some() {
+            return Err(CorePrivateLifeSessionError::MicrorealmAlreadyBound);
+        }
+        let runtime_route_lease = runtime.route_lease();
+        let runtime = Arc::new(Mutex::new(runtime));
+        entry.microrealm_route_lease = Some(runtime_route_lease);
+        entry.microrealm = Some(Arc::clone(&runtime));
+        Ok(runtime)
+    }
+
+    /// Returns live danger authority only to the current transport generation. The returned owner
+    /// remains valid across a later detach so the server tick loop can keep the character live.
+    pub async fn microrealm_authority(
+        &self,
+        lease: CorePrivateLifeTransportLease,
+    ) -> Result<Arc<Mutex<CorePrivateMicrorealmRuntime>>, CorePrivateLifeSessionError> {
+        let state = self.state.lock().await;
+        let entry = state
+            .sessions
+            .get(&lease.account_id)
+            .ok_or(CorePrivateLifeSessionError::SessionUnavailable)?;
+        if entry.active.as_ref().map(|active| active.lease) != Some(lease) {
+            return Err(CorePrivateLifeSessionError::StaleTransport);
+        }
+        entry
+            .microrealm
+            .as_ref()
+            .map(Arc::clone)
+            .ok_or(CorePrivateLifeSessionError::MicrorealmUnavailable)
+    }
+
+    /// Removes exactly one terminal or transfer-retired live owner without touching the shared
+    /// writer. A later danger generation must bind a fresh runtime.
+    pub async fn unbind_microrealm(
+        &self,
+        lease: CorePrivateLifeTransportLease,
+        route_lease: CorePrivateRouteActorLease,
+    ) -> Result<(), CorePrivateLifeSessionError> {
+        let mut state = self.state.lock().await;
+        if !state.accepting {
+            return Err(CorePrivateLifeSessionError::Retired);
+        }
+        let entry = state
+            .sessions
+            .get_mut(&lease.account_id)
+            .ok_or(CorePrivateLifeSessionError::SessionUnavailable)?;
+        if entry.active.as_ref().map(|active| active.lease) != Some(lease) {
+            return Err(CorePrivateLifeSessionError::StaleTransport);
+        }
+        if entry.microrealm.is_none() || entry.microrealm_route_lease != Some(route_lease) {
+            return Err(CorePrivateLifeSessionError::MicrorealmUnavailable);
+        }
+        entry.microrealm = None;
+        entry.microrealm_route_lease = None;
+        Ok(())
     }
 
     /// Binds the current Boss-exit extraction actor to the exact private-life writer. This is
@@ -872,6 +966,8 @@ where
             }
             entry.recall_lease = None;
             entry.extraction_lease = None;
+            entry.microrealm = None;
+            entry.microrealm_route_lease = None;
         }
         drop(state);
         connections.extend(self.recall.begin_shutdown().await);
@@ -904,15 +1000,22 @@ where
             .filter(|entry| entry.active.is_some())
             .count();
         let extraction_zero_residue = extraction.as_ref().is_none_or(|report| report.zero_residue);
+        let remaining_microrealm_bindings = state
+            .sessions
+            .values()
+            .filter(|entry| entry.microrealm.is_some())
+            .count();
         state.sessions.clear();
         Ok(CorePrivateLifeSessionReport {
             retired_account_count,
             remaining_active_transports,
             recall,
             extraction,
+            remaining_microrealm_bindings,
             zero_residue: remaining_active_transports == 0
                 && recall.zero_residue
-                && extraction_zero_residue,
+                && extraction_zero_residue
+                && remaining_microrealm_bindings == 0,
         })
     }
 
@@ -938,6 +1041,11 @@ where
                 .values()
                 .filter(|entry| entry.extraction_bound)
                 .count(),
+            microrealm_bound_count: state
+                .sessions
+                .values()
+                .filter(|entry| entry.microrealm.is_some())
+                .count(),
         }
     }
 }
@@ -950,20 +1058,23 @@ mod tests {
     };
 
     use protocol::{
-        ActionResultCode, RecallFrameV1, RecallIntentV1, RecallResultV1, ReliableEvent,
-        TERMINAL_INVENTORY_SCHEMA_VERSION,
+        ActionResultCode, CorePrivateRouteContentRevisionV1, CorePrivateRoutePhaseV1,
+        CorePrivateRouteSceneV1, ManifestHash, RecallFrameV1, RecallIntentV1, RecallResultV1,
+        ReliableEvent, TERMINAL_INVENTORY_SCHEMA_VERSION, WorldFlowContentRevisionV1,
     };
     use rcgen::generate_simple_self_signed;
     use rustls::pki_types::PrivatePkcs8KeyDer;
 
     use super::*;
     use crate::{
-        AccountId, CoreRecallIntentAuthority, ProductionRecallIntentActor,
+        AccountId, CorePrivateRouteActorDirectory, CorePrivateRouteActorPosition,
+        CorePrivateRouteActorSeed, CoreRecallIntentAuthority, ProductionRecallIntentActor,
         ProductionRecallPendingAuthorityV1,
     };
 
     const ACCOUNT_ID: [u8; 16] = [71; 16];
     const CHARACTER_ID: [u8; 16] = [72; 16];
+    const LINEAGE_ID: [u8; 16] = [73; 16];
 
     #[derive(Debug, Clone, Copy)]
     struct FixedClock;
@@ -1015,6 +1126,62 @@ mod tests {
             client_tick: 10,
             intent: RecallIntentV1::Start,
         }
+    }
+
+    fn hash(byte: char) -> ManifestHash {
+        ManifestHash::new(byte.to_string().repeat(64)).unwrap()
+    }
+
+    fn route_revision() -> CorePrivateRouteContentRevisionV1 {
+        CorePrivateRouteContentRevisionV1 {
+            records_blake3: hash('a'),
+            assets_blake3: hash('b'),
+            localization_blake3: hash('c'),
+        }
+    }
+
+    fn world_revision() -> WorldFlowContentRevisionV1 {
+        WorldFlowContentRevisionV1 {
+            records_blake3: hash('d'),
+            assets_blake3: hash('e'),
+            localization_blake3: hash('f'),
+        }
+    }
+
+    fn live_microrealm() -> (
+        CorePrivateRouteActorDirectory,
+        CorePrivateRouteActorLease,
+        CorePrivateMicrorealmRuntime,
+    ) {
+        let routes = CorePrivateRouteActorDirectory::new();
+        let lease = routes
+            .register_actor(
+                authenticated(),
+                CorePrivateRouteActorSeed {
+                    character_id: CHARACTER_ID,
+                    character_version: 2,
+                    content_revision: route_revision(),
+                    world_flow_revision: world_revision(),
+                    position: CorePrivateRouteActorPosition {
+                        instance_lineage_id: Some(LINEAGE_ID),
+                        scene: CorePrivateRouteSceneV1::CoreMicrorealm,
+                        room: None,
+                        phase: CorePrivateRoutePhaseV1::MicrorealmDormant,
+                    },
+                },
+                7,
+            )
+            .unwrap();
+        let scene = sim_content::load_core_development_world_flow(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content"),
+        )
+        .unwrap()
+        .compile_microrealm_scene()
+        .unwrap();
+        let runtime =
+            CorePrivateMicrorealmRuntime::new(routes.clone(), lease, &route_revision(), scene)
+                .unwrap();
+        (routes, lease, runtime)
     }
 
     async fn live_connection_pair() -> (
@@ -1086,7 +1253,7 @@ mod tests {
     #[tokio::test]
     async fn handshake_session_binds_recall_to_the_existing_writer_and_sequence() {
         let ticks = Arc::new(TickSource(AtomicU64::new(100)));
-        let recall = Arc::new(CoreRecallActorDirectory::new(ticks));
+        let recall = Arc::new(CoreRecallActorDirectory::<FixedClock, _>::new(ticks));
         let sessions = Arc::new(CorePrivateLifeSessionDirectory::new(Arc::clone(&recall)));
         let (server_endpoint, client_endpoint, client, server) = live_connection_pair().await;
 
@@ -1148,6 +1315,86 @@ mod tests {
         client.close(0_u32.into(), b"test complete");
         server_endpoint.wait_idle().await;
         client_endpoint.wait_idle().await;
+    }
+
+    #[tokio::test]
+    async fn live_microrealm_survives_handoff_and_link_lost_until_exact_unbind() {
+        let ticks = Arc::new(TickSource(AtomicU64::new(100)));
+        let recall = Arc::new(CoreRecallActorDirectory::<FixedClock, _>::new(ticks));
+        let sessions = Arc::new(CorePrivateLifeSessionDirectory::new(recall));
+        let (routes, route_lease, runtime) = live_microrealm();
+
+        let (first_server_endpoint, first_client_endpoint, first_client, first_server) =
+            live_connection_pair().await;
+        let first = sessions
+            .attach_transport(authenticated(), first_server, 5_000)
+            .await
+            .unwrap();
+        let bound = sessions
+            .bind_microrealm(first.lease, runtime)
+            .await
+            .unwrap();
+        assert_eq!(sessions.snapshot().await.microrealm_bound_count, 1);
+
+        let (second_server_endpoint, second_client_endpoint, second_client, second_server) =
+            live_connection_pair().await;
+        let second = sessions
+            .attach_transport(authenticated(), second_server, 5_100)
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(second.microrealm.as_ref().unwrap(), &bound));
+        assert!(matches!(
+            sessions.microrealm_authority(first.lease).await,
+            Err(CorePrivateLifeSessionError::StaleTransport)
+        ));
+        assert!(matches!(
+            sessions
+                .detach_transport(second.lease, 5_200)
+                .await
+                .unwrap(),
+            CorePrivateLifeTransportDetach::Detached { .. }
+        ));
+        let detached = sessions.snapshot().await;
+        assert_eq!(detached.active_transport_count, 0);
+        assert_eq!(detached.microrealm_bound_count, 1);
+
+        let (third_server_endpoint, third_client_endpoint, third_client, third_server) =
+            live_connection_pair().await;
+        let third = sessions
+            .attach_transport(authenticated(), third_server, 5_300)
+            .await
+            .unwrap();
+        let rebound = sessions.microrealm_authority(third.lease).await.unwrap();
+        assert!(Arc::ptr_eq(&rebound, &bound));
+        sessions
+            .unbind_microrealm(third.lease, route_lease)
+            .await
+            .unwrap();
+        assert_eq!(sessions.snapshot().await.microrealm_bound_count, 0);
+
+        for connection in sessions.begin_shutdown().await {
+            connection.close(0_u32.into(), b"test shutdown");
+        }
+        let report = sessions.finish_shutdown().await.unwrap();
+        assert_eq!(report.remaining_microrealm_bindings, 0);
+        assert!(report.zero_residue);
+        routes.begin_shutdown();
+        assert!(routes.finish_shutdown().await.unwrap().zero_residue);
+
+        for client in [&first_client, &second_client, &third_client] {
+            client.close(0_u32.into(), b"test complete");
+        }
+        drop(first);
+        drop(second);
+        drop(third);
+        drop(bound);
+        drop(rebound);
+        first_server_endpoint.wait_idle().await;
+        first_client_endpoint.wait_idle().await;
+        second_server_endpoint.wait_idle().await;
+        second_client_endpoint.wait_idle().await;
+        third_server_endpoint.wait_idle().await;
+        third_client_endpoint.wait_idle().await;
     }
 
     #[tokio::test]
