@@ -70,9 +70,9 @@ These high-resolution, illustration-style drafts are not drop-in game sprites. A
 3. Validate readability at the GDD camera range of 20 x 11.25 to 30 x 16.875 tiles and in normal/reduced-effects modes.
 4. Only after review, add the approved runtime derivative through the Core asset registry/hash pipeline. Do not replace existing content hashes with these concept files.
 
-## Current next step
+## Current Next Step
 
-`GB-M03-03G` first requires cumulative hosted Linux/PostgreSQL/Windows CI for the exact content/actor/schema-62 checkpoint. After green proof, it constructs `BoundCorePrivateLifeServer`, attaches live simulation and terminal authorities, and proves real-QUIC cleanup/reconnect. Normal `core_world_flow_integration`, Character Select `Play`, and production Realm Gate interaction remain disabled until the owning slices and evidence pass.
+The exact content/phase-actor/schema-62 checkpoint is green at `c768a62` under hosted CI [`29622689323`](https://github.com/MikeyPar/Gravebound/actions/runs/29622689323). The art next step is to select and redraw the approved silhouette at renderer scale, establish one shared foot/origin anchor, and produce idle, Shield Arc, Charge Lane, and recover frames for camera/readability review in standard and reduced-effects modes. Only a reviewed derivative may enter the Core asset registry and content hashes. In parallel, `GB-M03-03G` continues shared reliable sequencing, terminal-first composition, live simulation/terminal ownership, and real-QUIC proof; normal `core_world_flow_integration`, Character Select `Play`, and Realm Gate interaction remain disabled until those owning slices and evidence pass.
 
 ## Licensing and provenance review
 
