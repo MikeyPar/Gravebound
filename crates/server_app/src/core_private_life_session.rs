@@ -12,6 +12,7 @@ use std::{collections::BTreeMap, future::Future, path::Path, pin::Pin, sync::Arc
 use persistence::PostgresPersistence;
 use protocol::{
     ActionFrame, ActionKind, CorePrivateRouteContentRevisionV1, InputFrame, ManifestHash,
+    WorldFlowContentRevisionV1,
 };
 use sim_core::{AimDirection, MovementAction, SimulationVector};
 use thiserror::Error;
@@ -20,12 +21,13 @@ use tokio::sync::Mutex;
 use crate::{
     AuthenticatedAccount, AuthenticatedNamespace, CaldusVictoryCompositionError,
     CoreB3RewardAuthority, CoreB3RewardCompositionError, CoreB3RewardWriterGeneration,
-    CoreBellPortalTransition, CoreCaldusRewardAuthority, CoreDurableB3Resolution,
-    CoreDurableBargainRestResolution, CoreExtractionActorDirectory,
-    CoreExtractionAuthoritativeTick, CoreExtractionConnectionLease, CoreExtractionHallProjection,
-    CoreExtractionRuntimeError, CoreExtractionRuntimeReport, CoreExtractionTransportAttach,
-    CoreExtractionTransportDetach, CorePrivateB3RewardRuntime, CorePrivateB3RewardRuntimeError,
-    CorePrivateCaldusRewardRuntime, CorePrivateCaldusRewardRuntimeError,
+    CoreBellPortalTransition, CoreCaldusPendingInventoryAuthority, CoreCaldusRewardAuthority,
+    CoreCaldusRewardWriterGeneration, CoreDurableB3Resolution, CoreDurableBargainRestResolution,
+    CoreExtractionActorDirectory, CoreExtractionAuthoritativeTick, CoreExtractionConnectionLease,
+    CoreExtractionHallProjection, CoreExtractionRuntimeError, CoreExtractionRuntimeReport,
+    CoreExtractionTransportAttach, CoreExtractionTransportDetach, CorePrivateB3RewardRuntime,
+    CorePrivateB3RewardRuntimeError, CorePrivateCaldusRewardRuntime,
+    CorePrivateCaldusRewardRuntimeConfig, CorePrivateCaldusRewardRuntimeError,
     CorePrivateFixedDungeonAdvance, CorePrivateFixedDungeonB3RewardCommit,
     CorePrivateFixedDungeonDriverReady, CorePrivateFixedDungeonRestCommit,
     CorePrivateMicrorealmAbility, CorePrivateMicrorealmAbilityPress, CorePrivateMicrorealmDriver,
@@ -285,6 +287,8 @@ struct BoundMicrorealmDriver {
 struct CaldusRewardAuthorityBinding {
     authority: Arc<dyn CoreCaldusRewardAuthority>,
     progression_content_revision: ManifestHash,
+    pending_inventory: Option<Arc<dyn CoreCaldusPendingInventoryAuthority>>,
+    world_flow_revision: Option<WorldFlowContentRevisionV1>,
 }
 
 impl std::fmt::Debug for CaldusRewardAuthorityBinding {
@@ -487,6 +491,27 @@ where
         self.caldus_rewards = Some(CaldusRewardAuthorityBinding {
             authority,
             progression_content_revision,
+            pending_inventory: None,
+            world_flow_revision: None,
+        });
+        self
+    }
+
+    /// Installs the complete Caldus reward/publication pipeline with process-owned content and
+    /// storage authority. Neither transport input nor the combat driver can select these values.
+    #[must_use]
+    pub fn with_caldus_reward_pipeline(
+        mut self,
+        authority: Arc<dyn CoreCaldusRewardAuthority>,
+        progression_content_revision: ManifestHash,
+        pending_inventory: Arc<dyn CoreCaldusPendingInventoryAuthority>,
+        world_flow_revision: WorldFlowContentRevisionV1,
+    ) -> Self {
+        self.caldus_rewards = Some(CaldusRewardAuthorityBinding {
+            authority,
+            progression_content_revision,
+            pending_inventory: Some(pending_inventory),
+            world_flow_revision: Some(world_flow_revision),
         });
         self
     }
@@ -521,12 +546,28 @@ where
         let progression_content_revision =
             ManifestHash::new(progression_content.hashes().records_blake3.clone())
                 .map_err(|_| CaldusVictoryCompositionError::ProgressionContent)?;
+        let world_flow = sim_content::load_core_development_world_flow(content_root)
+            .map_err(|_| CaldusVictoryCompositionError::ProgressionContent)?;
+        let world_flow_revision = WorldFlowContentRevisionV1 {
+            records_blake3: ManifestHash::new(world_flow.hashes().records_blake3.clone())
+                .map_err(|_| CaldusVictoryCompositionError::ProgressionContent)?,
+            assets_blake3: ManifestHash::new(world_flow.hashes().assets_blake3.clone())
+                .map_err(|_| CaldusVictoryCompositionError::ProgressionContent)?,
+            localization_blake3: ManifestHash::new(world_flow.hashes().localization_blake3.clone())
+                .map_err(|_| CaldusVictoryCompositionError::ProgressionContent)?,
+        };
         let authority = Arc::new(PostgresCaldusVictoryCoordinator::load(
-            persistence,
+            persistence.clone(),
             content_root,
             epoch,
         )?);
-        Ok(self.with_caldus_reward_authority(authority, progression_content_revision))
+        let pending_inventory: Arc<dyn CoreCaldusPendingInventoryAuthority> = Arc::new(persistence);
+        Ok(self.with_caldus_reward_pipeline(
+            authority,
+            progression_content_revision,
+            pending_inventory,
+            world_flow_revision,
+        ))
     }
 
     async fn prepare_dynamic_writer_handoffs(
@@ -802,6 +843,12 @@ where
                     Arc::clone(&writer),
                 );
             }
+            if let Some(caldus_rewards) = &bound.caldus_rewards {
+                caldus_rewards.attach_writer(
+                    CoreCaldusRewardWriterGeneration::new(generation.get())?,
+                    Arc::clone(&writer),
+                );
+            }
         }
 
         let invalidated_connection = previous.map(|active| {
@@ -935,12 +982,28 @@ where
             )
         });
         let caldus_rewards = self.caldus_rewards.as_ref().map(|binding| {
-            CorePrivateCaldusRewardRuntime::spawn(
+            let mut config = CorePrivateCaldusRewardRuntimeConfig::new(
                 entry.authenticated,
                 binding.progression_content_revision.clone(),
                 Arc::clone(&binding.authority),
+            );
+            if let (Some(pending_inventory), Some(world_flow_revision)) =
+                (&binding.pending_inventory, &binding.world_flow_revision)
+            {
+                config = config.with_pending_inventory(
+                    Arc::clone(pending_inventory),
+                    world_flow_revision.clone(),
+                );
+            }
+            CorePrivateCaldusRewardRuntime::spawn(
+                config,
                 handle.clone(),
                 handle.observe(),
+                Some((
+                    CoreCaldusRewardWriterGeneration::new(active.lease.generation.get())
+                        .expect("session transport generations are nonzero"),
+                    Arc::clone(&active.writer),
+                )),
             )
         });
         let binding = CorePrivateMicrorealmBinding {
@@ -1446,6 +1509,48 @@ where
         Ok(outcome)
     }
 
+    /// Clears a registered extraction owner after another terminal wins, including while the
+    /// private-life session is `LinkLost`. The exact danger binding prevents stale terminal
+    /// cleanup from changing a replacement generation; an absent transport lease is a successful
+    /// no-writer cleanup, not a reason to poison the next reconnect.
+    pub async fn unbind_registered_extraction(
+        &self,
+        lease: CorePrivateMicrorealmBindingLease,
+    ) -> Result<Option<CoreExtractionTransportDetach>, CorePrivateLifeSessionError> {
+        let mut state = self.state.lock().await;
+        if !state.accepting {
+            return Err(CorePrivateLifeSessionError::Retired);
+        }
+        let entry = state
+            .sessions
+            .get_mut(&lease.account_id)
+            .ok_or(CorePrivateLifeSessionError::SessionUnavailable)?;
+        if entry.authenticated.account_id.as_bytes() != lease.account_id
+            || entry
+                .microrealm
+                .as_ref()
+                .is_none_or(|bound| bound.lease != lease)
+        {
+            return Err(CorePrivateLifeSessionError::MicrorealmUnavailable);
+        }
+        if !entry.extraction_bound {
+            return Err(CorePrivateLifeSessionError::ExtractionNotBound);
+        }
+        let outcome = if let Some(extraction_lease) = entry.extraction_lease.take() {
+            Some(
+                self.extraction
+                    .as_ref()
+                    .ok_or(CorePrivateLifeSessionError::ExtractionUnavailable)?
+                    .detach(extraction_lease)
+                    .await,
+            )
+        } else {
+            None
+        };
+        entry.extraction_bound = false;
+        Ok(outcome)
+    }
+
     /// Removes the danger-only Recall actor without retiring the session writer. The terminal
     /// coordinator calls this only after its stored result and destination projection have been
     /// published; a later danger generation must register and bind a fresh actor explicitly.
@@ -1517,6 +1622,16 @@ where
             {
                 b3_rewards.detach_writer(
                     CoreB3RewardWriterGeneration::new(lease.generation.get())
+                        .expect("session transport generations are nonzero"),
+                );
+            }
+            if let Some(caldus_rewards) = entry
+                .microrealm
+                .as_ref()
+                .and_then(|bound| bound.caldus_rewards.as_ref())
+            {
+                caldus_rewards.detach_writer(
+                    CoreCaldusRewardWriterGeneration::new(lease.generation.get())
                         .expect("session transport generations are nonzero"),
                 );
             }
@@ -2138,6 +2253,89 @@ mod tests {
         second_client_endpoint.wait_idle().await;
         third_server_endpoint.wait_idle().await;
         third_client_endpoint.wait_idle().await;
+    }
+
+    #[tokio::test]
+    async fn exact_danger_lease_clears_registered_extraction_during_link_lost() {
+        let ticks = Arc::new(TickSource(AtomicU64::new(100)));
+        let recall = Arc::new(CoreRecallActorDirectory::<FixedClock, _>::new(ticks));
+        let sessions = Arc::new(CorePrivateLifeSessionDirectory::new(recall));
+        let (routes, _route_lease, runtime) = live_microrealm();
+        let (first_server_endpoint, first_client_endpoint, first_client, first_server) =
+            live_connection_pair().await;
+        let first = sessions
+            .attach_transport(authenticated(), first_server, 5_000)
+            .await
+            .unwrap();
+        let bound = sessions
+            .bind_microrealm(first.lease, runtime)
+            .await
+            .unwrap();
+
+        // Model the transport-free state created by `bind_registered_extraction`: the actor is
+        // owned by this danger generation, but no dynamic writer lease exists during LinkLost.
+        {
+            let mut state = sessions.state.lock().await;
+            let entry = state.sessions.get_mut(&ACCOUNT_ID).unwrap();
+            entry.extraction_bound = true;
+            entry.extraction_lease = None;
+        }
+        assert!(matches!(
+            sessions.detach_transport(first.lease, 5_100).await.unwrap(),
+            CorePrivateLifeTransportDetach::Detached { .. }
+        ));
+        assert_eq!(sessions.snapshot().await.extraction_bound_count, 1);
+
+        let stale = CorePrivateMicrorealmBindingLease {
+            binding_generation: bound.lease.binding_generation().saturating_add(1),
+            ..bound.lease
+        };
+        assert!(matches!(
+            sessions.unbind_registered_extraction(stale).await,
+            Err(CorePrivateLifeSessionError::MicrorealmUnavailable)
+        ));
+        assert_eq!(sessions.snapshot().await.extraction_bound_count, 1);
+        assert_eq!(
+            sessions
+                .unbind_registered_extraction(bound.lease)
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(sessions.snapshot().await.extraction_bound_count, 0);
+
+        let (second_server_endpoint, second_client_endpoint, second_client, second_server) =
+            live_connection_pair().await;
+        let second = sessions
+            .attach_transport(authenticated(), second_server, 5_200)
+            .await
+            .expect("reconnect must not resurrect the retired extraction actor");
+        assert!(second.extraction_lease.is_none());
+        assert_eq!(second.microrealm.as_ref().unwrap().lease, bound.lease);
+        sessions
+            .detach_transport(second.lease, 5_300)
+            .await
+            .unwrap();
+        assert!(
+            sessions
+                .unbind_microrealm(bound.lease)
+                .await
+                .unwrap()
+                .task_joined
+        );
+
+        for connection in sessions.begin_shutdown().await {
+            connection.close(0_u32.into(), b"test shutdown");
+        }
+        assert!(sessions.finish_shutdown().await.unwrap().zero_residue);
+        routes.begin_shutdown();
+        assert!(routes.finish_shutdown().await.unwrap().zero_residue);
+        first_client.close(0_u32.into(), b"test complete");
+        second_client.close(0_u32.into(), b"test complete");
+        first_server_endpoint.wait_idle().await;
+        first_client_endpoint.wait_idle().await;
+        second_server_endpoint.wait_idle().await;
+        second_client_endpoint.wait_idle().await;
     }
 
     #[tokio::test]

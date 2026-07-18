@@ -125,7 +125,9 @@ pub use core_private_caldus_reward::{
     CorePrivateCaldusDefeatHandoff, CorePrivateCaldusRewardCommit,
     CorePrivateCaldusRewardCommitDisposition, CorePrivateCaldusRewardError,
 };
+pub(crate) use core_private_caldus_reward_runtime::CorePrivateCaldusRewardRuntimeConfig;
 pub use core_private_caldus_reward_runtime::{
+    CoreCaldusPendingInventoryAuthority, CoreCaldusRewardWriterGeneration,
     CorePrivateCaldusRewardRuntime, CorePrivateCaldusRewardRuntimeError,
     CorePrivateCaldusRewardRuntimeReport, CorePrivateCaldusRewardRuntimeState,
 };
