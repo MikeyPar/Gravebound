@@ -336,6 +336,10 @@ enum CorePrivateRouteActorCommand {
         permit: CorePrivateRouteExtractionPermit,
         reply: oneshot::Sender<Result<(), CorePrivateRouteRuntimeError>>,
     },
+    AbortExtractionTerminal {
+        permit: CorePrivateRouteExtractionPermit,
+        reply: oneshot::Sender<CorePrivateRouteActorReply>,
+    },
 }
 
 type CorePrivateRouteActorReply = Result<CorePrivateRouteStateV1, CorePrivateRouteRuntimeError>;
@@ -487,6 +491,20 @@ impl CorePrivateRouteActorHandle {
         let (reply, receive) = oneshot::channel();
         self.commands
             .send(CorePrivateRouteActorCommand::RevalidateExtractionTerminal { permit, reply })
+            .await
+            .map_err(|_| CorePrivateRouteRuntimeError::ActorUnavailable)?;
+        receive
+            .await
+            .map_err(|_| CorePrivateRouteRuntimeError::ActorUnavailable)?
+    }
+
+    async fn abort_extraction_terminal(
+        &self,
+        permit: CorePrivateRouteExtractionPermit,
+    ) -> CorePrivateRouteActorReply {
+        let (reply, receive) = oneshot::channel();
+        self.commands
+            .send(CorePrivateRouteActorCommand::AbortExtractionTerminal { permit, reply })
             .await
             .map_err(|_| CorePrivateRouteRuntimeError::ActorUnavailable)?;
         receive
@@ -812,6 +830,23 @@ impl CorePrivateRouteActorDirectory {
             .await
     }
 
+    /// Cancels one exact uncommitted extraction reservation and restores `BossExitReady` with a
+    /// new, monotonic route-state version. This fail-closed rollback follows the terminal
+    /// authority in `Gravebound_Production_GDD_v1_Canonical.md`, the canonical Caldus exit in
+    /// `Gravebound_Content_Production_Spec_v1.md`, and the M03 private-life/extraction gates in
+    /// `Gravebound_Development_Roadmap_v1.md`. A stale, foreign, changed, retired, or replaced
+    /// permit cannot release another reservation or mutate another actor generation.
+    pub async fn abort_extraction_terminal(
+        &self,
+        lease: CorePrivateRouteActorLease,
+        permit: &CorePrivateRouteExtractionPermit,
+    ) -> CorePrivateRouteActorReply {
+        validate_extraction_lease_binding(lease, permit.binding())?;
+        self.actor_handle(lease)?
+            .abort_extraction_terminal(permit.clone())
+            .await
+    }
+
     pub fn snapshot(
         &self,
         lease: CorePrivateRouteActorLease,
@@ -1116,6 +1151,10 @@ impl CoreBellPortalAuthority for CorePrivateRouteActorDirectory {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one mailbox loop keeps reply cancellation and reservation cleanup exhaustive"
+)]
 async fn serve_actor_mailbox(
     mut inbox: mpsc::Receiver<CorePrivateRouteActorCommand>,
     control: Arc<Mutex<CorePrivateRouteActorControl>>,
@@ -1190,6 +1229,9 @@ async fn serve_actor_mailbox(
             CorePrivateRouteActorCommand::RevalidateExtractionTerminal { permit, reply } => {
                 let _ = reply.send(handle_revalidate_extraction_terminal(&control, &permit));
             }
+            CorePrivateRouteActorCommand::AbortExtractionTerminal { permit, reply } => {
+                let _ = reply.send(handle_abort_extraction_terminal(&control, &permit));
+            }
         }
     }
     let mut abandoned = 0_u64;
@@ -1200,7 +1242,8 @@ async fn serve_actor_mailbox(
             | CorePrivateRouteActorCommand::SetBellPortalRange { reply, .. }
             | CorePrivateRouteActorCommand::ApplyMicrorealmAuthority { reply, .. }
             | CorePrivateRouteActorCommand::ApplyFixedDungeonAuthority { reply, .. }
-            | CorePrivateRouteActorCommand::ReconcileEnterMicrorealm { reply, .. } => {
+            | CorePrivateRouteActorCommand::ReconcileEnterMicrorealm { reply, .. }
+            | CorePrivateRouteActorCommand::AbortExtractionTerminal { reply, .. } => {
                 let _ = reply.send(Err(CorePrivateRouteRuntimeError::Retired));
             }
             CorePrivateRouteActorCommand::PrepareBellPortal { reply, .. } => {
@@ -1788,6 +1831,45 @@ fn handle_revalidate_extraction_terminal(
 ) -> Result<(), CorePrivateRouteRuntimeError> {
     let control = lock(control);
     validate_extraction_permit(&control, permit)
+}
+
+fn handle_abort_extraction_terminal(
+    control: &Mutex<CorePrivateRouteActorControl>,
+    permit: &CorePrivateRouteExtractionPermit,
+) -> CorePrivateRouteActorReply {
+    let mut control = lock(control);
+    validate_extraction_permit(&control, permit)?;
+
+    let aborted_route_state_version = permit
+        .terminal_pending_route_state_version
+        .checked_add(1)
+        .ok_or(CorePrivateRouteRuntimeError::StaleRouteState)?;
+    let actor_before_abort = control.actor.clone();
+    let reopened = match control.actor.abort_extraction_terminal() {
+        Ok(reopened) => reopened.clone(),
+        Err(error) => {
+            control.actor = actor_before_abort;
+            return Err(error.into());
+        }
+    };
+    let accepted = permit.binding.accepted_route();
+    if reopened.actor_generation != permit.actor_generation
+        || reopened.state_version != aborted_route_state_version
+        || reopened.state_version <= permit.terminal_pending_route_state_version
+        || reopened.character_id != accepted.character_id
+        || reopened.character_version != accepted.character_version
+        || reopened.content_revision != permit.route_content_revision
+        || reopened.instance_lineage_id != accepted.instance_lineage_id
+        || reopened.scene != CorePrivateRouteSceneV1::BellSepulcher
+        || reopened.room != Some(CorePrivateRouteRoomV1::CaldusArenaB6)
+        || reopened.phase != CorePrivateRoutePhaseV1::BossExitReady
+        || !reopened.readiness.extraction_available.is_available()
+    {
+        control.actor = actor_before_abort;
+        return Err(CorePrivateRouteRuntimeError::StaleRouteState);
+    }
+    control.terminal_reservation = None;
+    Ok(reopened)
 }
 
 fn validate_extraction_permit(

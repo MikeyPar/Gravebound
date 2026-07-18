@@ -703,6 +703,170 @@ async fn extraction_reservation_is_atomic_idempotent_and_pins_paired_authority()
 }
 
 #[tokio::test]
+async fn extraction_abort_is_exact_monotonic_and_cannot_release_another_permit() {
+    let directory = CorePrivateRouteActorDirectory::new();
+    let lease = directory
+        .register_actor(authenticated(), hall_seed(CHARACTER_ID, 1), 121)
+        .expect("actor registers");
+    let accepted = reach_boss_exit_ready(&directory, lease).await;
+    let first = directory
+        .prepare_extraction_terminal(
+            lease,
+            extraction_binding(accepted, extraction_exit_binding()),
+        )
+        .await
+        .expect("first terminal reserves");
+
+    let reopened = directory
+        .abort_extraction_terminal(lease, &first)
+        .await
+        .expect("the exact uncommitted permit reopens the exit");
+    assert_eq!(reopened.phase, CorePrivateRoutePhaseV1::BossExitReady);
+    assert_eq!(
+        reopened.readiness.extraction_available,
+        CorePrivateRouteAvailabilityV1::Available
+    );
+    assert_eq!(
+        reopened.state_version,
+        first.terminal_pending_route_state_version() + 1
+    );
+    assert!(reopened.state_version > first.terminal_pending_route_state_version());
+    assert!(matches!(
+        directory
+            .revalidate_extraction_terminal(lease, &first)
+            .await,
+        Err(CorePrivateRouteRuntimeError::TerminalReservationConflict)
+    ));
+
+    let second = directory
+        .prepare_extraction_terminal(
+            lease,
+            extraction_binding(reopened, changed_extraction_exit_binding()),
+        )
+        .await
+        .expect("the reopened authority can reserve a new exact terminal");
+    assert_ne!(second.permit_id(), first.permit_id());
+    let second_pending = directory
+        .snapshot(lease)
+        .expect("second terminal projection");
+    assert!(matches!(
+        directory.abort_extraction_terminal(lease, &first).await,
+        Err(CorePrivateRouteRuntimeError::TerminalReservationConflict)
+    ));
+    assert_eq!(
+        directory.snapshot(lease).expect("stale abort is inert"),
+        second_pending
+    );
+    directory
+        .revalidate_extraction_terminal(lease, &second)
+        .await
+        .expect("the newer reservation remains pinned");
+
+    let foreign_directory = CorePrivateRouteActorDirectory::new();
+    let foreign_lease = foreign_directory
+        .register_actor(authenticated(), hall_seed([77; 16], 1), 121)
+        .expect("foreign character actor registers");
+    let foreign_before = foreign_directory
+        .snapshot(foreign_lease)
+        .expect("foreign actor projection");
+    assert!(matches!(
+        foreign_directory
+            .abort_extraction_terminal(foreign_lease, &second)
+            .await,
+        Err(CorePrivateRouteRuntimeError::InvalidExtractionBinding)
+    ));
+    assert_eq!(
+        foreign_directory
+            .snapshot(foreign_lease)
+            .expect("foreign permit is inert"),
+        foreign_before
+    );
+
+    directory
+        .abort_extraction_terminal(lease, &second)
+        .await
+        .expect("current terminal cleans up");
+    directory.begin_shutdown();
+    assert!(
+        directory
+            .finish_shutdown()
+            .await
+            .expect("shutdown")
+            .zero_residue
+    );
+    foreign_directory.begin_shutdown();
+    assert!(
+        foreign_directory
+            .finish_shutdown()
+            .await
+            .expect("foreign shutdown")
+            .zero_residue
+    );
+}
+
+#[tokio::test]
+async fn extraction_abort_rejects_a_changed_permit_without_disturbing_current_authority() {
+    let directory = CorePrivateRouteActorDirectory::new();
+    let lease = directory
+        .register_actor(authenticated(), hall_seed(CHARACTER_ID, 1), 122)
+        .expect("actor registers");
+    let accepted = reach_boss_exit_ready(&directory, lease).await;
+    let current = directory
+        .prepare_extraction_terminal(
+            lease,
+            extraction_binding(accepted, extraction_exit_binding()),
+        )
+        .await
+        .expect("current terminal reserves");
+
+    let other_directory = CorePrivateRouteActorDirectory::new();
+    let other_lease = other_directory
+        .register_actor(authenticated(), hall_seed(CHARACTER_ID, 1), 122)
+        .expect("independent actor registers");
+    let other_accepted = reach_boss_exit_ready(&other_directory, other_lease).await;
+    let changed = other_directory
+        .prepare_extraction_terminal(
+            other_lease,
+            extraction_binding(other_accepted, changed_extraction_exit_binding()),
+        )
+        .await
+        .expect("changed server authority reserves only its own actor");
+
+    let before = directory
+        .snapshot(lease)
+        .expect("current terminal projection");
+    assert!(matches!(
+        directory.abort_extraction_terminal(lease, &changed).await,
+        Err(CorePrivateRouteRuntimeError::TerminalReservationConflict)
+    ));
+    assert_eq!(
+        directory.snapshot(lease).expect("changed abort is inert"),
+        before
+    );
+    directory
+        .revalidate_extraction_terminal(lease, &current)
+        .await
+        .expect("current permit remains authoritative");
+
+    directory.begin_shutdown();
+    assert!(
+        directory
+            .finish_shutdown()
+            .await
+            .expect("shutdown")
+            .zero_residue
+    );
+    other_directory.begin_shutdown();
+    assert!(
+        other_directory
+            .finish_shutdown()
+            .await
+            .expect("other shutdown")
+            .zero_residue
+    );
+}
+
+#[tokio::test]
 async fn extraction_prepare_rejects_stale_or_mixed_actor_authority_without_residue() {
     let directory = CorePrivateRouteActorDirectory::new();
     let lease = directory
@@ -817,6 +981,10 @@ async fn retirement_and_shutdown_invalidate_terminal_permits_and_drain_workers()
         .await
         .expect("terminal retirement invalidates the in-memory reservation");
     assert!(matches!(
+        directory.abort_extraction_terminal(lease, &permit).await,
+        Err(CorePrivateRouteRuntimeError::ActorUnavailable)
+    ));
+    assert!(matches!(
         directory
             .revalidate_extraction_terminal(lease, &permit)
             .await,
@@ -831,6 +999,19 @@ async fn retirement_and_shutdown_invalidate_terminal_permits_and_drain_workers()
             .await,
         Err(CorePrivateRouteRuntimeError::StaleGeneration)
     ));
+    let replacement_before = directory
+        .snapshot(replacement)
+        .expect("replacement projection");
+    assert!(matches!(
+        directory.abort_extraction_terminal(lease, &permit).await,
+        Err(CorePrivateRouteRuntimeError::StaleGeneration)
+    ));
+    assert_eq!(
+        directory
+            .snapshot(replacement)
+            .expect("stale permit cannot disturb replacement"),
+        replacement_before
+    );
     assert_eq!(replacement.actor_generation(), 15);
     directory.begin_shutdown();
     let report = directory.finish_shutdown().await.expect("shutdown");

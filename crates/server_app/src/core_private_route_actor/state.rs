@@ -242,6 +242,19 @@ impl CorePrivateRouteActor {
         Ok(&self.state)
     }
 
+    /// Reopens the Caldus exit only after the directory has matched the exact terminal permit.
+    /// Keeping this operation outside [`CorePrivateRouteActorAdvance`] prevents ordinary route
+    /// callers from cancelling a terminal reservation without its server-owned authority.
+    pub(super) fn abort_extraction_terminal(
+        &mut self,
+    ) -> Result<&CorePrivateRouteStateV1, CorePrivateRouteActorError> {
+        self.boss_phase(
+            CorePrivateRoutePhaseV1::TerminalPending,
+            CorePrivateRoutePhaseV1::BossExitReady,
+        )?;
+        Ok(&self.state)
+    }
+
     pub(super) fn commit_bell_portal(
         &mut self,
         destination_character_version: u64,
