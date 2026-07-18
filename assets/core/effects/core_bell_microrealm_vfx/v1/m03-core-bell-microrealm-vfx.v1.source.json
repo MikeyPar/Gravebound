@@ -1,0 +1,124 @@
+{
+  "schema_version": 1,
+  "package_id": "review.m03.core_bell_microrealm_vfx.v1",
+  "status": "unregistered_candidate_assets",
+  "scope": {
+    "encounter": "pack.bell.01",
+    "room_path": "M03 B0 -> B1 -> B2 -> B3 -> B4 -> B5 -> B6",
+    "purpose": "presentation-only hostile combat VFX candidates for the existing M03 Bell encounter",
+    "out_of_scope": [
+      "registry changes",
+      "content balance or behavior changes",
+      "collision, hitbox, damage, lifetime, or audio authority",
+      "Rust or runtime integration",
+      "task documentation, README, and distribution output"
+    ]
+  },
+  "authority": {
+    "design_documents": [
+      "Gravebound_Production_GDD_v1_Canonical.md",
+      "Gravebound_Content_Production_Spec_v1.md",
+      "Gravebound_Development_Roadmap_v1.md"
+    ],
+    "content": [
+      "docs/architecture/content_spec_v0_1.md#CONT-ROOM-007",
+      "docs/architecture/content_spec_v0_1.md#CONT-ENEMY-001",
+      "docs/architecture/content_spec_v0_1.md#CONT-ENEMY-002",
+      "content/core_dev/encounter_rooms.assets.json"
+    ],
+    "art": [
+      "docs/architecture/gdd_v0_1.md#ART-001",
+      "docs/architecture/gdd_v0_1.md#ART-002",
+      "docs/architecture/gdd_v0_1.md#ART-004",
+      "docs/architecture/gdd_v0_1.md#ART-005",
+      "docs/architecture/gdd_v0_1.md#ART-006",
+      "docs/architecture/gdd_v0_1.md#ART-020",
+      "docs/architecture/gdd_v0_1.md#ART-030",
+      "docs/architecture/gdd_v0_1.md#COM-005",
+      "docs/architecture/gdd_v0_1.md#COM-006"
+    ],
+    "visual_reference_only": "assets/core/enemies/core_bell_encounter_trio/v1/previews/core-bell-encounter-trio.96px.png"
+  },
+  "authored_record_alignment": {
+    "shared_spawn": "All core enemies use SpawnTelegraph(900); pack.bell.01 has a simultaneous warning before its six Drowned Pilgrims and two Bell Reeds.",
+    "drowned_pilgrim": "Every 2.2 s: warn 300 ms, then three physical Chip projectiles at -15/0/+15 degrees, speed 5.5, range 7, radius 0.12.",
+    "bell_reed": "Every 3.0 s: warn 450 ms first / 300 ms later, then six Veil Pressure projectiles from eight radial indices with one adjacent two-index gap; speed 4.5, range 9, radius 0.13.",
+    "adjustment": "The existing content registry names the Drowned Pilgrim fan and Bell Reed gap-ring telegraphs but contains no separately registered projectile-image IDs. This package therefore supplies a Pilgrim three-direction release cue and a Reed six-direction gap-ring cue; it does not invent projectile registry IDs or claim runtime wiring."
+  },
+  "generation": {
+    "tool": "built-in image generation",
+    "mode": "stylized-concept",
+    "source_background": "flat chroma-key green followed by local alpha extraction",
+    "alpha_postprocess": "C:/Users/micha/.codex/skills/.system/imagegen/scripts/remove_chroma_key.py --auto-key border --soft-matte --transparent-threshold 12 --opaque-threshold 220 --despill",
+    "normalization": "Pillow RGBA crop-to-alpha-bounds and nearest-neighbor scale into the declared transparent runtime canvas; preview sheets use opaque checkerboards solely to display alpha.",
+    "provenance": "All raw chroma sources were generated during this task and copied unchanged from the default generated-images directory into source/. No external assets were used."
+  },
+  "prompts": {
+    "pack_bell_spawn_warning": "Use case: stylized-concept. Asset type: M03 hostile spawn-warning ground-decal VFX runtime candidate, one static frame. Input images: approved Core Bell encounter enemy trio preview, only pixel density/material language. Primary request: single circular hostile spawn-warning decal for 900ms ground warning. thin broken ring pale ash-white chalk and tarnished iron nail ticks, small dark empty center. Must mean incoming enemy spawn, not healing/safety/exit/loot/interact. Scene/backdrop flat #00ff00. Style 2D overhead VFX. Lighting cold ash white/iron gray, thin hostile red-brown outer edge; no gold/violet/cyan. Constraints: no #00ff00 in the asset; no lantern/cross/doorway/treasure/loot/projectile/skull/safe-zone/friendly symbols; no text or UI; nearest-neighbor-friendly hard silhouette.",
+    "drowned_pilgrim_fan_cue": "Use case: stylized-concept. Asset type: M03 Drowned Pilgrim hostile fan-attack VFX runtime candidate, single static cue. Input image: spawn warning only for pixel density. Primary request: oriented physical Chip fan cue for the exact three-shot 30-degree fan. Exactly three bone-white needle projectiles in a narrow forward fan, center / upper-left / upper-right, with thin dark red-brown hostile edge. No enemy, floor, impact, or fourth projectile. Represents the 300ms windup/release while preserving directions. Scene: flat #00ff00; top-down; origin bottom-center and tips up; no text, UI, or labels; hard readable silhouettes, no anti-aliased blur. No #00ff00 in the cue itself; no red/green-only signaling; no gold, cyan, lantern, cross, doorway, treasure, loot, skull, friendly, or safe-zone symbols.",
+    "bell_reed_gap_ring_cue": "Use case: stylized-concept. Asset type: M03 Bell Reed hostile gap-ring attack VFX runtime candidate, one static cue. Input image: prior Bell Reed gap-ring attempt; correct marker geometry exactly while preserving only its small dark-fantasy violet curse-marker style. Primary request: render EXACTLY SIX small separated violet diamond-spiral curse markers on a radial ring at 12 o'clock, 1:30, 3 o'clock, 4:30, 9 o'clock, and 10:30. Leave 6 o'clock and 7:30 completely empty: one adjacent two-index gap in the eight-position Bell Reed pattern. No additional marks, particles, rings, runes, or projectiles. Flat #00ff00 background. 2D overhead combat VFX sprite; crisp separated violet diamond/spiral markers with near-black interior and thin cold violet edge; hostile Veil/Pressure, not healing/safety. No floor, enemy, weapon, character, text, UI, numerals, logo, border, glow cloud, or cast shadow; no #00ff00 in the cue; no red/green-only signaling; no gold, cyan, lantern, cross, doorway, treasure, loot, skull, friendly, or safe-zone symbols; nearest-neighbor-friendly, no anti-aliased blur."
+  },
+  "assets": [
+    {
+      "candidate_id": "review.vfx.pack.bell.01.spawn_warning",
+      "existing_content_asset_id": null,
+      "runtime_path": "runtime/pack-bell-spawn-warning.96.png",
+      "source_path": "source/pack-bell-spawn-warning.raw-chroma.png",
+      "runtime_sha256": "8dc06aed914263a4b5c02fe683880eed6aed35c7bdb50ec033d5d776b036d56e",
+      "source_sha256": "57a8edcf9ded4799476024391ed6179a1d32977246e0666ee49331888ec99b68",
+      "dimensions_px": [96, 96],
+      "anchor_px": [48, 48],
+      "direction": "world-centered ground decal",
+      "runtime_intent": "Shared presentation candidate for the authored 900ms SpawnTelegraph; warning duration remains content/runtime authority.",
+      "reduced_effects_requirement": "Retain the broken ring, hostile red-brown edge, and actual warning timing."
+    },
+    {
+      "candidate_id": "review.vfx.enemy.drowned_pilgrim.fan_release",
+      "existing_content_asset_id": "pattern.enemy.drowned_pilgrim.fan.telegraph",
+      "runtime_path": "runtime/drowned-pilgrim-fan-cue.64.png",
+      "source_path": "source/drowned-pilgrim-fan-cue.raw-chroma.png",
+      "runtime_sha256": "250448296bd1f143fe04a753875a8d186182e3ea06d9ae8ed62400eb688eb71a",
+      "source_sha256": "1a0a7942bb687d1c69f93da66c9d484bad3045b48ad4137e8634459328c164e9",
+      "dimensions_px": [64, 64],
+      "anchor_px": [32, 60],
+      "direction": "bottom-center origin; three tips point forward at -15/0/+15 degrees",
+      "runtime_intent": "Presentation candidate for the authored 300ms physical fan warning/release; projectile simulation, collision, and Chip damage remain outside this package.",
+      "reduced_effects_requirement": "Retain all three bone-white directions and the dark red-brown hostile edge."
+    },
+    {
+      "candidate_id": "review.vfx.enemy.bell_reed.gap_ring",
+      "existing_content_asset_id": "pattern.enemy.bell_reed.gap_ring.telegraph",
+      "runtime_path": "runtime/bell-reed-gap-ring-cue.96.png",
+      "source_path": "source/bell-reed-gap-ring-cue.raw-chroma.png",
+      "runtime_sha256": "29bc27d18f36e7ebade5111360c32f1f01abe5649cecc50a44674ead40f37141",
+      "source_sha256": "a67f6fcdb579f42b72b0a4588852f3f1a3dd0bd23164a383c492cef331d44990",
+      "dimensions_px": [96, 96],
+      "anchor_px": [48, 48],
+      "direction": "six emitted directions at 12, 1:30, 3, 4:30, 9, and 10:30; empty adjacent positions at 6 and 7:30",
+      "runtime_intent": "Combined directional telegraph/release candidate for the authored six-projectile Veil gap-ring; behavior, timing, collision, and Pressure damage remain outside this package.",
+      "reduced_effects_requirement": "Retain six separated violet markers and the one obvious adjacent two-index gap."
+    }
+  ],
+  "preview_files": [
+    {
+      "path": "previews/core-bell-microrealm-vfx.runtime-scale.png",
+      "sha256": "1f6d7f142d68b63c421088d7ff83eb081075fc51963eef6e009a870175e723b8",
+      "dimensions_px": [256, 96],
+      "note": "Opaque checkerboard review sheet: spawn warning, Pilgrim cue, Bell Reed cue left to right."
+    },
+    {
+      "path": "previews/core-bell-microrealm-vfx.2x.png",
+      "sha256": "01eb1c3cfeeeb80d2b162830c16046e19dbd92107438c009087e738b6492aa59",
+      "dimensions_px": [512, 192],
+      "note": "Nearest-neighbor 2x version of the runtime-scale review sheet."
+    }
+  ],
+  "review_gates": [
+    "Art review: check actual in-engine scale, hostile/readable separation, and that the spawn ring cannot read as safety or interactable language.",
+    "Combat review: verify real SpawnTelegraph, 300ms fan warning, and 450/300ms gap-ring warning preserve authored durations and counterplay.",
+    "Pattern review: verify the Bell Reed cue communicates exactly six emitted directions with the correct adjacent two-index gap for each rotating gap state; this still image depicts the authored initial orientation only.",
+    "Accessibility/reduced-effects review: retain shape and directional count/gap rather than relying on color alone.",
+    "Integration review: create explicit registry/runtime bindings only after asset approval; do not infer collision, damage, lifecycle, or audio from these PNGs."
+  ],
+  "license": "Generated for this workspace during this task; retain raw sources and this provenance manifest with any future integration."
+}
