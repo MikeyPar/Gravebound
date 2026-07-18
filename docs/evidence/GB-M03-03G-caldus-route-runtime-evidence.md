@@ -8,7 +8,7 @@
 
 ## Delivered contract
 
-Commits `8efcec0`, `b61cbce`, `4eba061`, `c433cbd`, and `f7f7fbb` add the first route-bound B6 owner and its distinct physical-body collision path.
+Commits `8efcec0`, `b61cbce`, `4eba061`, `c433cbd`, `f7f7fbb`, and `a9a17e0` add the first route-bound B6 owner and its complete physical-body collision path.
 
 - The route actor accepts atomic, versioned Caldus countdown, introduction, combat, break, defeat, exit-ready, and pre-defeat reset projections. Stale versions fail before local state commits; exact same-position replay is read-only.
 - Sir Caldus uses stable run-qualified entity ID offset `40_002`, disjoint from player, projectile, normal-enemy, and Bell Proctor namespaces. A consuming reset API preserves the monotonic hostile-projectile allocator without retaining abandoned encounter authority.
@@ -16,11 +16,12 @@ Commits `8efcec0`, `b61cbce`, `4eba061`, `c433cbd`, and `f7f7fbb` add the first 
 - The immutable fixed-route plan now carries the exact compiled B6 arena. `CorePrivateCaldusRuntime` relocates the moved player only after consuming B5 authority and owns B6 movement from that point onward.
 - Every loading, countdown, and introduction frame advances the carried player combat/movement tick. On the combat-start tick, the runtime creates and steps the Caldus encounter at that same inherited tick, then commits its projected route phase by compare-and-swap.
 - A typed body-collision world keeps Caldus's authored `0.70` physical radius separate from the `0.62` projectile hurtbox. Walking and forced Slipstep stop at the combined player/body radius, exact boundary departure remains legal, and the route runtime consumes the live encounter body snapshot.
+- Every charge segment resolves living locked participants by immutable party slot and entity ID to the shortest legal combined `1.00` body radius. Blocked radial placement uses the approved reverse-axis/clockwise cardinal fallback; absence of a legal placement rolls the staged frame back. The server synchronizes the route-bound movement owner to the committed separation and clears stale inward velocity.
 - The normal route, reward, pending-inventory, stable exit, and presentation registrations remain disabled.
 
 ## Verification
 
-Local Windows verification through exact source `f7f7fbb`:
+Local Windows verification through exact source `a9a17e0`:
 
 - Exact inherited lifecycle: first B6 frame enters the visible countdown; tick `start + 150` commits the lock/introduction; tick `start + 225` creates and steps Phase 1 without tick rewind.
 - Stale route mutation rejects the next runtime frame without advancing local tick or player combat.
@@ -28,15 +29,15 @@ Local Windows verification through exact source `f7f7fbb`:
 - Full server library: `338 passed`, `0 failed`.
 - Focused route-bound Caldus runtime: `2 passed`, `0 failed`.
 - Focused boss-lock simulation: `9 passed`, `0 failed`.
-- Full simulation library after body-collision integration: `396 passed`, `0 failed`.
+- Full simulation library after body-collision and separation integration: `399 passed`, `0 failed`.
 - Full server library after body-collision integration: `338 passed`, `0 failed`.
 - Strict `sim_core`/`server_app` all-target, all-feature Clippy: pass.
 - `cargo fmt --all` and `git diff --check`: pass.
 
 ## Explicit boundary
 
-This slice now uses the compiled arena shell/pillars plus the exact `0.70` Caldus body for player walking and forced Slipstep while retaining the exact `0.62` hurtbox for friendly projectile damage. It does not yet claim deterministic player separation after a moving charge, the complete full-fight route trace, durable victory/reward, pending inventory, stable exit, driver/session composition, or normal admission.
+This slice now uses the compiled arena shell/pillars plus the exact `0.70` Caldus body for player walking, forced Slipstep, and deterministic moving-charge separation while retaining the exact `0.62` hurtbox for friendly projectile damage. It does not yet claim the complete full-fight route trace, durable victory/reward, pending inventory, stable exit, driver/session composition, or normal admission.
 
 ## Current Next Step
 
-Implement the approved deterministic post-charge player de-overlap rule, including shell/pillar legality and rollback when no placement exists. Then execute deterministic full-fight and adverse route-CAS traces through `BossDefeated` before composing the already-existing durable victory, pending-inventory, and stable-exit authorities.
+Execute deterministic full-fight and adverse route-CAS traces through both authored breaks and `BossDefeated`, including charge separation, projectile identity nonreuse after reset, and terminal hostile cleanup. Then compose the already-existing durable victory, pending-inventory, and stable-exit authorities.
