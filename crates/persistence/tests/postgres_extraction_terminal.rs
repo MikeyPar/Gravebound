@@ -15,10 +15,11 @@ use persistence::{
     ProductionExtractionCommitRequestV1, ProductionExtractionExpectedVersionsV1,
     ProductionExtractionTransactionV1, RESOLUTION_HOLD_CONTRACT_VERSION_V1,
     ResolutionHoldMutationRequestV1, ResolutionHoldMutationTransactionV1,
-    StoredExtractionLocationV1, StoredResolutionHoldActionV1, StoredResolutionHoldDestinationV1,
-    StoredResolutionHoldDispositionV1, StoredWorldFlowRevisionV1, WIPEABLE_CORE_NAMESPACE,
-    stage_danger_entry_ash_wallet_restore_v3, stage_danger_entry_inventory_restore_v3,
-    stage_danger_entry_life_metrics_restore_v3, stage_danger_entry_oath_bargain_restore_v3,
+    StoredExtractionLocationV1, StoredPrivateLifeBootstrapStateV1, StoredResolutionHoldActionV1,
+    StoredResolutionHoldDestinationV1, StoredResolutionHoldDispositionV1,
+    StoredWorldFlowRevisionV1, WIPEABLE_CORE_NAMESPACE, stage_danger_entry_ash_wallet_restore_v3,
+    stage_danger_entry_inventory_restore_v3, stage_danger_entry_life_metrics_restore_v3,
+    stage_danger_entry_oath_bargain_restore_v3,
 };
 use sqlx::Row;
 
@@ -1204,6 +1205,18 @@ async fn resolution_hold_move_restart_replay_and_conflict_are_atomic() {
         .load_resolution_hold_snapshot_v1(ACCOUNT_ID, CHARACTER_ID)
         .await
         .unwrap();
+    assert!(matches!(
+        persistence
+            .load_private_life_bootstrap_v1(ACCOUNT_ID)
+            .await
+            .unwrap()
+            .state,
+        StoredPrivateLifeBootstrapStateV1::ExtractionCommitted {
+            ref hall,
+            ref terminal,
+        } if hall.resolution_hold.storage_resolution_required
+            && terminal.result == extraction
+    ));
     assert_eq!(full_snapshot.stacks.len(), 1);
     assert_eq!(full_snapshot.stacks[0].planned_destination, None);
     let full_request = hold_request(
@@ -1296,6 +1309,15 @@ async fn resolution_hold_move_restart_replay_and_conflict_are_atomic() {
         panic!("response-loss retry after reconnect must return stored Hold result");
     };
     assert_eq!(replayed, fresh);
+    assert!(matches!(
+        persistence
+            .load_private_life_bootstrap_v1(ACCOUNT_ID)
+            .await
+            .unwrap()
+            .state,
+        StoredPrivateLifeBootstrapStateV1::HallReady(ref hall)
+            if !hall.resolution_hold.storage_resolution_required
+    ));
 
     let mut altered = commit_request.clone();
     altered.issued_at_unix_millis += 1;
@@ -1556,6 +1578,27 @@ async fn extraction_commit_restart_replay_and_conflict_are_atomic() {
             .unwrap(),
         Some(recovered)
     );
+    let bootstrap = persistence
+        .load_private_life_bootstrap_v1(ACCOUNT_ID)
+        .await
+        .unwrap();
+    assert!(matches!(
+        bootstrap.state,
+        StoredPrivateLifeBootstrapStateV1::ExtractionCommitted {
+            ref hall,
+            ref terminal,
+        } if !hall.resolution_hold.storage_resolution_required
+            && terminal.result == fresh
+    ));
+    let process_restart = persistence
+        .resolve_private_life_process_restart_v1(ACCOUNT_ID)
+        .await
+        .unwrap();
+    assert!(process_restart.crash_restore.is_none());
+    assert!(matches!(
+        process_restart.bootstrap.state,
+        StoredPrivateLifeBootstrapStateV1::ExtractionCommitted { .. }
+    ));
     let replay_prepared = persistence
         .prepare_production_extraction_v1(&commit_request)
         .await

@@ -18,10 +18,10 @@ use persistence::{
     LiveDamageTraceNetworkStateV1, LiveDamageTraceRecallStateV1, LiveDamageTraceStatusV1,
     LiveDamageTraceTickCommandV1, LiveDamageTraceTickRequestV1, LiveDamageTraceTickTransactionV1,
     PersistenceConfig, PersistenceError, PostgresPersistence, StoredLiveDamageTraceSnapshotEntryV1,
-    WIPEABLE_CORE_NAMESPACE, canonical_death_terminal_payload_hash_v1,
-    derive_durable_death_item_ledger_event_id, stage_danger_entry_ash_wallet_restore_v3,
-    stage_danger_entry_inventory_restore_v3, stage_danger_entry_life_metrics_restore_v3,
-    stage_danger_entry_oath_bargain_restore_v3,
+    StoredPrivateLifeBootstrapStateV1, WIPEABLE_CORE_NAMESPACE,
+    canonical_death_terminal_payload_hash_v1, derive_durable_death_item_ledger_event_id,
+    stage_danger_entry_ash_wallet_restore_v3, stage_danger_entry_inventory_restore_v3,
+    stage_danger_entry_life_metrics_restore_v3, stage_danger_entry_oath_bargain_restore_v3,
 };
 use serde::Serialize;
 use sqlx::Row;
@@ -3254,6 +3254,24 @@ async fn assert_committed_terminal_recovery(
         terminal.terminal_payload_hash,
         promotion.terminal_payload_hash()
     );
+    let bootstrap = persistence
+        .load_private_life_bootstrap_v1(ACCOUNT_ID)
+        .await
+        .unwrap();
+    assert!(matches!(
+        bootstrap.state,
+        StoredPrivateLifeBootstrapStateV1::DeathCommitted(ref stored)
+            if stored.result == *expected
+    ));
+    let process_restart = persistence
+        .resolve_private_life_process_restart_v1(ACCOUNT_ID)
+        .await
+        .unwrap();
+    assert!(process_restart.crash_restore.is_none());
+    assert!(matches!(
+        process_restart.bootstrap.state,
+        StoredPrivateLifeBootstrapStateV1::DeathCommitted(_)
+    ));
     assert_eq!(
         persistence
             .load_committed_death_terminal_v1([229; 16], CHARACTER_ID)
@@ -3445,6 +3463,15 @@ async fn later_ordinary_death_supersedes_the_prior_successor_reservation() {
         count(&persistence, "successor_roster_reservations_v1").await,
         2
     );
+    let bootstrap = persistence
+        .load_private_life_bootstrap_v1(ACCOUNT_ID)
+        .await
+        .unwrap();
+    assert!(matches!(
+        bootstrap.state,
+        StoredPrivateLifeBootstrapStateV1::DeathCommitted(ref terminal)
+            if terminal.result.death_id == RequestIds::secondary().death_id
+    ));
 
     let replay = persistence
         .transact_durable_death(&secondary, &content, &secondary_promotion)
@@ -3502,6 +3529,16 @@ async fn incident_and_administrative_deaths_preserve_prior_successor_authority()
             count(&persistence, "successor_roster_reservations_v1").await,
             1
         );
+        let bootstrap = persistence
+            .load_private_life_bootstrap_v1(ACCOUNT_ID)
+            .await
+            .unwrap();
+        assert!(matches!(
+            bootstrap.state,
+            StoredPrivateLifeBootstrapStateV1::DeathCommitted(ref terminal)
+                if terminal.result.death_id == RequestIds::primary().death_id
+                    && terminal.result.character_id == CHARACTER_ID
+        ));
 
         let replay = persistence
             .transact_durable_death(&nonordinary, &content, &promotion)

@@ -139,22 +139,31 @@ impl PostgresPersistence {
         character_id: [u8; ID_BYTES],
     ) -> Result<StoredResolutionHoldSnapshotV1, PersistenceError> {
         let mut transaction = self.begin_transaction().await?;
-        let authority =
-            lock_hold_authority(transaction.connection(), account_id, character_id).await?;
-        let rows =
-            lock_hold_and_storage_items(transaction.connection(), account_id, character_id).await?;
-        let authoritative_time_unix_millis =
-            transaction_timestamp_millis(transaction.connection()).await?;
-        let snapshot = assemble_resolution_hold_snapshot(
-            account_id,
-            character_id,
-            authority,
-            rows,
-            authoritative_time_unix_millis,
-        )?;
+        let snapshot =
+            load_resolution_hold_snapshot_v1_on(transaction.connection(), account_id, character_id)
+                .await?;
         transaction.rollback().await?;
         Ok(snapshot)
     }
+}
+
+/// Connection-scoped form used by the private-life bootstrap so Hall authority, terminal
+/// precedence, and `ResolutionHold` are observed under one serializable snapshot.
+pub(crate) async fn load_resolution_hold_snapshot_v1_on(
+    connection: &mut PgConnection,
+    account_id: [u8; ID_BYTES],
+    character_id: [u8; ID_BYTES],
+) -> Result<StoredResolutionHoldSnapshotV1, PersistenceError> {
+    let authority = lock_hold_authority(connection, account_id, character_id).await?;
+    let rows = lock_hold_and_storage_items(connection, account_id, character_id).await?;
+    let authoritative_time_unix_millis = transaction_timestamp_millis(connection).await?;
+    assemble_resolution_hold_snapshot(
+        account_id,
+        character_id,
+        authority,
+        rows,
+        authoritative_time_unix_millis,
+    )
 }
 
 impl PostgresPersistence {

@@ -47,6 +47,7 @@ const LIFE_DEED_REVOCATION_CONTEXT: &str = "gravebound.life-deed-revocation.v2";
 #[derive(Debug)]
 struct AccountLock {
     version: u64,
+    selected_character_id: Option<[u8; 16]>,
 }
 
 #[derive(Debug)]
@@ -283,7 +284,10 @@ impl PostgresPersistence {
             transaction.commit().await?;
             return Ok(DangerCrashRestoreTransaction::Fresh(receipt));
         }
-        if character.life_state != 0 || root.restore_location_id != HALL_ID {
+        if character.life_state != 0
+            || root.restore_location_id != HALL_ID
+            || account.selected_character_id != Some(request.character_id)
+        {
             return Err(PersistenceError::CorruptStoredDangerCrashRestore);
         }
 
@@ -416,7 +420,7 @@ async fn lock_account(
     account_id: [u8; 16],
 ) -> Result<AccountLock, PersistenceError> {
     let row = sqlx::query(
-        "SELECT state_version FROM accounts \
+        "SELECT state_version,selected_character_id FROM accounts \
          WHERE namespace_id=$1 AND account_id=$2 FOR UPDATE",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
@@ -426,6 +430,7 @@ async fn lock_account(
     .ok_or(PersistenceError::DangerCrashRestoreOwnerNotFound)?;
     Ok(AccountLock {
         version: positive(row.try_get("state_version")?)?,
+        selected_character_id: optional_fixed(row.try_get("selected_character_id")?)?,
     })
 }
 

@@ -483,7 +483,9 @@ async fn load_location(
     row.map_err(PersistenceError::Database)
 }
 
-fn decode_location(row: &sqlx::postgres::PgRow) -> Result<StoredWorldLocation, PersistenceError> {
+pub(crate) fn decode_location(
+    row: &sqlx::postgres::PgRow,
+) -> Result<StoredWorldLocation, PersistenceError> {
     let version: i64 = row
         .try_get("character_version")
         .map_err(PersistenceError::Database)?;

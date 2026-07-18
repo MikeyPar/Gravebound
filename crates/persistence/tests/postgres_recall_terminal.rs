@@ -13,9 +13,10 @@ use persistence::{
     CORE_WORLD_RECORDS_BLAKE3, PRODUCTION_RECALL_CONTRACT_VERSION_V1, PersistenceConfig,
     PersistenceError, PostgresPersistence, ProductionRecallCommitRequestV1,
     ProductionRecallExpectedVersionsV1, ProductionRecallTransactionV1, ProductionRecallTriggerV1,
-    StoredRecallLocationV1, StoredWorldFlowRevisionV1, WIPEABLE_CORE_NAMESPACE,
-    stage_danger_entry_ash_wallet_restore_v3, stage_danger_entry_inventory_restore_v3,
-    stage_danger_entry_life_metrics_restore_v3, stage_danger_entry_oath_bargain_restore_v3,
+    StoredPrivateLifeBootstrapStateV1, StoredRecallLocationV1, StoredWorldFlowRevisionV1,
+    WIPEABLE_CORE_NAMESPACE, stage_danger_entry_ash_wallet_restore_v3,
+    stage_danger_entry_inventory_restore_v3, stage_danger_entry_life_metrics_restore_v3,
+    stage_danger_entry_oath_bargain_restore_v3,
 };
 use sqlx::Row;
 
@@ -528,6 +529,28 @@ async fn explicit_recall_is_atomic_replay_safe_and_restart_durable() {
             .unwrap(),
         Some(recovered)
     );
+    let bootstrap = reconnected
+        .load_private_life_bootstrap_v1(ACCOUNT_ID)
+        .await
+        .unwrap();
+    assert!(matches!(
+        bootstrap.state,
+        StoredPrivateLifeBootstrapStateV1::RecallCommitted {
+            ref hall,
+            ref terminal,
+        } if !hall.resolution_hold.storage_resolution_required
+            && terminal.result == result
+            && terminal.owns_current_hall
+    ));
+    let process_restart = reconnected
+        .resolve_private_life_process_restart_v1(ACCOUNT_ID)
+        .await
+        .unwrap();
+    assert!(process_restart.crash_restore.is_none());
+    assert!(matches!(
+        process_restart.bootstrap.state,
+        StoredPrivateLifeBootstrapStateV1::RecallCommitted { .. }
+    ));
 
     let mut verification = reconnected.begin_transaction().await.unwrap();
     let aggregate = sqlx::query(

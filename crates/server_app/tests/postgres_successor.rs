@@ -7,8 +7,9 @@
 
 use persistence::{
     CORE_ITEM_CONTENT_REVISION, PersistenceConfig, PostgresPersistence,
-    SUCCESSOR_CONTRACT_VERSION_V1, SuccessorCreateRequestV1, SuccessorCreateTransactionV1,
-    WIPEABLE_CORE_NAMESPACE, derive_successor_character_id_v1, derive_successor_receipt_id_v1,
+    SUCCESSOR_CONTRACT_VERSION_V1, StoredPrivateLifeBootstrapStateV1, SuccessorCreateRequestV1,
+    SuccessorCreateTransactionV1, WIPEABLE_CORE_NAMESPACE, derive_successor_character_id_v1,
+    derive_successor_receipt_id_v1,
 };
 use protocol::{AccountErrorCode, CharacterMutationFrame, CharacterMutationPayload, ManifestHash};
 use protocol::{SuccessorCreatePayloadV1, WireText};
@@ -505,6 +506,47 @@ async fn assert_complete_successor_graph(
     transaction.rollback().await.unwrap();
 }
 
+async fn assert_bootstrap_tracks_successor_consumption(
+    persistence: &PostgresPersistence,
+    successor: &persistence::StoredSuccessorResultV1,
+) {
+    let selected = persistence
+        .load_private_life_bootstrap_v1(durable_death_fixture::ACCOUNT_ID)
+        .await
+        .unwrap();
+    assert!(matches!(
+        selected.state,
+        StoredPrivateLifeBootstrapStateV1::CharacterSelect {
+            selected_character: Some(ref character),
+            next_hall_arrival: Some(_),
+        } if character.character_id == successor.successor_id
+    ));
+
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    sqlx::query(
+        "UPDATE accounts SET selected_character_id=NULL
+         WHERE namespace_id=$1 AND account_id=$2 AND selected_character_id=$3",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(durable_death_fixture::ACCOUNT_ID.as_slice())
+    .bind(successor.successor_id.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    transaction.commit().await.unwrap();
+    let consumed_history = persistence
+        .load_private_life_bootstrap_v1(durable_death_fixture::ACCOUNT_ID)
+        .await
+        .unwrap();
+    assert!(matches!(
+        consumed_history.state,
+        StoredPrivateLifeBootstrapStateV1::CharacterSelect {
+            selected_character: None,
+            next_hall_arrival: None,
+        }
+    ));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires explicitly authorized disposable PostgreSQL"]
 async fn successor_creation_is_atomic_concurrent_replayable_and_restart_safe() {
@@ -589,5 +631,6 @@ async fn successor_creation_is_atomic_concurrent_replayable_and_restart_safe() {
     assert_eq!(conflict_count, 1);
     transaction.rollback().await.unwrap();
     assert_complete_successor_graph(&persistence, &fresh).await;
+    assert_bootstrap_tracks_successor_consumption(&persistence, &fresh).await;
     persistence.close().await;
 }

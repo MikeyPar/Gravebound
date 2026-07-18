@@ -16,7 +16,7 @@ use persistence::{
     PRODUCTION_RECALL_CONTRACT_VERSION_V1, PersistenceConfig, PersistenceError,
     PostgresPersistence, ProductionRecallCommitRequestV1, ProductionRecallExpectedVersionsV1,
     ProductionRecallTransactionV1, ProductionRecallTriggerV1, StoredDangerCheckpoint,
-    StoredWorldFlowRevisionV1, WIPEABLE_CORE_NAMESPACE,
+    StoredPrivateLifeBootstrapStateV1, StoredWorldFlowRevisionV1, WIPEABLE_CORE_NAMESPACE,
 };
 use protocol::{
     ManifestHash, WireText, WorldFlowContentRevisionV1, WorldFlowFrame, WorldFlowRequest,
@@ -39,10 +39,227 @@ const FIRST_RESTORE_ID: [u8; 16] = [145; 16];
 const SECOND_TRANSFER_ID: [u8; 16] = [146; 16];
 const SECOND_LINEAGE_ID: [u8; 16] = [147; 16];
 const SECOND_RESTORE_ID: [u8; 16] = [148; 16];
+const FOREIGN_SELECTED_CHARACTER_ID: [u8; 16] = [149; 16];
 const HALL_ID: &str = "hub.lantern_halls_01";
 
 fn hash(seed: u8) -> [u8; 32] {
     [seed; 32]
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires explicitly authorized disposable PostgreSQL"]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the hosted matrix keeps every bootstrap and restart terminal state in one journey"
+)]
+async fn private_life_bootstrap_is_terminal_first_and_never_resumes_danger() {
+    let persistence = disposable_database().await;
+    reset_fixture(&persistence).await;
+
+    assert!(matches!(
+        persistence
+            .load_private_life_bootstrap_v1(ACCOUNT_ID)
+            .await
+            .unwrap()
+            .state,
+        StoredPrivateLifeBootstrapStateV1::HallReady(_)
+    ));
+
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    sqlx::query(
+        "UPDATE accounts SET selected_character_id=NULL
+         WHERE namespace_id=$1 AND account_id=$2",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    transaction.commit().await.unwrap();
+    assert!(matches!(
+        persistence
+            .load_private_life_bootstrap_v1(ACCOUNT_ID)
+            .await
+            .unwrap()
+            .state,
+        StoredPrivateLifeBootstrapStateV1::CharacterSelect {
+            selected_character: None,
+            next_hall_arrival: None
+        }
+    ));
+
+    reset_fixture(&persistence).await;
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    sqlx::query(
+        "UPDATE character_world_locations
+         SET location_kind=0,location_content_id=NULL,safe_arrival_kind=0,
+             safe_spawn_id=NULL,instance_lineage_id=NULL,entry_restore_point_id=NULL
+         WHERE namespace_id=$1 AND account_id=$2 AND character_id=$3",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(CHARACTER_ID.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    transaction.commit().await.unwrap();
+    assert!(matches!(
+        persistence
+            .load_private_life_bootstrap_v1(ACCOUNT_ID)
+            .await
+            .unwrap()
+            .state,
+        StoredPrivateLifeBootstrapStateV1::CharacterSelect {
+            selected_character: Some(_),
+            next_hall_arrival: Some(_)
+        }
+    ));
+
+    reset_fixture(&persistence).await;
+    seed_entry_loadout(&persistence).await;
+    enter_danger(
+        &persistence,
+        FixedIds {
+            transfer: FIRST_TRANSFER_ID,
+            lineage: FIRST_LINEAGE_ID,
+            restore: FIRST_RESTORE_ID,
+        },
+        91,
+        1,
+    )
+    .await;
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    sqlx::query(
+        "INSERT INTO characters (namespace_id,account_id,character_id,roster_ordinal,class_id,
+          level,oath_id,life_state,security_state,character_state_version)
+         VALUES ($1,$2,$3,2,'class.grave_arbalist',1,NULL,0,0,1)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(FOREIGN_SELECTED_CHARACTER_ID.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE accounts SET selected_character_id=$1
+         WHERE namespace_id=$2 AND account_id=$3 AND selected_character_id=$4",
+    )
+    .bind(FOREIGN_SELECTED_CHARACTER_ID.as_slice())
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(CHARACTER_ID.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    transaction.commit().await.unwrap();
+    assert!(matches!(
+        persistence
+            .transact_danger_crash_restore(&crash_request(FIRST_RESTORE_ID, [150; 16]))
+            .await,
+        Err(PersistenceError::CorruptStoredDangerCrashRestore)
+    ));
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let root_state: i16 = sqlx::query_scalar(
+        "SELECT restore_state FROM character_entry_restore_points
+         WHERE namespace_id=$1 AND account_id=$2 AND character_id=$3 AND restore_point_id=$4",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(CHARACTER_ID.as_slice())
+    .bind(FIRST_RESTORE_ID.as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    transaction.rollback().await.unwrap();
+    assert_eq!(root_state, 0, "cross-character selection must not restore");
+
+    reset_fixture(&persistence).await;
+    seed_entry_loadout(&persistence).await;
+    enter_danger(
+        &persistence,
+        FixedIds {
+            transfer: FIRST_TRANSFER_ID,
+            lineage: FIRST_LINEAGE_ID,
+            restore: FIRST_RESTORE_ID,
+        },
+        91,
+        1,
+    )
+    .await;
+    let danger = persistence
+        .load_private_life_bootstrap_v1(ACCOUNT_ID)
+        .await
+        .unwrap();
+    assert!(matches!(
+        danger.state,
+        StoredPrivateLifeBootstrapStateV1::DangerRequiresCrashRestore {
+            ref danger,
+            ..
+        } if danger.lineage_id == FIRST_LINEAGE_ID
+            && danger.restore_point_id == FIRST_RESTORE_ID
+    ));
+
+    persistence.close().await;
+    let restarted = disposable_database().await;
+    let resolved = restarted
+        .resolve_private_life_process_restart_v1(ACCOUNT_ID)
+        .await
+        .unwrap();
+    assert!(matches!(
+        resolved.crash_restore,
+        Some(ref receipt) if receipt.code == DangerCrashRestoreCode::Restored
+    ));
+    assert!(matches!(
+        resolved.bootstrap.state,
+        StoredPrivateLifeBootstrapStateV1::HallReady(_)
+    ));
+    let replay = restarted
+        .resolve_private_life_process_restart_v1(ACCOUNT_ID)
+        .await
+        .unwrap();
+    assert!(replay.crash_restore.is_none());
+    assert!(matches!(
+        replay.bootstrap.state,
+        StoredPrivateLifeBootstrapStateV1::HallReady(_)
+    ));
+
+    reset_fixture(&restarted).await;
+    let mut transaction = restarted.begin_transaction().await.unwrap();
+    sqlx::query(
+        "UPDATE character_world_locations SET character_version=99
+         WHERE namespace_id=$1 AND account_id=$2 AND character_id=$3",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(CHARACTER_ID.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    transaction.commit().await.unwrap();
+    assert!(matches!(
+        restarted.load_private_life_bootstrap_v1(ACCOUNT_ID).await,
+        Err(PersistenceError::CorruptStoredPrivateLifeBootstrap)
+    ));
+
+    reset_fixture(&restarted).await;
+    let mut transaction = restarted.begin_transaction().await.unwrap();
+    sqlx::query(
+        "UPDATE character_world_locations
+         SET safe_arrival_kind=1,safe_spawn_id='spawn.hub.foreign'
+         WHERE namespace_id=$1 AND account_id=$2 AND character_id=$3",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(CHARACTER_ID.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    transaction.commit().await.unwrap();
+    assert!(matches!(
+        restarted.load_private_life_bootstrap_v1(ACCOUNT_ID).await,
+        Err(PersistenceError::CorruptStoredPrivateLifeBootstrap)
+    ));
+    restarted.close().await;
 }
 
 const ENTRY_EQUIPMENT: [u8; 16] = [151; 16];
