@@ -1,0 +1,133 @@
+{
+  "schema_version": 1,
+  "pack_id": "review.m03.sir_caldus.charge_stop_ring.v5",
+  "status": {
+    "classification": "unregistered_review_candidate",
+    "runtime_registered": false,
+    "content_hash_input": false,
+    "runtime_bundle": null,
+    "intended_runtime_asset_id": "sprite.boss.sir_caldus",
+    "presentation_family": "boss.caldus.charge_stop_ring"
+  },
+  "source_revision": "42d9f8565a41584f8bc56bfe5850ec295a854f8c",
+  "design_authority": [
+    "Gravebound_Production_GDD_v1_Canonical.md:ENC-010,ART-001,ART-002,ART-004,ART-005,ART-006,ART-020,ART-030",
+    "Gravebound_Content_Production_Spec_v1.md:CONT-ROOM-002,CONT-ROOM-007,CONT-BOSS-001,CONT-BOSS-002",
+    "Gravebound_Development_Roadmap_v1.md:GB-M03-03"
+  ],
+  "generation": {
+    "method": "OpenAI built-in image generation",
+    "references": [
+      {
+        "path": "../v1/sir-caldus-idle-guard.seed.png",
+        "role": "immutable Sir Caldus identity and renderer-scale seed",
+        "sha256": "da0c0b90ca1cc390ba4a59ea3a8991313c95f2a2a339123c36b174da99ad4ea5"
+      },
+      {
+        "path": "../v2/previews/sir-caldus-charge-lane.192px.png",
+        "role": "accepted Charge Lane transition and visual-continuity reference",
+        "sha256": "b2684d5fe7b88e35a6dea3fed3fa19855dcaf8e077ce323a114df4ed5359c05f"
+      }
+    ],
+    "prompt_record": "README.md#exact-generation-prompt"
+  },
+  "postprocess": {
+    "chroma_helper": "C:/Users/micha/.codex/skills/.system/imagegen/scripts/remove_chroma_key.py",
+    "chroma_arguments": [
+      "--auto-key",
+      "border",
+      "--soft-matte",
+      "--transparent-threshold",
+      "12",
+      "--opaque-threshold",
+      "220",
+      "--despill"
+    ],
+    "sampled_key": "#f605f1",
+    "splitter": "C:/Users/micha/.codex/plugins/cache/openai-curated-remote/game-studio/0.1.2/scripts/normalize_sprite_strip.py",
+    "slot_count": 4,
+    "frame_dimensions": [192, 192],
+    "anchor_pixels": [96, 192],
+    "generated_frame_content_height_pixels": 176,
+    "frame_01_lock": {
+      "path": "../v2/frames/charge_lane/04.png",
+      "sha256": "b09b565c36f8e97398ef8d3f7e937cd72080e15291d1d35a64bb333b69130f52"
+    },
+    "alpha_threshold_for_bounds": 8,
+    "connectivity": 4,
+    "connected_components_per_frame": [1, 1, 1, 1],
+    "manual_repaint": false
+  },
+  "sources": [
+    {
+      "path": "source/sir-caldus-charge-stop-ring.raw-chroma.png",
+      "dimensions": [2172, 724],
+      "mode": "RGB",
+      "sha256": "4f4dd4d21b9bbc206557bde09cb8a3e26eeb0cebb7770e69abf427d2678c292d"
+    },
+    {
+      "path": "source/sir-caldus-charge-stop-ring.alpha.png",
+      "dimensions": [2172, 724],
+      "mode": "RGBA",
+      "sha256": "44ad57ddbd63f50d1dd07d76d74a831187c12b80f87100eac891f6d68af09c92"
+    }
+  ],
+  "strip": {
+    "id": "review.sprite.boss.sir_caldus.charge_stop_ring.v5",
+    "path": "frames/charge_stop_ring",
+    "frame_labels": [
+      "charge_lane_terminal_brake",
+      "planted_bell_stop",
+      "radial_release_commitment",
+      "guarded_recovery"
+    ],
+    "frame_sha256": [
+      "b09b565c36f8e97398ef8d3f7e937cd72080e15291d1d35a64bb333b69130f52",
+      "0e8f5756cdf485d74a571d20074c6c3589c32c87b1e0087f9054afab542076c8",
+      "e3865a5f7558af07f4f65c6792762e0a574352c1b40d0da7c2a18b86c97e20ce",
+      "af31d824374f5185192a16ab39dfc2e333308f4912063326961aaf035d919e38"
+    ],
+    "nontransparent_bounds": [
+      [26, 13, 166, 192],
+      [36, 16, 156, 192],
+      [18, 16, 174, 192],
+      [36, 16, 156, 192]
+    ],
+    "uncompressed_frame_bytes": 147456,
+    "uncompressed_strip_bytes": 589824
+  },
+  "preview_hashes": {
+    "sheet_192": "eeaf3f50eb80c8d2bf83d1c977cbc1cf75d7f3ddc7ff52e615ff8666b0402a84",
+    "sheet_96": "401fb07bf91e920d7e3d547993bff6aa724ff1d8668001b291b78f7008f7a235",
+    "standard_1280_mock": "02b2ed2f5f4d97ce15c445b281d5d19689ba689257c9f8bd936e6ec4127d4ca7",
+    "standard_1920_mock": "c6a5df0cc0105dc1a644b982996c5eef8ca8ae39bbb93ff90d30eb21904815b5",
+    "reduced_1280_mock": "2162d057b03f74b19f3ee73f09c3280ed18b063e1ff2710b06f7d574c0e2613f",
+    "reduced_1920_mock": "c54b4c9269eeacc95532d4da6ce98cbf3dbff8566357075e607de651ec937fbb"
+  },
+  "mock_backdrops": [
+    "docs/evidence/GB-M03-03E-charge-pressure-standard-1280x720.png",
+    "docs/evidence/GB-M03-03E-charge-pressure-standard-1920x1080.png",
+    "docs/evidence/GB-M03-03E-charge-pressure-reduced-1280x720.png",
+    "docs/evidence/GB-M03-03E-charge-pressure-reduced-1920x1080.png"
+  ],
+  "authority_boundaries": {
+    "animation_is_presentation_only": true,
+    "scheduler_and_timing_source": "Gravebound_Content_Production_Spec_v1.md CONT-BOSS-002",
+    "projectile_gap_damage_speed_source": "Gravebound_Production_GDD_v1_Canonical.md ENC-010",
+    "collision_and_hurtbox_source": "Gravebound_Content_Production_Spec_v1.md CONT-BOSS-001",
+    "reward_and_exit_source": "Gravebound_Content_Production_Spec_v1.md CONT-BOSS-001",
+    "may_drive_simulation": false,
+    "may_enable_route": false
+  },
+  "review_gates": [
+    "combined v2-v5 in-engine motion and anchor review",
+    "distinct read from Shield Arc and ordinary Bell Ring at minimum zoom",
+    "authored attack-origin and collision/hurtbox alignment",
+    "grayscale and colorblind Stop Ring gap readability",
+    "standard and reduced effects at 1280x720 and 1920x1080",
+    "optimized native capture and registry/content-hash validation",
+    "committed reward, pending-risk, and stable-exit ordering review",
+    "commercial-rights and visual-similarity review"
+  ],
+  "license_provenance": "Project-generated review material; no third-party visual reference was supplied. Commercial-rights, similarity, registry, and native runtime review remain required."
+}
