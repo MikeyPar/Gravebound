@@ -42,4 +42,4 @@ This slice now uses the compiled arena shell/pillars plus the exact `0.70` Caldu
 
 ## Current Next Step
 
-Compose the already-existing durable victory coordinator, personal reward result, pending-inventory placement, and stable exit into the route-bound owner. Keep `BossDefeated` frozen until the durable terminal is acknowledged, project reward-unresolved and reward-committed states in order, and preserve exact replay across response loss before enabling any normal admission.
+Commit `78b7ff0` closes the frozen defeat-to-stable-exit owner seam under [reward-handoff evidence](GB-M03-03G-caldus-reward-handoff-evidence.md). Next compose the session-task-owned PostgreSQL victory coordinator, exact partial-commit/restart reconciliation, pending-inventory publication, and production extraction binding. Keep normal admission disabled until those authorities and hosted adverse proof pass.
