@@ -1,0 +1,238 @@
+{
+  "schema_version": 1,
+  "asset_kind": "sir_caldus_renderer_review_pack",
+  "pack_id": "review.m03.sir_caldus.renderer.v1",
+  "generated_date": "2026-07-17",
+  "source_revision": "2d59fa3",
+  "generation_method": "OpenAI built-in image generation",
+  "status": {
+    "classification": "unregistered_review_candidate",
+    "runtime_registered": false,
+    "content_hash_input": false,
+    "runtime_bundle": null,
+    "promotes_content": false,
+    "intended_runtime_asset_id": "sprite.boss.sir_caldus"
+  },
+  "design_authority": [
+    "Gravebound_Production_GDD_v1_Canonical.md:SIM-002",
+    "Gravebound_Production_GDD_v1_Canonical.md:ART-001",
+    "Gravebound_Production_GDD_v1_Canonical.md:ART-002",
+    "Gravebound_Production_GDD_v1_Canonical.md:ART-004",
+    "Gravebound_Production_GDD_v1_Canonical.md:ART-020",
+    "Gravebound_Production_GDD_v1_Canonical.md:ART-030",
+    "Gravebound_Content_Production_Spec_v1.md:CONT-ROOM-007",
+    "Gravebound_Content_Production_Spec_v1.md:CONT-BOSS-001",
+    "Gravebound_Content_Production_Spec_v1.md:CONT-BOSS-002",
+    "Gravebound_Development_Roadmap_v1.md:GB-M03-03",
+    "docs/tasks/GB-M03-03G.md:Current Next Step"
+  ],
+  "references": [
+    {
+      "path": "Concept Art/m03-sir-caldus-combat-silhouette-drafts/sir-caldus-shield-arc-draft-alpha.png",
+      "role": "supplied identity, palette, armor, bell, and shield reference",
+      "sha256": "b5353ad590a9188a939e22cc075e86d687498f370d2a34cf3632a173124b1c10"
+    },
+    {
+      "path": "Concept Art/m03-sir-caldus-combat-silhouette-drafts/sir-caldus-charge-draft-alpha.png",
+      "role": "inspected for action intent only; not supplied to accepted generations",
+      "sha256": "803e890c3ec9028e885924605c9983a772c3357709db35acbda6d1e1a3fe91c4"
+    }
+  ],
+  "prompt_record": {
+    "path": "README.md#exact-prompts",
+    "includes_rejected_prompt": true
+  },
+  "source_outputs": [
+    {
+      "path": "source/sir-caldus-idle-guard.raw-chroma.png",
+      "dimensions": [1254, 1254],
+      "mode": "RGB",
+      "sha256": "c89ea89876303b6d9421340439041fb9e7f12d6d416938a12e9511491e89d3b6"
+    },
+    {
+      "path": "source/sir-caldus-key-poses.edit-canvas.png",
+      "dimensions": [1024, 1024],
+      "mode": "RGBA",
+      "sha256": "ab0d0fd7159686f4ca3ef060f467f40b1cc82b5f1742aaccfc566557d679ca7d"
+    },
+    {
+      "path": "source/sir-caldus-key-poses.raw-chroma.png",
+      "dimensions": [1254, 1254],
+      "mode": "RGB",
+      "sha256": "3cb7cd3359f91d0ba3375b2b5aa4d3a69635b45c6c404d05d2c573b34d3219da"
+    }
+  ],
+  "rejected_outputs": [
+    {
+      "workspace_copy": null,
+      "sha256": "2ab10202cfa2932de086a71c95b3b4a75a8936e1170f4ef462ca22acd34c752a",
+      "reason": "The fourth figure crossed its equal quarter-slot boundary."
+    }
+  ],
+  "postprocess": {
+    "background_removal": {
+      "script": "C:/Users/micha/.codex/skills/.system/imagegen/scripts/remove_chroma_key.py",
+      "arguments": [
+        "--auto-key",
+        "border",
+        "--soft-matte",
+        "--transparent-threshold",
+        "12",
+        "--opaque-threshold",
+        "220",
+        "--despill"
+      ],
+      "seed_detected_key": "#fb02fa",
+      "seed_transparent_pixels": 1075197,
+      "seed_partially_transparent_pixels": 7758,
+      "strip_detected_key": "#f903f7",
+      "strip_transparent_pixels": 1294852,
+      "strip_partially_transparent_pixels": 11285,
+      "total_pixels_per_source": 1572516
+    },
+    "normalization": {
+      "build_canvas_script": "game-studio/scripts/build_sprite_edit_canvas.py",
+      "normalize_script": "game-studio/scripts/normalize_sprite_strip.py",
+      "preview_script": "game-studio/scripts/render_sprite_preview_sheet.py",
+      "slot_count": 4,
+      "shared_content_scale_pixels": 176,
+      "renderer_frame_dimensions": [192, 192],
+      "frame_01_locked_to_seed": true,
+      "anchor_convention": "bottom_center",
+      "anchor_pixels": [96, 192]
+    },
+    "mask_fallback": {
+      "used_after_built_in_background_removal": true,
+      "reason": "Tiny disconnected edge remnants remained after chroma removal and equal-slot normalization.",
+      "alpha_threshold": 8,
+      "connectivity": 4,
+      "operation": "Retain the largest connected alpha component in each frame and clear all smaller components.",
+      "removed_pixels_by_frame": [2, 36, 42, 1]
+    }
+  },
+  "candidate_assets": [
+    {
+      "candidate_asset_id": "review.sprite.boss.sir_caldus.idle_guard.v1",
+      "path": "sir-caldus-idle-guard.seed.png",
+      "source_path": "sir-caldus-idle-guard.seed.png",
+      "asset_type": "boss_seed_frame",
+      "dimensions": [192, 192],
+      "mode": "RGBA",
+      "anchor_pixels": [96, 192],
+      "nontransparent_bounds": [36, 16, 156, 192],
+      "frame_rate": null,
+      "runtime_bundle": null,
+      "dependencies": [],
+      "collision_ref": null,
+      "readability_ref": "previews/sir-caldus-key-poses.192px-checkerboard.png",
+      "audio_ref": null,
+      "uncompressed_rgba_bytes": 147456,
+      "platform_resolution_set": ["pc_1280x720", "pc_1920x1080"],
+      "license_ref": "$.license_provenance",
+      "sha256": "da0c0b90ca1cc390ba4a59ea3a8991313c95f2a2a339123c36b174da99ad4ea5"
+    },
+    {
+      "candidate_asset_id": "review.sprite.boss.sir_caldus.key_poses.v1",
+      "path": "sir-caldus-key-poses.strip.png",
+      "source_path": "sir-caldus-key-poses.strip.png",
+      "asset_type": "boss_key_pose_strip",
+      "dimensions": [768, 192],
+      "mode": "RGBA",
+      "slot_dimensions": [192, 192],
+      "anchor_pixels_per_slot": [96, 192],
+      "reading_order": [
+        "guard_idle",
+        "shield_arc_brace",
+        "charge_lane_drive",
+        "recovery"
+      ],
+      "frame_rate": null,
+      "runtime_bundle": null,
+      "dependencies": [],
+      "collision_ref": null,
+      "readability_ref": "previews/sir-caldus-key-poses.192px-checkerboard.png",
+      "audio_ref": null,
+      "uncompressed_rgba_bytes": 589824,
+      "platform_resolution_set": ["pc_1280x720", "pc_1920x1080"],
+      "license_ref": "$.license_provenance",
+      "sha256": "d7cfae2b77f701029a3dccf31a845b9c3e99e3e10af9e39121cf60b79cd123d1"
+    }
+  ],
+  "frame_records": [
+    {
+      "path": "frames/01-guard-idle.png",
+      "nontransparent_bounds": [36, 16, 156, 192],
+      "sha256": "da0c0b90ca1cc390ba4a59ea3a8991313c95f2a2a339123c36b174da99ad4ea5"
+    },
+    {
+      "path": "frames/02-shield-arc-brace.png",
+      "nontransparent_bounds": [28, 26, 147, 192],
+      "sha256": "3ee4ae19dc5fcfc80da897718a872fa89332e4077ed1b45ecd0e5bb4806659cd"
+    },
+    {
+      "path": "frames/03-charge-lane-drive.png",
+      "nontransparent_bounds": [26, 43, 149, 192],
+      "sha256": "0b05c2b64351489eb659649485ee064fb970f5e98fba5f61869f44380a231ff0"
+    },
+    {
+      "path": "frames/04-recovery.png",
+      "nontransparent_bounds": [36, 16, 156, 192],
+      "sha256": "a2251f1b6ff1c8580a7cdf83a524905f260c4f62e7bade839531ed40692e11f3"
+    }
+  ],
+  "preview_records": [
+    {
+      "path": "previews/sir-caldus-key-poses.192px-checkerboard.png",
+      "dimensions": [792, 192],
+      "sha256": "1a52408c37fb6527e7022402ed98ef4e62e60c3602c46bb06a4dbccef238717b"
+    },
+    {
+      "path": "previews/sir-caldus-key-poses.96px-readability.png",
+      "dimensions": [408, 96],
+      "sha256": "48f753db82d24637725a8c9e28164907619688e3c20067dda69a0057a628ce7b"
+    },
+    {
+      "path": "previews/sir-caldus-shield-arc.standard.1280x720.review-mock.png",
+      "dimensions": [1280, 720],
+      "backdrop_path": "docs/evidence/GB-M03-03E-phase-one-standard-1280x720.png",
+      "backdrop_sha256": "407c42fd8cb81aca8fa2c212ac56ce2602b203819986bbc5c9c06b286a2f5ef8",
+      "sha256": "7d3f375329da3f76040e38da82d0c6e8f8f4af5ec9bf4fda781636688f138111"
+    },
+    {
+      "path": "previews/sir-caldus-shield-arc.reduced.1280x720.review-mock.png",
+      "dimensions": [1280, 720],
+      "backdrop_path": "docs/evidence/GB-M03-03E-phase-one-reduced-1280x720.png",
+      "backdrop_sha256": "40764d89cbbf2032e13a800654f2129d52f741ed61c80b23749a8de01081d0ac",
+      "sha256": "4583887fc2edf6326679b1ba38fee8fec70a31751e28e42e0c96ddf670894c75"
+    },
+    {
+      "path": "previews/sir-caldus-shield-arc.standard.1920x1080.review-mock.png",
+      "dimensions": [1920, 1080],
+      "backdrop_path": "docs/evidence/GB-M03-03E-phase-one-standard-1920x1080.png",
+      "backdrop_sha256": "ef315bc4dd520e057061953a759587053046b96d94d971594bdf6d332c127fcf",
+      "sha256": "ac3e8fdaf6b8041693d81dd9ef52da8d26a22261366f356ec9c53d24618947b7"
+    },
+    {
+      "path": "previews/sir-caldus-shield-arc.reduced.1920x1080.review-mock.png",
+      "dimensions": [1920, 1080],
+      "backdrop_path": "docs/evidence/GB-M03-03E-phase-one-reduced-1920x1080.png",
+      "backdrop_sha256": "cb858140f7adfeffa74a19fbde4a95288cc37f3b98b3d76628b4efe5936ecb8f",
+      "sha256": "5fbcd5b5c2e8ac2fe66d23a09ef53016908597d97fa2d2910c164a14300311a6"
+    }
+  ],
+  "qa": {
+    "visual_inspection": "candidate_pass",
+    "one_connected_silhouette_per_frame": true,
+    "shared_bottom_center_anchor": true,
+    "frame_01_matches_seed": true,
+    "standard_reduced_sprite_geometry_identical": true,
+    "readable_at_192_pixels": true,
+    "silhouette_readable_at_96_pixels": true,
+    "limitations": [
+      "Key poses are not an animation and have no authored frame rate.",
+      "No in-engine import, motion review, collision review, registry validation, or content-hash integration has occurred.",
+      "Review mocks are static composites over existing evidence backdrops, not native captures."
+    ]
+  },
+  "license_provenance": "Project-generated review material. No third-party visual reference, artist, game, brand, or trademark was supplied. Normal commercial-rights, similarity, repository-registry, and licensing review remains required before runtime use."
+}
