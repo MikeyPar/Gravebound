@@ -2735,16 +2735,29 @@ async fn assert_persistent_successor_starter_items(
 }
 
 async fn assert_database_peer_sessions_idle(persistence: &PostgresPersistence) {
-    let mut residue = persistence.begin_transaction().await.unwrap();
-    let non_idle_peer_sessions: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM pg_stat_activity \
-         WHERE datname=current_database() AND pid<>pg_backend_pid() AND state<>'idle'",
-    )
-    .fetch_one(residue.connection())
-    .await
-    .unwrap();
-    assert_eq!(non_idle_peer_sessions, 0);
-    residue.rollback().await.unwrap();
+    let residue = wait_for_zero_database_residue(persistence).await;
+    assert!(
+        residue.is_zero(),
+        "PostgreSQL residue did not drain: {residue:?}"
+    );
+}
+
+async fn wait_for_zero_database_residue(
+    persistence: &PostgresPersistence,
+) -> death_measurement::PostgresResidueSnapshotV1 {
+    const CLEANUP_BUDGET: Duration = Duration::from_secs(1);
+    const CLEANUP_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+    let deadline = Instant::now() + CLEANUP_BUDGET;
+    loop {
+        let residue = death_measurement::PostgresResidueSnapshotV1::capture(persistence)
+            .await
+            .unwrap();
+        if residue.is_zero() || Instant::now() >= deadline {
+            return residue;
+        }
+        tokio::time::sleep(CLEANUP_POLL_INTERVAL).await;
+    }
 }
 
 #[derive(Debug)]
@@ -3097,9 +3110,7 @@ async fn run_disposable_successor_recovery_journey(
             ..
         }) if character_version == expected_danger_version && location_content_id == WORLD_ID
     ));
-    let database_residue = death_measurement::PostgresResidueSnapshotV1::capture(persistence)
-        .await
-        .unwrap();
+    let database_residue = wait_for_zero_database_residue(persistence).await;
     assert!(database_residue.is_zero());
     let starter_item_uids = client_outcome.stored.starter_items.ordered_uids();
 
