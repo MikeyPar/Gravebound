@@ -9,19 +9,21 @@
 
 use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc};
 
-use protocol::{ActionFrame, ActionKind, InputFrame};
+use protocol::{ActionFrame, ActionKind, CorePrivateRouteContentRevisionV1, InputFrame};
 use sim_core::{AimDirection, MovementAction, SimulationVector};
 use thiserror::Error;
 use tokio::sync::Mutex;
 
 use crate::{
-    AuthenticatedAccount, AuthenticatedNamespace, CoreExtractionActorDirectory,
-    CoreExtractionAuthoritativeTick, CoreExtractionConnectionLease, CoreExtractionHallProjection,
-    CoreExtractionRuntimeError, CoreExtractionRuntimeReport, CoreExtractionTransportAttach,
-    CoreExtractionTransportDetach, CorePrivateMicrorealmAbility, CorePrivateMicrorealmAbilityPress,
-    CorePrivateMicrorealmDriver, CorePrivateMicrorealmDriverError,
-    CorePrivateMicrorealmDriverHandle, CorePrivateMicrorealmDriverObserver,
-    CorePrivateMicrorealmDriverReport, CorePrivateMicrorealmIngressError,
+    AuthenticatedAccount, AuthenticatedNamespace, CoreBellPortalTransition,
+    CoreExtractionActorDirectory, CoreExtractionAuthoritativeTick, CoreExtractionConnectionLease,
+    CoreExtractionHallProjection, CoreExtractionRuntimeError, CoreExtractionRuntimeReport,
+    CoreExtractionTransportAttach, CoreExtractionTransportDetach,
+    CorePrivateFixedDungeonDriverReady, CorePrivateMicrorealmAbility,
+    CorePrivateMicrorealmAbilityPress, CorePrivateMicrorealmDriver,
+    CorePrivateMicrorealmDriverError, CorePrivateMicrorealmDriverHandle,
+    CorePrivateMicrorealmDriverObserver, CorePrivateMicrorealmDriverReport,
+    CorePrivateMicrorealmIngressError, CorePrivateMicrorealmPreparedHandoff,
     CorePrivateMicrorealmRetainedInput, CorePrivateMicrorealmRuntime, CorePrivateRouteActorLease,
     CoreRecallActorDirectory, CoreRecallActorRetirementReport, CoreRecallAuthoritativeTick,
     CoreRecallConnectionAuthority, CoreRecallConnectionLease, CoreRecallRuntimeError,
@@ -97,6 +99,40 @@ impl CorePrivateMicrorealmBindingLease {
 pub struct CorePrivateMicrorealmBinding {
     pub lease: CorePrivateMicrorealmBindingLease,
     pub observer: CorePrivateMicrorealmDriverObserver,
+}
+
+/// Transport-independent pause token for the one live danger task. The caller resolves the Bell
+/// mutation durably while this token freezes the exact frame boundary, then either aborts or
+/// installs the committed B0 runtime inside that same task.
+#[derive(Debug)]
+pub struct CorePrivateLifePreparedBellHandoff {
+    pub binding_lease: CorePrivateMicrorealmBindingLease,
+    prepared: CorePrivateMicrorealmPreparedHandoff,
+}
+
+impl CorePrivateLifePreparedBellHandoff {
+    #[must_use]
+    pub const fn ready(&self) -> crate::CorePrivateMicrorealmHandoffReady {
+        self.prepared.ready()
+    }
+
+    pub async fn abort(self) -> Result<(), CorePrivateLifeSessionError> {
+        self.prepared.abort().await?;
+        Ok(())
+    }
+
+    pub async fn commit_into_fixed_dungeon(
+        self,
+        transition: CoreBellPortalTransition,
+        expected_content_revision: CorePrivateRouteContentRevisionV1,
+        encounters: sim_content::CoreDevelopmentEncounterRooms,
+    ) -> Result<CorePrivateFixedDungeonDriverReady, CorePrivateLifeSessionError> {
+        self.prepared
+            .commit_into_fixed_dungeon(transition, expected_content_revision, encounters)?
+            .wait()
+            .await
+            .map_err(Into::into)
+    }
 }
 
 impl CorePrivateLifeTransportLease {
@@ -790,6 +826,36 @@ where
             .ok_or(CorePrivateLifeSessionError::MicrorealmUnavailable)
     }
 
+    /// Freezes the exact session-owned danger task between frames before any Bell reservation or
+    /// durable mutation begins. The pause is transport-independent: reconnect observes the same
+    /// binding and task. Known rejection must explicitly abort; dropping the acknowledged token
+    /// is an unknown durable outcome and remains frozen for restart/receipt reconciliation.
+    pub async fn prepare_bell_handoff(
+        &self,
+        lease: CorePrivateLifeTransportLease,
+    ) -> Result<CorePrivateLifePreparedBellHandoff, CorePrivateLifeSessionError> {
+        let (binding_lease, handle) = {
+            let state = self.state.lock().await;
+            let entry = state
+                .sessions
+                .get(&lease.account_id)
+                .ok_or(CorePrivateLifeSessionError::SessionUnavailable)?;
+            if entry.active.as_ref().map(|active| active.lease) != Some(lease) {
+                return Err(CorePrivateLifeSessionError::StaleTransport);
+            }
+            let bound = entry
+                .microrealm
+                .as_ref()
+                .ok_or(CorePrivateLifeSessionError::MicrorealmUnavailable)?;
+            (bound.lease, bound.driver.handle())
+        };
+        let prepared = handle.prepare_handoff().await?;
+        Ok(CorePrivateLifePreparedBellHandoff {
+            binding_lease,
+            prepared,
+        })
+    }
+
     /// Validates compact input against the negotiated protocol, checks the current transport
     /// generation under the session lock, then submits without retaining that lock.
     pub async fn submit_microrealm_input(
@@ -1273,9 +1339,10 @@ mod tests {
 
     use super::*;
     use crate::{
-        AccountId, CorePrivateRouteActorDirectory, CorePrivateRouteActorPosition,
-        CorePrivateRouteActorSeed, CoreRecallIntentAuthority, ProductionRecallIntentActor,
-        ProductionRecallPendingAuthorityV1,
+        AccountId, CoreBellPortalAuthority, CoreBellPortalBinding,
+        CorePrivateMicrorealmDriverState, CorePrivateRouteActorAdvance,
+        CorePrivateRouteActorDirectory, CorePrivateRouteActorPosition, CorePrivateRouteActorSeed,
+        CoreRecallIntentAuthority, ProductionRecallIntentActor, ProductionRecallPendingAuthorityV1,
     };
 
     const ACCOUNT_ID: [u8; 16] = [71; 16];
@@ -1393,6 +1460,43 @@ mod tests {
         )
         .unwrap();
         (routes, lease, runtime)
+    }
+
+    async fn commit_bell_route(
+        routes: &CorePrivateRouteActorDirectory,
+        route_lease: CorePrivateRouteActorLease,
+    ) -> CoreBellPortalTransition {
+        for advance in [
+            CorePrivateRouteActorAdvance::MicrorealmWaiting,
+            CorePrivateRouteActorAdvance::MicrorealmActive,
+            CorePrivateRouteActorAdvance::MicrorealmCleared,
+        ] {
+            routes.advance(route_lease, advance).await.unwrap();
+        }
+        routes
+            .set_bell_portal_in_range(route_lease, true)
+            .await
+            .unwrap();
+        let binding = CoreBellPortalBinding {
+            account_id: ACCOUNT_ID,
+            character_id: CHARACTER_ID,
+            mutation_id: [74; 16],
+            instance_lineage_id: LINEAGE_ID,
+            entry_restore_point_id: [75; 16],
+            character_version: 2,
+            content_revision: world_revision(),
+        };
+        let permit = routes.prepare_bell_portal(binding.clone()).await.unwrap();
+        let transition = CoreBellPortalTransition {
+            binding,
+            transfer_id: [76; 16],
+            destination_character_version: 3,
+        };
+        routes
+            .commit_bell_portal(permit, transition.clone())
+            .await
+            .unwrap();
+        transition
     }
 
     async fn live_connection_pair() -> (
@@ -1694,6 +1798,70 @@ mod tests {
         second_client_endpoint.wait_idle().await;
         third_server_endpoint.wait_idle().await;
         third_client_endpoint.wait_idle().await;
+    }
+
+    #[tokio::test]
+    async fn bell_conversion_keeps_one_session_task_and_observer_across_reconnect() {
+        let ticks = Arc::new(TickSource(AtomicU64::new(100)));
+        let recall = Arc::new(CoreRecallActorDirectory::<FixedClock, _>::new(ticks));
+        let sessions = Arc::new(CorePrivateLifeSessionDirectory::new(recall));
+        let (routes, route_lease, runtime) = live_microrealm();
+        let runtime =
+            crate::core_private_microrealm_runtime::core_bell_ready_runtime_test_fixture(runtime);
+        let (first_server_endpoint, first_client_endpoint, first_client, first_server) =
+            live_connection_pair().await;
+        let first = sessions
+            .attach_transport(authenticated(), first_server, 5_000)
+            .await
+            .unwrap();
+        let mut first_binding = sessions
+            .bind_microrealm(first.lease, runtime)
+            .await
+            .unwrap();
+        let prepared = sessions.prepare_bell_handoff(first.lease).await.unwrap();
+
+        let (second_server_endpoint, second_client_endpoint, second_client, second_server) =
+            live_connection_pair().await;
+        let second = sessions
+            .attach_transport(authenticated(), second_server, 5_100)
+            .await
+            .unwrap();
+        let mut second_binding = second.microrealm.expect("reconnected danger binding");
+        assert_eq!(first_binding.lease, second_binding.lease);
+        assert_eq!(prepared.binding_lease, second_binding.lease);
+
+        let transition = commit_bell_route(&routes, route_lease).await;
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content");
+        let encounters = sim_content::load_core_development_encounter_rooms(&root).unwrap();
+        let ready = prepared
+            .commit_into_fixed_dungeon(transition, route_revision(), encounters)
+            .await
+            .unwrap();
+        assert_eq!(ready.route_lease, route_lease);
+        assert!(matches!(
+            first_binding.observer.changed().await.unwrap(),
+            CorePrivateMicrorealmDriverState::FixedDungeonReady { ready: published }
+                if published == ready
+        ));
+        assert!(matches!(
+            second_binding.observer.changed().await.unwrap(),
+            CorePrivateMicrorealmDriverState::FixedDungeonReady { ready: published }
+                if published == ready
+        ));
+        assert_eq!(sessions.snapshot().await.microrealm_bound_count, 1);
+
+        for connection in sessions.begin_shutdown().await {
+            connection.close(0_u32.into(), b"test shutdown");
+        }
+        assert!(sessions.finish_shutdown().await.unwrap().zero_residue);
+        routes.begin_shutdown();
+        assert!(routes.finish_shutdown().await.unwrap().zero_residue);
+        first_client.close(0_u32.into(), b"test complete");
+        second_client.close(0_u32.into(), b"test complete");
+        first_server_endpoint.wait_idle().await;
+        first_client_endpoint.wait_idle().await;
+        second_server_endpoint.wait_idle().await;
+        second_client_endpoint.wait_idle().await;
     }
 
     #[tokio::test]

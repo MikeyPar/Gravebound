@@ -599,6 +599,46 @@ pub enum CorePrivateMicrorealmRuntimeError {
 }
 
 #[cfg(test)]
+pub(crate) fn core_bell_ready_runtime_test_fixture(
+    mut runtime: CorePrivateMicrorealmRuntime,
+) -> CorePrivateMicrorealmRuntime {
+    let ordinary = CoreMicrorealmInput {
+        entrant_position: runtime.player_position,
+        primary_released: false,
+        living_participants: 1,
+        pack_cleared: false,
+    };
+    runtime
+        .lifecycle
+        .step(
+            Tick(1),
+            CoreMicrorealmInput {
+                primary_released: true,
+                ..ordinary
+            },
+        )
+        .expect("test fixture trigger");
+    runtime
+        .lifecycle
+        .step(Tick(31), ordinary)
+        .expect("test fixture activation");
+    runtime
+        .lifecycle
+        .step(
+            Tick(32),
+            CoreMicrorealmInput {
+                pack_cleared: true,
+                ..ordinary
+            },
+        )
+        .expect("test fixture clear");
+    runtime.player_position = runtime.bell_portal_center;
+    runtime.tick = Tick(32);
+    assert!(runtime.bell_transfer_ready());
+    runtime
+}
+
+#[cfg(test)]
 mod tests {
     use protocol::{ManifestHash, WorldFlowContentRevisionV1};
 
@@ -695,6 +735,56 @@ mod tests {
             crate::combat_factory::core_character_combat_test_fixture(CHARACTER_ID),
         )
         .expect("live runtime")
+    }
+
+    fn bell_ready_runtime(
+        directory: &CorePrivateRouteActorDirectory,
+        lease: CorePrivateRouteActorLease,
+    ) -> CorePrivateMicrorealmRuntime {
+        core_bell_ready_runtime_test_fixture(runtime(directory, lease))
+    }
+
+    async fn commit_bell_transition(
+        directory: &CorePrivateRouteActorDirectory,
+        lease: CorePrivateRouteActorLease,
+    ) -> CoreBellPortalTransition {
+        for advance in [
+            crate::CorePrivateRouteActorAdvance::MicrorealmWaiting,
+            crate::CorePrivateRouteActorAdvance::MicrorealmActive,
+            crate::CorePrivateRouteActorAdvance::MicrorealmCleared,
+        ] {
+            directory
+                .advance(lease, advance)
+                .await
+                .expect("route phase");
+        }
+        directory
+            .set_bell_portal_in_range(lease, true)
+            .await
+            .expect("Bell range");
+        let binding = CoreBellPortalBinding {
+            account_id: ACCOUNT_ID,
+            character_id: CHARACTER_ID,
+            mutation_id: [0x44; 16],
+            instance_lineage_id: LINEAGE_ID,
+            entry_restore_point_id: [0x55; 16],
+            character_version: 2,
+            content_revision: world_revision(),
+        };
+        let permit = directory
+            .prepare_bell_portal(binding.clone())
+            .await
+            .expect("Bell permit");
+        let transition = CoreBellPortalTransition {
+            binding,
+            transfer_id: [0x66; 16],
+            destination_character_version: 3,
+        };
+        directory
+            .commit_bell_portal(permit, transition.clone())
+            .await
+            .expect("Bell commit");
+        transition
     }
 
     #[tokio::test]
@@ -902,63 +992,64 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn committed_driver_handoff_returns_the_exact_live_runtime() {
+    async fn dropped_conversion_ack_still_converts_inside_the_exact_live_task() {
         let directory = CorePrivateRouteActorDirectory::new();
         let lease = directory
             .register_actor(authenticated(), seed(), 12)
             .expect("actor");
-        let mut runtime = runtime(&directory, lease);
-        let spawn = runtime.player_position;
-        let ordinary = CoreMicrorealmInput {
-            entrant_position: spawn,
-            primary_released: false,
-            living_participants: 1,
-            pack_cleared: false,
-        };
-        runtime
-            .lifecycle
-            .step(
-                Tick(1),
-                CoreMicrorealmInput {
-                    primary_released: true,
-                    ..ordinary
-                },
-            )
-            .expect("trigger");
-        runtime
-            .lifecycle
-            .step(Tick(31), ordinary)
-            .expect("activate");
-        runtime
-            .lifecycle
-            .step(
-                Tick(32),
-                CoreMicrorealmInput {
-                    pack_cleared: true,
-                    ..ordinary
-                },
-            )
-            .expect("clear");
-        runtime.player_position = runtime.bell_portal_center;
-        runtime.tick = Tick(32);
-        assert!(runtime.bell_transfer_ready());
-
-        let mut driver = CorePrivateMicrorealmDriver::spawn(runtime);
+        let runtime = bell_ready_runtime(&directory, lease);
+        let driver = CorePrivateMicrorealmDriver::spawn(runtime);
+        let handle = driver.handle();
+        let state_reader = handle.observe();
         tokio::task::yield_now().await;
         let prepared = driver.prepare_handoff().await.expect("prepare handoff");
-        let handoff = prepared.commit().await.expect("commit handoff");
+        let transition = commit_bell_transition(&directory, lease).await;
+        let (_, encounters, _) = content();
+        let conversion = prepared
+            .commit_into_fixed_dungeon(transition, route_revision(), encounters)
+            .expect("conversion decision");
+        drop(conversion);
+        let mut state_reader = state_reader;
+        let pending_state = state_reader
+            .changed()
+            .await
+            .expect("fixed-dungeon observation");
+        assert!(matches!(
+            pending_state,
+            crate::CorePrivateMicrorealmDriverState::BellResolutionPending { .. }
+        ));
+        let published_state = state_reader
+            .changed()
+            .await
+            .expect("fixed-dungeon observation");
+        let crate::CorePrivateMicrorealmDriverState::FixedDungeonReady { ready } = published_state
+        else {
+            panic!("same observer must publish fixed-dungeon ownership");
+        };
 
         assert_eq!(
-            handoff.report.outcome,
-            CorePrivateMicrorealmDriverOutcome::Transferred
+            ready.node,
+            sim_content::CoreFixedDungeonNode::BellVestibuleB0
         );
-        assert!(handoff.report.task_joined);
-        assert!(!handoff.report.driver_task_live_after_join);
-        assert_eq!(handoff.runtime.account_id(), ACCOUNT_ID);
-        assert_eq!(handoff.runtime.character_id(), CHARACTER_ID);
-        assert_eq!(handoff.runtime.route_lease(), lease);
-        assert_eq!(handoff.runtime.tick(), Tick(32));
-        assert!(handoff.runtime.bell_transfer_ready());
+        assert_eq!(ready.route_lease, lease);
+        assert_eq!(ready.final_microrealm_tick, Tick(32));
+        assert!(matches!(
+            state_reader.latest(),
+            crate::CorePrivateMicrorealmDriverState::FixedDungeonReady { ready: installed }
+                if installed == ready
+        ));
+        assert!(matches!(
+            handle.prepare_handoff().await,
+            Err(crate::CorePrivateMicrorealmDriverError::HandoffNotReady)
+        ));
+        assert!(crate::active_core_microrealm_driver_tasks() >= 1);
+        let report = driver.shutdown().await.expect("joined shutdown");
+        assert_eq!(
+            report.outcome,
+            CorePrivateMicrorealmDriverOutcome::FixedDungeonReady
+        );
+        assert!(report.task_joined);
+        assert!(!report.driver_task_live_after_join);
     }
 
     #[tokio::test]

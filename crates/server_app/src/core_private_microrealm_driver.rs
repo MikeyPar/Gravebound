@@ -27,8 +27,8 @@ use tokio::{
 };
 
 use crate::{
-    CorePrivateMicrorealmInput, CorePrivateMicrorealmRuntime, CorePrivateMicrorealmRuntimeError,
-    CorePrivateMicrorealmStep,
+    CoreBellPortalTransition, CorePrivateFixedDungeonRuntime, CorePrivateMicrorealmInput,
+    CorePrivateMicrorealmRuntime, CorePrivateMicrorealmRuntimeError, CorePrivateMicrorealmStep,
 };
 
 const NANOS_PER_SECOND: u64 = 1_000_000_000;
@@ -150,9 +150,35 @@ impl SharedIngress {
 pub struct CorePrivateMicrorealmDriverHandle {
     ingress: Arc<SharedIngress>,
     observation_rx: watch::Receiver<CorePrivateMicrorealmDriverState>,
+    handoff_tx: mpsc::Sender<CorePrivateMicrorealmHandoffRequest>,
 }
 
 impl CorePrivateMicrorealmDriverHandle {
+    /// Pauses this task between frames without transferring ownership to the caller. The returned
+    /// decision token is independent of any transport generation, so reconnect cannot create a
+    /// second simulation owner while durable Bell resolution is in flight.
+    pub async fn prepare_handoff(
+        &self,
+    ) -> Result<CorePrivateMicrorealmPreparedHandoff, CorePrivateMicrorealmDriverError> {
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let (decision_tx, decision_rx) = oneshot::channel();
+        self.handoff_tx
+            .send(CorePrivateMicrorealmHandoffRequest {
+                ready_tx,
+                decision_rx,
+            })
+            .await
+            .map_err(|_| CorePrivateMicrorealmDriverError::HandoffControlClosed)?;
+        let ready = ready_rx
+            .await
+            .map_err(|_| CorePrivateMicrorealmDriverError::HandoffControlClosed)?
+            .map_err(|()| CorePrivateMicrorealmDriverError::HandoffNotReady)?;
+        Ok(CorePrivateMicrorealmPreparedHandoff {
+            ready,
+            decision_tx: Some(decision_tx),
+        })
+    }
+
     /// Replaces the single retained compact input when its client sequence is newer.
     pub fn submit_latest_input(
         &self,
@@ -322,6 +348,13 @@ pub enum CorePrivateMicrorealmDriverState {
         committed_frames: u64,
         lethal_step: Arc<CorePrivateMicrorealmStep>,
     },
+    BellResolutionPending {
+        committed_frames: u64,
+        final_tick: Tick,
+    },
+    FixedDungeonReady {
+        ready: CorePrivateFixedDungeonDriverReady,
+    },
     Faulted {
         committed_frames: u64,
         fault: CorePrivateMicrorealmDriverFault,
@@ -334,7 +367,10 @@ impl CorePrivateMicrorealmDriverState {
         match self {
             Self::Running { step, .. } => Some(step),
             Self::TerminalPending { lethal_step, .. } => Some(lethal_step),
-            Self::Starting | Self::Faulted { .. } => None,
+            Self::Starting
+            | Self::BellResolutionPending { .. }
+            | Self::FixedDungeonReady { .. }
+            | Self::Faulted { .. } => None,
         }
     }
 }
@@ -343,7 +379,8 @@ impl CorePrivateMicrorealmDriverState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CorePrivateMicrorealmDriverOutcome {
     Shutdown,
-    Transferred,
+    BellResolutionPending,
+    FixedDungeonReady,
     TerminalPending,
     Faulted,
 }
@@ -355,17 +392,48 @@ pub struct CorePrivateMicrorealmHandoffReady {
     pub final_tick: Tick,
 }
 
-/// Exact runtime returned only after a prepared frame-boundary handoff commits.
+/// Stable observation emitted after the same exclusive task has consumed its microrealm and owns
+/// the route-bound B0-B6 runtime. The task deliberately remains frozen at B0 until fixed-room
+/// frame generation is installed; normal admission therefore remains disabled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CorePrivateFixedDungeonDriverReady {
+    pub committed_microrealm_frames: u64,
+    pub final_microrealm_tick: Tick,
+    pub transfer_id: [u8; 16],
+    pub route_lease: crate::CorePrivateRouteActorLease,
+    pub node: sim_content::CoreFixedDungeonNode,
+}
+
+/// Awaitable acknowledgement for an irreversible in-task conversion. Dropping this value only
+/// drops the caller's acknowledgement; it cannot cancel the decision already owned by the task.
 #[derive(Debug)]
-pub struct CorePrivateMicrorealmHandoff {
-    pub report: CorePrivateMicrorealmDriverReport,
-    pub runtime: CorePrivateMicrorealmRuntime,
+pub struct CorePrivateFixedDungeonConversion {
+    result_rx: oneshot::Receiver<Result<CorePrivateFixedDungeonDriverReady, String>>,
+}
+
+impl CorePrivateFixedDungeonConversion {
+    pub async fn wait(
+        self,
+    ) -> Result<CorePrivateFixedDungeonDriverReady, CorePrivateMicrorealmDriverError> {
+        self.result_rx
+            .await
+            .map_err(|_| CorePrivateMicrorealmDriverError::HandoffDecisionLost)?
+            .map_err(CorePrivateMicrorealmDriverError::FixedDungeonConversion)
+    }
 }
 
 #[derive(Debug)]
 enum CorePrivateMicrorealmHandoffDecision {
     Abort(oneshot::Sender<()>),
-    Commit,
+    Convert(Box<CorePrivateFixedDungeonConversionRequest>),
+}
+
+#[derive(Debug)]
+struct CorePrivateFixedDungeonConversionRequest {
+    transition: CoreBellPortalTransition,
+    expected_content_revision: protocol::CorePrivateRouteContentRevisionV1,
+    encounters: sim_content::CoreDevelopmentEncounterRooms,
+    result_tx: oneshot::Sender<Result<CorePrivateFixedDungeonDriverReady, String>>,
 }
 
 #[derive(Debug)]
@@ -374,16 +442,16 @@ struct CorePrivateMicrorealmHandoffRequest {
     decision_rx: oneshot::Receiver<CorePrivateMicrorealmHandoffDecision>,
 }
 
-/// Non-cloneable two-phase pause. Dropping it closes the decision channel and resumes the exact
-/// runtime; only `commit` consumes the driver's runtime.
+/// Non-cloneable two-phase pause. Explicit abort resumes the exact runtime. Dropping after the
+/// pause acknowledgement is treated as an unknown durable outcome and stays frozen until restart
+/// reconciliation; conversion consumes the microrealm only inside its existing exclusive task.
 #[derive(Debug)]
-pub struct CorePrivateMicrorealmPreparedHandoff<'driver> {
-    driver: &'driver mut CorePrivateMicrorealmDriver,
+pub struct CorePrivateMicrorealmPreparedHandoff {
     ready: CorePrivateMicrorealmHandoffReady,
     decision_tx: Option<oneshot::Sender<CorePrivateMicrorealmHandoffDecision>>,
 }
 
-impl CorePrivateMicrorealmPreparedHandoff<'_> {
+impl CorePrivateMicrorealmPreparedHandoff {
     #[must_use]
     pub const fn ready(&self) -> CorePrivateMicrorealmHandoffReady {
         self.ready
@@ -406,15 +474,29 @@ impl CorePrivateMicrorealmPreparedHandoff<'_> {
         Ok(self.ready)
     }
 
-    pub async fn commit(
+    /// Installs the already-durable Bell result inside the existing task. Once this returns, loss
+    /// of the acknowledgement cannot undo the conversion or lose either runtime: the
+    /// authoritative result remains visible through the original observer.
+    pub fn commit_into_fixed_dungeon(
         mut self,
-    ) -> Result<CorePrivateMicrorealmHandoff, CorePrivateMicrorealmDriverError> {
+        transition: CoreBellPortalTransition,
+        expected_content_revision: protocol::CorePrivateRouteContentRevisionV1,
+        encounters: sim_content::CoreDevelopmentEncounterRooms,
+    ) -> Result<CorePrivateFixedDungeonConversion, CorePrivateMicrorealmDriverError> {
+        let (result_tx, result_rx) = oneshot::channel();
         self.decision_tx
             .take()
             .ok_or(CorePrivateMicrorealmDriverError::HandoffDecisionLost)?
-            .send(CorePrivateMicrorealmHandoffDecision::Commit)
+            .send(CorePrivateMicrorealmHandoffDecision::Convert(Box::new(
+                CorePrivateFixedDungeonConversionRequest {
+                    transition,
+                    expected_content_revision,
+                    encounters,
+                    result_tx,
+                },
+            )))
             .map_err(|_| CorePrivateMicrorealmDriverError::HandoffDecisionLost)?;
-        self.driver.finish_committed_handoff().await
+        Ok(CorePrivateFixedDungeonConversion { result_rx })
     }
 }
 
@@ -438,7 +520,6 @@ pub struct CorePrivateMicrorealmDriverReport {
 pub struct CorePrivateMicrorealmDriver {
     handle: CorePrivateMicrorealmDriverHandle,
     shutdown_tx: watch::Sender<bool>,
-    handoff_tx: mpsc::Sender<CorePrivateMicrorealmHandoffRequest>,
     join: Option<JoinHandle<CorePrivateMicrorealmDriverTaskExit>>,
 }
 
@@ -456,26 +537,9 @@ impl CorePrivateMicrorealmDriver {
     /// Pauses the exclusive owner between frames only when its owned simulation still proves the
     /// cleared Bell interaction. Cancellation before acknowledgement resumes automatically.
     pub async fn prepare_handoff(
-        &mut self,
-    ) -> Result<CorePrivateMicrorealmPreparedHandoff<'_>, CorePrivateMicrorealmDriverError> {
-        let (ready_tx, ready_rx) = oneshot::channel();
-        let (decision_tx, decision_rx) = oneshot::channel();
-        self.handoff_tx
-            .send(CorePrivateMicrorealmHandoffRequest {
-                ready_tx,
-                decision_rx,
-            })
-            .await
-            .map_err(|_| CorePrivateMicrorealmDriverError::HandoffControlClosed)?;
-        let ready = ready_rx
-            .await
-            .map_err(|_| CorePrivateMicrorealmDriverError::HandoffControlClosed)?
-            .map_err(|()| CorePrivateMicrorealmDriverError::HandoffNotReady)?;
-        Ok(CorePrivateMicrorealmPreparedHandoff {
-            driver: self,
-            ready,
-            decision_tx: Some(decision_tx),
-        })
+        &self,
+    ) -> Result<CorePrivateMicrorealmPreparedHandoff, CorePrivateMicrorealmDriverError> {
+        self.handle.prepare_handoff().await
     }
 
     pub async fn shutdown(
@@ -493,30 +557,6 @@ impl CorePrivateMicrorealmDriver {
         report.driver_task_live_after_join = self.handle.ingress.task_live.load(Ordering::Acquire);
         report.active_driver_tasks_after_join = active_core_microrealm_driver_tasks();
         Ok(*report)
-    }
-
-    async fn finish_committed_handoff(
-        &mut self,
-    ) -> Result<CorePrivateMicrorealmHandoff, CorePrivateMicrorealmDriverError> {
-        let join = self
-            .join
-            .take()
-            .ok_or(CorePrivateMicrorealmDriverError::AlreadyJoined)?;
-        let mut exit = join.await.map_err(CorePrivateMicrorealmDriverError::Task)?;
-        exit.report.task_joined = true;
-        exit.report.driver_task_live_after_join =
-            self.handle.ingress.task_live.load(Ordering::Acquire);
-        exit.report.active_driver_tasks_after_join = active_core_microrealm_driver_tasks();
-        if exit.report.outcome != CorePrivateMicrorealmDriverOutcome::Transferred {
-            return Err(CorePrivateMicrorealmDriverError::HandoffOutcomeMismatch);
-        }
-        let runtime = exit
-            .runtime
-            .ok_or(CorePrivateMicrorealmDriverError::HandoffRuntimeUnavailable)?;
-        Ok(CorePrivateMicrorealmHandoff {
-            report: exit.report,
-            runtime,
-        })
     }
 }
 
@@ -570,10 +610,8 @@ pub enum CorePrivateMicrorealmDriverError {
     HandoffNotReady,
     #[error("Core private-microrealm handoff decision was lost")]
     HandoffDecisionLost,
-    #[error("Core private-microrealm handoff joined with the wrong outcome")]
-    HandoffOutcomeMismatch,
-    #[error("Core private-microrealm handoff did not return its live runtime")]
-    HandoffRuntimeUnavailable,
+    #[error("Core fixed-dungeon conversion failed: {0}")]
+    FixedDungeonConversion(String),
 }
 
 trait MicrorealmFrameRuntime: Send + 'static {
@@ -615,7 +653,6 @@ impl MicrorealmFrameRuntime for CorePrivateMicrorealmRuntime {
 #[derive(Debug)]
 struct CorePrivateMicrorealmDriverTaskExit {
     report: CorePrivateMicrorealmDriverReport,
-    runtime: Option<CorePrivateMicrorealmRuntime>,
 }
 
 fn spawn_driver<R>(runtime: R) -> CorePrivateMicrorealmDriver
@@ -653,9 +690,9 @@ where
         handle: CorePrivateMicrorealmDriverHandle {
             ingress,
             observation_rx,
+            handoff_tx: handoff_tx.clone(),
         },
         shutdown_tx,
-        handoff_tx,
         join: Some(join),
     }
 }
@@ -682,9 +719,7 @@ async fn run_driver<R>(
 where
     R: MicrorealmFrameRuntime,
 {
-    let mut interval = tokio::time::interval(DRIVER_TICK_DURATION);
-    interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    interval.tick().await;
+    let mut interval = fixed_driver_interval().await;
     let mut committed_frames = 0_u64;
     let mut final_tick = Tick(0);
     let mut skipped_deadlines = 0_u64;
@@ -706,14 +741,29 @@ where
                 match handle_handoff_request(
                     runtime.handoff_ready(),
                     &ingress,
+                    &observation_tx,
                     request,
                     committed_frames,
                     final_tick,
                     &mut shutdown_rx,
                 ).await {
                     HandoffControlOutcome::Continue => continue,
-                    HandoffControlOutcome::Transfer => {
-                        outcome = CorePrivateMicrorealmDriverOutcome::Transferred;
+                    HandoffControlOutcome::Convert(request) => {
+                        return convert_runtime_and_wait(
+                            runtime,
+                            request,
+                            &ingress,
+                            &observation_tx,
+                            committed_frames,
+                            final_tick,
+                            skipped_deadlines,
+                            &mut shutdown_rx,
+                            &mut handoff_rx,
+                        ).await;
+                    }
+                    HandoffControlOutcome::Indeterminate => {
+                        outcome = CorePrivateMicrorealmDriverOutcome::BellResolutionPending;
+                        wait_for_shutdown(&mut shutdown_rx, &mut handoff_rx).await;
                         break;
                     }
                     HandoffControlOutcome::Shutdown => break,
@@ -763,7 +813,6 @@ where
     }
     ingress.stop_accepting();
     driver_task_exit(
-        runtime,
         &ingress,
         committed_frames,
         final_tick,
@@ -772,17 +821,98 @@ where
     )
 }
 
-fn driver_task_exit<R>(
+async fn fixed_driver_interval() -> tokio::time::Interval {
+    let mut interval = tokio::time::interval(DRIVER_TICK_DURATION);
+    interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    interval.tick().await;
+    interval
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn convert_runtime_and_wait<R>(
     runtime: R,
+    request: Box<CorePrivateFixedDungeonConversionRequest>,
+    ingress: &Arc<SharedIngress>,
+    observation_tx: &watch::Sender<CorePrivateMicrorealmDriverState>,
+    committed_frames: u64,
+    final_tick: Tick,
+    skipped_deadlines: u64,
+    shutdown_rx: &mut watch::Receiver<bool>,
+    handoff_rx: &mut mpsc::Receiver<CorePrivateMicrorealmHandoffRequest>,
+) -> CorePrivateMicrorealmDriverTaskExit
+where
+    R: MicrorealmFrameRuntime,
+{
+    ingress.stop_accepting();
+    let CorePrivateFixedDungeonConversionRequest {
+        transition,
+        expected_content_revision,
+        encounters,
+        result_tx,
+    } = *request;
+    let transfer_id = transition.transfer_id;
+    let converted = runtime
+        .into_live_runtime()
+        .ok_or_else(|| "test-only runtime cannot become a fixed dungeon".to_owned())
+        .and_then(|microrealm| {
+            CorePrivateFixedDungeonRuntime::from_committed_bell(
+                microrealm,
+                &transition,
+                &expected_content_revision,
+                encounters,
+            )
+            .map_err(|error| error.to_string())
+        });
+    let (final_tick, outcome) = match converted {
+        Ok(fixed_dungeon) => {
+            let final_tick = fixed_dungeon.tick();
+            let ready = CorePrivateFixedDungeonDriverReady {
+                committed_microrealm_frames: committed_frames,
+                final_microrealm_tick: final_tick,
+                transfer_id,
+                route_lease: fixed_dungeon.route_lease(),
+                node: fixed_dungeon.node(),
+            };
+            observation_tx
+                .send_replace(CorePrivateMicrorealmDriverState::FixedDungeonReady { ready });
+            let _ = result_tx.send(Ok(ready));
+            wait_for_shutdown(shutdown_rx, handoff_rx).await;
+            drop(fixed_dungeon);
+            (
+                final_tick,
+                CorePrivateMicrorealmDriverOutcome::FixedDungeonReady,
+            )
+        }
+        Err(message) => {
+            observation_tx.send_replace(CorePrivateMicrorealmDriverState::Faulted {
+                committed_frames,
+                fault: CorePrivateMicrorealmDriverFault {
+                    kind: CorePrivateMicrorealmFaultKind::RouteAuthority,
+                    message: Arc::from(message.clone()),
+                    last_committed_tick: final_tick,
+                },
+            });
+            let _ = result_tx.send(Err(message));
+            wait_for_shutdown(shutdown_rx, handoff_rx).await;
+            (final_tick, CorePrivateMicrorealmDriverOutcome::Faulted)
+        }
+    };
+    driver_task_exit(
+        ingress,
+        committed_frames,
+        final_tick,
+        skipped_deadlines,
+        outcome,
+    )
+}
+
+fn driver_task_exit(
     ingress: &SharedIngress,
     committed_frames: u64,
     final_tick: Tick,
     skipped_deadlines: u64,
     outcome: CorePrivateMicrorealmDriverOutcome,
-) -> CorePrivateMicrorealmDriverTaskExit
-where
-    R: MicrorealmFrameRuntime,
-{
+) -> CorePrivateMicrorealmDriverTaskExit {
     CorePrivateMicrorealmDriverTaskExit {
         report: CorePrivateMicrorealmDriverReport {
             committed_frames,
@@ -805,19 +935,20 @@ where
             driver_task_live_after_join: true,
             active_driver_tasks_after_join: active_core_microrealm_driver_tasks(),
         },
-        runtime: runtime.into_live_runtime(),
     }
 }
 
 enum HandoffControlOutcome {
     Continue,
-    Transfer,
+    Convert(Box<CorePrivateFixedDungeonConversionRequest>),
+    Indeterminate,
     Shutdown,
 }
 
 async fn handle_handoff_request(
     handoff_ready: bool,
     ingress: &Arc<SharedIngress>,
+    observation_tx: &watch::Sender<CorePrivateMicrorealmDriverState>,
     request: CorePrivateMicrorealmHandoffRequest,
     committed_frames: u64,
     final_tick: Tick,
@@ -836,17 +967,20 @@ async fn handle_handoff_request(
         ingress.resume_accepting();
         return HandoffControlOutcome::Continue;
     }
+    let previous_state =
+        observation_tx.send_replace(CorePrivateMicrorealmDriverState::BellResolutionPending {
+            committed_frames,
+            final_tick,
+        });
     match await_handoff_decision(request.decision_rx, shutdown_rx).await {
         HandoffWaitOutcome::Abort(resumed_tx) => {
             ingress.resume_accepting();
+            observation_tx.send_replace(previous_state);
             let _ = resumed_tx.send(());
             HandoffControlOutcome::Continue
         }
-        HandoffWaitOutcome::DecisionDropped => {
-            ingress.resume_accepting();
-            HandoffControlOutcome::Continue
-        }
-        HandoffWaitOutcome::Commit => HandoffControlOutcome::Transfer,
+        HandoffWaitOutcome::DecisionDropped => HandoffControlOutcome::Indeterminate,
+        HandoffWaitOutcome::Convert(request) => HandoffControlOutcome::Convert(request),
         HandoffWaitOutcome::Shutdown => HandoffControlOutcome::Shutdown,
     }
 }
@@ -854,7 +988,7 @@ async fn handle_handoff_request(
 enum HandoffWaitOutcome {
     Abort(oneshot::Sender<()>),
     DecisionDropped,
-    Commit,
+    Convert(Box<CorePrivateFixedDungeonConversionRequest>),
     Shutdown,
 }
 
@@ -872,7 +1006,9 @@ async fn await_handoff_decision(
             Ok(CorePrivateMicrorealmHandoffDecision::Abort(resumed_tx)) => {
                 HandoffWaitOutcome::Abort(resumed_tx)
             }
-            Ok(CorePrivateMicrorealmHandoffDecision::Commit) => HandoffWaitOutcome::Commit,
+            Ok(CorePrivateMicrorealmHandoffDecision::Convert(request)) => {
+                HandoffWaitOutcome::Convert(request)
+            }
             Err(_) => HandoffWaitOutcome::DecisionDropped,
         }
     }
@@ -1217,7 +1353,7 @@ mod tests {
         let received = Arc::new(StdMutex::new(Vec::new()));
         let mut runtime = ScriptedRuntime::ordinary(Arc::clone(&received));
         runtime.handoff_ready = true;
-        let mut driver = spawn_driver(runtime);
+        let driver = spawn_driver(runtime);
         let handle = driver.handle();
         let mut observer = handle.observe();
         tokio::task::yield_now().await;
@@ -1264,7 +1400,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn handoff_rejects_non_bell_state_without_freezing_ingress() {
         let received = Arc::new(StdMutex::new(Vec::new()));
-        let mut driver = spawn_driver(ScriptedRuntime::ordinary(received));
+        let driver = spawn_driver(ScriptedRuntime::ordinary(received));
         tokio::task::yield_now().await;
         assert!(matches!(
             driver.prepare_handoff().await,
@@ -1284,11 +1420,11 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn dropped_prepared_handoff_resumes_without_reconstructing_runtime() {
+    async fn dropped_prepared_handoff_freezes_unknown_durable_outcome_until_shutdown() {
         let received = Arc::new(StdMutex::new(Vec::new()));
         let mut runtime = ScriptedRuntime::ordinary(Arc::clone(&received));
         runtime.handoff_ready = true;
-        let mut driver = spawn_driver(runtime);
+        let driver = spawn_driver(runtime);
         let handle = driver.handle();
         let mut observer = handle.observe();
         tokio::task::yield_now().await;
@@ -1298,18 +1434,31 @@ mod tests {
         drop(prepared);
         tokio::task::yield_now().await;
         tokio::task::yield_now().await;
-        handle
-            .submit_latest_input(CorePrivateMicrorealmRetainedInput {
+        assert!(matches!(
+            observer.latest(),
+            CorePrivateMicrorealmDriverState::BellResolutionPending {
+                committed_frames: 1,
+                final_tick: Tick(1),
+            }
+        ));
+        assert_eq!(
+            handle.submit_latest_input(CorePrivateMicrorealmRetainedInput {
                 input_sequence: 1,
                 movement: MovementAction::default(),
                 aim: AimDirection::east(),
                 primary_held: false,
                 primary_sequence: 0,
-            })
-            .expect("drop resumes ingress");
-        advance_one_frame(&mut observer).await;
-        assert!(received.lock().expect("received").len() >= 2);
-        driver.shutdown().await.expect("shutdown");
+            }),
+            Err(CorePrivateMicrorealmIngressError::DriverFrozen)
+        );
+        tokio::time::advance(DRIVER_TICK_DURATION * 5).await;
+        tokio::task::yield_now().await;
+        assert_eq!(received.lock().expect("received").len(), 1);
+        let report = driver.shutdown().await.expect("shutdown");
+        assert_eq!(
+            report.outcome,
+            CorePrivateMicrorealmDriverOutcome::BellResolutionPending
+        );
     }
 
     #[tokio::test(start_paused = true)]

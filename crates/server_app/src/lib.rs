@@ -107,18 +107,21 @@ pub use core_private_life_runtime_bootstrap::{
     CorePrivateLifeReattachOutcome, CorePrivateLifeRuntimeBootstrapAdapter,
 };
 pub use core_private_life_session::{
-    CorePrivateLifeSessionDirectory, CorePrivateLifeSessionError, CorePrivateLifeSessionReport,
-    CorePrivateLifeSessionSnapshot, CorePrivateLifeTransportAttach, CorePrivateLifeTransportDetach,
+    CorePrivateLifePreparedBellHandoff, CorePrivateLifeSessionDirectory,
+    CorePrivateLifeSessionError, CorePrivateLifeSessionReport, CorePrivateLifeSessionSnapshot,
+    CorePrivateLifeTransportAttach, CorePrivateLifeTransportDetach,
     CorePrivateLifeTransportGeneration, CorePrivateLifeTransportLease,
     CorePrivateMicrorealmBinding, CorePrivateMicrorealmBindingLease,
 };
 pub use core_private_microrealm_driver::{
+    CorePrivateFixedDungeonConversion, CorePrivateFixedDungeonDriverReady,
     CorePrivateMicrorealmAbility, CorePrivateMicrorealmAbilityPress, CorePrivateMicrorealmDriver,
     CorePrivateMicrorealmDriverError, CorePrivateMicrorealmDriverFault,
     CorePrivateMicrorealmDriverHandle, CorePrivateMicrorealmDriverObserver,
     CorePrivateMicrorealmDriverOutcome, CorePrivateMicrorealmDriverReport,
     CorePrivateMicrorealmDriverState, CorePrivateMicrorealmFaultKind,
-    CorePrivateMicrorealmIngressError, CorePrivateMicrorealmObservationError,
+    CorePrivateMicrorealmHandoffReady, CorePrivateMicrorealmIngressError,
+    CorePrivateMicrorealmObservationError, CorePrivateMicrorealmPreparedHandoff,
     CorePrivateMicrorealmRetainedInput, active_core_microrealm_driver_tasks,
 };
 pub use core_private_microrealm_runtime::{
