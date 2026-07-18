@@ -94,4 +94,3 @@ Before registration or content-hash promotion, optimized native playback must pr
 Integrate this pack only as a review dependency in the route-bound `CorePrivateCaldusRuntime`, then capture optimized native staging → countdown → closed-door introduction evidence at `1280×720` and `1920×1080` in standard and reduced-effects modes. Do not register or promote it until the runtime proves authoritative event ordering and exact timing.
 
 No gameplay logic, content record, asset registry, content hash, route gate, task/audit document, root README, distribution file, existing asset, commit, or push is changed by this pack.
-

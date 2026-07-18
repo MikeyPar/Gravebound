@@ -38,4 +38,4 @@ Commits `e1e4d7c`, `83ccbb1`, `83c75a5`, `3f4ecaf`, and `8a4898d` project durabl
 
 ## Current Next Step
 
-Consume the committed B5 boss-staging handoff into one route-bound Caldus owner at the inherited tick. Drive exact staging, countdown, introduction, and combat phases before adding durable rewards/pending inventory, the stable B6 exit, terminal composition, and hosted restart evidence.
+Construct `CorePrivateCaldusRuntime` from commit `cdeceda`'s consuming handoff and drive exact loading, five-second countdown, participant lock, 2.5-second introduction, and combat phases at the inherited tick. Then compose durable reward/pending-inventory placement, the stable B6 exit, normal-route publication, and hosted restart evidence.

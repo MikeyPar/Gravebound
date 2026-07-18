@@ -38,4 +38,4 @@ Commit `6749141` now binds this component to the persistent `CorePrivateRouteAct
 
 ## Current Next Step
 
-Commits `a2a5b09`, `09c9c9e`, `e1e4d7c`, `83ccbb1`, `83c75a5`, `3f4ecaf`, and `8a4898d` now own fixed-room frames, durable B3/B4 resolution, automatic acknowledgement-gated publication, and canonical persistent B3 composition. Commit `3c05a36` removes the B6 tick rewind. Next consume the committed B5 boss-staging handoff into authoritative route-bound Sir Caldus combat, then add committed reward/pending-inventory placement, stable B6 exit, and all five terminal producers.
+Commits `a2a5b09`, `09c9c9e`, `e1e4d7c`, `83ccbb1`, `83c75a5`, `3f4ecaf`, and `8a4898d` own fixed-room frames, durable B3/B4 resolution, automatic acknowledgement-gated publication, and canonical persistent B3 composition. Commits `3c05a36` and `cdeceda` now preserve the global danger tick and consume the exact B5 participant into B6 staging. Next construct the route-bound Caldus owner, then add committed reward/pending-inventory placement and the stable B6 exit.
