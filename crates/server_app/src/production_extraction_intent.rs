@@ -189,6 +189,16 @@ impl ProductionExtractionBossExitAuthorityV1 {
     }
 
     #[must_use]
+    pub const fn instance_lineage_id(&self) -> [u8; 16] {
+        self.instance_lineage_id
+    }
+
+    #[must_use]
+    pub const fn entry_restore_point_id(&self) -> [u8; 16] {
+        self.entry_restore_point_id
+    }
+
+    #[must_use]
     pub const fn route_state_version(&self) -> u64 {
         self.route_permit.accepted_route_state_version()
     }
@@ -503,6 +513,11 @@ impl ProductionExtractionPreparedIntentV1 {
         self.prepared.as_ref()
     }
 
+    #[must_use]
+    pub(crate) const fn frame(&self) -> &ExtractionCommitFrameV1 {
+        &self.frame
+    }
+
     fn exact_frame(&self, frame: &ExtractionCommitFrameV1) -> bool {
         self.frame.schema_version == frame.schema_version
             && self.frame.mutation_id == frame.mutation_id
@@ -556,6 +571,12 @@ impl<Planner, Clock> ProductionExtractionIntentActor<Planner, Clock> {
     #[must_use]
     pub async fn prepared_intent(&self) -> Option<ProductionExtractionPreparedIntentV1> {
         self.intent.lock().await.clone()
+    }
+
+    /// Retires the route generation only after the extraction runtime has retained a committed
+    /// terminal result. Durable bootstrap owns recovery if the process ends before this cleanup.
+    pub async fn retire_route_after_terminal(&self) -> Result<(), CorePrivateRouteRuntimeError> {
+        self.route_directory.retire_actor(self.route_lease).await
     }
 }
 
@@ -627,7 +648,13 @@ where
             }
         }
 
-        let pinned = intent.as_mut().expect("intent was installed above");
+        let Some(pinned) = intent.as_mut() else {
+            return rejection_reply(
+                frame,
+                server_tick,
+                TerminalInventoryRejectionCodeV1::SourceUnavailable,
+            );
+        };
         self.prepare_pinned_intent(frame, pinned).await
     }
 
@@ -809,6 +836,7 @@ pub struct CoreExtractionActorInbox {
 struct CoreExtractionActorCommand {
     authenticated: AuthenticatedAccount,
     frame: ExtractionCommitFrameV1,
+    fallback_server_tick: u64,
     reply: oneshot::Sender<CoreExtractionIntentReply>,
 }
 
@@ -857,6 +885,7 @@ impl CoreExtractionIntentAuthority for CoreExtractionActorHandle {
                 .send(CoreExtractionActorCommand {
                     authenticated,
                     frame: frame.clone(),
+                    fallback_server_tick,
                     reply,
                 })
                 .await
@@ -894,14 +923,39 @@ impl CoreExtractionActorInbox {
         Planner: ProductionExtractionPlanner,
         Clock: IdentityClock,
     {
+        self.serve_next_with_tick(actor, || Some(authoritative_tick))
+            .await
+            .unwrap_or(false)
+    }
+
+    pub(crate) async fn serve_next_with_tick<Planner, Clock, Tick>(
+        &mut self,
+        actor: &ProductionExtractionIntentActor<Planner, Clock>,
+        authoritative_tick: Tick,
+    ) -> Result<bool, ()>
+    where
+        Planner: ProductionExtractionPlanner,
+        Clock: IdentityClock,
+        Tick: FnOnce() -> Option<u64>,
+    {
         let Some(command) = self.receiver.recv().await else {
-            return false;
+            return Ok(false);
+        };
+        let Some(authoritative_tick) = authoritative_tick() else {
+            let _ = command.reply.send(CoreExtractionIntentReply {
+                server_tick: command.fallback_server_tick,
+                result: rejected(
+                    &command.frame,
+                    TerminalInventoryRejectionCodeV1::SourceUnavailable,
+                ),
+            });
+            return Err(());
         };
         let reply = actor
             .handle(command.authenticated, &command.frame, authoritative_tick)
             .await;
         let _ = command.reply.send(reply);
-        true
+        Ok(true)
     }
 }
 
@@ -1112,27 +1166,37 @@ pub enum ProductionExtractionIntentError {
 #[cfg(test)]
 mod tests {
     use std::{
+        num::NonZeroU64,
         path::{Path, PathBuf},
         sync::{
             Arc, Mutex as StdMutex,
-            atomic::{AtomicUsize, Ordering},
+            atomic::{AtomicU64, AtomicUsize, Ordering},
         },
+        time::Duration,
     };
 
     use persistence::{
-        PreparedProductionExtractionV1, StoredCaldusVictoryExit, StoredCaldusVictoryOwner,
+        PreparedProductionExtractionV1, ProductionExtractionTransactionV1,
+        ProductionExtractionVersionAdvanceV1, ProductionExtractionVersionsV1,
+        StoredCaldusVictoryExit, StoredCaldusVictoryOwner, StoredProductionExtractionResultV1,
+        canonical_production_extraction_plan_hash_v1,
     };
     use protocol::{
-        CorePrivateRouteContentRevisionV1, ExtractionCommitPayloadV1, ManifestHash,
-        TerminalExpectedVersionsV1,
+        ActionResultCode, CorePrivateRouteContentRevisionV1, ExtractionCommitPayloadV1,
+        ExtractionCommitResultV1, ManifestHash, ReliableEvent, TerminalExpectedVersionsV1,
     };
     use sim_core::EntityId;
 
     use super::*;
     use crate::{
-        AccountId, CaldusExitPresentationCommit, CorePrivateRouteActorPosition,
-        CorePrivateRouteActorSeed, CorePrivateRouteExtractionBinding,
-        CorePrivateRouteExtractionExitBinding,
+        AccountId, CaldusExitPresentationCommit, CoreExtractionActorDirectory,
+        CoreExtractionActorLease, CoreExtractionAuthoritativeTick,
+        CoreExtractionPublicationOutcome, CoreExtractionRuntimeError,
+        CorePrivateRouteActorPosition, CorePrivateRouteActorSeed,
+        CorePrivateRouteExtractionBinding, CorePrivateRouteExtractionExitBinding,
+        CoreReliableWriter, CoreTerminalCoordinator, ProductionExtractionPublicationProof,
+        STORED_TERMINAL_RECEIPT_SCHEMA_V1, StoredTerminalReceipt, StoredTerminalReceiptV1,
+        TerminalKind,
     };
 
     #[derive(Debug, Clone, Copy)]
@@ -1238,7 +1302,33 @@ mod tests {
             }
             let request = input.commit_request().clone();
             let request_hash = request.canonical_hash()?;
-            PreparedProductionExtractionV1::seal(request, request_hash, [0x55; 32], false)
+            let plan_hash = canonical_production_extraction_plan_hash_v1(&[], &[])?;
+            PreparedProductionExtractionV1::seal(request, request_hash, plan_hash, false)
+        }
+    }
+
+    #[derive(Debug)]
+    struct ExtractionTicks {
+        tick: AtomicU64,
+        calls: AtomicUsize,
+    }
+
+    impl ExtractionTicks {
+        fn new(tick: u64) -> Self {
+            Self {
+                tick: AtomicU64::new(tick),
+                calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl CoreExtractionAuthoritativeTick for ExtractionTicks {
+        fn current_tick(&self, lease: CoreExtractionActorLease) -> Option<NonZeroU64> {
+            assert_eq!(lease.account_id(), [1; 16]);
+            assert_eq!(lease.character_id(), [2; 16]);
+            assert_eq!(lease.route_generation(), 7);
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            NonZeroU64::new(self.tick.load(Ordering::SeqCst))
         }
     }
 
@@ -1451,6 +1541,407 @@ mod tests {
             issued_at_unix_millis: 1_000,
             payload_hash: payload.canonical_hash(),
             payload,
+        }
+    }
+
+    fn stored_result(
+        prepared: &PreparedProductionExtractionV1,
+    ) -> StoredProductionExtractionResultV1 {
+        let request = prepared.request();
+        let result = StoredProductionExtractionResultV1 {
+            contract_version: request.contract_version,
+            namespace_id: request.namespace_id.clone(),
+            account_id: request.account_id,
+            character_id: request.character_id,
+            mutation_id: request.mutation_id,
+            terminal_id: request.terminal_id,
+            extraction_request_id: request.extraction_request_id,
+            extraction_receipt_id: request.extraction_receipt_id,
+            canonical_request_hash: prepared.canonical_request_hash(),
+            canonical_plan_hash: prepared.canonical_plan_hash(),
+            result_code: 1,
+            issued_at_unix_ms: request.issued_at_unix_ms,
+            observed_tick: request.observed_tick,
+            committed_at_unix_ms: request.issued_at_unix_ms + 1,
+            destination_content_id: persistence::PRODUCTION_EXTRACTION_HALL_ID.into(),
+            versions: ProductionExtractionVersionsV1 {
+                account: ProductionExtractionVersionAdvanceV1 { pre: 10, post: 10 },
+                character: ProductionExtractionVersionAdvanceV1 { pre: 20, post: 21 },
+                world: ProductionExtractionVersionAdvanceV1 { pre: 20, post: 21 },
+                inventory: ProductionExtractionVersionAdvanceV1 { pre: 30, post: 31 },
+                life_metrics: ProductionExtractionVersionAdvanceV1 { pre: 40, post: 41 },
+            },
+            placements: Vec::new(),
+            material_credits: Vec::new(),
+            storage_resolution_required: false,
+        };
+        result.validate().expect("valid stored extraction result");
+        result
+    }
+
+    async fn live_connection_pair() -> (
+        quinn::Endpoint,
+        quinn::Endpoint,
+        quinn::Connection,
+        quinn::Connection,
+    ) {
+        let rcgen::CertifiedKey { cert, signing_key } =
+            rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+        let certificate = cert.der().clone();
+        let private_key = rustls::pki_types::PrivatePkcs8KeyDer::from(signing_key.serialize_der());
+        let server_config =
+            quinn::ServerConfig::with_single_cert(vec![certificate.clone()], private_key.into())
+                .unwrap();
+        let server_endpoint =
+            quinn::Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap()).unwrap();
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(certificate).unwrap();
+        let client_config = quinn::ClientConfig::with_root_certificates(Arc::new(roots)).unwrap();
+        let mut client_endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+        client_endpoint.set_default_client_config(client_config);
+        let connecting = client_endpoint
+            .connect(server_endpoint.local_addr().unwrap(), "localhost")
+            .unwrap();
+        let incoming = server_endpoint.accept().await.unwrap();
+        let (client, server) = tokio::join!(connecting, incoming);
+        (
+            server_endpoint,
+            client_endpoint,
+            client.unwrap(),
+            server.unwrap(),
+        )
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one contiguous real-QUIC journey proves sequence continuity, durable publication, route retirement, handoff replay, and Hall acknowledgement"
+    )]
+    async fn dynamic_runtime_reuses_session_writer_replays_commit_and_retires_route() {
+        let planner = FakePlanner::stable();
+        let (exit_authority, route_directory, route_lease) = authority().await;
+        let actor = Arc::new(
+            ProductionExtractionIntentActor::new(
+                exit_authority,
+                route_directory.clone(),
+                route_lease,
+                planner,
+                FixedClock(10_000),
+            )
+            .expect("intent actor"),
+        );
+        let ticks = Arc::new(ExtractionTicks::new(700));
+        let runtime = Arc::new(CoreExtractionActorDirectory::new(Arc::clone(&ticks)));
+        let actor_lease = runtime
+            .register_actor(authenticated(), Arc::clone(&actor))
+            .await
+            .expect("register extraction actor");
+        tokio::task::yield_now().await;
+        assert_eq!(ticks.calls.load(Ordering::SeqCst), 0);
+        let (first_server_endpoint, first_client_endpoint, first_client, first_server) =
+            live_connection_pair().await;
+        let session_writer = Arc::new(CoreReliableWriter::new(first_server));
+        let preceding = session_writer
+            .send_event(
+                699,
+                ReliableEvent::ActionResult {
+                    action_sequence: 9,
+                    code: ActionResultCode::Accepted,
+                },
+            )
+            .await
+            .expect("preceding session event");
+        assert_eq!(preceding.sequence, 1);
+        assert_eq!(
+            bot_client::receive_server_reliable(&first_client)
+                .await
+                .unwrap(),
+            preceding
+        );
+        let first = runtime
+            .attach_reliable_writer(authenticated(), Arc::clone(&session_writer))
+            .await
+            .expect("attach session writer");
+        assert!(!first.committed_result_replayed);
+        let authority = Arc::clone(&runtime).authority(first.lease);
+        let request = frame(1);
+        let foreign = AuthenticatedAccount {
+            account_id: AccountId::new([8; 16]).expect("foreign account"),
+            namespace: AuthenticatedNamespace::WipeableTest,
+        };
+        assert!(matches!(
+            authority
+                .handle_extraction(foreign, &request, 1)
+                .await
+                .result,
+            ExtractionCommitResultV1::Rejected {
+                code: TerminalInventoryRejectionCodeV1::ForeignAuthority,
+                ..
+            }
+        ));
+        let pending = authority
+            .handle_extraction(authenticated(), &request, 1)
+            .await;
+        assert_eq!(pending.server_tick, 700);
+        assert!(matches!(
+            pending.result,
+            ExtractionCommitResultV1::Pending { .. }
+        ));
+        assert_eq!(ticks.calls.load(Ordering::SeqCst), 1);
+
+        let intent = actor.prepared_intent().await.expect("prepared intent");
+        let prepared = intent.prepared().expect("prepared transaction");
+        let stored = stored_result(prepared);
+        let terminal_id = stored.terminal_id;
+        let result_hash = stored.digest().expect("stored result hash");
+        let fresh_transaction = ProductionExtractionTransactionV1::Fresh(stored.clone());
+        let fresh_proof = ProductionExtractionPublicationProof::from_validated_test_transaction(
+            prepared,
+            &fresh_transaction,
+        )
+        .expect("validated fresh publication proof");
+        let replay_transaction = ProductionExtractionTransactionV1::Replayed(stored);
+        let replay_proof = ProductionExtractionPublicationProof::from_validated_test_transaction(
+            prepared,
+            &replay_transaction,
+        )
+        .expect("validated replay publication proof");
+        let (delivery_started, release_delivery) = runtime.install_delivery_test_gate().await;
+        let fresh_runtime = Arc::clone(&runtime);
+        let fresh_intent = intent.clone();
+        let fresh_publication = tokio::spawn(async move {
+            fresh_runtime
+                .publish_coordinated(actor_lease, &fresh_intent, &fresh_proof)
+                .await
+        });
+        delivery_started.notified().await;
+        fresh_publication.abort();
+        assert!(
+            fresh_publication
+                .await
+                .expect_err("outer publication cancelled")
+                .is_cancelled()
+        );
+        assert_eq!(
+            runtime
+                .publish_coordinated(actor_lease, &intent, &replay_proof)
+                .await
+                .expect("concurrent exact repository replay"),
+            CoreExtractionPublicationOutcome::ReplayedQueued
+        );
+        release_delivery.notify_one();
+        let pushed = bot_client::receive_server_reliable(&first_client)
+            .await
+            .unwrap();
+        assert_eq!(pushed.sequence, 2);
+        assert_eq!(pushed.server_tick, 700);
+        assert!(matches!(
+            pushed.event,
+            ReliableEvent::ExtractionCommitResult(result)
+                if matches!(*result, ExtractionCommitResultV1::Stored { request_sequence: 1, replayed: false, .. })
+        ));
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(50),
+                bot_client::receive_server_reliable(&first_client),
+            )
+            .await
+            .is_err(),
+            "concurrent publication must emit one completion event"
+        );
+
+        let retry = authority
+            .handle_extraction(authenticated(), &frame(2), 999)
+            .await;
+        assert_eq!(retry.server_tick, 700);
+        assert!(matches!(
+            retry.result,
+            ExtractionCommitResultV1::Stored {
+                request_sequence: 2,
+                replayed: true,
+                ..
+            }
+        ));
+        let retired = runtime
+            .retire_actor_after_commit(actor_lease)
+            .await
+            .expect("retire committed actor");
+        assert!(retired.committed_result_retained);
+        assert!(retired.zero_actor_residue);
+        assert!(matches!(
+            authority
+                .handle_extraction(authenticated(), &frame(3), 999)
+                .await
+                .result,
+            ExtractionCommitResultV1::Stored {
+                request_sequence: 3,
+                ..
+            }
+        ));
+        let mut changed = frame(4);
+        changed.issued_at_unix_millis += 1;
+        assert!(matches!(
+            authority
+                .handle_extraction(authenticated(), &changed, 999)
+                .await
+                .result,
+            ExtractionCommitResultV1::Rejected {
+                code: TerminalInventoryRejectionCodeV1::IdempotencyConflict,
+                ..
+            }
+        ));
+        let stale_hall = runtime
+            .prepare_hall_projection(first.lease, terminal_id, result_hash)
+            .await
+            .expect("first generation Hall projection");
+
+        let (second_server_endpoint, second_client_endpoint, second_client, second_server) =
+            live_connection_pair().await;
+        let second_writer = Arc::new(CoreReliableWriter::new(second_server));
+        let second = runtime
+            .attach_reliable_writer(authenticated(), Arc::clone(&second_writer))
+            .await
+            .expect("handoff committed extraction");
+        assert!(second.invalidated_connection.is_some());
+        assert!(second.committed_result_replayed);
+        assert!(!session_writer.is_available());
+        let replayed = bot_client::receive_server_reliable(&second_client)
+            .await
+            .unwrap();
+        assert_eq!(replayed.sequence, 1);
+        assert!(matches!(
+            replayed.event,
+            ReliableEvent::ExtractionCommitResult(result)
+                if matches!(*result, ExtractionCommitResultV1::Stored { replayed: true, .. })
+        ));
+        assert!(matches!(
+            runtime.acknowledge_hall_installed(stale_hall).await,
+            Err(CoreExtractionRuntimeError::TransportUnavailable)
+        ));
+        assert!(matches!(
+            authority
+                .handle_extraction(authenticated(), &frame(4), 999)
+                .await
+                .result,
+            ExtractionCommitResultV1::Rejected {
+                code: TerminalInventoryRejectionCodeV1::SourceUnavailable,
+                ..
+            }
+        ));
+
+        let hall = runtime
+            .prepare_hall_projection(second.lease, terminal_id, result_hash)
+            .await
+            .expect("prepare delivered Hall projection");
+        assert_eq!(hall.snapshot().character_id, [2; 16]);
+        runtime
+            .acknowledge_hall_installed(hall)
+            .await
+            .expect("release extraction binding without retiring session writer");
+        assert!(second_writer.is_available());
+        for connection in runtime.begin_shutdown().await {
+            connection.close(0_u32.into(), b"test shutdown");
+        }
+        let report = runtime.finish_shutdown().await.unwrap();
+        assert_eq!(report.served_commands, 2);
+        assert!(report.zero_residue);
+        first_client.close(0_u32.into(), b"test complete");
+        second_client.close(0_u32.into(), b"test complete");
+        first_server_endpoint.wait_idle().await;
+        first_client_endpoint.wait_idle().await;
+        second_server_endpoint.wait_idle().await;
+        second_client_endpoint.wait_idle().await;
+    }
+
+    fn committed_terminal_coordinator(kind: TerminalKind) -> CoreTerminalCoordinator {
+        committed_terminal_coordinator_with_route(kind, [3; 16], [4; 16])
+    }
+
+    fn committed_terminal_coordinator_with_route(
+        kind: TerminalKind,
+        lineage_id: [u8; 16],
+        restore_point_id: [u8; 16],
+    ) -> CoreTerminalCoordinator {
+        let receipt = StoredTerminalReceipt::from_storage(&StoredTerminalReceiptV1 {
+            schema_version: STORED_TERMINAL_RECEIPT_SCHEMA_V1,
+            account_id: [1; 16],
+            character_id: [2; 16],
+            lineage_id,
+            restore_point_id,
+            terminal_id: [70 + kind.stable_code(); 16],
+            mutation_id: [80 + kind.stable_code(); 16],
+            payload_hash: [90 + kind.stable_code(); 32],
+            server_plan_hash: [100 + kind.stable_code(); 32],
+            result_hash: [110 + kind.stable_code(); 32],
+            expected_state_version: 20,
+            post_state_version: 21,
+            observed_tick: 700,
+            committed_tick: 700,
+            terminal_kind_code: kind.stable_code(),
+        })
+        .expect("stored terminal receipt");
+        CoreTerminalCoordinator::from_stored_receipt(authenticated(), receipt)
+            .expect("committed terminal coordinator")
+    }
+
+    #[tokio::test]
+    async fn every_other_terminal_winner_retires_extraction_without_retiring_session_authority() {
+        for kind in [
+            TerminalKind::LethalDeath,
+            TerminalKind::EmergencyRecall,
+            TerminalKind::DisconnectRecovery,
+            TerminalKind::VerifiedServerFaultRestoration,
+        ] {
+            let planner = FakePlanner::stable();
+            let (exit_authority, route_directory, route_lease) = authority().await;
+            let actor = Arc::new(
+                ProductionExtractionIntentActor::new(
+                    exit_authority,
+                    route_directory.clone(),
+                    route_lease,
+                    planner,
+                    FixedClock(10_000),
+                )
+                .expect("intent actor"),
+            );
+            let runtime = Arc::new(CoreExtractionActorDirectory::new(Arc::new(
+                ExtractionTicks::new(700),
+            )));
+            let actor_lease = runtime
+                .register_actor(authenticated(), actor)
+                .await
+                .expect("register extraction actor");
+            for stale in [
+                committed_terminal_coordinator_with_route(kind, [9; 16], [4; 16]),
+                committed_terminal_coordinator_with_route(kind, [3; 16], [9; 16]),
+            ] {
+                assert!(matches!(
+                    runtime
+                        .retire_actor_after_other_terminal(actor_lease, &stale)
+                        .await,
+                    Err(CoreExtractionRuntimeError::InvalidTerminalWinner)
+                ));
+            }
+            let retired = runtime
+                .retire_actor_after_other_terminal(
+                    actor_lease,
+                    &committed_terminal_coordinator(kind),
+                )
+                .await
+                .expect("retire losing extraction");
+            assert!(!retired.committed_result_retained);
+            assert!(retired.zero_actor_residue);
+            assert!(route_directory.snapshot(route_lease).is_err());
+            assert!(runtime.begin_shutdown().await.is_empty());
+            assert!(runtime.finish_shutdown().await.unwrap().zero_residue);
+            route_directory.begin_shutdown();
+            assert!(
+                route_directory
+                    .finish_shutdown()
+                    .await
+                    .unwrap()
+                    .zero_residue
+            );
         }
     }
 

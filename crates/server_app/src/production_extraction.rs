@@ -173,9 +173,68 @@ pub struct ProductionExtractionExecutionOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProductionExtractionCoordinatedOutcome {
+    pub execution: ProductionExtractionExecutionOutcome,
+    publication: ProductionExtractionPublicationProof,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProductionExtractionReplayOutcome {
     pub transaction: ProductionExtractionTransactionV1,
     pub receipt: StoredTerminalReceipt,
+    publication: ProductionExtractionPublicationProof,
+}
+
+/// Opaque evidence that the extraction executor validated the complete stored result and either
+/// committed it as the frozen five-producer winner or recovered its durable terminal receipt.
+/// Runtime publication accepts this proof instead of a caller-supplied repository transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProductionExtractionPublicationProof {
+    transaction: ProductionExtractionTransactionV1,
+    receipt: StoredTerminalReceipt,
+}
+
+impl ProductionExtractionPublicationProof {
+    #[must_use]
+    pub const fn transaction(&self) -> &ProductionExtractionTransactionV1 {
+        &self.transaction
+    }
+
+    #[must_use]
+    pub const fn receipt(&self) -> &StoredTerminalReceipt {
+        &self.receipt
+    }
+
+    #[must_use]
+    pub const fn is_replay(&self) -> bool {
+        self.transaction.is_replay()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_validated_test_transaction(
+        extraction: &PreparedProductionExtractionV1,
+        transaction: &ProductionExtractionTransactionV1,
+    ) -> Result<Self, ProductionExtractionExecutionError> {
+        let result = transaction
+            .result()
+            .ok_or(ProductionExtractionExecutionError::RepositoryConflict)?;
+        let receipt = committed_extraction_terminal_receipt(extraction, result)?;
+        extraction_publication_proof(extraction, transaction, &receipt)
+    }
+}
+
+impl ProductionExtractionCoordinatedOutcome {
+    #[must_use]
+    pub const fn publication_proof(&self) -> &ProductionExtractionPublicationProof {
+        &self.publication
+    }
+}
+
+impl ProductionExtractionReplayOutcome {
+    #[must_use]
+    pub const fn publication_proof(&self) -> &ProductionExtractionPublicationProof {
+        &self.publication
+    }
 }
 
 #[derive(Debug, Error)]
@@ -234,20 +293,30 @@ where
         coordinator: &mut CoreTerminalCoordinator,
         prepared_terminal: &PreparedTerminal,
         extraction: &PreparedProductionExtractionV1,
-    ) -> Result<ProductionExtractionExecutionOutcome, ProductionExtractionExecutionError> {
-        self.execute_prepared(
-            coordinator.terminal_arbiter_mut(),
-            prepared_terminal,
-            extraction,
-        )
-        .await
+    ) -> Result<ProductionExtractionCoordinatedOutcome, ProductionExtractionExecutionError> {
+        let execution = self
+            .execute_prepared(
+                coordinator.terminal_arbiter_mut(),
+                prepared_terminal,
+                extraction,
+            )
+            .await?;
+        let receipt = coordinator
+            .committed_receipt()
+            .ok_or(ProductionExtractionExecutionError::StoredTerminalRecoveryMismatch)?;
+        let publication =
+            extraction_publication_proof(extraction, &execution.transaction, receipt)?;
+        Ok(ProductionExtractionCoordinatedOutcome {
+            execution,
+            publication,
+        })
     }
 
     /// Executes only the frozen successful-extraction winner.
     ///
     /// Repository failure or plan drift leaves the arbiter prepared, so departure remains blocked
     /// and the exact intent can be retried or recovered without publishing a Hall arrival.
-    pub async fn execute_prepared(
+    pub(crate) async fn execute_prepared(
         &self,
         arbiter: &mut TerminalArbiter,
         prepared_terminal: &PreparedTerminal,
@@ -306,11 +375,31 @@ where
                 .ok_or(ProductionExtractionExecutionError::RepositoryConflict)?;
             committed_extraction_terminal_receipt(extraction, result)?
         };
+        let publication = extraction_publication_proof(extraction, &transaction, &receipt)?;
         Ok(ProductionExtractionReplayOutcome {
             transaction,
             receipt,
+            publication,
         })
     }
+}
+
+fn extraction_publication_proof(
+    extraction: &PreparedProductionExtractionV1,
+    transaction: &ProductionExtractionTransactionV1,
+    receipt: &StoredTerminalReceipt,
+) -> Result<ProductionExtractionPublicationProof, ProductionExtractionExecutionError> {
+    let result = transaction
+        .result()
+        .ok_or(ProductionExtractionExecutionError::RepositoryConflict)?;
+    let expected = committed_extraction_terminal_receipt(extraction, result)?;
+    if &expected != receipt || receipt.kind() != TerminalKind::SuccessfulExtraction {
+        return Err(ProductionExtractionExecutionError::StoredTerminalRecoveryMismatch);
+    }
+    Ok(ProductionExtractionPublicationProof {
+        transaction: transaction.clone(),
+        receipt: receipt.clone(),
+    })
 }
 
 /// Converts one repository-prepared extraction into the opaque shared terminal candidate.
@@ -933,6 +1022,40 @@ mod tests {
             production_extraction_terminal_candidate(&extraction),
             Err(ProductionExtractionExecutionError::CommittedReplayRequiresRecovery)
         ));
+    }
+
+    #[test]
+    fn publication_proof_rejects_tick_time_and_every_pre_version_drift() {
+        let extraction = prepared_extraction();
+        let base = stored_result(&extraction);
+        let mut invalid = Vec::new();
+        let mut issued = base.clone();
+        issued.issued_at_unix_ms += 1;
+        invalid.push(issued);
+        let mut observed = base.clone();
+        observed.observed_tick += 1;
+        invalid.push(observed);
+        for axis in 0..5 {
+            let mut version = base.clone();
+            match axis {
+                0 => version.versions.account.pre += 1,
+                1 => version.versions.character.pre += 1,
+                2 => version.versions.world.pre += 1,
+                3 => version.versions.inventory.pre += 1,
+                _ => version.versions.life_metrics.pre += 1,
+            }
+            invalid.push(version);
+        }
+        for stored in invalid {
+            let transaction = ProductionExtractionTransactionV1::Fresh(stored);
+            assert!(matches!(
+                ProductionExtractionPublicationProof::from_validated_test_transaction(
+                    &extraction,
+                    &transaction,
+                ),
+                Err(ProductionExtractionExecutionError::StoredResultMismatch)
+            ));
+        }
     }
 
     #[tokio::test]

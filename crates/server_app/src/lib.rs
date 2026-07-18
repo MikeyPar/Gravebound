@@ -11,6 +11,7 @@ mod caldus_extraction;
 mod caldus_instance_presentation;
 mod caldus_victory;
 mod combat_factory;
+mod core_extraction_runtime;
 mod core_journey_world_flow;
 mod core_lifecycle;
 mod core_private_life_foundation;
@@ -75,6 +76,13 @@ pub use caldus_victory::{
 pub use combat_factory::{
     CoreCharacterCombat, CoreCharacterCombatCompiler, CoreCharacterCombatFactory,
     CoreCombatFactoryError,
+};
+pub use core_extraction_runtime::{
+    CoreExtractionActorDirectory, CoreExtractionActorLease, CoreExtractionActorRetirementReport,
+    CoreExtractionAuthoritativeTick, CoreExtractionConnectionAuthority,
+    CoreExtractionConnectionLease, CoreExtractionPublicationOutcome, CoreExtractionRuntimeError,
+    CoreExtractionRuntimeReport, CoreExtractionTransportAttach, CoreExtractionTransportDetach,
+    CoreExtractionTransportGeneration,
 };
 pub use core_journey_world_flow::{
     CommittedExtractionTransferAuthority, DisposableCoreJourneyWorldFlow,
@@ -169,8 +177,9 @@ pub use live_damage_trace_service::{
 pub use oath_selection::{CoreOathSelectionAuthority, PostgresOathSelectionService};
 pub use production_extraction::{
     CoreExtractionIntentAuthority, CoreExtractionIntentReply, CoreExtractionTerminalAuthority,
-    PostgresProductionExtractionExecutionService, ProductionExtractionExecutionError,
-    ProductionExtractionExecutionOutcome, ProductionExtractionExecutionService,
+    PostgresProductionExtractionExecutionService, ProductionExtractionCoordinatedOutcome,
+    ProductionExtractionExecutionError, ProductionExtractionExecutionOutcome,
+    ProductionExtractionExecutionService, ProductionExtractionPublicationProof,
     ProductionExtractionReplayOutcome, ProductionExtractionTerminalReader,
     ProductionExtractionWriter, committed_extraction_terminal_receipt,
     committed_extraction_terminal_receipt_from_stored, hall_snapshot_from_stored_extraction,
