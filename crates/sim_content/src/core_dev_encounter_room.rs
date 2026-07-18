@@ -11,9 +11,9 @@ use content_schema::{
     SCHEMA_VERSION,
 };
 use sim_core::{
-    BellReedDefinition, ChainSentryDefinition, CoreAttackGroupRule, CoreEnemyDefinition,
-    CoreEnemyDefinitionParameters, CoreEnemyLocomotionParameters, CoreEnemyRole,
-    CoreEnemyStateStage, CorePatternDefinition, CorePatternDefinitionParameters,
+    ArenaGeometry, BellReedDefinition, ChainSentryDefinition, CoreAttackGroupRule,
+    CoreEnemyDefinition, CoreEnemyDefinitionParameters, CoreEnemyLocomotionParameters,
+    CoreEnemyRole, CoreEnemyStateStage, CorePatternDefinition, CorePatternDefinitionParameters,
     CorePatternGeometryParameters, CorePatternWarningParameters, CoreRadialGapRelation,
     CoreTargetSelection, CoreTelegraphLock, Counterplay, DrownedPilgrimDefinition,
     DungeonAnchorKind, DungeonCorridor, DungeonDoorDefinition, DungeonDoorSide, DungeonRoomAnchor,
@@ -261,6 +261,19 @@ impl CoreDevelopmentEncounterRooms {
     pub fn compile_fixed_layout_definition(&self) -> Result<FixedDungeonLayoutDefinition> {
         let definitions = self.compile_room_definitions()?;
         compile_fixed_layout(&self.records.layouts[0], &definitions)
+    }
+
+    /// Compiles the exact B6 local collision arena used by the route-bound Sir Caldus owner.
+    /// The fixed layout remains the source of rotation and room identity; the boss cannot select
+    /// an alternate arena or reconstruct collision geometry from client presentation data.
+    pub fn compile_caldus_arena(&self) -> Result<ArenaGeometry> {
+        let layout = self.compile_fixed_layout_definition()?;
+        let b6 = layout
+            .rooms
+            .iter()
+            .find(|room| room.node_id == "B6")
+            .context("Core fixed layout is missing B6")?;
+        crate::core_fixed_room_encounter::combat_arena(&b6.room).map_err(Into::into)
     }
 }
 
@@ -2538,6 +2551,20 @@ mod tests {
             .expect("checked-in encounter rooms");
         assert_eq!(compiled.roster().len(), 8);
         assert_eq!(compiled.actor_definitions().len(), 8);
+        let caldus_arena = compiled.compile_caldus_arena().expect("compiled B6 arena");
+        assert_eq!(caldus_arena.id, "arena.boss.caldus_01.combat");
+        assert_eq!(
+            (
+                caldus_arena.width_milli_tiles,
+                caldus_arena.height_milli_tiles
+            ),
+            (18_000, 18_000)
+        );
+        assert_eq!(
+            caldus_arena.boss_spawn,
+            sim_core::TilePoint::new(9_000, 9_000)
+        );
+        assert_eq!(caldus_arena.anchors.len(), 8);
         assert_eq!(
             compiled
                 .actor_definitions()

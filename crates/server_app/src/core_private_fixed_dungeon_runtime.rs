@@ -72,6 +72,50 @@ pub struct CorePrivateFixedDungeonLiveRoomFrame {
     pub player_died: bool,
 }
 
+/// Consuming B5-to-B6 transfer. The exact player, combat envelope, projectile allocator, route
+/// lease, and inherited danger tick cross together; no caller can rebuild or partially clone the
+/// boss participant.
+#[derive(Debug)]
+pub struct CorePrivateCaldusStagingHandoff {
+    pub(crate) route_directory: CorePrivateRouteActorDirectory,
+    pub(crate) route_lease: CorePrivateRouteActorLease,
+    pub(crate) content_revision: CorePrivateRouteContentRevisionV1,
+    pub(crate) combat_envelope: CoreCharacterCombatEnvelope,
+    pub(crate) participant: sim_core::NormalWaveHandoff,
+    pub(crate) tick: Tick,
+}
+
+impl CorePrivateCaldusStagingHandoff {
+    #[must_use]
+    pub const fn route_lease(&self) -> CorePrivateRouteActorLease {
+        self.route_lease
+    }
+
+    #[must_use]
+    pub const fn tick(&self) -> Tick {
+        self.tick
+    }
+
+    #[must_use]
+    pub const fn content_revision(&self) -> &CorePrivateRouteContentRevisionV1 {
+        &self.content_revision
+    }
+
+    #[must_use]
+    pub const fn combat_envelope(&self) -> &CoreCharacterCombatEnvelope {
+        &self.combat_envelope
+    }
+
+    pub fn route_snapshot(&self) -> Result<CorePrivateRouteStateV1, CorePrivateRouteRuntimeError> {
+        self.route_directory.snapshot(self.route_lease)
+    }
+
+    #[must_use]
+    pub fn player(&self) -> &sim_core::EnemyLabPlayer {
+        &self.participant.player
+    }
+}
+
 #[derive(Debug)]
 pub struct CorePrivateFixedDungeonRuntime {
     route_directory: CorePrivateRouteActorDirectory,
@@ -165,6 +209,28 @@ impl CorePrivateFixedDungeonRuntime {
     #[must_use]
     pub fn pending_b3_reward_handoff(&self) -> Option<&sim_content::CoreB3RewardHandoff> {
         self.combat.pending_b3_reward_handoff()
+    }
+
+    pub fn into_caldus_staging_handoff(
+        self,
+    ) -> Result<CorePrivateCaldusStagingHandoff, CorePrivateFixedDungeonRuntimeError> {
+        let route = self.route_directory.snapshot(self.route_lease)?;
+        self.validate_route_authority(&route)?;
+        if self.combat.node() != sim_content::CoreFixedDungeonNode::CaldusArenaB6
+            || self.movement.is_some()
+            || route.phase != CorePrivateRoutePhaseV1::BossStaging
+        {
+            return Err(CorePrivateFixedDungeonRuntimeError::InvalidComposition);
+        }
+        let participant = self.combat.into_boss_handoff()?;
+        Ok(CorePrivateCaldusStagingHandoff {
+            route_directory: self.route_directory,
+            route_lease: self.route_lease,
+            content_revision: self.content_revision,
+            combat_envelope: self.combat_envelope,
+            participant,
+            tick: self.tick,
+        })
     }
 
     pub async fn advance(
@@ -893,7 +959,7 @@ mod tests {
 
     #[tokio::test]
     async fn durable_b4_resolution_is_lineage_bound_replay_safe_and_advances_to_b5() {
-        let (directory, _, mut runtime) = fixture_at(Tick(0));
+        let (directory, lease, mut runtime) = fixture_at(Tick(0));
         runtime.advance().await.expect("enter B1");
         let _ = clear_current_room(&mut runtime).await;
         runtime.advance().await.expect("enter B2");
@@ -974,6 +1040,27 @@ mod tests {
             entered.route.room,
             Some(CorePrivateRouteRoomV1::BellBridgeB5)
         );
+
+        let _ = clear_current_room(&mut runtime).await;
+        let inherited_tick = runtime.tick();
+        let player_entity_id = runtime.combat.player().expect("B5 player").target.entity_id;
+        let entered = runtime.advance().await.expect("enter B6 staging");
+        assert_eq!(entered.route.phase, CorePrivateRoutePhaseV1::BossStaging);
+        assert_eq!(
+            entered.route.room,
+            Some(CorePrivateRouteRoomV1::CaldusArenaB6)
+        );
+
+        let handoff = runtime
+            .into_caldus_staging_handoff()
+            .expect("consume exact B6 staging handoff");
+        assert_eq!(handoff.route_lease(), lease);
+        assert_eq!(handoff.tick(), inherited_tick);
+        assert_eq!(handoff.content_revision(), &route_revision());
+        assert_eq!(handoff.combat_envelope().character_id(), CHARACTER_ID);
+        assert_eq!(handoff.player().target.entity_id, player_entity_id);
+        let route = handoff.route_snapshot().expect("handoff route snapshot");
+        assert_eq!(route, entered.route);
 
         directory.begin_shutdown();
         assert!(directory.finish_shutdown().await.unwrap().zero_residue);

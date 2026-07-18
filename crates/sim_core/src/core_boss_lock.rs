@@ -155,16 +155,20 @@ pub struct CoreBossLockSimulation {
 
 impl Default for CoreBossLockSimulation {
     fn default() -> Self {
+        Self::new_at_tick(Tick(0))
+    }
+}
+
+impl CoreBossLockSimulation {
+    #[must_use]
+    pub const fn new_at_tick(start_tick: Tick) -> Self {
         Self {
-            tick: Tick(0),
+            tick: start_tick,
             phase: CoreBossLockPhase::BossWarning,
             next_attempt_ordinal: 1,
             rejected_late_entries: BTreeSet::new(),
         }
     }
-}
-
-impl CoreBossLockSimulation {
     #[must_use]
     pub const fn tick(&self) -> Tick {
         self.tick
@@ -718,6 +722,42 @@ mod tests {
         assert!(matches!(active.phase, CoreBossLockPhase::Combat { .. }));
         assert!(simulation.recall_allowed());
         assert!(simulation.door_closed());
+    }
+
+    #[test]
+    fn inherited_danger_tick_preserves_exact_countdown_and_introduction_offsets() {
+        let start = Tick(12_345);
+        let mut simulation = CoreBossLockSimulation::new_at_tick(start);
+        let first = step(&mut simulation, vec![entrant(1, 0)]);
+        assert_eq!(first.tick, start);
+        assert!(matches!(
+            first.phase,
+            CoreBossLockPhase::ReadyCountdown {
+                started_at: Tick(12_345),
+                closes_at: Tick(12_495),
+                ..
+            }
+        ));
+
+        for _ in 1..150 {
+            step(&mut simulation, vec![entrant(1, 0)]);
+        }
+        let closed = step(&mut simulation, vec![entrant(1, 0)]);
+        assert!(matches!(
+            closed.phase,
+            CoreBossLockPhase::Introduction {
+                started_at: Tick(12_495),
+                activates_at: Tick(12_570),
+                ..
+            }
+        ));
+
+        for _ in 151..225 {
+            step(&mut simulation, vec![entrant(1, 0)]);
+        }
+        let active = step(&mut simulation, vec![entrant(1, 0)]);
+        assert_eq!(active.tick, Tick(12_570));
+        assert!(matches!(active.phase, CoreBossLockPhase::Combat { .. }));
     }
 
     #[test]

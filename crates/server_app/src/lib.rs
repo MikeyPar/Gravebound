@@ -113,10 +113,10 @@ pub use core_private_b3_reward_runtime::{
     CorePrivateB3RewardRuntimeReport, CorePrivateB3RewardRuntimeState,
 };
 pub use core_private_fixed_dungeon_runtime::{
-    CorePrivateFixedDungeonAdvance, CorePrivateFixedDungeonB3RewardCommit,
-    CorePrivateFixedDungeonLiveRoomFrame, CorePrivateFixedDungeonRestCommit,
-    CorePrivateFixedDungeonRoomFrame, CorePrivateFixedDungeonRuntime,
-    CorePrivateFixedDungeonRuntimeError,
+    CorePrivateCaldusStagingHandoff, CorePrivateFixedDungeonAdvance,
+    CorePrivateFixedDungeonB3RewardCommit, CorePrivateFixedDungeonLiveRoomFrame,
+    CorePrivateFixedDungeonRestCommit, CorePrivateFixedDungeonRoomFrame,
+    CorePrivateFixedDungeonRuntime, CorePrivateFixedDungeonRuntimeError,
 };
 pub use core_private_life_runtime_bootstrap::{
     CorePrivateLifeBootstrapDisposition, CorePrivateLifeBootstrapError,

@@ -104,6 +104,22 @@ impl CoreCaldusEncounterSimulation {
     }
 
     #[must_use]
+    pub const fn arena(&self) -> &ArenaGeometry {
+        &self.arena
+    }
+
+    #[must_use]
+    pub const fn state(&self) -> &crate::CoreCaldusState {
+        self.scheduler.state()
+    }
+
+    pub fn hurtbox(&self) -> Result<Option<crate::EnemyHurtbox>, CoreCaldusEncounterError> {
+        self.health
+            .hurtbox(self.body.simulation_position())
+            .map_err(Into::into)
+    }
+
+    #[must_use]
     pub fn hostile_projectiles(&self) -> &[HostileProjectile] {
         self.hostile_projectiles.projectiles()
     }
