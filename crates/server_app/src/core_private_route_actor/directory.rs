@@ -298,6 +298,12 @@ enum CorePrivateRouteActorCommand {
         in_range: bool,
         reply: oneshot::Sender<CorePrivateRouteActorReply>,
     },
+    ApplyMicrorealmAuthority {
+        expected_state_version: u64,
+        phase: CorePrivateRoutePhaseV1,
+        bell_portal_in_range: bool,
+        reply: oneshot::Sender<CorePrivateRouteActorReply>,
+    },
     PrepareBellPortal {
         binding: CoreBellPortalBinding,
         reply: oneshot::Sender<Result<CoreBellPortalPermit, CoreBellPortalRejection>>,
@@ -344,6 +350,27 @@ impl CorePrivateRouteActorHandle {
         let (reply, receive) = oneshot::channel();
         self.commands
             .send(CorePrivateRouteActorCommand::SetBellPortalRange { in_range, reply })
+            .await
+            .map_err(|_| CorePrivateRouteRuntimeError::ActorUnavailable)?;
+        receive
+            .await
+            .map_err(|_| CorePrivateRouteRuntimeError::ActorUnavailable)?
+    }
+
+    async fn apply_microrealm_authority(
+        &self,
+        expected_state_version: u64,
+        phase: CorePrivateRoutePhaseV1,
+        bell_portal_in_range: bool,
+    ) -> CorePrivateRouteActorReply {
+        let (reply, receive) = oneshot::channel();
+        self.commands
+            .send(CorePrivateRouteActorCommand::ApplyMicrorealmAuthority {
+                expected_state_version,
+                phase,
+                bell_portal_in_range,
+                reply,
+            })
             .await
             .map_err(|_| CorePrivateRouteRuntimeError::ActorUnavailable)?;
         receive
@@ -701,6 +728,21 @@ impl CorePrivateRouteActorDirectory {
             .await
     }
 
+    /// Atomically applies one server-owned microrealm simulation result. The caller supplies the
+    /// exact route version it staged against; phase and Bell range either advance together under
+    /// the actor lock or neither changes.
+    pub(crate) async fn apply_microrealm_authority(
+        &self,
+        lease: CorePrivateRouteActorLease,
+        expected_state_version: u64,
+        phase: CorePrivateRoutePhaseV1,
+        bell_portal_in_range: bool,
+    ) -> CorePrivateRouteActorReply {
+        self.actor_handle(lease)?
+            .apply_microrealm_authority(expected_state_version, phase, bell_portal_in_range)
+            .await
+    }
+
     /// Atomically reserves one exact successful-extraction authority and revokes ordinary route
     /// control. Exact replay returns the same permit; changed material cannot replace it.
     pub async fn prepare_extraction_terminal(
@@ -1055,6 +1097,19 @@ async fn serve_actor_mailbox(
             CorePrivateRouteActorCommand::SetBellPortalRange { in_range, reply } => {
                 let _ = reply.send(handle_portal_range(&control, in_range));
             }
+            CorePrivateRouteActorCommand::ApplyMicrorealmAuthority {
+                expected_state_version,
+                phase,
+                bell_portal_in_range,
+                reply,
+            } => {
+                let _ = reply.send(handle_microrealm_authority(
+                    &control,
+                    expected_state_version,
+                    phase,
+                    bell_portal_in_range,
+                ));
+            }
             CorePrivateRouteActorCommand::PrepareBellPortal { binding, reply } => {
                 let result = handle_prepare_bell_portal(&control, binding);
                 let prepared = result.as_ref().ok().cloned();
@@ -1093,6 +1148,7 @@ async fn serve_actor_mailbox(
         match command {
             CorePrivateRouteActorCommand::Advance { reply, .. }
             | CorePrivateRouteActorCommand::SetBellPortalRange { reply, .. }
+            | CorePrivateRouteActorCommand::ApplyMicrorealmAuthority { reply, .. }
             | CorePrivateRouteActorCommand::ReconcileEnterMicrorealm { reply, .. } => {
                 let _ = reply.send(Err(CorePrivateRouteRuntimeError::Retired));
             }
@@ -1146,6 +1202,53 @@ fn handle_portal_range(
         return Err(CorePrivateRouteRuntimeError::TerminalInProgress);
     }
     control.actor.set_bell_portal_in_range(in_range)?;
+    Ok(control.actor.projection().clone())
+}
+
+fn handle_microrealm_authority(
+    control: &Mutex<CorePrivateRouteActorControl>,
+    expected_state_version: u64,
+    phase: CorePrivateRoutePhaseV1,
+    bell_portal_in_range: bool,
+) -> CorePrivateRouteActorReply {
+    let mut control = lock(control);
+    if control.retired {
+        return Err(CorePrivateRouteRuntimeError::Retired);
+    }
+    if control.bell_reservation.is_some() {
+        return Err(CorePrivateRouteRuntimeError::TransferInProgress);
+    }
+    if control.terminal_reservation.is_some() {
+        return Err(CorePrivateRouteRuntimeError::TerminalInProgress);
+    }
+    let projection = control.actor.projection();
+    if projection.state_version != expected_state_version
+        || projection.scene != CorePrivateRouteSceneV1::CoreMicrorealm
+        || projection.room.is_some()
+        || (phase != CorePrivateRoutePhaseV1::MicrorealmCleared && bell_portal_in_range)
+    {
+        return Err(CorePrivateRouteRuntimeError::StaleRouteState);
+    }
+    let advance = match (projection.phase, phase) {
+        (current, target) if current == target => None,
+        (
+            CorePrivateRoutePhaseV1::MicrorealmDormant,
+            CorePrivateRoutePhaseV1::MicrorealmWaiting,
+        ) => Some(CorePrivateRouteActorAdvance::MicrorealmWaiting),
+        (CorePrivateRoutePhaseV1::MicrorealmWaiting, CorePrivateRoutePhaseV1::MicrorealmActive) => {
+            Some(CorePrivateRouteActorAdvance::MicrorealmActive)
+        }
+        (CorePrivateRoutePhaseV1::MicrorealmActive, CorePrivateRoutePhaseV1::MicrorealmCleared) => {
+            Some(CorePrivateRouteActorAdvance::MicrorealmCleared)
+        }
+        _ => return Err(CorePrivateRouteRuntimeError::StaleRouteState),
+    };
+    if let Some(advance) = advance {
+        control.actor.advance(advance)?;
+    }
+    control
+        .actor
+        .set_bell_portal_in_range(bell_portal_in_range)?;
     Ok(control.actor.projection().clone())
 }
 

@@ -17,6 +17,7 @@ mod core_lifecycle;
 mod core_private_life_foundation;
 mod core_private_life_runtime_bootstrap;
 mod core_private_life_session;
+mod core_private_microrealm_runtime;
 mod core_private_route_actor;
 mod core_private_world_flow;
 mod core_recall_outbox;
@@ -103,6 +104,10 @@ pub use core_private_life_session::{
     CorePrivateLifeSessionDirectory, CorePrivateLifeSessionError, CorePrivateLifeSessionReport,
     CorePrivateLifeSessionSnapshot, CorePrivateLifeTransportAttach, CorePrivateLifeTransportDetach,
     CorePrivateLifeTransportGeneration, CorePrivateLifeTransportLease,
+};
+pub use core_private_microrealm_runtime::{
+    CoreMicrorealmPackClearProof, CorePrivateMicrorealmInput, CorePrivateMicrorealmRuntime,
+    CorePrivateMicrorealmRuntimeError, CorePrivateMicrorealmStep,
 };
 pub use core_private_route_actor::{
     CORE_PRIVATE_ROUTE_ACTOR_MAILBOX_CAPACITY, CorePrivateRouteActor, CorePrivateRouteActorAdvance,
