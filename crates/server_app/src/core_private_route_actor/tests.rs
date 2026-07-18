@@ -289,6 +289,97 @@ async fn actor_trace_is_exactly_hall_microrealm_b0_through_b6_terminal() {
 }
 
 #[tokio::test]
+async fn boss_authority_cas_is_atomic_replay_safe_and_resettable_before_defeat() {
+    let directory = CorePrivateRouteActorDirectory::new();
+    let lease = directory
+        .register_actor(authenticated(), hall_seed(CHARACTER_ID, 1), 82)
+        .expect("actor registers");
+    commit_bell_entry(&directory, lease).await;
+    for room in [
+        CorePrivateRouteRoomV1::BellCrossB1,
+        CorePrivateRouteRoomV1::BellNaveB2,
+        CorePrivateRouteRoomV1::BellKnightB3,
+    ] {
+        directory
+            .advance(lease, CorePrivateRouteActorAdvance::EnterCombatRoom(room))
+            .await
+            .expect("enter fixed room");
+        clear_current_room(&directory, lease).await;
+    }
+    directory
+        .advance(lease, CorePrivateRouteActorAdvance::EnterRest)
+        .await
+        .expect("enter B4");
+    directory
+        .advance(
+            lease,
+            CorePrivateRouteActorAdvance::EnterCombatRoom(CorePrivateRouteRoomV1::BellBridgeB5),
+        )
+        .await
+        .expect("enter B5");
+    clear_current_room(&directory, lease).await;
+    let staging = directory
+        .advance(lease, CorePrivateRouteActorAdvance::EnterBoss)
+        .await
+        .expect("enter B6 staging");
+
+    let countdown = directory
+        .apply_fixed_dungeon_authority(
+            lease,
+            staging.state_version,
+            CorePrivateRouteRoomV1::CaldusArenaB6,
+            CorePrivateRoutePhaseV1::BossReadyCountdown,
+        )
+        .await
+        .expect("commit countdown");
+    assert_eq!(countdown.phase, CorePrivateRoutePhaseV1::BossReadyCountdown);
+    assert!(matches!(
+        directory
+            .apply_fixed_dungeon_authority(
+                lease,
+                staging.state_version,
+                CorePrivateRouteRoomV1::CaldusArenaB6,
+                CorePrivateRoutePhaseV1::BossIntroduction,
+            )
+            .await,
+        Err(CorePrivateRouteRuntimeError::StaleRouteState)
+    ));
+
+    let introduction = directory
+        .apply_fixed_dungeon_authority(
+            lease,
+            countdown.state_version,
+            CorePrivateRouteRoomV1::CaldusArenaB6,
+            CorePrivateRoutePhaseV1::BossIntroduction,
+        )
+        .await
+        .expect("commit introduction");
+    let reset = directory
+        .apply_fixed_dungeon_authority(
+            lease,
+            introduction.state_version,
+            CorePrivateRouteRoomV1::CaldusArenaB6,
+            CorePrivateRoutePhaseV1::BossStaging,
+        )
+        .await
+        .expect("commit DNG-006 reset");
+    assert_eq!(reset.phase, CorePrivateRoutePhaseV1::BossStaging);
+    let replay = directory
+        .apply_fixed_dungeon_authority(
+            lease,
+            reset.state_version,
+            CorePrivateRouteRoomV1::CaldusArenaB6,
+            CorePrivateRoutePhaseV1::BossStaging,
+        )
+        .await
+        .expect("exact staging replay");
+    assert_eq!(replay, reset);
+
+    directory.begin_shutdown();
+    assert!(directory.finish_shutdown().await.unwrap().zero_residue);
+}
+
+#[tokio::test]
 async fn fixed_dungeon_cas_commits_multiphase_frames_resets_and_rejects_stale_authority() {
     let directory = CorePrivateRouteActorDirectory::new();
     let lease = directory

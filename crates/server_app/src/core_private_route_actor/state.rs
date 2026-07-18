@@ -61,6 +61,7 @@ pub enum CorePrivateRouteActorAdvance {
     BossPhaseThree,
     BossDefeated,
     BossExitReady,
+    BossReset,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -232,6 +233,7 @@ impl CorePrivateRouteActor {
                 CorePrivateRoutePhaseV1::BossDefeated,
                 CorePrivateRoutePhaseV1::BossExitReady,
             )?,
+            CorePrivateRouteActorAdvance::BossReset => self.boss_reset()?,
         }
         Ok(&self.state)
     }
@@ -436,6 +438,28 @@ impl CorePrivateRouteActor {
         self.replace_position(
             self.state.character_version,
             self.position_with_phase(destination),
+        )
+    }
+
+    fn boss_reset(&mut self) -> Result<(), CorePrivateRouteActorError> {
+        if self.state.scene != CorePrivateRouteSceneV1::BellSepulcher
+            || self.state.room != Some(CorePrivateRouteRoomV1::CaldusArenaB6)
+            || !matches!(
+                self.state.phase,
+                CorePrivateRoutePhaseV1::BossReadyCountdown
+                    | CorePrivateRoutePhaseV1::BossIntroduction
+                    | CorePrivateRoutePhaseV1::BossPhaseOne
+                    | CorePrivateRoutePhaseV1::BossBreakToTwo
+                    | CorePrivateRoutePhaseV1::BossPhaseTwo
+                    | CorePrivateRoutePhaseV1::BossBreakToThree
+                    | CorePrivateRoutePhaseV1::BossPhaseThree
+            )
+        {
+            return Err(CorePrivateRouteActorError::InvalidTransition);
+        }
+        self.replace_position(
+            self.state.character_version,
+            self.position_with_phase(CorePrivateRoutePhaseV1::BossStaging),
         )
     }
 

@@ -1363,6 +1363,9 @@ fn fixed_dungeon_advances(
     if same && canonical_fixed_dungeon_position(target_room, target_phase) {
         return Some(Vec::new());
     }
+    if current_room == Some(Room::CaldusArenaB6) && target_room == Room::CaldusArenaB6 {
+        return boss_advances(current_phase, target_phase);
+    }
     let advances = match (current_room, current_phase, target_room, target_phase) {
         (
             Some(Room::BellVestibuleB0),
@@ -1437,6 +1440,38 @@ fn fixed_dungeon_advances(
     Some(advances)
 }
 
+fn boss_advances(
+    current: CorePrivateRoutePhaseV1,
+    target: CorePrivateRoutePhaseV1,
+) -> Option<Vec<CorePrivateRouteActorAdvance>> {
+    use CorePrivateRouteActorAdvance as Advance;
+    use CorePrivateRoutePhaseV1 as Phase;
+
+    let advance = match (current, target) {
+        (Phase::BossStaging, Phase::BossReadyCountdown) => Advance::BossReadyCountdown,
+        (Phase::BossReadyCountdown, Phase::BossIntroduction) => Advance::BossIntroduction,
+        (Phase::BossIntroduction, Phase::BossPhaseOne) => Advance::BossPhaseOne,
+        (Phase::BossPhaseOne, Phase::BossBreakToTwo) => Advance::BossBreakToTwo,
+        (Phase::BossBreakToTwo, Phase::BossPhaseTwo) => Advance::BossPhaseTwo,
+        (Phase::BossPhaseTwo, Phase::BossBreakToThree) => Advance::BossBreakToThree,
+        (Phase::BossBreakToThree, Phase::BossPhaseThree) => Advance::BossPhaseThree,
+        (Phase::BossPhaseThree, Phase::BossDefeated) => Advance::BossDefeated,
+        (Phase::BossDefeated, Phase::BossExitReady) => Advance::BossExitReady,
+        (
+            Phase::BossReadyCountdown
+            | Phase::BossIntroduction
+            | Phase::BossPhaseOne
+            | Phase::BossBreakToTwo
+            | Phase::BossPhaseTwo
+            | Phase::BossBreakToThree
+            | Phase::BossPhaseThree,
+            Phase::BossStaging,
+        ) => Advance::BossReset,
+        _ => return None,
+    };
+    Some(vec![advance])
+}
+
 const fn canonical_fixed_dungeon_position(
     room: CorePrivateRouteRoomV1,
     phase: CorePrivateRoutePhaseV1,
@@ -1457,7 +1492,19 @@ const fn canonical_fixed_dungeon_position(
             )
         }
         Room::BellRestB4 => matches!(phase, Phase::Rest),
-        Room::CaldusArenaB6 => matches!(phase, Phase::BossStaging),
+        Room::CaldusArenaB6 => matches!(
+            phase,
+            Phase::BossStaging
+                | Phase::BossReadyCountdown
+                | Phase::BossIntroduction
+                | Phase::BossPhaseOne
+                | Phase::BossBreakToTwo
+                | Phase::BossPhaseTwo
+                | Phase::BossBreakToThree
+                | Phase::BossPhaseThree
+                | Phase::BossDefeated
+                | Phase::BossExitReady
+        ),
     }
 }
 
