@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "pack_id": "review.m03.sir_caldus.bell_ring.v4",
+  "status": {
+    "classification": "unregistered_review_candidate",
+    "runtime_registered": false,
+    "content_hash_input": false,
+    "runtime_bundle": null,
+    "intended_runtime_asset_id": "sprite.boss.sir_caldus"
+  },
+  "source_revision": "beb547442f75a8129cd54175b364d6ba1eb2f83e",
+  "design_authority": [
+    "Gravebound_Production_GDD_v1_Canonical.md:SIM-002,ART-001..006,ART-020,ART-030,ENC-010",
+    "Gravebound_Content_Production_Spec_v1.md:CONT-ROOM-007,CONT-BOSS-001,CONT-BOSS-002,CONT-PATTERN-003",
+    "Gravebound_Development_Roadmap_v1.md:GB-M03-03"
+  ],
+  "generation": {
+    "method": "OpenAI built-in image generation",
+    "references": [
+      {
+        "path": "../v1/sir-caldus-idle-guard.seed.png",
+        "role": "locked identity and renderer anchor",
+        "sha256": "da0c0b90ca1cc390ba4a59ea3a8991313c95f2a2a339123c36b174da99ad4ea5"
+      },
+      {
+        "path": "../v3/previews/sir-caldus-idle-loop.192px.png",
+        "role": "accepted visual-continuity reference",
+        "sha256": "888288ba118f73bdf204d7174e24a13f1a34fdd1b83f8f00e82a116c98c37001"
+      }
+    ],
+    "prompt_record": "README.md#exact-prompt"
+  },
+  "postprocess": {
+    "chroma_helper": "C:/Users/micha/.codex/skills/.system/imagegen/scripts/remove_chroma_key.py",
+    "chroma_arguments": ["--auto-key", "border", "--soft-matte", "--transparent-threshold", "12", "--opaque-threshold", "220", "--despill"],
+    "splitter": "C:/Users/micha/.codex/plugins/cache/openai-curated-remote/game-studio/0.1.2/scripts/normalize_sprite_strip.py",
+    "slot_count": 4,
+    "frame_dimensions": [192, 192],
+    "anchor_pixels": [96, 192],
+    "content_height_pixels": 176,
+    "frame_01_locked_to_seed": true,
+    "connected_component_cleanup": {"alpha_threshold": 8, "connectivity": 4, "removed_isolated_pixels": {"02": 3, "03": 4, "04": 5}}
+  },
+  "sources": [
+    {"path": "source/sir-caldus-bell-ring.raw-chroma.png", "dimensions": [2172, 724], "mode": "RGB", "sha256": "30f89f3611ac7d50fef2f99654f5ce072267ff90d63d170762da543ca27e0955"},
+    {"path": "source/sir-caldus-bell-ring.alpha.png", "dimensions": [2172, 724], "mode": "RGBA", "sha256": "9c49d5fca712c43f28e26185ba445d419d9d2e5db068d8283bbcbdb6c7172cad"}
+  ],
+  "strip": {
+    "id": "review.sprite.boss.sir_caldus.bell_ring.v4",
+    "path": "frames/bell_ring",
+    "frame_labels": ["guard", "chest_bell_anticipation", "hand_bell_release", "guarded_return"],
+    "frame_sha256": ["da0c0b90ca1cc390ba4a59ea3a8991313c95f2a2a339123c36b174da99ad4ea5", "37706a5ad9b33b4cff28c18c42b7712001b4809af841f2a891369659d76cf840", "22d5de8960ba4bac03b0cc21518e0a304d2d2edf8162e7fd2c91c40be9143478", "a8734fa766ffe3ba0e78210dfb2e4ac645db6bcbf0805b217f25ab5abca64861"],
+    "locked_frame": 1
+  },
+  "preview_hashes": {
+    "sheet_192": "58b89346a9c972d63716174c90c5059c09dd66392c94318e6558097e7ce401a4",
+    "sheet_96": "31a4aeac942898c5f687ef89541a5f2c4f2c24ce6bd710bf2c623d71b3e1b85f"
+  },
+  "mock_backdrops": [
+    "docs/evidence/GB-M03-03E-phase-one-standard-1280x720.png",
+    "docs/evidence/GB-M03-03E-phase-one-reduced-1280x720.png",
+    "docs/evidence/GB-M03-03E-phase-one-standard-1920x1080.png",
+    "docs/evidence/GB-M03-03E-phase-one-reduced-1920x1080.png"
+  ],
+  "mock_hashes": {
+    "standard_1280": "43d9b38ce28cb4a2ec871c631b9d5ed51ea425e16c0ce52e45d259a8958c4325",
+    "reduced_1280": "4b6d5fa348bbc9e35460184ef555845f8e54bf0fce710d3f7fe6ee7ef13c0ad0",
+    "standard_1920": "59901239d8a59c7ed5b23a8d1b8516a78eb3805d91eea41c04f13a9e28880606",
+    "reduced_1920": "c33ba214c6f106dbc88ee338c3f5ad294f5f0343fa805c636285b4f644f7e1c4"
+  },
+  "non_authoritative_review_recommendations": {
+    "timing": "For later renderer review only: CONT-BOSS-002's ordinary phase-one 800 ms Bell Ring telegraph could stage guard, anticipation, release, then return across that existing window. Phase-three child emissions have no ordinary 800 ms telegraph, so this strip must not auto-play there. No cadence or simulation change is made by this pack.",
+    "origin": "Use the authoritative boss transform and authored attack-origin data. The chest/hand bell pose is a visual cue only and must never provide origin coordinates.",
+    "hurtbox_and_collision": "Retain CONT-BOSS-001's authored Caldus collision/hurtbox radii (0.70/0.62). The raster has no collision or hit authority.",
+    "readability": "Keep the authoritative hostile ring and three-adjacent-index gap outside the sprite, legible in both effects modes, and unobscured by the pose."
+  },
+  "license_provenance": "Project-generated review material; no third-party visual reference was supplied. Commercial-rights, similarity, and registry review remain required."
+}
