@@ -88,7 +88,8 @@ pub use combat_factory::{
     CoreCharacterCombatFactory, CoreCombatFactoryError,
 };
 pub use core_b3_reward::{
-    CoreB3RewardCoordinatorError, CoreDurableB3RewardCommit, PostgresCoreB3RewardCoordinator,
+    CoreB3RewardCoordinatorError, CoreDurableB3IneligibleCommit, CoreDurableB3Resolution,
+    CoreDurableB3RewardCommit, PostgresCoreB3RewardCoordinator,
 };
 pub use core_extraction_runtime::{
     CoreExtractionActorDirectory, CoreExtractionActorLease, CoreExtractionActorRetirementReport,

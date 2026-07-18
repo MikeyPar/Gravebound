@@ -16,7 +16,7 @@ use tokio::sync::Mutex;
 
 use crate::{
     AuthenticatedAccount, AuthenticatedNamespace, CoreBellPortalTransition,
-    CoreDurableB3RewardCommit, CoreDurableBargainRestResolution, CoreExtractionActorDirectory,
+    CoreDurableB3Resolution, CoreDurableBargainRestResolution, CoreExtractionActorDirectory,
     CoreExtractionAuthoritativeTick, CoreExtractionConnectionLease, CoreExtractionHallProjection,
     CoreExtractionRuntimeError, CoreExtractionRuntimeReport, CoreExtractionTransportAttach,
     CoreExtractionTransportDetach, CorePrivateFixedDungeonAdvance,
@@ -924,7 +924,7 @@ where
     pub async fn commit_fixed_dungeon_b3_reward(
         &self,
         lease: CorePrivateLifeTransportLease,
-        durable: CoreDurableB3RewardCommit,
+        durable: CoreDurableB3Resolution,
     ) -> Result<CorePrivateFixedDungeonB3RewardCommit, CorePrivateLifeSessionError> {
         if durable.account_id() != lease.account_id {
             return Err(CorePrivateLifeSessionError::InvalidAccountBinding);

@@ -27,7 +27,7 @@ use tokio::{
 };
 
 use crate::{
-    CoreBellPortalTransition, CoreDurableB3RewardCommit, CoreDurableBargainRestResolution,
+    CoreBellPortalTransition, CoreDurableB3Resolution, CoreDurableBargainRestResolution,
     CorePrivateFixedDungeonAdvance, CorePrivateFixedDungeonB3RewardCommit,
     CorePrivateFixedDungeonLiveRoomFrame, CorePrivateFixedDungeonRestCommit,
     CorePrivateFixedDungeonRuntime, CorePrivateFixedDungeonRuntimeError,
@@ -251,7 +251,7 @@ impl CorePrivateMicrorealmDriverHandle {
     /// progression/milestone terminals exist. The proof is opaque and remains task-owned.
     pub async fn commit_fixed_dungeon_b3_reward(
         &self,
-        durable: CoreDurableB3RewardCommit,
+        durable: CoreDurableB3Resolution,
     ) -> Result<CorePrivateFixedDungeonB3RewardCommit, CorePrivateMicrorealmDriverError> {
         let (result_tx, result_rx) = oneshot::channel();
         self.fixed_advance_tx
@@ -589,7 +589,7 @@ enum CorePrivateFixedDungeonControlRequest {
         result_tx: oneshot::Sender<Result<CorePrivateFixedDungeonRestCommit, String>>,
     },
     CommitB3Reward {
-        durable: Box<CoreDurableB3RewardCommit>,
+        durable: Box<CoreDurableB3Resolution>,
         result_tx: oneshot::Sender<Result<CorePrivateFixedDungeonB3RewardCommit, String>>,
     },
 }
@@ -1247,7 +1247,11 @@ async fn run_fixed_dungeon(
                     b3_reward_pending = false;
                     ingress.resume_accepting();
                     interval.reset();
-                    if let Some(frame) = last_fixed_frame.clone() {
+                    if let Some(frame) = last_fixed_frame.as_deref().cloned() {
+                        let mut frame = frame;
+                        frame.route = commit.route.clone();
+                        let frame = Arc::new(frame);
+                        last_fixed_frame = Some(Arc::clone(&frame));
                         observation_tx.send_replace(
                             CorePrivateMicrorealmDriverState::FixedDungeonRunning {
                                 committed_frames,
@@ -1657,12 +1661,12 @@ mod tests {
         .unwrap()
     }
 
-    fn b3_reward_authority() -> CoreDurableB3RewardCommit {
+    fn b3_reward_authority() -> CoreDurableB3Resolution {
         let authenticated = crate::AuthenticatedAccount {
             account_id: crate::AccountId::new([0x11; 16]).unwrap(),
             namespace: crate::AuthenticatedNamespace::WipeableTest,
         };
-        CoreDurableB3RewardCommit::test_fixture(
+        crate::CoreDurableB3RewardCommit::test_fixture(
             authenticated,
             [0x22; 16],
             [0x33; 16],
@@ -1688,6 +1692,7 @@ mod tests {
                 trust_state: sim_core::RewardTrustState::Valid,
             },
         )
+        .into()
     }
 
     fn template_step(tick: u64) -> CorePrivateMicrorealmStep {

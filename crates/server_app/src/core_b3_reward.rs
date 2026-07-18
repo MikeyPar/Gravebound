@@ -8,13 +8,14 @@
 //! immutable handoff produced by the B3 simulation owner. It never accepts client-authored reward
 //! IDs, item destinations, XP values, Bargain candidates, or aggregate versions.
 
-use sim_core::{EncounterXpEvidence, RewardLifeState, RewardRecallState, RewardTrustState};
+use sim_core::EncounterXpEvidence;
 use thiserror::Error;
 
 use crate::{
     AuthenticatedAccount, AuthenticatedNamespace, CoreDurableBargainRestResolution,
-    PostgresProgressionAwardService, PostgresRewardService, ProgressionAwardCode,
-    ProgressionAwardOutcome, RewardGrantContext, RewardGrantError, RewardGrantTransaction,
+    PostgresProgressionAwardService, PostgresRewardService, ProgressionAwardAuthorityResult,
+    ProgressionAwardCode, ProgressionAwardOutcome, RewardGrantContext, RewardGrantError,
+    RewardGrantTransaction,
 };
 
 const B3_SOURCE_CONTENT_ID: &str = "miniboss.sepulcher_knight";
@@ -22,7 +23,6 @@ const B3_REWARD_PROFILE_ID: &str = "reward.miniboss_t1";
 const B3_XP_PROFILE_ID: &str = "xp.miniboss_t1";
 const B3_REFERENCE_HEALTH: u64 = 1_600;
 const B3_REWARD_DELAY_TICKS: u64 = 8;
-const TWENTY_SECONDS_AT_30_HZ: u64 = 600;
 
 /// Opaque proof that the exact B3 personal item result and progression/milestone result are both
 /// durable. Runtime code can compare its private bindings, but transport code cannot construct a
@@ -147,6 +147,134 @@ impl CoreDurableB3RewardCommit {
     }
 }
 
+/// Opaque proof that progression durably recorded the exact B3 participant as ineligible. This
+/// terminal deliberately contains no item result, source-instance grant, Bargain offer, or
+/// no-offer milestone because none of those authorities run for an ineligible clear.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreDurableB3IneligibleCommit {
+    account_id: [u8; 16],
+    character_id: [u8; 16],
+    instance_lineage_id: [u8; 16],
+    reward_event_id: [u8; 16],
+    handoff: sim_content::CoreB3RewardHandoff,
+    progression_payload_hash: [u8; 32],
+    progression: ProgressionAwardOutcome,
+}
+
+impl CoreDurableB3IneligibleCommit {
+    #[must_use]
+    pub const fn progression(&self) -> &ProgressionAwardOutcome {
+        &self.progression
+    }
+}
+
+/// Complete durable B3 terminal. Both variants acknowledge the exact room clear; only `Granted`
+/// carries item and Bargain authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CoreDurableB3Resolution {
+    Granted(CoreDurableB3RewardCommit),
+    Ineligible(CoreDurableB3IneligibleCommit),
+}
+
+impl CoreDurableB3Resolution {
+    #[must_use]
+    pub const fn account_id(&self) -> [u8; 16] {
+        match self {
+            Self::Granted(commit) => commit.account_id,
+            Self::Ineligible(commit) => commit.account_id,
+        }
+    }
+
+    #[must_use]
+    pub const fn character_id(&self) -> [u8; 16] {
+        match self {
+            Self::Granted(commit) => commit.character_id,
+            Self::Ineligible(commit) => commit.character_id,
+        }
+    }
+
+    #[must_use]
+    pub const fn instance_lineage_id(&self) -> [u8; 16] {
+        match self {
+            Self::Granted(commit) => commit.instance_lineage_id,
+            Self::Ineligible(commit) => commit.instance_lineage_id,
+        }
+    }
+
+    #[must_use]
+    pub const fn reward_event_id(&self) -> [u8; 16] {
+        match self {
+            Self::Granted(commit) => commit.reward_event_id,
+            Self::Ineligible(commit) => commit.reward_event_id,
+        }
+    }
+
+    #[must_use]
+    pub const fn handoff(&self) -> &sim_content::CoreB3RewardHandoff {
+        match self {
+            Self::Granted(commit) => &commit.handoff,
+            Self::Ineligible(commit) => &commit.handoff,
+        }
+    }
+
+    #[must_use]
+    pub const fn progression_payload_hash(&self) -> [u8; 32] {
+        match self {
+            Self::Granted(commit) => commit.progression_payload_hash,
+            Self::Ineligible(commit) => commit.progression_payload_hash,
+        }
+    }
+
+    #[must_use]
+    pub const fn progression(&self) -> &ProgressionAwardOutcome {
+        match self {
+            Self::Granted(commit) => &commit.progression,
+            Self::Ineligible(commit) => &commit.progression,
+        }
+    }
+
+    #[must_use]
+    pub const fn reward_result_hash(&self) -> Option<[u8; 32]> {
+        match self {
+            Self::Granted(commit) => Some(commit.reward_result_hash),
+            Self::Ineligible(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn bargain_offer_id(&self) -> Option<[u8; 16]> {
+        match self {
+            Self::Granted(commit) => commit.bargain_offer_id,
+            Self::Ineligible(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn has_no_offer_resolution(&self) -> bool {
+        match self {
+            Self::Granted(commit) => commit.no_offer_resolution.is_some(),
+            Self::Ineligible(_) => true,
+        }
+    }
+
+    #[must_use]
+    pub const fn disposition(&self) -> sim_content::CoreB3RewardDisposition {
+        match self {
+            Self::Granted(commit) if commit.bargain_offer_id.is_some() => {
+                sim_content::CoreB3RewardDisposition::GrantedOffer
+            }
+            Self::Granted(_) => sim_content::CoreB3RewardDisposition::GrantedNoOffer,
+            Self::Ineligible(_) => sim_content::CoreB3RewardDisposition::IneligibleNoOffer,
+        }
+    }
+}
+
+impl From<CoreDurableB3RewardCommit> for CoreDurableB3Resolution {
+    fn from(value: CoreDurableB3RewardCommit) -> Self {
+        Self::Granted(value)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PostgresCoreB3RewardCoordinator {
     rewards: PostgresRewardService,
@@ -172,8 +300,8 @@ impl PostgresCoreB3RewardCoordinator {
         instance_lineage_id: [u8; 16],
         current_tick: u64,
         handoff: &sim_content::CoreB3RewardHandoff,
-    ) -> Result<CoreDurableB3RewardCommit, CoreB3RewardCoordinatorError> {
-        validate_binding(
+    ) -> Result<CoreDurableB3Resolution, CoreB3RewardCoordinatorError> {
+        validate_structural_binding(
             authenticated,
             character_id,
             instance_lineage_id,
@@ -216,10 +344,21 @@ impl PostgresCoreB3RewardCoordinator {
                 evidence,
             )
             .await?;
-        if progression.outcome.code != ProgressionAwardCode::Accepted {
-            return Err(CoreB3RewardCoordinatorError::ProgressionNotCommitted(
-                progression.outcome.code,
-            ));
+        match progression.outcome.code {
+            ProgressionAwardCode::Accepted => {}
+            ProgressionAwardCode::NotEligible => {
+                return project_ineligible_authority(
+                    authenticated,
+                    character_id,
+                    instance_lineage_id,
+                    reward_event_id,
+                    handoff,
+                    progression,
+                );
+            }
+            code => {
+                return Err(CoreB3RewardCoordinatorError::ProgressionNotCommitted(code));
+            }
         }
         let reward = self
             .rewards
@@ -244,21 +383,53 @@ impl PostgresCoreB3RewardCoordinator {
             progression.payload_hash,
             progression.bargain_milestone.as_ref(),
         )?;
-        Ok(CoreDurableB3RewardCommit {
+        Ok(CoreDurableB3Resolution::Granted(
+            CoreDurableB3RewardCommit {
+                account_id: authenticated.account_id.as_bytes(),
+                character_id,
+                instance_lineage_id,
+                reward_event_id,
+                source_instance_id,
+                handoff: handoff.clone(),
+                reward_result_hash,
+                reward_replayed,
+                progression_payload_hash: progression.payload_hash,
+                progression: progression.outcome,
+                bargain_offer_id,
+                no_offer_resolution,
+            },
+        ))
+    }
+}
+
+fn project_ineligible_authority(
+    authenticated: AuthenticatedAccount,
+    character_id: [u8; 16],
+    instance_lineage_id: [u8; 16],
+    reward_event_id: [u8; 16],
+    handoff: &sim_content::CoreB3RewardHandoff,
+    progression: ProgressionAwardAuthorityResult,
+) -> Result<CoreDurableB3Resolution, CoreB3RewardCoordinatorError> {
+    if progression.bargain_milestone.is_some()
+        || progression.outcome.code != ProgressionAwardCode::NotEligible
+        || progression.outcome.base_xp != 0
+        || progression.outcome.first_clear_bonus_xp != 0
+        || progression.outcome.applied_xp != 0
+        || progression.outcome.first_clear_awarded
+    {
+        return Err(CoreB3RewardCoordinatorError::IneligibleAuthorityMismatch);
+    }
+    Ok(CoreDurableB3Resolution::Ineligible(
+        CoreDurableB3IneligibleCommit {
             account_id: authenticated.account_id.as_bytes(),
             character_id,
             instance_lineage_id,
             reward_event_id,
-            source_instance_id,
             handoff: handoff.clone(),
-            reward_result_hash,
-            reward_replayed,
             progression_payload_hash: progression.payload_hash,
             progression: progression.outcome,
-            bargain_offer_id,
-            no_offer_resolution,
-        })
-    }
+        },
+    ))
 }
 
 fn project_milestone_authority(
@@ -296,21 +467,18 @@ fn project_milestone_authority(
     }
 }
 
-fn validate_binding(
+fn validate_structural_binding(
     authenticated: AuthenticatedAccount,
     character_id: [u8; 16],
     instance_lineage_id: [u8; 16],
     current_tick: u64,
     handoff: &sim_content::CoreB3RewardHandoff,
 ) -> Result<(), CoreB3RewardCoordinatorError> {
-    let minimum_contribution = handoff.reference_health.div_ceil(200);
     let exact_reward_due_tick = handoff
         .death_tick
         .0
         .checked_add(B3_REWARD_DELAY_TICKS)
         .ok_or(CoreB3RewardCoordinatorError::InvalidHandoff)?;
-    let presence_qualified = handoff.active_ticks < TWENTY_SECONDS_AT_30_HZ
-        || handoff.present_ticks >= handoff.active_ticks.div_ceil(2);
     if authenticated.namespace != AuthenticatedNamespace::WipeableTest
         || character_id == [0; 16]
         || instance_lineage_id == [0; 16]
@@ -321,15 +489,9 @@ fn validate_binding(
         || handoff.xp_profile_id != B3_XP_PROFILE_ID
         || handoff.reference_health != B3_REFERENCE_HEALTH
         || handoff.active_ticks == 0
-        || handoff.present_ticks == 0
         || handoff.present_ticks > handoff.active_ticks
-        || !presence_qualified
-        || handoff.longest_inactivity_ticks > TWENTY_SECONDS_AT_30_HZ
-        || handoff.direct_damage < minimum_contribution
+        || handoff.longest_inactivity_ticks > handoff.active_ticks
         || handoff.direct_damage > handoff.reference_health
-        || handoff.life_state != RewardLifeState::Living
-        || handoff.recall_state != RewardRecallState::Eligible
-        || handoff.trust_state != RewardTrustState::Valid
     {
         return Err(CoreB3RewardCoordinatorError::InvalidHandoff);
     }
@@ -365,6 +527,8 @@ pub enum CoreB3RewardCoordinatorError {
     ProgressionNotCommitted(ProgressionAwardCode),
     #[error("B3 Bargain milestone does not match the reward/progression authority")]
     MilestoneAuthorityMismatch,
+    #[error("B3 ineligible terminal unexpectedly carried reward or milestone authority")]
+    IneligibleAuthorityMismatch,
     #[error(transparent)]
     Reward(#[from] RewardGrantError),
     #[error(transparent)]
@@ -373,7 +537,9 @@ pub enum CoreB3RewardCoordinatorError {
 
 #[cfg(test)]
 mod tests {
-    use sim_core::{EntityId, SpawnInstanceId, Tick};
+    use sim_core::{
+        EntityId, RewardLifeState, RewardRecallState, RewardTrustState, SpawnInstanceId, Tick,
+    };
 
     use super::*;
     use crate::{AccountId, AuthenticatedAccount};
@@ -430,38 +596,45 @@ mod tests {
     }
 
     #[test]
-    fn binding_rejects_early_or_underqualified_handoffs() {
+    fn structural_binding_rejects_malformed_authority_but_accepts_ineligible_evidence() {
         let valid = handoff();
-        validate_binding(authenticated(), [2; 16], [3; 16], 1_008, &valid).expect("valid handoff");
+        validate_structural_binding(authenticated(), [2; 16], [3; 16], 1_008, &valid)
+            .expect("valid handoff");
         assert!(matches!(
-            validate_binding(authenticated(), [2; 16], [3; 16], 1_007, &valid),
-            Err(CoreB3RewardCoordinatorError::InvalidHandoff)
-        ));
-        let mut weak = valid.clone();
-        weak.direct_damage = 7;
-        assert!(matches!(
-            validate_binding(authenticated(), [2; 16], [3; 16], 1_008, &weak),
+            validate_structural_binding(authenticated(), [2; 16], [3; 16], 1_007, &valid),
             Err(CoreB3RewardCoordinatorError::InvalidHandoff)
         ));
         let mut wrong_delay = valid.clone();
         wrong_delay.reward_due_tick = Tick(1_009);
         assert!(matches!(
-            validate_binding(authenticated(), [2; 16], [3; 16], 1_009, &wrong_delay),
+            validate_structural_binding(authenticated(), [2; 16], [3; 16], 1_009, &wrong_delay,),
             Err(CoreB3RewardCoordinatorError::InvalidHandoff)
         ));
+
+        let mut impossible = valid.clone();
+        impossible.present_ticks = impossible.active_ticks + 1;
+        assert!(matches!(
+            validate_structural_binding(authenticated(), [2; 16], [3; 16], 1_008, &impossible),
+            Err(CoreB3RewardCoordinatorError::InvalidHandoff)
+        ));
+
         let mut absent = valid.clone();
         absent.active_ticks = 600;
         absent.present_ticks = 299;
-        assert!(matches!(
-            validate_binding(authenticated(), [2; 16], [3; 16], 1_008, &absent),
-            Err(CoreB3RewardCoordinatorError::InvalidHandoff)
-        ));
+        validate_structural_binding(authenticated(), [2; 16], [3; 16], 1_008, &absent)
+            .expect("presence eligibility belongs to progression");
+
         let mut inactive = valid.clone();
+        inactive.active_ticks = 700;
         inactive.longest_inactivity_ticks = 601;
-        assert!(matches!(
-            validate_binding(authenticated(), [2; 16], [3; 16], 1_008, &inactive),
-            Err(CoreB3RewardCoordinatorError::InvalidHandoff)
-        ));
+        validate_structural_binding(authenticated(), [2; 16], [3; 16], 1_008, &inactive)
+            .expect("inactivity eligibility belongs to progression");
+
+        let mut weak = valid.clone();
+        weak.direct_damage = 7;
+        validate_structural_binding(authenticated(), [2; 16], [3; 16], 1_008, &weak)
+            .expect("contribution eligibility belongs to progression");
+
         for invalid in [
             {
                 let mut handoff = valid.clone();
@@ -479,10 +652,8 @@ mod tests {
                 handoff
             },
         ] {
-            assert!(matches!(
-                validate_binding(authenticated(), [2; 16], [3; 16], 1_008, &invalid),
-                Err(CoreB3RewardCoordinatorError::InvalidHandoff)
-            ));
+            validate_structural_binding(authenticated(), [2; 16], [3; 16], 1_008, &invalid)
+                .expect("terminal eligibility belongs to progression");
         }
     }
 }

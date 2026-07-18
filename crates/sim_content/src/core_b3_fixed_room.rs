@@ -54,6 +54,16 @@ pub enum CoreB3RewardReceipt {
     Replayed,
 }
 
+/// Durable outcome applied to the B3 simulation boundary. Eligibility is authoritative outside
+/// simulation; every disposition acknowledges the exact immutable clear without allowing an
+/// ineligible participant to receive an item, XP, or Bargain offer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoreB3RewardDisposition {
+    GrantedOffer,
+    GrantedNoOffer,
+    IneligibleNoOffer,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct CoreB3CombatStep {
     pub tick: Tick,
@@ -352,7 +362,7 @@ pub struct CoreB3FixedRoomSimulation {
     participant: Option<NormalWaveHandoff>,
     combat: Option<CoreB3CombatSimulation>,
     pending_reward_handoff: Option<CoreB3RewardHandoff>,
-    reward_acknowledged: bool,
+    reward_disposition: Option<CoreB3RewardDisposition>,
 }
 
 impl CoreB3FixedRoomSimulation {
@@ -383,7 +393,7 @@ impl CoreB3FixedRoomSimulation {
             }),
             combat: None,
             pending_reward_handoff: None,
-            reward_acknowledged: false,
+            reward_disposition: None,
         })
     }
 
@@ -398,7 +408,7 @@ impl CoreB3FixedRoomSimulation {
         if self.authority.phase() != FixedRoomPhase::Cleared
             || self.combat.is_some()
             || self.pending_reward_handoff.is_none()
-            || !self.reward_acknowledged
+            || self.reward_disposition.is_none()
         {
             return Err(CoreFixedRoomEncounterError::RoomHandoffUnavailable);
         }
@@ -408,7 +418,16 @@ impl CoreB3FixedRoomSimulation {
 
     #[must_use]
     pub const fn pending_reward_handoff(&self) -> Option<&CoreB3RewardHandoff> {
-        self.pending_reward_handoff.as_ref()
+        if self.reward_disposition.is_some() {
+            None
+        } else {
+            self.pending_reward_handoff.as_ref()
+        }
+    }
+
+    #[must_use]
+    pub const fn reward_disposition(&self) -> Option<CoreB3RewardDisposition> {
+        self.reward_disposition
     }
 
     /// Acknowledges only the exact B3 handoff that persistence resolved. The server layer keeps
@@ -417,6 +436,7 @@ impl CoreB3FixedRoomSimulation {
     pub fn acknowledge_reward(
         &mut self,
         handoff: &CoreB3RewardHandoff,
+        disposition: CoreB3RewardDisposition,
     ) -> Result<CoreB3RewardReceipt, CoreFixedRoomEncounterError> {
         let pending = self
             .pending_reward_handoff
@@ -425,10 +445,14 @@ impl CoreB3FixedRoomSimulation {
         if pending != handoff {
             return Err(CoreFixedRoomEncounterError::B3RewardConflict);
         }
-        if self.reward_acknowledged {
-            return Ok(CoreB3RewardReceipt::Replayed);
+        if let Some(stored) = self.reward_disposition {
+            return if stored == disposition {
+                Ok(CoreB3RewardReceipt::Replayed)
+            } else {
+                Err(CoreFixedRoomEncounterError::B3RewardConflict)
+            };
         }
-        self.reward_acknowledged = true;
+        self.reward_disposition = Some(disposition);
         Ok(CoreB3RewardReceipt::Committed)
     }
 
@@ -558,7 +582,7 @@ impl CoreB3FixedRoomSimulation {
                         .take()
                         .ok_or(CoreFixedRoomEncounterError::B3RewardUnavailable)?;
                     self.pending_reward_handoff = Some(handoff.clone());
-                    self.reward_acknowledged = false;
+                    self.reward_disposition = None;
                     reward_handoff = Some(handoff);
                     self.participant = Some(NormalWaveHandoff {
                         player: combat.player,
@@ -567,7 +591,7 @@ impl CoreB3FixedRoomSimulation {
                 }
                 FixedRoomEvent::RoomReset => {
                     self.pending_reward_handoff = None;
-                    self.reward_acknowledged = false;
+                    self.reward_disposition = None;
                     if let Some(mut combat) = self.combat.take() {
                         reset_cleared_projectiles = combat.hostile.clear_projectiles();
                         self.participant = Some(NormalWaveHandoff {
@@ -875,19 +899,24 @@ mod tests {
         let mut changed = reward_handoff.clone();
         changed.reward_due_tick = Tick(changed.reward_due_tick.0 + 1);
         assert!(matches!(
-            room.acknowledge_reward(&changed),
+            room.acknowledge_reward(&changed, CoreB3RewardDisposition::GrantedOffer),
             Err(CoreFixedRoomEncounterError::B3RewardConflict)
         ));
         assert_eq!(
-            room.acknowledge_reward(&reward_handoff)
+            room.acknowledge_reward(&reward_handoff, CoreB3RewardDisposition::GrantedOffer,)
                 .expect("durable reward acknowledgement"),
             CoreB3RewardReceipt::Committed
         );
+        assert!(room.pending_reward_handoff().is_none());
         assert_eq!(
-            room.acknowledge_reward(&reward_handoff)
+            room.acknowledge_reward(&reward_handoff, CoreB3RewardDisposition::GrantedOffer,)
                 .expect("exact acknowledgement replay"),
             CoreB3RewardReceipt::Replayed
         );
+        assert!(matches!(
+            room.acknowledge_reward(&reward_handoff, CoreB3RewardDisposition::IneligibleNoOffer,),
+            Err(CoreFixedRoomEncounterError::B3RewardConflict)
+        ));
 
         for tick in 1_051..1_110 {
             assert!(

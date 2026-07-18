@@ -17,7 +17,7 @@ use sim_core::{
 use thiserror::Error;
 
 use crate::{
-    CoreBellPortalTransition, CoreCharacterCombatEnvelope, CoreDurableB3RewardCommit,
+    CoreBellPortalTransition, CoreCharacterCombatEnvelope, CoreDurableB3Resolution,
     CoreDurableBargainRestResolution, CorePrivateMicrorealmInput, CorePrivateMicrorealmRuntime,
     CorePrivateMicrorealmRuntimeError, CorePrivateRouteActorDirectory, CorePrivateRouteActorLease,
     CorePrivateRouteRuntimeError,
@@ -52,8 +52,9 @@ pub struct CorePrivateFixedDungeonRestCommit {
 pub struct CorePrivateFixedDungeonB3RewardCommit {
     pub route: CorePrivateRouteStateV1,
     pub receipt: sim_content::CoreB3RewardReceipt,
+    pub disposition: sim_content::CoreB3RewardDisposition,
     pub reward_event_id: [u8; 16],
-    pub reward_result_hash: [u8; 32],
+    pub reward_result_hash: Option<[u8; 32]>,
     pub progression_payload_hash: [u8; 32],
     pub bargain_offer_id: Option<[u8; 16]>,
     pub has_no_offer_resolution: bool,
@@ -235,7 +236,7 @@ impl CorePrivateFixedDungeonRuntime {
     /// first application shares the route CAS, while exact retry is read-only.
     pub async fn commit_b3_reward(
         &mut self,
-        durable: &CoreDurableB3RewardCommit,
+        durable: &CoreDurableB3Resolution,
     ) -> Result<CorePrivateFixedDungeonB3RewardCommit, CorePrivateFixedDungeonRuntimeError> {
         let route_before = self.route_directory.snapshot(self.route_lease)?;
         self.validate_route_authority(&route_before)?;
@@ -248,7 +249,8 @@ impl CorePrivateFixedDungeonRuntime {
             return Err(CorePrivateFixedDungeonRuntimeError::B3RewardAuthorityMismatch);
         }
         let mut staged = self.combat.clone();
-        let receipt = staged.acknowledge_b3_reward(durable.handoff())?;
+        let disposition = durable.disposition();
+        let receipt = staged.acknowledge_b3_reward(durable.handoff(), disposition)?;
         let route = if receipt == sim_content::CoreB3RewardReceipt::Committed {
             let (room, phase) = route_position(staged.node(), staged.room_phase())?;
             self.route_directory
@@ -266,11 +268,12 @@ impl CorePrivateFixedDungeonRuntime {
         Ok(CorePrivateFixedDungeonB3RewardCommit {
             route,
             receipt,
+            disposition,
             reward_event_id: durable.reward_event_id(),
             reward_result_hash: durable.reward_result_hash(),
             progression_payload_hash: durable.progression_payload_hash(),
             bargain_offer_id: durable.bargain_offer_id(),
-            has_no_offer_resolution: durable.no_offer_resolution().is_some(),
+            has_no_offer_resolution: durable.has_no_offer_resolution(),
         })
     }
 
@@ -900,22 +903,26 @@ mod tests {
             .await
             .expect("B3 reward handoff");
         assert!(runtime.advance().await.is_err());
-        let foreign_reward = CoreDurableB3RewardCommit::test_fixture(
-            authenticated(),
-            CHARACTER_ID,
-            [0xFE; 16],
-            reward.clone(),
-        );
+        let foreign_reward: CoreDurableB3Resolution =
+            crate::CoreDurableB3RewardCommit::test_fixture(
+                authenticated(),
+                CHARACTER_ID,
+                [0xFE; 16],
+                reward.clone(),
+            )
+            .into();
         assert!(matches!(
             runtime.commit_b3_reward(&foreign_reward).await,
             Err(CorePrivateFixedDungeonRuntimeError::B3RewardAuthorityMismatch)
         ));
-        let durable_reward = CoreDurableB3RewardCommit::test_fixture(
-            authenticated(),
-            CHARACTER_ID,
-            LINEAGE_ID,
-            reward,
-        );
+        let durable_reward: CoreDurableB3Resolution =
+            crate::CoreDurableB3RewardCommit::test_fixture(
+                authenticated(),
+                CHARACTER_ID,
+                LINEAGE_ID,
+                reward,
+            )
+            .into();
         let committed = runtime
             .commit_b3_reward(&durable_reward)
             .await
@@ -924,6 +931,12 @@ mod tests {
             committed.receipt,
             sim_content::CoreB3RewardReceipt::Committed
         );
+        assert_eq!(
+            committed.disposition,
+            sim_content::CoreB3RewardDisposition::GrantedOffer
+        );
+        assert!(committed.reward_result_hash.is_some());
+        assert!(runtime.pending_b3_reward_handoff().is_none());
         let replay = runtime
             .commit_b3_reward(&durable_reward)
             .await

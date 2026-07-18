@@ -8,9 +8,9 @@ use thiserror::Error;
 
 use crate::{
     CoreB2FixedRoomSimulation, CoreB2FixedRoomStep, CoreB3FixedRoomSimulation, CoreB3FixedRoomStep,
-    CoreB3RewardHandoff, CoreB3RewardReceipt, CoreDevelopmentEncounterRooms,
-    CoreFixedRoomEncounterError, CoreFixedRoomEncounterPlan, CoreImmutableFixedRoomInput,
-    CoreImmutableFixedRoomSimulation, CoreImmutableFixedRoomStep,
+    CoreB3RewardDisposition, CoreB3RewardHandoff, CoreB3RewardReceipt,
+    CoreDevelopmentEncounterRooms, CoreFixedRoomEncounterError, CoreFixedRoomEncounterPlan,
+    CoreImmutableFixedRoomInput, CoreImmutableFixedRoomSimulation, CoreImmutableFixedRoomStep,
     compile_core_fixed_room_encounters_from,
 };
 
@@ -365,11 +365,13 @@ impl CoreFixedDungeonCombat {
     pub fn acknowledge_b3_reward(
         &mut self,
         handoff: &CoreB3RewardHandoff,
+        disposition: CoreB3RewardDisposition,
     ) -> Result<CoreB3RewardReceipt, CoreFixedDungeonError> {
         let CoreFixedDungeonState::B3(room) = &mut self.state else {
             return Err(CoreFixedDungeonError::B3RewardUnavailable);
         };
-        room.acknowledge_reward(handoff).map_err(Into::into)
+        room.acknowledge_reward(handoff, disposition)
+            .map_err(Into::into)
     }
 
     pub fn step_room(
@@ -519,16 +521,25 @@ fn enter_b4(
     room: Box<CoreB3FixedRoomSimulation>,
 ) -> Result<CoreFixedDungeonTransition, CoreFixedDungeonError> {
     require_cleared(CoreFixedDungeonNode::BellKnightB3, room.phase())?;
+    let resolution = match room
+        .reward_disposition()
+        .ok_or(CoreFixedDungeonError::B3RewardUnavailable)?
+    {
+        CoreB3RewardDisposition::GrantedOffer => None,
+        CoreB3RewardDisposition::GrantedNoOffer | CoreB3RewardDisposition::IneligibleNoOffer => {
+            Some(CoreFixedDungeonRestResolution::NoOffer)
+        }
+    };
     let participant = room.into_handoff()?;
     Ok((
         CoreFixedDungeonState::Rest {
             participant,
-            resolution: None,
+            resolution,
         },
         transition(
             CoreFixedDungeonNode::BellKnightB3,
             CoreFixedDungeonNode::BellRestB4,
-            None,
+            resolution,
         ),
     ))
 }
@@ -794,6 +805,52 @@ mod tests {
         (doors_at, reward)
     }
 
+    fn reach_cleared_b3(dungeon: &mut CoreFixedDungeonCombat) -> (u64, crate::CoreB3RewardHandoff) {
+        dungeon.advance().expect("enter B1");
+        let (b1_done, _) = clear_current_room(dungeon, 1);
+        dungeon.advance().expect("enter B2");
+        let (b2_done, _) = clear_current_room(dungeon, b1_done + 1);
+        dungeon.advance().expect("enter B3");
+        let (b3_done, reward) = clear_current_room(dungeon, b2_done + 1);
+        (b3_done, reward.expect("B3 reward handoff"))
+    }
+
+    #[test]
+    fn no_offer_and_ineligible_b3_dispositions_enter_resolved_b4() {
+        for disposition in [
+            CoreB3RewardDisposition::GrantedNoOffer,
+            CoreB3RewardDisposition::IneligibleNoOffer,
+        ] {
+            let mut dungeon = fixture();
+            let (_, reward) = reach_cleared_b3(&mut dungeon);
+            assert_eq!(
+                dungeon
+                    .acknowledge_b3_reward(&reward, disposition)
+                    .expect("B3 terminal acknowledgement"),
+                CoreB3RewardReceipt::Committed
+            );
+            assert!(dungeon.pending_b3_reward_handoff().is_none());
+
+            let entered_b4 = dungeon.advance().expect("enter resolved B4");
+            assert_eq!(
+                entered_b4.rest_resolution,
+                Some(CoreFixedDungeonRestResolution::NoOffer)
+            );
+            assert_eq!(
+                dungeon.rest_resolution(),
+                Some(CoreFixedDungeonRestResolution::NoOffer)
+            );
+            assert_eq!(
+                dungeon
+                    .resolve_rest(CoreFixedDungeonRestResolution::NoOffer)
+                    .expect("authoritative no-offer replay"),
+                CoreFixedDungeonRestReceipt::Replayed
+            );
+            dungeon.advance().expect("resolved B4 enters B5");
+            assert_eq!(dungeon.node(), CoreFixedDungeonNode::BellBridgeB5);
+        }
+    }
+
     #[test]
     fn one_participant_crosses_b0_through_b6_without_early_escape_or_identity_reuse() {
         let mut dungeon = fixture();
@@ -825,19 +882,17 @@ mod tests {
         assert_eq!(reward.xp_profile_id, "xp.miniboss_t1");
         assert!(matches!(
             dungeon.advance(),
-            Err(CoreFixedDungeonError::FixedRoom(
-                CoreFixedRoomEncounterError::RoomHandoffUnavailable
-            ))
+            Err(CoreFixedDungeonError::B3RewardUnavailable)
         ));
         assert_eq!(
             dungeon
-                .acknowledge_b3_reward(&reward)
+                .acknowledge_b3_reward(&reward, CoreB3RewardDisposition::GrantedOffer)
                 .expect("B3 reward acknowledgement"),
             CoreB3RewardReceipt::Committed
         );
         assert_eq!(
             dungeon
-                .acknowledge_b3_reward(&reward)
+                .acknowledge_b3_reward(&reward, CoreB3RewardDisposition::GrantedOffer)
                 .expect("B3 reward acknowledgement replay"),
             CoreB3RewardReceipt::Replayed
         );
