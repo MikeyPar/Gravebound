@@ -34,4 +34,4 @@ The hosted PostgreSQL suite now includes two additional adverse contracts: termi
 
 ## Current Next Step
 
-Commits `f4ad323`, `e5f7dc8`, `1bd230a`, and `47ad6c3` add the automatic executor and the coherent custody, wire-projection, and reconnect-binding prerequisites; see [extraction-prerequisite evidence](GB-M03-03G-caldus-extraction-prerequisites-evidence.md). Next publish/retain the snapshot and construct/register production extraction only from the exact committed `BossExitReady` result, then run the hosted PostgreSQL/real-QUIC adverse and restart matrix. Keep normal admission disabled.
+Commits `42a632b`, `be52c29`, and `f5c12b3` now close fail-closed custody validation, exact permit rollback, ordered pending-inventory publication/replay, and transport-free `LinkLost` cleanup; see [extraction-prerequisite evidence](GB-M03-03G-caldus-extraction-prerequisites-evidence.md). Next construct/register production extraction only from the committed `BossExitReady` exit plus coherent storage versions and bind it through the exact danger lease, then run the hosted PostgreSQL/real-QUIC adverse and restart matrix. Keep normal admission disabled.

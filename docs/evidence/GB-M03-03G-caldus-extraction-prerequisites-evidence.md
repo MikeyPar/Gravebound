@@ -14,18 +14,20 @@
 - Commit `e5f7dc8` adds `load_current_danger_extraction_snapshot_v1`. It reuses the terminal-first private-life bootstrap transaction without invoking crash restoration, validates the exact selected living danger root and promoted content, rejects unresolved reward mutations, and returns current post-reward account/character/world/inventory/life versions with bounded `RunBackpack`, `PersonalGround`, and material custody.
 - Commit `1bd230a` appends protocol 1.19 `CorePendingInventoryStateV1` at reliable-event discriminant 21. The server projects storage authority without reauthoring identities, custody, or versions; canonical ordering, uniqueness, capacities, content binding, and compatibility validation fail closed. The explicit 1.18 encoder preserves the prior route frame hash.
 - Commit `47ad6c3` adds exact registered-actor lookup and transport-independent session binding. A matching extraction actor can be retained while the session is `LinkLost`; reconnect attaches it to the session-owned reliable writer before the new transport generation becomes visible. Foreign account, character, or route generation fails before binding.
-- Normal admission and ordinary feature advertisement remain disabled. The worker does not yet publish the snapshot or construct/register the extraction actor; those are the next integration seam.
+- Commit `42a632b` closes impossible custody shapes at every projection boundary. Equipment cannot share one pending slot, Red Tonic stacks are homogeneous and capped at six, run materials are capped at 99, staged lineages cannot project extraction authority, and Core rejects material families excluded by `CONT-REWARD-003`.
+- Commit `be52c29` adds exact extraction-permit abort. Only the current account/character/generation/permit may reopen `BossExitReady`; the route version advances monotonically and stale, changed, foreign, retired, or replacement permits cannot clear newer authority.
+- Commit `f5c12b3` completes ordered worker publication. After durable reward acknowledgement the worker loads the coherent storage snapshot, sends pending inventory before the matching `BossExitReady` route state at the same authoritative defeat tick, retains both events, and replays them only on newer writer generations. The private-life session installs the writer before reconnect visibility, removes the current writer on `LinkLost`, and can clear the exact registered extraction binding without a transport lease when another terminal wins.
+- Normal admission and ordinary feature advertisement remain disabled. Production extraction actor construction/registration from the committed exit and storage version vector is the next integration seam.
 
 ## Verification
 
-- Strict all-feature/all-target Clippy passed for `protocol`, `client_bevy`, `persistence`, and `server_app`.
-- Protocol: `87/87` tests passed.
+- Strict all-feature/all-target Clippy passed with warnings denied for `protocol`, `persistence`, and `server_app`.
+- Protocol: `88/88` tests passed.
 - Persistence: `246/246` tests passed.
-- Native route model: `8/8` focused tests passed.
-- Server library: `349/349` tests passed, including coherent projection and active/`LinkLost` extraction-binding coverage.
+- Server library: `354/354` tests passed, including exact reservation abort, ordered real-QUIC publication/replay, coherent projection, and transport-free exact/foreign `LinkLost` cleanup coverage.
 - `cargo check -p server_app --test postgres_caldus_victory` passed, so the hosted custody journey compiles.
 - `TEST_DATABASE_URL` was absent locally. Hosted PostgreSQL execution and real-QUIC restart/adverse evidence are therefore explicitly unclaimed.
 
 ## Current Next Step
 
-Extend the session-owned Caldus worker to load, project, publish, and retain the coherent pending-inventory snapshot; then construct/register the production extraction actor only from the exact committed `BossExitReady` authority and call the transport-independent session binding. Add rollback/abort handling so no post-permit failure can strand `TerminalPending`. Prove active transport, response loss, reconnect, `LinkLost`, competing terminal, restart, and zero-residue behavior before bound normal-server construction or admission.
+Construct and register the production extraction actor only from the exact committed `BossExitReady` exit plus coherent storage version vector, then call the transport-independent session binding. Every post-permit failure must use the exact abort contract so `TerminalPending` cannot strand. Prove active transport, response loss, reconnect, `LinkLost`, competing terminal, restart, and zero-residue behavior before bound normal-server construction or admission.

@@ -38,4 +38,4 @@ This slice freezes and acknowledges one exact durable Caldus result but does not
 
 ## Current Next Step
 
-Commit `f4ad323` installs the automatic session retry/acknowledgement worker; commits `e5f7dc8`, `1bd230a`, and `47ad6c3` add its coherent custody, wire-projection, and reconnect-binding prerequisites under [extraction-prerequisite evidence](GB-M03-03G-caldus-extraction-prerequisites-evidence.md). Next publish/retain that snapshot and construct/register production extraction only from committed `BossExitReady`. Keep normal admission disabled.
+Commits `42a632b`, `be52c29`, and `f5c12b3` complete fail-closed custody validation, exact permit abort, ordered pending-inventory publication, reconnect replay, and transport-free `LinkLost` cleanup under [extraction-prerequisite evidence](GB-M03-03G-caldus-extraction-prerequisites-evidence.md). Next construct/register production extraction only from the committed `BossExitReady` exit and coherent storage versions, then bind it through the exact danger lease. Keep normal admission disabled.

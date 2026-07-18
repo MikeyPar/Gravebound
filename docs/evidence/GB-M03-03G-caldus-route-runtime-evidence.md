@@ -42,4 +42,4 @@ This slice now uses the compiled arena shell/pillars plus the exact `0.70` Caldu
 
 ## Current Next Step
 
-Commit `78b7ff0` closes the frozen defeat-to-stable-exit owner seam, and commits `f4ad323`, `e5f7dc8`, `1bd230a`, and `47ad6c3` add automatic durable execution plus the coherent custody, protocol, and reconnect-binding prerequisites; see [extraction-prerequisite evidence](GB-M03-03G-caldus-extraction-prerequisites-evidence.md). Next publish/retain the snapshot and construct/register the exact `BossExitReady` production extraction actor. Keep normal admission disabled until that integration and hosted adverse proof pass.
+Commits `42a632b`, `be52c29`, and `f5c12b3` now close custody hardening, exact permit rollback, ordered pending-inventory publication/replay, and `LinkLost` loser cleanup; see [extraction-prerequisite evidence](GB-M03-03G-caldus-extraction-prerequisites-evidence.md). Next construct/register the exact `BossExitReady` production extraction actor from the committed exit and coherent storage versions, then bind it through the exact danger lease. Keep normal admission disabled until that integration and hosted adverse proof pass.
