@@ -172,13 +172,30 @@ impl CorePrivateCaldusRuntime {
         &mut self,
         input: CorePrivateCaldusRuntimeInput,
     ) -> Result<CorePrivateCaldusFrame, CorePrivateCaldusRuntimeError> {
+        self.step_inner(input, None).await
+    }
+
+    #[cfg(test)]
+    async fn step_with_test_friendly_inputs(
+        &mut self,
+        input: CorePrivateCaldusRuntimeInput,
+        friendly_inputs: Vec<CoreCaldusFriendlyInput>,
+    ) -> Result<CorePrivateCaldusFrame, CorePrivateCaldusRuntimeError> {
+        self.step_inner(input, Some(friendly_inputs)).await
+    }
+
+    async fn step_inner(
+        &mut self,
+        input: CorePrivateCaldusRuntimeInput,
+        friendly_inputs: Option<Vec<CoreCaldusFriendlyInput>>,
+    ) -> Result<CorePrivateCaldusFrame, CorePrivateCaldusRuntimeError> {
         let tick = self
             .tick
             .checked_next()
             .ok_or(CorePrivateCaldusRuntimeError::TickExhausted)?;
         let route_before = self.route_directory.snapshot(self.route_lease)?;
         self.validate_route_authority(&route_before)?;
-        let staged = self.stage_frame(input, tick)?;
+        let staged = self.stage_frame(input, tick, friendly_inputs.as_deref())?;
         let route = self
             .route_directory
             .apply_fixed_dungeon_authority(
@@ -225,6 +242,7 @@ impl CorePrivateCaldusRuntime {
         &self,
         input: CorePrivateCaldusRuntimeInput,
         tick: Tick,
+        friendly_inputs: Option<&[CoreCaldusFriendlyInput]>,
     ) -> Result<StagedCaldusFrame, CorePrivateCaldusRuntimeError> {
         let mut lock_simulation = self.lock.clone();
         let mut players = self.players.clone();
@@ -283,6 +301,7 @@ impl CorePrivateCaldusRuntime {
             encounter_simulation.as_mut(),
             self.participant,
             &combat,
+            friendly_inputs,
             &mut players,
         )?;
         let resolved_player_position = players
@@ -388,21 +407,26 @@ fn step_encounter_if_active(
     encounter: Option<&mut CoreCaldusEncounterSimulation>,
     participant: CoreBossParticipant,
     combat: &sim_core::CombatStep,
+    friendly_inputs: Option<&[CoreCaldusFriendlyInput]>,
     players: &mut BTreeMap<EntityId, EnemyLabPlayer>,
 ) -> Result<Option<CoreCaldusEncounterStep>, CorePrivateCaldusRuntimeError> {
     if !matches!(lock.phase, CoreBossLockPhase::Combat { .. }) {
         return Ok(None);
     }
+    let generated;
+    let friendly_inputs = if let Some(inputs) = friendly_inputs {
+        inputs
+    } else {
+        generated = [CoreCaldusFriendlyInput {
+            participant,
+            combat: combat.clone(),
+        }];
+        &generated
+    };
     Ok(Some(
         encounter
             .ok_or(CorePrivateCaldusRuntimeError::InvalidComposition)?
-            .step(
-                &[CoreCaldusFriendlyInput {
-                    participant,
-                    combat: combat.clone(),
-                }],
-                players,
-            )?,
+            .step(friendly_inputs, players)?,
     ))
 }
 
@@ -499,7 +523,10 @@ mod tests {
     use std::{num::NonZeroU64, path::Path};
 
     use protocol::{CorePrivateRouteContentRevisionV1, ManifestHash, WorldFlowContentRevisionV1};
-    use sim_core::{AimDirection, MovementAction, SimulationVector};
+    use sim_core::{
+        AimDirection, CollisionTarget, CombatStep, FriendlyProjectileSource, MovementAction,
+        ProjectileCollision, RawDamageIntent, RawDamageIntentSource, SimulationVector,
+    };
 
     use super::*;
     use crate::{
@@ -604,6 +631,176 @@ mod tests {
         }
     }
 
+    fn scripted_damage(
+        runtime: &CorePrivateCaldusRuntime,
+        tick: Tick,
+        raw_damage: u32,
+    ) -> Vec<CoreCaldusFriendlyInput> {
+        let projectile_id = EntityId::new(960_000 + tick.0).expect("script projectile");
+        let boss_position = runtime
+            .encounter
+            .as_ref()
+            .expect("active encounter")
+            .body()
+            .simulation_position();
+        vec![CoreCaldusFriendlyInput {
+            participant: runtime.participant,
+            combat: CombatStep {
+                tick,
+                collisions: vec![ProjectileCollision {
+                    tick,
+                    projectile_id,
+                    source: FriendlyProjectileSource::Primary,
+                    target: CollisionTarget::Enemy(runtime.boss_entity_id),
+                    final_position: boss_position,
+                    distance_travelled_tiles: 1.0,
+                    contact_ordinal: 0,
+                    empowered_by_slipstep: false,
+                    focused_by_stillness: false,
+                    projectile_continues: false,
+                }],
+                raw_damage_intents: vec![RawDamageIntent {
+                    tick,
+                    projectile_id,
+                    source: RawDamageIntentSource::Primary,
+                    target: runtime.boss_entity_id,
+                    base_raw_damage: raw_damage,
+                    multiplier_basis_points: 10_000,
+                    resolved_raw_damage: raw_damage,
+                    contact_ordinal: 0,
+                }],
+                ..CombatStep::default()
+            },
+        }]
+    }
+
+    fn relocate_for_scripted_charge(runtime: &mut CorePrivateCaldusRuntime) {
+        let charge_target = SimulationVector::new(14.0, 9.0);
+        runtime
+            .players
+            .get_mut(&runtime.participant.entity_id)
+            .expect("player")
+            .target
+            .position = charge_target;
+        runtime.movement = PlayerMovementState::new_with_config(
+            charge_target,
+            runtime.movement.config(),
+            &runtime.arena,
+        )
+        .expect("phase-two charge target");
+    }
+
+    fn scripted_fight_damage(
+        runtime: &CorePrivateCaldusRuntime,
+        sequence: u64,
+    ) -> Vec<CoreCaldusFriendlyInput> {
+        match sequence {
+            300 => scripted_damage(runtime, Tick(sequence), 2_500),
+            550 => scripted_damage(runtime, Tick(sequence), 2_400),
+            950 => scripted_damage(runtime, Tick(sequence), 3_000),
+            _ => Vec::new(),
+        }
+    }
+
+    async fn scripted_full_fight_trace()
+    -> (blake3::Hash, Vec<CorePrivateRoutePhaseV1>, bool, bool, u32) {
+        let (directory, _, mut runtime) = fixture();
+        let mut trace = blake3::Hasher::new();
+        let mut phases = Vec::new();
+        for sequence in 1..=226 {
+            let frame = runtime.step(input(sequence)).await.expect("boss entry");
+            if phases.last() != Some(&frame.route.phase) {
+                phases.push(frame.route.phase);
+            }
+        }
+        runtime
+            .encounter
+            .as_mut()
+            .expect("active encounter")
+            .set_damage_policy(sim_core::HostileDamagePolicy::DebugInvulnerable);
+        let mut separated = false;
+        let mut charged = false;
+        let mut minimum_charge_distance_milli_tiles = u32::MAX;
+        let mut defeated = false;
+        for sequence in 227..=950 {
+            if sequence == 420 {
+                relocate_for_scripted_charge(&mut runtime);
+            }
+            let scripted = scripted_fight_damage(&runtime, sequence);
+            let frame = runtime
+                .step_with_test_friendly_inputs(input(sequence), scripted)
+                .await
+                .unwrap_or_else(|error| panic!("full-fight tick {sequence}: {error}"));
+            if phases.last() != Some(&frame.route.phase) {
+                phases.push(frame.route.phase);
+            }
+            if let Some(encounter) = &frame.encounter {
+                separated |= !encounter.player_separations.is_empty();
+                let moved = encounter.body_events.iter().any(|event| {
+                    matches!(event, sim_core::CoreCaldusBodyEvent::ChargeMoved { .. })
+                });
+                charged |= moved;
+                if moved {
+                    #[allow(
+                        clippy::cast_possible_truncation,
+                        clippy::cast_sign_loss,
+                        reason = "arena distances are finite and tightly bounded"
+                    )]
+                    let distance = ((runtime.player().target.position
+                        - runtime
+                            .encounter
+                            .as_ref()
+                            .expect("encounter")
+                            .body()
+                            .simulation_position())
+                    .length()
+                        * 1_000.0)
+                        .round() as u32;
+                    minimum_charge_distance_milli_tiles =
+                        minimum_charge_distance_milli_tiles.min(distance);
+                }
+                trace.update(format!("{encounter:?}\n").as_bytes());
+            }
+            trace.update(
+                format!(
+                    "{:?}|{:?}|{:?}|{:?}\n",
+                    frame.tick, frame.route.phase, frame.boss_health, frame.player_position
+                )
+                .as_bytes(),
+            );
+            if frame.route.phase == CorePrivateRoutePhaseV1::BossDefeated {
+                assert_eq!(frame.boss_health, Some((0, 7_200)));
+                assert!(
+                    runtime
+                        .encounter
+                        .as_ref()
+                        .expect("defeated encounter")
+                        .hostile_projectiles()
+                        .is_empty()
+                );
+                defeated = true;
+                break;
+            }
+        }
+        assert!(defeated);
+        drop(runtime);
+        directory.begin_shutdown();
+        assert!(
+            directory
+                .finish_shutdown()
+                .await
+                .expect("shutdown")
+                .zero_residue
+        );
+        (
+            trace.finalize(),
+            phases,
+            separated,
+            charged,
+            minimum_charge_distance_milli_tiles,
+        )
+    }
+
     #[tokio::test]
     async fn inherited_tick_runs_exact_countdown_intro_and_same_tick_phase_one() {
         let (directory, _, mut runtime) = fixture();
@@ -678,6 +875,32 @@ mod tests {
                 .await
                 .expect("shutdown")
                 .zero_residue
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_route_bound_fight_is_byte_identical_through_defeat() {
+        let first = scripted_full_fight_trace().await;
+        let second = scripted_full_fight_trace().await;
+        assert_eq!(first, second);
+        assert!(
+            first.2,
+            "charge moved: {}, minimum distance: {}",
+            first.3, first.4
+        );
+        assert_eq!(first.4, 1_000);
+        assert_eq!(
+            first.1,
+            [
+                CorePrivateRoutePhaseV1::BossReadyCountdown,
+                CorePrivateRoutePhaseV1::BossIntroduction,
+                CorePrivateRoutePhaseV1::BossPhaseOne,
+                CorePrivateRoutePhaseV1::BossBreakToTwo,
+                CorePrivateRoutePhaseV1::BossPhaseTwo,
+                CorePrivateRoutePhaseV1::BossBreakToThree,
+                CorePrivateRoutePhaseV1::BossPhaseThree,
+                CorePrivateRoutePhaseV1::BossDefeated,
+            ]
         );
     }
 

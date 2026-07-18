@@ -566,8 +566,63 @@ mod tests {
 
     #[test]
     fn reset_consumes_encounter_and_preserves_monotonic_projectile_identity() {
-        let allocator = encounter().into_cleared_projectile_allocator();
-        assert_eq!(allocator.peek(), id(1_000));
+        let mut first = encounter();
+        first.set_damage_policy(HostileDamagePolicy::DebugInvulnerable);
+        let mut first_players = players();
+        let mut first_ids = Vec::new();
+        for _ in 0..=60 {
+            let step = first.step(&[], &mut first_players).expect("first attempt");
+            first_ids.extend(step.hostile_spawn_events.iter().filter_map(|event| {
+                if let HostileEvent::Spawned { projectile, .. } = event {
+                    Some(projectile.id())
+                } else {
+                    None
+                }
+            }));
+            if !first_ids.is_empty() {
+                break;
+            }
+        }
+        assert!(!first_ids.is_empty());
+        let highest_first = first_ids.iter().copied().max().expect("first ID");
+        let allocator = first.into_cleared_projectile_allocator();
+        assert!(allocator.peek() > highest_first);
+
+        let mut second_lock = lock();
+        second_lock.attempt_ordinal = 2;
+        let mut second =
+            CoreCaldusEncounterSimulation::new(second_lock, arena(), id(99), allocator)
+                .expect("second attempt");
+        second.set_damage_policy(HostileDamagePolicy::DebugInvulnerable);
+        assert!(second.hostile_projectiles().is_empty());
+        let mut second_players = players();
+        let mut second_ids = Vec::new();
+        for _ in 0..=60 {
+            let step = second
+                .step(&[], &mut second_players)
+                .expect("second attempt");
+            second_ids.extend(step.hostile_spawn_events.iter().filter_map(|event| {
+                if let HostileEvent::Spawned { projectile, .. } = event {
+                    Some(projectile.id())
+                } else {
+                    None
+                }
+            }));
+            if !second_ids.is_empty() {
+                break;
+            }
+        }
+        assert!(!second_ids.is_empty());
+        assert!(
+            second_ids
+                .iter()
+                .all(|projectile| *projectile > highest_first)
+        );
+        assert!(
+            first_ids
+                .iter()
+                .all(|projectile| !second_ids.contains(projectile))
+        );
     }
 
     #[test]
