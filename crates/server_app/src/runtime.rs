@@ -3,18 +3,17 @@
 //! This module owns transport and scheduling only. Gameplay authority remains in
 //! [`InstanceScheduler`], and every gameplay value still comes from validated `fp.1.0.0` data.
 
-use persistence::DurableDeathPresentationAuthorityV1;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
     future::Future,
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 use protocol::{
@@ -36,13 +35,18 @@ use crate::{
     CoreExtractionTerminalAuthority, CoreOathSelectionAuthority, CoreRecallTerminalAuthority,
     CoreReliableWriter, CoreResolutionHoldAuthority, CoreSafeInventoryAuthority,
     CoreSuccessorAuthority, DeathViewRepository, DeathViewService, DisabledDeathViewRepository,
-    DisabledProgressionQueryRepository, HandshakePolicy, IdentityClock, IdentityService,
+    DisabledProgressionQueryRepository, HandshakePolicy, IdentityService,
     InMemoryAccountRepository, InstanceError, InstanceScheduler, NoopIdentityEventSink,
     PostgresAccountRepository, PostgresBargainService, PostgresDeathViewRepository,
     PostgresOathSelectionService, PostgresProgressionQueryRepository,
     PostgresWorldFlowLocationRepository, ProgressionQueryRepository, ProgressionQueryService,
     SERVER_SHUTDOWN_CLOSE_CODE, SessionOwnerId, TransportId, WorldFlowGateService,
-    WorldFlowLocationRepository, close_transport, serve_core_reliable,
+    WorldFlowLocationRepository, close_transport,
+    core_private_life_foundation::{
+        CorePrivateLifeFoundationError, CorePrivateLifePersistentFoundation, SystemIdentityClock,
+        load_death_view_revision,
+    },
+    serve_core_reliable,
 };
 
 pub const LOCAL_BUILD_ID: &str = M02_LOCAL_BUILD_ID;
@@ -53,21 +57,6 @@ pub const CORE_IDENTITY_CONTENT_TARGET: &str = M03_CORE_DEV_CONTENT_TARGET;
 const LOCAL_FEATURE_FLAG: &str = "m02-local-runtime";
 #[allow(clippy::cast_lossless)] // `From::from` is not const-stable for this conversion.
 const TICK_NANOS: u64 = 1_000_000_000 / SIMULATION_HZ as u64;
-
-#[derive(Debug, Clone, Copy)]
-struct SystemIdentityClock;
-
-impl IdentityClock for SystemIdentityClock {
-    fn unix_millis(&self) -> u64 {
-        u64::try_from(
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis(),
-        )
-        .unwrap_or(u64::MAX)
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct LocalServerConfig {
@@ -511,6 +500,25 @@ struct CoreReadRepositories<Progression, DeathViews> {
     death_views: DeathViews,
 }
 
+struct CoreIdentityRuntimeMode {
+    private_life_foundation: Option<Arc<CorePrivateLifePersistentFoundation>>,
+    persistence_enabled: bool,
+}
+
+impl CoreIdentityRuntimeMode {
+    const EPHEMERAL: Self = Self {
+        private_life_foundation: None,
+        persistence_enabled: false,
+    };
+
+    fn persistent(foundation: Arc<CorePrivateLifePersistentFoundation>) -> Self {
+        Self {
+            private_life_foundation: Some(foundation),
+            persistence_enabled: true,
+        }
+    }
+}
+
 /// Explicit Core-development endpoint. It never creates an [`InstanceScheduler`] and therefore
 /// cannot silently route identity clients into the M02 combat laboratory.
 pub struct BoundCoreIdentityServer<
@@ -534,6 +542,7 @@ pub struct BoundCoreIdentityServer<
     successor: Arc<CoreSuccessorAuthority>,
     extraction: Arc<CoreExtractionTerminalAuthority>,
     recall: Arc<CoreRecallTerminalAuthority>,
+    private_life_foundation: Option<Arc<CorePrivateLifePersistentFoundation>>,
     persistence_enabled: bool,
 }
 
@@ -566,7 +575,7 @@ impl BoundCoreIdentityServer {
                 oath: CoreOathSelectionAuthority::disabled(),
                 bargain: CoreBargainAuthority::disabled(),
             },
-            false,
+            CoreIdentityRuntimeMode::EPHEMERAL,
         )
     }
 }
@@ -584,6 +593,10 @@ impl
         repository: PostgresAccountRepository,
     ) -> Result<Self, LocalServerRuntimeError> {
         let persistence = repository.persistence();
+        let private_life_foundation = Arc::new(CorePrivateLifePersistentFoundation::new(
+            &config.content_root,
+            persistence.clone(),
+        )?);
         let progression_content =
             sim_content::load_core_development_progression(&config.content_root)
                 .map_err(|error| LocalServerRuntimeError::Content(error.to_string()))?;
@@ -614,7 +627,7 @@ impl
             },
             &progression_content,
             CoreShrineAuthorities { oath, bargain },
-            true,
+            CoreIdentityRuntimeMode::persistent(private_life_foundation),
         )
     }
 }
@@ -633,7 +646,7 @@ where
         reads: CoreReadRepositories<P, D>,
         progression_content: &sim_content::CoreDevelopmentProgression,
         shrines: CoreShrineAuthorities,
-        persistence_enabled: bool,
+        mode: CoreIdentityRuntimeMode,
     ) -> Result<Self, LocalServerRuntimeError> {
         sim_content::load_core_development_identity(&config.content_root)
             .map_err(|error| LocalServerRuntimeError::Content(error.to_string()))?;
@@ -660,7 +673,7 @@ where
         let endpoint = quinn::Endpoint::server(server_config, config.bind_address)?;
         let local_address = endpoint.local_addr()?;
         let mut feature_flags = vec![WireText::new(CORE_TEST_IDENTITY_FEATURE_FLAG)?];
-        if persistence_enabled {
+        if mode.persistence_enabled {
             feature_flags.push(WireText::new(protocol::CORE_DEATH_VIEW_FEATURE_FLAG)?);
         }
         let policy = HandshakePolicy {
@@ -715,7 +728,8 @@ where
             successor,
             extraction,
             recall,
-            persistence_enabled,
+            private_life_foundation: mode.private_life_foundation,
+            persistence_enabled: mode.persistence_enabled,
         })
     }
 
@@ -792,6 +806,9 @@ where
                 }
             }
         }
+        if let Some(foundation) = self.private_life_foundation.as_ref() {
+            foundation.begin_shutdown();
+        }
         self.endpoint.close(
             SERVER_SHUTDOWN_CLOSE_CODE.into(),
             b"Core identity server shutdown",
@@ -806,6 +823,14 @@ where
         let remaining_connection_tasks = workers.len();
         self.endpoint.wait_idle().await;
         let remaining_open_connections = self.endpoint.open_connections();
+        if let Some(foundation) = self.private_life_foundation.as_ref() {
+            let report = foundation.finish_shutdown().await?;
+            if !report.zero_residue {
+                return Err(LocalServerRuntimeError::Content(
+                    "dormant private-life foundation left route runtime residue".to_owned(),
+                ));
+            }
+        }
         Ok(CoreIdentityServerReport {
             accepted_connections: accepted.load(Ordering::Relaxed),
             rejected_connections: rejected.load(Ordering::Relaxed),
@@ -818,30 +843,6 @@ where
             persistence_enabled: self.persistence_enabled,
         })
     }
-}
-
-fn load_death_view_revision(
-    content_root: &Path,
-) -> Result<protocol::DeathViewContentRevisionV1, LocalServerRuntimeError> {
-    let content = sim_content::load_core_development_death_view(content_root)
-        .map_err(|error| LocalServerRuntimeError::Content(error.to_string()))?;
-    let hashes = content.hashes();
-    let persistence_authority = DurableDeathPresentationAuthorityV1::core();
-    if hashes.records_blake3 != persistence_authority.records_blake3
-        || hashes.assets_blake3 != persistence_authority.assets_blake3
-        || hashes.localization_blake3 != persistence_authority.localization_blake3
-        || content.item_content_revision() != persistence::CORE_ITEM_CONTENT_REVISION
-    {
-        return Err(LocalServerRuntimeError::Content(
-            "compiled Core death presentation does not match the durable death authority"
-                .to_owned(),
-        ));
-    }
-    Ok(protocol::DeathViewContentRevisionV1 {
-        records_blake3: ManifestHash::new(hashes.records_blake3.clone())?,
-        assets_blake3: ManifestHash::new(hashes.assets_blake3.clone())?,
-        localization_blake3: ManifestHash::new(hashes.localization_blake3.clone())?,
-    })
 }
 
 #[allow(
@@ -1058,6 +1059,8 @@ pub enum LocalServerRuntimeError {
     Rustls(#[from] rustls::Error),
     #[error(transparent)]
     Bounded(#[from] protocol::BoundedValueError),
+    #[error("private-life foundation failed: {0}")]
+    PrivateLifeFoundation(String),
     #[error(transparent)]
     Codec(#[from] protocol::WireCodecError),
     #[error(transparent)]
@@ -1080,10 +1083,21 @@ impl From<quinn::ConnectError> for LocalServerRuntimeError {
     }
 }
 
+impl From<CorePrivateLifeFoundationError> for LocalServerRuntimeError {
+    fn from(error: CorePrivateLifeFoundationError) -> Self {
+        Self::PrivateLifeFoundation(error.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::{path::Path, sync::Arc};
+    use std::{
+        path::Path,
+        sync::Arc,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
+    use persistence::DurableDeathPresentationAuthorityV1;
     use protocol::{
         AccountBootstrapFrame, AccountBootstrapRequest, AccountBootstrapResult, ActionFrame,
         ActionKind, AuthTicket, CharacterMutationFrame, CharacterMutationPayload, Compression,

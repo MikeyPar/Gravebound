@@ -13,6 +13,7 @@ mod caldus_victory;
 mod combat_factory;
 mod core_journey_world_flow;
 mod core_lifecycle;
+mod core_private_life_foundation;
 mod core_private_route_actor;
 mod core_private_world_flow;
 mod core_recall_outbox;
