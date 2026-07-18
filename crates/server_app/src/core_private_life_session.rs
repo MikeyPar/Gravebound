@@ -15,14 +15,15 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 
 use crate::{
-    AuthenticatedAccount, AuthenticatedNamespace, CoreBellPortalTransition,
-    CoreDurableB3Resolution, CoreDurableBargainRestResolution, CoreExtractionActorDirectory,
+    AuthenticatedAccount, AuthenticatedNamespace, CoreB3RewardAuthority,
+    CoreB3RewardWriterGeneration, CoreBellPortalTransition, CoreDurableB3Resolution,
+    CoreDurableBargainRestResolution, CoreExtractionActorDirectory,
     CoreExtractionAuthoritativeTick, CoreExtractionConnectionLease, CoreExtractionHallProjection,
     CoreExtractionRuntimeError, CoreExtractionRuntimeReport, CoreExtractionTransportAttach,
-    CoreExtractionTransportDetach, CorePrivateFixedDungeonAdvance,
-    CorePrivateFixedDungeonB3RewardCommit, CorePrivateFixedDungeonDriverReady,
-    CorePrivateFixedDungeonRestCommit, CorePrivateMicrorealmAbility,
-    CorePrivateMicrorealmAbilityPress, CorePrivateMicrorealmDriver,
+    CoreExtractionTransportDetach, CorePrivateB3RewardRuntime, CorePrivateB3RewardRuntimeError,
+    CorePrivateFixedDungeonAdvance, CorePrivateFixedDungeonB3RewardCommit,
+    CorePrivateFixedDungeonDriverReady, CorePrivateFixedDungeonRestCommit,
+    CorePrivateMicrorealmAbility, CorePrivateMicrorealmAbilityPress, CorePrivateMicrorealmDriver,
     CorePrivateMicrorealmDriverError, CorePrivateMicrorealmDriverHandle,
     CorePrivateMicrorealmDriverObserver, CorePrivateMicrorealmDriverReport,
     CorePrivateMicrorealmIngressError, CorePrivateMicrorealmPreparedHandoff,
@@ -235,6 +236,8 @@ pub enum CorePrivateLifeSessionError {
     MicrorealmIngress(#[from] CorePrivateMicrorealmIngressError),
     #[error("Core private-life microrealm driver failed: {0}")]
     MicrorealmDriver(#[from] CorePrivateMicrorealmDriverError),
+    #[error("Core private-life automatic B3 reward runtime failed: {0}")]
+    B3RewardRuntime(#[from] CorePrivateB3RewardRuntimeError),
 }
 
 #[derive(Debug)]
@@ -260,6 +263,7 @@ struct SessionEntry {
 struct BoundMicrorealmDriver {
     lease: CorePrivateMicrorealmBindingLease,
     driver: CorePrivateMicrorealmDriver,
+    b3_rewards: Option<CorePrivateB3RewardRuntime>,
 }
 
 #[derive(Debug)]
@@ -288,6 +292,7 @@ struct CommittedDynamicWriterHandoffs {
 pub struct CorePrivateLifeSessionDirectory<Clock, TickSource> {
     recall: Arc<CoreRecallActorDirectory<Clock, TickSource>>,
     extraction: Option<Box<dyn PrivateLifeExtractionRuntime>>,
+    b3_rewards: Option<Arc<dyn CoreB3RewardAuthority>>,
     state: Mutex<SessionState>,
 }
 
@@ -391,6 +396,7 @@ where
         Self {
             recall,
             extraction: None,
+            b3_rewards: None,
             state: Mutex::new(SessionState {
                 accepting: true,
                 shutdown_started: false,
@@ -413,6 +419,12 @@ where
         let mut sessions = Self::new(recall);
         sessions.extraction = Some(Box::new(extraction));
         sessions
+    }
+
+    #[must_use]
+    pub fn with_b3_reward_authority(mut self, authority: Arc<dyn CoreB3RewardAuthority>) -> Self {
+        self.b3_rewards = Some(authority);
+        self
     }
 
     async fn prepare_dynamic_writer_handoffs(
@@ -682,6 +694,12 @@ where
         entry.extraction_lease = committed.extraction.as_ref().map(|attached| attached.lease);
         if let Some(bound) = &entry.microrealm {
             bound.driver.handle().mark_reward_session_active();
+            if let Some(b3_rewards) = &bound.b3_rewards {
+                b3_rewards.attach_writer(
+                    CoreB3RewardWriterGeneration::new(generation.get())?,
+                    Arc::clone(&writer),
+                );
+            }
         }
 
         let invalidated_connection = previous.map(|active| {
@@ -795,14 +813,34 @@ where
             route_lease,
         };
         let driver = CorePrivateMicrorealmDriver::spawn(runtime);
+        let handle = driver.handle();
+        let active = entry
+            .active
+            .as_ref()
+            .ok_or(CorePrivateLifeSessionError::SessionUnavailable)?;
+        let b3_rewards = self.b3_rewards.as_ref().map(|authority| {
+            CorePrivateB3RewardRuntime::spawn(
+                entry.authenticated,
+                binding_lease.character_id(),
+                Arc::clone(authority),
+                handle.clone(),
+                handle.observe(),
+                Some((
+                    CoreB3RewardWriterGeneration::new(active.lease.generation.get())
+                        .expect("session transport generations are nonzero"),
+                    Arc::clone(&active.writer),
+                )),
+            )
+        });
         let binding = CorePrivateMicrorealmBinding {
             lease: binding_lease,
-            observer: driver.handle().observe(),
+            observer: handle.observe(),
         };
         entry.next_microrealm_binding_generation = next_binding_generation;
         entry.microrealm = Some(BoundMicrorealmDriver {
             lease: binding_lease,
             driver,
+            b3_rewards,
         });
         Ok(binding)
     }
@@ -1059,7 +1097,14 @@ where
             .take()
             .ok_or(CorePrivateLifeSessionError::MicrorealmUnavailable)?;
         drop(state);
-        bound.driver.shutdown().await.map_err(Into::into)
+        let b3_result = if let Some(b3_rewards) = &bound.b3_rewards {
+            b3_rewards.shutdown().await.map(|_| ())
+        } else {
+            Ok(())
+        };
+        let driver_result = bound.driver.shutdown().await;
+        b3_result?;
+        driver_result.map_err(Into::into)
     }
 
     /// Binds the current Boss-exit extraction actor to the exact private-life writer. This is
@@ -1287,6 +1332,16 @@ where
             None
         };
         if let Some(active) = entry.active.take() {
+            if let Some(b3_rewards) = entry
+                .microrealm
+                .as_ref()
+                .and_then(|bound| bound.b3_rewards.as_ref())
+            {
+                b3_rewards.detach_writer(
+                    CoreB3RewardWriterGeneration::new(lease.generation.get())
+                        .expect("session transport generations are nonzero"),
+                );
+            }
             active
                 .writer
                 .retire(SESSION_DETACHED_CLOSE_CODE, SESSION_DETACHED_REASON);
@@ -1320,13 +1375,19 @@ where
             entry.recall_lease = None;
             entry.extraction_lease = None;
             if let Some(bound) = entry.microrealm.take() {
-                microrealm_drivers.push(bound.driver);
+                microrealm_drivers.push(bound);
             }
         }
         drop(state);
         let mut microrealm_shutdown_failures = 0_usize;
-        for driver in microrealm_drivers {
-            if driver.shutdown().await.is_err() {
+        for bound in microrealm_drivers {
+            let b3_failed = if let Some(b3_rewards) = &bound.b3_rewards {
+                b3_rewards.shutdown().await.is_err()
+            } else {
+                false
+            };
+            let driver_failed = bound.driver.shutdown().await.is_err();
+            if b3_failed || driver_failed {
                 microrealm_shutdown_failures = microrealm_shutdown_failures.saturating_add(1);
             }
         }

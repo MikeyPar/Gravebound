@@ -15,6 +15,7 @@ mod core_b3_reward;
 mod core_extraction_runtime;
 mod core_journey_world_flow;
 mod core_lifecycle;
+mod core_private_b3_reward_runtime;
 mod core_private_combat_frame;
 mod core_private_fixed_dungeon_runtime;
 mod core_private_life_foundation;
@@ -105,6 +106,11 @@ pub use core_lifecycle::{
     CoreCheckpointBinding, CoreCheckpointServiceError, CoreDangerCheckpointRepository,
     CoreDangerCheckpointService, CoreLifeKey, CoreLiveBindingId, CoreLiveCharacter,
     CoreLiveDirectory, CoreLiveError, CoreResumeOutcome, DANGER_CHECKPOINT_INTERVAL_TICKS,
+};
+pub use core_private_b3_reward_runtime::{
+    CoreB3RewardAuthority, CoreB3RewardAuthorityFailure, CoreB3RewardAuthorityFailureKind,
+    CoreB3RewardWriterGeneration, CorePrivateB3RewardRuntime, CorePrivateB3RewardRuntimeError,
+    CorePrivateB3RewardRuntimeReport, CorePrivateB3RewardRuntimeState,
 };
 pub use core_private_fixed_dungeon_runtime::{
     CorePrivateFixedDungeonAdvance, CorePrivateFixedDungeonB3RewardCommit,

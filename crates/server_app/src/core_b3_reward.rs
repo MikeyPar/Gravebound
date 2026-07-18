@@ -134,7 +134,21 @@ impl CoreDurableB3RewardCommit {
             progression: ProgressionAwardOutcome {
                 reward_event_id,
                 code: ProgressionAwardCode::Accepted,
-                projection: None,
+                projection: Some(protocol::ProgressionProjection {
+                    character_id,
+                    progression_version: 2,
+                    level: 2,
+                    total_xp: 120,
+                    current_health: 140,
+                    maximum_health: 140,
+                    armor: 5,
+                    movement_milli_tiles_per_second: 4_500,
+                    level_damage_multiplier_basis_points: 10_400,
+                    cap_state: protocol::ProgressionCapState::Advancing {
+                        level_start_total_xp: 100,
+                        next_level_total_xp: 250,
+                    },
+                }),
                 base_xp: 120,
                 first_clear_bonus_xp: 0,
                 applied_xp: 120,
@@ -165,6 +179,38 @@ impl CoreDurableB3IneligibleCommit {
     #[must_use]
     pub const fn progression(&self) -> &ProgressionAwardOutcome {
         &self.progression
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_fixture(
+        authenticated: AuthenticatedAccount,
+        character_id: [u8; 16],
+        instance_lineage_id: [u8; 16],
+        handoff: sim_content::CoreB3RewardHandoff,
+    ) -> Self {
+        let reward_event_id = derive_identity(
+            b"gravebound.core-b3-reward-event.v1\0",
+            instance_lineage_id,
+            &handoff,
+        );
+        Self {
+            account_id: authenticated.account_id.as_bytes(),
+            character_id,
+            instance_lineage_id,
+            reward_event_id,
+            handoff,
+            progression_payload_hash: [9; 32],
+            progression: ProgressionAwardOutcome {
+                reward_event_id,
+                code: ProgressionAwardCode::NotEligible,
+                projection: None,
+                base_xp: 0,
+                first_clear_bonus_xp: 0,
+                applied_xp: 0,
+                discarded_at_core_cap: 0,
+                first_clear_awarded: false,
+            },
+        }
     }
 }
 

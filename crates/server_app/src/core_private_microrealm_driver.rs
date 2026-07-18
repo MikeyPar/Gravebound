@@ -444,6 +444,13 @@ impl CorePrivateMicrorealmDriverObserver {
             .map_err(|_| CorePrivateMicrorealmObservationError::Closed)?;
         Ok(self.latest())
     }
+
+    #[cfg(test)]
+    pub(crate) fn from_receiver_for_test(
+        receiver: watch::Receiver<CorePrivateMicrorealmDriverState>,
+    ) -> Self {
+        Self { receiver }
+    }
 }
 
 /// Fail-closed reason retained when the authoritative frame owner stops advancing.
