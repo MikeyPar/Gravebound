@@ -26,4 +26,4 @@ Registration remains blocked until the fixed B0-B6 runtime exists and optimized 
 
 ## Current Next Step
 
-Implement the exclusive 30 Hz microrealm driver, then compose fixed-room combat, Bargain, rewards, pending inventory, and terminal outcomes. Exercise B0/B4/B6 against those authoritative timelines before proposing any registry or content-hash change.
+Compose fixed-room combat, Bargain, rewards, pending inventory, and terminal outcomes on the completed exclusive 30 Hz driver. Exercise B0/B4/B6 against those authoritative timelines before proposing any registry or content-hash change.

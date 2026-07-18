@@ -35,4 +35,4 @@ Hosted CI [`29640683239`](https://github.com/MikeyPar/Gravebound/actions/runs/29
 
 ## Current Next Step
 
-Move input-sequence validation to session ingress and place the runtime behind one exclusive driver with a one-slot latest-state input channel, separately reliable ability presses, a `MissedTickBehavior::Skip` 30 Hz interval, LinkLost neutralization with continued danger ticks, generation-safe reconnect, frame-complete freeze/shutdown, and zero residue. Then extend the same mutable handoff through fixed B0-B6 rooms, rewards, pending inventory, and all terminal producers.
+The exclusive retained-input 30 Hz driver and observer-only session binding are composed by `c3bc57e`, `995151c`, and `4516b1a`. Extend the same mutable handoff through fixed B0-B6 rooms, rewards, pending inventory, and all terminal producers.
