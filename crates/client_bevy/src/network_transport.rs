@@ -13,8 +13,9 @@ use std::{
 
 use protocol::{
     AccountBootstrapFrame, AccountBootstrapRequest, ClientHello, ControlEvent, HandshakeResponse,
-    ManifestHash, RELIABLE_FRAME_LIMIT, ReliableEvent, ReliableEventFrame, SessionControlFrame,
-    SessionControlRequest, SnapshotChunk, WireMessage, WireText, decode_frame, encode_frame,
+    ManifestHash, RELIABLE_FRAME_LIMIT, ReliableEvent, ReliableEventFrame, ReliableEventInbox,
+    ReliableEventInboxError, SessionControlFrame, SessionControlRequest, SnapshotChunk,
+    WireMessage, WireText, decode_frame, encode_frame,
 };
 use rustls::pki_types::CertificateDer;
 use thiserror::Error;
@@ -25,6 +26,7 @@ const RELIABLE_EVENT_CAPACITY: usize = 64;
 const SNAPSHOT_QUEUE_CAPACITY: usize = 16;
 const RECONNECT_ATTEMPTS: usize = 10;
 const RECONNECT_DELAY: Duration = Duration::from_millis(250);
+const RELIABLE_GAP_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone)]
 pub struct NetworkTransportConfig {
@@ -182,6 +184,7 @@ async fn run_worker(
     send_event(&events, TransportEvent::Connecting)?;
     let mut prior_session: Option<WireText<64>> = None;
     let mut core_bootstrapped = false;
+    let mut combat_reliable_sequence = 0_u32;
     let mut control_sequence = 1_u32;
     let mut reconnect_attempt = 0_usize;
     loop {
@@ -205,41 +208,14 @@ async fn run_worker(
             Err(error) => return Err(error),
         };
         send_event(&events, TransportEvent::HandshakeAccepted(server_hello))?;
-        let lifecycle_event = match &config.startup {
-            NetworkStartup::CombatSession => {
-                let request = match prior_session.clone() {
-                    Some(prior_session_id) => SessionControlRequest::Reconnect { prior_session_id },
-                    None => SessionControlRequest::Join,
-                };
-                perform_control(
-                    &connection,
-                    SessionControlFrame {
-                        sequence: control_sequence,
-                        client_tick: 0,
-                        client_monotonic_micros: 0,
-                        request,
-                    },
-                )
-                .await?
-            }
-            NetworkStartup::CoreIdentity {
-                content_manifest_hash,
-            } => {
-                perform_core_bootstrap(
-                    &connection,
-                    AccountBootstrapFrame {
-                        sequence: control_sequence,
-                        request: if core_bootstrapped {
-                            AccountBootstrapRequest::Refresh
-                        } else {
-                            AccountBootstrapRequest::Bootstrap
-                        },
-                        content_manifest_hash: content_manifest_hash.clone(),
-                    },
-                )
-                .await?
-            }
-        };
+        let lifecycle_event = perform_startup(
+            &connection,
+            &config.startup,
+            prior_session.as_ref(),
+            core_bootstrapped,
+            control_sequence,
+        )
+        .await?;
         control_sequence = control_sequence
             .checked_add(1)
             .ok_or(NetworkTransportError::SequenceExhausted)?;
@@ -250,9 +226,26 @@ async fn run_worker(
             }
             NetworkStartup::CoreIdentity { .. } => core_bootstrapped = true,
         }
-        send_event(&events, TransportEvent::Reliable(lifecycle_event))?;
-
-        match run_connected(&connection, &mut input, &mut reliable, &events, &snapshots).await? {
+        let previous_reliable_sequence = if matches!(&config.startup, NetworkStartup::CombatSession)
+        {
+            combat_reliable_sequence
+        } else {
+            0
+        };
+        let (connected, delivered_sequence) = run_connected_transport(
+            &connection,
+            &mut input,
+            &mut reliable,
+            &events,
+            &snapshots,
+            lifecycle_event,
+            previous_reliable_sequence,
+        )
+        .await?;
+        if matches!(&config.startup, NetworkStartup::CombatSession) {
+            combat_reliable_sequence = delivered_sequence;
+        }
+        match connected {
             ConnectedExit::Shutdown => {
                 connection.close(0_u32.into(), b"native client shutdown");
                 endpoint.wait_idle().await;
@@ -272,6 +265,74 @@ async fn run_worker(
             }
         }
     }
+}
+
+async fn perform_startup(
+    connection: &quinn::Connection,
+    startup: &NetworkStartup,
+    prior_session: Option<&WireText<64>>,
+    core_bootstrapped: bool,
+    control_sequence: u32,
+) -> Result<ReliableEventFrame, NetworkTransportError> {
+    match startup {
+        NetworkStartup::CombatSession => {
+            let request = prior_session.map_or(SessionControlRequest::Join, |prior_session_id| {
+                SessionControlRequest::Reconnect {
+                    prior_session_id: prior_session_id.clone(),
+                }
+            });
+            perform_control(
+                connection,
+                SessionControlFrame {
+                    sequence: control_sequence,
+                    client_tick: 0,
+                    client_monotonic_micros: 0,
+                    request,
+                },
+            )
+            .await
+        }
+        NetworkStartup::CoreIdentity {
+            content_manifest_hash,
+        } => {
+            perform_core_bootstrap(
+                connection,
+                AccountBootstrapFrame {
+                    sequence: control_sequence,
+                    request: if core_bootstrapped {
+                        AccountBootstrapRequest::Refresh
+                    } else {
+                        AccountBootstrapRequest::Bootstrap
+                    },
+                    content_manifest_hash: content_manifest_hash.clone(),
+                },
+            )
+            .await
+        }
+    }
+}
+
+async fn run_connected_transport(
+    connection: &quinn::Connection,
+    input: &mut watch::Receiver<Option<protocol::InputFrame>>,
+    reliable: &mut tokio_mpsc::Receiver<ReliableCommand>,
+    events: &mpsc::SyncSender<TransportEvent>,
+    snapshots: &Arc<Mutex<VecDeque<SnapshotChunk>>>,
+    lifecycle_event: ReliableEventFrame,
+    previous_reliable_sequence: u32,
+) -> Result<(ConnectedExit, u32), NetworkTransportError> {
+    let mut reliable_inbox = ReliableEventInbox::resume_after(previous_reliable_sequence);
+    deliver_reliable(events, &mut reliable_inbox, lifecycle_event)?;
+    let connected = run_connected(
+        connection,
+        input,
+        reliable,
+        events,
+        snapshots,
+        &mut reliable_inbox,
+    )
+    .await?;
+    Ok((connected, reliable_inbox.last_delivered_sequence()))
 }
 
 async fn connect_and_handshake(
@@ -300,9 +361,17 @@ async fn run_connected(
     reliable: &mut tokio_mpsc::Receiver<ReliableCommand>,
     events: &mpsc::SyncSender<TransportEvent>,
     snapshots: &Arc<Mutex<VecDeque<SnapshotChunk>>>,
+    reliable_inbox: &mut ReliableEventInbox,
 ) -> Result<ConnectedExit, NetworkTransportError> {
+    let mut gap_deadline = None;
     loop {
         tokio::select! {
+            () = tokio::time::sleep_until(
+                gap_deadline.unwrap_or_else(tokio::time::Instant::now)
+            ), if gap_deadline.is_some() => {
+                connection.close(0_u32.into(), b"reliable sequence gap");
+                return Ok(ConnectedExit::Lost);
+            }
             result = input.changed() => {
                 if result.is_err() {
                     return Ok(ConnectedExit::Shutdown);
@@ -321,7 +390,10 @@ async fn run_connected(
                         let WireMessage::ReliableEvent(event) = decode_frame(&response)? else {
                             return Err(NetworkTransportError::UnexpectedMessage);
                         };
-                        send_event(events, TransportEvent::Reliable(event))?;
+                        if deliver_reliable(events, reliable_inbox, event).is_err() {
+                            connection.close(0_u32.into(), b"invalid reliable sequence");
+                            return Ok(ConnectedExit::Lost);
+                        }
                     }
                     Some(ReliableCommand::Shutdown) | None => {
                         return Ok(ConnectedExit::Shutdown);
@@ -345,8 +417,16 @@ async fn run_connected(
                 let WireMessage::ReliableEvent(event) = decode_frame(&bytes)? else {
                     return Err(NetworkTransportError::UnexpectedMessage);
                 };
-                send_event(events, TransportEvent::Reliable(event))?;
+                if deliver_reliable(events, reliable_inbox, event).is_err() {
+                    connection.close(0_u32.into(), b"invalid reliable sequence");
+                    return Ok(ConnectedExit::Lost);
+                }
             }
+        }
+        if reliable_inbox.has_gap() {
+            gap_deadline.get_or_insert_with(|| tokio::time::Instant::now() + RELIABLE_GAP_TIMEOUT);
+        } else {
+            gap_deadline = None;
         }
     }
 }
@@ -420,6 +500,17 @@ fn send_event(
         .map_err(|_| NetworkTransportError::EventReceiverClosed)
 }
 
+fn deliver_reliable(
+    events: &mpsc::SyncSender<TransportEvent>,
+    inbox: &mut ReliableEventInbox,
+    event: ReliableEventFrame,
+) -> Result<(), NetworkTransportError> {
+    for ready in inbox.push(event)? {
+        send_event(events, TransportEvent::Reliable(ready))?;
+    }
+    Ok(())
+}
+
 #[derive(Debug, Error)]
 pub enum NetworkTransportError {
     #[error("local server certificate is empty")]
@@ -432,6 +523,8 @@ pub enum NetworkTransportError {
     EventReceiverClosed,
     #[error("network worker received an unexpected protocol message")]
     UnexpectedMessage,
+    #[error(transparent)]
+    ReliableSequence(#[from] ReliableEventInboxError),
     #[error("network TLS configuration failed: {0}")]
     TlsConfiguration(String),
     #[error("network control sequence exhausted")]
@@ -466,6 +559,17 @@ pub enum NetworkTransportError {
 mod tests {
     use super::*;
 
+    fn reliable(sequence: u32) -> ReliableEventFrame {
+        ReliableEventFrame {
+            sequence,
+            server_tick: u64::from(sequence),
+            event: ReliableEvent::ActionResult {
+                action_sequence: sequence,
+                code: protocol::ActionResultCode::Accepted,
+            },
+        }
+    }
+
     #[test]
     fn snapshot_queue_is_strictly_bounded_and_retains_latest_state() {
         let queue = Arc::new(Mutex::new(VecDeque::new()));
@@ -487,5 +591,20 @@ mod tests {
         assert_eq!(queue.len(), SNAPSHOT_QUEUE_CAPACITY);
         assert_eq!(queue.front().unwrap().sequence, 17);
         assert_eq!(queue.back().unwrap().sequence, 32);
+    }
+
+    #[test]
+    fn reliable_transport_publishes_cross_stream_events_contiguously() {
+        let (events, receive) = mpsc::sync_channel(4);
+        let mut inbox = ReliableEventInbox::new();
+        deliver_reliable(&events, &mut inbox, reliable(2)).unwrap();
+        assert!(receive.try_recv().is_err());
+
+        deliver_reliable(&events, &mut inbox, reliable(1)).unwrap();
+        let first = receive.try_recv().unwrap();
+        let second = receive.try_recv().unwrap();
+        assert!(matches!(first, TransportEvent::Reliable(frame) if frame.sequence == 1));
+        assert!(matches!(second, TransportEvent::Reliable(frame) if frame.sequence == 2));
+        assert!(receive.try_recv().is_err());
     }
 }

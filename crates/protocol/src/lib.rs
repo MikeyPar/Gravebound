@@ -15,6 +15,7 @@ mod handshake;
 mod messages;
 mod oath;
 mod progression;
+mod reliable_inbox;
 mod resolution_hold;
 mod safe_inventory;
 mod successor;
@@ -95,6 +96,9 @@ pub use oath::{
 pub use progression::{
     PROGRESSION_REWARD_EVENT_ID_BYTES, ProgressionCapState, ProgressionProjection,
     ProgressionQueryFrame, ProgressionResult, ProgressionResultCode, ProgressionValidationError,
+};
+pub use reliable_inbox::{
+    RELIABLE_EVENT_REORDER_CAPACITY, ReliableEventInbox, ReliableEventInboxError,
 };
 pub use resolution_hold::{
     RESOLUTION_HOLD_DIGEST_BYTES, RESOLUTION_HOLD_ID_BYTES, RESOLUTION_HOLD_ID_MAX_BYTES,
