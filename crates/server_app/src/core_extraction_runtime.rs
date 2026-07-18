@@ -100,6 +100,21 @@ pub struct CoreExtractionTransportAttach {
     pub committed_result_replayed: bool,
 }
 
+/// Opaque reservation for extraction's side of a coordinated private-life writer handoff.
+/// Preparing reserves the real extraction transport generation without changing active authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CoreExtractionPreparedWriterHandoff {
+    lease: CoreExtractionConnectionLease,
+}
+
+impl CoreExtractionPreparedWriterHandoff {
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) const fn lease(self) -> CoreExtractionConnectionLease {
+        self.lease
+    }
+}
+
 /// Generation-bound handoff material. The bootstrap/session owner first installs this Hall
 /// snapshot, then consumes the token to clear extraction replay state and release only the
 /// extraction binding. A stale transport generation cannot acknowledge a newer delivery.
@@ -112,6 +127,11 @@ pub struct CoreExtractionHallProjection {
 }
 
 impl CoreExtractionHallProjection {
+    #[must_use]
+    pub(crate) const fn lease(&self) -> CoreExtractionConnectionLease {
+        self.lease
+    }
+
     #[must_use]
     pub const fn snapshot(&self) -> &protocol::CharacterLocationSnapshot {
         &self.hall
@@ -153,6 +173,7 @@ pub struct CoreExtractionRuntimeReport {
     pub remaining_retiring_actors: usize,
     pub route_retirement_failures: u64,
     pub remaining_active_transports: usize,
+    pub retired_pending_writer_handoffs: usize,
     pub remaining_committed_results: usize,
     pub zero_residue: bool,
 }
@@ -173,6 +194,8 @@ pub enum CoreExtractionRuntimeError {
     ReliableWriterUnavailable,
     #[error("Core extraction reliable writer is already attached")]
     ReliableWriterAlreadyAttached,
+    #[error("Core extraction prepared reliable-writer handoff is stale or invalid")]
+    PreparedWriterHandoffMismatch,
     #[error("Core extraction transport generation overflowed")]
     GenerationExhausted,
     #[error("Core extraction prepared intent does not match actor authority")]
@@ -311,6 +334,13 @@ struct ActiveExtractionTransport {
     writer: Arc<CoreReliableWriter>,
 }
 
+#[derive(Debug)]
+struct PendingExtractionWriterHandoff {
+    prepared: CoreExtractionPreparedWriterHandoff,
+    authenticated: AuthenticatedAccount,
+    writer: Arc<CoreReliableWriter>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExtractionDeliveryState {
     InFlight,
@@ -323,6 +353,8 @@ struct ExtractionRuntimeState<Planner, Clock> {
     actors: BTreeMap<[u8; 16], ExtractionActorEntry<Planner, Clock>>,
     retiring_actors: BTreeMap<[u8; 16], CoreExtractionActorLease>,
     transports: BTreeMap<[u8; 16], ActiveExtractionTransport>,
+    pending_writer_handoffs: BTreeMap<[u8; 16], PendingExtractionWriterHandoff>,
+    retired_pending_writer_handoffs: usize,
     committed: BTreeMap<[u8; 16], CommittedExtractionPublication>,
     delivery: BTreeMap<[u8; 16], (CoreExtractionTransportGeneration, ExtractionDeliveryState)>,
     next_transport_generation: BTreeMap<[u8; 16], u64>,
@@ -357,6 +389,8 @@ where
                 actors: BTreeMap::new(),
                 retiring_actors: BTreeMap::new(),
                 transports: BTreeMap::new(),
+                pending_writer_handoffs: BTreeMap::new(),
+                retired_pending_writer_handoffs: 0,
                 committed: BTreeMap::new(),
                 delivery: BTreeMap::new(),
                 next_transport_generation: BTreeMap::new(),
@@ -451,6 +485,20 @@ where
         authenticated: AuthenticatedAccount,
         writer: Arc<CoreReliableWriter>,
     ) -> Result<CoreExtractionTransportAttach, CoreExtractionRuntimeError> {
+        let prepared = self
+            .prepare_reliable_writer_handoff(authenticated, writer)
+            .await?;
+        self.commit_prepared_reliable_writer_handoff_inner(prepared, true)
+            .await
+    }
+
+    /// Reserves extraction's real transport generation without changing the visible binding.
+    /// The exact returned token must be committed or aborted by the private-life session owner.
+    pub(crate) async fn prepare_reliable_writer_handoff(
+        &self,
+        authenticated: AuthenticatedAccount,
+        writer: Arc<CoreReliableWriter>,
+    ) -> Result<CoreExtractionPreparedWriterHandoff, CoreExtractionRuntimeError> {
         if authenticated.namespace != AuthenticatedNamespace::WipeableTest {
             return Err(CoreExtractionRuntimeError::InvalidActorBinding);
         }
@@ -458,17 +506,126 @@ where
             return Err(CoreExtractionRuntimeError::ReliableWriterUnavailable);
         }
         let account_id = authenticated.account_id.as_bytes();
-        let (lease, invalidated_connection, has_committed) = {
-            let mut state = self.state.lock().await;
+        let mut state = self.state.lock().await;
+        if !state.accepting {
+            return Err(CoreExtractionRuntimeError::Retired);
+        }
+        if let Some(pending) = state.pending_writer_handoffs.get(&account_id)
+            && pending.authenticated == authenticated
+            && Arc::ptr_eq(&pending.writer, &writer)
+        {
+            return Ok(pending.prepared);
+        }
+        if state
+            .transports
+            .values()
+            .any(|active| Arc::ptr_eq(&active.writer, &writer))
+            || state
+                .pending_writer_handoffs
+                .iter()
+                .any(|(pending_account, pending)| {
+                    *pending_account != account_id && Arc::ptr_eq(&pending.writer, &writer)
+                })
+        {
+            return Err(CoreExtractionRuntimeError::ReliableWriterAlreadyAttached);
+        }
+        let actor = state
+            .actors
+            .get(&account_id)
+            .map(|entry| (entry.authenticated, entry.lease));
+        let committed_lease = state
+            .committed
+            .get(&account_id)
+            .map(|committed| committed.actor_lease);
+        let actor_lease = match (actor, committed_lease) {
+            (Some((binding, lease)), _) if binding == authenticated => lease,
+            (None, Some(lease)) => lease,
+            (Some(_), _) => return Err(CoreExtractionRuntimeError::InvalidActorBinding),
+            _ => return Err(CoreExtractionRuntimeError::ActorUnavailable),
+        };
+        let next = *state
+            .next_transport_generation
+            .entry(account_id)
+            .or_insert(1);
+        let after = next
+            .checked_add(1)
+            .ok_or(CoreExtractionRuntimeError::GenerationExhausted)?;
+        state.next_transport_generation.insert(account_id, after);
+        let prepared = CoreExtractionPreparedWriterHandoff {
+            lease: CoreExtractionConnectionLease {
+                actor: actor_lease,
+                transport_generation: CoreExtractionTransportGeneration(next),
+            },
+        };
+        state.pending_writer_handoffs.insert(
+            account_id,
+            PendingExtractionWriterHandoff {
+                prepared,
+                authenticated,
+                writer,
+            },
+        );
+        Ok(prepared)
+    }
+
+    /// Commits only the exact prepared reservation. Shared writer retirement remains exclusively
+    /// owned by the central private-life session.
+    #[allow(
+        dead_code,
+        reason = "consumed by the private-life session composition slice"
+    )]
+    pub(crate) async fn commit_prepared_reliable_writer_handoff(
+        self: &Arc<Self>,
+        prepared: CoreExtractionPreparedWriterHandoff,
+    ) -> Result<CoreExtractionTransportAttach, CoreExtractionRuntimeError> {
+        self.commit_prepared_reliable_writer_handoff_inner(prepared, false)
+            .await
+    }
+
+    async fn commit_prepared_reliable_writer_handoff_inner(
+        self: &Arc<Self>,
+        prepared: CoreExtractionPreparedWriterHandoff,
+        retire_invalidated_writer: bool,
+    ) -> Result<CoreExtractionTransportAttach, CoreExtractionRuntimeError> {
+        let account_id = prepared.lease.actor.account_id;
+        {
+            let state = self.state.lock().await;
             if !state.accepting {
                 return Err(CoreExtractionRuntimeError::Retired);
             }
             if state
                 .transports
-                .values()
-                .any(|active| Arc::ptr_eq(&active.writer, &writer))
+                .get(&account_id)
+                .is_some_and(|active| active.lease == prepared.lease)
             {
-                return Err(CoreExtractionRuntimeError::ReliableWriterAlreadyAttached);
+                let has_committed = state.committed.contains_key(&account_id);
+                drop(state);
+                let committed_result_replayed = if has_committed {
+                    self.deliver_committed(account_id, true).await
+                } else {
+                    false
+                };
+                return Ok(CoreExtractionTransportAttach {
+                    lease: prepared.lease,
+                    invalidated_connection: None,
+                    committed_result_replayed,
+                });
+            }
+        }
+        let (lease, invalidated_connection, has_committed) = {
+            let mut state = self.state.lock().await;
+            if !state.accepting {
+                return Err(CoreExtractionRuntimeError::Retired);
+            }
+            let pending = state
+                .pending_writer_handoffs
+                .get(&account_id)
+                .ok_or(CoreExtractionRuntimeError::PreparedWriterHandoffMismatch)?;
+            if pending.prepared != prepared {
+                return Err(CoreExtractionRuntimeError::PreparedWriterHandoffMismatch);
+            }
+            if !pending.writer.is_available() {
+                return Err(CoreExtractionRuntimeError::ReliableWriterUnavailable);
             }
             let actor = state
                 .actors
@@ -478,43 +635,43 @@ where
                 .committed
                 .get(&account_id)
                 .map(|committed| committed.actor_lease);
-            let has_committed = committed_lease.is_some();
-            let actor_lease = match (actor, committed_lease) {
-                (Some((binding, lease)), _) if binding == authenticated => lease,
+            let authoritative_lease = match (actor, committed_lease) {
+                (Some((binding, lease)), _) if binding == pending.authenticated => lease,
                 (None, Some(lease)) => lease,
                 (Some(_), _) => return Err(CoreExtractionRuntimeError::InvalidActorBinding),
                 _ => return Err(CoreExtractionRuntimeError::ActorUnavailable),
             };
-            let next = *state
-                .next_transport_generation
-                .entry(account_id)
-                .or_insert(1);
-            let after = next
-                .checked_add(1)
-                .ok_or(CoreExtractionRuntimeError::GenerationExhausted)?;
-            state.next_transport_generation.insert(account_id, after);
-            let lease = CoreExtractionConnectionLease {
-                actor: actor_lease,
-                transport_generation: CoreExtractionTransportGeneration(next),
-            };
+            if authoritative_lease != prepared.lease.actor {
+                return Err(CoreExtractionRuntimeError::PreparedWriterHandoffMismatch);
+            }
+            let pending = state
+                .pending_writer_handoffs
+                .remove(&account_id)
+                .ok_or(CoreExtractionRuntimeError::PreparedWriterHandoffMismatch)?;
             let invalidated_connection = state
                 .transports
                 .insert(
                     account_id,
                     ActiveExtractionTransport {
-                        lease,
-                        writer: Arc::clone(&writer),
+                        lease: prepared.lease,
+                        writer: pending.writer,
                     },
                 )
                 .map(|active| {
-                    active.writer.retire(
-                        TRANSPORT_REPLACED_CLOSE_CODE,
-                        b"authoritative extraction transport handoff",
-                    );
+                    if retire_invalidated_writer {
+                        active.writer.retire(
+                            TRANSPORT_REPLACED_CLOSE_CODE,
+                            b"authoritative extraction transport handoff",
+                        );
+                    }
                     active.writer.connection().clone()
                 });
             state.delivery.remove(&account_id);
-            (lease, invalidated_connection, has_committed)
+            (
+                prepared.lease,
+                invalidated_connection,
+                committed_lease.is_some(),
+            )
         };
         let committed_result_replayed = if has_committed {
             self.deliver_committed(account_id, true).await
@@ -528,6 +685,29 @@ where
         })
     }
 
+    /// Cancels only the exact prepared reservation and intentionally does not reuse its reserved
+    /// extraction transport generation.
+    #[allow(
+        dead_code,
+        reason = "consumed by the private-life session composition slice"
+    )]
+    pub(crate) async fn abort_prepared_reliable_writer_handoff(
+        &self,
+        prepared: CoreExtractionPreparedWriterHandoff,
+    ) -> Result<(), CoreExtractionRuntimeError> {
+        let account_id = prepared.lease.actor.account_id;
+        let mut state = self.state.lock().await;
+        let pending = state
+            .pending_writer_handoffs
+            .get(&account_id)
+            .ok_or(CoreExtractionRuntimeError::PreparedWriterHandoffMismatch)?;
+        if pending.prepared != prepared {
+            return Err(CoreExtractionRuntimeError::PreparedWriterHandoffMismatch);
+        }
+        state.pending_writer_handoffs.remove(&account_id);
+        Ok(())
+    }
+
     #[must_use]
     pub fn authority(
         self: &Arc<Self>,
@@ -537,6 +717,22 @@ where
             directory: Arc::clone(self),
             lease,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn reliable_writer(
+        &self,
+        lease: CoreExtractionConnectionLease,
+    ) -> Result<Arc<CoreReliableWriter>, CoreExtractionRuntimeError> {
+        let state = self.state.lock().await;
+        let active = state
+            .transports
+            .get(&lease.actor.account_id)
+            .ok_or(CoreExtractionRuntimeError::TransportUnavailable)?;
+        if active.lease != lease {
+            return Err(CoreExtractionRuntimeError::TransportUnavailable);
+        }
+        Ok(Arc::clone(&active.writer))
     }
 
     pub async fn publish_coordinated(
@@ -673,6 +869,9 @@ where
                 state.transports.remove(&actor_lease.account_id);
                 state.delivery.remove(&actor_lease.account_id);
             }
+            state
+                .pending_writer_handoffs
+                .remove(&actor_lease.account_id);
             entry
         };
         if let Err(error) = entry.actor.retire_route_after_terminal().await {
@@ -795,6 +994,27 @@ where
         &self,
         lease: CoreExtractionConnectionLease,
     ) -> CoreExtractionTransportDetach {
+        self.detach_transport_inner(lease, true).await
+    }
+
+    /// Releases only extraction's exact dynamic binding. The shared reliable writer remains
+    /// owned by the central private-life session, which performs the one authoritative retire.
+    #[allow(
+        dead_code,
+        reason = "consumed by the private-life session composition slice"
+    )]
+    pub(crate) async fn detach_shared_reliable_writer(
+        &self,
+        lease: CoreExtractionConnectionLease,
+    ) -> CoreExtractionTransportDetach {
+        self.detach_transport_inner(lease, false).await
+    }
+
+    async fn detach_transport_inner(
+        &self,
+        lease: CoreExtractionConnectionLease,
+        retire_writer: bool,
+    ) -> CoreExtractionTransportDetach {
         let mut state = self.state.lock().await;
         if state.shutdown_started {
             return CoreExtractionTransportDetach::PlannedShutdownIgnored;
@@ -809,10 +1029,12 @@ where
             return CoreExtractionTransportDetach::StaleGenerationIgnored;
         };
         state.delivery.remove(&lease.actor.account_id);
-        active.writer.retire(
-            EXTRACTION_TRANSPORT_DETACHED_CLOSE_CODE,
-            EXTRACTION_TRANSPORT_DETACHED_REASON,
-        );
+        if retire_writer {
+            active.writer.retire(
+                EXTRACTION_TRANSPORT_DETACHED_CLOSE_CODE,
+                EXTRACTION_TRANSPORT_DETACHED_REASON,
+            );
+        }
         CoreExtractionTransportDetach::Detached
     }
 
@@ -831,6 +1053,10 @@ where
                     active.writer.connection().clone()
                 })
                 .collect();
+            state.retired_pending_writer_handoffs = state
+                .retired_pending_writer_handoffs
+                .saturating_add(state.pending_writer_handoffs.len());
+            state.pending_writer_handoffs.clear();
             (connections, std::mem::take(&mut state.actors))
         };
         let mut tasks = Vec::with_capacity(actors.len());
@@ -886,6 +1112,8 @@ where
         let remaining_registered_actors = state.actors.len();
         let remaining_retiring_actors = state.retiring_actors.len();
         let remaining_active_transports = state.transports.len();
+        let retired_pending_writer_handoffs = state.retired_pending_writer_handoffs;
+        state.pending_writer_handoffs.clear();
         let retired_committed_results = state.committed.len();
         state.committed.clear();
         state.delivery.clear();
@@ -902,12 +1130,14 @@ where
             remaining_retiring_actors,
             route_retirement_failures: state.route_retirement_failures,
             remaining_active_transports,
+            retired_pending_writer_handoffs,
             remaining_committed_results,
             zero_residue: remaining_actor_tasks == 0
                 && remaining_registered_actors == 0
                 && remaining_retiring_actors == 0
                 && state.route_retirement_failures == 0
                 && remaining_active_transports == 0
+                && state.pending_writer_handoffs.is_empty()
                 && remaining_committed_results == 0,
         })
     }

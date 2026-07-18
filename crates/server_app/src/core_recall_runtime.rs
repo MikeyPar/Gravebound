@@ -66,6 +66,18 @@ pub struct CoreRecallTransportAttach {
     pub invalidated_connection: Option<quinn::Connection>,
 }
 
+/// Opaque reservation for a coordinated private-life writer handoff.
+///
+/// Preparing reserves a monotonically increasing handoff generation, but deliberately does not
+/// change the active Recall transport generation. The private-life session owner may therefore
+/// prepare every dynamic runtime against one writer before committing any of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CoreRecallPreparedWriterHandoff {
+    account_id: [u8; 16],
+    character_id: [u8; 16],
+    handoff_generation: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct CoreRecallActorRegistration {
     pub completion_outbox: CoreRecallCompletionOutbox,
@@ -93,6 +105,7 @@ pub struct CoreRecallRuntimeReport {
     pub remaining_completion_tasks: usize,
     pub remaining_registered_actors: usize,
     pub remaining_active_transports: usize,
+    pub retired_pending_writer_handoffs: usize,
     pub zero_residue: bool,
 }
 
@@ -110,6 +123,10 @@ pub enum CoreRecallRuntimeError {
     ReliableWriterUnavailable,
     #[error("Core Recall reliable writer is already attached")]
     ReliableWriterAlreadyAttached,
+    #[error("Core Recall prepared reliable-writer handoff is stale or invalid")]
+    PreparedWriterHandoffMismatch,
+    #[error("Core Recall reliable-writer handoff generation overflowed")]
+    WriterHandoffGenerationExhausted,
     #[error("Core Recall runtime shutdown has not started")]
     ShutdownNotStarted,
     #[error("Core Recall actor task failed")]
@@ -146,6 +163,14 @@ struct CoreRecallCompletionTaskReport {
 struct ActiveRecallTransport {
     lease: CoreRecallConnectionLease,
     writer: Arc<CoreRecallReliableWriter>,
+    handoff_generation: u64,
+}
+
+#[derive(Debug)]
+struct PendingRecallWriterHandoff {
+    prepared: CoreRecallPreparedWriterHandoff,
+    authenticated: AuthenticatedAccount,
+    writer: Arc<CoreRecallReliableWriter>,
 }
 
 struct CoreRecallRuntimeState<Clock> {
@@ -153,6 +178,9 @@ struct CoreRecallRuntimeState<Clock> {
     shutdown_started: bool,
     actors: BTreeMap<[u8; 16], CoreRecallActorEntry<Clock>>,
     transports: BTreeMap<[u8; 16], ActiveRecallTransport>,
+    pending_writer_handoffs: BTreeMap<[u8; 16], PendingRecallWriterHandoff>,
+    next_writer_handoff_generation: BTreeMap<[u8; 16], u64>,
+    retired_pending_writer_handoffs: usize,
 }
 
 pub struct CoreRecallActorDirectory<Clock, TickSource> {
@@ -174,6 +202,9 @@ where
                 shutdown_started: false,
                 actors: BTreeMap::new(),
                 transports: BTreeMap::new(),
+                pending_writer_handoffs: BTreeMap::new(),
+                next_writer_handoff_generation: BTreeMap::new(),
+                retired_pending_writer_handoffs: 0,
             }),
         }
     }
@@ -256,6 +287,20 @@ where
         authenticated: AuthenticatedAccount,
         writer: Arc<CoreRecallReliableWriter>,
     ) -> Result<CoreRecallTransportAttach, CoreRecallRuntimeError> {
+        let prepared = self
+            .prepare_reliable_writer_handoff(authenticated, writer)
+            .await?;
+        self.commit_prepared_reliable_writer_handoff_inner(prepared, true)
+            .await
+    }
+
+    /// Reserves Recall's side of a coordinated session-writer handoff without changing visible
+    /// transport authority. The exact returned token must be committed or aborted.
+    pub(crate) async fn prepare_reliable_writer_handoff(
+        &self,
+        authenticated: AuthenticatedAccount,
+        writer: Arc<CoreRecallReliableWriter>,
+    ) -> Result<CoreRecallPreparedWriterHandoff, CoreRecallRuntimeError> {
         if !writer.is_available() {
             return Err(CoreRecallRuntimeError::ReliableWriterUnavailable);
         }
@@ -264,10 +309,22 @@ where
         if !state.accepting {
             return Err(CoreRecallRuntimeError::Retired);
         }
+        if let Some(pending) = state.pending_writer_handoffs.get(&account_id)
+            && pending.authenticated == authenticated
+            && Arc::ptr_eq(&pending.writer, &writer)
+        {
+            return Ok(pending.prepared);
+        }
         if state
             .transports
             .values()
             .any(|active| Arc::ptr_eq(&active.writer, &writer))
+            || state
+                .pending_writer_handoffs
+                .iter()
+                .any(|(pending_account, pending)| {
+                    *pending_account != account_id && Arc::ptr_eq(&pending.writer, &writer)
+                })
         {
             return Err(CoreRecallRuntimeError::ReliableWriterAlreadyAttached);
         }
@@ -278,6 +335,87 @@ where
         if entry.authenticated != authenticated {
             return Err(CoreRecallRuntimeError::InvalidActorBinding);
         }
+        let character_id = entry.character_id;
+        let generation = *state
+            .next_writer_handoff_generation
+            .entry(account_id)
+            .or_insert(1);
+        let after = generation
+            .checked_add(1)
+            .ok_or(CoreRecallRuntimeError::WriterHandoffGenerationExhausted)?;
+        state
+            .next_writer_handoff_generation
+            .insert(account_id, after);
+        let prepared = CoreRecallPreparedWriterHandoff {
+            account_id,
+            character_id,
+            handoff_generation: generation,
+        };
+        state.pending_writer_handoffs.insert(
+            account_id,
+            PendingRecallWriterHandoff {
+                prepared,
+                authenticated,
+                writer,
+            },
+        );
+        Ok(prepared)
+    }
+
+    /// Commits only the exact prepared reservation. Neither the superseded writer nor the newly
+    /// shared writer is retired; the central private-life session owns their lifecycle.
+    #[allow(
+        dead_code,
+        reason = "consumed by the private-life session composition slice"
+    )]
+    pub(crate) async fn commit_prepared_reliable_writer_handoff(
+        &self,
+        prepared: CoreRecallPreparedWriterHandoff,
+    ) -> Result<CoreRecallTransportAttach, CoreRecallRuntimeError> {
+        self.commit_prepared_reliable_writer_handoff_inner(prepared, false)
+            .await
+    }
+
+    async fn commit_prepared_reliable_writer_handoff_inner(
+        &self,
+        prepared: CoreRecallPreparedWriterHandoff,
+        retire_invalidated_writer: bool,
+    ) -> Result<CoreRecallTransportAttach, CoreRecallRuntimeError> {
+        let account_id = prepared.account_id;
+        let mut state = self.state.lock().await;
+        if !state.accepting {
+            return Err(CoreRecallRuntimeError::Retired);
+        }
+        if let Some(active) = state.transports.get(&account_id)
+            && active.handoff_generation == prepared.handoff_generation
+            && active.lease.character_id == prepared.character_id
+        {
+            return Ok(CoreRecallTransportAttach {
+                lease: active.lease,
+                invalidated_connection: None,
+            });
+        }
+        let pending = state
+            .pending_writer_handoffs
+            .get(&account_id)
+            .ok_or(CoreRecallRuntimeError::PreparedWriterHandoffMismatch)?;
+        if pending.prepared != prepared {
+            return Err(CoreRecallRuntimeError::PreparedWriterHandoffMismatch);
+        }
+        if !pending.writer.is_available() {
+            return Err(CoreRecallRuntimeError::ReliableWriterUnavailable);
+        }
+        let entry = state
+            .actors
+            .get(&account_id)
+            .ok_or(CoreRecallRuntimeError::ActorUnavailable)?;
+        if entry.authenticated != pending.authenticated
+            || entry.character_id != prepared.character_id
+        {
+            return Err(CoreRecallRuntimeError::InvalidActorBinding);
+        }
+        let authenticated = pending.authenticated;
+        let writer = Arc::clone(&pending.writer);
         let tick = self
             .tick_source
             .current_tick(account_id, entry.character_id)
@@ -288,20 +426,56 @@ where
             character_id: entry.character_id,
             generation: transport_lease.generation(),
         };
+        let removed = state
+            .pending_writer_handoffs
+            .remove(&account_id)
+            .ok_or(CoreRecallRuntimeError::PreparedWriterHandoffMismatch)?;
+        debug_assert_eq!(removed.authenticated, authenticated);
         let invalidated_connection = state
             .transports
-            .insert(account_id, ActiveRecallTransport { lease, writer })
+            .insert(
+                account_id,
+                ActiveRecallTransport {
+                    lease,
+                    writer,
+                    handoff_generation: prepared.handoff_generation,
+                },
+            )
             .map(|active| {
-                active.writer.retire(
-                    TRANSPORT_REPLACED_CLOSE_CODE,
-                    b"authoritative transport handoff",
-                );
+                if retire_invalidated_writer {
+                    active.writer.retire(
+                        TRANSPORT_REPLACED_CLOSE_CODE,
+                        b"authoritative transport handoff",
+                    );
+                }
                 active.writer.connection().clone()
             });
         Ok(CoreRecallTransportAttach {
             lease,
             invalidated_connection,
         })
+    }
+
+    /// Cancels only the exact pending reservation. The currently active binding remains intact;
+    /// its reserved generation is intentionally never reused.
+    #[allow(
+        dead_code,
+        reason = "consumed by the private-life session composition slice"
+    )]
+    pub(crate) async fn abort_prepared_reliable_writer_handoff(
+        &self,
+        prepared: CoreRecallPreparedWriterHandoff,
+    ) -> Result<(), CoreRecallRuntimeError> {
+        let mut state = self.state.lock().await;
+        let pending = state
+            .pending_writer_handoffs
+            .get(&prepared.account_id)
+            .ok_or(CoreRecallRuntimeError::PreparedWriterHandoffMismatch)?;
+        if pending.prepared != prepared {
+            return Err(CoreRecallRuntimeError::PreparedWriterHandoffMismatch);
+        }
+        state.pending_writer_handoffs.remove(&prepared.account_id);
+        Ok(())
     }
 
     #[must_use]
@@ -383,6 +557,7 @@ where
                 return Err(CoreRecallRuntimeError::InvalidActorBinding);
             }
             let detached_transport_binding = state.transports.remove(&account_id).is_some();
+            state.pending_writer_handoffs.remove(&account_id);
             (entry, detached_transport_binding)
         };
 
@@ -432,6 +607,10 @@ where
             .into_values()
             .map(|active| active.writer.connection().clone())
             .collect();
+        state.retired_pending_writer_handoffs = state
+            .retired_pending_writer_handoffs
+            .saturating_add(state.pending_writer_handoffs.len());
+        state.pending_writer_handoffs.clear();
         for entry in state.actors.values() {
             entry.lifecycle.retire_for_shutdown().await;
         }
@@ -501,6 +680,9 @@ where
         state.actors.clear();
         let remaining_registered_actors = state.actors.len();
         let remaining_active_transports = state.transports.len();
+        let retired_pending_writer_handoffs = state.retired_pending_writer_handoffs;
+        state.pending_writer_handoffs.clear();
+        state.next_writer_handoff_generation.clear();
         Ok(CoreRecallRuntimeReport {
             served_actor_commands,
             abandoned_actor_commands,
@@ -511,10 +693,12 @@ where
             remaining_completion_tasks,
             remaining_registered_actors,
             remaining_active_transports,
+            retired_pending_writer_handoffs,
             zero_residue: remaining_actor_tasks == 0
                 && remaining_completion_tasks == 0
                 && remaining_registered_actors == 0
-                && remaining_active_transports == 0,
+                && remaining_active_transports == 0
+                && state.pending_writer_handoffs.is_empty(),
         })
     }
 
@@ -1074,6 +1258,128 @@ mod tests {
         first_client_endpoint.wait_idle().await;
         second_server_endpoint.wait_idle().await;
         second_client_endpoint.wait_idle().await;
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one real-QUIC test keeps the complete prepare, recover, supersede, abort, commit, retry, and shutdown contract contiguous"
+    )]
+    async fn coordinated_writer_handoff_is_recoverable_exact_and_non_retiring() {
+        let tick_source = Arc::new(TickSource(AtomicU64::new(100)));
+        let directory = Arc::new(CoreRecallActorDirectory::new(Arc::clone(&tick_source)));
+        directory
+            .register_actor(authenticated(), actor())
+            .await
+            .unwrap();
+        let (first_server_endpoint, first_client_endpoint, first_client, first_connection) =
+            live_connection_pair().await;
+        let first_writer = Arc::new(CoreRecallReliableWriter::new(first_connection));
+        let first = directory
+            .attach_reliable_writer(authenticated(), Arc::clone(&first_writer))
+            .await
+            .unwrap();
+        let old_authority = directory.authority(first.lease);
+
+        let (second_server_endpoint, second_client_endpoint, second_client, second_connection) =
+            live_connection_pair().await;
+        let second_writer = Arc::new(CoreRecallReliableWriter::new(second_connection));
+        let abandoned = directory
+            .prepare_reliable_writer_handoff(authenticated(), Arc::clone(&second_writer))
+            .await
+            .unwrap();
+        assert_eq!(
+            directory
+                .prepare_reliable_writer_handoff(authenticated(), Arc::clone(&second_writer))
+                .await
+                .unwrap(),
+            abandoned,
+            "a cancelled prepare call must recover its exact reservation"
+        );
+
+        let (third_server_endpoint, third_client_endpoint, third_client, third_connection) =
+            live_connection_pair().await;
+        let third_writer = Arc::new(CoreRecallReliableWriter::new(third_connection));
+        let superseding = directory
+            .prepare_reliable_writer_handoff(authenticated(), Arc::clone(&third_writer))
+            .await
+            .unwrap();
+        assert!(superseding.handoff_generation > abandoned.handoff_generation);
+        assert!(matches!(
+            directory
+                .commit_prepared_reliable_writer_handoff(abandoned)
+                .await,
+            Err(CoreRecallRuntimeError::PreparedWriterHandoffMismatch)
+        ));
+        assert!(matches!(
+            old_authority
+                .handle_recall(authenticated(), &frame(), 0)
+                .await
+                .result,
+            RecallResultV1::Pending { .. }
+        ));
+
+        directory
+            .abort_prepared_reliable_writer_handoff(superseding)
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(
+            &directory.reliable_writer(first.lease).await.unwrap(),
+            &first_writer
+        ));
+        let exact = directory
+            .prepare_reliable_writer_handoff(authenticated(), Arc::clone(&third_writer))
+            .await
+            .unwrap();
+        assert!(exact.handoff_generation > superseding.handoff_generation);
+        let committed = directory
+            .commit_prepared_reliable_writer_handoff(exact)
+            .await
+            .unwrap();
+        assert!(committed.invalidated_connection.is_some());
+        assert!(first_writer.is_available());
+        assert!(third_writer.is_available());
+        let replayed_commit = directory
+            .commit_prepared_reliable_writer_handoff(exact)
+            .await
+            .unwrap();
+        assert_eq!(replayed_commit.lease, committed.lease);
+        assert!(replayed_commit.invalidated_connection.is_none());
+        let changed = CoreRecallPreparedWriterHandoff {
+            handoff_generation: exact.handoff_generation + 1,
+            ..exact
+        };
+        assert!(matches!(
+            directory
+                .commit_prepared_reliable_writer_handoff(changed)
+                .await,
+            Err(CoreRecallRuntimeError::PreparedWriterHandoffMismatch)
+        ));
+        directory
+            .prepare_reliable_writer_handoff(authenticated(), Arc::clone(&second_writer))
+            .await
+            .unwrap();
+
+        for connection in directory.begin_shutdown().await {
+            connection.close(0_u32.into(), b"test shutdown");
+        }
+        let report = directory.finish_shutdown().await.unwrap();
+        assert_eq!(report.retired_pending_writer_handoffs, 1);
+        assert!(report.zero_residue);
+        assert!(first_writer.is_available());
+        assert!(second_writer.is_available());
+        first_writer.retire(0_u32, b"central session cleanup");
+        second_writer.retire(0_u32, b"central session cleanup");
+        third_writer.retire(0_u32, b"central session cleanup");
+        first_client.close(0_u32.into(), b"test complete");
+        second_client.close(0_u32.into(), b"test complete");
+        third_client.close(0_u32.into(), b"test complete");
+        first_server_endpoint.wait_idle().await;
+        first_client_endpoint.wait_idle().await;
+        second_server_endpoint.wait_idle().await;
+        second_client_endpoint.wait_idle().await;
+        third_server_endpoint.wait_idle().await;
+        third_client_endpoint.wait_idle().await;
     }
 
     #[tokio::test]

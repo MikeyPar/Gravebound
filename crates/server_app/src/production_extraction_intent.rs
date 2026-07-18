@@ -1192,9 +1192,12 @@ mod tests {
         AccountId, CaldusExitPresentationCommit, CoreExtractionActorDirectory,
         CoreExtractionActorLease, CoreExtractionAuthoritativeTick,
         CoreExtractionPublicationOutcome, CoreExtractionRuntimeError,
-        CorePrivateRouteActorPosition, CorePrivateRouteActorSeed,
+        CoreExtractionTransportDetach, CorePrivateLifeSessionDirectory,
+        CorePrivateLifeTransportDetach, CorePrivateRouteActorPosition, CorePrivateRouteActorSeed,
         CorePrivateRouteExtractionBinding, CorePrivateRouteExtractionExitBinding,
-        CoreReliableWriter, CoreTerminalCoordinator, ProductionExtractionPublicationProof,
+        CoreRecallActorDirectory, CoreRecallAuthoritativeTick, CoreReliableWriter,
+        CoreTerminalCoordinator, ProductionExtractionPublicationProof, ProductionRecallClock,
+        ProductionRecallIntentActor, ProductionRecallPendingAuthorityV1,
         STORED_TERMINAL_RECEIPT_SCHEMA_V1, StoredTerminalReceipt, StoredTerminalReceiptV1,
         TerminalKind,
     };
@@ -1206,6 +1209,41 @@ mod tests {
         fn unix_millis(&self) -> u64 {
             self.0
         }
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct RecallClock;
+
+    impl ProductionRecallClock for RecallClock {
+        fn unix_millis(&self) -> u64 {
+            10_000
+        }
+    }
+
+    #[derive(Debug)]
+    struct RecallTicks(AtomicU64);
+
+    impl CoreRecallAuthoritativeTick for RecallTicks {
+        fn current_tick(&self, account_id: [u8; 16], character_id: [u8; 16]) -> NonZeroU64 {
+            assert_eq!(account_id, [1; 16]);
+            assert_eq!(character_id, [2; 16]);
+            NonZeroU64::new(self.0.load(Ordering::SeqCst)).expect("non-zero Recall tick")
+        }
+    }
+
+    fn recall_actor() -> Arc<ProductionRecallIntentActor<RecallClock>> {
+        Arc::new(
+            ProductionRecallIntentActor::new(
+                RecallClock,
+                [1; 16],
+                [2; 16],
+                ProductionRecallPendingAuthorityV1 {
+                    pending_item_count: 0,
+                    pending_material_stack_count: 0,
+                },
+            )
+            .expect("Recall actor"),
+        )
     }
 
     #[derive(Debug, Clone)]
@@ -1610,6 +1648,332 @@ mod tests {
             client.unwrap(),
             server.unwrap(),
         )
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one real-QUIC test keeps the complete prepare, recover, supersede, abort, commit, retry, shared detach, and shutdown contract contiguous"
+    )]
+    async fn extraction_writer_handoff_is_recoverable_exact_and_non_retiring() {
+        let planner = FakePlanner::stable();
+        let (exit_authority, route_directory, route_lease) = authority().await;
+        let actor = Arc::new(
+            ProductionExtractionIntentActor::new(
+                exit_authority,
+                route_directory,
+                route_lease,
+                planner,
+                FixedClock(10_000),
+            )
+            .expect("intent actor"),
+        );
+        let runtime = Arc::new(CoreExtractionActorDirectory::new(Arc::new(
+            ExtractionTicks::new(700),
+        )));
+        runtime
+            .register_actor(authenticated(), actor)
+            .await
+            .expect("register actor");
+
+        let (first_server_endpoint, first_client_endpoint, first_client, first_server) =
+            live_connection_pair().await;
+        let first_writer = Arc::new(CoreReliableWriter::new(first_server));
+        let first = runtime
+            .attach_reliable_writer(authenticated(), Arc::clone(&first_writer))
+            .await
+            .expect("first attach");
+        let old_authority = Arc::clone(&runtime).authority(first.lease);
+
+        let (second_server_endpoint, second_client_endpoint, second_client, second_server) =
+            live_connection_pair().await;
+        let second_writer = Arc::new(CoreReliableWriter::new(second_server));
+        let abandoned = runtime
+            .prepare_reliable_writer_handoff(authenticated(), Arc::clone(&second_writer))
+            .await
+            .expect("prepare second writer");
+        assert_eq!(
+            runtime
+                .prepare_reliable_writer_handoff(authenticated(), Arc::clone(&second_writer))
+                .await
+                .expect("recover cancelled prepare"),
+            abandoned
+        );
+
+        let (third_server_endpoint, third_client_endpoint, third_client, third_server) =
+            live_connection_pair().await;
+        let third_writer = Arc::new(CoreReliableWriter::new(third_server));
+        let superseding = runtime
+            .prepare_reliable_writer_handoff(authenticated(), Arc::clone(&third_writer))
+            .await
+            .expect("supersede abandoned prepare");
+        assert!(
+            superseding.lease().transport_generation().get()
+                > abandoned.lease().transport_generation().get()
+        );
+        assert!(matches!(
+            runtime
+                .commit_prepared_reliable_writer_handoff(abandoned)
+                .await,
+            Err(CoreExtractionRuntimeError::PreparedWriterHandoffMismatch)
+        ));
+        assert!(matches!(
+            old_authority
+                .handle_extraction(authenticated(), &frame(1), 1)
+                .await
+                .result,
+            ExtractionCommitResultV1::Pending { .. }
+        ));
+
+        runtime
+            .abort_prepared_reliable_writer_handoff(superseding)
+            .await
+            .expect("abort exact prepare");
+        let exact = runtime
+            .prepare_reliable_writer_handoff(authenticated(), Arc::clone(&third_writer))
+            .await
+            .expect("prepare exact handoff");
+        assert!(
+            exact.lease().transport_generation().get()
+                > superseding.lease().transport_generation().get()
+        );
+        let committed = runtime
+            .commit_prepared_reliable_writer_handoff(exact)
+            .await
+            .expect("commit exact handoff");
+        assert!(committed.invalidated_connection.is_some());
+        assert!(first_writer.is_available());
+        assert!(third_writer.is_available());
+        let retried = runtime
+            .commit_prepared_reliable_writer_handoff(exact)
+            .await
+            .expect("retry committed handoff");
+        assert_eq!(retried.lease, committed.lease);
+        assert!(retried.invalidated_connection.is_none());
+        assert_eq!(
+            runtime.detach_shared_reliable_writer(committed.lease).await,
+            CoreExtractionTransportDetach::Detached
+        );
+        assert!(third_writer.is_available());
+        runtime
+            .prepare_reliable_writer_handoff(authenticated(), Arc::clone(&second_writer))
+            .await
+            .expect("prepare shutdown reservation");
+
+        first_writer.retire(0, b"central session cleanup");
+        third_writer.retire(0, b"central session cleanup");
+        for connection in runtime.begin_shutdown().await {
+            connection.close(0_u32.into(), b"test shutdown");
+        }
+        let report = runtime.finish_shutdown().await.unwrap();
+        assert_eq!(report.retired_pending_writer_handoffs, 1);
+        assert!(report.zero_residue);
+        assert!(second_writer.is_available());
+        second_writer.retire(0, b"central session cleanup");
+        first_client.close(0_u32.into(), b"test complete");
+        second_client.close(0_u32.into(), b"test complete");
+        third_client.close(0_u32.into(), b"test complete");
+        first_server_endpoint.wait_idle().await;
+        first_client_endpoint.wait_idle().await;
+        second_server_endpoint.wait_idle().await;
+        second_client_endpoint.wait_idle().await;
+        third_server_endpoint.wait_idle().await;
+        third_client_endpoint.wait_idle().await;
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one bounded real-QUIC composition journey proves shared sequence authority, coordinated dual-runtime reconnect, detach, and shutdown"
+    )]
+    async fn private_life_session_coordinates_recall_and_extraction_writer_handoffs() {
+        let recall = Arc::new(CoreRecallActorDirectory::new(Arc::new(RecallTicks(
+            AtomicU64::new(700),
+        ))));
+        recall
+            .register_actor(authenticated(), recall_actor())
+            .await
+            .expect("register Recall actor");
+
+        let (exit_authority, route_directory, route_lease) = authority().await;
+        let extraction_actor = Arc::new(
+            ProductionExtractionIntentActor::new(
+                exit_authority,
+                route_directory.clone(),
+                route_lease,
+                FakePlanner::stable(),
+                FixedClock(10_000),
+            )
+            .expect("extraction actor"),
+        );
+        let extraction = Arc::new(CoreExtractionActorDirectory::new(Arc::new(
+            ExtractionTicks::new(700),
+        )));
+        extraction
+            .register_actor(authenticated(), extraction_actor)
+            .await
+            .expect("register extraction actor");
+        let sessions = CorePrivateLifeSessionDirectory::with_extraction_runtime(
+            Arc::clone(&recall),
+            Arc::clone(&extraction),
+        );
+
+        let (first_server_endpoint, first_client_endpoint, first_client, first_server) =
+            live_connection_pair().await;
+        let first = sessions
+            .attach_transport(authenticated(), first_server, 10_000)
+            .await
+            .expect("attach first private-life transport");
+        let first_recall_lease = sessions
+            .bind_recall(first.lease)
+            .await
+            .expect("bind Recall");
+        let first_extraction_lease = sessions
+            .bind_extraction(first.lease)
+            .await
+            .expect("bind extraction");
+        let first_session_writer = sessions.writer(first.lease).await.expect("session writer");
+        let first_recall_writer = recall
+            .reliable_writer(first_recall_lease)
+            .await
+            .expect("Recall writer");
+        let first_extraction_writer = extraction
+            .reliable_writer(first_extraction_lease)
+            .await
+            .expect("extraction writer");
+        assert!(Arc::ptr_eq(&first.writer, &first_session_writer));
+        assert!(Arc::ptr_eq(&first.writer, &first_recall_writer));
+        assert!(Arc::ptr_eq(&first.writer, &first_extraction_writer));
+
+        for (writer, action_sequence, expected_sequence) in [
+            (&first_session_writer, 11, 1),
+            (&first_recall_writer, 12, 2),
+            (&first_extraction_writer, 13, 3),
+        ] {
+            let sent = writer
+                .send_event(
+                    700,
+                    ReliableEvent::ActionResult {
+                        action_sequence,
+                        code: ActionResultCode::Accepted,
+                    },
+                )
+                .await
+                .expect("shared reliable send");
+            assert_eq!(sent.sequence, expected_sequence);
+            assert_eq!(
+                bot_client::receive_server_reliable(&first_client)
+                    .await
+                    .expect("shared reliable receive"),
+                sent
+            );
+        }
+
+        let (second_server_endpoint, second_client_endpoint, second_client, second_server) =
+            live_connection_pair().await;
+        let second = sessions
+            .attach_transport(authenticated(), second_server, 10_500)
+            .await
+            .expect("coordinated reconnect");
+        let second_recall_lease = second.recall_lease.expect("rebound Recall lease");
+        let second_extraction_lease = second.extraction_lease.expect("rebound extraction lease");
+        let second_session_writer = sessions
+            .writer(second.lease)
+            .await
+            .expect("new session writer");
+        let second_recall_writer = recall
+            .reliable_writer(second_recall_lease)
+            .await
+            .expect("new Recall writer");
+        let second_extraction_writer = extraction
+            .reliable_writer(second_extraction_lease)
+            .await
+            .expect("new extraction writer");
+        assert!(second.invalidated_connection.is_some());
+        assert!(!first.writer.is_available());
+        assert!(Arc::ptr_eq(&second.writer, &second_session_writer));
+        assert!(Arc::ptr_eq(&second.writer, &second_recall_writer));
+        assert!(Arc::ptr_eq(&second.writer, &second_extraction_writer));
+        assert!(recall.reliable_writer(first_recall_lease).await.is_err());
+        assert!(
+            extraction
+                .reliable_writer(first_extraction_lease)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            sessions
+                .detach_transport(first.lease, 10_500)
+                .await
+                .expect("stale detach"),
+            CorePrivateLifeTransportDetach::StaleGenerationIgnored
+        );
+
+        for (writer, action_sequence, expected_sequence) in [
+            (&second_session_writer, 21, 1),
+            (&second_recall_writer, 22, 2),
+            (&second_extraction_writer, 23, 3),
+        ] {
+            let sent = writer
+                .send_event(
+                    701,
+                    ReliableEvent::ActionResult {
+                        action_sequence,
+                        code: ActionResultCode::Accepted,
+                    },
+                )
+                .await
+                .expect("rebound reliable send");
+            assert_eq!(sent.sequence, expected_sequence);
+            assert_eq!(
+                bot_client::receive_server_reliable(&second_client)
+                    .await
+                    .expect("rebound reliable receive"),
+                sent
+            );
+        }
+
+        assert!(matches!(
+            sessions
+                .detach_transport(second.lease, 11_000)
+                .await
+                .expect("current detach"),
+            CorePrivateLifeTransportDetach::Detached {
+                recall: Some(_),
+                extraction: Some(CoreExtractionTransportDetach::Detached),
+            }
+        ));
+        assert!(!second.writer.is_available());
+        assert!(recall.reliable_writer(second_recall_lease).await.is_err());
+        assert!(
+            extraction
+                .reliable_writer(second_extraction_lease)
+                .await
+                .is_err()
+        );
+
+        for connection in sessions.begin_shutdown().await {
+            connection.close(0_u32.into(), b"test shutdown");
+        }
+        let report = sessions.finish_shutdown().await.expect("session shutdown");
+        assert!(report.recall.zero_residue);
+        assert!(report.extraction.is_some_and(|report| report.zero_residue));
+        assert!(report.zero_residue);
+        route_directory.begin_shutdown();
+        assert!(
+            route_directory
+                .finish_shutdown()
+                .await
+                .expect("route shutdown")
+                .zero_residue
+        );
+
+        first_client.close(0_u32.into(), b"test complete");
+        second_client.close(0_u32.into(), b"test complete");
+        first_server_endpoint.wait_idle().await;
+        first_client_endpoint.wait_idle().await;
+        second_server_endpoint.wait_idle().await;
+        second_client_endpoint.wait_idle().await;
     }
 
     #[tokio::test]

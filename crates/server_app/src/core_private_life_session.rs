@@ -7,16 +7,24 @@
 //! A session therefore exists from handshake onward, before a danger actor or Recall channel is
 //! available, and later binds those dynamic owners to the same reliable writer.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc};
 
 use thiserror::Error;
 use tokio::sync::Mutex;
 
 use crate::{
-    AuthenticatedAccount, AuthenticatedNamespace, CoreRecallActorDirectory,
-    CoreRecallActorRetirementReport, CoreRecallAuthoritativeTick, CoreRecallConnectionAuthority,
-    CoreRecallConnectionLease, CoreRecallRuntimeError, CoreRecallRuntimeReport, CoreReliableWriter,
-    ProductionRecallClock, ProductionRecallDetachOutcome, TRANSPORT_REPLACED_CLOSE_CODE,
+    AuthenticatedAccount, AuthenticatedNamespace, CoreExtractionActorDirectory,
+    CoreExtractionAuthoritativeTick, CoreExtractionConnectionLease, CoreExtractionHallProjection,
+    CoreExtractionRuntimeError, CoreExtractionRuntimeReport, CoreExtractionTransportAttach,
+    CoreExtractionTransportDetach, CoreRecallActorDirectory, CoreRecallActorRetirementReport,
+    CoreRecallAuthoritativeTick, CoreRecallConnectionAuthority, CoreRecallConnectionLease,
+    CoreRecallRuntimeError, CoreRecallRuntimeReport, CoreRecallTransportAttach, CoreReliableWriter,
+    IdentityClock, ProductionExtractionPlanner, ProductionRecallClock,
+    ProductionRecallDetachOutcome, TRANSPORT_REPLACED_CLOSE_CODE,
+};
+use crate::{
+    core_extraction_runtime::CoreExtractionPreparedWriterHandoff,
+    core_recall_runtime::CoreRecallPreparedWriterHandoff,
 };
 
 const SESSION_DETACHED_CLOSE_CODE: u32 = 0x104;
@@ -55,6 +63,7 @@ pub struct CorePrivateLifeTransportAttach {
     pub lease: CorePrivateLifeTransportLease,
     pub writer: Arc<CoreReliableWriter>,
     pub recall_lease: Option<CoreRecallConnectionLease>,
+    pub extraction_lease: Option<CoreExtractionConnectionLease>,
     pub invalidated_connection: Option<quinn::Connection>,
 }
 
@@ -62,6 +71,7 @@ pub struct CorePrivateLifeTransportAttach {
 pub enum CorePrivateLifeTransportDetach {
     Detached {
         recall: Option<ProductionRecallDetachOutcome>,
+        extraction: Option<CoreExtractionTransportDetach>,
     },
     StaleGenerationIgnored,
     PlannedShutdownIgnored,
@@ -74,6 +84,7 @@ pub struct CorePrivateLifeSessionSnapshot {
     pub retained_account_count: usize,
     pub active_transport_count: usize,
     pub recall_bound_count: usize,
+    pub extraction_bound_count: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,6 +92,7 @@ pub struct CorePrivateLifeSessionReport {
     pub retired_account_count: usize,
     pub remaining_active_transports: usize,
     pub recall: CoreRecallRuntimeReport,
+    pub extraction: Option<CoreExtractionRuntimeReport>,
     pub zero_residue: bool,
 }
 
@@ -100,10 +112,20 @@ pub enum CorePrivateLifeSessionError {
     RecallAlreadyBound,
     #[error("Core private-life Recall authority is not bound")]
     RecallUnavailable,
+    #[error("Core private-life extraction runtime is unavailable")]
+    ExtractionUnavailable,
+    #[error("Core private-life extraction authority is already bound")]
+    ExtractionAlreadyBound,
+    #[error("Core private-life extraction authority is not bound")]
+    ExtractionNotBound,
+    #[error("Core private-life dynamic writer handoff could not restore one-owner authority")]
+    DynamicWriterHandoffInconsistent,
     #[error("Core private-life session shutdown has not started")]
     ShutdownNotStarted,
     #[error("Core private-life Recall runtime failed")]
     Recall(#[from] CoreRecallRuntimeError),
+    #[error("Core private-life extraction runtime failed: {0}")]
+    Extraction(#[from] CoreExtractionRuntimeError),
 }
 
 #[derive(Debug)]
@@ -119,6 +141,8 @@ struct SessionEntry {
     active: Option<ActiveTransport>,
     recall_bound: bool,
     recall_lease: Option<CoreRecallConnectionLease>,
+    extraction_bound: bool,
+    extraction_lease: Option<CoreExtractionConnectionLease>,
 }
 
 #[derive(Debug)]
@@ -128,12 +152,115 @@ struct SessionState {
     sessions: BTreeMap<[u8; 16], SessionEntry>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct PreparedDynamicWriterHandoffs {
+    recall: Option<CoreRecallPreparedWriterHandoff>,
+    extraction: Option<CoreExtractionPreparedWriterHandoff>,
+}
+
+#[derive(Debug)]
+struct CommittedDynamicWriterHandoffs {
+    recall: Option<CoreRecallTransportAttach>,
+    extraction: Option<CoreExtractionTransportAttach>,
+}
+
 /// Owns exactly one current transport generation and writer for each authenticated account.
 /// Recall may bind after danger entry; later transport handoffs automatically rebind it before
 /// the new session generation becomes visible.
 pub struct CorePrivateLifeSessionDirectory<Clock, TickSource> {
     recall: Arc<CoreRecallActorDirectory<Clock, TickSource>>,
+    extraction: Option<Box<dyn PrivateLifeExtractionRuntime>>,
     state: Mutex<SessionState>,
+}
+
+type RuntimeFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+trait PrivateLifeExtractionRuntime: Send + Sync {
+    fn prepare(
+        &self,
+        authenticated: AuthenticatedAccount,
+        writer: Arc<CoreReliableWriter>,
+    ) -> RuntimeFuture<'_, Result<CoreExtractionPreparedWriterHandoff, CoreExtractionRuntimeError>>;
+    fn commit(
+        &self,
+        prepared: CoreExtractionPreparedWriterHandoff,
+    ) -> RuntimeFuture<'_, Result<CoreExtractionTransportAttach, CoreExtractionRuntimeError>>;
+    fn abort(
+        &self,
+        prepared: CoreExtractionPreparedWriterHandoff,
+    ) -> RuntimeFuture<'_, Result<(), CoreExtractionRuntimeError>>;
+    fn detach(
+        &self,
+        lease: CoreExtractionConnectionLease,
+    ) -> RuntimeFuture<'_, CoreExtractionTransportDetach>;
+    fn acknowledge_hall_installed(
+        &self,
+        projection: CoreExtractionHallProjection,
+    ) -> RuntimeFuture<'_, Result<(), CoreExtractionRuntimeError>>;
+    fn begin_shutdown(&self) -> RuntimeFuture<'_, Vec<quinn::Connection>>;
+    fn finish_shutdown(
+        &self,
+    ) -> RuntimeFuture<'_, Result<CoreExtractionRuntimeReport, CoreExtractionRuntimeError>>;
+}
+
+impl<Planner, ExtractionClock, ExtractionTicks> PrivateLifeExtractionRuntime
+    for Arc<CoreExtractionActorDirectory<Planner, ExtractionClock, ExtractionTicks>>
+where
+    Planner: ProductionExtractionPlanner + 'static,
+    ExtractionClock: IdentityClock + 'static,
+    ExtractionTicks: CoreExtractionAuthoritativeTick + 'static,
+{
+    fn prepare(
+        &self,
+        authenticated: AuthenticatedAccount,
+        writer: Arc<CoreReliableWriter>,
+    ) -> RuntimeFuture<'_, Result<CoreExtractionPreparedWriterHandoff, CoreExtractionRuntimeError>>
+    {
+        Box::pin(async move {
+            self.prepare_reliable_writer_handoff(authenticated, writer)
+                .await
+        })
+    }
+
+    fn commit(
+        &self,
+        prepared: CoreExtractionPreparedWriterHandoff,
+    ) -> RuntimeFuture<'_, Result<CoreExtractionTransportAttach, CoreExtractionRuntimeError>> {
+        Box::pin(async move { self.commit_prepared_reliable_writer_handoff(prepared).await })
+    }
+
+    fn abort(
+        &self,
+        prepared: CoreExtractionPreparedWriterHandoff,
+    ) -> RuntimeFuture<'_, Result<(), CoreExtractionRuntimeError>> {
+        Box::pin(async move { self.abort_prepared_reliable_writer_handoff(prepared).await })
+    }
+
+    fn detach(
+        &self,
+        lease: CoreExtractionConnectionLease,
+    ) -> RuntimeFuture<'_, CoreExtractionTransportDetach> {
+        Box::pin(async move { self.detach_shared_reliable_writer(lease).await })
+    }
+
+    fn acknowledge_hall_installed(
+        &self,
+        projection: CoreExtractionHallProjection,
+    ) -> RuntimeFuture<'_, Result<(), CoreExtractionRuntimeError>> {
+        Box::pin(async move {
+            CoreExtractionActorDirectory::acknowledge_hall_installed(self, projection).await
+        })
+    }
+
+    fn begin_shutdown(&self) -> RuntimeFuture<'_, Vec<quinn::Connection>> {
+        Box::pin(async move { CoreExtractionActorDirectory::begin_shutdown(self).await })
+    }
+
+    fn finish_shutdown(
+        &self,
+    ) -> RuntimeFuture<'_, Result<CoreExtractionRuntimeReport, CoreExtractionRuntimeError>> {
+        Box::pin(async move { CoreExtractionActorDirectory::finish_shutdown(self).await })
+    }
 }
 
 impl<Clock, TickSource> CorePrivateLifeSessionDirectory<Clock, TickSource>
@@ -145,12 +272,221 @@ where
     pub fn new(recall: Arc<CoreRecallActorDirectory<Clock, TickSource>>) -> Self {
         Self {
             recall,
+            extraction: None,
             state: Mutex::new(SessionState {
                 accepting: true,
                 shutdown_started: false,
                 sessions: BTreeMap::new(),
             }),
         }
+    }
+
+    #[must_use]
+    pub fn with_extraction_runtime<Planner, ExtractionClock, ExtractionTicks>(
+        recall: Arc<CoreRecallActorDirectory<Clock, TickSource>>,
+        extraction: Arc<CoreExtractionActorDirectory<Planner, ExtractionClock, ExtractionTicks>>,
+    ) -> Self
+    where
+        Planner: ProductionExtractionPlanner + 'static,
+        ExtractionClock: IdentityClock + 'static,
+        ExtractionTicks: CoreExtractionAuthoritativeTick + 'static,
+    {
+        let mut sessions = Self::new(recall);
+        sessions.extraction = Some(Box::new(extraction));
+        sessions
+    }
+
+    async fn prepare_dynamic_writer_handoffs(
+        &self,
+        entry: &SessionEntry,
+        authenticated: AuthenticatedAccount,
+        writer: &Arc<CoreReliableWriter>,
+    ) -> Result<PreparedDynamicWriterHandoffs, CorePrivateLifeSessionError> {
+        let recall = if entry.recall_bound {
+            match self
+                .recall
+                .prepare_reliable_writer_handoff(authenticated, Arc::clone(writer))
+                .await
+            {
+                Ok(prepared) => Some(prepared),
+                Err(error) => {
+                    writer.retire(
+                        crate::CORE_RELIABLE_WRITE_UNCERTAIN_CLOSE_CODE,
+                        b"private-life writer handoff preparation failed",
+                    );
+                    return Err(error.into());
+                }
+            }
+        } else {
+            None
+        };
+        let extraction = if entry.extraction_bound {
+            let Some(extraction) = self.extraction.as_ref() else {
+                if let Some(prepared) = recall {
+                    let _ = self
+                        .recall
+                        .abort_prepared_reliable_writer_handoff(prepared)
+                        .await;
+                }
+                writer.retire(
+                    crate::CORE_RELIABLE_WRITE_UNCERTAIN_CLOSE_CODE,
+                    b"private-life extraction runtime unavailable",
+                );
+                return Err(CorePrivateLifeSessionError::ExtractionUnavailable);
+            };
+            match extraction.prepare(authenticated, Arc::clone(writer)).await {
+                Ok(prepared) => Some(prepared),
+                Err(error) => {
+                    if let Some(prepared) = recall {
+                        let _ = self
+                            .recall
+                            .abort_prepared_reliable_writer_handoff(prepared)
+                            .await;
+                    }
+                    writer.retire(
+                        crate::CORE_RELIABLE_WRITE_UNCERTAIN_CLOSE_CODE,
+                        b"private-life extraction handoff preparation failed",
+                    );
+                    return Err(error.into());
+                }
+            }
+        } else {
+            None
+        };
+        Ok(PreparedDynamicWriterHandoffs { recall, extraction })
+    }
+
+    async fn restore_recall_after_extraction_failure(
+        &self,
+        entry: &mut SessionEntry,
+        authenticated: AuthenticatedAccount,
+        writer: &Arc<CoreReliableWriter>,
+        issued_at_unix_ms: u64,
+        recall_attach: &CoreRecallTransportAttach,
+    ) -> Result<(), CorePrivateLifeSessionError> {
+        let had_previous_transport = entry.active.is_some();
+        let restored = if let Some(previous) = &entry.active {
+            match self
+                .recall
+                .prepare_reliable_writer_handoff(authenticated, Arc::clone(&previous.writer))
+                .await
+            {
+                Ok(prepared) => self
+                    .recall
+                    .commit_prepared_reliable_writer_handoff(prepared)
+                    .await
+                    .ok(),
+                Err(_) => None,
+            }
+        } else {
+            None
+        };
+        writer.retire(
+            crate::CORE_RELIABLE_WRITE_UNCERTAIN_CLOSE_CODE,
+            b"private-life dynamic writer handoff failed",
+        );
+        if let Some(restored) = restored {
+            entry.recall_lease = Some(restored.lease);
+            return Ok(());
+        }
+        let _ = self
+            .recall
+            .detach_transport(recall_attach.lease, issued_at_unix_ms)
+            .await;
+        entry.recall_lease = None;
+        if let Some(active) = entry.active.take() {
+            active.writer.retire(
+                crate::CORE_RELIABLE_WRITE_UNCERTAIN_CLOSE_CODE,
+                b"private-life writer handoff restore failed",
+            );
+        }
+        if had_previous_transport {
+            Err(CorePrivateLifeSessionError::DynamicWriterHandoffInconsistent)
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn commit_dynamic_writer_handoffs(
+        &self,
+        entry: &mut SessionEntry,
+        authenticated: AuthenticatedAccount,
+        writer: &Arc<CoreReliableWriter>,
+        issued_at_unix_ms: u64,
+        prepared: PreparedDynamicWriterHandoffs,
+    ) -> Result<CommittedDynamicWriterHandoffs, CorePrivateLifeSessionError> {
+        let recall = if let Some(prepared_recall) = prepared.recall {
+            match self
+                .recall
+                .commit_prepared_reliable_writer_handoff(prepared_recall)
+                .await
+            {
+                Ok(attached) => Some(attached),
+                Err(error) => {
+                    let _ = self
+                        .recall
+                        .abort_prepared_reliable_writer_handoff(prepared_recall)
+                        .await;
+                    if let (Some(extraction), Some(prepared_extraction)) =
+                        (&self.extraction, prepared.extraction)
+                    {
+                        let _ = extraction.abort(prepared_extraction).await;
+                    }
+                    writer.retire(
+                        crate::CORE_RELIABLE_WRITE_UNCERTAIN_CLOSE_CODE,
+                        b"private-life Recall handoff commit failed",
+                    );
+                    return Err(error.into());
+                }
+            }
+        } else {
+            None
+        };
+        let extraction = if let Some(prepared_extraction) = prepared.extraction {
+            let Some(runtime) = self.extraction.as_ref() else {
+                if let Some(recall_attach) = &recall {
+                    self.restore_recall_after_extraction_failure(
+                        entry,
+                        authenticated,
+                        writer,
+                        issued_at_unix_ms,
+                        recall_attach,
+                    )
+                    .await?;
+                } else {
+                    writer.retire(
+                        crate::CORE_RELIABLE_WRITE_UNCERTAIN_CLOSE_CODE,
+                        b"private-life extraction runtime unavailable",
+                    );
+                }
+                return Err(CorePrivateLifeSessionError::ExtractionUnavailable);
+            };
+            match runtime.commit(prepared_extraction).await {
+                Ok(attached) => Some(attached),
+                Err(error) => {
+                    let _ = runtime.abort(prepared_extraction).await;
+                    if let Some(recall_attach) = &recall {
+                        self.restore_recall_after_extraction_failure(
+                            entry,
+                            authenticated,
+                            writer,
+                            issued_at_unix_ms,
+                            recall_attach,
+                        )
+                        .await?;
+                    } else {
+                        writer.retire(
+                            crate::CORE_RELIABLE_WRITE_UNCERTAIN_CLOSE_CODE,
+                            b"private-life extraction handoff commit failed",
+                        );
+                    }
+                    return Err(error.into());
+                }
+            }
+        } else {
+            None
+        };
+        Ok(CommittedDynamicWriterHandoffs { recall, extraction })
     }
 
     /// Accepts a transport after authentication. No route or danger owner is required yet.
@@ -160,6 +496,7 @@ where
         &self,
         authenticated: AuthenticatedAccount,
         connection: quinn::Connection,
+        issued_at_unix_ms: u64,
     ) -> Result<CorePrivateLifeTransportAttach, CorePrivateLifeSessionError> {
         if authenticated.namespace != AuthenticatedNamespace::WipeableTest {
             return Err(CorePrivateLifeSessionError::InvalidAccountBinding);
@@ -168,6 +505,10 @@ where
         let writer = Arc::new(CoreReliableWriter::new(connection));
         let mut state = self.state.lock().await;
         if !state.accepting {
+            writer.retire(
+                crate::SERVER_SHUTDOWN_CLOSE_CODE,
+                b"private-life session admission retired",
+            );
             return Err(CorePrivateLifeSessionError::Retired);
         }
         let entry = state.sessions.entry(account_id).or_insert(SessionEntry {
@@ -176,25 +517,37 @@ where
             active: None,
             recall_bound: false,
             recall_lease: None,
+            extraction_bound: false,
+            extraction_lease: None,
         });
         if entry.authenticated != authenticated {
+            writer.retire(
+                crate::CORE_RELIABLE_WRITE_UNCERTAIN_CLOSE_CODE,
+                b"private-life account binding mismatch",
+            );
             return Err(CorePrivateLifeSessionError::InvalidAccountBinding);
         }
         let generation = CorePrivateLifeTransportGeneration(entry.next_generation);
-        let next_generation = entry
-            .next_generation
-            .checked_add(1)
-            .ok_or(CorePrivateLifeSessionError::GenerationExhausted)?;
-
-        let recall_attach = if entry.recall_bound {
-            Some(
-                self.recall
-                    .attach_reliable_writer(authenticated, Arc::clone(&writer))
-                    .await?,
-            )
-        } else {
-            None
+        let Some(next_generation) = entry.next_generation.checked_add(1) else {
+            writer.retire(
+                crate::CORE_RELIABLE_WRITE_UNCERTAIN_CLOSE_CODE,
+                b"private-life session generation exhausted",
+            );
+            return Err(CorePrivateLifeSessionError::GenerationExhausted);
         };
+
+        let prepared = self
+            .prepare_dynamic_writer_handoffs(entry, authenticated, &writer)
+            .await?;
+        let committed = self
+            .commit_dynamic_writer_handoffs(
+                entry,
+                authenticated,
+                &writer,
+                issued_at_unix_ms,
+                prepared,
+            )
+            .await?;
         let lease = CorePrivateLifeTransportLease {
             account_id,
             generation,
@@ -204,23 +557,21 @@ where
             writer: Arc::clone(&writer),
         });
         entry.next_generation = next_generation;
-        entry.recall_lease = recall_attach.as_ref().map(|attached| attached.lease);
+        entry.recall_lease = committed.recall.as_ref().map(|attached| attached.lease);
+        entry.extraction_lease = committed.extraction.as_ref().map(|attached| attached.lease);
 
-        let invalidated_connection = if let Some(attached) = recall_attach {
-            attached.invalidated_connection
-        } else {
-            previous.map(|active| {
-                active.writer.retire(
-                    TRANSPORT_REPLACED_CLOSE_CODE,
-                    b"authoritative private-life transport handoff",
-                );
-                active.writer.connection().clone()
-            })
-        };
+        let invalidated_connection = previous.map(|active| {
+            active.writer.retire(
+                TRANSPORT_REPLACED_CLOSE_CODE,
+                b"authoritative private-life transport handoff",
+            );
+            active.writer.connection().clone()
+        });
         Ok(CorePrivateLifeTransportAttach {
             lease,
             writer,
             recall_lease: entry.recall_lease,
+            extraction_lease: entry.extraction_lease,
             invalidated_connection,
         })
     }
@@ -250,12 +601,70 @@ where
         if entry.recall_bound {
             return Err(CorePrivateLifeSessionError::RecallAlreadyBound);
         }
-        let attached = self
+        let prepared = self
             .recall
-            .attach_reliable_writer(entry.authenticated, Arc::clone(&active.writer))
+            .prepare_reliable_writer_handoff(entry.authenticated, Arc::clone(&active.writer))
             .await?;
+        let attached = match self
+            .recall
+            .commit_prepared_reliable_writer_handoff(prepared)
+            .await
+        {
+            Ok(attached) => attached,
+            Err(error) => {
+                let _ = self
+                    .recall
+                    .abort_prepared_reliable_writer_handoff(prepared)
+                    .await;
+                return Err(error.into());
+            }
+        };
         entry.recall_bound = true;
         entry.recall_lease = Some(attached.lease);
+        Ok(attached.lease)
+    }
+
+    /// Binds the current Boss-exit extraction actor to the exact private-life writer. This is
+    /// independent from Recall because terminal authority may exist before or after Recall is
+    /// armed, but both bindings always share the session's one reliable sequence.
+    pub async fn bind_extraction(
+        &self,
+        lease: CorePrivateLifeTransportLease,
+    ) -> Result<CoreExtractionConnectionLease, CorePrivateLifeSessionError> {
+        let mut state = self.state.lock().await;
+        if !state.accepting {
+            return Err(CorePrivateLifeSessionError::Retired);
+        }
+        let entry = state
+            .sessions
+            .get_mut(&lease.account_id)
+            .ok_or(CorePrivateLifeSessionError::SessionUnavailable)?;
+        let active = entry
+            .active
+            .as_ref()
+            .ok_or(CorePrivateLifeSessionError::SessionUnavailable)?;
+        if active.lease != lease {
+            return Err(CorePrivateLifeSessionError::StaleTransport);
+        }
+        if entry.extraction_bound {
+            return Err(CorePrivateLifeSessionError::ExtractionAlreadyBound);
+        }
+        let extraction = self
+            .extraction
+            .as_ref()
+            .ok_or(CorePrivateLifeSessionError::ExtractionUnavailable)?;
+        let prepared = extraction
+            .prepare(entry.authenticated, Arc::clone(&active.writer))
+            .await?;
+        let attached = match extraction.commit(prepared).await {
+            Ok(attached) => attached,
+            Err(error) => {
+                let _ = extraction.abort(prepared).await;
+                return Err(error.into());
+            }
+        };
+        entry.extraction_bound = true;
+        entry.extraction_lease = Some(attached.lease);
         Ok(attached.lease)
     }
 
@@ -291,6 +700,89 @@ where
             .recall_lease
             .ok_or(CorePrivateLifeSessionError::RecallUnavailable)?;
         Ok(self.recall.authority(recall_lease))
+    }
+
+    pub async fn extraction_lease(
+        &self,
+        lease: CorePrivateLifeTransportLease,
+    ) -> Result<CoreExtractionConnectionLease, CorePrivateLifeSessionError> {
+        let state = self.state.lock().await;
+        let entry = state
+            .sessions
+            .get(&lease.account_id)
+            .ok_or(CorePrivateLifeSessionError::SessionUnavailable)?;
+        if entry.active.as_ref().map(|active| active.lease) != Some(lease) {
+            return Err(CorePrivateLifeSessionError::StaleTransport);
+        }
+        entry
+            .extraction_lease
+            .ok_or(CorePrivateLifeSessionError::ExtractionNotBound)
+    }
+
+    /// Consumes extraction replay authority only after the exact committed Hall projection has
+    /// been installed. The session writer remains live for Hall control.
+    pub async fn acknowledge_extraction_hall_installed(
+        &self,
+        lease: CorePrivateLifeTransportLease,
+        projection: CoreExtractionHallProjection,
+    ) -> Result<(), CorePrivateLifeSessionError> {
+        let mut state = self.state.lock().await;
+        if !state.accepting {
+            return Err(CorePrivateLifeSessionError::Retired);
+        }
+        let entry = state
+            .sessions
+            .get_mut(&lease.account_id)
+            .ok_or(CorePrivateLifeSessionError::SessionUnavailable)?;
+        if entry.active.as_ref().map(|active| active.lease) != Some(lease) {
+            return Err(CorePrivateLifeSessionError::StaleTransport);
+        }
+        let extraction_lease = entry
+            .extraction_lease
+            .ok_or(CorePrivateLifeSessionError::ExtractionNotBound)?;
+        if projection.lease() != extraction_lease {
+            return Err(CorePrivateLifeSessionError::StaleTransport);
+        }
+        self.extraction
+            .as_ref()
+            .ok_or(CorePrivateLifeSessionError::ExtractionUnavailable)?
+            .acknowledge_hall_installed(projection)
+            .await?;
+        entry.extraction_bound = false;
+        entry.extraction_lease = None;
+        Ok(())
+    }
+
+    /// Clears extraction's dynamic transport binding after another terminal producer wins. The
+    /// terminal coordinator retires the actor first; an already-cleared runtime lease is therefore
+    /// an expected exact outcome and never retires the shared session writer.
+    pub async fn unbind_extraction(
+        &self,
+        lease: CorePrivateLifeTransportLease,
+    ) -> Result<CoreExtractionTransportDetach, CorePrivateLifeSessionError> {
+        let mut state = self.state.lock().await;
+        if !state.accepting {
+            return Err(CorePrivateLifeSessionError::Retired);
+        }
+        let entry = state
+            .sessions
+            .get_mut(&lease.account_id)
+            .ok_or(CorePrivateLifeSessionError::SessionUnavailable)?;
+        if entry.active.as_ref().map(|active| active.lease) != Some(lease) {
+            return Err(CorePrivateLifeSessionError::StaleTransport);
+        }
+        let extraction_lease = entry
+            .extraction_lease
+            .ok_or(CorePrivateLifeSessionError::ExtractionNotBound)?;
+        let outcome = self
+            .extraction
+            .as_ref()
+            .ok_or(CorePrivateLifeSessionError::ExtractionUnavailable)?
+            .detach(extraction_lease)
+            .await;
+        entry.extraction_bound = false;
+        entry.extraction_lease = None;
+        Ok(outcome)
     }
 
     /// Removes the danger-only Recall actor without retiring the session writer. The terminal
@@ -335,6 +827,17 @@ where
         if entry.active.as_ref().map(|active| active.lease) != Some(lease) {
             return Ok(CorePrivateLifeTransportDetach::StaleGenerationIgnored);
         }
+        let extraction = if let Some(extraction_lease) = entry.extraction_lease.take() {
+            Some(
+                self.extraction
+                    .as_ref()
+                    .ok_or(CorePrivateLifeSessionError::ExtractionUnavailable)?
+                    .detach(extraction_lease)
+                    .await,
+            )
+        } else {
+            None
+        };
         let recall = if let Some(recall_lease) = entry.recall_lease.take() {
             Some(
                 self.recall
@@ -349,7 +852,7 @@ where
                 .writer
                 .retire(SESSION_DETACHED_CLOSE_CODE, SESSION_DETACHED_REASON);
         }
-        Ok(CorePrivateLifeTransportDetach::Detached { recall })
+        Ok(CorePrivateLifeTransportDetach::Detached { recall, extraction })
     }
 
     /// Stops admission and retires every writer before Recall inbox shutdown. Duplicate
@@ -368,9 +871,13 @@ where
                 connections.push(active.writer.connection().clone());
             }
             entry.recall_lease = None;
+            entry.extraction_lease = None;
         }
         drop(state);
         connections.extend(self.recall.begin_shutdown().await);
+        if let Some(extraction) = &self.extraction {
+            connections.extend(extraction.begin_shutdown().await);
+        }
         connections
     }
 
@@ -384,6 +891,11 @@ where
             }
         }
         let recall = self.recall.finish_shutdown().await?;
+        let extraction = if let Some(extraction) = &self.extraction {
+            Some(extraction.finish_shutdown().await?)
+        } else {
+            None
+        };
         let mut state = self.state.lock().await;
         let retired_account_count = state.sessions.len();
         let remaining_active_transports = state
@@ -391,12 +903,16 @@ where
             .values()
             .filter(|entry| entry.active.is_some())
             .count();
+        let extraction_zero_residue = extraction.as_ref().is_none_or(|report| report.zero_residue);
         state.sessions.clear();
         Ok(CorePrivateLifeSessionReport {
             retired_account_count,
             remaining_active_transports,
             recall,
-            zero_residue: remaining_active_transports == 0 && recall.zero_residue,
+            extraction,
+            zero_residue: remaining_active_transports == 0
+                && recall.zero_residue
+                && extraction_zero_residue,
         })
     }
 
@@ -416,6 +932,11 @@ where
                 .sessions
                 .values()
                 .filter(|entry| entry.recall_bound)
+                .count(),
+            extraction_bound_count: state
+                .sessions
+                .values()
+                .filter(|entry| entry.extraction_bound)
                 .count(),
         }
     }
@@ -570,7 +1091,7 @@ mod tests {
         let (server_endpoint, client_endpoint, client, server) = live_connection_pair().await;
 
         let attached = sessions
-            .attach_transport(authenticated(), server)
+            .attach_transport(authenticated(), server, 5_000)
             .await
             .unwrap();
         assert_eq!(
@@ -630,6 +1151,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one contiguous real-QUIC lifecycle proves handoff, stale detach, LinkLost, reconnect, actor replacement, and zero-residue shutdown"
+    )]
     async fn handoff_rebinds_recall_before_visibility_and_stale_detach_is_harmless() {
         let ticks = Arc::new(TickSource(AtomicU64::new(100)));
         let recall = Arc::new(CoreRecallActorDirectory::new(Arc::clone(&ticks)));
@@ -641,7 +1166,7 @@ mod tests {
         let (first_server_endpoint, first_client_endpoint, first_client, first_server) =
             live_connection_pair().await;
         let first = sessions
-            .attach_transport(authenticated(), first_server)
+            .attach_transport(authenticated(), first_server, 5_000)
             .await
             .unwrap();
         sessions.bind_recall(first.lease).await.unwrap();
@@ -654,7 +1179,7 @@ mod tests {
         let (second_server_endpoint, second_client_endpoint, second_client, second_server) =
             live_connection_pair().await;
         let second = sessions
-            .attach_transport(authenticated(), second_server)
+            .attach_transport(authenticated(), second_server, 5_500)
             .await
             .unwrap();
         assert!(second.recall_lease.is_some());
@@ -696,7 +1221,8 @@ mod tests {
                 .await
                 .unwrap(),
             CorePrivateLifeTransportDetach::Detached {
-                recall: Some(ProductionRecallDetachOutcome::LinkLostStarted { deadline_tick: 192 })
+                recall: Some(ProductionRecallDetachOutcome::LinkLostStarted { deadline_tick: 192 }),
+                ..
             }
         ));
         assert_eq!(sessions.snapshot().await.active_transport_count, 0);
@@ -705,7 +1231,7 @@ mod tests {
         let (third_server_endpoint, third_client_endpoint, third_client, third_server) =
             live_connection_pair().await;
         let third = sessions
-            .attach_transport(authenticated(), third_server)
+            .attach_transport(authenticated(), third_server, 5_900)
             .await
             .unwrap();
         assert!(third.recall_lease.is_some());
