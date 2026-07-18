@@ -274,6 +274,7 @@ impl PlayerMovementState {
         if !displacement.is_finite() {
             return Err(MovementError::NonFiniteState);
         }
+        let start = self.position;
         let hit = collision_world.sweep_solids(
             self.position,
             displacement,
@@ -287,10 +288,15 @@ impl PlayerMovementState {
         });
         self.position = self.position + displacement * fraction;
         self.velocity = SimulationVector::default();
+        // Closed-form sweep contact can land a few floating-point ULPs inside a rounded solid.
+        // Resolve only a reported solid contact back to the legal boundary before validation.
+        if solid.is_some() {
+            self.resolve_solids(arena);
+        }
         self.validate(arena)?;
         Ok(ForcedMovementStep {
             position: self.position,
-            travelled_tiles: displacement.length() * fraction,
+            travelled_tiles: (self.position - start).length(),
             solid,
         })
     }
@@ -394,6 +400,8 @@ pub enum MovementError {
     InvalidConfig,
     #[error("authoritative movement velocity exceeds configured final speed")]
     VelocityExceedsMaximum,
+    #[error("simulation position cannot be represented in fixed-point world coordinates")]
+    PositionOutOfRange,
     #[error("player position intersects the arena shell or a solid pillar")]
     IllegalPosition,
     #[error(transparent)]
@@ -406,6 +414,21 @@ pub fn tile_point_to_simulation(point: TilePoint) -> SimulationVector {
         milli_to_tiles(point.x_milli_tiles),
         milli_to_tiles(point.y_milli_tiles),
     )
+}
+
+/// Quantizes a finite simulation position into the shared millitile world projection. Gameplay
+/// authority remains in simulation space; this conversion is the one canonical route/wire view.
+#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+pub fn simulation_to_tile_point(position: SimulationVector) -> Result<TilePoint, MovementError> {
+    if !position.is_finite() {
+        return Err(MovementError::NonFiniteState);
+    }
+    let x = (position.x * MILLI_TILES_PER_TILE as f32).round();
+    let y = (position.y * MILLI_TILES_PER_TILE as f32).round();
+    if x < i32::MIN as f32 || x > i32::MAX as f32 || y < i32::MIN as f32 || y > i32::MAX as f32 {
+        return Err(MovementError::PositionOutOfRange);
+    }
+    Ok(TilePoint::new(x as i32, y as i32))
 }
 
 fn move_towards(
@@ -531,6 +554,23 @@ mod tests {
         assert_eq!(
             MovementAction::try_from_milli(1_001, 0),
             Err(MovementError::InputOutOfRange)
+        );
+    }
+
+    #[test]
+    fn simulation_position_quantizes_once_to_the_shared_millitile_projection() {
+        let point = TilePoint::new(8_501, 40_499);
+        assert_eq!(
+            simulation_to_tile_point(tile_point_to_simulation(point)),
+            Ok(point)
+        );
+        assert_eq!(
+            simulation_to_tile_point(SimulationVector::new(f32::NAN, 1.0)),
+            Err(MovementError::NonFiniteState)
+        );
+        assert_eq!(
+            simulation_to_tile_point(SimulationVector::new(f32::MAX, 1.0)),
+            Err(MovementError::PositionOutOfRange)
         );
     }
 

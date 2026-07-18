@@ -305,7 +305,7 @@ pub use movement::{
     ForcedMovementStep, GRAVE_ARBALIST_SPEED_TILES_PER_SECOND, MOVEMENT_RESPONSE_TICKS,
     MovementAction, MovementError, MovementStep, PLAYER_COLLISION_RADIUS_MILLI_TILES,
     PLAYER_COLLISION_RADIUS_TILES, PlayerMovementConfig, PlayerMovementState, SimulationVector,
-    tile_point_to_simulation,
+    simulation_to_tile_point, tile_point_to_simulation,
 };
 pub use normal_wave::{
     FIRST_PLAYABLE_SPAWN_TELEGRAPH_TICKS, HOSTILE_PROJECTILE_ID_OFFSET,
