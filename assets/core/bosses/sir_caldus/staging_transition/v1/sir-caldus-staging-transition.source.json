@@ -1,0 +1,149 @@
+{
+  "schema_version": 1,
+  "pack_id": "review.m03.sir_caldus.staging_transition.v1",
+  "generated_date": "2026-07-18",
+  "status": {
+    "classification": "unregistered_review_candidate",
+    "runtime_registered": false,
+    "content_hash_input": false,
+    "runtime_bundle": null,
+    "normal_route_gate_changed": false
+  },
+  "source_revision": "8cb3884d747f8d8edf25e16b052d229c7fafc8b1",
+  "design_authority": [
+    "Gravebound_Production_GDD_v1_Canonical.md:DNG-006,ENC-005,ART-001,ART-002,ART-004,ART-005,ART-006,ART-020,ART-030,UI-010,UI-011,QA-007",
+    "Gravebound_Content_Production_Spec_v1.md:CONT-ROOM-002,CONT-ROOM-007,CONT-BOSS-001",
+    "Gravebound_Development_Roadmap_v1.md:GB-M03-03,GB-M03-exit-gate"
+  ],
+  "inventory_audit": {
+    "existing_b5_presentation": "assets/core/dungeons/bell_bridge_combat_review/v1",
+    "existing_b6_combat_presentation": "assets/core/bosses/sir_caldus/combat_presentation/v1",
+    "existing_caldus_character_packs": "assets/core/bosses/sir_caldus/review/v1..v6",
+    "existing_caldus_resolution_states": "assets/core/ui/caldus_resolution_states/v1",
+    "existing_stable_exit": "assets/core/dungeons/bell_fixed_route_landmarks/v1",
+    "selected_gap": "B5-to-B6 threshold lock, ready-countdown framing, and Caldus identity-introduction framing",
+    "copied_existing_assets": []
+  },
+  "generation": {
+    "method": "OpenAI built-in image generation with project-local visual references",
+    "use_case": "stylized-concept",
+    "prompt_record": "README.md#exact-generation-prompt-and-provenance",
+    "raw_source": "source/sir-caldus-boss-lock.raw-chroma.png",
+    "raw_source_sha256": "9f9489d296fe44e1a64a87284b5f3b152b3c9230c2d0991efa4e63f07f375377",
+    "alpha_source": "source/sir-caldus-boss-lock.alpha.png",
+    "alpha_source_sha256": "5804500d78f1f7d6a1ed6c0d949c92ed08f1f68578741854a9ad7ae1c841b502",
+    "chroma_key_sample": "#fa05f8",
+    "chroma_helper": "C:/Users/micha/.codex/skills/.system/imagegen/scripts/remove_chroma_key.py",
+    "chroma_arguments": ["--auto-key", "border", "--soft-matte", "--transparent-threshold", "12", "--opaque-threshold", "220", "--despill"],
+    "builder": "source/build_review_artifacts.py",
+    "hash_manifest": "SHA256SUMS.txt",
+    "external_visual_references": []
+  },
+  "review_dependencies": [
+    {
+      "path": "assets/core/bosses/sir_caldus/combat_presentation/v1/runtime/caldus-bell-court.576x576.png",
+      "use": "static review composition only"
+    },
+    {
+      "path": "assets/core/bosses/sir_caldus/review/v3/frames/idle/01.png",
+      "use": "static identity-introduction composition only"
+    }
+  ],
+  "runtime_candidates": [
+    {
+      "candidate_id": "review.sprite.boss_lock.caldus_transition.standard",
+      "path": "runtime/boss-lock-state-sheet.standard.1024x256.png",
+      "asset_type": "four_state_prop_sheet",
+      "dimensions": [1024, 256],
+      "frame_dimensions": [256, 256],
+      "frame_count": 4,
+      "anchor": "center",
+      "animation_fps": 0,
+      "states": ["dormant_open", "arming", "sealed", "introduction_resonance"],
+      "collision_metadata_reference": "none_presentation_only",
+      "palette_readability_tags": ["boss_objective", "black_iron", "tarnished_brass", "jaw_state_non_color_cue", "bone_white_latch"]
+    },
+    {
+      "candidate_id": "review.sprite.boss_lock.caldus_transition.reduced",
+      "path": "runtime/boss-lock-state-sheet.reduced.1024x256.png",
+      "asset_type": "four_state_prop_sheet_reduced_effects",
+      "dimensions": [1024, 256],
+      "frame_dimensions": [256, 256],
+      "frame_count": 4,
+      "anchor": "center",
+      "animation_fps": 0,
+      "collision_metadata_reference": "none_presentation_only",
+      "palette_readability_tags": ["reduced_effects", "same_alpha_geometry", "jaw_state_non_color_cue", "bone_white_latch"]
+    },
+    {
+      "candidate_id": "review.ui.boss_ready_countdown_dial.standard",
+      "path": "runtime/boss-ready-countdown-dial.standard.128.png",
+      "asset_type": "text_free_ui_material",
+      "dimensions": [128, 128],
+      "anchor": "center",
+      "animation_fps": 0,
+      "collision_metadata_reference": "none",
+      "palette_readability_tags": ["boss_objective", "five_notches", "no_embedded_progress"]
+    },
+    {
+      "candidate_id": "review.ui.boss_ready_countdown_dial.reduced",
+      "path": "runtime/boss-ready-countdown-dial.reduced.128.png",
+      "asset_type": "text_free_ui_material_reduced_effects",
+      "dimensions": [128, 128],
+      "anchor": "center",
+      "animation_fps": 0,
+      "collision_metadata_reference": "none",
+      "palette_readability_tags": ["reduced_effects", "five_notches", "no_embedded_progress"]
+    },
+    {
+      "candidate_id": "review.ui.caldus_introduction_frame.standard",
+      "path": "runtime/caldus-introduction-frame.standard.512x96.png",
+      "asset_type": "text_free_ui_frame",
+      "dimensions": [512, 96],
+      "anchor": "center",
+      "animation_fps": 0,
+      "collision_metadata_reference": "none",
+      "palette_readability_tags": ["boss_identity", "text_free", "tarnished_brass"]
+    },
+    {
+      "candidate_id": "review.ui.caldus_introduction_frame.reduced",
+      "path": "runtime/caldus-introduction-frame.reduced.512x96.png",
+      "asset_type": "text_free_ui_frame_reduced_effects",
+      "dimensions": [512, 96],
+      "anchor": "center",
+      "animation_fps": 0,
+      "collision_metadata_reference": "none",
+      "palette_readability_tags": ["reduced_effects", "boss_identity", "text_free"]
+    }
+  ],
+  "timing_contract": {
+    "load_wait_bound_milliseconds": 10000,
+    "ready_countdown_milliseconds": 5000,
+    "caldus_introduction_milliseconds": 2500,
+    "authority": "simulation_and_route_runtime_only",
+    "baked_timing_or_progress_in_runtime_pixels": false
+  },
+  "validation": {
+    "hashed_png_count": 21,
+    "runtime_frame_dimensions": [256, 256],
+    "frame_count_per_effects_mode": 4,
+    "transparent_frame_corners": true,
+    "standard_reduced_frame_alpha_identical": true,
+    "standard_reduced_changed_rgb_pixels": [29246, 31519, 30097, 33227],
+    "review_dimensions": [[1280, 720], [1920, 1080]],
+    "effects_modes": ["standard", "reduced"],
+    "deterministic_postprocess_and_composition": true
+  },
+  "authority_boundaries": {
+    "may_author_load_completion_or_timeout": false,
+    "may_author_countdown_tick_or_progress": false,
+    "may_author_participant_lock_or_count": false,
+    "may_author_door_collision_or_late_entry": false,
+    "may_author_safe_radius_or_invulnerability": false,
+    "may_author_introduction_duration_or_phase": false,
+    "may_start_cancel_or_resolve_combat": false,
+    "may_commit_reward_or_create_exit": false,
+    "may_advance_route_or_enable_normal_admission": false
+  },
+  "license_source_record": "Original generated candidate using only project-local references and deterministic project-authored post-processing. No third-party image, artist, game, brand, trademark, font asset, or style reference was supplied. Commercial-rights, similarity, registry, and native runtime review remain required."
+}
