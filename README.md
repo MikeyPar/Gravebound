@@ -156,7 +156,7 @@ Concept images establish mood, hierarchy, and visual language. They are not fina
 
 ## Current Next Step
 
-Commit `78b7ff0` now freezes the exact route/version/lineage/attempt/participant/content/progression and eligibility authority on Caldus defeat, blocks later combat frames, validates the durable personal-owner result, normalizes response-loss replay metadata, and advances exactly once to the compiled stable exit only after matching durable acknowledgement; see the [reward-handoff evidence](docs/evidence/GB-M03-03G-caldus-reward-handoff-evidence.md). Next add the session-task-owned PostgreSQL coordinator adapter, exact partial-commit/restart reconciliation, pending-inventory publication, and production extraction binding. Bound normal-server construction, hosted adverse/restart proof, and normal admission remain disabled.
+Commit `0cb44f0` now consumes B5 into Caldus inside the same persistent 30 Hz task, pins validated presentation content at Bell conversion, exposes frozen reward/terminal/exit observations, rejects stale acknowledgements without faulting, and carries the exact accepted B3 progression version into B6; see the [driver-binding evidence](docs/evidence/GB-M03-03G-caldus-driver-binding-evidence.md). Next add the durable danger-lineage/terminal-winner precondition across Caldus item, progression, and exit finalization, then install the automatic session executor and production extraction binding. Bound normal-server construction, hosted adverse/restart proof, and normal admission remain disabled.
 
 ### Historical cumulative record
 

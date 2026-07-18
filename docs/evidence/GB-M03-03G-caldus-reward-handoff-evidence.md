@@ -38,4 +38,4 @@ This slice freezes and acknowledges one exact durable Caldus result but does not
 
 ## Current Next Step
 
-Add the session-task-owned PostgreSQL Caldus authority adapter. It must build owner commands only from authenticated session/content/progression authority, retry the same frozen handoff across partial reward/progression/exit commits and response loss, feed the exact stored result back into this owner, and then bind the production extraction authority to the committed `BossExitReady` route. Keep all normal admission disabled until that composition and its adverse/restart proof pass.
+Commit `0cb44f0` closes the same-task B6 driver and authenticated coordinator seam under [driver-binding evidence](GB-M03-03G-caldus-driver-binding-evidence.md). Next add the durable danger-lineage/terminal-winner precondition across personal item, progression, and exit finalization, then install the automatic session retry/acknowledgement worker and bind production extraction only from committed `BossExitReady`. Keep normal admission disabled.
