@@ -33,10 +33,12 @@ use thiserror::Error;
 use tokio::sync::{Mutex, mpsc, oneshot};
 
 use crate::{
-    AuthenticatedAccount, AuthenticatedNamespace, CaldusInstancePresentation,
-    CoreExtractionIntentAuthority, CoreExtractionIntentReply, CorePrivateRouteActorDirectory,
-    CorePrivateRouteActorLease, CorePrivateRouteExtractionPermit, CorePrivateRouteRuntimeError,
-    IdentityClock,
+    AuthenticatedAccount, AuthenticatedNamespace, CaldusExitPresentation,
+    CaldusInstancePresentation, CoreExtractionIntentAuthority, CoreExtractionIntentReply,
+    CorePrivateCaldusDefeatHandoff, CorePrivateCaldusRewardCommit, CorePrivateRouteActorDirectory,
+    CorePrivateRouteActorLease, CorePrivateRouteExtractionBinding,
+    CorePrivateRouteExtractionExitBinding, CorePrivateRouteExtractionPermit,
+    CorePrivateRouteRuntimeError, IdentityClock,
 };
 
 pub const CORE_EXTRACTION_ACTOR_MAILBOX_CAPACITY: usize = 8;
@@ -83,6 +85,121 @@ impl ProductionExtractionBossExitAuthorityV1 {
         participant: CoreBossParticipant,
         expected_versions: ProductionExtractionExpectedVersionsV1,
     ) -> Result<Self, ProductionExtractionIntentError> {
+        let exit = presentation
+            .exit()
+            .ok_or(ProductionExtractionIntentError::ExitNotCommitted)?;
+        Self::seal_committed_exit(
+            authenticated,
+            selected_character_id,
+            route_permit,
+            presentation.instance_lineage_id(),
+            presentation.attempt_ordinal(),
+            exit,
+            lock,
+            participant,
+            expected_versions,
+        )
+    }
+
+    /// Reserves and seals one production extraction authority directly from the frozen Caldus
+    /// defeat, its committed `BossExitReady` result, and the coherent post-reward version vector.
+    /// The canonical GDD (`TECH-021`-`023`), Content Production Specification
+    /// (`CONT-BOSS-001`, `CONT-REWARD-003`), and roadmap (`GB-M03-03`, `GB-M03-08`) require these
+    /// authorities to share one server-owned identity. Any failure after reservation invokes the
+    /// exact permit abort before returning, so construction cannot strand `TerminalPending`.
+    pub async fn prepare_from_caldus_commit(
+        authenticated: AuthenticatedAccount,
+        route_directory: &CorePrivateRouteActorDirectory,
+        handoff: &CorePrivateCaldusDefeatHandoff,
+        commit: &CorePrivateCaldusRewardCommit,
+        world_flow_revision: WorldFlowContentRevisionV1,
+        expected_versions: ProductionExtractionExpectedVersionsV1,
+    ) -> Result<Self, ProductionExtractionIntentError> {
+        let lock = handoff.lock();
+        let [participant] = lock.participants.as_slice() else {
+            return Err(ProductionExtractionIntentError::InvalidRouteAuthority);
+        };
+        let participant = *participant;
+        let route = &commit.route;
+        if authenticated.namespace != AuthenticatedNamespace::WipeableTest
+            || authenticated.account_id.as_bytes() != handoff.route_lease().account_id()
+            || handoff.character_id() != handoff.route_lease().character_id()
+            || route.character_id != handoff.character_id()
+            || route.actor_generation != handoff.route_lease().actor_generation()
+            || route.instance_lineage_id != Some(handoff.instance_lineage_id())
+            || route.phase != CorePrivateRoutePhaseV1::BossExitReady
+        {
+            return Err(ProductionExtractionIntentError::InvalidRouteAuthority);
+        }
+        let identities = CoreCaldusVictoryIdentities::derive(handoff.instance_lineage_id(), lock)
+            .map_err(|_| ProductionExtractionIntentError::InvalidExitAuthority)?;
+        let extraction = identities
+            .extraction_for(participant)
+            .ok_or(ProductionExtractionIntentError::InvalidExitAuthority)?;
+        let terminal_id = derive_production_extraction_terminal_id_v1(
+            authenticated.account_id.as_bytes(),
+            handoff.character_id(),
+            identities.encounter_id.bytes(),
+            extraction.request_id.bytes(),
+            extraction.receipt_id.bytes(),
+        )?;
+        let exit = CorePrivateRouteExtractionExitBinding::new(
+            identities.encounter_id.bytes(),
+            identities.exit_instance_id.bytes(),
+            extraction.request_id.bytes(),
+            extraction.receipt_id.bytes(),
+            terminal_id,
+        )
+        .map_err(|_| ProductionExtractionIntentError::InvalidExitAuthority)?;
+        let binding = CorePrivateRouteExtractionBinding::new(
+            authenticated.account_id.as_bytes(),
+            route.clone(),
+            world_flow_revision,
+            handoff.entry_restore_point_id(),
+            exit,
+        )
+        .map_err(|_| ProductionExtractionIntentError::InvalidRouteAuthority)?;
+        let permit = route_directory
+            .prepare_extraction_terminal(handoff.route_lease(), binding)
+            .await
+            .map_err(|_| ProductionExtractionIntentError::InvalidRouteAuthority)?;
+        match Self::seal_committed_exit(
+            authenticated,
+            handoff.character_id(),
+            permit.clone(),
+            handoff.instance_lineage_id(),
+            lock.attempt_ordinal,
+            &commit.exit,
+            lock,
+            participant,
+            expected_versions,
+        ) {
+            Ok(authority) => Ok(authority),
+            Err(error) => {
+                route_directory
+                    .abort_extraction_terminal(handoff.route_lease(), &permit)
+                    .await
+                    .map_err(|_| ProductionExtractionIntentError::RouteReservationAbortFailed)?;
+                Err(error)
+            }
+        }
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the private seal binds every cross-domain authority without an override object"
+    )]
+    fn seal_committed_exit(
+        authenticated: AuthenticatedAccount,
+        selected_character_id: [u8; 16],
+        route_permit: CorePrivateRouteExtractionPermit,
+        instance_lineage_id: [u8; 16],
+        attempt_ordinal: u32,
+        exit: &CaldusExitPresentation,
+        lock: &CoreBossParticipantLock,
+        participant: CoreBossParticipant,
+        expected_versions: ProductionExtractionExpectedVersionsV1,
+    ) -> Result<Self, ProductionExtractionIntentError> {
         let binding = route_permit.binding();
         let route = binding.accepted_route();
         route
@@ -103,25 +220,21 @@ impl ProductionExtractionBossExitAuthorityV1 {
             || route.room != Some(CorePrivateRouteRoomV1::CaldusArenaB6)
             || route.phase != CorePrivateRoutePhaseV1::BossExitReady
             || !route.readiness.extraction_available.is_available()
-            || route.instance_lineage_id != Some(presentation.instance_lineage_id())
-            || lock.attempt_ordinal != presentation.attempt_ordinal()
+            || route.instance_lineage_id != Some(instance_lineage_id)
+            || lock.attempt_ordinal != attempt_ordinal
             || lock.participants.as_slice() != [participant]
             || participant.party_slot != 0
         {
             return Err(ProductionExtractionIntentError::InvalidRouteAuthority);
         }
-        let exit = presentation
-            .exit()
-            .ok_or(ProductionExtractionIntentError::ExitNotCommitted)?;
         if exit.content_id != CALDUS_EXIT_ID
             || exit.destination_content_id != CALDUS_HALL_ID
             || !exit.requires_committed_extraction_receipt
         {
             return Err(ProductionExtractionIntentError::InvalidExitAuthority);
         }
-        let identities =
-            CoreCaldusVictoryIdentities::derive(presentation.instance_lineage_id(), lock)
-                .map_err(|_| ProductionExtractionIntentError::InvalidExitAuthority)?;
+        let identities = CoreCaldusVictoryIdentities::derive(instance_lineage_id, lock)
+            .map_err(|_| ProductionExtractionIntentError::InvalidExitAuthority)?;
         let extraction = identities
             .extraction_for(participant)
             .ok_or(ProductionExtractionIntentError::InvalidExitAuthority)?;
@@ -157,7 +270,7 @@ impl ProductionExtractionBossExitAuthorityV1 {
             selected_character_id,
             route_permit,
             encounter_id: identities.encounter_id.bytes(),
-            instance_lineage_id: presentation.instance_lineage_id(),
+            instance_lineage_id,
             entry_restore_point_id,
             exit_instance_id: identities.exit_instance_id.bytes(),
             extraction_request_id: extraction.request_id.bytes(),
@@ -1161,6 +1274,8 @@ pub enum ProductionExtractionIntentError {
     InvalidContentAuthority,
     #[error("live extraction terminal identity derivation produced a reserved value")]
     TerminalIdentityUnavailable,
+    #[error("live extraction could not safely abort its exact route reservation")]
+    RouteReservationAbortFailed,
 }
 
 #[cfg(test)]
@@ -1185,7 +1300,7 @@ mod tests {
         ActionResultCode, CorePrivateRouteContentRevisionV1, ExtractionCommitPayloadV1,
         ExtractionCommitResultV1, ManifestHash, ReliableEvent, TerminalExpectedVersionsV1,
     };
-    use sim_core::EntityId;
+    use sim_core::{EntityId, Tick};
 
     use super::*;
     use crate::{
@@ -1475,6 +1590,34 @@ mod tests {
         presentation
     }
 
+    fn defeat_handoff(route_lease: CorePrivateRouteActorLease) -> CorePrivateCaldusDefeatHandoff {
+        CorePrivateCaldusDefeatHandoff {
+            route_lease,
+            route_state_version: 1,
+            instance_lineage_id: [3; 16],
+            entry_restore_point_id: [4; 16],
+            lock: lock(),
+            active_duration_ticks: 300,
+            defeat_tick: Tick(900),
+            character_id: [2; 16],
+            expected_progression_version: 19,
+            eligibility: Vec::new(),
+        }
+    }
+
+    fn reward_commit(
+        directory: &CorePrivateRouteActorDirectory,
+        route_lease: CorePrivateRouteActorLease,
+    ) -> CorePrivateCaldusRewardCommit {
+        CorePrivateCaldusRewardCommit {
+            route: directory
+                .snapshot(route_lease)
+                .expect("BossExitReady route"),
+            exit: presentation(true).exit().expect("committed exit").clone(),
+            disposition: crate::CorePrivateCaldusRewardCommitDisposition::Committed,
+        }
+    }
+
     struct ExitIdentityFixture {
         encounter: [u8; 16],
         exit: [u8; 16],
@@ -1556,6 +1699,80 @@ mod tests {
         )
         .expect("exit authority");
         (authority, directory, lease)
+    }
+
+    #[tokio::test]
+    async fn committed_caldus_authority_reserves_exact_route_and_aborts_failed_seal() {
+        let directory = CorePrivateRouteActorDirectory::new();
+        let lease = directory
+            .register_actor(authenticated(), route_seed(), 21)
+            .expect("route actor");
+        let handoff = defeat_handoff(lease);
+        let commit = reward_commit(&directory, lease);
+        let accepted_version = commit.route.state_version;
+
+        let authority = ProductionExtractionBossExitAuthorityV1::prepare_from_caldus_commit(
+            authenticated(),
+            &directory,
+            &handoff,
+            &commit,
+            revision(),
+            versions(),
+        )
+        .await
+        .expect("exact Caldus authority");
+        assert_eq!(authority.selected_character_id(), [2; 16]);
+        assert_eq!(authority.instance_lineage_id(), [3; 16]);
+        assert_eq!(authority.route_state_version(), accepted_version);
+        let terminal_pending = directory.snapshot(lease).expect("terminal projection");
+        assert_eq!(
+            terminal_pending.phase,
+            CorePrivateRoutePhaseV1::TerminalPending
+        );
+        assert_eq!(terminal_pending.state_version, accepted_version + 1);
+        directory
+            .abort_extraction_terminal(lease, authority.route_permit())
+            .await
+            .expect("test cleanup");
+
+        let mut changed = reward_commit(&directory, lease);
+        let reopened_version = changed.route.state_version;
+        changed.exit.content_id = "portal.exit.changed".to_owned();
+        assert_eq!(
+            ProductionExtractionBossExitAuthorityV1::prepare_from_caldus_commit(
+                authenticated(),
+                &directory,
+                &handoff,
+                &changed,
+                revision(),
+                versions(),
+            )
+            .await,
+            Err(ProductionExtractionIntentError::InvalidExitAuthority)
+        );
+        let reopened = directory
+            .snapshot(lease)
+            .expect("failed seal reopens route");
+        assert_eq!(reopened.phase, CorePrivateRoutePhaseV1::BossExitReady);
+        assert_eq!(reopened.state_version, reopened_version + 2);
+
+        let fresh_commit = reward_commit(&directory, lease);
+        let retried = ProductionExtractionBossExitAuthorityV1::prepare_from_caldus_commit(
+            authenticated(),
+            &directory,
+            &handoff,
+            &fresh_commit,
+            revision(),
+            versions(),
+        )
+        .await
+        .expect("failed construction leaves no reservation residue");
+        directory
+            .abort_extraction_terminal(lease, retried.route_permit())
+            .await
+            .expect("retry cleanup");
+        directory.begin_shutdown();
+        assert!(directory.finish_shutdown().await.unwrap().zero_residue);
     }
 
     fn frame(sequence: u32) -> ExtractionCommitFrameV1 {
