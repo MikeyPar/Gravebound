@@ -2,7 +2,7 @@
 
 use sim_core::{
     ArenaGeometry, CoreBargainKind, EnemyLabPlayer, EntityId, EntityIdAllocator, FixedRoomPhase,
-    NormalWaveHandoff, Tick,
+    NormalWaveHandoff, Tick, TilePoint, tile_point_to_simulation,
 };
 use thiserror::Error;
 
@@ -362,6 +362,7 @@ fn enter_b1(
     plans: &CoreFixedDungeonPlans,
     participant: NormalWaveHandoff,
 ) -> Result<CoreFixedDungeonTransition, CoreFixedDungeonError> {
+    let participant = relocate_participant(participant, plans.b1.arena().player_spawn);
     let room = CoreImmutableFixedRoomSimulation::new(
         plans.b1.clone(),
         participant.player,
@@ -383,7 +384,7 @@ fn enter_b2(
     room: Box<CoreImmutableFixedRoomSimulation>,
 ) -> Result<CoreFixedDungeonTransition, CoreFixedDungeonError> {
     require_cleared(CoreFixedDungeonNode::BellCrossB1, room.phase())?;
-    let participant = room.into_handoff()?;
+    let participant = relocate_participant(room.into_handoff()?, plans.b2.arena().player_spawn);
     let room = CoreB2FixedRoomSimulation::new(
         plans.b2.clone(),
         content,
@@ -406,7 +407,7 @@ fn enter_b3(
     room: Box<CoreB2FixedRoomSimulation>,
 ) -> Result<CoreFixedDungeonTransition, CoreFixedDungeonError> {
     require_cleared(CoreFixedDungeonNode::BellNaveB2, room.phase())?;
-    let participant = room.into_handoff()?;
+    let participant = relocate_participant(room.into_handoff()?, plans.b3.arena().player_spawn);
     let room = CoreB3FixedRoomSimulation::new(
         plans.b3.clone(),
         content,
@@ -447,6 +448,7 @@ fn enter_b5(
     resolution: Option<CoreFixedDungeonRestResolution>,
 ) -> Result<CoreFixedDungeonTransition, CoreFixedDungeonError> {
     let resolution = resolution.ok_or(CoreFixedDungeonError::RestResolutionRequired)?;
+    let participant = relocate_participant(participant, plans.b5.arena().player_spawn);
     let room = CoreImmutableFixedRoomSimulation::new(
         plans.b5.clone(),
         participant.player,
@@ -460,6 +462,13 @@ fn enter_b5(
             Some(resolution),
         ),
     ))
+}
+
+/// Moves only the scene-local target position at an authored room boundary. All life-persistent
+/// combat state and both identity allocators remain in the same moved allocation.
+fn relocate_participant(mut participant: NormalWaveHandoff, spawn: TilePoint) -> NormalWaveHandoff {
+    participant.player.target.position = tile_point_to_simulation(spawn);
+    participant
 }
 
 fn enter_b6(
@@ -766,5 +775,25 @@ mod tests {
             panic!("fixture starts at B0");
         };
         assert!(CoreFixedDungeonCombat::from_handoff(dungeon.content, 0, handoff).is_err());
+    }
+
+    #[test]
+    fn room_entry_relocates_the_same_participant_and_projectile_allocator() {
+        let dungeon = fixture();
+        let CoreFixedDungeonState::Vestibule(participant) = dungeon.state else {
+            panic!("fixture starts at B0");
+        };
+        let participant_id = participant.player.target.entity_id;
+        let next_projectile_id = participant.hostile_projectile_ids.peek();
+        let spawn = TilePoint::new(1_750, 9_250);
+
+        let relocated = relocate_participant(participant, spawn);
+
+        assert_eq!(relocated.player.target.entity_id, participant_id);
+        assert_eq!(relocated.hostile_projectile_ids.peek(), next_projectile_id);
+        assert_eq!(
+            relocated.player.target.position,
+            SimulationVector::new(1.75, 9.25)
+        );
     }
 }

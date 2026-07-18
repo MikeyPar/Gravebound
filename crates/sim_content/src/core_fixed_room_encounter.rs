@@ -7,15 +7,15 @@ use sim_core::{
     ArenaAnchor, ArenaGeometry, CollisionTarget, CombatStep, CoreEnemyDefinition,
     CoreNormalAttackError, CoreNormalAttackEvent, CoreNormalAttackKind, CoreNormalAttackSimulation,
     CoreNormalLocomotionError, CoreNormalLocomotionSimulation, CoreNormalLocomotionStep,
-    CoreTargetCandidate, CoreWorldPosition, DungeonAnchorKind, DungeonRoomDefinition,
-    DungeonRoomVolumeGeometry, DungeonRoomVolumeKind, EnemyHealthActor, EnemyHealthError,
-    EnemyHealthSimulation, EnemyHealthSnapshot, EnemyHealthStep, EnemyLabPlayer, EntityId,
-    EntityIdAllocator, FixedRoomError, FixedRoomEvent, FixedRoomInput, FixedRoomPhase,
+    CoreTargetCandidate, CoreWorldPosition, DungeonAnchorKind, DungeonDoorSide,
+    DungeonRoomDefinition, DungeonRoomVolumeGeometry, DungeonRoomVolumeKind, EnemyHealthActor,
+    EnemyHealthError, EnemyHealthSimulation, EnemyHealthSnapshot, EnemyHealthStep, EnemyLabPlayer,
+    EntityId, EntityIdAllocator, FixedRoomError, FixedRoomEvent, FixedRoomInput, FixedRoomPhase,
     FixedRoomSimulation, HostileDamagePolicy, HostileEvent, NormalRewardDropEvent,
     NormalWaveClearedHostiles, NormalWaveDefinitions, NormalWaveEnemyKind, NormalWaveEntityIdError,
     NormalWaveError, NormalWaveHandoff, NormalWaveInstanceSnapshot, NormalWaveSimulation,
-    NormalWaveSpawn, NormalWaveStep, RotatedDungeonRoom, SpawnInstanceId, Tick, TilePoint,
-    TileRectangle, normal_wave_entity_id, select_core_target,
+    NormalWaveSpawn, NormalWaveStep, PLAYER_COLLISION_RADIUS_MILLI_TILES, RotatedDungeonRoom,
+    SpawnInstanceId, Tick, TilePoint, TileRectangle, normal_wave_entity_id, select_core_target,
 };
 use thiserror::Error;
 
@@ -1102,21 +1102,16 @@ fn compile_node_plan(
 pub(crate) fn combat_arena(
     room: &RotatedDungeonRoom,
 ) -> Result<ArenaGeometry, CoreFixedRoomEncounterError> {
-    let center = TilePoint::new(
-        i32::try_from(room.width_milli_tiles / 2)
-            .map_err(|_| CoreFixedRoomEncounterError::DefinitionDrift)?,
-        i32::try_from(room.height_milli_tiles / 2)
-            .map_err(|_| CoreFixedRoomEncounterError::DefinitionDrift)?,
-    );
-    let player_spawn = room.doors.first().map_or(center, |door| {
-        TilePoint::new(door.x_milli_tiles, door.y_milli_tiles)
-    });
+    let width_milli_tiles = i32::try_from(room.width_milli_tiles)
+        .map_err(|_| CoreFixedRoomEncounterError::DefinitionDrift)?;
+    let height_milli_tiles = i32::try_from(room.height_milli_tiles)
+        .map_err(|_| CoreFixedRoomEncounterError::DefinitionDrift)?;
+    let center = TilePoint::new(width_milli_tiles / 2, height_milli_tiles / 2);
+    let player_spawn = combat_entry_spawn(room, center)?;
     ArenaGeometry {
         id: format!("{}.combat", room.room_id),
-        width_milli_tiles: i32::try_from(room.width_milli_tiles)
-            .map_err(|_| CoreFixedRoomEncounterError::DefinitionDrift)?,
-        height_milli_tiles: i32::try_from(room.height_milli_tiles)
-            .map_err(|_| CoreFixedRoomEncounterError::DefinitionDrift)?,
+        width_milli_tiles,
+        height_milli_tiles,
         shell_thickness_milli_tiles: 1_000,
         player_spawn,
         boss_spawn: center,
@@ -1152,6 +1147,43 @@ pub(crate) fn combat_arena(
     }
     .validated()
     .map_err(Into::into)
+}
+
+fn combat_entry_spawn(
+    room: &RotatedDungeonRoom,
+    fallback: TilePoint,
+) -> Result<TilePoint, CoreFixedRoomEncounterError> {
+    let Some(door) = room.doors.first() else {
+        return Ok(fallback);
+    };
+    // Door centers lie on the room shell. Move one player radius plus visual/collision clearance
+    // into the authored room so a transferred participant can never begin overlapped with solid
+    // geometry.
+    let inset = PLAYER_COLLISION_RADIUS_MILLI_TILES
+        .checked_add(200)
+        .ok_or(CoreFixedRoomEncounterError::DefinitionDrift)?;
+    let (x_milli_tiles, y_milli_tiles) = match door.side {
+        DungeonDoorSide::North => (
+            Some(door.x_milli_tiles),
+            door.y_milli_tiles.checked_add(inset),
+        ),
+        DungeonDoorSide::East => (
+            door.x_milli_tiles.checked_sub(inset),
+            Some(door.y_milli_tiles),
+        ),
+        DungeonDoorSide::South => (
+            Some(door.x_milli_tiles),
+            door.y_milli_tiles.checked_sub(inset),
+        ),
+        DungeonDoorSide::West => (
+            door.x_milli_tiles.checked_add(inset),
+            Some(door.y_milli_tiles),
+        ),
+    };
+    Ok(TilePoint::new(
+        x_milli_tiles.ok_or(CoreFixedRoomEncounterError::DefinitionDrift)?,
+        y_milli_tiles.ok_or(CoreFixedRoomEncounterError::DefinitionDrift)?,
+    ))
 }
 
 fn runtime_and_anchor_kind(
