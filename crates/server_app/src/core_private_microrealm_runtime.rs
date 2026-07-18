@@ -103,7 +103,6 @@ pub struct CorePrivateMicrorealmRuntime {
     bell_portal_center: TilePoint,
     bell_portal_radius_milli_tiles: i32,
     tick: Tick,
-    last_input_sequence: Option<u64>,
 }
 
 struct StagedMicrorealmFrame {
@@ -205,7 +204,6 @@ impl CorePrivateMicrorealmRuntime {
             bell_portal_center,
             bell_portal_radius_milli_tiles,
             tick: Tick(0),
-            last_input_sequence: None,
         })
     }
 
@@ -250,17 +248,13 @@ impl CorePrivateMicrorealmRuntime {
             .map_err(Into::into)
     }
 
+    /// Advances one server-owned simulation frame with the driver's retained action state. The
+    /// sequence is an acknowledgement value; transport ingress validates/coalesces it and the
+    /// independent scheduler may intentionally reuse it across many frames.
     pub async fn step(
         &mut self,
         input: CorePrivateMicrorealmInput,
     ) -> Result<CorePrivateMicrorealmStep, CorePrivateMicrorealmRuntimeError> {
-        if input.input_sequence == 0
-            || self
-                .last_input_sequence
-                .is_some_and(|last| input.input_sequence <= last)
-        {
-            return Err(CorePrivateMicrorealmRuntimeError::StaleInputSequence);
-        }
         let tick = self
             .tick
             .checked_next()
@@ -292,7 +286,6 @@ impl CorePrivateMicrorealmRuntime {
         self.lifecycle = frame.lifecycle;
         self.combat = frame.combat;
         self.tick = tick;
-        self.last_input_sequence = Some(input.input_sequence);
         Ok(CorePrivateMicrorealmStep {
             input_sequence: input.input_sequence,
             tick,
@@ -511,8 +504,6 @@ fn point_in_circle(point: TilePoint, center: TilePoint, radius_milli_tiles: i32)
 pub enum CorePrivateMicrorealmRuntimeError {
     #[error("live Core microrealm composition is invalid")]
     InvalidComposition,
-    #[error("live Core microrealm input sequence is stale or zero")]
-    StaleInputSequence,
     #[error("live Core microrealm route authority no longer matches local state")]
     RouteAuthorityMismatch,
     #[error("live Core microrealm pack-clear proof is invalid or foreign")]
@@ -642,7 +633,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn movement_and_lifecycle_commit_with_the_exact_route_projection() {
+    async fn retained_input_advances_many_ticks_and_commits_the_exact_route_projection() {
         let directory = CorePrivateRouteActorDirectory::new();
         let lease = directory
             .register_actor(authenticated(), seed(), 7)
@@ -662,8 +653,8 @@ mod tests {
         );
 
         let mut active = None;
-        for sequence in 2..=31 {
-            let mut waiting_input = input(sequence);
+        for _ in 2..=31 {
+            let mut waiting_input = input(1);
             waiting_input.primary_sequence = 1;
             active = Some(runtime.step(waiting_input).await.expect("wait tick"));
         }
@@ -806,7 +797,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stale_route_or_input_rolls_back_local_movement_and_lifecycle() {
+    async fn stale_route_rolls_back_local_movement_and_lifecycle() {
         let directory = CorePrivateRouteActorDirectory::new();
         let lease = directory
             .register_actor(authenticated(), seed(), 11)
@@ -829,11 +820,6 @@ mod tests {
         ));
         assert_eq!(runtime.player_position(), start);
         assert_eq!(runtime.phase(), CoreMicrorealmPhase::Dormant);
-
-        assert!(matches!(
-            runtime.step(input(0)).await,
-            Err(CorePrivateMicrorealmRuntimeError::StaleInputSequence)
-        ));
     }
 
     #[tokio::test]
