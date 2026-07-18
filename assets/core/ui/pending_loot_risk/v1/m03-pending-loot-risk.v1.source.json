@@ -1,0 +1,139 @@
+{
+  "schema_version": 1,
+  "package_id": "review.m03.pending_loot_risk.v1",
+  "status": {
+    "classification": "unregistered_runtime_candidate",
+    "runtime_registered": false,
+    "content_hash_input": false,
+    "runtime_bundle": null,
+    "integration_note": "This isolated presentation package does not modify Core asset records, content/runtime hashes, item state, reward grants, pending inventory, extraction, Recall, collision, or route authority."
+  },
+  "scope": {
+    "route": "fixed Bell Sepulcher B0 -> B6 dungeon/reward/pending-risk route",
+    "purpose": "Candidate visual language for personal pending drops, pending-inventory risk, and the separate run-material pouch.",
+    "out_of_scope": [
+      "asset registration or bundle wiring",
+      "content record, localization, or hash edits",
+      "reward odds, item generation, inventory capacity, material amount, ownership, or lifetime authority",
+      "extraction, Recall, death, wallet, Vault, Overflow, or ResolutionHold implementation",
+      "code, tests, task documents, README, commits, and pushes"
+    ]
+  },
+  "authority": {
+    "design_documents": [
+      "Gravebound_Production_GDD_v1_Canonical.md",
+      "Gravebound_Content_Production_Spec_v1.md",
+      "Gravebound_Development_Roadmap_v1.md"
+    ],
+    "gdd": [
+      "Gravebound_Production_GDD_v1_Canonical.md#DTH-010",
+      "Gravebound_Production_GDD_v1_Canonical.md#LOOT-002",
+      "Gravebound_Production_GDD_v1_Canonical.md#LOOT-010",
+      "Gravebound_Production_GDD_v1_Canonical.md#LOOT-033",
+      "Gravebound_Production_GDD_v1_Canonical.md#UI-003",
+      "Gravebound_Production_GDD_v1_Canonical.md#UI-005",
+      "Gravebound_Production_GDD_v1_Canonical.md#UI-006",
+      "Gravebound_Production_GDD_v1_Canonical.md#ART-001",
+      "Gravebound_Production_GDD_v1_Canonical.md#ART-004",
+      "Gravebound_Production_GDD_v1_Canonical.md#ART-020",
+      "Gravebound_Production_GDD_v1_Canonical.md#ART-030"
+    ],
+    "content": [
+      "Gravebound_Content_Production_Spec_v1.md#CONT-REWARD-001",
+      "Gravebound_Content_Production_Spec_v1.md#CONT-REWARD-003",
+      "Gravebound_Content_Production_Spec_v1.md#CONT-REWARD-004",
+      "Gravebound_Content_Production_Spec_v1.md#CONT-ROOM-007",
+      "content/core_dev/items.records.json#reward.boss_caldus",
+      "content/core_dev/items.records.json#reward.normal_outer"
+    ],
+    "roadmap": [
+      "Gravebound_Development_Roadmap_v1.md#GB-M03-03",
+      "Gravebound_Development_Roadmap_v1.md#GB-M03-04",
+      "Gravebound_Development_Roadmap_v1.md#GB-M03-08"
+    ],
+    "current_task": "docs/tasks/GB-M03-03G.md#Objective; #Implementation slices; #Current Next Step",
+    "existing_asset_audit": [
+      "assets/core/items/core_item_icons.svg",
+      "content/core_dev/items.assets.json",
+      "assets/core/world/microrealm_route_landmarks/v1/m03-microrealm-route-landmarks.v1.source.json",
+      "assets/core/enemies/core_bell_encounter_trio/v1/m03-core-bell-encounter-trio.v1.source.json",
+      "assets/core/effects/core_bell_microrealm_vfx/v1/m03-core-bell-microrealm-vfx.v1.source.json"
+    ]
+  },
+  "selection_rationale": "GB-M03-03G explicitly remains blocked on live combat/reward/pending-inventory composition. The current assets already cover the route landmarks, repeated Bell enemy silhouettes, and first hostile VFX trio; Core item icons already exist as repository SVG. The next missing player-visible decision is whether a newly obtained personal reward remains AtRiskPending, is a personal ground drop, or belongs to the distinct run-material pouch. GDD UI-003 requires pending capacity and loot feed; UI-006 requires a distinct ash border and loss label; LOOT-002/010/033 define the risk, 60-second personal-drop fallback, and four-entry material pouch.",
+  "authored_record_alignment": {
+    "pending_item": "The eight-slot RunBackpack holds AtRiskPending items; UI text remains responsible for the mandated 'Lost on death or Emergency Recall' label.",
+    "personal_ground_drop": "If inventory is full, equipment/consumables may be a personal ground drop for 60 seconds. This image is only a presentation candidate and cannot show or alter its authoritative timer, ownership, or pickup rules.",
+    "material_pouch": "The separate four-entry run-material pouch holds AtRiskPending stacks and becomes safe only on successful extraction. Bell Brass is the exact singleton Caldus material result in CONT-REWARD-003/004, although no quantity or safe-wallet claim is encoded by this icon. The present core_dev reward table still uses its fixed development material pool; this candidate must not be bound as Bell Brass unless the approved runtime record also resolves to it.",
+    "no_registry_inference": "None of these candidates maps to a new or existing registered asset ID; later integration must select an explicit UI/world marker binding and retain all server-owned lifecycle rules."
+  },
+  "generation": {
+    "tool": "built-in image generation",
+    "mode": "stylized-concept",
+    "source_provenance": "Generated during this task and copied unchanged from the default generated-images directory to source/. No external asset was used.",
+    "transparent_runtime_process": "The prompts requested flat #00ff00. The ground-drop source obeyed it; the frame and pouch sources rendered a near-white flat background. All three used remove_chroma_key.py auto-key border, soft matte, thresholds 12/220, and despill; auto-selected source keys were #f8f7f7, #04f806, and #fefefe respectively. Runtime canvases were crop-to-alpha-bounds and nearest-neighbor normalized with Pillow.",
+    "preview_process": "Preview sheets are opaque dark checkerboards solely for alpha review; runtime assets retain transparent corners."
+  },
+  "prompts": {
+    "pending_slot_risk_frame": "Use case: stylized-concept. Asset type: M03 pending-inventory risk overlay candidate, one static transparent-runtime-ready raster icon. Primary request: a single compact square at-risk inventory slot seal for a grim dark-fantasy action RPG. Depict only an empty hollow item-slot frame made from ash-gray chipped metal, with a small broken iron lock and one restrained dark ember-red crack at the lower-right. It must communicate unsecured pending loot that will be lost on death or Emergency Recall, not a safe vault, healing, quest, hostile telegraph, or locked-unavailable slot. Scene/backdrop: perfectly flat solid #00ff00 chroma-key background; no floor, gradient, shadows, reflections, or texture. Style: clean high-contrast 2D game UI raster emblem, crisp pixel-art-compatible silhouette, restrained ash/iron/ember palette matching a dark Bell Sepulcher tone. Centered 1:1 slot frame with generous transparent-safe padding; no item inside; read at 32-48 px. No text, letters, numerals, UI panel, tooltip, character, weapon, skull, lantern, cross, chest, coin, safe lock, green, gold, cyan, purple, glow cloud, cast shadow, watermark, or #00ff00 in icon. Do not look like ability cooldown/combat warning. Nearest-neighbor-friendly hard edges, no blur.",
+    "personal_ground_drop_marker": "Use case: stylized-concept. Asset type: M03 personal ground-drop pending-loot beacon candidate, one static transparent-runtime-ready raster icon. Primary request: a single compact overhead marker for a personal reward drop in a Bell Sepulcher dungeon. Depict a small dark iron loot satchel sealed with a torn ash-gray cloth tag and a thin ember-red downward chevron/spark below it. It must read as your unsecured pending drop: pick up before its short personal ground-drop window ends, not treasure already secured, merchant, objective, hostile attack, healing, or quest waypoint. Scene/backdrop: perfectly flat solid #00ff00 chroma-key background; no floor, gradient, shadows, reflections, or texture. Style: professional high-contrast 2D grim dark-fantasy game HUD/world-marker raster; ash gray, tarnished iron, muted parchment, restrained dark ember-red risk accent. Centered 1:1 with transparent-safe padding, readable at 48-64 px. No text, letters, numerals, UI panel, tooltip, character, weapon, chest, coin pile, skull, lantern, cross, map pin, safe vault, green, gold, cyan, violet, glow cloud, cast shadow, watermark, or #00ff00 in subject. No ornate treasure presentation. Nearest-neighbor-friendly hard edges, no blur.",
+    "bell_brass_pouch_risk": "Use case: stylized-concept. Asset type: M03 run-material-pouch pending-risk UI token candidate, one static transparent-runtime-ready raster icon. Primary request: a single compact dark iron-and-ash pouch token for the separate four-entry run material pouch. Show a small torn ash-cloth pouch holding exactly three dull bell-brass fragments, with a fine ember-red thread around the mouth to signal materials at risk until successful extraction. It must not read as a safe wallet, coin currency, treasure reward chest, consumable potion, healing, hostile spell, or equipment item. Scene/backdrop: perfectly flat solid #00ff00 chroma-key background; no floor, gradient, shadows, reflections, or texture. Style: professional high-contrast 2D grim dark-fantasy game UI raster, crisp pixel-art-compatible silhouette, restrained ash gray, iron black, tarnished brass, and dark ember-red accent. Centered 1:1 icon with transparent-safe padding, readable at 32-48 px; no separate badge, text, or numerical count. No text, letters, numerals, UI panel, tooltip, character, weapon, skull, lantern, cross, chest, safe vault, green, bright gold, cyan, violet, glow cloud, cast shadow, watermark, or #00ff00 in subject. No generic money bag. Nearest-neighbor-friendly hard edges, no blur."
+  },
+  "assets": [
+    {
+      "candidate_id": "review.ui.pending_loot.at_risk_slot_frame",
+      "registered_asset_id": null,
+      "runtime_path": "runtime/pending-slot-risk-frame.64.png",
+      "source_path": "source/pending-slot-risk-frame.raw.png",
+      "runtime_sha256": "b83c8f2f9fa51d20307c49bce56b8917bcebc4b6d48c7c8a68c9a51f7cf6df8d",
+      "source_sha256": "238cd40ddc9862af50110a68b0be436b8aaf2af81cb3ef7325c9a6a808479eae",
+      "dimensions_px": [64, 64],
+      "anchor_px": [32, 32],
+      "presentation_intent": "Overlay/frame candidate for an AtRiskPending RunBackpack item."
+    },
+    {
+      "candidate_id": "review.world.pending_loot.personal_ground_drop_marker",
+      "registered_asset_id": null,
+      "runtime_path": "runtime/personal-ground-drop-marker.64.png",
+      "source_path": "source/personal-ground-drop-marker.raw.png",
+      "runtime_sha256": "ae0aff277041bd0a9478d20319a31e629755bbbe6a9dcb75a7eaa95b2129dbb3",
+      "source_sha256": "e9c707e8cff639a7fb02083dfaf827a346be4ef58f05ca816b8b7e8cadcc8f77",
+      "dimensions_px": [64, 64],
+      "anchor_px": [32, 32],
+      "presentation_intent": "World-marker candidate for a player-owned, unsecured personal ground drop; no timer, pickup radius, or ownership behavior is conveyed as authority."
+    },
+    {
+      "candidate_id": "review.ui.pending_loot.bell_brass_pouch",
+      "registered_asset_id": null,
+      "runtime_path": "runtime/bell-brass-pouch-risk.48.png",
+      "source_path": "source/bell-brass-pouch-risk.raw.png",
+      "runtime_sha256": "f289be7eeda941708cc8c938c7fbf7ea5c308940ff067413b306a36cc3623e27",
+      "source_sha256": "27a23682febc32ccf7812b1ac242f135020a505fef96b25e67e8fa4cc2270067",
+      "dimensions_px": [48, 48],
+      "anchor_px": [24, 24],
+      "presentation_intent": "Token candidate for the separate AtRiskPending material pouch, visually based on the authored Bell Brass Caldus reward."
+    }
+  ],
+  "preview_files": [
+    {
+      "path": "previews/pending-loot-risk.runtime-scale.png",
+      "dimensions_px": [192, 64],
+      "sha256": "ceba279dbfdc1362e017f91c077b62a0875ee0004889865f570d291199eafdb7",
+      "note": "Opaque checkerboard review sheet: at-risk frame, personal drop marker, and material-pouch token, left to right."
+    },
+    {
+      "path": "previews/pending-loot-risk.2x.png",
+      "dimensions_px": [384, 128],
+      "sha256": "2ab610cac94771e65c1ebaf92a2cbdc0f2e5498d0f32dbad12ce07f637b9b9cb",
+      "note": "Nearest-neighbor 2x review sheet."
+    }
+  ],
+  "review_gates": [
+    "UI review: compare the at-risk frame with the required text label; it must remain visibly distinct from Safe, Vault, Overflow, ResolutionHold, disabled, equipped, and cooldown states.",
+    "World/readability review: inspect the personal drop marker at 1280x720 and 1920x1080 in standard and reduced-effects modes; preserve player-ownership and risk distinction without a misleading shared-loot claim.",
+    "Lifecycle review: verify runtime exposes the authoritative 60-second ground-drop lifetime, eight-slot capacity, four-entry pouch, extraction safety transition, and Recall/death loss independently of this artwork.",
+    "Accessibility review: use label/shape/placement as well as restrained ember color; no visual candidate substitutes for the mandated loss label.",
+    "Integration review: choose explicit bindings only after approval, do not add registry IDs or content/runtime hash dependencies as a side effect."
+  ],
+  "license": "Generated for this workspace during this task. Retain the raw sources, prompts, and hashes with any future integration."
+}
