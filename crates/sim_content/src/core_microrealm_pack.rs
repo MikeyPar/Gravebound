@@ -237,19 +237,36 @@ pub struct CoreMicrorealmEncounterStep {
     pub reset_cleared_hostiles: Option<NormalWaveClearedHostiles>,
 }
 
-/// Capacity-one owner joining the `03C` lifecycle to the exact `03D` pack runtime.
-#[derive(Debug, Clone)]
-pub struct CoreMicrorealmEncounterSimulation {
-    encounters: CoreDevelopmentEncounterRooms,
-    world_flow: CoreDevelopmentWorldFlow,
-    lifecycle: CoreMicrorealmSimulation,
-    run_ordinal: u32,
-    next_spawn_ordinal: u16,
-    participant: Option<NormalWaveHandoff>,
-    wave: Option<NormalWaveSimulation>,
+#[derive(Debug, Clone, PartialEq)]
+pub enum CoreMicrorealmPackCombatTransition {
+    WarningPrepared,
+    Reset {
+        cleared_hostiles: NormalWaveClearedHostiles,
+    },
+    Cleared,
 }
 
-impl CoreMicrorealmEncounterSimulation {
+#[derive(Debug, Clone)]
+enum CoreMicrorealmPackCombatState {
+    Handoff(Box<NormalWaveHandoff>),
+    Wave(Box<NormalWaveSimulation>),
+}
+
+/// Lifecycle-free capacity-one combat owner for the exact Core microrealm pack.
+///
+/// The server supplies already-authoritative lifecycle events. This component never evaluates
+/// entrant movement, participant presence, reset deadlines, or portal state; it owns only the
+/// participant/projectile handoff or the one wave created from that handoff.
+#[derive(Debug, Clone)]
+pub struct CoreMicrorealmPackCombat {
+    encounters: CoreDevelopmentEncounterRooms,
+    world_flow: CoreDevelopmentWorldFlow,
+    run_ordinal: u32,
+    next_spawn_ordinal: u16,
+    state: CoreMicrorealmPackCombatState,
+}
+
+impl CoreMicrorealmPackCombat {
     pub fn new(
         encounters: CoreDevelopmentEncounterRooms,
         world_flow: CoreDevelopmentWorldFlow,
@@ -262,18 +279,175 @@ impl CoreMicrorealmEncounterSimulation {
                 NormalWaveEntityIdError::ZeroRunOrdinal,
             ));
         }
-        let spawn = world_flow.world().player_spawn;
         Ok(Self {
             encounters,
             world_flow,
-            lifecycle: CoreMicrorealmSimulation::new(TilePoint::new(spawn.x, spawn.y)),
             run_ordinal,
             next_spawn_ordinal: 1,
-            participant: Some(NormalWaveHandoff {
+            state: CoreMicrorealmPackCombatState::Handoff(Box::new(NormalWaveHandoff {
                 player,
                 hostile_projectile_ids,
-            }),
-            wave: None,
+            })),
+        })
+    }
+
+    #[must_use]
+    pub const fn wave(&self) -> Option<&NormalWaveSimulation> {
+        match &self.state {
+            CoreMicrorealmPackCombatState::Handoff(_) => None,
+            CoreMicrorealmPackCombatState::Wave(wave) => Some(wave),
+        }
+    }
+
+    #[must_use]
+    pub fn player(&self) -> &EnemyLabPlayer {
+        match &self.state {
+            CoreMicrorealmPackCombatState::Handoff(handoff) => &handoff.player,
+            CoreMicrorealmPackCombatState::Wave(wave) => wave.player(),
+        }
+    }
+
+    pub fn player_mut(&mut self) -> &mut EnemyLabPlayer {
+        match &mut self.state {
+            CoreMicrorealmPackCombatState::Handoff(handoff) => &mut handoff.player,
+            CoreMicrorealmPackCombatState::Wave(wave) => wave.player_mut(),
+        }
+    }
+
+    pub fn alive_hurtboxes(&self) -> Result<Vec<sim_core::EnemyHurtbox>, CoreMicrorealmPackError> {
+        match &self.state {
+            CoreMicrorealmPackCombatState::Handoff(_) => Ok(Vec::new()),
+            CoreMicrorealmPackCombatState::Wave(wave) => wave.alive_hurtboxes().map_err(Into::into),
+        }
+    }
+
+    /// Returns the exact compiled collision arena used by this pack. The server combat owner uses
+    /// the same geometry for friendly projectile collision before feeding the resulting step back
+    /// into this component.
+    pub fn arena(&self) -> Result<ArenaGeometry, CoreMicrorealmPackError> {
+        microrealm_combat_arena(&self.world_flow)
+    }
+
+    /// Consumes a quiet or cleared component and returns the one mutable participant allocation.
+    /// Active combat cannot be transferred to another scene.
+    pub fn into_handoff(self) -> Result<NormalWaveHandoff, CoreMicrorealmPackError> {
+        match self.state {
+            CoreMicrorealmPackCombatState::Handoff(handoff) => Ok(*handoff),
+            CoreMicrorealmPackCombatState::Wave(_) => {
+                Err(CoreMicrorealmPackError::HandoffBeforeClear)
+            }
+        }
+    }
+
+    /// Advances the owned wave with an existing server-generated combat step. State changes only
+    /// after the complete wave step succeeds.
+    pub fn step(
+        &mut self,
+        combat_step: &CombatStep,
+    ) -> Result<NormalWaveStep, CoreMicrorealmPackError> {
+        let mut staged = self.clone();
+        let step = match &mut staged.state {
+            CoreMicrorealmPackCombatState::Handoff(_) => {
+                return Err(CoreMicrorealmPackError::MissingWave);
+            }
+            CoreMicrorealmPackCombatState::Wave(wave) => wave.step(combat_step)?,
+        };
+        *self = staged;
+        Ok(step)
+    }
+
+    /// Applies one event emitted by the authoritative lifecycle. Construction, ordinal advance,
+    /// reset cleanup, and clear handoff are staged on a clone and commit together.
+    pub fn apply_lifecycle_event(
+        &mut self,
+        tick: Tick,
+        event: CoreMicrorealmEvent,
+    ) -> Result<CoreMicrorealmPackCombatTransition, CoreMicrorealmPackError> {
+        let mut staged = self.clone();
+        let transition = staged.apply_lifecycle_event_inner(tick, event)?;
+        *self = staged;
+        Ok(transition)
+    }
+
+    fn apply_lifecycle_event_inner(
+        &mut self,
+        tick: Tick,
+        event: CoreMicrorealmEvent,
+    ) -> Result<CoreMicrorealmPackCombatTransition, CoreMicrorealmPackError> {
+        match event {
+            CoreMicrorealmEvent::BeginPackWarning { .. } => {
+                let CoreMicrorealmPackCombatState::Handoff(participant) = &self.state else {
+                    return Err(CoreMicrorealmPackError::MissingParticipantHandoff);
+                };
+                let plan = construct_core_microrealm_pack_at_ordinal(
+                    &self.encounters,
+                    &self.world_flow,
+                    tick,
+                    event,
+                    self.run_ordinal,
+                    self.next_spawn_ordinal,
+                )?;
+                let wave = instantiate_core_microrealm_pack(
+                    &plan,
+                    &self.world_flow,
+                    participant.player.clone(),
+                    participant.hostile_projectile_ids.clone(),
+                )?;
+                let next_spawn_ordinal = self
+                    .next_spawn_ordinal
+                    .checked_add(8)
+                    .ok_or(CoreMicrorealmPackError::DefinitionDrift)?;
+                self.state = CoreMicrorealmPackCombatState::Wave(Box::new(wave));
+                self.next_spawn_ordinal = next_spawn_ordinal;
+                Ok(CoreMicrorealmPackCombatTransition::WarningPrepared)
+            }
+            CoreMicrorealmEvent::ResetPack => {
+                let CoreMicrorealmPackCombatState::Wave(wave) = &self.state else {
+                    return Err(CoreMicrorealmPackError::MissingWave);
+                };
+                let reset = wave.as_ref().clone().into_reset_handoff()?;
+                self.state = CoreMicrorealmPackCombatState::Handoff(Box::new(reset.participant));
+                Ok(CoreMicrorealmPackCombatTransition::Reset {
+                    cleared_hostiles: reset.cleared_hostiles,
+                })
+            }
+            CoreMicrorealmEvent::Cleared => {
+                let CoreMicrorealmPackCombatState::Wave(wave) = &self.state else {
+                    return Err(CoreMicrorealmPackError::MissingWave);
+                };
+                let participant = wave.as_ref().clone().into_handoff()?;
+                self.state = CoreMicrorealmPackCombatState::Handoff(Box::new(participant));
+                Ok(CoreMicrorealmPackCombatTransition::Cleared)
+            }
+        }
+    }
+}
+
+/// Capacity-one owner joining the `03C` lifecycle to the exact `03D` pack runtime.
+#[derive(Debug, Clone)]
+pub struct CoreMicrorealmEncounterSimulation {
+    lifecycle: CoreMicrorealmSimulation,
+    combat: CoreMicrorealmPackCombat,
+}
+
+impl CoreMicrorealmEncounterSimulation {
+    pub fn new(
+        encounters: CoreDevelopmentEncounterRooms,
+        world_flow: CoreDevelopmentWorldFlow,
+        run_ordinal: u32,
+        player: EnemyLabPlayer,
+        hostile_projectile_ids: EntityIdAllocator,
+    ) -> Result<Self, CoreMicrorealmPackError> {
+        let spawn = world_flow.world().player_spawn;
+        Ok(Self {
+            lifecycle: CoreMicrorealmSimulation::new(TilePoint::new(spawn.x, spawn.y)),
+            combat: CoreMicrorealmPackCombat::new(
+                encounters,
+                world_flow,
+                run_ordinal,
+                player,
+                hostile_projectile_ids,
+            )?,
         })
     }
 
@@ -284,7 +458,7 @@ impl CoreMicrorealmEncounterSimulation {
 
     #[must_use]
     pub const fn wave(&self) -> Option<&NormalWaveSimulation> {
-        self.wave.as_ref()
+        self.combat.wave()
     }
 
     #[must_use]
@@ -310,7 +484,7 @@ impl CoreMicrorealmEncounterSimulation {
     ) -> Result<CoreMicrorealmEncounterStep, CoreMicrorealmPackError> {
         let mut wave_step = None;
         let mut wave_cleared = false;
-        if let Some(wave) = &mut self.wave {
+        if self.combat.wave().is_some() {
             let combat_step = match input.combat_step.as_ref() {
                 Some(step) => step.clone(),
                 None if input.living_participants == 0 => CombatStep {
@@ -319,7 +493,7 @@ impl CoreMicrorealmEncounterSimulation {
                 },
                 None => return Err(CoreMicrorealmPackError::MissingCombatStep),
             };
-            let step = wave.step(&combat_step)?;
+            let step = self.combat.step(&combat_step)?;
             wave_cleared = matches!(step.phase_after, NormalWavePhase::Cleared { .. });
             wave_step = Some(step);
         }
@@ -337,51 +511,23 @@ impl CoreMicrorealmEncounterSimulation {
         for event in lifecycle_events.iter().copied() {
             match event {
                 CoreMicrorealmEvent::BeginPackWarning { .. } => {
-                    let participant = self
-                        .participant
-                        .take()
-                        .ok_or(CoreMicrorealmPackError::MissingParticipantHandoff)?;
-                    let plan = construct_core_microrealm_pack_at_ordinal(
-                        &self.encounters,
-                        &self.world_flow,
-                        tick,
-                        event,
-                        self.run_ordinal,
-                        self.next_spawn_ordinal,
-                    )?;
-                    let mut wave = instantiate_core_microrealm_pack(
-                        &plan,
-                        &self.world_flow,
-                        participant.player,
-                        participant.hostile_projectile_ids,
-                    )?;
+                    self.combat.apply_lifecycle_event(tick, event)?;
                     let initial_combat = input.combat_step.clone().unwrap_or(CombatStep {
                         tick,
                         ..CombatStep::default()
                     });
-                    wave_step = Some(wave.step(&initial_combat)?);
-                    self.next_spawn_ordinal = self
-                        .next_spawn_ordinal
-                        .checked_add(8)
-                        .ok_or(CoreMicrorealmPackError::DefinitionDrift)?;
-                    self.wave = Some(wave);
+                    wave_step = Some(self.combat.step(&initial_combat)?);
                 }
                 CoreMicrorealmEvent::ResetPack => {
-                    let reset = self
-                        .wave
-                        .take()
-                        .ok_or(CoreMicrorealmPackError::MissingWave)?
-                        .into_reset_handoff()?;
-                    self.participant = Some(reset.participant);
-                    reset_cleared_hostiles = Some(reset.cleared_hostiles);
+                    let CoreMicrorealmPackCombatTransition::Reset { cleared_hostiles } =
+                        self.combat.apply_lifecycle_event(tick, event)?
+                    else {
+                        return Err(CoreMicrorealmPackError::DefinitionDrift);
+                    };
+                    reset_cleared_hostiles = Some(cleared_hostiles);
                 }
                 CoreMicrorealmEvent::Cleared => {
-                    self.participant = Some(
-                        self.wave
-                            .take()
-                            .ok_or(CoreMicrorealmPackError::MissingWave)?
-                            .into_handoff()?,
-                    );
+                    self.combat.apply_lifecycle_event(tick, event)?;
                 }
             }
         }
@@ -460,6 +606,8 @@ pub enum CoreMicrorealmPackError {
     MissingParticipantHandoff,
     #[error("Core microrealm lifecycle requested cleanup without an owned wave")]
     MissingWave,
+    #[error("Core microrealm combat cannot hand off while its wave remains active")]
+    HandoffBeforeClear,
     #[error(transparent)]
     EntityId(#[from] NormalWaveEntityIdError),
     #[error(transparent)]
@@ -486,7 +634,12 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content")
     }
 
-    fn runtime_fixture() -> CoreMicrorealmEncounterSimulation {
+    fn combat_inputs() -> (
+        CoreDevelopmentEncounterRooms,
+        CoreDevelopmentWorldFlow,
+        EnemyLabPlayer,
+        EntityIdAllocator,
+    ) {
         let root = content_root();
         let encounters = load_core_development_encounter_rooms(&root).expect("encounters");
         let world = load_core_development_world_flow(&root).expect("world");
@@ -513,14 +666,215 @@ mod tests {
             .expect("tonic"),
             combat: definitions.combat,
         };
-        CoreMicrorealmEncounterSimulation::new(
+        (
             encounters,
             world,
-            1,
             player,
             EntityIdAllocator::starting_at(NonZeroU64::new(20_000).expect("projectile ID")),
         )
-        .expect("runtime")
+    }
+
+    fn combat_fixture() -> CoreMicrorealmPackCombat {
+        let (encounters, world, player, projectile_ids) = combat_inputs();
+        CoreMicrorealmPackCombat::new(encounters, world, 1, player, projectile_ids).expect("combat")
+    }
+
+    fn runtime_fixture() -> CoreMicrorealmEncounterSimulation {
+        let (encounters, world, player, projectile_ids) = combat_inputs();
+        CoreMicrorealmEncounterSimulation::new(encounters, world, 1, player, projectile_ids)
+            .expect("runtime")
+    }
+
+    fn lethal_step(combat: &CoreMicrorealmPackCombat, tick: Tick) -> CombatStep {
+        let targets = combat
+            .wave()
+            .expect("wave")
+            .snapshots()
+            .into_iter()
+            .map(|snapshot| snapshot.entity_id)
+            .collect::<Vec<_>>();
+        let mut lethal = CombatStep {
+            tick,
+            ..CombatStep::default()
+        };
+        for (index, target) in targets.into_iter().enumerate() {
+            let projectile_id = EntityId::new(50_000 + u64::try_from(index).expect("index"))
+                .expect("projectile ID");
+            lethal.collisions.push(ProjectileCollision {
+                tick,
+                projectile_id,
+                source: FriendlyProjectileSource::Primary,
+                target: CollisionTarget::Enemy(target),
+                final_position: SimulationVector::new(8.5, 8.5),
+                distance_travelled_tiles: 1.0,
+                contact_ordinal: 0,
+                empowered_by_slipstep: false,
+                focused_by_stillness: false,
+                projectile_continues: false,
+            });
+            lethal.raw_damage_intents.push(RawDamageIntent {
+                tick,
+                projectile_id,
+                source: RawDamageIntentSource::Primary,
+                target,
+                base_raw_damage: 10_000,
+                multiplier_basis_points: 10_000,
+                resolved_raw_damage: 10_000,
+                contact_ordinal: 0,
+            });
+        }
+        lethal
+    }
+
+    #[test]
+    fn combat_component_warning_prepares_exact_wave_without_lifecycle_authority() {
+        let mut combat = combat_fixture();
+        let player_id = combat.player().target.entity_id;
+        assert!(combat.wave().is_none());
+        assert_eq!(
+            combat
+                .apply_lifecycle_event(
+                    Tick(32),
+                    CoreMicrorealmEvent::BeginPackWarning { warning_ticks: 27 },
+                )
+                .expect("warning"),
+            CoreMicrorealmPackCombatTransition::WarningPrepared
+        );
+        let wave = combat.wave().expect("prepared wave");
+        assert_eq!(wave.player().target.entity_id, player_id);
+        assert_eq!(
+            wave.snapshots()
+                .iter()
+                .map(|snapshot| snapshot.instance_id.spawn_ordinal)
+                .collect::<Vec<_>>(),
+            (1..=8).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            wave.phase(),
+            NormalWavePhase::DormantTelegraph {
+                activates_at: Tick(59)
+            }
+        );
+    }
+
+    #[test]
+    fn combat_component_reset_returns_cleanup_and_preserves_participant() {
+        let mut combat = combat_fixture();
+        let player_id = combat.player().target.entity_id;
+        combat
+            .apply_lifecycle_event(
+                Tick(32),
+                CoreMicrorealmEvent::BeginPackWarning { warning_ticks: 27 },
+            )
+            .expect("warning");
+        combat
+            .step(&CombatStep {
+                tick: Tick(32),
+                ..CombatStep::default()
+            })
+            .expect("warning step");
+        let CoreMicrorealmPackCombatTransition::Reset { cleared_hostiles } = combat
+            .apply_lifecycle_event(Tick(33), CoreMicrorealmEvent::ResetPack)
+            .expect("reset")
+        else {
+            panic!("unexpected transition");
+        };
+        assert!(cleared_hostiles.projectiles.is_empty());
+        assert!(cleared_hostiles.lanes.is_empty());
+        assert!(combat.wave().is_none());
+        assert_eq!(combat.player().target.entity_id, player_id);
+    }
+
+    #[test]
+    fn combat_component_reset_never_reuses_spawn_ordinals() {
+        let mut combat = combat_fixture();
+        combat
+            .apply_lifecycle_event(
+                Tick(32),
+                CoreMicrorealmEvent::BeginPackWarning { warning_ticks: 27 },
+            )
+            .expect("first warning");
+        combat
+            .apply_lifecycle_event(Tick(33), CoreMicrorealmEvent::ResetPack)
+            .expect("reset");
+        combat
+            .apply_lifecycle_event(
+                Tick(64),
+                CoreMicrorealmEvent::BeginPackWarning { warning_ticks: 27 },
+            )
+            .expect("second warning");
+        assert_eq!(
+            combat
+                .wave()
+                .expect("second wave")
+                .snapshots()
+                .iter()
+                .map(|snapshot| snapshot.instance_id.spawn_ordinal)
+                .collect::<Vec<_>>(),
+            (9..=16).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn combat_component_clear_validates_and_restores_terminal_handoff() {
+        let mut combat = combat_fixture();
+        let player_id = combat.player().target.entity_id;
+        combat
+            .apply_lifecycle_event(
+                Tick(32),
+                CoreMicrorealmEvent::BeginPackWarning { warning_ticks: 27 },
+            )
+            .expect("warning");
+        for tick in 32..59 {
+            combat
+                .step(&CombatStep {
+                    tick: Tick(tick),
+                    ..CombatStep::default()
+                })
+                .expect("warning progression");
+        }
+        let lethal = lethal_step(&combat, Tick(59));
+        let cleared = combat.step(&lethal).expect("authoritative clear");
+        assert!(matches!(
+            cleared.phase_after,
+            NormalWavePhase::Cleared { .. }
+        ));
+        assert_eq!(
+            combat
+                .apply_lifecycle_event(Tick(59), CoreMicrorealmEvent::Cleared)
+                .expect("clear handoff"),
+            CoreMicrorealmPackCombatTransition::Cleared
+        );
+        assert!(combat.wave().is_none());
+        assert_eq!(combat.player().target.entity_id, player_id);
+        assert!(combat.alive_hurtboxes().expect("hurtboxes").is_empty());
+    }
+
+    #[test]
+    fn combat_component_handoff_is_available_only_without_an_active_wave() {
+        let quiet = combat_fixture();
+        let player_id = quiet.player().target.entity_id;
+        assert_eq!(
+            quiet
+                .into_handoff()
+                .expect("quiet handoff")
+                .player
+                .target
+                .entity_id,
+            player_id
+        );
+
+        let mut active = combat_fixture();
+        active
+            .apply_lifecycle_event(
+                Tick(32),
+                CoreMicrorealmEvent::BeginPackWarning { warning_ticks: 27 },
+            )
+            .expect("warning");
+        assert!(matches!(
+            active.into_handoff(),
+            Err(CoreMicrorealmPackError::HandoffBeforeClear)
+        ));
     }
 
     #[test]
