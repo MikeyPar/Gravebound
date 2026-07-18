@@ -10,18 +10,22 @@
 use std::{collections::BTreeMap, future::Future, path::Path, pin::Pin, sync::Arc};
 
 use persistence::PostgresPersistence;
-use protocol::{ActionFrame, ActionKind, CorePrivateRouteContentRevisionV1, InputFrame};
+use protocol::{
+    ActionFrame, ActionKind, CorePrivateRouteContentRevisionV1, InputFrame, ManifestHash,
+};
 use sim_core::{AimDirection, MovementAction, SimulationVector};
 use thiserror::Error;
 use tokio::sync::Mutex;
 
 use crate::{
-    AuthenticatedAccount, AuthenticatedNamespace, CoreB3RewardAuthority,
-    CoreB3RewardCompositionError, CoreB3RewardWriterGeneration, CoreBellPortalTransition,
-    CoreDurableB3Resolution, CoreDurableBargainRestResolution, CoreExtractionActorDirectory,
+    AuthenticatedAccount, AuthenticatedNamespace, CaldusVictoryCompositionError,
+    CoreB3RewardAuthority, CoreB3RewardCompositionError, CoreB3RewardWriterGeneration,
+    CoreBellPortalTransition, CoreCaldusRewardAuthority, CoreDurableB3Resolution,
+    CoreDurableBargainRestResolution, CoreExtractionActorDirectory,
     CoreExtractionAuthoritativeTick, CoreExtractionConnectionLease, CoreExtractionHallProjection,
     CoreExtractionRuntimeError, CoreExtractionRuntimeReport, CoreExtractionTransportAttach,
     CoreExtractionTransportDetach, CorePrivateB3RewardRuntime, CorePrivateB3RewardRuntimeError,
+    CorePrivateCaldusRewardRuntime, CorePrivateCaldusRewardRuntimeError,
     CorePrivateFixedDungeonAdvance, CorePrivateFixedDungeonB3RewardCommit,
     CorePrivateFixedDungeonDriverReady, CorePrivateFixedDungeonRestCommit,
     CorePrivateMicrorealmAbility, CorePrivateMicrorealmAbilityPress, CorePrivateMicrorealmDriver,
@@ -32,8 +36,9 @@ use crate::{
     CoreRecallActorDirectory, CoreRecallActorRetirementReport, CoreRecallAuthoritativeTick,
     CoreRecallConnectionAuthority, CoreRecallConnectionLease, CoreRecallRuntimeError,
     CoreRecallRuntimeReport, CoreRecallTransportAttach, CoreReliableWriter, IdentityClock,
-    PostgresCoreB3RewardCoordinator, ProductionExtractionPlanner, ProductionRecallClock,
-    ProductionRecallDetachOutcome, SecretRewardEpoch, TRANSPORT_REPLACED_CLOSE_CODE,
+    PostgresCaldusVictoryCoordinator, PostgresCoreB3RewardCoordinator, ProductionExtractionPlanner,
+    ProductionRecallClock, ProductionRecallDetachOutcome, SecretRewardEpoch,
+    TRANSPORT_REPLACED_CLOSE_CODE,
 };
 use crate::{
     core_extraction_runtime::CoreExtractionPreparedWriterHandoff,
@@ -245,6 +250,8 @@ pub enum CorePrivateLifeSessionError {
     MicrorealmDriver(#[from] CorePrivateMicrorealmDriverError),
     #[error("Core private-life automatic B3 reward runtime failed: {0}")]
     B3RewardRuntime(#[from] CorePrivateB3RewardRuntimeError),
+    #[error("Core private-life automatic Caldus reward runtime failed: {0}")]
+    CaldusRewardRuntime(#[from] CorePrivateCaldusRewardRuntimeError),
 }
 
 #[derive(Debug)]
@@ -271,6 +278,25 @@ struct BoundMicrorealmDriver {
     lease: CorePrivateMicrorealmBindingLease,
     driver: CorePrivateMicrorealmDriver,
     b3_rewards: Option<CorePrivateB3RewardRuntime>,
+    caldus_rewards: Option<CorePrivateCaldusRewardRuntime>,
+}
+
+#[derive(Clone)]
+struct CaldusRewardAuthorityBinding {
+    authority: Arc<dyn CoreCaldusRewardAuthority>,
+    progression_content_revision: ManifestHash,
+}
+
+impl std::fmt::Debug for CaldusRewardAuthorityBinding {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CaldusRewardAuthorityBinding")
+            .field(
+                "progression_content_revision",
+                &self.progression_content_revision,
+            )
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug)]
@@ -300,6 +326,7 @@ pub struct CorePrivateLifeSessionDirectory<Clock, TickSource> {
     recall: Arc<CoreRecallActorDirectory<Clock, TickSource>>,
     extraction: Option<Box<dyn PrivateLifeExtractionRuntime>>,
     b3_rewards: Option<Arc<dyn CoreB3RewardAuthority>>,
+    caldus_rewards: Option<CaldusRewardAuthorityBinding>,
     state: Mutex<SessionState>,
 }
 
@@ -404,6 +431,7 @@ where
             recall,
             extraction: None,
             b3_rewards: None,
+            caldus_rewards: None,
             state: Mutex::new(SessionState {
                 accepting: true,
                 shutdown_started: false,
@@ -434,6 +462,21 @@ where
         self
     }
 
+    /// Pins the process-validated progression revision beside the one durable Caldus authority.
+    /// Neither the client nor the live driver may select content at the reward boundary.
+    #[must_use]
+    pub fn with_caldus_reward_authority(
+        mut self,
+        authority: Arc<dyn CoreCaldusRewardAuthority>,
+        progression_content_revision: ManifestHash,
+    ) -> Self {
+        self.caldus_rewards = Some(CaldusRewardAuthorityBinding {
+            authority,
+            progression_content_revision,
+        });
+        self
+    }
+
     /// Installs the one production `PostgreSQL` B3 authority at private-life session construction.
     /// The caller owns reward-epoch loading so one redacted epoch can be shared for the complete
     /// server process rather than re-read or rotated per account, connection, or retry.
@@ -449,6 +492,27 @@ where
             epoch,
         )?);
         Ok(self.with_b3_reward_authority(authority))
+    }
+
+    /// Installs the production `PostgreSQL` Caldus authority and pins the validated progression
+    /// records revision for every frozen defeat owned by this process.
+    pub fn with_persistent_caldus_reward_authority(
+        self,
+        persistence: PostgresPersistence,
+        content_root: &Path,
+        epoch: SecretRewardEpoch,
+    ) -> Result<Self, CaldusVictoryCompositionError> {
+        let progression_content = sim_content::load_core_development_progression(content_root)
+            .map_err(|_| CaldusVictoryCompositionError::ProgressionContent)?;
+        let progression_content_revision =
+            ManifestHash::new(progression_content.hashes().records_blake3.clone())
+                .map_err(|_| CaldusVictoryCompositionError::ProgressionContent)?;
+        let authority = Arc::new(PostgresCaldusVictoryCoordinator::load(
+            persistence,
+            content_root,
+            epoch,
+        )?);
+        Ok(self.with_caldus_reward_authority(authority, progression_content_revision))
     }
 
     async fn prepare_dynamic_writer_handoffs(
@@ -856,6 +920,15 @@ where
                 )),
             )
         });
+        let caldus_rewards = self.caldus_rewards.as_ref().map(|binding| {
+            CorePrivateCaldusRewardRuntime::spawn(
+                entry.authenticated,
+                binding.progression_content_revision.clone(),
+                Arc::clone(&binding.authority),
+                handle.clone(),
+                handle.observe(),
+            )
+        });
         let binding = CorePrivateMicrorealmBinding {
             lease: binding_lease,
             observer: handle.observe(),
@@ -865,6 +938,7 @@ where
             lease: binding_lease,
             driver,
             b3_rewards,
+            caldus_rewards,
         });
         Ok(binding)
     }
@@ -1126,8 +1200,14 @@ where
         } else {
             Ok(())
         };
+        let caldus_result = if let Some(caldus_rewards) = &bound.caldus_rewards {
+            caldus_rewards.shutdown().await.map(|_| ())
+        } else {
+            Ok(())
+        };
         let driver_result = bound.driver.shutdown().await;
         b3_result?;
+        caldus_result?;
         driver_result.map_err(Into::into)
     }
 
@@ -1410,8 +1490,13 @@ where
             } else {
                 false
             };
+            let caldus_failed = if let Some(caldus_rewards) = &bound.caldus_rewards {
+                caldus_rewards.shutdown().await.is_err()
+            } else {
+                false
+            };
             let driver_failed = bound.driver.shutdown().await.is_err();
-            if b3_failed || driver_failed {
+            if b3_failed || caldus_failed || driver_failed {
                 microrealm_shutdown_failures = microrealm_shutdown_failures.saturating_add(1);
             }
         }
