@@ -66,6 +66,87 @@ pub struct EnemyHurtbox {
     radius_tiles: f32,
 }
 
+/// Simulation-owned physical enemy body. This is deliberately distinct from an attack hurtbox:
+/// authored bosses may use different collision and damage-target radii.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EnemyBodyCollider {
+    id: EntityId,
+    center: SimulationVector,
+    radius_tiles: f32,
+}
+
+impl EnemyBodyCollider {
+    pub fn new(
+        id: EntityId,
+        center: SimulationVector,
+        radius_tiles: f32,
+    ) -> Result<Self, HurtboxError> {
+        EnemyHurtbox::new(id, center, radius_tiles)?;
+        Ok(Self {
+            id,
+            center,
+            radius_tiles,
+        })
+    }
+
+    #[must_use]
+    pub const fn id(self) -> EntityId {
+        self.id
+    }
+
+    #[must_use]
+    pub const fn center(self) -> SimulationVector {
+        self.center
+    }
+
+    #[must_use]
+    pub const fn radius_tiles(self) -> f32 {
+        self.radius_tiles
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BodyCollisionWorld {
+    collision: ProjectileCollisionWorld,
+    bodies: Vec<EnemyBodyCollider>,
+}
+
+impl BodyCollisionWorld {
+    pub fn new(
+        arena: &ArenaGeometry,
+        mut bodies: Vec<EnemyBodyCollider>,
+    ) -> Result<Self, CollisionError> {
+        bodies.sort_by_key(|body| body.id);
+        let collision = ProjectileCollisionWorld::new(
+            arena,
+            bodies
+                .iter()
+                .map(|body| EnemyHurtbox {
+                    id: body.id,
+                    center: body.center,
+                    radius_tiles: body.radius_tiles,
+                })
+                .collect(),
+        )?;
+        Ok(Self { collision, bodies })
+    }
+
+    #[must_use]
+    pub fn bodies(&self) -> &[EnemyBodyCollider] {
+        &self.bodies
+    }
+
+    pub fn sweep_circle(
+        &self,
+        start: SimulationVector,
+        displacement: SimulationVector,
+        radius_tiles: f32,
+    ) -> Result<Option<SweepHit>, CollisionError> {
+        self.collision
+            .sweep_enemies(start, displacement, radius_tiles)
+    }
+}
+
 impl EnemyHurtbox {
     pub fn new(
         id: EntityId,
@@ -243,6 +324,35 @@ impl ProjectileCollisionWorld {
             .map(|enemy| enemy.id)
             .collect::<Vec<_>>();
         self.sweep_circle_ignoring_enemies(start, displacement, radius_tiles, &ignored)
+    }
+
+    /// Finds the earliest dynamic-body contact while intentionally ignoring arena solids.
+    pub fn sweep_enemies(
+        &self,
+        start: SimulationVector,
+        displacement: SimulationVector,
+        radius_tiles: f32,
+    ) -> Result<Option<SweepHit>, CollisionError> {
+        validate_sweep(start, displacement, radius_tiles)?;
+        let mut best = None;
+        for enemy in &self.enemies {
+            let combined_radius = radius_tiles + enemy.radius_tiles;
+            if !combined_radius.is_finite() {
+                return Err(CollisionError::CalculatedNonFiniteContact);
+            }
+            if let Some(fraction) =
+                segment_circle_fraction(start, displacement, enemy.center, combined_radius)?
+            {
+                consider_hit(
+                    &mut best,
+                    SweepHit {
+                        fraction,
+                        target: CollisionTarget::Enemy(enemy.id),
+                    },
+                );
+            }
+        }
+        Ok(best)
     }
 
     fn collect_shell_hits(
@@ -427,7 +537,13 @@ fn segment_circle_fraction(
 ) -> Result<Option<f32>, CollisionError> {
     let relative = start - center;
     let radius_squared = radius * radius;
-    if relative.length_squared() <= radius_squared {
+    let distance_squared = relative.length_squared();
+    if distance_squared < radius_squared - CONTACT_EPSILON_SQUARED {
+        return Ok(Some(0.0));
+    }
+    if (distance_squared - radius_squared).abs() <= CONTACT_EPSILON_SQUARED
+        && relative.dot(displacement) < 0.0
+    {
         return Ok(Some(0.0));
     }
     let a = displacement.length_squared();
@@ -445,6 +561,20 @@ fn segment_circle_fraction(
     }
     let fraction = (-b - discriminant.sqrt()) / (2.0 * a);
     validate_fraction_or_none(fraction)
+}
+
+fn validate_sweep(
+    start: SimulationVector,
+    displacement: SimulationVector,
+    radius_tiles: f32,
+) -> Result<(), CollisionError> {
+    if !start.is_finite() || !displacement.is_finite() {
+        return Err(CollisionError::NonFiniteSweep);
+    }
+    if !radius_tiles.is_finite() || radius_tiles <= 0.0 {
+        return Err(CollisionError::InvalidProjectileRadius);
+    }
+    Ok(())
 }
 
 fn validate_fraction_or_none(fraction: f32) -> Result<Option<f32>, CollisionError> {

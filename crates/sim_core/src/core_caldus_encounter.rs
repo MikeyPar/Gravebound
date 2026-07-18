@@ -133,6 +133,16 @@ impl CoreCaldusEncounterSimulation {
             .map_err(Into::into)
     }
 
+    pub fn body_collider(&self) -> Result<crate::EnemyBodyCollider, CoreCaldusEncounterError> {
+        crate::EnemyBodyCollider::new(
+            self.health.entity_id(),
+            self.body.simulation_position(),
+            crate::CALDUS_COLLISION_RADIUS_TILES,
+        )
+        .map_err(CoreCaldusHealthError::from)
+        .map_err(Into::into)
+    }
+
     #[must_use]
     pub fn hostile_projectiles(&self) -> &[HostileProjectile] {
         self.hostile_projectiles.projectiles()
@@ -453,6 +463,27 @@ mod tests {
     fn reset_consumes_encounter_and_preserves_monotonic_projectile_identity() {
         let allocator = encounter().into_cleared_projectile_allocator();
         assert_eq!(allocator.peek(), id(1_000));
+    }
+
+    #[test]
+    fn physical_body_and_damage_hurtbox_keep_distinct_authored_radii() {
+        let encounter = encounter();
+        assert!(
+            (encounter.body_collider().expect("body").radius_tiles()
+                - crate::CALDUS_COLLISION_RADIUS_TILES)
+                .abs()
+                < f32::EPSILON
+        );
+        assert!(
+            (encounter
+                .hurtbox()
+                .expect("hurtbox")
+                .expect("living boss")
+                .radius_tiles()
+                - crate::CALDUS_HURTBOX_RADIUS_TILES)
+                .abs()
+                < f32::EPSILON
+        );
     }
 
     fn participant() -> CoreBossParticipant {

@@ -5,11 +5,11 @@ use thiserror::Error;
 
 use crate::BellDebtDefinition;
 use crate::{
-    ArenaGeometry, BASIS_POINTS_PER_ONE, CollisionError, CollisionTarget, EntityId,
-    EntityIdAllocator, GraveArbalistOath, GraveMarkDefinition, IntentMathError, MovementAction,
-    MovementError, MovementStep, NailTrapEnemy, NailTrapField, NailTrapStep, PlayerMovementState,
-    ProjectileCollisionWorld, SimulationVector, SlipstepDefinition, SolidColliderId,
-    StillnessDefinition, TICKS_PER_SECOND, Tick, WeaponDefinition,
+    ArenaGeometry, BASIS_POINTS_PER_ONE, BodyCollisionWorld, CollisionError, CollisionTarget,
+    EntityId, EntityIdAllocator, GraveArbalistOath, GraveMarkDefinition, IntentMathError,
+    MovementAction, MovementError, MovementStep, NailTrapEnemy, NailTrapField, NailTrapStep,
+    PlayerMovementState, ProjectileCollisionWorld, SimulationVector, SlipstepDefinition,
+    SolidColliderId, StillnessDefinition, TICKS_PER_SECOND, Tick, WeaponDefinition,
 };
 
 const AIM_EPSILON_SQUARED: f32 = 1.0e-12;
@@ -251,6 +251,7 @@ pub struct SlipstepTransition {
     pub travelled_tiles: f32,
     pub remaining_travel_ticks: u32,
     pub solid: Option<SolidColliderId>,
+    pub body: Option<EntityId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1019,7 +1020,31 @@ impl PlayerCombatState {
             action,
             next_movement.position(),
             collision_world,
-            Some((&mut next_movement, arena)),
+            Some((&mut next_movement, arena, None)),
+        )?;
+        let movement_step = movement_step.ok_or(CombatError::MovementOutcomeMissing)?;
+        *self = next_combat;
+        *movement = next_movement;
+        Ok((result, movement_step))
+    }
+
+    /// Advances one avatar tick while keeping physical enemy bodies distinct from projectile
+    /// hurtboxes.
+    pub fn step_with_movement_and_bodies_outcome(
+        &mut self,
+        movement: &mut PlayerMovementState,
+        action: CombatAction,
+        arena: &ArenaGeometry,
+        collision_world: &ProjectileCollisionWorld,
+        body_world: &BodyCollisionWorld,
+    ) -> Result<(CombatStep, MovementStep), CombatError> {
+        let mut next_combat = self.clone();
+        let mut next_movement = *movement;
+        let (result, movement_step) = next_combat.step_inner(
+            action,
+            next_movement.position(),
+            collision_world,
+            Some((&mut next_movement, arena, Some(body_world))),
         )?;
         let movement_step = movement_step.ok_or(CombatError::MovementOutcomeMissing)?;
         *self = next_combat;
@@ -1032,7 +1057,11 @@ impl PlayerCombatState {
         action: CombatAction,
         mut player_position: SimulationVector,
         collision_world: &ProjectileCollisionWorld,
-        movement: Option<(&mut PlayerMovementState, &ArenaGeometry)>,
+        movement: Option<(
+            &mut PlayerMovementState,
+            &ArenaGeometry,
+            Option<&BodyCollisionWorld>,
+        )>,
     ) -> Result<(CombatStep, Option<MovementStep>), CombatError> {
         if !player_position.is_finite() {
             return Err(CombatError::NonFinitePlayerPosition);
@@ -1068,7 +1097,7 @@ impl PlayerCombatState {
 
         let mut slipstep_travelled = false;
         let mut movement_step = None;
-        if let Some((movement, arena)) = movement {
+        if let Some((movement, arena, bodies)) = movement {
             if let Some(active) = self.active_slipstep {
                 slipstep_travelled = true;
                 let displacement = if active.remaining_ticks == 1 {
@@ -1076,21 +1105,29 @@ impl PlayerCombatState {
                 } else {
                     active.direction.vector() * self.slipstep.travel_per_tick_tiles()
                 };
-                let moved =
-                    movement.apply_forced_displacement(displacement, collision_world, arena)?;
+                let moved = if let Some(bodies) = bodies {
+                    movement.apply_forced_displacement_with_bodies(
+                        displacement,
+                        collision_world,
+                        bodies,
+                        arena,
+                    )?
+                } else {
+                    movement.apply_forced_displacement(displacement, collision_world, arena)?
+                };
                 movement_step = Some(MovementStep {
                     position: moved.position,
                     velocity: movement.velocity(),
-                    collided: moved.solid.is_some(),
+                    collided: moved.solid.is_some() || moved.body.is_some(),
                 });
                 player_position = moved.position;
                 step.direct_damage_reduction_basis_points =
                     self.slipstep.direct_damage_reduction_basis_points();
                 let remaining = active.remaining_ticks.saturating_sub(1);
-                let terminal = moved.solid.is_some() || remaining == 0;
+                let terminal = moved.solid.is_some() || moved.body.is_some() || remaining == 0;
                 step.slipstep_transitions.push(SlipstepTransition {
                     tick: self.tick,
-                    kind: if moved.solid.is_some() {
+                    kind: if moved.solid.is_some() || moved.body.is_some() {
                         SlipstepTransitionKind::Collided
                     } else if terminal {
                         SlipstepTransitionKind::Completed
@@ -1102,13 +1139,18 @@ impl PlayerCombatState {
                     travelled_tiles: moved.travelled_tiles,
                     remaining_travel_ticks: if terminal { 0 } else { remaining },
                     solid: moved.solid,
+                    body: moved.body,
                 });
                 self.active_slipstep = (!terminal).then_some(ActiveSlipstep {
                     remaining_ticks: remaining,
                     ..active
                 });
             } else {
-                movement_step = Some(movement.step(action.movement, arena)?);
+                movement_step = Some(if let Some(bodies) = bodies {
+                    movement.step_with_bodies(action.movement, arena, bodies)?
+                } else {
+                    movement.step(action.movement, arena)?
+                });
                 player_position = movement.position();
             }
             self.update_stillness(
@@ -1249,6 +1291,7 @@ impl PlayerCombatState {
                     travelled_tiles: 0.0,
                     remaining_travel_ticks: self.slipstep_remaining_travel_ticks(),
                     solid: None,
+                    body: None,
                 });
             }
         }
@@ -1375,6 +1418,7 @@ impl PlayerCombatState {
                     travelled_tiles: 0.0,
                     remaining_travel_ticks: self.slipstep_remaining_travel_ticks(),
                     solid: None,
+                    body: None,
                 });
             }
         }
@@ -1389,6 +1433,7 @@ impl PlayerCombatState {
                     travelled_tiles: 0.0,
                     remaining_travel_ticks: self.slipstep_remaining_travel_ticks(),
                     solid: None,
+                    body: None,
                 });
             }
         }
@@ -1496,6 +1541,7 @@ impl PlayerCombatState {
             travelled_tiles: 0.0,
             remaining_travel_ticks: self.slipstep.travel_ticks(),
             solid: None,
+            body: None,
         });
     }
 

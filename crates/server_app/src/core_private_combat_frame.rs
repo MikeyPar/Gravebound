@@ -6,8 +6,9 @@
 //! stage this primitive with their own lifecycle and route CAS; it never commits authority alone.
 
 use sim_core::{
-    ArenaGeometry, CombatAction, CombatStep, ConsumableAction, MOVEMENT_RESPONSE_TICKS,
-    MovementStep, PlayerMovementConfig, PlayerMovementState, ProjectileCollisionWorld,
+    ArenaGeometry, BodyCollisionWorld, CombatAction, CombatStep, ConsumableAction,
+    MOVEMENT_RESPONSE_TICKS, MovementStep, PlayerMovementConfig, PlayerMovementState,
+    ProjectileCollisionWorld,
 };
 
 use crate::{CorePrivateMicrorealmInput, CorePrivateMicrorealmRuntimeError};
@@ -39,17 +40,50 @@ pub(crate) fn step_live_player_combat(
     }
     let (step, movement_step) = player.combat.step_with_movement_outcome(
         movement,
-        CombatAction {
-            aim: input.aim,
-            movement: input.movement,
-            primary_held: input.primary_held,
-            primary_press_sequence: input.primary_sequence,
-            ability_1_press_sequence: input.ability_1_sequence,
-            ability_2_press_sequence: input.ability_2_sequence,
-        },
+        combat_action(input),
         arena,
         collision_world,
     )?;
+    finish_player_frame(player, movement_step, step)
+}
+
+pub(crate) fn step_live_player_combat_with_bodies(
+    player: &mut sim_core::EnemyLabPlayer,
+    movement: &mut PlayerMovementState,
+    input: &CorePrivateMicrorealmInput,
+    arena: &ArenaGeometry,
+    collision_world: &ProjectileCollisionWorld,
+    body_world: &BodyCollisionWorld,
+) -> Result<(CombatStep, MovementStep), CorePrivateMicrorealmRuntimeError> {
+    if player.target.position != movement.position() {
+        return Err(CorePrivateMicrorealmRuntimeError::InvalidComposition);
+    }
+    let (step, movement_step) = player.combat.step_with_movement_and_bodies_outcome(
+        movement,
+        combat_action(input),
+        arena,
+        collision_world,
+        body_world,
+    )?;
+    finish_player_frame(player, movement_step, step)
+}
+
+const fn combat_action(input: &CorePrivateMicrorealmInput) -> CombatAction {
+    CombatAction {
+        aim: input.aim,
+        movement: input.movement,
+        primary_held: input.primary_held,
+        primary_press_sequence: input.primary_sequence,
+        ability_1_press_sequence: input.ability_1_sequence,
+        ability_2_press_sequence: input.ability_2_sequence,
+    }
+}
+
+fn finish_player_frame(
+    player: &mut sim_core::EnemyLabPlayer,
+    movement_step: MovementStep,
+    step: CombatStep,
+) -> Result<(CombatStep, MovementStep), CorePrivateMicrorealmRuntimeError> {
     player.target.position = movement_step.position;
     player.consumables.step(ConsumableAction::default())?;
     player

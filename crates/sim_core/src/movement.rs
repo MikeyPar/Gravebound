@@ -1,8 +1,9 @@
 use thiserror::Error;
 
 use crate::{
-    ArenaGeometry, CollisionError, CollisionTarget, MILLI_TILES_PER_TILE, ProjectileCollisionWorld,
-    TICKS_PER_SECOND, TilePoint, TileRectangle,
+    ArenaGeometry, BodyCollisionWorld, CollisionError, CollisionTarget, EntityId,
+    MILLI_TILES_PER_TILE, ProjectileCollisionWorld, SweepHit, TICKS_PER_SECOND, TilePoint,
+    TileRectangle,
 };
 
 /// Grave Arbalist movement speed from `CLS-020`.
@@ -263,6 +264,33 @@ impl PlayerMovementState {
         })
     }
 
+    /// Advances walking against immutable arena solids and a distinct dynamic body snapshot.
+    pub fn step_with_bodies(
+        &mut self,
+        action: MovementAction,
+        arena: &ArenaGeometry,
+        bodies: &BodyCollisionWorld,
+    ) -> Result<MovementStep, MovementError> {
+        let mut staged = *self;
+        let start = staged.position;
+        let mut step = staged.step(action, arena)?;
+        let displacement = step.position - start;
+        if let Some(hit) =
+            bodies.sweep_circle(start, displacement, staged.config.collision_radius_tiles)?
+        {
+            staged.position = start + displacement * hit.fraction;
+            staged.velocity = SimulationVector::default();
+            staged.validate(arena)?;
+            step = MovementStep {
+                position: staged.position,
+                velocity: staged.velocity,
+                collided: true,
+            };
+        }
+        *self = staged;
+        Ok(step)
+    }
+
     /// Applies one authoritative movement-ability segment, stopping exactly at the first solid.
     pub fn apply_forced_displacement(
         &mut self,
@@ -270,21 +298,55 @@ impl PlayerMovementState {
         collision_world: &ProjectileCollisionWorld,
         arena: &ArenaGeometry,
     ) -> Result<ForcedMovementStep, MovementError> {
+        self.apply_forced_displacement_inner(displacement, collision_world, None, arena)
+    }
+
+    pub fn apply_forced_displacement_with_bodies(
+        &mut self,
+        displacement: SimulationVector,
+        collision_world: &ProjectileCollisionWorld,
+        bodies: &BodyCollisionWorld,
+        arena: &ArenaGeometry,
+    ) -> Result<ForcedMovementStep, MovementError> {
+        self.apply_forced_displacement_inner(displacement, collision_world, Some(bodies), arena)
+    }
+
+    fn apply_forced_displacement_inner(
+        &mut self,
+        displacement: SimulationVector,
+        collision_world: &ProjectileCollisionWorld,
+        bodies: Option<&BodyCollisionWorld>,
+        arena: &ArenaGeometry,
+    ) -> Result<ForcedMovementStep, MovementError> {
         self.validate(arena)?;
         if !displacement.is_finite() {
             return Err(MovementError::NonFiniteState);
         }
         let start = self.position;
-        let hit = collision_world.sweep_solids(
+        let solid_hit = collision_world.sweep_solids(
             self.position,
             displacement,
             self.config.collision_radius_tiles,
         )?;
-        let (fraction, solid) = hit.map_or((1.0, None), |hit| {
-            let CollisionTarget::Solid(solid) = hit.target else {
-                unreachable!("solid-only sweep returned an enemy")
-            };
-            (hit.fraction, Some(solid))
+        let body_hit = bodies
+            .map(|world| {
+                world.sweep_circle(
+                    self.position,
+                    displacement,
+                    self.config.collision_radius_tiles,
+                )
+            })
+            .transpose()?
+            .flatten();
+        let hit = earliest_hit(solid_hit, body_hit);
+        let fraction = hit.map_or(1.0, |hit| hit.fraction);
+        let solid = hit.and_then(|hit| match hit.target {
+            CollisionTarget::Solid(solid) => Some(solid),
+            CollisionTarget::Enemy(_) => None,
+        });
+        let body = hit.and_then(|hit| match hit.target {
+            CollisionTarget::Enemy(body) => Some(body),
+            CollisionTarget::Solid(_) => None,
         });
         self.position = self.position + displacement * fraction;
         self.velocity = SimulationVector::default();
@@ -298,6 +360,7 @@ impl PlayerMovementState {
             position: self.position,
             travelled_tiles: (self.position - start).length(),
             solid,
+            body,
         })
     }
 
@@ -386,6 +449,26 @@ pub struct ForcedMovementStep {
     pub position: SimulationVector,
     pub travelled_tiles: f32,
     pub solid: Option<crate::SolidColliderId>,
+    pub body: Option<EntityId>,
+}
+
+fn earliest_hit(first: Option<SweepHit>, second: Option<SweepHit>) -> Option<SweepHit> {
+    match (first, second) {
+        (Some(first), Some(second)) => Some(
+            if first
+                .fraction
+                .total_cmp(&second.fraction)
+                .then_with(|| first.target.cmp(&second.target))
+                .is_le()
+            {
+                first
+            } else {
+                second
+            },
+        ),
+        (Some(hit), None) | (None, Some(hit)) => Some(hit),
+        (None, None) => None,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
@@ -644,6 +727,60 @@ mod tests {
         }
         assert!((pillar.position().x - 9.7).abs() < 1.0e-5);
         assert!(pillar.velocity().x.abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn walking_uses_physical_body_radius_and_allows_tangent_departure() {
+        let arena = arena(20_000, 20_000, TilePoint::new(8_000, 10_000), vec![]);
+        let boss = EntityId::new(40_002).expect("boss");
+        let bodies = BodyCollisionWorld::new(
+            &arena,
+            vec![
+                crate::EnemyBodyCollider::new(boss, SimulationVector::new(10.0, 10.0), 0.70)
+                    .expect("body"),
+            ],
+        )
+        .expect("body world");
+        let mut player = PlayerMovementState::at_arena_spawn(&arena).expect("player");
+        for _ in 0..20 {
+            player
+                .step_with_bodies(MovementAction::new(1, 0), &arena, &bodies)
+                .expect("body tick");
+        }
+        assert!((player.position().x - 9.0).abs() < 1.0e-5);
+        assert_eq!(player.velocity(), SimulationVector::default());
+
+        player
+            .step_with_bodies(MovementAction::new(-1, 0), &arena, &bodies)
+            .expect("depart tangent");
+        assert!(player.position().x < 9.0);
+    }
+
+    #[test]
+    fn forced_displacement_stops_at_combined_player_and_body_radius() {
+        let arena = arena(20_000, 20_000, TilePoint::new(8_000, 10_000), vec![]);
+        let boss = EntityId::new(40_002).expect("boss");
+        let bodies = BodyCollisionWorld::new(
+            &arena,
+            vec![
+                crate::EnemyBodyCollider::new(boss, SimulationVector::new(10.0, 10.0), 0.70)
+                    .expect("body"),
+            ],
+        )
+        .expect("body world");
+        let projectiles = ProjectileCollisionWorld::new(&arena, Vec::new()).expect("world");
+        let mut player = PlayerMovementState::at_arena_spawn(&arena).expect("player");
+        let moved = player
+            .apply_forced_displacement_with_bodies(
+                SimulationVector::new(5.0, 0.0),
+                &projectiles,
+                &bodies,
+                &arena,
+            )
+            .expect("forced movement");
+        assert!((moved.position.x - 9.0).abs() < 1.0e-5);
+        assert_eq!(moved.body, Some(boss));
+        assert_eq!(moved.solid, None);
     }
 
     #[test]

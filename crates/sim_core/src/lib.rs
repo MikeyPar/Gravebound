@@ -106,8 +106,8 @@ pub use clock::{
     FixedStepClock, TICK_RATE_HZ, Tick, duration_ms_to_ticks_ceil, duration_ms_to_ticks_nearest,
 };
 pub use collision::{
-    CollisionError, CollisionTarget, EnemyHurtbox, HurtboxError, ProjectileCollisionWorld,
-    ShellSide, SolidColliderId, SweepHit,
+    BodyCollisionWorld, CollisionError, CollisionTarget, EnemyBodyCollider, EnemyHurtbox,
+    HurtboxError, ProjectileCollisionWorld, ShellSide, SolidColliderId, SweepHit,
 };
 pub use combat::{
     ActiveGraveMark, AimDirection, AimDirectionError, BELL_DEBT_CHECKPOINT_SCHEMA_VERSION,
@@ -148,7 +148,8 @@ pub use core_caldus::{
     CoreCaldusProjectileRelease, CoreCaldusSimulation, CoreCaldusState, CoreCaldusTargetInput,
 };
 pub use core_caldus_body::{
-    CoreCaldusBodyError, CoreCaldusBodyEvent, CoreCaldusBodySimulation, CoreCaldusBodyTarget,
+    CALDUS_COLLISION_RADIUS_MILLI_TILES, CALDUS_COLLISION_RADIUS_TILES, CoreCaldusBodyError,
+    CoreCaldusBodyEvent, CoreCaldusBodySimulation, CoreCaldusBodyTarget,
 };
 pub use core_caldus_encounter::{
     CALDUS_CHARGE_CONTACT_DAMAGE, CORE_CALDUS_ENTITY_ID_OFFSET, CoreCaldusChargeDamageEvent,

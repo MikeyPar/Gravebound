@@ -14,9 +14,9 @@ use protocol::{
     CorePrivateRouteStateV1,
 };
 use sim_core::{
-    CoreBossConnectionState, CoreBossEntrantInput, CoreBossLifeState, CoreBossLockEvent,
-    CoreBossLockInput, CoreBossLockPhase, CoreBossLockSimulation, CoreBossLockStep,
-    CoreBossParticipant, CoreCaldusEncounterSimulation, CoreCaldusEncounterStep,
+    BodyCollisionWorld, CoreBossConnectionState, CoreBossEntrantInput, CoreBossLifeState,
+    CoreBossLockEvent, CoreBossLockInput, CoreBossLockPhase, CoreBossLockSimulation,
+    CoreBossLockStep, CoreBossParticipant, CoreCaldusEncounterSimulation, CoreCaldusEncounterStep,
     CoreCaldusFriendlyInput, CoreCaldusPhase, CoreCaldusState, EnemyLabPlayer, EntityId,
     EntityIdAllocator, PlayerMovementState, ProjectileCollisionWorld, Tick, TilePoint,
     core_caldus_entity_id, simulation_to_tile_point, tile_point_to_simulation,
@@ -27,7 +27,7 @@ use crate::{
     CoreCharacterCombatEnvelope, CorePrivateCaldusStagingHandoff, CorePrivateMicrorealmInput,
     CorePrivateMicrorealmRuntimeError, CorePrivateRouteActorDirectory, CorePrivateRouteActorLease,
     CorePrivateRouteRuntimeError,
-    core_private_combat_frame::{core_player_movement_config, step_live_player_combat},
+    core_private_combat_frame::{core_player_movement_config, step_live_player_combat_with_bodies},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -257,15 +257,23 @@ impl CorePrivateCaldusRuntime {
             .flatten()
             .collect();
         let collision_world = ProjectileCollisionWorld::new(&self.arena, hurtboxes)?;
+        let bodies = encounter_simulation
+            .as_ref()
+            .map(CoreCaldusEncounterSimulation::body_collider)
+            .transpose()?
+            .into_iter()
+            .collect();
+        let body_world = BodyCollisionWorld::new(&self.arena, bodies)?;
         let player = players
             .get_mut(&self.participant.entity_id)
             .ok_or(CorePrivateCaldusRuntimeError::InvalidComposition)?;
-        let (combat, movement) = step_live_player_combat(
+        let (combat, movement) = step_live_player_combat_with_bodies(
             player,
             &mut movement_state,
             &input.action,
             &self.arena,
             &collision_world,
+            &body_world,
         )?;
         if combat.tick != tick {
             return Err(CorePrivateCaldusRuntimeError::CombatTickMismatch);
@@ -629,6 +637,29 @@ mod tests {
         );
         assert_eq!(combat.route.phase, CorePrivateRoutePhaseV1::BossPhaseOne);
         assert_eq!(combat.boss_health, Some((7_200, 7_200)));
+
+        let near_body = SimulationVector::new(7.8, 9.0);
+        runtime
+            .players
+            .get_mut(&runtime.participant.entity_id)
+            .expect("player")
+            .target
+            .position = near_body;
+        runtime.movement = PlayerMovementState::new_with_config(
+            near_body,
+            runtime.movement.config(),
+            &runtime.arena,
+        )
+        .expect("near-body movement");
+        for sequence in 227..=230 {
+            let mut body_input = input(sequence);
+            body_input.action.movement = MovementAction::new(1, 0);
+            runtime
+                .step(body_input)
+                .await
+                .expect("body collision frame");
+        }
+        assert!((runtime.player().target.position.x - 8.0).abs() < 1.0e-5);
 
         drop(runtime);
         directory.begin_shutdown();
