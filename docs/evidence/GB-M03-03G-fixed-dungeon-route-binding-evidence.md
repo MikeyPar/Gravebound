@@ -30,8 +30,8 @@
 
 ## Explicit boundary
 
-The existing session-owned 30 Hz driver converts in place, never returns its allocation through a caller-owned join, produces live fixed-room frames, and now accepts only opaque durable B4 outcomes. The disabled normal coordinator does not yet deliver the B3 reward/milestone result; this slice also does not construct Sir Caldus, commit room/boss rewards or pending inventory, create the stable B6 exit, or compose all five terminal producers. Normal Character Select `Play`, Realm Gate interaction, dungeon admission, extraction, and Recall remain disabled.
+The existing session-owned 30 Hz driver converts in place, never returns its allocation through a caller-owned join, produces live fixed-room frames, and accepts opaque durable B3/B4 outcomes. Commit `83ccbb1` adds the B3 coordinator and task-owned pending/acknowledgement seam, but automatic normal-server execution and reliable publication remain disabled. This slice also does not construct Sir Caldus, commit boss rewards or pending inventory, create the stable B6 exit, or compose all five terminal producers. Normal Character Select `Play`, Realm Gate interaction, dungeon admission, extraction, and Recall remain disabled.
 
 ## Current Next Step
 
-Deliver the committed B3 reward/milestone and B4 proof through the normal coordinator, then implement the B5 bridge before constructing Caldus at B6 and its reward/terminal authority.
+Automatically consume `FixedDungeonRewardPending`, acknowledge the durable B3 proof in the same task before reliable publication, and prove response-loss/reconnect/process-restart convergence. Then implement the B5 bridge before constructing Caldus at B6 and its reward/terminal authority.

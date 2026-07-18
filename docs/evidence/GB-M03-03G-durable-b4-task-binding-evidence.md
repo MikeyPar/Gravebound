@@ -33,8 +33,8 @@ Commit `ac31961` adds the unregistered [`DefeatedRewardUnresolved` / `RewardComm
 
 ## Explicit boundary
 
-The server now has a durable-result-to-task contract, but the disabled ordinary coordinator does not yet commit and deliver the B3 reward/milestone result before publishing the B4 response. Sir Caldus combat, personal rewards, pending inventory, stable exit, native presentation registration, all terminal producers, restart/real-QUIC evidence, and normal admission remain open.
+Commit `83ccbb1` now supplies the durable B3 reward/progression/milestone coordinator and the task-owned pending/acknowledgement seam. Automatic normal-server coordinator execution and reliable response publication are still disabled, so response-loss/reconnect/process-restart convergence remains open. Sir Caldus combat, personal rewards, pending inventory, stable exit, native presentation registration, all terminal producers, and normal admission also remain open.
 
 ## Current Next Step
 
-Commit the B3 Sepulcher Knight reward and its optional Bargain milestone through the normal route coordinator, deliver the resulting opaque B4 proof before the reliable response, and prove response-loss/reconnect/restart convergence. Then implement the B5 bridge, construct Sir Caldus at B6, commit personal rewards into pending inventory, reveal the stable exit only after durable reward acknowledgement, and connect all terminal producers.
+Automatically consume the task-owned B3 pending handoff through the normal server coordinator, apply its opaque durable proof to the same task, and publish the B4-facing reliable result only after acknowledgement. Prove response-loss/reconnect/process-restart convergence and the integrated inactivity rejection, then implement B5 and Sir Caldus at B6.

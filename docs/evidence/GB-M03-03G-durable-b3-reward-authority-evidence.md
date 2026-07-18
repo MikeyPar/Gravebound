@@ -1,0 +1,38 @@
+# GB-M03-03G durable B3 reward-authority evidence
+
+**Status:** Local implementation and independent authority review accepted for commit `83ccbb1`. Normal route admission remains disabled. Hosted PostgreSQL execution, real-QUIC response-loss/process-restart proof, and hosted cumulative CI remain required before this slice can close the parent route.
+
+## Three-authority basis
+
+1. `Gravebound_Production_GDD_v1_Canonical.md` `PROG-003`, `BRG-001`-`005`, `DNG-005`, and `SOC-010` require server-owned miniboss XP/loot eligibility, an exact eight-tick normal reward delay, a temporary level-five Core Bargain, presence/contribution/inactivity/life/Recall/trust checks, and replay-safe life persistence.
+2. `Gravebound_Content_Production_Spec_v1.md` `CONT-014`, `CONT-REWARD-003`-`004`, `CONT-ROOM-007`, and `CONT-ENEMY-003` bind the Sepulcher Knight to B3, `reward.miniboss_t1`, `xp.miniboss_t1`, and the B3-before-B4 fixed route.
+3. `Gravebound_Development_Roadmap_v1.md` `GB-M03-03`-`05` require the reward, progression, Bargain, reconnect, and persistent private-route authorities to compose without client-authored outcomes or duplicate grants.
+
+## Implemented contract
+
+- `PostgresCoreB3RewardCoordinator` consumes only the immutable handoff from the sole B3 simulation owner. It derives domain-separated reward/source identities and rejects early delivery, wrong content/profile/reference health, foreign authority, invalid delay, inadequate presence/contribution, more than 600 inactive ticks, death, completed Recall, or invalid session trust.
+- Progression and the optional Bargain milestone commit before loot. The progression command is constructed while its aggregate locks are held, eliminating a stale-version window; an ineligible participant cannot leave personal items behind.
+- Migration `0064_b3_no_offer_disposition_v1.sql` adds result code `3` for a durable below-level or already-consumed `NoOffer` disposition. Its partial unique index reserves once-per-life uniqueness only for an actually earned milestone, so a nonqualifying B3 receipt cannot consume a later legal level-five trigger.
+- Exact replay reconstructs the stored progression/milestone and reward authorities. Changed payloads, stale/foreign ownership, or malformed stored projections fail closed.
+- The fixed-dungeon task freezes at the exact B3 reward-due handoff, rejects normal advance, and resumes only after an opaque account/character/lineage-bound durable commit is acknowledged. B4 can then use the existing durable selected/refused/no-offer binding.
+- Reward participation is driver-owned. Production-cadence no-op packets do not count as activity; movement, aim/primary edges, held movement/primary, and reliable abilities do. `LinkLost` marks the participant absent and session-invalid while danger ticks continue. Reconnect restores session authority under the same generation lock, so an old detach cannot overwrite a replacement transport.
+
+## Verification
+
+- `cargo check -p persistence -p sim_content -p server_app --all-targets --all-features`: pass.
+- Strict `cargo clippy -p persistence -p sim_content -p server_app --all-targets --all-features -- -D warnings`: pass.
+- `cargo test --workspace --all-features`: pass, including `333/333` server, `243/243` persistence, `131/131` sim-content, `193/193` native-client, and `388/388` simulation-core library tests plus enabled integration and documentation tests.
+- Focused proof passes for the 605-frame no-op cadence, `LinkLost`/reconnect projection, real-QUIC private-life handoff lifecycle, B3 handoff evidence, exact eight-tick validation, underqualified rejection, durable B3 replay, foreign-lineage rejection, no-offer schema projection, and B4-to-B5 gating.
+- Independent review found no remaining P0/P1 blocker after the activity-cadence and detach/reconnect ordering corrections.
+- `git diff --check` passes. `cargo build --release -p server_app -p client_bevy` completed successfully after the command wrapper returned; both optimized Windows executables have fresh build timestamps.
+- The hosted PostgreSQL test compiles and covers commit/replay, restart reconstruction, item provenance/security/location, and below-level no-offer. `TEST_DATABASE_URL` was unavailable locally, so hosted execution remains explicitly open.
+
+## Evidence strengthening still open
+
+- Drive more than 600 no-op frames through the actual fixed-dungeon B3 runtime and coordinator, then prove terminal rejection and zero reward rows in PostgreSQL.
+- Force response loss, reconnect, process restart, and the formerly vulnerable detach/new-attach interleaving under real QUIC.
+- Add a distinct anti-cheat invalidation transition if M03 introduces an anti-cheat authority separate from authenticated session/input validity.
+
+## Current Next Step
+
+Instantiate the B3 coordinator in normal server composition, automatically consume `FixedDungeonRewardPending` at its exact due tick, apply the durable proof to the same task, and publish the reliable B4-facing result only after task acknowledgement. Prove exact response-loss/reconnect/process-restart convergence and the integrated inactivity zero-row case. Then implement the B5 bridge and authoritative Sir Caldus B6 route.

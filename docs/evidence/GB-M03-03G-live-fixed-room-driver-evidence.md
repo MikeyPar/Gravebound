@@ -30,12 +30,12 @@
 
 ## Presentation candidate
 
-Commit `a6fb62e` adds the unregistered [`Open`/`Selected`/`Refused` B4 shrine-state pack](../../assets/core/dungeons/bell_bargain_state_review/v1/README.md). The deterministic rebuild reproduces twelve manifest hashes; 96px readability plus 1280x720 and 1920x1080 standard/reduced review mocks pass visual inspection. Commit `e1e4d7c` supplies the stored durable projection; registration/content-hash changes remain blocked on normal-coordinator delivery and optimized native review.
+Commit `a6fb62e` adds the unregistered [`Open`/`Selected`/`Refused` B4 shrine-state pack](../../assets/core/dungeons/bell_bargain_state_review/v1/README.md). The deterministic rebuild reproduces twelve manifest hashes; 96px readability plus 1280x720 and 1920x1080 standard/reduced review mocks pass visual inspection. Commits `e1e4d7c` and `83ccbb1` supply the durable B4 and B3 projections; registration/content-hash changes remain blocked on automatic coordinator delivery and optimized native review.
 
 ## Explicit boundary
 
-Commit `e1e4d7c` now projects committed/replayed select, refuse, and authoritative no-offer material into B4 through an opaque account/character/lineage-bound receipt. The disabled ordinary coordinator does not yet commit and deliver the B3 reward/milestone result before B4 response publication. The route also does not yet construct Sir Caldus at B6, commit room/boss rewards or pending inventory, expose the stable exit, arbitrate all terminal producers, or enable ordinary native admission.
+Commit `e1e4d7c` projects committed/replayed select, refuse, and authoritative no-offer material into B4 through an opaque account/character/lineage-bound receipt. Commit `83ccbb1` adds the durable B3 coordinator and task-owned pending/acknowledgement seam. The disabled ordinary server does not yet invoke it automatically or publish the reliable result after acknowledgement. The route also does not yet construct Sir Caldus at B6, commit boss rewards or pending inventory, expose the stable exit, arbitrate all terminal producers, or enable ordinary native admission.
 
 ## Current Next Step
 
-Use the [durable B4 binding](GB-M03-03G-durable-b4-task-binding-evidence.md) from the normal B3 reward coordinator before publishing the reliable Bargain response, then prove response-loss/reconnect/restart convergence. Next implement the B5 bridge, Sir Caldus at B6, durable rewards/pending inventory, the stable B6 exit, and terminal composition.
+Automatically consume the task-owned B3 pending handoff, apply the [durable B3](GB-M03-03G-durable-b3-reward-authority-evidence.md) and [B4](GB-M03-03G-durable-b4-task-binding-evidence.md) proofs before reliable publication, and prove response-loss/reconnect/process-restart convergence. Next implement the B5 bridge, Sir Caldus at B6, durable rewards/pending inventory, the stable B6 exit, and terminal composition.

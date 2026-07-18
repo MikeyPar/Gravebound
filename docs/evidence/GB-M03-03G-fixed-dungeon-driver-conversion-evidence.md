@@ -31,4 +31,4 @@ The conversion itself stops at B0; the follow-on live-driver slice now synthesiz
 
 ## Current Next Step
 
-Commit `e1e4d7c` binds committed/replayed durable B4 outcomes into the same task. Next deliver the B3 reward/milestone result from the normal coordinator before response publication, then implement the B5 bridge, construct Sir Caldus at B6, commit reward/pending-inventory authority, reveal the stable B6 exit, and finish terminal composition.
+Commits `e1e4d7c` and `83ccbb1` bind durable B4 outcomes and the exact B3 reward/progression/milestone proof into the same task. Next automatically run the normal B3 coordinator at `FixedDungeonRewardPending`, acknowledge the proof before reliable publication, and prove response-loss/reconnect/process-restart convergence. Then implement B5, Sir Caldus B6, pending inventory, the stable exit, and terminal composition.

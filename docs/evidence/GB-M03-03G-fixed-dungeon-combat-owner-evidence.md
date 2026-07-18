@@ -38,4 +38,4 @@ Commit `6749141` now binds this component to the persistent `CorePrivateRouteAct
 
 ## Current Next Step
 
-Commits `a2a5b09`, `09c9c9e`, and `e1e4d7c` now convert the existing session-owned 30 Hz task in place, generate fixed-room frames, and bind opaque durable B4 outcomes. Next commit/deliver the B3 reward and milestone through the normal coordinator, then add the B5 bridge, authoritative Sir Caldus combat at B6, committed reward/pending-inventory placement, stable B6 exit, and all five terminal producers.
+Commits `a2a5b09`, `09c9c9e`, `e1e4d7c`, and `83ccbb1` now convert the existing session-owned 30 Hz task in place, generate fixed-room frames, and bind opaque durable B3/B4 outcomes. Next automatically run the B3 coordinator at the pending handoff and acknowledge it before reliable publication, then add the B5 bridge, authoritative Sir Caldus combat at B6, committed reward/pending-inventory placement, stable B6 exit, and all five terminal producers.
