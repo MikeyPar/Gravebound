@@ -355,6 +355,22 @@ impl ProjectileCollisionWorld {
         Ok(best)
     }
 
+    /// Checks one stationary circle against authored shell and pillar geometry.
+    pub fn is_circle_clear(
+        &self,
+        center: SimulationVector,
+        radius_tiles: f32,
+    ) -> Result<bool, CollisionError> {
+        validate_sweep(center, SimulationVector::default(), radius_tiles)?;
+        Ok(!circle_overlaps_world_solid(
+            center,
+            radius_tiles,
+            self.width_tiles,
+            self.height_tiles,
+            &self.pillars,
+        ))
+    }
+
     fn collect_shell_hits(
         &self,
         start: SimulationVector,

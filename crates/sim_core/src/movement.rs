@@ -291,6 +291,24 @@ impl PlayerMovementState {
         Ok(step)
     }
 
+    /// Applies a simulation-owned body separation without preserving inward momentum.
+    pub fn apply_body_separation(
+        &mut self,
+        position: SimulationVector,
+        arena: &ArenaGeometry,
+    ) -> Result<MovementStep, MovementError> {
+        let mut staged = *self;
+        staged.position = position;
+        staged.velocity = SimulationVector::default();
+        staged.validate(arena)?;
+        *self = staged;
+        Ok(MovementStep {
+            position,
+            velocity: SimulationVector::default(),
+            collided: true,
+        })
+    }
+
     /// Applies one authoritative movement-ability segment, stopping exactly at the first solid.
     pub fn apply_forced_displacement(
         &mut self,
@@ -781,6 +799,24 @@ mod tests {
         assert!((moved.position.x - 9.0).abs() < 1.0e-5);
         assert_eq!(moved.body, Some(boss));
         assert_eq!(moved.solid, None);
+    }
+
+    #[test]
+    fn body_separation_repositions_atomically_and_clears_velocity() {
+        let arena = arena(20_000, 20_000, TilePoint::new(8_000, 10_000), vec![]);
+        let mut player = PlayerMovementState::at_arena_spawn(&arena).expect("player");
+        player
+            .step(MovementAction::new(1, 0), &arena)
+            .expect("accelerate");
+        assert!(player.velocity().x > 0.0);
+        let separated = player
+            .apply_body_separation(SimulationVector::new(7.5, 10.0), &arena)
+            .expect("separation");
+        assert_eq!(separated.position, SimulationVector::new(7.5, 10.0));
+        assert_eq!(separated.velocity, SimulationVector::default());
+        assert!(separated.collided);
+        assert_eq!(player.position(), separated.position);
+        assert_eq!(player.velocity(), separated.velocity);
     }
 
     #[test]

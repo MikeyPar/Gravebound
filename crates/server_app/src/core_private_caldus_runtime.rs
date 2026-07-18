@@ -267,7 +267,7 @@ impl CorePrivateCaldusRuntime {
         let player = players
             .get_mut(&self.participant.entity_id)
             .ok_or(CorePrivateCaldusRuntimeError::InvalidComposition)?;
-        let (combat, movement) = step_live_player_combat_with_bodies(
+        let (combat, mut movement) = step_live_player_combat_with_bodies(
             player,
             &mut movement_state,
             &input.action,
@@ -285,6 +285,15 @@ impl CorePrivateCaldusRuntime {
             &combat,
             &mut players,
         )?;
+        let resolved_player_position = players
+            .get(&self.participant.entity_id)
+            .ok_or(CorePrivateCaldusRuntimeError::InvalidComposition)?
+            .target
+            .position;
+        if resolved_player_position != movement_state.position() {
+            movement =
+                movement_state.apply_body_separation(resolved_player_position, &self.arena)?;
+        }
         if lock
             .events
             .iter()

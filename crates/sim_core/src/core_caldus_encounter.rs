@@ -8,13 +8,15 @@ use std::collections::BTreeMap;
 use thiserror::Error;
 
 use crate::{
-    AppliedHostileDamage, ArenaGeometry, CoreBossParticipant, CoreBossParticipantLock,
-    CoreCaldusBodyError, CoreCaldusBodyEvent, CoreCaldusBodySimulation, CoreCaldusBodyTarget,
-    CoreCaldusDamageEvent, CoreCaldusDefeat, CoreCaldusError, CoreCaldusEvent,
-    CoreCaldusFriendlyInput, CoreCaldusHealthError, CoreCaldusHealthSimulation, CoreCaldusInput,
+    AppliedHostileDamage, ArenaGeometry, CALDUS_COLLISION_RADIUS_TILES, CollisionError,
+    CoreBossParticipant, CoreBossParticipantLock, CoreCaldusBodyError, CoreCaldusBodyEvent,
+    CoreCaldusBodySimulation, CoreCaldusBodyTarget, CoreCaldusChargeAxis, CoreCaldusDamageEvent,
+    CoreCaldusDefeat, CoreCaldusError, CoreCaldusEvent, CoreCaldusFriendlyInput,
+    CoreCaldusHealthError, CoreCaldusHealthSimulation, CoreCaldusInput,
     CoreCaldusProjectileRelease, CoreCaldusSimulation, CoreCaldusTargetInput, DamageType,
     EnemyLabPlayer, EntityId, EntityIdAllocator, HostileDamagePolicy, HostileError, HostileEvent,
-    HostileProjectile, HostileProjectileSimulation, HostileStep, Tick,
+    HostileProjectile, HostileProjectileSimulation, HostileStep, PLAYER_COLLISION_RADIUS_TILES,
+    ProjectileCollisionWorld, SimulationVector, Tick,
     apply_hostile_contact_transaction_with_policy,
 };
 
@@ -42,6 +44,15 @@ pub struct CoreCaldusChargeDamageEvent {
     pub damage: AppliedHostileDamage,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CoreCaldusPlayerSeparationEvent {
+    pub tick: Tick,
+    pub participant: CoreBossParticipant,
+    pub boss_position: SimulationVector,
+    pub from: SimulationVector,
+    pub to: SimulationVector,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct CoreCaldusEncounterStep {
     pub tick: Tick,
@@ -49,6 +60,7 @@ pub struct CoreCaldusEncounterStep {
     pub scheduler_events: Vec<CoreCaldusEvent>,
     pub body_events: Vec<CoreCaldusBodyEvent>,
     pub hostile_spawn_events: Vec<HostileEvent>,
+    pub player_separations: Vec<CoreCaldusPlayerSeparationEvent>,
     pub charge_damage: Vec<CoreCaldusChargeDamageEvent>,
     pub hostile_step: HostileStep,
     pub defeat: Option<CoreCaldusDefeat>,
@@ -195,6 +207,7 @@ impl CoreCaldusEncounterSimulation {
         let body_events = self
             .body
             .advance(&self.arena, &scheduler_events, &body_targets)?;
+        let player_separations = self.resolve_charge_overlaps(&body_events, players)?;
         let cleared_projectiles = if scheduler_events
             .iter()
             .any(|event| matches!(event, CoreCaldusEvent::HostilesCleared { .. }))
@@ -233,6 +246,7 @@ impl CoreCaldusEncounterSimulation {
             scheduler_events,
             body_events,
             hostile_spawn_events,
+            player_separations,
             charge_damage,
             hostile_step,
             defeat: health_step.defeat,
@@ -352,6 +366,93 @@ impl CoreCaldusEncounterSimulation {
         }
         Ok(output)
     }
+
+    fn resolve_charge_overlaps(
+        &self,
+        events: &[CoreCaldusBodyEvent],
+        players: &mut BTreeMap<EntityId, EnemyLabPlayer>,
+    ) -> Result<Vec<CoreCaldusPlayerSeparationEvent>, CoreCaldusEncounterError> {
+        let Some((tick, charge_axis)) = events.iter().find_map(|event| match event {
+            CoreCaldusBodyEvent::ChargeMoved { tick, axis, .. } => Some((*tick, *axis)),
+            _ => None,
+        }) else {
+            return Ok(Vec::new());
+        };
+        let boss_position = self.body.simulation_position();
+        let static_world = ProjectileCollisionWorld::new(&self.arena, Vec::new())?;
+        let combined_radius = CALDUS_COLLISION_RADIUS_TILES + PLAYER_COLLISION_RADIUS_TILES;
+        let combined_squared = combined_radius * combined_radius;
+        let reverse_axis = reverse_charge_axis(charge_axis);
+        let cardinal_directions = clockwise_cardinals_from(reverse_axis);
+        let mut participants = self.lock.participants.clone();
+        participants.sort_by_key(|participant| (participant.party_slot, participant.entity_id));
+        let mut output = Vec::new();
+        for participant in participants {
+            let player = players
+                .get_mut(&participant.entity_id)
+                .ok_or(CoreCaldusEncounterError::PlayerMapMismatch)?;
+            if player.consumables.vitals().current_health() == 0 {
+                continue;
+            }
+            let from = player.target.position;
+            let delta = from - boss_position;
+            let distance_squared = delta.length_squared();
+            if distance_squared >= combined_squared {
+                continue;
+            }
+            let radial = if distance_squared > f32::EPSILON {
+                delta * (combined_radius / distance_squared.sqrt())
+            } else {
+                reverse_axis * combined_radius
+            };
+            let candidates = std::iter::once(boss_position + radial).chain(
+                cardinal_directions
+                    .into_iter()
+                    .map(|direction| boss_position + direction * combined_radius),
+            );
+            let mut legal = None;
+            for candidate in candidates {
+                if static_world.is_circle_clear(candidate, PLAYER_COLLISION_RADIUS_TILES)? {
+                    legal = Some(candidate);
+                    break;
+                }
+            }
+            let to =
+                legal.ok_or(CoreCaldusEncounterError::NoLegalPlayerSeparation { participant })?;
+            player.target.position = to;
+            output.push(CoreCaldusPlayerSeparationEvent {
+                tick,
+                participant,
+                boss_position,
+                from,
+                to,
+            });
+        }
+        Ok(output)
+    }
+}
+
+const fn reverse_charge_axis(axis: CoreCaldusChargeAxis) -> SimulationVector {
+    match axis {
+        CoreCaldusChargeAxis::East => SimulationVector::new(-1.0, 0.0),
+        CoreCaldusChargeAxis::South => SimulationVector::new(0.0, -1.0),
+        CoreCaldusChargeAxis::West => SimulationVector::new(1.0, 0.0),
+        CoreCaldusChargeAxis::North => SimulationVector::new(0.0, 1.0),
+    }
+}
+
+fn clockwise_cardinals_from(first: SimulationVector) -> [SimulationVector; 4] {
+    const CARDINALS: [SimulationVector; 4] = [
+        SimulationVector::new(1.0, 0.0),
+        SimulationVector::new(0.0, 1.0),
+        SimulationVector::new(-1.0, 0.0),
+        SimulationVector::new(0.0, -1.0),
+    ];
+    let start = CARDINALS
+        .iter()
+        .position(|direction| *direction == first)
+        .unwrap_or(2);
+    std::array::from_fn(|offset| CARDINALS[(start + offset) % CARDINALS.len()])
 }
 
 fn scheduler_releases(
@@ -413,6 +514,10 @@ pub enum CoreCaldusEncounterError {
     NonFinitePlayerPosition,
     #[error("Caldus squared target distance exceeds scheduler input range")]
     DistanceOverflow,
+    #[error("Caldus charge could not legally separate participant {participant:?}")]
+    NoLegalPlayerSeparation { participant: CoreBossParticipant },
+    #[error(transparent)]
+    Collision(#[from] CollisionError),
     #[error(transparent)]
     Scheduler(#[from] CoreCaldusError),
     #[error(transparent)]
@@ -687,10 +792,12 @@ mod tests {
             }
         )));
         let mut charge_damage = Vec::new();
+        let mut player_separations = Vec::new();
         let mut stop_ring_projectiles = 0;
         for _ in 1..=167 {
             let step = encounter.step(&[], &mut players).expect("advance");
             charge_damage.extend(step.charge_damage);
+            player_separations.extend(step.player_separations);
             if step
                 .body_events
                 .iter()
@@ -707,6 +814,80 @@ mod tests {
         );
         assert_eq!(stop_ring_projectiles, 12);
         assert!(players[&id(10)].consumables.vitals().current_health() < 128);
+        assert!(!player_separations.is_empty());
+        assert!(player_separations.iter().all(|event| {
+            ((event.to - event.boss_position).length()
+                - (CALDUS_COLLISION_RADIUS_TILES + PLAYER_COLLISION_RADIUS_TILES))
+                .abs()
+                < 1.0e-5
+        }));
+    }
+
+    #[test]
+    fn blocked_radial_separation_uses_reverse_charge_axis() {
+        let mut blocked_arena = arena();
+        blocked_arena.pillars = vec![crate::TileRectangle::new(10_200, 8_900, 100, 200)];
+        let encounter = CoreCaldusEncounterSimulation::new(
+            lock(),
+            blocked_arena,
+            id(99),
+            EntityIdAllocator::starting_at(NonZeroU64::new(1_000).expect("nonzero")),
+        )
+        .expect("encounter");
+        let mut players = players();
+        players.get_mut(&id(10)).expect("player").target.position = SimulationVector::new(9.5, 9.0);
+        let events = [CoreCaldusBodyEvent::ChargeMoved {
+            tick: Tick(0),
+            cast_id: 7,
+            segment_index: 0,
+            from: crate::CoreWorldPosition::new(8_000, 9_000),
+            to: crate::CoreWorldPosition::new(9_000, 9_000),
+            axis: CoreCaldusChargeAxis::East,
+            blocked_by: None,
+            contacts: vec![participant()],
+        }];
+        let separated = encounter
+            .resolve_charge_overlaps(&events, &mut players)
+            .expect("fallback separation");
+        assert_eq!(separated.len(), 1);
+        assert_eq!(separated[0].to, SimulationVector::new(8.0, 9.0));
+        assert_eq!(players[&id(10)].target.position, separated[0].to);
+    }
+
+    #[test]
+    fn unavailable_separation_fails_without_mutating_players() {
+        let mut blocked_arena = arena();
+        blocked_arena.pillars = vec![
+            crate::TileRectangle::new(10_200, 8_900, 100, 200),
+            crate::TileRectangle::new(8_900, 10_200, 200, 100),
+            crate::TileRectangle::new(7_700, 8_900, 100, 200),
+            crate::TileRectangle::new(8_900, 7_700, 200, 100),
+        ];
+        let encounter = CoreCaldusEncounterSimulation::new(
+            lock(),
+            blocked_arena,
+            id(99),
+            EntityIdAllocator::starting_at(NonZeroU64::new(1_000).expect("nonzero")),
+        )
+        .expect("encounter");
+        let mut players = players();
+        players.get_mut(&id(10)).expect("player").target.position = SimulationVector::new(9.0, 9.0);
+        let before = players.clone();
+        let events = [CoreCaldusBodyEvent::ChargeMoved {
+            tick: Tick(0),
+            cast_id: 7,
+            segment_index: 0,
+            from: crate::CoreWorldPosition::new(8_000, 9_000),
+            to: crate::CoreWorldPosition::new(9_000, 9_000),
+            axis: CoreCaldusChargeAxis::East,
+            blocked_by: None,
+            contacts: vec![participant()],
+        }];
+        assert!(matches!(
+            encounter.resolve_charge_overlaps(&events, &mut players),
+            Err(CoreCaldusEncounterError::NoLegalPlayerSeparation { .. })
+        ));
+        assert_eq!(players, before);
     }
 
     #[test]

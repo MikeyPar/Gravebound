@@ -33,6 +33,14 @@ pub struct CoreCaldusBodyTarget {
     pub damageable: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoreCaldusChargeAxis {
+    East,
+    South,
+    West,
+    North,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CoreCaldusBodyEvent {
     ChargeLocked {
@@ -49,6 +57,7 @@ pub enum CoreCaldusBodyEvent {
         segment_index: u8,
         from: CoreWorldPosition,
         to: CoreWorldPosition,
+        axis: CoreCaldusChargeAxis,
         blocked_by: Option<SolidColliderId>,
         contacts: Vec<CoreBossParticipant>,
     },
@@ -321,6 +330,7 @@ impl CoreCaldusBodySimulation {
             segment_index: charge.next_segment,
             from,
             to,
+            axis: charge_axis(charge.lock.origin, charge.lock.nominal_endpoint)?,
             blocked_by,
             contacts,
         };
@@ -369,6 +379,20 @@ impl CoreCaldusBodySimulation {
             blocked_by,
         });
         Ok(())
+    }
+}
+
+fn charge_axis(
+    origin: CoreWorldPosition,
+    endpoint: CoreWorldPosition,
+) -> Result<CoreCaldusChargeAxis, CoreCaldusBodyError> {
+    let (dx, dy) = position_delta(origin, endpoint);
+    match (dx.signum(), dy.signum()) {
+        (1, 0) => Ok(CoreCaldusChargeAxis::East),
+        (-1, 0) => Ok(CoreCaldusChargeAxis::West),
+        (0, 1) => Ok(CoreCaldusChargeAxis::South),
+        (0, -1) => Ok(CoreCaldusChargeAxis::North),
+        _ => Err(CoreCaldusBodyError::CoincidentChargeTarget),
     }
 }
 
