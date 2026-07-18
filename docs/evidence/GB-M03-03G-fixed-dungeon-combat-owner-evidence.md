@@ -38,4 +38,4 @@ Commit `6749141` now binds this component to the persistent `CorePrivateRouteAct
 
 ## Current Next Step
 
-Commits `a2a5b09`, `09c9c9e`, `e1e4d7c`, `83ccbb1`, and `83c75a5` now convert the existing session-owned 30 Hz task in place, generate fixed-room frames, and bind opaque durable `Granted | Ineligible` B3 plus B4 outcomes without re-pending. Next add the transport-independent B3 executor and acknowledgement-gated retained progression/route publication, then add the B5 bridge, authoritative Sir Caldus combat at B6, committed reward/pending-inventory placement, stable B6 exit, and all five terminal producers.
+Commits `a2a5b09`, `09c9c9e`, `e1e4d7c`, `83ccbb1`, `83c75a5`, `3f4ecaf`, and `8a4898d` now own fixed-room frames, durable B3/B4 resolution, automatic acknowledgement-gated publication, and canonical persistent B3 composition. Commit `3c05a36` removes the B6 tick rewind. Next consume the committed B5 boss-staging handoff into authoritative route-bound Sir Caldus combat, then add committed reward/pending-inventory placement, stable B6 exit, and all five terminal producers.

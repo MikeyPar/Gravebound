@@ -34,8 +34,8 @@ Commit `a6fb62e` adds the unregistered [`Open`/`Selected`/`Refused` B4 shrine-st
 
 ## Explicit boundary
 
-Commit `e1e4d7c` projects committed/replayed select, refuse, and authoritative no-offer material into B4 through an opaque account/character/lineage-bound receipt. Commit `83ccbb1` adds the durable B3 coordinator and task-owned pending/acknowledgement seam. The disabled ordinary server does not yet invoke it automatically or publish the reliable result after acknowledgement. The route also does not yet construct Sir Caldus at B6, commit boss rewards or pending inventory, expose the stable exit, arbitrate all terminal producers, or enable ordinary native admission.
+Commits `e1e4d7c`, `83ccbb1`, `83c75a5`, `3f4ecaf`, and `8a4898d` project durable B3/B4 authority into the task, acknowledge it without re-pending, publish only afterward across writer generations, and provide canonical persistent composition. Commit `3c05a36` makes every Caldus sub-owner inherit the carried danger tick. The route still does not consume the B5 boss handoff into live B6 combat, commit boss rewards or pending inventory, expose the stable exit, arbitrate all terminal producers, or enable ordinary native admission.
 
 ## Current Next Step
 
-Automatically consume the task-owned B3 pending handoff, apply the [durable B3](GB-M03-03G-durable-b3-reward-authority-evidence.md) and [B4](GB-M03-03G-durable-b4-task-binding-evidence.md) proofs before reliable publication, and prove response-loss/reconnect/process-restart convergence. Next implement the B5 bridge, Sir Caldus at B6, durable rewards/pending inventory, the stable B6 exit, and terminal composition.
+Consume the committed B5 boss-staging handoff into one route-bound Caldus owner at the inherited tick. Drive exact staging, countdown, introduction, and combat phases before adding durable rewards/pending inventory, the stable B6 exit, terminal composition, and hosted restart evidence.
