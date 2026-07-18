@@ -36,6 +36,7 @@ serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
 sysinfo.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

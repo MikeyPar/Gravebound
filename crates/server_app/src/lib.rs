@@ -17,6 +17,7 @@ mod core_lifecycle;
 mod core_private_life_foundation;
 mod core_private_life_runtime_bootstrap;
 mod core_private_life_session;
+mod core_private_microrealm_driver;
 mod core_private_microrealm_runtime;
 mod core_private_route_actor;
 mod core_private_world_flow;
@@ -104,6 +105,15 @@ pub use core_private_life_session::{
     CorePrivateLifeSessionDirectory, CorePrivateLifeSessionError, CorePrivateLifeSessionReport,
     CorePrivateLifeSessionSnapshot, CorePrivateLifeTransportAttach, CorePrivateLifeTransportDetach,
     CorePrivateLifeTransportGeneration, CorePrivateLifeTransportLease,
+};
+pub use core_private_microrealm_driver::{
+    CorePrivateMicrorealmAbility, CorePrivateMicrorealmAbilityPress, CorePrivateMicrorealmDriver,
+    CorePrivateMicrorealmDriverError, CorePrivateMicrorealmDriverFault,
+    CorePrivateMicrorealmDriverHandle, CorePrivateMicrorealmDriverObserver,
+    CorePrivateMicrorealmDriverOutcome, CorePrivateMicrorealmDriverReport,
+    CorePrivateMicrorealmDriverState, CorePrivateMicrorealmFaultKind,
+    CorePrivateMicrorealmIngressError, CorePrivateMicrorealmObservationError,
+    CorePrivateMicrorealmRetainedInput, active_core_microrealm_driver_tasks,
 };
 pub use core_private_microrealm_runtime::{
     CoreMicrorealmPackClearProof, CorePrivateMicrorealmInput, CorePrivateMicrorealmRuntime,
