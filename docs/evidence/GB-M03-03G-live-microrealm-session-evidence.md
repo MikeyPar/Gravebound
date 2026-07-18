@@ -21,7 +21,7 @@ Commit `e5e1a9b` makes the live microrealm owner part of the persistent private-
 - Shutdown clears retained runtime ownership and reports the remaining binding count as part of the zero-residue contract.
 - The session never awaits the microrealm mutex while holding its own directory lock. It stores the immutable route lease beside the runtime, preserving a single lock order.
 
-Normal route admission remains disabled. This slice retains the live owner but does not yet provide the server scheduler, combat-clear producer, fixed-room combat, rewards, pending inventory, or complete terminal-producer composition.
+Normal route admission remains disabled. Follow-on commits `302ccb3`, `f07a282`, and `587924e` now provide the lifecycle-free Bell pack owner, exact mutable combat handoff, and action-only server-generated combat frames recorded in [`GB-M03-03G-live-microrealm-combat-evidence.md`](GB-M03-03G-live-microrealm-combat-evidence.md). The independent 30 Hz session driver, Slipstep collision, fixed-room combat, rewards, pending inventory, and complete terminal-producer composition remain open.
 
 ## Verification
 
@@ -38,4 +38,4 @@ The focused proof binds a live compiled microrealm, replaces its transport, reje
 
 ## Current Next Step
 
-Attach the retained microrealm owner to the 30 Hz server scheduler and compose the authoritative `pack.bell.01` spawn/combat/clear producer. Then extend the same live ownership pattern through fixed B0-B6 combat, rewards, pending inventory, and all five terminal producers before enabling normal admission.
+Drive the retained action-only owner from the session's independent 30 Hz scheduler using bounded latest-state input, compose Slipstep through the same collision transaction, then extend the single combat handoff through fixed B0-B6 rooms, rewards, pending inventory, and all five terminal producers before enabling normal admission.
