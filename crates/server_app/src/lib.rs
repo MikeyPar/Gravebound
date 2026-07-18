@@ -17,6 +17,7 @@ mod core_private_route_actor;
 mod core_private_world_flow;
 mod core_recall_outbox;
 mod core_recall_runtime;
+mod core_reliable_writer;
 mod core_terminal_coordinator;
 mod death_view_service;
 mod durable_death_execution;
@@ -95,14 +96,17 @@ pub use core_private_world_flow::{
 pub use core_recall_outbox::{
     CORE_RECALL_COMPLETION_OUTBOX_CAPACITY, CoreRecallCompletionDelivery,
     CoreRecallCompletionInbox, CoreRecallCompletionOutbox, CoreRecallOutboxError,
-    CoreRecallReliableWriter, CoreRecallResponsePermit, CoreReliableSequence,
-    core_recall_completion_outbox,
+    core_recall_completion_outbox, send_recall_publication,
 };
 pub use core_recall_runtime::{
     CoreRecallActorDirectory, CoreRecallActorRegistration, CoreRecallAuthoritativeTick,
     CoreRecallConnectionAuthority, CoreRecallConnectionLease, CoreRecallRuntimeError,
     CoreRecallRuntimeReport, CoreRecallTransportAttach,
 };
+pub use core_reliable_writer::{
+    CORE_RELIABLE_WRITE_UNCERTAIN_CLOSE_CODE, CoreReliableWriter, CoreReliableWriterError,
+};
+pub type CoreRecallReliableWriter = CoreReliableWriter;
 pub use core_terminal_coordinator::{
     CoreNonTerminalAdmission, CoreTerminalBarrierProgress, CoreTerminalCoordinator,
     CoreTerminalCoordinatorError, CoreTerminalEvaluation, CoreTerminalEvaluationAccepted,
@@ -616,7 +620,7 @@ where
     Ok(response)
 }
 
-async fn write_reliable_response(
+pub(crate) async fn write_reliable_response(
     mut send: quinn::SendStream,
     response: &protocol::ReliableEventFrame,
 ) -> Result<(), ServerTransportError> {
@@ -648,7 +652,7 @@ pub async fn serve_core_reliable<R, C, G, E, W, P, D, OC, BC, HA, SA, RA>(
     extraction: &CoreExtractionTerminalAuthority,
     recall: &RA,
     authenticated: AuthenticatedAccount,
-    response_sequence: u32,
+    response_writer: &CoreReliableWriter,
     server_tick: u64,
 ) -> Result<protocol::ReliableEventFrame, ServerTransportError>
 where
@@ -665,9 +669,6 @@ where
     SA: CoreSuccessorIntentAuthority,
     RA: CoreRecallIntentAuthority,
 {
-    if response_sequence == 0 {
-        return Err(ServerTransportError::UnexpectedMessage);
-    }
     let (send, mut receive) = connection
         .accept_bi()
         .await
@@ -751,13 +752,10 @@ where
         }
         _ => return Err(ServerTransportError::UnexpectedMessage),
     };
-    let response = protocol::ReliableEventFrame {
-        sequence: response_sequence,
-        server_tick: response_server_tick,
-        event,
-    };
-    write_reliable_response(send, &response).await?;
-    Ok(response)
+    response_writer
+        .send_response(send, response_server_tick, event)
+        .await
+        .map_err(ServerTransportError::from)
 }
 
 pub fn close_transport(connection: &quinn::Connection, close_code: u32, reason: &'static [u8]) {
@@ -768,7 +766,7 @@ pub fn close_transport(connection: &quinn::Connection, close_code: u32, reason: 
 ///
 /// The caller owns sequencing and durable replay. A transport failure never rolls
 /// back the already committed domain outcome.
-pub async fn send_server_reliable_event(
+pub(crate) async fn send_server_reliable_event(
     connection: &quinn::Connection,
     event: &protocol::ReliableEventFrame,
 ) -> Result<(), ServerTransportError> {
@@ -808,10 +806,25 @@ pub enum ServerTransportError {
     Codec(#[from] protocol::WireCodecError),
     #[error("client sent a non-hello message on the handshake stream")]
     UnexpectedMessage,
+    #[error("Core reliable event sequence is exhausted")]
+    ReliableSequenceExhausted,
+    #[error("Core reliable writer is unavailable")]
+    ReliableWriterUnavailable,
     #[error("authoritative session failed: {0}")]
     Session(#[from] SessionError),
     #[error("logical session lifecycle failed: {0}")]
     Lifecycle(#[from] LifecycleError),
+}
+
+impl From<CoreReliableWriterError> for ServerTransportError {
+    fn from(error: CoreReliableWriterError) -> Self {
+        match error {
+            CoreReliableWriterError::InvalidEvent => Self::UnexpectedMessage,
+            CoreReliableWriterError::SequenceExhausted => Self::ReliableSequenceExhausted,
+            CoreReliableWriterError::Unavailable => Self::ReliableWriterUnavailable,
+            CoreReliableWriterError::Transport(error) => error,
+        }
+    }
 }
 
 #[cfg(test)]

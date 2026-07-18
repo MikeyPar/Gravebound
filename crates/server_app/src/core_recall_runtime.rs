@@ -28,8 +28,8 @@ use crate::{
     CoreRecallIntentReply, CoreRecallReliableWriter, ProductionRecallClock,
     ProductionRecallDetachOutcome, ProductionRecallIntentActor, ProductionRecallPublishedV1,
     ProductionRecallSessionError, ProductionRecallSessionLifecycle,
-    ProductionRecallTransportGeneration, core_recall_completion_outbox,
-    production_recall_actor_mailbox,
+    ProductionRecallTransportGeneration, TRANSPORT_REPLACED_CLOSE_CODE,
+    core_recall_completion_outbox, production_recall_actor_mailbox, send_recall_publication,
 };
 
 pub trait CoreRecallAuthoritativeTick: Send + Sync {
@@ -256,7 +256,13 @@ where
                     writer: Arc::new(CoreRecallReliableWriter::new(connection)),
                 },
             )
-            .map(|active| active.writer.connection().clone());
+            .map(|active| {
+                active.writer.retire(
+                    TRANSPORT_REPLACED_CLOSE_CODE,
+                    b"authoritative transport handoff",
+                );
+                active.writer.connection().clone()
+            });
         Ok(CoreRecallTransportAttach {
             lease,
             invalidated_connection,
@@ -461,26 +467,39 @@ where
         account_id: [u8; 16],
         published: ProductionRecallPublishedV1,
     ) -> bool {
-        let writer = {
+        let result_character_id = match &published.result {
+            RecallResultV1::Stored { result, .. } => result.character_id,
+            RecallResultV1::Pending { character_id, .. }
+            | RecallResultV1::Cancelled { character_id, .. }
+            | RecallResultV1::Rejected { character_id, .. } => *character_id,
+        };
+        loop {
+            let (lease, writer) = {
+                let state = self.state.lock().await;
+                let Some(entry) = state.actors.get(&account_id) else {
+                    return false;
+                };
+                if result_character_id != entry.character_id {
+                    return false;
+                }
+                let Some(active) = state.transports.get(&account_id) else {
+                    return false;
+                };
+                (active.lease, Arc::clone(&active.writer))
+            };
+            let delivered = send_recall_publication(writer.as_ref(), &published)
+                .await
+                .is_ok();
             let state = self.state.lock().await;
-            let Some(entry) = state.actors.get(&account_id) else {
-                return false;
-            };
-            let result_character_id = match &published.result {
-                RecallResultV1::Stored { result, .. } => result.character_id,
-                RecallResultV1::Pending { character_id, .. }
-                | RecallResultV1::Cancelled { character_id, .. }
-                | RecallResultV1::Rejected { character_id, .. } => *character_id,
-            };
-            if result_character_id != entry.character_id {
-                return false;
-            }
             let Some(active) = state.transports.get(&account_id) else {
                 return false;
             };
-            Arc::clone(&active.writer)
-        };
-        writer.send_publication(published).await.is_ok()
+            if active.lease == lease {
+                return delivered;
+            }
+            // A committed publication may have raced the authoritative handoff. Retry the same
+            // durable result in the winning generation's independent sequence space.
+        }
     }
 }
 
@@ -597,15 +616,14 @@ where
 mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use protocol::{
-        CharacterLocation, CharacterLocationSnapshot, RecallIntentV1, RecallTerminalTriggerV1,
-        ReliableEvent, SafeArrival, StoredRecallTerminalResultV1, TERMINAL_HALL_CONTENT_ID,
-        TerminalInventoryRejectionCodeV1, TerminalVersionAdvanceV1, TerminalVersionVectorV1,
-        WireText,
-    };
-
     use super::*;
     use crate::{AccountId, ProductionRecallPendingAuthorityV1};
+    use protocol::{
+        ActionResultCode, CharacterLocation, CharacterLocationSnapshot, RecallIntentV1,
+        RecallTerminalTriggerV1, ReliableEvent, SafeArrival, StoredRecallTerminalResultV1,
+        TERMINAL_HALL_CONTENT_ID, TerminalInventoryRejectionCodeV1, TerminalVersionAdvanceV1,
+        TerminalVersionVectorV1, WireMessage, WireText, decode_frame,
+    };
 
     const ACCOUNT_ID: [u8; 16] = [41; 16];
     const CHARACTER_ID: [u8; 16] = [42; 16];
@@ -759,9 +777,33 @@ mod tests {
             .await
             .unwrap();
         let writer = directory.reliable_writer(attached.lease).await.unwrap();
-        let response = writer.begin_response().await.unwrap();
-        assert_eq!(response.sequence(), 1);
-        drop(response);
+        let (mut client_send, mut client_receive) = client.open_bi().await.unwrap();
+        client_send.write_all(&[1]).await.unwrap();
+        client_send.finish().unwrap();
+        let (server_send, mut server_receive) = writer.connection().accept_bi().await.unwrap();
+        assert_eq!(server_receive.read_to_end(1).await.unwrap(), vec![1]);
+        let response = writer
+            .send_response(
+                server_send,
+                111,
+                ReliableEvent::ActionResult {
+                    action_sequence: 9,
+                    code: ActionResultCode::Accepted,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.sequence, 1);
+        assert_eq!(response.server_tick, 111);
+        let response_bytes = client_receive
+            .read_to_end(protocol::RELIABLE_FRAME_LIMIT)
+            .await
+            .unwrap();
+        let WireMessage::ReliableEvent(received_response) = decode_frame(&response_bytes).unwrap()
+        else {
+            panic!("expected reliable response frame");
+        };
+        assert_eq!(received_response, response);
 
         registration
             .completion_outbox
@@ -795,6 +837,72 @@ mod tests {
         client.close(0_u32.into(), b"test complete");
         server_endpoint.wait_idle().await;
         client_endpoint.wait_idle().await;
+    }
+
+    #[tokio::test]
+    async fn completion_after_handoff_uses_only_the_winning_transport_generation() {
+        let tick_source = Arc::new(TickSource(AtomicU64::new(100)));
+        let directory = Arc::new(CoreRecallActorDirectory::new(tick_source));
+        directory
+            .register_actor(authenticated(), actor())
+            .await
+            .unwrap();
+        let (first_server_endpoint, first_client_endpoint, first_client, first_server) =
+            live_connection_pair().await;
+        let first = directory
+            .attach_transport(authenticated(), first_server)
+            .await
+            .unwrap();
+        let first_writer = directory.reliable_writer(first.lease).await.unwrap();
+        let blocked_sequence = first_writer.hold_sequence_for_test().await;
+        let delivery_directory = Arc::clone(&directory);
+        let delivery_task = tokio::spawn(async move {
+            delivery_directory
+                .deliver_publication(ACCOUNT_ID, publication())
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while Arc::strong_count(&first_writer) < 3 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let (second_server_endpoint, second_client_endpoint, second_client, second_server) =
+            live_connection_pair().await;
+        let second = directory
+            .attach_transport(authenticated(), second_server)
+            .await
+            .unwrap();
+        assert!(second.invalidated_connection.is_some());
+        assert!(!first_writer.is_available());
+        tokio::time::timeout(std::time::Duration::from_secs(5), first_client.closed())
+            .await
+            .unwrap();
+
+        drop(blocked_sequence);
+        assert!(delivery_task.await.unwrap());
+        let pushed = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            bot_client::receive_server_reliable(&second_client),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(pushed.sequence, 1);
+        assert_eq!(pushed.server_tick, 112);
+        assert!(matches!(pushed.event, ReliableEvent::RecallResult(_)));
+
+        for connection in directory.begin_shutdown().await {
+            connection.close(0_u32.into(), b"test shutdown");
+        }
+        assert!(directory.finish_shutdown().await.unwrap().zero_residue);
+        second_client.close(0_u32.into(), b"test complete");
+        first_server_endpoint.wait_idle().await;
+        first_client_endpoint.wait_idle().await;
+        second_server_endpoint.wait_idle().await;
+        second_client_endpoint.wait_idle().await;
     }
 
     #[tokio::test]

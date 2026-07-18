@@ -13,11 +13,11 @@
 
 use protocol::{CharacterLocationSnapshot, ReliableEvent, ReliableEventFrame};
 use thiserror::Error;
-use tokio::sync::{Mutex, MutexGuard, mpsc};
+use tokio::sync::mpsc;
 
 use crate::{
-    CoreRecallTerminalTickOutcome, ProductionRecallExecutionError, ProductionRecallPublishedV1,
-    ServerTransportError, send_server_reliable_event,
+    CoreRecallTerminalTickOutcome, CoreReliableWriter, CoreReliableWriterError,
+    ProductionRecallExecutionError, ProductionRecallPublishedV1,
 };
 
 pub const CORE_RECALL_COMPLETION_OUTBOX_CAPACITY: usize = 8;
@@ -32,36 +32,10 @@ pub struct CoreRecallCompletionInbox {
     receiver: mpsc::Receiver<ProductionRecallPublishedV1>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct CoreReliableSequence {
-    last_sequence: u32,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreRecallCompletionDelivery {
     pub frame: ReliableEventFrame,
     pub hall: CharacterLocationSnapshot,
-}
-
-/// One connection's reliable-event writer. Client responses and server-generated completion
-/// pushes take the same sequence mutex only after a stream/publication is ready, so neither can
-/// reserve a sequence while waiting indefinitely for the other producer.
-#[derive(Debug)]
-pub struct CoreRecallReliableWriter {
-    connection: quinn::Connection,
-    sequence: Mutex<CoreReliableSequence>,
-}
-
-pub struct CoreRecallResponsePermit<'a> {
-    _sequence_guard: MutexGuard<'a, CoreReliableSequence>,
-    sequence: u32,
-}
-
-impl CoreRecallResponsePermit<'_> {
-    #[must_use]
-    pub const fn sequence(&self) -> u32 {
-        self.sequence
-    }
 }
 
 #[derive(Debug, Error)]
@@ -72,10 +46,8 @@ pub enum CoreRecallOutboxError {
     Saturated,
     #[error("Recall completion session is unavailable")]
     SessionUnavailable,
-    #[error("Core reliable sequence is exhausted")]
-    SequenceExhausted,
-    #[error("server-initiated Recall delivery failed")]
-    Transport(#[source] ServerTransportError),
+    #[error(transparent)]
+    Writer(#[from] CoreReliableWriterError),
 }
 
 #[must_use]
@@ -122,101 +94,28 @@ impl CoreRecallCompletionOutbox {
     }
 }
 
-impl CoreReliableSequence {
-    #[must_use]
-    pub const fn new() -> Self {
-        Self { last_sequence: 0 }
-    }
-
-    #[must_use]
-    pub const fn last_sequence(self) -> u32 {
-        self.last_sequence
-    }
-
-    pub fn next_sequence(&mut self) -> Result<u32, CoreRecallOutboxError> {
-        self.last_sequence = self
-            .last_sequence
-            .checked_add(1)
-            .ok_or(CoreRecallOutboxError::SequenceExhausted)?;
-        Ok(self.last_sequence)
-    }
-
-    fn frame(
-        &mut self,
-        server_tick: u64,
-        event: ReliableEvent,
-    ) -> Result<ReliableEventFrame, CoreRecallOutboxError> {
-        let frame = ReliableEventFrame {
-            sequence: self.next_sequence()?,
+/// Delivers one already committed Recall publication through the transport's shared writer.
+/// Transport loss cannot alter the durable replay state owned by the terminal repository.
+pub async fn send_recall_publication(
+    writer: &CoreReliableWriter,
+    published: &ProductionRecallPublishedV1,
+) -> Result<CoreRecallCompletionDelivery, CoreRecallOutboxError> {
+    published
+        .validate()
+        .map_err(CoreRecallOutboxError::InvalidPublication)?;
+    let server_tick = published
+        .completion_tick()
+        .map_err(CoreRecallOutboxError::InvalidPublication)?;
+    let frame = writer
+        .send_event(
             server_tick,
-            event,
-        };
-        frame.validate().map_err(|_| {
-            CoreRecallOutboxError::InvalidPublication(
-                ProductionRecallExecutionError::PublishedReceiptMismatch,
-            )
-        })?;
-        Ok(frame)
-    }
-}
-
-impl CoreRecallReliableWriter {
-    #[must_use]
-    pub fn new(connection: quinn::Connection) -> Self {
-        Self {
-            connection,
-            sequence: Mutex::new(CoreReliableSequence::new()),
-        }
-    }
-
-    #[must_use]
-    pub const fn connection(&self) -> &quinn::Connection {
-        &self.connection
-    }
-
-    /// Reserves one response sequence after the caller has accepted a concrete request stream.
-    /// Retaining the permit through response delivery serializes it with server pushes.
-    pub async fn begin_response(
-        &self,
-    ) -> Result<CoreRecallResponsePermit<'_>, CoreRecallOutboxError> {
-        let mut sequence_guard = self.sequence.lock().await;
-        let sequence = sequence_guard.next_sequence()?;
-        Ok(CoreRecallResponsePermit {
-            _sequence_guard: sequence_guard,
-            sequence,
-        })
-    }
-
-    /// Delivers one already committed publication while holding the same sequence authority used
-    /// by client-request responses. Transport loss never changes its durable replay state.
-    pub async fn send_publication(
-        &self,
-        published: ProductionRecallPublishedV1,
-    ) -> Result<CoreRecallCompletionDelivery, CoreRecallOutboxError> {
-        published
-            .validate()
-            .map_err(CoreRecallOutboxError::InvalidPublication)?;
-        let server_tick = published
-            .completion_tick()
-            .map_err(CoreRecallOutboxError::InvalidPublication)?;
-        let mut sequence = self.sequence.lock().await;
-        let frame = sequence.frame(
-            server_tick,
-            ReliableEvent::RecallResult(Box::new(published.result)),
-        )?;
-        send_server_reliable_event(&self.connection, &frame)
-            .await
-            .map_err(CoreRecallOutboxError::Transport)?;
-        Ok(CoreRecallCompletionDelivery {
-            frame,
-            hall: published.hall,
-        })
-    }
-
-    #[must_use]
-    pub async fn last_sequence(&self) -> u32 {
-        self.sequence.lock().await.last_sequence()
-    }
+            ReliableEvent::RecallResult(Box::new(published.result.clone())),
+        )
+        .await?;
+    Ok(CoreRecallCompletionDelivery {
+        frame,
+        hall: published.hall.clone(),
+    })
 }
 
 impl CoreRecallCompletionInbox {
@@ -242,32 +141,6 @@ impl CoreRecallCompletionInbox {
             retired = retired.saturating_add(1);
         }
         retired
-    }
-
-    /// Sends the next committed completion on a server-initiated QUIC stream. `Ok(None)` means
-    /// every producer handle has retired and no queued completion remains.
-    pub async fn send_next(
-        &mut self,
-        connection: &quinn::Connection,
-        sequence: &mut CoreReliableSequence,
-    ) -> Result<Option<CoreRecallCompletionDelivery>, CoreRecallOutboxError> {
-        let Some(published) = self.receiver.recv().await else {
-            return Ok(None);
-        };
-        let server_tick = published
-            .completion_tick()
-            .map_err(CoreRecallOutboxError::InvalidPublication)?;
-        let frame = sequence.frame(
-            server_tick,
-            ReliableEvent::RecallResult(Box::new(published.result.clone())),
-        )?;
-        send_server_reliable_event(connection, &frame)
-            .await
-            .map_err(CoreRecallOutboxError::Transport)?;
-        Ok(Some(CoreRecallCompletionDelivery {
-            frame,
-            hall: published.hall,
-        }))
     }
 }
 
@@ -374,29 +247,6 @@ mod tests {
         assert!(matches!(
             outbox.try_publish(published()),
             Err(CoreRecallOutboxError::SessionUnavailable)
-        ));
-    }
-
-    #[test]
-    fn sequence_is_shared_across_request_responses_and_push_delivery() {
-        let mut sequence = CoreReliableSequence::new();
-        assert_eq!(sequence.next_sequence().unwrap(), 1);
-        let pushed = sequence
-            .frame(
-                112,
-                ReliableEvent::RecallResult(Box::new(published().result)),
-            )
-            .unwrap();
-        assert_eq!(pushed.sequence, 2);
-        assert_eq!(pushed.server_tick, 112);
-        assert_eq!(sequence.last_sequence(), 2);
-
-        let mut exhausted = CoreReliableSequence {
-            last_sequence: u32::MAX,
-        };
-        assert!(matches!(
-            exhausted.next_sequence(),
-            Err(CoreRecallOutboxError::SequenceExhausted)
         ));
     }
 }

@@ -34,8 +34,8 @@ use crate::{
     AccountId, AccountRepository, AdmissionState, AuthenticatedAccount, AuthenticatedNamespace,
     AuthenticationDecision, Blake3CharacterIds, CoreBargainAuthority,
     CoreExtractionTerminalAuthority, CoreOathSelectionAuthority, CoreRecallTerminalAuthority,
-    CoreResolutionHoldAuthority, CoreSafeInventoryAuthority, CoreSuccessorAuthority,
-    DeathViewRepository, DeathViewService, DisabledDeathViewRepository,
+    CoreReliableWriter, CoreResolutionHoldAuthority, CoreSafeInventoryAuthority,
+    CoreSuccessorAuthority, DeathViewRepository, DeathViewService, DisabledDeathViewRepository,
     DisabledProgressionQueryRepository, HandshakePolicy, IdentityClock, IdentityService,
     InMemoryAccountRepository, InstanceError, InstanceScheduler, NoopIdentityEventSink,
     PostgresAccountRepository, PostgresBargainService, PostgresDeathViewRepository,
@@ -894,11 +894,8 @@ where
         account_id,
         namespace: AuthenticatedNamespace::WipeableTest,
     };
-    let mut response_sequence = 0_u32;
+    let response_writer = CoreReliableWriter::new(connection.clone());
     loop {
-        response_sequence = response_sequence
-            .checked_add(1)
-            .ok_or(LocalServerRuntimeError::IdentityExhausted)?;
         if serve_core_reliable(
             &connection,
             authority.as_ref(),
@@ -913,7 +910,7 @@ where
             extraction.as_ref(),
             recall.as_ref(),
             authenticated,
-            response_sequence,
+            &response_writer,
             0,
         )
         .await

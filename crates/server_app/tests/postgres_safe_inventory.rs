@@ -23,16 +23,16 @@ use server_app::{
     AccountId, AdmissionState, AuthenticatedAccount, AuthenticatedNamespace,
     AuthenticationDecision, CharacterIdGenerator, CoreBargainAuthority,
     CoreExtractionTerminalAuthority, CoreOathSelectionAuthority, CoreRecallTerminalAuthority,
-    CoreResolutionHoldAuthority, CoreSafeInventoryAuthority, CoreSuccessorAuthority,
-    DeathViewService, DisabledDeathViewRepository, FieldEquipmentConfirmCommand,
-    FieldEquipmentPreviewSource, HandshakePolicy, IdentityClock, IdentityService,
-    NoopIdentityEventSink, PostgresAccountRepository, PostgresFieldEquipmentService,
-    PostgresProgressionAwardService, PostgresProgressionQueryRepository, PostgresRewardService,
-    PostgresSafeInventoryService, PostgresWorldFlowLocationRepository, ProgressionAwardCode,
-    ProgressionAwardCommand, ProgressionAwardEvidence, ProgressionAwardPayload,
-    ProgressionQueryService, RewardGrantContext, RewardGrantTransaction, RewardPlacement,
-    SafeInventoryServiceError, SecretRewardEpoch, WorldFlowGateService,
-    initialize_postgres_starter, serve_core_reliable, serve_handshake,
+    CoreReliableWriter, CoreResolutionHoldAuthority, CoreSafeInventoryAuthority,
+    CoreSuccessorAuthority, DeathViewService, DisabledDeathViewRepository,
+    FieldEquipmentConfirmCommand, FieldEquipmentPreviewSource, HandshakePolicy, IdentityClock,
+    IdentityService, NoopIdentityEventSink, PostgresAccountRepository,
+    PostgresFieldEquipmentService, PostgresProgressionAwardService,
+    PostgresProgressionQueryRepository, PostgresRewardService, PostgresSafeInventoryService,
+    PostgresWorldFlowLocationRepository, ProgressionAwardCode, ProgressionAwardCommand,
+    ProgressionAwardEvidence, ProgressionAwardPayload, ProgressionQueryService, RewardGrantContext,
+    RewardGrantTransaction, RewardPlacement, SafeInventoryServiceError, SecretRewardEpoch,
+    WorldFlowGateService, initialize_postgres_starter, serve_core_reliable, serve_handshake,
 };
 use sim_core::{EncounterXpEvidence, RewardLifeState, RewardRecallState, RewardTrustState};
 
@@ -507,7 +507,8 @@ async fn run_quic_transfer_journey(
         )
         .await
         .unwrap();
-        for response_sequence in 1..=frames.len() + 3 {
+        let writer = CoreReliableWriter::new(server.clone());
+        for request_index in 0..frames.len() + 3 {
             let result = serve_core_reliable(
                 &server,
                 &identity,
@@ -522,11 +523,11 @@ async fn run_quic_transfer_journey(
                 &extraction_terminal,
                 &recall_terminal,
                 authenticated,
-                u32::try_from(response_sequence).unwrap(),
+                &writer,
                 0,
             )
             .await;
-            if !options.drop_first_safe_response || response_sequence != 4 {
+            if !options.drop_first_safe_response || request_index != 3 {
                 result.unwrap();
             }
         }

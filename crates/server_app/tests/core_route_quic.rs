@@ -60,7 +60,7 @@ use server_app::{
     CharacterIdGenerator, CoreBargainAuthority, CoreExtractionTerminalAuthority,
     CoreIdentityServerConfig, CoreIdentityServerReport, CoreNonTerminalAdmission,
     CoreOathSelectionAuthority, CoreRecallActorDirectory, CoreRecallAuthoritativeTick,
-    CoreRecallTerminalAuthority, CoreRecallTerminalTickOutcome, CoreReliableSequence,
+    CoreRecallTerminalAuthority, CoreRecallTerminalTickOutcome, CoreReliableWriter,
     CoreResolutionHoldAuthority, CoreResolutionHoldIntentAuthority, CoreSafeInventoryAuthority,
     CoreSuccessorAuthority, CoreSuccessorIntentAuthority, CoreTerminalCoordinator,
     CoreTerminalEvaluation, CoreTerminalOtherEvaluationsV1, CoreTerminalProducer,
@@ -82,8 +82,8 @@ use server_app::{
     TerminalCandidate, TerminalKind, WorldFlowGateService, WorldFlowIdGenerator,
     WorldFlowIdentityMaterial, core_recall_completion_outbox, drive_recall_terminal_tick,
     durable_death_terminal_candidate, production_recall_actor_mailbox,
-    recover_committed_death_arbiter, recover_committed_recall_actor, serve_core_reliable,
-    serve_handshake,
+    recover_committed_death_arbiter, recover_committed_recall_actor, send_recall_publication,
+    serve_core_reliable, serve_handshake,
 };
 use sim_core::{
     CoreBossParticipant, CoreBossParticipantLock, CoreCaldusAntiCheatState,
@@ -1430,6 +1430,7 @@ async fn run_lost_death_summary_session(persistence: &PostgresPersistence) -> De
         )
         .await
         .unwrap();
+        let writer = CoreReliableWriter::new(server.clone());
         serve_core_reliable(
             &server,
             &identity,
@@ -1444,7 +1445,7 @@ async fn run_lost_death_summary_session(persistence: &PostgresPersistence) -> De
             &extraction_terminal,
             &recall_terminal,
             authenticated,
-            1,
+            &writer,
             20_000,
         )
         .await
@@ -1466,7 +1467,7 @@ async fn run_lost_death_summary_session(persistence: &PostgresPersistence) -> De
             &extraction_terminal,
             &recall_terminal,
             authenticated,
-            2,
+            &writer,
             20_000,
         )
         .await;
@@ -1557,7 +1558,8 @@ async fn run_restarted_death_read_session(
         )
         .await
         .unwrap();
-        for response_sequence in 1..=4 {
+        let writer = CoreReliableWriter::new(server.clone());
+        for _ in 0..4 {
             serve_core_reliable(
                 &server,
                 &identity,
@@ -1572,7 +1574,7 @@ async fn run_restarted_death_read_session(
                 &extraction_terminal,
                 &recall_terminal,
                 authenticated,
-                response_sequence,
+                &writer,
                 20_000,
             )
             .await
@@ -1793,7 +1795,8 @@ async fn run_reliable_core_journey(persistence: &PostgresPersistence) -> Duratio
         )
         .await
         .unwrap();
-        for response_sequence in 1..=6 {
+        let writer = CoreReliableWriter::new(server.clone());
+        for _ in 0..6 {
             serve_core_reliable(
                 &server,
                 &identity,
@@ -1808,7 +1811,7 @@ async fn run_reliable_core_journey(persistence: &PostgresPersistence) -> Duratio
                 &extraction_terminal,
                 &recall_terminal,
                 authenticated,
-                response_sequence,
+                &writer,
                 0,
             )
             .await
@@ -1975,6 +1978,7 @@ async fn reliable_quic_rejects_disabled_terminal_capabilities_before_domain_acce
         )
         .await
         .unwrap();
+        let writer = CoreReliableWriter::new(server.clone());
         serve_core_reliable(
             &server,
             &identity,
@@ -1989,7 +1993,7 @@ async fn reliable_quic_rejects_disabled_terminal_capabilities_before_domain_acce
             &extraction_terminal,
             &recall_terminal,
             authenticated,
-            1,
+            &writer,
             100,
         )
         .await
@@ -2008,7 +2012,7 @@ async fn reliable_quic_rejects_disabled_terminal_capabilities_before_domain_acce
             &extraction_terminal,
             &recall_terminal,
             authenticated,
-            2,
+            &writer,
             100,
         )
         .await
@@ -2027,7 +2031,7 @@ async fn reliable_quic_rejects_disabled_terminal_capabilities_before_domain_acce
             &extraction_terminal,
             &recall_terminal,
             authenticated,
-            3,
+            &writer,
             100,
         )
         .await
@@ -2046,7 +2050,7 @@ async fn reliable_quic_rejects_disabled_terminal_capabilities_before_domain_acce
             &extraction_terminal,
             &recall_terminal,
             authenticated,
-            4,
+            &writer,
             100,
         )
         .await
@@ -2220,6 +2224,7 @@ async fn reliable_quic_dispatches_authenticated_successor_frame() {
         )
         .await
         .unwrap();
+        let writer = CoreReliableWriter::new(server.clone());
         serve_core_reliable(
             &server,
             &identity,
@@ -2234,7 +2239,7 @@ async fn reliable_quic_dispatches_authenticated_successor_frame() {
             &extraction_terminal,
             &recall_terminal,
             authenticated,
-            1,
+            &writer,
             100,
         )
         .await
@@ -2338,6 +2343,7 @@ async fn run_raw_successor_rejection(
         )
         .await
         .unwrap();
+        let writer = CoreReliableWriter::new(server.clone());
         serve_core_reliable(
             &server,
             &identity,
@@ -2352,7 +2358,7 @@ async fn run_raw_successor_rejection(
             &extraction,
             &recall,
             authenticated,
-            1,
+            &writer,
             100,
         )
         .await
@@ -2495,8 +2501,8 @@ async fn run_persistent_successor_quic_session(
         )
         .await
         .unwrap();
-        for index in 0..request_count {
-            let response_sequence = u32::try_from(index + 1).unwrap();
+        let writer = CoreReliableWriter::new(server.clone());
+        for _ in 0..request_count {
             let outcome = serve_core_reliable(
                 &server,
                 &identity,
@@ -2511,7 +2517,7 @@ async fn run_persistent_successor_quic_session(
                 &extraction,
                 &recall,
                 authenticated,
-                response_sequence,
+                &writer,
                 SERVER_TICK,
             )
             .await;
@@ -2853,7 +2859,8 @@ async fn run_disposable_successor_recovery_journey(
         )
         .await
         .unwrap();
-        for response_sequence in 1..=5 {
+        let writer = CoreReliableWriter::new(server.clone());
+        for _ in 0..5 {
             serve_core_reliable(
                 &server,
                 &identity,
@@ -2868,7 +2875,7 @@ async fn run_disposable_successor_recovery_journey(
                 &extraction,
                 &recall,
                 authenticated,
-                response_sequence,
+                &writer,
                 20_100,
             )
             .await
@@ -3183,6 +3190,7 @@ async fn successor_child_process_serves_stored_replay_over_real_quic() {
         )
         .await
         .unwrap();
+        let writer = CoreReliableWriter::new(server.clone());
         serve_core_reliable(
             &server,
             &identity,
@@ -3197,7 +3205,7 @@ async fn successor_child_process_serves_stored_replay_over_real_quic() {
             &extraction,
             &recall,
             durable_death_fixture::authenticated_account(),
-            1,
+            &writer,
             20_100,
         )
         .await
@@ -3448,7 +3456,8 @@ async fn reliable_quic_dispatches_resolution_hold_move_replay_and_conflict() {
         )
         .await
         .unwrap();
-        for response_sequence in 1..=4 {
+        let writer = CoreReliableWriter::new(server.clone());
+        for _ in 0..4 {
             serve_core_reliable(
                 &server,
                 &identity,
@@ -3463,7 +3472,7 @@ async fn reliable_quic_dispatches_resolution_hold_move_replay_and_conflict() {
                 &extraction_terminal,
                 &recall_terminal,
                 authenticated,
-                response_sequence,
+                &writer,
                 100,
             )
             .await
@@ -3615,6 +3624,7 @@ async fn reliable_quic_rejects_disabled_recall_before_domain_access() {
         )
         .await
         .unwrap();
+        let writer = CoreReliableWriter::new(server.clone());
         serve_core_reliable(
             &server,
             &identity,
@@ -3629,7 +3639,7 @@ async fn reliable_quic_rejects_disabled_recall_before_domain_access() {
             &extraction_terminal,
             &recall_terminal,
             authenticated,
-            1,
+            &writer,
             100,
         )
         .await
@@ -3728,6 +3738,7 @@ async fn run_empty_resolution_hold_quic(
         )
         .await
         .unwrap();
+        let writer = CoreReliableWriter::new(server.clone());
         serve_core_reliable(
             &server,
             &identity,
@@ -3742,7 +3753,7 @@ async fn run_empty_resolution_hold_quic(
             &extraction_terminal,
             &recall_terminal,
             authenticated,
-            1,
+            &writer,
             100,
         )
         .await
@@ -3762,7 +3773,7 @@ async fn run_empty_resolution_hold_quic(
                 &extraction_terminal,
                 &recall_terminal,
                 authenticated,
-                2,
+                &writer,
                 100,
             )
             .await
@@ -3905,6 +3916,7 @@ async fn reliable_quic_dispatches_recall_to_one_actor_owned_channel() {
         )
         .await
         .unwrap();
+        let writer = CoreReliableWriter::new(server.clone());
         serve_core_reliable(
             &server,
             &identity,
@@ -3919,7 +3931,7 @@ async fn reliable_quic_dispatches_recall_to_one_actor_owned_channel() {
             &extraction_terminal,
             &recall_handle,
             authenticated,
-            1,
+            &writer,
             9_000,
         )
         .await
@@ -3938,7 +3950,7 @@ async fn reliable_quic_dispatches_recall_to_one_actor_owned_channel() {
             &extraction_terminal,
             &recall_handle,
             authenticated,
-            2,
+            &writer,
             9_001,
         )
         .await
@@ -4074,8 +4086,7 @@ async fn reliable_quic_pushes_committed_recall_without_a_second_client_request()
         )
         .await
         .unwrap();
-        let mut sequence = CoreReliableSequence::new();
-        let response_sequence = sequence.next_sequence().unwrap();
+        let writer = CoreReliableWriter::new(server.clone());
         serve_core_reliable(
             &server,
             &identity,
@@ -4090,19 +4101,21 @@ async fn reliable_quic_pushes_committed_recall_without_a_second_client_request()
             &extraction_terminal,
             &recall_handle,
             authenticated,
-            response_sequence,
+            &writer,
             9_000,
         )
         .await
         .unwrap();
-        let delivery = completion_inbox
-            .send_next(&server, &mut sequence)
+        let publication = completion_inbox
+            .receive_next()
             .await
-            .unwrap()
             .expect("queued Recall completion");
+        let delivery = send_recall_publication(&writer, &publication)
+            .await
+            .unwrap();
         assert_eq!(delivery.frame.sequence, 2);
         assert_eq!(delivery.frame.server_tick, 112);
-        assert_eq!(sequence.last_sequence(), 2);
+        assert_eq!(writer.last_sequence().await, 2);
         assert_eq!(delivery.hall, recall_completion_publication().hall);
     };
     let client_session = async {
@@ -4216,8 +4229,9 @@ async fn reliable_quic_abandoned_recall_push_replays_on_exact_reconnect() {
         )
         .await
         .unwrap();
-        let mut sequence = CoreReliableSequence::new();
-        let _delivery = completion_inbox.send_next(&server, &mut sequence).await;
+        let writer = CoreReliableWriter::new(server.clone());
+        let publication = completion_inbox.receive_next().await.unwrap();
+        let _delivery = send_recall_publication(&writer, &publication).await;
     };
     let abandoning_client = async {
         let HandshakeResponse::Accepted(_) = bot_client::perform_handshake(&client, hello())
@@ -4279,6 +4293,7 @@ async fn reliable_quic_abandoned_recall_push_replays_on_exact_reconnect() {
         )
         .await
         .unwrap();
+        let writer = CoreReliableWriter::new(server.clone());
         serve_core_reliable(
             &server,
             &identity,
@@ -4293,7 +4308,7 @@ async fn reliable_quic_abandoned_recall_push_replays_on_exact_reconnect() {
             &extraction_terminal,
             &recall_handle,
             authenticated,
-            1,
+            &writer,
             9_000,
         )
         .await
@@ -4768,9 +4783,8 @@ async fn reliable_quic_postgres_recall_replays_after_pool_and_actor_restart() {
         )
         .await
         .unwrap();
-        let mut sequence = CoreReliableSequence::new();
+        let writer = CoreReliableWriter::new(server.clone());
         for _ in 0..3 {
-            let response_sequence = sequence.next_sequence().unwrap();
             serve_core_reliable(
                 &server,
                 &identity,
@@ -4785,13 +4799,13 @@ async fn reliable_quic_postgres_recall_replays_after_pool_and_actor_restart() {
                 &extraction_terminal,
                 &recall_handle,
                 authenticated,
-                response_sequence,
+                &writer,
                 9_000,
             )
             .await
             .unwrap();
         }
-        assert_eq!(sequence.last_sequence(), 3);
+        assert_eq!(writer.last_sequence().await, 3);
     };
     let fresh_client = async {
         let HandshakeResponse::Accepted(server_hello) =
@@ -4990,7 +5004,8 @@ async fn reliable_quic_postgres_recall_replays_after_pool_and_actor_restart() {
         )
         .await
         .unwrap();
-        for response_sequence in 1..=2 {
+        let writer = CoreReliableWriter::new(server.clone());
+        for _ in 0..2 {
             serve_core_reliable(
                 &server,
                 &identity,
@@ -5005,7 +5020,7 @@ async fn reliable_quic_postgres_recall_replays_after_pool_and_actor_restart() {
                 &extraction_terminal,
                 &restarted_handle,
                 authenticated,
-                response_sequence,
+                &writer,
                 9_000,
             )
             .await
