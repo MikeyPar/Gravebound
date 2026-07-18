@@ -474,6 +474,32 @@ where
         Ok(lease)
     }
 
+    /// Returns the exact transport-independent actor binding admitted for this account. Session
+    /// composition uses it before retaining a `LinkLost` extraction binding, so a foreign
+    /// character or stale route generation cannot be attached on the next reconnect.
+    pub async fn registered_actor_lease(
+        &self,
+        authenticated: AuthenticatedAccount,
+    ) -> Result<CoreExtractionActorLease, CoreExtractionRuntimeError> {
+        if authenticated.namespace != AuthenticatedNamespace::WipeableTest {
+            return Err(CoreExtractionRuntimeError::InvalidActorBinding);
+        }
+        let state = self.state.lock().await;
+        if !state.accepting {
+            return Err(CoreExtractionRuntimeError::Retired);
+        }
+        let entry = state
+            .actors
+            .get(&authenticated.account_id.as_bytes())
+            .ok_or(CoreExtractionRuntimeError::ActorUnavailable)?;
+        if entry.authenticated != authenticated
+            || entry.lease.account_id != authenticated.account_id.as_bytes()
+        {
+            return Err(CoreExtractionRuntimeError::InvalidActorBinding);
+        }
+        Ok(entry.lease)
+    }
+
     /// Attaches the reliable writer already owned by the private-life session. A pending durable
     /// result is replayed on the new generation before this method returns.
     #[allow(

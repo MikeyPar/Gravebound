@@ -338,6 +338,10 @@ trait PrivateLifeExtractionRuntime: Send + Sync {
         authenticated: AuthenticatedAccount,
         writer: Arc<CoreReliableWriter>,
     ) -> RuntimeFuture<'_, Result<CoreExtractionPreparedWriterHandoff, CoreExtractionRuntimeError>>;
+    fn registered_actor_lease(
+        &self,
+        authenticated: AuthenticatedAccount,
+    ) -> RuntimeFuture<'_, Result<crate::CoreExtractionActorLease, CoreExtractionRuntimeError>>;
     fn commit(
         &self,
         prepared: CoreExtractionPreparedWriterHandoff,
@@ -367,6 +371,16 @@ where
     ExtractionClock: IdentityClock + 'static,
     ExtractionTicks: CoreExtractionAuthoritativeTick + 'static,
 {
+    fn registered_actor_lease(
+        &self,
+        authenticated: AuthenticatedAccount,
+    ) -> RuntimeFuture<'_, Result<crate::CoreExtractionActorLease, CoreExtractionRuntimeError>>
+    {
+        Box::pin(async move {
+            CoreExtractionActorDirectory::registered_actor_lease(self, authenticated).await
+        })
+    }
+
     fn prepare(
         &self,
         authenticated: AuthenticatedAccount,
@@ -1253,6 +1267,66 @@ where
         entry.extraction_bound = true;
         entry.extraction_lease = Some(attached.lease);
         Ok(attached.lease)
+    }
+
+    /// Retains the production Boss-exit actor against the live danger generation even when no
+    /// transport exists. The canonical GDD (`TECH-021`-`023`), Content Production Specification
+    /// (`CONT-BOSS-001`), and roadmap (`GB-M03-03`, `GB-M03-08`) require the same actor to survive
+    /// `LinkLost`; reconnect will attach it before the winning session generation becomes visible.
+    pub async fn bind_registered_extraction(
+        &self,
+        lease: CorePrivateMicrorealmBindingLease,
+    ) -> Result<Option<CoreExtractionConnectionLease>, CorePrivateLifeSessionError> {
+        let mut state = self.state.lock().await;
+        if !state.accepting {
+            return Err(CorePrivateLifeSessionError::Retired);
+        }
+        let entry = state
+            .sessions
+            .get_mut(&lease.account_id)
+            .ok_or(CorePrivateLifeSessionError::SessionUnavailable)?;
+        if entry.authenticated.account_id.as_bytes() != lease.account_id
+            || entry
+                .microrealm
+                .as_ref()
+                .is_none_or(|bound| bound.lease != lease)
+        {
+            return Err(CorePrivateLifeSessionError::MicrorealmUnavailable);
+        }
+        if entry.extraction_bound {
+            return Err(CorePrivateLifeSessionError::ExtractionAlreadyBound);
+        }
+        let extraction = self
+            .extraction
+            .as_ref()
+            .ok_or(CorePrivateLifeSessionError::ExtractionUnavailable)?;
+        let actor_lease = extraction
+            .registered_actor_lease(entry.authenticated)
+            .await?;
+        if actor_lease.account_id() != lease.account_id
+            || actor_lease.character_id() != lease.character_id
+            || actor_lease.route_generation() != lease.actor_generation
+        {
+            return Err(CorePrivateLifeSessionError::InvalidAccountBinding);
+        }
+
+        let attached = if let Some(active) = &entry.active {
+            let prepared = extraction
+                .prepare(entry.authenticated, Arc::clone(&active.writer))
+                .await?;
+            match extraction.commit(prepared).await {
+                Ok(attached) => Some(attached),
+                Err(error) => {
+                    let _ = extraction.abort(prepared).await;
+                    return Err(error.into());
+                }
+            }
+        } else {
+            None
+        };
+        entry.extraction_bound = true;
+        entry.extraction_lease = attached.as_ref().map(|attached| attached.lease);
+        Ok(entry.extraction_lease)
     }
 
     pub async fn writer(

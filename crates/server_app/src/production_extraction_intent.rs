@@ -1813,6 +1813,16 @@ mod tests {
             .register_actor(authenticated(), extraction_actor)
             .await
             .expect("register extraction actor");
+        let registered = extraction
+            .registered_actor_lease(authenticated())
+            .await
+            .expect("registered extraction binding");
+        assert_eq!(registered.account_id(), route_lease.account_id());
+        assert_eq!(registered.character_id(), route_lease.character_id());
+        assert_eq!(
+            registered.route_generation(),
+            route_lease.actor_generation()
+        );
         let sessions = CorePrivateLifeSessionDirectory::with_extraction_runtime(
             Arc::clone(&recall),
             Arc::clone(&extraction),
