@@ -19,6 +19,20 @@ use crate::{
 };
 
 pub const CALDUS_CHARGE_CONTACT_DAMAGE: u32 = 48;
+pub const CORE_CALDUS_ENTITY_ID_OFFSET: u64 = 40_002;
+
+/// Derives Sir Caldus's stable run-qualified identity in the boss namespace. The adjacent
+/// `40_001` slot belongs to the Bell Proctor and normal enemies occupy `30_001..=39_999`.
+pub fn core_caldus_entity_id(run_ordinal: u32) -> Result<EntityId, CoreCaldusEncounterError> {
+    let zero_based = run_ordinal
+        .checked_sub(1)
+        .ok_or(CoreCaldusEncounterError::ZeroRunOrdinal)?;
+    let value = u64::from(zero_based)
+        .checked_mul(crate::RUN_ENTITY_ID_STRIDE)
+        .and_then(|base| base.checked_add(CORE_CALDUS_ENTITY_ID_OFFSET))
+        .ok_or(CoreCaldusEncounterError::EntityIdOverflow)?;
+    EntityId::new(value).ok_or(CoreCaldusEncounterError::EntityIdOverflow)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreCaldusChargeDamageEvent {
@@ -127,6 +141,15 @@ impl CoreCaldusEncounterSimulation {
     pub fn set_damage_policy(&mut self, policy: HostileDamagePolicy) {
         self.damage_policy = policy;
         self.hostile_projectiles.set_damage_policy(policy);
+    }
+
+    /// Clears attempt-local hostiles and returns the same monotonic projectile allocator for a
+    /// DNG-006 reset. Consuming the encounter prevents a caller from retaining defeated or
+    /// abandoned boss authority beside the recovered allocator.
+    #[must_use]
+    pub fn into_cleared_projectile_allocator(mut self) -> EntityIdAllocator {
+        self.hostile_projectiles.clear_projectiles();
+        self.hostile_projectiles.into_allocator()
     }
 
     pub fn step(
@@ -368,6 +391,10 @@ fn tiles_to_milli(value: f32) -> i32 {
 
 #[derive(Debug, Error)]
 pub enum CoreCaldusEncounterError {
+    #[error("Caldus encounter run ordinal must be nonzero")]
+    ZeroRunOrdinal,
+    #[error("Caldus encounter entity identity overflowed")]
+    EntityIdOverflow,
     #[error("Caldus encounter player map contains an unknown or mismatched identity")]
     PlayerMapMismatch,
     #[error("Caldus friendly input has no matching authoritative player")]
@@ -402,6 +429,30 @@ mod tests {
 
     fn id(value: u64) -> EntityId {
         EntityId::new(value).expect("entity")
+    }
+
+    #[test]
+    fn caldus_identity_is_stable_run_qualified_and_disjoint() {
+        assert_eq!(core_caldus_entity_id(1).expect("first").get(), 40_002);
+        assert_eq!(core_caldus_entity_id(2).expect("second").get(), 140_002);
+        assert_ne!(
+            core_caldus_entity_id(1).expect("Caldus"),
+            crate::normal_wave_entity_id(crate::SpawnInstanceId {
+                run_ordinal: 1,
+                spawn_ordinal: 9_999,
+            })
+            .expect("normal enemy")
+        );
+        assert!(matches!(
+            core_caldus_entity_id(0),
+            Err(CoreCaldusEncounterError::ZeroRunOrdinal)
+        ));
+    }
+
+    #[test]
+    fn reset_consumes_encounter_and_preserves_monotonic_projectile_identity() {
+        let allocator = encounter().into_cleared_projectile_allocator();
+        assert_eq!(allocator.peek(), id(1_000));
     }
 
     fn participant() -> CoreBossParticipant {

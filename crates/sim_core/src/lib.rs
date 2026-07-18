@@ -151,8 +151,9 @@ pub use core_caldus_body::{
     CoreCaldusBodyError, CoreCaldusBodyEvent, CoreCaldusBodySimulation, CoreCaldusBodyTarget,
 };
 pub use core_caldus_encounter::{
-    CALDUS_CHARGE_CONTACT_DAMAGE, CoreCaldusChargeDamageEvent, CoreCaldusEncounterError,
-    CoreCaldusEncounterSimulation, CoreCaldusEncounterStep,
+    CALDUS_CHARGE_CONTACT_DAMAGE, CORE_CALDUS_ENTITY_ID_OFFSET, CoreCaldusChargeDamageEvent,
+    CoreCaldusEncounterError, CoreCaldusEncounterSimulation, CoreCaldusEncounterStep,
+    core_caldus_entity_id,
 };
 pub use core_caldus_health::{
     CALDUS_ARMOR, CALDUS_BREAK_DAMAGE_BASIS_POINTS, CALDUS_HURTBOX_RADIUS_TILES,
