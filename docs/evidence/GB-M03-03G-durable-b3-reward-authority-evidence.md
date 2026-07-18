@@ -1,6 +1,6 @@
 # GB-M03-03G durable B3 reward-authority evidence
 
-**Status:** Local implementation and independent authority review accepted through corrective commit `83c75a5`. Normal route admission remains disabled. Hosted PostgreSQL execution, automatic transport-independent execution, real-QUIC response-loss/process-restart proof, and hosted cumulative CI remain required before this slice can close the parent route.
+**Status:** Local implementation is accepted through automatic-runtime commit `3f4ecaf`. Normal route admission remains disabled. Production PostgreSQL coordinator/secret composition, hosted inactivity and restart execution, end-to-end response-loss proof, and hosted cumulative CI remain required before this slice can close the parent route.
 
 ## Three-authority basis
 
@@ -16,6 +16,8 @@
 - Exact replay reconstructs the stored progression/milestone and reward authorities. Changed payloads, stale/foreign ownership, or malformed stored projections fail closed.
 - The fixed-dungeon task freezes at the exact B3 reward-due handoff, rejects normal advance, and resumes only after an opaque account/character/lineage-bound durable resolution is acknowledged. Exact acknowledgement suppresses the pending handoff permanently instead of re-entering the reward freeze on the next frame. `GrantedNoOffer` and `IneligibleNoOffer` enter B4 already resolved as authoritative `NoOffer`; `GrantedOffer` retains the ordinary selection/refusal path.
 - Reward participation is driver-owned. Production-cadence no-op packets do not count as activity; movement, aim/primary edges, held movement/primary, and reliable abilities do. `LinkLost` marks the participant absent and session-invalid while danger ticks continue. Reconnect restores session authority under the same generation lock, so an old detach cannot overwrite a replacement transport.
+- `CorePrivateB3RewardRuntime` follows the route binding rather than a QUIC connection. It observes the immutable pending frame, retries transient PostgreSQL failures with bounded shutdown-aware backoff, acknowledges the opaque durable result through the same single-writer driver task, and only then constructs reliable publication.
+- Granted publication emits the existing progression event immediately before the existing route-state event; ineligible publication emits only the route result. The runtime retains that exact publication across transport loss, replays it once to every newer writer generation, ignores stale-generation detach, and joins before its driver owner shuts down. Session construction remains opt-in until the production coordinator and process-bound secret epoch are composed and proven.
 
 ## Verification
 
@@ -27,13 +29,15 @@
 - Independent review found no remaining P0/P1 blocker after the activity-cadence and detach/reconnect ordering corrections.
 - `git diff --check` passes. `cargo build --release -p server_app -p client_bevy` completed successfully after the command wrapper returned; both optimized Windows executables have fresh build timestamps.
 - The hosted PostgreSQL test compiles and covers commit/replay, restart reconstruction, item provenance/security/location, and below-level no-offer. `TEST_DATABASE_URL` was unavailable locally, so hosted execution remains explicitly open.
+- Commit `3f4ecaf` passes two focused automatic-runtime tests: transport-free transient retry followed by one same-task acknowledgement, and real-QUIC granted progression/route publication with exact contiguous replay across two writer generations plus stale-detach protection.
+- `cargo check -p server_app --all-targets --all-features`, all four private-life session real-QUIC lifecycle tests, `cargo test --workspace --all-targets --all-features`, and strict workspace all-target/all-feature Clippy pass for `3f4ecaf`.
 
 ## Evidence strengthening still open
 
 - Drive more than 600 no-op frames through the actual fixed-dungeon B3 runtime and coordinator, then prove the durable `NotEligible` resolution and zero reward rows in hosted PostgreSQL.
-- Force response loss, reconnect, process restart, and the formerly vulnerable detach/new-attach interleaving under real QUIC.
+- Inject the real PostgreSQL coordinator and process-bound reward secret into production route construction, then force response loss, reconnect, and process restart through the full session boundary. The isolated automatic runtime already proves real-QUIC writer replacement and the formerly vulnerable stale-detach interleaving.
 - Add a distinct anti-cheat invalidation transition if M03 introduces an anti-cheat authority separate from authenticated session/input validity.
 
 ## Current Next Step
 
-Build the transport-independent automatic B3 executor, consume `FixedDungeonRewardPending` at its exact due tick, apply the durable `Granted | Ineligible` proof to the same task, and publish progression then route state only after task acknowledgement. Retain publication across writer replacement and prove exact response-loss/reconnect/process-restart convergence plus the integrated inactivity zero-row case. Then implement the B5 bridge and authoritative Sir Caldus B6 route.
+Inject `PostgresCoreB3RewardCoordinator` with a process-bound `SecretRewardEpoch` at normal-route construction, then prove the integrated inactivity zero-row case and exact response-loss/reconnect/process-restart convergence against hosted PostgreSQL. After that evidence is green, implement the B5 bridge and authoritative Sir Caldus B6 route.

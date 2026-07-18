@@ -33,8 +33,8 @@ Commit `ac31961` adds the unregistered [`DefeatedRewardUnresolved` / `RewardComm
 
 ## Explicit boundary
 
-Commit `83ccbb1` now supplies the durable B3 reward/progression/milestone coordinator and the task-owned pending/acknowledgement seam. Automatic normal-server coordinator execution and reliable response publication are still disabled, so response-loss/reconnect/process-restart convergence remains open. Sir Caldus combat, personal rewards, pending inventory, stable exit, native presentation registration, all terminal producers, and normal admission also remain open.
+Commits `83ccbb1`, `83c75a5`, and `3f4ecaf` supply the durable B3 reward/progression/milestone coordinator, corrected terminal semantics, task-owned acknowledgement, and the transport-independent automatic executor with acknowledgement-gated reliable publication across writer generations. Production PostgreSQL/secret injection and end-to-end response-loss/reconnect/process-restart convergence remain open. Sir Caldus combat, personal rewards, pending inventory, stable exit, native presentation registration, all terminal producers, and normal admission also remain open.
 
 ## Current Next Step
 
-Build the transport-independent B3 executor, apply its opaque durable `Granted | Ineligible` proof to the same task, and retain progression/route publication across writer generations only after acknowledgement. Prove response-loss/reconnect/process-restart convergence and integrated inactivity zero-row behavior, then implement B5 and Sir Caldus at B6.
+Inject the real B3 PostgreSQL coordinator and process-bound reward secret at production route construction, then prove hosted inactivity zero-row and response-loss/reconnect/process-restart convergence. After that evidence is green, implement B5 and Sir Caldus at B6.
