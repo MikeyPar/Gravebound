@@ -65,6 +65,28 @@ impl CoreExtractionActorLease {
     }
 }
 
+/// Distinguishes ownership of actor construction so exact activation replay can reuse the winner
+/// without granting the replaying caller authority to abort it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CoreExtractionActorRegistration {
+    Fresh(CoreExtractionActorLease),
+    Replayed(CoreExtractionActorLease),
+}
+
+impl CoreExtractionActorRegistration {
+    #[must_use]
+    pub(crate) const fn lease(self) -> CoreExtractionActorLease {
+        match self {
+            Self::Fresh(lease) | Self::Replayed(lease) => lease,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn is_fresh(self) -> bool {
+        matches!(self, Self::Fresh(_))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct CoreExtractionTransportGeneration(u64);
 
@@ -424,6 +446,21 @@ where
         authenticated: AuthenticatedAccount,
         actor: Arc<ProductionExtractionIntentActor<Planner, Clock>>,
     ) -> Result<CoreExtractionActorLease, CoreExtractionRuntimeError> {
+        match self.register_or_replay_actor(authenticated, actor).await? {
+            CoreExtractionActorRegistration::Fresh(lease) => Ok(lease),
+            CoreExtractionActorRegistration::Replayed(_) => {
+                Err(CoreExtractionRuntimeError::ActorAlreadyRegistered)
+            }
+        }
+    }
+
+    /// Registers one actor or returns the exact existing actor as replay. A replay never replaces
+    /// runtime ownership and therefore must never receive construction-abort authority.
+    pub(crate) async fn register_or_replay_actor(
+        &self,
+        authenticated: AuthenticatedAccount,
+        actor: Arc<ProductionExtractionIntentActor<Planner, Clock>>,
+    ) -> Result<CoreExtractionActorRegistration, CoreExtractionRuntimeError> {
         let authority = actor.authority();
         if authenticated.namespace != AuthenticatedNamespace::WipeableTest
             || authenticated.account_id.as_bytes() != authority.account_id()
@@ -442,8 +479,16 @@ where
         if !state.accepting {
             return Err(CoreExtractionRuntimeError::Retired);
         }
-        if state.actors.contains_key(&account_id)
-            || state.retiring_actors.contains_key(&account_id)
+        if let Some(existing) = state.actors.get(&account_id) {
+            if existing.authenticated == authenticated
+                && existing.lease == lease
+                && existing.actor.authority() == actor.authority()
+            {
+                return Ok(CoreExtractionActorRegistration::Replayed(lease));
+            }
+            return Err(CoreExtractionRuntimeError::ActorAlreadyRegistered);
+        }
+        if state.retiring_actors.contains_key(&account_id)
             || state.committed.contains_key(&account_id)
         {
             return Err(CoreExtractionRuntimeError::ActorAlreadyRegistered);
@@ -475,7 +520,33 @@ where
                 task: Some(task),
             },
         );
-        Ok(lease)
+        Ok(CoreExtractionActorRegistration::Fresh(lease))
+    }
+
+    /// Returns only an already-registered exact actor. A route-permit replay cannot race ahead of
+    /// the fresh reservation owner by constructing a second actor of its own.
+    pub(crate) async fn replay_registered_actor(
+        &self,
+        authenticated: AuthenticatedAccount,
+        authority: &crate::ProductionExtractionBossExitAuthorityV1,
+    ) -> Result<CoreExtractionActorRegistration, CoreExtractionRuntimeError> {
+        if authenticated.namespace != AuthenticatedNamespace::WipeableTest
+            || authenticated.account_id.as_bytes() != authority.account_id()
+        {
+            return Err(CoreExtractionRuntimeError::InvalidActorBinding);
+        }
+        let state = self.state.lock().await;
+        if !state.accepting {
+            return Err(CoreExtractionRuntimeError::Retired);
+        }
+        let entry = state
+            .actors
+            .get(&authority.account_id())
+            .ok_or(CoreExtractionRuntimeError::ActorUnavailable)?;
+        if entry.authenticated != authenticated || entry.actor.authority() != authority {
+            return Err(CoreExtractionRuntimeError::ActorAlreadyRegistered);
+        }
+        Ok(CoreExtractionActorRegistration::Replayed(entry.lease))
     }
 
     /// Returns the exact transport-independent actor binding admitted for this account. Session

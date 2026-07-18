@@ -227,7 +227,47 @@ pub struct CorePrivateRouteExtractionPermit {
     world_flow_revision: WorldFlowContentRevisionV1,
 }
 
+/// Identifies which caller owns rollback of a shared exact terminal permit. Exact replays may use
+/// the permit but can never reopen the route beneath the fresh owner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CorePrivateRouteExtractionReservation {
+    Fresh(CorePrivateRouteExtractionPermit),
+    Replayed(CorePrivateRouteExtractionPermit),
+}
+
+impl CorePrivateRouteExtractionReservation {
+    #[must_use]
+    pub(crate) fn permit(&self) -> &CorePrivateRouteExtractionPermit {
+        match self {
+            Self::Fresh(permit) | Self::Replayed(permit) => permit,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn is_fresh(&self) -> bool {
+        matches!(self, Self::Fresh(_))
+    }
+
+    #[must_use]
+    fn into_permit(self) -> CorePrivateRouteExtractionPermit {
+        match self {
+            Self::Fresh(permit) | Self::Replayed(permit) => permit,
+        }
+    }
+}
+
 impl CorePrivateRouteExtractionPermit {
+    #[must_use]
+    pub const fn route_lease(&self) -> CorePrivateRouteActorLease {
+        CorePrivateRouteActorLease {
+            key: CorePrivateRouteActorKey {
+                account_id: self.binding.account_id,
+                character_id: self.binding.accepted_route.character_id,
+            },
+            actor_generation: self.actor_generation,
+        }
+    }
+
     #[must_use]
     pub const fn permit_id(&self) -> [u8; 16] {
         self.permit_id
@@ -329,8 +369,9 @@ enum CorePrivateRouteActorCommand {
     },
     PrepareExtractionTerminal {
         binding: CorePrivateRouteExtractionBinding,
-        reply:
-            oneshot::Sender<Result<CorePrivateRouteExtractionPermit, CorePrivateRouteRuntimeError>>,
+        reply: oneshot::Sender<
+            Result<CorePrivateRouteExtractionReservation, CorePrivateRouteRuntimeError>,
+        >,
     },
     RevalidateExtractionTerminal {
         permit: CorePrivateRouteExtractionPermit,
@@ -473,7 +514,7 @@ impl CorePrivateRouteActorHandle {
     async fn prepare_extraction_terminal(
         &self,
         binding: CorePrivateRouteExtractionBinding,
-    ) -> Result<CorePrivateRouteExtractionPermit, CorePrivateRouteRuntimeError> {
+    ) -> Result<CorePrivateRouteExtractionReservation, CorePrivateRouteRuntimeError> {
         let (reply, receive) = oneshot::channel();
         self.commands
             .send(CorePrivateRouteActorCommand::PrepareExtractionTerminal { binding, reply })
@@ -810,6 +851,16 @@ impl CorePrivateRouteActorDirectory {
         lease: CorePrivateRouteActorLease,
         binding: CorePrivateRouteExtractionBinding,
     ) -> Result<CorePrivateRouteExtractionPermit, CorePrivateRouteRuntimeError> {
+        self.prepare_extraction_terminal_owned(lease, binding)
+            .await
+            .map(CorePrivateRouteExtractionReservation::into_permit)
+    }
+
+    pub(crate) async fn prepare_extraction_terminal_owned(
+        &self,
+        lease: CorePrivateRouteActorLease,
+        binding: CorePrivateRouteExtractionBinding,
+    ) -> Result<CorePrivateRouteExtractionReservation, CorePrivateRouteRuntimeError> {
         validate_extraction_lease_binding(lease, &binding)?;
         self.actor_handle(lease)?
             .prepare_extraction_terminal(binding)
@@ -1742,7 +1793,7 @@ fn handle_reconcile_enter_microrealm(
 fn handle_prepare_extraction_terminal(
     control: &Mutex<CorePrivateRouteActorControl>,
     binding: CorePrivateRouteExtractionBinding,
-) -> Result<CorePrivateRouteExtractionPermit, CorePrivateRouteRuntimeError> {
+) -> Result<CorePrivateRouteExtractionReservation, CorePrivateRouteRuntimeError> {
     let mut control = lock(control);
     if control.retired {
         return Err(CorePrivateRouteRuntimeError::Retired);
@@ -1752,7 +1803,9 @@ fn handle_prepare_extraction_terminal(
             return Err(CorePrivateRouteRuntimeError::TerminalReservationConflict);
         }
         validate_extraction_permit(&control, existing)?;
-        return Ok(existing.clone());
+        return Ok(CorePrivateRouteExtractionReservation::Replayed(
+            existing.clone(),
+        ));
     }
     if control.bell_reservation.is_some() {
         return Err(CorePrivateRouteRuntimeError::TransferInProgress);
@@ -1822,7 +1875,7 @@ fn handle_prepare_extraction_terminal(
         world_flow_revision,
     };
     control.terminal_reservation = Some(permit.clone());
-    Ok(permit)
+    Ok(CorePrivateRouteExtractionReservation::Fresh(permit))
 }
 
 fn handle_revalidate_extraction_terminal(

@@ -229,6 +229,11 @@ impl CorePrivateMicrorealmRuntime {
     }
 
     #[must_use]
+    pub(crate) fn route_directory(&self) -> CorePrivateRouteActorDirectory {
+        self.route_directory.clone()
+    }
+
+    #[must_use]
     pub const fn account_id(&self) -> [u8; 16] {
         self.route_lease.account_id()
     }

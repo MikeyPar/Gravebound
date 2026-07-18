@@ -9,10 +9,19 @@
 //! frozen defeat, lets `PostgreSQL` arbitrate against terminal winners, and acknowledges only the
 //! opaque matching result through the existing exclusive driver task.
 
-use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use persistence::{
-    PersistenceError, PostgresPersistence, StoredActiveDangerAuthorityV1, StoredWorldFlowRevisionV1,
+    PersistenceError, PostgresPersistence, ProductionExtractionExpectedVersionsV1,
+    StoredActiveDangerAuthorityV1, StoredWorldFlowRevisionV1,
 };
 use protocol::{
     CorePendingInventoryStateV1, CorePrivateRoutePhaseV1, ManifestHash, ReliableEvent,
@@ -29,8 +38,9 @@ use crate::{
     CoreCaldusRewardAuthorityFailure, CoreCaldusRewardAuthorityFailureKind,
     CoreDurableCaldusResolution, CorePrivateCaldusDefeatHandoff, CorePrivateCaldusRewardCommit,
     CorePrivateMicrorealmDriverError, CorePrivateMicrorealmDriverHandle,
-    CorePrivateMicrorealmDriverObserver, CorePrivateMicrorealmDriverState, CoreReliableWriter,
-    CoreReliableWriterError, project_core_pending_inventory,
+    CorePrivateMicrorealmDriverObserver, CorePrivateMicrorealmDriverState,
+    CorePrivateRouteActorDirectory, CoreReliableWriter, CoreReliableWriterError,
+    ProductionExtractionCaldusReservationV1, project_core_pending_inventory,
 };
 
 const INITIAL_RETRY_BACKOFF: Duration = Duration::from_millis(25);
@@ -53,7 +63,73 @@ pub trait CoreCaldusPendingInventoryAuthority: Send + Sync {
         authenticated: AuthenticatedAccount,
         handoff: CorePrivateCaldusDefeatHandoff,
         world_flow_revision: WorldFlowContentRevisionV1,
-    ) -> RuntimeFuture<'_, Result<CorePendingInventoryStateV1, CoreCaldusRewardAuthorityFailure>>;
+    ) -> RuntimeFuture<
+        '_,
+        Result<CoreCaldusPendingInventorySnapshot, CoreCaldusRewardAuthorityFailure>,
+    >;
+}
+
+/// Type-erased production seam that constructs, registers, and session-binds one exact actor.
+/// The activator consumes the reservation and owns all post-permit cleanup on failure.
+pub trait CoreCaldusExtractionActivator: Send + Sync {
+    fn activate(
+        &self,
+        reservation: ProductionExtractionCaldusReservationV1,
+        expected_versions: ProductionExtractionExpectedVersionsV1,
+    ) -> RuntimeFuture<'_, Result<(), CoreCaldusRewardAuthorityFailure>>;
+}
+
+/// Server-only coherent custody material. The wire projection is never promoted back into
+/// persistence authority; the original storage versions travel beside it for actor sealing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreCaldusPendingInventorySnapshot {
+    projection: CorePendingInventoryStateV1,
+    expected_versions: ProductionExtractionExpectedVersionsV1,
+}
+
+impl CoreCaldusPendingInventorySnapshot {
+    pub fn new(
+        projection: CorePendingInventoryStateV1,
+        expected_versions: ProductionExtractionExpectedVersionsV1,
+    ) -> Result<Self, CoreCaldusRewardAuthorityFailure> {
+        projection
+            .validate()
+            .map_err(|error| fatal_failure(error.to_string()))?;
+        let wire = projection.expected_extraction_versions;
+        if wire.account != expected_versions.account
+            || wire.character != expected_versions.character
+            || wire.world != expected_versions.world
+            || wire.inventory != expected_versions.inventory
+            || wire.life_clock != expected_versions.life_metrics
+        {
+            return Err(fatal_failure(
+                "pending inventory projection does not match its storage version authority",
+            ));
+        }
+        Ok(Self {
+            projection,
+            expected_versions,
+        })
+    }
+
+    #[must_use]
+    pub const fn projection(&self) -> &CorePendingInventoryStateV1 {
+        &self.projection
+    }
+
+    #[must_use]
+    pub const fn expected_versions(&self) -> &ProductionExtractionExpectedVersionsV1 {
+        &self.expected_versions
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        CorePendingInventoryStateV1,
+        ProductionExtractionExpectedVersionsV1,
+    ) {
+        (self.projection, self.expected_versions)
+    }
 }
 
 impl CoreCaldusPendingInventoryAuthority for PostgresPersistence {
@@ -62,8 +138,10 @@ impl CoreCaldusPendingInventoryAuthority for PostgresPersistence {
         authenticated: AuthenticatedAccount,
         handoff: CorePrivateCaldusDefeatHandoff,
         world_flow_revision: WorldFlowContentRevisionV1,
-    ) -> RuntimeFuture<'_, Result<CorePendingInventoryStateV1, CoreCaldusRewardAuthorityFailure>>
-    {
+    ) -> RuntimeFuture<
+        '_,
+        Result<CoreCaldusPendingInventorySnapshot, CoreCaldusRewardAuthorityFailure>,
+    > {
         Box::pin(async move {
             if authenticated.namespace != AuthenticatedNamespace::WipeableTest
                 || authenticated.account_id.as_bytes() != handoff.route_lease().account_id()
@@ -92,8 +170,10 @@ impl CoreCaldusPendingInventoryAuthority for PostgresPersistence {
                 )
                 .await
                 .map_err(|error| snapshot_failure(&error))?;
-            project_core_pending_inventory(&snapshot)
-                .map_err(|error| fatal_failure(error.to_string()))
+            let expected_versions = snapshot.expected_versions;
+            let projection = project_core_pending_inventory(&snapshot)
+                .map_err(|error| fatal_failure(error.to_string()))?;
+            CoreCaldusPendingInventorySnapshot::new(projection, expected_versions)
         })
     }
 }
@@ -135,6 +215,8 @@ pub(crate) struct CorePrivateCaldusRewardRuntimeConfig {
     authority: Arc<dyn CoreCaldusRewardAuthority>,
     pending_inventory: Option<Arc<dyn CoreCaldusPendingInventoryAuthority>>,
     world_flow_revision: Option<WorldFlowContentRevisionV1>,
+    extraction_route: Option<CorePrivateRouteActorDirectory>,
+    extraction_activator: Option<Arc<dyn CoreCaldusExtractionActivator>>,
 }
 
 impl CorePrivateCaldusRewardRuntimeConfig {
@@ -149,6 +231,8 @@ impl CorePrivateCaldusRewardRuntimeConfig {
             authority,
             pending_inventory: None,
             world_flow_revision: None,
+            extraction_route: None,
+            extraction_activator: None,
         }
     }
 
@@ -160,6 +244,17 @@ impl CorePrivateCaldusRewardRuntimeConfig {
     ) -> Self {
         self.pending_inventory = Some(authority);
         self.world_flow_revision = Some(world_flow_revision);
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn with_extraction_activation(
+        mut self,
+        route_directory: CorePrivateRouteActorDirectory,
+        activator: Arc<dyn CoreCaldusExtractionActivator>,
+    ) -> Self {
+        self.extraction_route = Some(route_directory);
+        self.extraction_activator = Some(activator);
         self
     }
 }
@@ -183,6 +278,8 @@ pub enum CorePrivateCaldusRewardRuntimeState {
     LoadingInventory {
         attempts: u32,
     },
+    ReservingExtraction,
+    ActivatingExtraction,
     Acknowledged {
         encounter_id: [u8; 16],
         exit_instance_id: [u8; 16],
@@ -205,8 +302,12 @@ pub struct CorePrivateCaldusRewardRuntimeReport {
     pub resolution_attempts: u32,
     pub acknowledgements: u32,
     pub snapshot_attempts: u32,
+    pub extraction_reservations: u32,
+    pub extraction_activations: u32,
+    pub extraction_abort_failures: u32,
     pub publication_attempts: u32,
     pub publication_generations: u32,
+    pub faulted: bool,
     pub task_joined: bool,
 }
 
@@ -216,12 +317,17 @@ pub enum CorePrivateCaldusRewardRuntimeError {
     InvalidWriterGeneration,
     #[error("Caldus reward runtime task failed")]
     Join(#[source] JoinError),
+    #[error(
+        "Caldus reward runtime faulted before shutdown ({extraction_abort_failures} reservation abort failures)"
+    )]
+    Faulted { extraction_abort_failures: u32 },
 }
 
 pub struct CorePrivateCaldusRewardRuntime {
     writer_tx: watch::Sender<Option<WriterBinding>>,
     state_rx: watch::Receiver<CorePrivateCaldusRewardRuntimeState>,
     shutdown_tx: watch::Sender<bool>,
+    terminal_completed: AtomicBool,
     join: Mutex<Option<JoinHandle<CorePrivateCaldusRewardRuntimeReport>>>,
 }
 
@@ -267,6 +373,7 @@ impl CorePrivateCaldusRewardRuntime {
             writer_tx,
             state_rx,
             shutdown_tx,
+            terminal_completed: AtomicBool::new(false),
             join: Mutex::new(Some(join)),
         }
     }
@@ -274,6 +381,31 @@ impl CorePrivateCaldusRewardRuntime {
     #[must_use]
     pub fn observe(&self) -> watch::Receiver<CorePrivateCaldusRewardRuntimeState> {
         self.state_rx.clone()
+    }
+
+    /// Prevents the danger owner from being discarded while a durable boss result, reservation,
+    /// extraction actor, retained publication, or fail-closed reconciliation still owns it.
+    #[must_use]
+    pub fn blocks_danger_unbind(&self) -> bool {
+        !self.terminal_completed.load(Ordering::Acquire)
+            && matches!(
+                &*self.state_rx.borrow(),
+                CorePrivateCaldusRewardRuntimeState::Resolving { .. }
+                    | CorePrivateCaldusRewardRuntimeState::LoadingInventory { .. }
+                    | CorePrivateCaldusRewardRuntimeState::ReservingExtraction
+                    | CorePrivateCaldusRewardRuntimeState::ActivatingExtraction
+                    | CorePrivateCaldusRewardRuntimeState::Acknowledged { .. }
+                    | CorePrivateCaldusRewardRuntimeState::AwaitingWriter { .. }
+                    | CorePrivateCaldusRewardRuntimeState::Published { .. }
+                    | CorePrivateCaldusRewardRuntimeState::Faulted { .. }
+            )
+    }
+
+    /// Releases retained boss-exit publication only after the owning terminal path has committed
+    /// its destination or an exact competing terminal has retired extraction authority.
+    pub fn acknowledge_terminal_complete(&self) {
+        self.terminal_completed.store(true, Ordering::Release);
+        self.shutdown_tx.send_replace(true);
     }
 
     pub fn attach_writer(
@@ -304,15 +436,28 @@ impl CorePrivateCaldusRewardRuntime {
     ) -> Result<CorePrivateCaldusRewardRuntimeReport, CorePrivateCaldusRewardRuntimeError> {
         self.shutdown_tx.send_replace(true);
         match self.join.lock().await.take() {
-            Some(join) => join
-                .await
-                .map_err(CorePrivateCaldusRewardRuntimeError::Join),
+            Some(join) => {
+                let report = join
+                    .await
+                    .map_err(CorePrivateCaldusRewardRuntimeError::Join)?;
+                if report.faulted {
+                    Err(CorePrivateCaldusRewardRuntimeError::Faulted {
+                        extraction_abort_failures: report.extraction_abort_failures,
+                    })
+                } else {
+                    Ok(report)
+                }
+            }
             None => Ok(CorePrivateCaldusRewardRuntimeReport {
                 resolution_attempts: 0,
                 acknowledgements: 0,
                 snapshot_attempts: 0,
+                extraction_reservations: 0,
+                extraction_activations: 0,
+                extraction_abort_failures: 0,
                 publication_attempts: 0,
                 publication_generations: 0,
+                faulted: false,
                 task_joined: true,
             }),
         }
@@ -337,15 +482,33 @@ async fn run_runtime(
         authority,
         pending_inventory,
         world_flow_revision,
+        extraction_route,
+        extraction_activator,
     } = config;
     let mut report = CorePrivateCaldusRewardRuntimeReport {
         resolution_attempts: 0,
         acknowledgements: 0,
         snapshot_attempts: 0,
+        extraction_reservations: 0,
+        extraction_activations: 0,
+        extraction_abort_failures: 0,
         publication_attempts: 0,
         publication_generations: 0,
+        faulted: false,
         task_joined: true,
     };
+    let inventory_configured = pending_inventory.is_some() && world_flow_revision.is_some();
+    let extraction_configured = extraction_route.is_some() && extraction_activator.is_some();
+    let configuration_is_complete = pending_inventory.is_some() == world_flow_revision.is_some()
+        && extraction_route.is_some() == extraction_activator.is_some()
+        && (!extraction_configured || inventory_configured);
+    if !configuration_is_complete {
+        report.faulted = true;
+        state_tx.send_replace(CorePrivateCaldusRewardRuntimeState::Faulted {
+            message: Arc::from("Caldus custody/extraction pipeline is only partially configured"),
+        });
+        return report;
+    }
     let mut acknowledged = false;
     let mut publication: Option<RetainedPublication> = None;
     let mut attempted_generation: Option<CoreCaldusRewardWriterGeneration> = None;
@@ -408,7 +571,48 @@ async fn run_runtime(
                     if let (Some(inventory), Some(world_flow_revision)) =
                         (&pending_inventory, &world_flow_revision)
                     {
-                        let projected = match load_snapshot_with_backoff(
+                        let mut reservation = match (&extraction_route, &extraction_activator) {
+                            (Some(route_directory), Some(_)) => {
+                                state_tx.send_replace(
+                                    CorePrivateCaldusRewardRuntimeState::ReservingExtraction,
+                                );
+                                match ProductionExtractionCaldusReservationV1::reserve(
+                                    authenticated,
+                                    route_directory.clone(),
+                                    &handoff,
+                                    &commit,
+                                    world_flow_revision.clone(),
+                                )
+                                .await
+                                {
+                                    Ok(reservation) => {
+                                        report.extraction_reservations =
+                                            report.extraction_reservations.saturating_add(1);
+                                        Some(reservation)
+                                    }
+                                    Err(error) => {
+                                        state_tx.send_replace(
+                                            CorePrivateCaldusRewardRuntimeState::Faulted {
+                                                message: Arc::from(error.to_string()),
+                                            },
+                                        );
+                                        break;
+                                    }
+                                }
+                            }
+                            (None, None) => None,
+                            _ => {
+                                state_tx.send_replace(
+                                    CorePrivateCaldusRewardRuntimeState::Faulted {
+                                        message: Arc::from(
+                                            "Caldus extraction activation is only partially configured",
+                                        ),
+                                    },
+                                );
+                                break;
+                            }
+                        };
+                        let snapshot = match load_snapshot_with_backoff(
                             authenticated,
                             handoff.clone(),
                             world_flow_revision.clone(),
@@ -419,9 +623,71 @@ async fn run_runtime(
                         )
                         .await
                         {
-                            Ok(Some(projected)) => projected,
-                            Ok(None) => break,
+                            Ok(Some(snapshot)) => snapshot,
+                            Ok(None) => {
+                                if let Err(message) = abort_reservation(
+                                    reservation.as_ref(),
+                                    &mut report,
+                                    &mut shutdown_rx,
+                                )
+                                .await
+                                {
+                                    state_tx.send_replace(
+                                        CorePrivateCaldusRewardRuntimeState::Faulted { message },
+                                    );
+                                }
+                                break;
+                            }
                             Err(failure) => {
+                                let message = abort_reservation(
+                                    reservation.as_ref(),
+                                    &mut report,
+                                    &mut shutdown_rx,
+                                )
+                                .await
+                                .err()
+                                .unwrap_or(failure.message);
+                                state_tx.send_replace(
+                                    CorePrivateCaldusRewardRuntimeState::Faulted { message },
+                                );
+                                break;
+                            }
+                        };
+                        let route = reservation.as_ref().map_or_else(
+                            || commit.route.clone(),
+                            |reservation| reservation.accepted_route().clone(),
+                        );
+                        let (projected, expected_versions) = snapshot.into_parts();
+                        let retained =
+                            match retained_publication(encounter_id, &handoff, &route, projected) {
+                                Ok(retained) => retained,
+                                Err(message) => {
+                                    let message = abort_reservation(
+                                        reservation.as_ref(),
+                                        &mut report,
+                                        &mut shutdown_rx,
+                                    )
+                                    .await
+                                    .err()
+                                    .unwrap_or(message);
+                                    state_tx.send_replace(
+                                        CorePrivateCaldusRewardRuntimeState::Faulted { message },
+                                    );
+                                    break;
+                                }
+                            };
+                        if let Some(reservation) = reservation.take() {
+                            state_tx.send_replace(
+                                CorePrivateCaldusRewardRuntimeState::ActivatingExtraction,
+                            );
+                            report.extraction_activations =
+                                report.extraction_activations.saturating_add(1);
+                            let activator = extraction_activator
+                                .as_ref()
+                                .expect("reservation requires configured activator");
+                            if let Err(failure) =
+                                activator.activate(reservation, expected_versions).await
+                            {
                                 state_tx.send_replace(
                                     CorePrivateCaldusRewardRuntimeState::Faulted {
                                         message: failure.message,
@@ -429,24 +695,12 @@ async fn run_runtime(
                                 );
                                 break;
                             }
-                        };
-                        match retained_publication(encounter_id, &handoff, &commit, projected) {
-                            Ok(retained) => {
-                                publication = Some(retained);
-                                attempted_generation = None;
-                                state_tx.send_replace(
-                                    CorePrivateCaldusRewardRuntimeState::AwaitingWriter {
-                                        encounter_id,
-                                    },
-                                );
-                            }
-                            Err(message) => {
-                                state_tx.send_replace(
-                                    CorePrivateCaldusRewardRuntimeState::Faulted { message },
-                                );
-                                break;
-                            }
                         }
+                        publication = Some(retained);
+                        attempted_generation = None;
+                        state_tx.send_replace(
+                            CorePrivateCaldusRewardRuntimeState::AwaitingWriter { encounter_id },
+                        );
                     } else if pending_inventory.is_none() && world_flow_revision.is_none() {
                         state_tx.send_replace(CorePrivateCaldusRewardRuntimeState::Acknowledged {
                             encounter_id,
@@ -495,8 +749,49 @@ async fn run_runtime(
             }
         }
     }
-    state_tx.send_replace(CorePrivateCaldusRewardRuntimeState::Shutdown);
+    report.faulted = matches!(
+        &*state_tx.borrow(),
+        CorePrivateCaldusRewardRuntimeState::Faulted { .. }
+    );
+    if !report.faulted {
+        state_tx.send_replace(CorePrivateCaldusRewardRuntimeState::Shutdown);
+    }
     report
+}
+
+async fn abort_reservation(
+    reservation: Option<&ProductionExtractionCaldusReservationV1>,
+    report: &mut CorePrivateCaldusRewardRuntimeReport,
+    shutdown_rx: &mut watch::Receiver<bool>,
+) -> Result<(), Arc<str>> {
+    let Some(reservation) = reservation else {
+        return Ok(());
+    };
+    let mut backoff = INITIAL_RETRY_BACKOFF;
+    loop {
+        match reservation.abort().await {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                report.extraction_abort_failures =
+                    report.extraction_abort_failures.saturating_add(1);
+                let message = Arc::from(format!(
+                    "Caldus extraction reservation abort failed: {error}"
+                ));
+                if *shutdown_rx.borrow() {
+                    return Err(message);
+                }
+                tokio::select! {
+                    () = tokio::time::sleep(backoff) => {}
+                    changed = shutdown_rx.changed() => {
+                        if changed.is_err() || *shutdown_rx.borrow() {
+                            return Err(message);
+                        }
+                    }
+                }
+                backoff = backoff.saturating_mul(2).min(MAX_RETRY_BACKOFF);
+            }
+        }
+    }
 }
 
 async fn load_snapshot_with_backoff(
@@ -507,7 +802,7 @@ async fn load_snapshot_with_backoff(
     state_tx: &watch::Sender<CorePrivateCaldusRewardRuntimeState>,
     shutdown_rx: &mut watch::Receiver<bool>,
     report: &mut CorePrivateCaldusRewardRuntimeReport,
-) -> Result<Option<CorePendingInventoryStateV1>, CoreCaldusRewardAuthorityFailure> {
+) -> Result<Option<CoreCaldusPendingInventorySnapshot>, CoreCaldusRewardAuthorityFailure> {
     let mut backoff = INITIAL_RETRY_BACKOFF;
     loop {
         report.snapshot_attempts = report.snapshot_attempts.saturating_add(1);
@@ -538,25 +833,23 @@ async fn load_snapshot_with_backoff(
 fn retained_publication(
     encounter_id: [u8; 16],
     handoff: &CorePrivateCaldusDefeatHandoff,
-    commit: &CorePrivateCaldusRewardCommit,
+    route: &protocol::CorePrivateRouteStateV1,
     pending_inventory: CorePendingInventoryStateV1,
 ) -> Result<RetainedPublication, Arc<str>> {
     pending_inventory
         .validate()
         .map_err(|error| Arc::from(error.to_string()))?;
-    commit
-        .route
+    route
         .validate()
         .map_err(|error| Arc::from(error.to_string()))?;
-    if commit.route.phase != CorePrivateRoutePhaseV1::BossExitReady
-        || commit.route.character_id != handoff.character_id()
-        || commit.route.actor_generation != handoff.route_lease().actor_generation()
-        || commit.route.instance_lineage_id != Some(handoff.instance_lineage_id())
+    if route.phase != CorePrivateRoutePhaseV1::BossExitReady
+        || route.character_id != handoff.character_id()
+        || route.actor_generation != handoff.route_lease().actor_generation()
+        || route.instance_lineage_id != Some(handoff.instance_lineage_id())
         || pending_inventory.character_id != handoff.character_id()
         || pending_inventory.instance_lineage_id != handoff.instance_lineage_id()
         || pending_inventory.entry_restore_point_id != handoff.entry_restore_point_id()
-        || pending_inventory.expected_extraction_versions.character
-            != commit.route.character_version
+        || pending_inventory.expected_extraction_versions.character != route.character_version
     {
         return Err(Arc::from(
             "Caldus pending inventory does not match acknowledged BossExitReady authority",
@@ -566,7 +859,7 @@ fn retained_publication(
         encounter_id,
         server_tick: handoff.defeat_tick().0,
         pending_inventory: ReliableEvent::CorePendingInventoryState(Box::new(pending_inventory)),
-        route: ReliableEvent::CorePrivateRouteState(Box::new(commit.route.clone())),
+        route: ReliableEvent::CorePrivateRouteState(Box::new(route.clone())),
     })
 }
 
@@ -797,6 +1090,121 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn pending_snapshot_keeps_storage_versions_separate_and_exact() {
+        let (_authenticated, handoff, directory) = fixture();
+        let expected = ProductionExtractionExpectedVersionsV1 {
+            account: 1,
+            character: 1,
+            world: 1,
+            inventory: 2,
+            life_metrics: 1,
+        };
+        let snapshot =
+            CoreCaldusPendingInventorySnapshot::new(pending_inventory(&handoff), expected)
+                .expect("coherent storage and wire authority");
+        assert_eq!(snapshot.expected_versions(), &expected);
+        assert_eq!(snapshot.projection().character_id, handoff.character_id());
+
+        let mut changed = expected;
+        changed.inventory = 3;
+        assert!(
+            CoreCaldusPendingInventorySnapshot::new(pending_inventory(&handoff), changed).is_err()
+        );
+        directory.begin_shutdown();
+        assert!(directory.finish_shutdown().await.unwrap().zero_residue);
+    }
+
+    #[tokio::test]
+    async fn shutdown_during_failed_reservation_abort_is_bounded_and_faulted() {
+        let (authenticated, handoff, directory) = fixture();
+        let route = directory
+            .advance(
+                handoff.route_lease(),
+                CorePrivateRouteActorAdvance::BossExitReady,
+            )
+            .await
+            .expect("BossExitReady");
+        let identities = sim_core::CoreCaldusVictoryIdentities::derive(
+            handoff.instance_lineage_id(),
+            handoff.lock(),
+        )
+        .expect("Caldus identities");
+        let commit = CorePrivateCaldusRewardCommit {
+            route,
+            exit: CaldusExitPresentation {
+                exit_instance_id: identities.exit_instance_id.bytes(),
+                content_id: "portal.exit.dungeon.bell_sepulcher".to_owned(),
+                asset_id: "asset.portal.exit.bell".to_owned(),
+                display_name: "Return to Lantern Halls".to_owned(),
+                description: "Secure pending custody before Hall return.".to_owned(),
+                tags: vec!["portal".to_owned()],
+                point: MilliTilePoint { x: 2_500, y: 9_000 },
+                destination_content_id: "hub.lantern_halls_01".to_owned(),
+                arrival: CoreCaldusSafeArrival::HallDefault,
+                requires_committed_extraction_receipt: true,
+            },
+            disposition: CorePrivateCaldusRewardCommitDisposition::Committed,
+        };
+        let reservation = ProductionExtractionCaldusReservationV1::reserve(
+            authenticated,
+            directory.clone(),
+            &handoff,
+            &commit,
+            pending_inventory(&handoff).content_revision,
+        )
+        .await
+        .expect("fresh reservation");
+        directory.begin_shutdown();
+        let (_shutdown_tx, mut shutdown_rx) = watch::channel(true);
+        let mut report = CorePrivateCaldusRewardRuntimeReport {
+            resolution_attempts: 0,
+            acknowledgements: 0,
+            snapshot_attempts: 0,
+            extraction_reservations: 1,
+            extraction_activations: 0,
+            extraction_abort_failures: 0,
+            publication_attempts: 0,
+            publication_generations: 0,
+            faulted: false,
+            task_joined: true,
+        };
+
+        let failure = tokio::time::timeout(
+            Duration::from_millis(100),
+            abort_reservation(Some(&reservation), &mut report, &mut shutdown_rx),
+        )
+        .await
+        .expect("shutdown cleanup must not hang")
+        .expect_err("retired route cannot accept exact abort");
+        assert!(failure.contains("reservation abort failed"));
+        assert_eq!(report.extraction_abort_failures, 1);
+        assert!(directory.finish_shutdown().await.unwrap().zero_residue);
+    }
+
+    #[test]
+    fn exact_terminal_completion_releases_retained_publication_unbind_gate() {
+        let (writer_tx, _writer_rx) = watch::channel(None::<WriterBinding>);
+        let (_state_tx, state_rx) =
+            watch::channel(CorePrivateCaldusRewardRuntimeState::Published {
+                encounter_id: [0xA1; 16],
+                generation: CoreCaldusRewardWriterGeneration::new(1).unwrap(),
+            });
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let runtime = CorePrivateCaldusRewardRuntime {
+            writer_tx,
+            state_rx,
+            shutdown_tx,
+            terminal_completed: AtomicBool::new(false),
+            join: Mutex::new(None),
+        };
+
+        assert!(runtime.blocks_danger_unbind());
+        runtime.acknowledge_terminal_complete();
+        assert!(!runtime.blocks_danger_unbind());
+        assert!(*shutdown_rx.borrow());
+    }
+
     async fn live_connection_pair() -> (
         quinn::Endpoint,
         quinn::Endpoint,
@@ -872,9 +1280,13 @@ mod tests {
             disposition: CorePrivateCaldusRewardCommitDisposition::Committed,
         };
         let encounter_id = [0x92; 16];
-        let retained =
-            retained_publication(encounter_id, &handoff, &commit, pending_inventory(&handoff))
-                .expect("retained publication");
+        let retained = retained_publication(
+            encounter_id,
+            &handoff,
+            &commit.route,
+            pending_inventory(&handoff),
+        )
+        .expect("retained publication");
 
         let (server_endpoint_1, client_endpoint_1, client_1, server_1) =
             live_connection_pair().await;
@@ -940,8 +1352,12 @@ mod tests {
             resolution_attempts: 0,
             acknowledgements: 0,
             snapshot_attempts: 0,
+            extraction_reservations: 0,
+            extraction_activations: 0,
+            extraction_abort_failures: 0,
             publication_attempts: 0,
             publication_generations: 0,
+            faulted: false,
             task_joined: true,
         };
 
@@ -980,8 +1396,12 @@ mod tests {
             resolution_attempts: 0,
             acknowledgements: 0,
             snapshot_attempts: 0,
+            extraction_reservations: 0,
+            extraction_activations: 0,
+            extraction_abort_failures: 0,
             publication_attempts: 0,
             publication_generations: 0,
+            faulted: false,
             task_joined: true,
         };
         let stop = tokio::spawn(async move {

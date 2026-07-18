@@ -81,6 +81,7 @@ pub struct ProductionExtractionCaldusReservationV1 {
     route_directory: CorePrivateRouteActorDirectory,
     route_lease: CorePrivateRouteActorLease,
     permit: CorePrivateRouteExtractionPermit,
+    owns_route_reservation: bool,
     handoff: CorePrivateCaldusDefeatHandoff,
     exit: CaldusExitPresentation,
     participant: CoreBossParticipant,
@@ -144,15 +145,18 @@ impl ProductionExtractionCaldusReservationV1 {
         )
         .map_err(|_| ProductionExtractionIntentError::InvalidRouteAuthority)?;
         let route_lease = handoff.route_lease();
-        let permit = route_directory
-            .prepare_extraction_terminal(route_lease, binding)
+        let reservation = route_directory
+            .prepare_extraction_terminal_owned(route_lease, binding)
             .await
             .map_err(|_| ProductionExtractionIntentError::InvalidRouteAuthority)?;
+        let owns_route_reservation = reservation.is_fresh();
+        let permit = reservation.permit().clone();
         Ok(Self {
             authenticated,
             route_directory,
             route_lease,
             permit,
+            owns_route_reservation,
             handoff: handoff.clone(),
             exit: commit.exit.clone(),
             participant,
@@ -167,6 +171,11 @@ impl ProductionExtractionCaldusReservationV1 {
     #[must_use]
     pub const fn permit(&self) -> &CorePrivateRouteExtractionPermit {
         &self.permit
+    }
+
+    #[must_use]
+    pub const fn owns_route_reservation(&self) -> bool {
+        self.owns_route_reservation
     }
 
     /// Seals the reserved route against the post-reservation coherent storage versions. A known
@@ -189,13 +198,18 @@ impl ProductionExtractionCaldusReservationV1 {
         match result {
             Ok(authority) => Ok(authority),
             Err(error) => {
-                self.abort().await?;
+                if self.owns_route_reservation {
+                    self.abort().await?;
+                }
                 Err(error)
             }
         }
     }
 
-    pub async fn abort(self) -> Result<(), ProductionExtractionIntentError> {
+    pub async fn abort(&self) -> Result<(), ProductionExtractionIntentError> {
+        if !self.owns_route_reservation {
+            return Ok(());
+        }
         self.route_directory
             .abort_extraction_terminal(self.route_lease, &self.permit)
             .await

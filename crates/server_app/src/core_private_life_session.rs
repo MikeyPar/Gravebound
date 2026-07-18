@@ -7,9 +7,15 @@
 //! A session therefore exists from handshake onward, before a danger actor or Recall channel is
 //! available, and later binds those dynamic owners to the same reliable writer.
 
-use std::{collections::BTreeMap, future::Future, path::Path, pin::Pin, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    future::Future,
+    path::Path,
+    pin::Pin,
+    sync::{Arc, Weak},
+};
 
-use persistence::PostgresPersistence;
+use persistence::{PostgresPersistence, ProductionExtractionExpectedVersionsV1};
 use protocol::{
     ActionFrame, ActionKind, CorePrivateRouteContentRevisionV1, InputFrame, ManifestHash,
     WorldFlowContentRevisionV1,
@@ -21,12 +27,14 @@ use tokio::sync::Mutex;
 use crate::{
     AuthenticatedAccount, AuthenticatedNamespace, CaldusVictoryCompositionError,
     CoreB3RewardAuthority, CoreB3RewardCompositionError, CoreB3RewardWriterGeneration,
-    CoreBellPortalTransition, CoreCaldusPendingInventoryAuthority, CoreCaldusRewardAuthority,
-    CoreCaldusRewardWriterGeneration, CoreDurableB3Resolution, CoreDurableBargainRestResolution,
-    CoreExtractionActorDirectory, CoreExtractionAuthoritativeTick, CoreExtractionConnectionLease,
-    CoreExtractionHallProjection, CoreExtractionRuntimeError, CoreExtractionRuntimeReport,
-    CoreExtractionTransportAttach, CoreExtractionTransportDetach, CorePrivateB3RewardRuntime,
-    CorePrivateB3RewardRuntimeError, CorePrivateCaldusRewardRuntime,
+    CoreBellPortalTransition, CoreCaldusExtractionActivator, CoreCaldusPendingInventoryAuthority,
+    CoreCaldusRewardAuthority, CoreCaldusRewardAuthorityFailure,
+    CoreCaldusRewardAuthorityFailureKind, CoreCaldusRewardWriterGeneration,
+    CoreDurableB3Resolution, CoreDurableBargainRestResolution, CoreExtractionActorDirectory,
+    CoreExtractionActorLease, CoreExtractionActorRegistration, CoreExtractionAuthoritativeTick,
+    CoreExtractionConnectionLease, CoreExtractionHallProjection, CoreExtractionRuntimeError,
+    CoreExtractionRuntimeReport, CoreExtractionTransportAttach, CoreExtractionTransportDetach,
+    CorePrivateB3RewardRuntime, CorePrivateB3RewardRuntimeError, CorePrivateCaldusRewardRuntime,
     CorePrivateCaldusRewardRuntimeConfig, CorePrivateCaldusRewardRuntimeError,
     CorePrivateFixedDungeonAdvance, CorePrivateFixedDungeonB3RewardCommit,
     CorePrivateFixedDungeonDriverReady, CorePrivateFixedDungeonRestCommit,
@@ -38,9 +46,10 @@ use crate::{
     CoreRecallActorDirectory, CoreRecallActorRetirementReport, CoreRecallAuthoritativeTick,
     CoreRecallConnectionAuthority, CoreRecallConnectionLease, CoreRecallRuntimeError,
     CoreRecallRuntimeReport, CoreRecallTransportAttach, CoreReliableWriter, IdentityClock,
-    PostgresCaldusVictoryCoordinator, PostgresCoreB3RewardCoordinator, ProductionExtractionPlanner,
-    ProductionRecallClock, ProductionRecallDetachOutcome, SecretRewardEpoch,
-    TRANSPORT_REPLACED_CLOSE_CODE,
+    PostgresCaldusVictoryCoordinator, PostgresCoreB3RewardCoordinator,
+    ProductionExtractionBossExitAuthorityV1, ProductionExtractionCaldusReservationV1,
+    ProductionExtractionIntentActor, ProductionExtractionPlanner, ProductionRecallClock,
+    ProductionRecallDetachOutcome, SecretRewardEpoch, TRANSPORT_REPLACED_CLOSE_CODE,
 };
 use crate::{
     core_extraction_runtime::CoreExtractionPreparedWriterHandoff,
@@ -228,6 +237,8 @@ pub enum CorePrivateLifeSessionError {
     ExtractionAlreadyBound,
     #[error("Core private-life extraction authority is not bound")]
     ExtractionNotBound,
+    #[error("Core private-life danger owner cannot unbind while extraction is unresolved")]
+    UnresolvedExtraction,
     #[error("Core private-life microrealm authority is already bound")]
     MicrorealmAlreadyBound,
     #[error("Core private-life microrealm authority is not bound")]
@@ -283,6 +294,14 @@ struct BoundMicrorealmDriver {
     caldus_rewards: Option<CorePrivateCaldusRewardRuntime>,
 }
 
+impl BoundMicrorealmDriver {
+    fn acknowledge_terminal_complete(&self) {
+        if let Some(caldus_rewards) = &self.caldus_rewards {
+            caldus_rewards.acknowledge_terminal_complete();
+        }
+    }
+}
+
 #[derive(Clone)]
 struct CaldusRewardAuthorityBinding {
     authority: Arc<dyn CoreCaldusRewardAuthority>,
@@ -329,6 +348,7 @@ struct CommittedDynamicWriterHandoffs {
 pub struct CorePrivateLifeSessionDirectory<Clock, TickSource> {
     recall: Arc<CoreRecallActorDirectory<Clock, TickSource>>,
     extraction: Option<Box<dyn PrivateLifeExtractionRuntime>>,
+    caldus_extraction_registrar: Option<Arc<dyn PrivateLifeCaldusExtractionRegistrar>>,
     b3_rewards: Option<Arc<dyn CoreB3RewardAuthority>>,
     caldus_rewards: Option<CaldusRewardAuthorityBinding>,
     state: Mutex<SessionState>,
@@ -366,6 +386,170 @@ trait PrivateLifeExtractionRuntime: Send + Sync {
     fn finish_shutdown(
         &self,
     ) -> RuntimeFuture<'_, Result<CoreExtractionRuntimeReport, CoreExtractionRuntimeError>>;
+}
+
+trait PrivateLifeCaldusExtractionRegistrar: Send + Sync {
+    fn register(
+        &self,
+        authority: ProductionExtractionBossExitAuthorityV1,
+        route_directory: crate::CorePrivateRouteActorDirectory,
+        owns_route_reservation: bool,
+    ) -> RuntimeFuture<'_, Result<CoreExtractionActorRegistration, CoreExtractionRuntimeError>>;
+    fn abort(
+        &self,
+        lease: CoreExtractionActorLease,
+    ) -> RuntimeFuture<'_, Result<(), CoreExtractionRuntimeError>>;
+}
+
+struct ProductionCaldusExtractionRegistrar<Planner, ExtractionClock, ExtractionTicks> {
+    directory: Arc<CoreExtractionActorDirectory<Planner, ExtractionClock, ExtractionTicks>>,
+    planner: Planner,
+    clock: ExtractionClock,
+}
+
+impl<Planner, ExtractionClock, ExtractionTicks> PrivateLifeCaldusExtractionRegistrar
+    for ProductionCaldusExtractionRegistrar<Planner, ExtractionClock, ExtractionTicks>
+where
+    Planner: ProductionExtractionPlanner + Clone + 'static,
+    ExtractionClock: IdentityClock + Clone + 'static,
+    ExtractionTicks: CoreExtractionAuthoritativeTick + 'static,
+{
+    fn register(
+        &self,
+        authority: ProductionExtractionBossExitAuthorityV1,
+        route_directory: crate::CorePrivateRouteActorDirectory,
+        owns_route_reservation: bool,
+    ) -> RuntimeFuture<'_, Result<CoreExtractionActorRegistration, CoreExtractionRuntimeError>>
+    {
+        Box::pin(async move {
+            let route_lease = authority.route_permit().route_lease();
+            let authenticated = AuthenticatedAccount {
+                account_id: crate::AccountId::new(route_lease.account_id())
+                    .ok_or(CoreExtractionRuntimeError::InvalidActorBinding)?,
+                namespace: AuthenticatedNamespace::WipeableTest,
+            };
+            if !owns_route_reservation {
+                return self
+                    .directory
+                    .replay_registered_actor(authenticated, &authority)
+                    .await;
+            }
+            let cleanup_authority = authority.clone();
+            let actor = if let Ok(actor) = ProductionExtractionIntentActor::new(
+                authority,
+                route_directory.clone(),
+                route_lease,
+                self.planner.clone(),
+                self.clock.clone(),
+            ) {
+                Arc::new(actor)
+            } else {
+                if owns_route_reservation {
+                    cleanup_authority
+                        .abort_uncommitted_route(&route_directory, route_lease)
+                        .await
+                        .map_err(|_| CoreExtractionRuntimeError::InvalidActorBinding)?;
+                }
+                return Err(CoreExtractionRuntimeError::InvalidActorBinding);
+            };
+            match self
+                .directory
+                .register_or_replay_actor(authenticated, Arc::clone(&actor))
+                .await
+            {
+                Ok(lease) => Ok(lease),
+                Err(error) => {
+                    if owns_route_reservation {
+                        actor.abort_route_after_failed_construction().await?;
+                    }
+                    Err(error)
+                }
+            }
+        })
+    }
+
+    fn abort(
+        &self,
+        lease: CoreExtractionActorLease,
+    ) -> RuntimeFuture<'_, Result<(), CoreExtractionRuntimeError>> {
+        Box::pin(async move {
+            self.directory
+                .abort_uncommitted_actor(lease)
+                .await
+                .map(|_| ())
+        })
+    }
+}
+
+struct SessionCaldusExtractionActivator<Clock, TickSource> {
+    sessions: Weak<CorePrivateLifeSessionDirectory<Clock, TickSource>>,
+    binding_lease: CorePrivateMicrorealmBindingLease,
+    route_directory: crate::CorePrivateRouteActorDirectory,
+    registrar: Arc<dyn PrivateLifeCaldusExtractionRegistrar>,
+}
+
+impl<Clock, TickSource> CoreCaldusExtractionActivator
+    for SessionCaldusExtractionActivator<Clock, TickSource>
+where
+    Clock: ProductionRecallClock + 'static,
+    TickSource: CoreRecallAuthoritativeTick + 'static,
+{
+    fn activate(
+        &self,
+        reservation: ProductionExtractionCaldusReservationV1,
+        expected_versions: ProductionExtractionExpectedVersionsV1,
+    ) -> RuntimeFuture<'_, Result<(), CoreCaldusRewardAuthorityFailure>> {
+        Box::pin(async move {
+            let owns_route_reservation = reservation.owns_route_reservation();
+            let authority = reservation
+                .seal(expected_versions)
+                .await
+                .map_err(caldus_activation_failure)?;
+            let registration = self
+                .registrar
+                .register(
+                    authority,
+                    self.route_directory.clone(),
+                    owns_route_reservation,
+                )
+                .await
+                .map_err(caldus_activation_failure)?;
+            let actor_lease = registration.lease();
+            let Some(sessions) = self.sessions.upgrade() else {
+                if registration.is_fresh() && owns_route_reservation {
+                    self.registrar
+                        .abort(actor_lease)
+                        .await
+                        .map_err(caldus_activation_failure)?;
+                }
+                return Err(caldus_activation_failure(
+                    CorePrivateLifeSessionError::SessionUnavailable,
+                ));
+            };
+            match sessions
+                .bind_registered_extraction(self.binding_lease)
+                .await
+            {
+                Ok(_) => Ok(()),
+                Err(error) => {
+                    if registration.is_fresh() && owns_route_reservation {
+                        self.registrar
+                            .abort(actor_lease)
+                            .await
+                            .map_err(caldus_activation_failure)?;
+                    }
+                    Err(caldus_activation_failure(error))
+                }
+            }
+        })
+    }
+}
+
+fn caldus_activation_failure(error: impl std::fmt::Display) -> CoreCaldusRewardAuthorityFailure {
+    CoreCaldusRewardAuthorityFailure {
+        kind: CoreCaldusRewardAuthorityFailureKind::Fatal,
+        message: Arc::from(error.to_string()),
+    }
 }
 
 impl<Planner, ExtractionClock, ExtractionTicks> PrivateLifeExtractionRuntime
@@ -448,6 +632,7 @@ where
         Self {
             recall,
             extraction: None,
+            caldus_extraction_registrar: None,
             b3_rewards: None,
             caldus_rewards: None,
             state: Mutex::new(SessionState {
@@ -472,6 +657,78 @@ where
         let mut sessions = Self::new(recall);
         sessions.extraction = Some(Box::new(extraction));
         sessions
+    }
+
+    /// Installs extraction transport ownership plus the production Caldus actor factory. The
+    /// planner and clock are process-owned; actor construction receives the exact route directory
+    /// from the already-bound server runtime and never accepts one from a client.
+    #[must_use]
+    pub fn with_caldus_extraction_runtime<Planner, ExtractionClock, ExtractionTicks>(
+        recall: Arc<CoreRecallActorDirectory<Clock, TickSource>>,
+        extraction: Arc<CoreExtractionActorDirectory<Planner, ExtractionClock, ExtractionTicks>>,
+        planner: Planner,
+        clock: ExtractionClock,
+    ) -> Self
+    where
+        Planner: ProductionExtractionPlanner + Clone + 'static,
+        ExtractionClock: IdentityClock + Clone + 'static,
+        ExtractionTicks: CoreExtractionAuthoritativeTick + 'static,
+    {
+        let registrar: Arc<dyn PrivateLifeCaldusExtractionRegistrar> =
+            Arc::new(ProductionCaldusExtractionRegistrar {
+                directory: Arc::clone(&extraction),
+                planner,
+                clock,
+            });
+        let mut sessions = Self::with_extraction_runtime(recall, extraction);
+        sessions.caldus_extraction_registrar = Some(registrar);
+        sessions
+    }
+
+    fn spawn_caldus_reward_runtime(
+        self: &Arc<Self>,
+        authenticated: AuthenticatedAccount,
+        binding_lease: CorePrivateMicrorealmBindingLease,
+        route_directory: crate::CorePrivateRouteActorDirectory,
+        handle: &CorePrivateMicrorealmDriverHandle,
+        transport_generation: u64,
+        writer: Arc<CoreReliableWriter>,
+    ) -> Option<CorePrivateCaldusRewardRuntime> {
+        self.caldus_rewards.as_ref().map(|binding| {
+            let mut config = CorePrivateCaldusRewardRuntimeConfig::new(
+                authenticated,
+                binding.progression_content_revision.clone(),
+                Arc::clone(&binding.authority),
+            );
+            if let (Some(pending_inventory), Some(world_flow_revision)) =
+                (&binding.pending_inventory, &binding.world_flow_revision)
+            {
+                config = config.with_pending_inventory(
+                    Arc::clone(pending_inventory),
+                    world_flow_revision.clone(),
+                );
+            }
+            if let Some(registrar) = &self.caldus_extraction_registrar {
+                let activator: Arc<dyn CoreCaldusExtractionActivator> =
+                    Arc::new(SessionCaldusExtractionActivator {
+                        sessions: Arc::downgrade(self),
+                        binding_lease,
+                        route_directory: route_directory.clone(),
+                        registrar: Arc::clone(registrar),
+                    });
+                config = config.with_extraction_activation(route_directory, activator);
+            }
+            CorePrivateCaldusRewardRuntime::spawn(
+                config,
+                handle.clone(),
+                handle.observe(),
+                Some((
+                    CoreCaldusRewardWriterGeneration::new(transport_generation)
+                        .expect("session transport generations are nonzero"),
+                    writer,
+                )),
+            )
+        })
     }
 
     #[must_use]
@@ -926,7 +1183,7 @@ where
     /// owner is transport-independent: disconnect keeps it alive for `LinkLost` vulnerability, and
     /// reconnect returns the same allocation to the winning transport generation.
     pub async fn bind_microrealm(
-        &self,
+        self: &Arc<Self>,
         lease: CorePrivateLifeTransportLease,
         runtime: CorePrivateMicrorealmRuntime,
     ) -> Result<CorePrivateMicrorealmBinding, CorePrivateLifeSessionError> {
@@ -961,6 +1218,7 @@ where
             binding_generation,
             route_lease,
         };
+        let route_directory = runtime.route_directory();
         let driver = CorePrivateMicrorealmDriver::spawn(runtime);
         let handle = driver.handle();
         let active = entry
@@ -981,31 +1239,14 @@ where
                 )),
             )
         });
-        let caldus_rewards = self.caldus_rewards.as_ref().map(|binding| {
-            let mut config = CorePrivateCaldusRewardRuntimeConfig::new(
-                entry.authenticated,
-                binding.progression_content_revision.clone(),
-                Arc::clone(&binding.authority),
-            );
-            if let (Some(pending_inventory), Some(world_flow_revision)) =
-                (&binding.pending_inventory, &binding.world_flow_revision)
-            {
-                config = config.with_pending_inventory(
-                    Arc::clone(pending_inventory),
-                    world_flow_revision.clone(),
-                );
-            }
-            CorePrivateCaldusRewardRuntime::spawn(
-                config,
-                handle.clone(),
-                handle.observe(),
-                Some((
-                    CoreCaldusRewardWriterGeneration::new(active.lease.generation.get())
-                        .expect("session transport generations are nonzero"),
-                    Arc::clone(&active.writer),
-                )),
-            )
-        });
+        let caldus_rewards = self.spawn_caldus_reward_runtime(
+            entry.authenticated,
+            binding_lease,
+            route_directory,
+            &handle,
+            active.lease.generation.get(),
+            Arc::clone(&active.writer),
+        );
         let binding = CorePrivateMicrorealmBinding {
             lease: binding_lease,
             observer: handle.observe(),
@@ -1267,6 +1508,14 @@ where
         {
             return Err(CorePrivateLifeSessionError::MicrorealmUnavailable);
         }
+        let caldus_terminal_unresolved = entry
+            .microrealm
+            .as_ref()
+            .and_then(|bound| bound.caldus_rewards.as_ref())
+            .is_some_and(CorePrivateCaldusRewardRuntime::blocks_danger_unbind);
+        if entry.extraction_bound || caldus_terminal_unresolved {
+            return Err(CorePrivateLifeSessionError::UnresolvedExtraction);
+        }
         let bound = entry
             .microrealm
             .take()
@@ -1356,9 +1605,6 @@ where
         {
             return Err(CorePrivateLifeSessionError::MicrorealmUnavailable);
         }
-        if entry.extraction_bound {
-            return Err(CorePrivateLifeSessionError::ExtractionAlreadyBound);
-        }
         let extraction = self
             .extraction
             .as_ref()
@@ -1371,6 +1617,15 @@ where
             || actor_lease.route_generation() != lease.actor_generation
         {
             return Err(CorePrivateLifeSessionError::InvalidAccountBinding);
+        }
+        if entry.extraction_bound {
+            if entry
+                .extraction_lease
+                .is_some_and(|connection| connection.actor() != actor_lease)
+            {
+                return Err(CorePrivateLifeSessionError::InvalidAccountBinding);
+            }
+            return Ok(entry.extraction_lease);
         }
 
         let attached = if let Some(active) = &entry.active {
@@ -1474,6 +1729,9 @@ where
             .await?;
         entry.extraction_bound = false;
         entry.extraction_lease = None;
+        if let Some(microrealm) = &entry.microrealm {
+            microrealm.acknowledge_terminal_complete();
+        }
         Ok(())
     }
 
@@ -1506,6 +1764,9 @@ where
             .await;
         entry.extraction_bound = false;
         entry.extraction_lease = None;
+        if let Some(microrealm) = &entry.microrealm {
+            microrealm.acknowledge_terminal_complete();
+        }
         Ok(outcome)
     }
 
@@ -1548,6 +1809,9 @@ where
             None
         };
         entry.extraction_bound = false;
+        if let Some(microrealm) = &entry.microrealm {
+            microrealm.acknowledge_terminal_complete();
+        }
         Ok(outcome)
     }
 
@@ -1782,6 +2046,11 @@ mod tests {
         sync::atomic::{AtomicU64, Ordering},
     };
 
+    use persistence::{
+        PersistenceError, PreparedProductionExtractionV1,
+        ProductionExtractionIntentAcceptanceTransactionV1, ProductionExtractionIntentAttemptV1,
+        StoredProductionExtractionIntentAcceptanceV1,
+    };
     use protocol::{
         ActionResultCode, CorePrivateRouteContentRevisionV1, CorePrivateRoutePhaseV1,
         CorePrivateRouteRoomV1, CorePrivateRouteSceneV1, ManifestHash, RecallFrameV1,
@@ -1790,14 +2059,16 @@ mod tests {
     };
     use rcgen::generate_simple_self_signed;
     use rustls::pki_types::PrivatePkcs8KeyDer;
-    use sim_core::Tick;
+    use sim_core::{CoreBossParticipant, CoreBossParticipantLock, EntityId, Tick};
 
     use super::*;
     use crate::{
-        AccountId, CoreBellPortalAuthority, CoreBellPortalBinding,
+        AccountId, CoreBellPortalAuthority, CoreBellPortalBinding, CorePrivateCaldusDefeatHandoff,
+        CorePrivateCaldusRewardCommit, CorePrivateCaldusRewardCommitDisposition,
         CorePrivateMicrorealmDriverState, CorePrivateRouteActorAdvance,
         CorePrivateRouteActorDirectory, CorePrivateRouteActorPosition, CorePrivateRouteActorSeed,
-        CoreRecallIntentAuthority, ProductionRecallIntentActor, ProductionRecallPendingAuthorityV1,
+        CoreRecallIntentAuthority, ProductionExtractionPlannerInputV1, ProductionRecallIntentActor,
+        ProductionRecallPendingAuthorityV1,
     };
 
     const ACCOUNT_ID: [u8; 16] = [71; 16];
@@ -1821,6 +2092,54 @@ mod tests {
             assert_eq!(account_id, ACCOUNT_ID);
             assert_eq!(character_id, CHARACTER_ID);
             NonZeroU64::new(self.0.load(Ordering::SeqCst)).unwrap()
+        }
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct ExtractionClock;
+
+    impl IdentityClock for ExtractionClock {
+        fn unix_millis(&self) -> u64 {
+            5_000
+        }
+    }
+
+    #[derive(Debug)]
+    struct ExtractionTicks;
+
+    impl CoreExtractionAuthoritativeTick for ExtractionTicks {
+        fn current_tick(&self, lease: CoreExtractionActorLease) -> Option<NonZeroU64> {
+            assert_eq!(lease.account_id(), ACCOUNT_ID);
+            assert_eq!(lease.character_id(), CHARACTER_ID);
+            assert_eq!(lease.route_generation(), 7);
+            NonZeroU64::new(700)
+        }
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct UnusedExtractionPlanner;
+
+    impl ProductionExtractionPlanner for UnusedExtractionPlanner {
+        async fn load_intent_acceptance(
+            &self,
+            _extraction_request_id: [u8; 16],
+        ) -> Result<Option<StoredProductionExtractionIntentAcceptanceV1>, PersistenceError>
+        {
+            panic!("activation must not execute an extraction request")
+        }
+
+        async fn accept_intent(
+            &self,
+            _attempt: &ProductionExtractionIntentAttemptV1,
+        ) -> Result<ProductionExtractionIntentAcceptanceTransactionV1, PersistenceError> {
+            panic!("activation must not accept an extraction request")
+        }
+
+        async fn prepare(
+            &self,
+            _input: &ProductionExtractionPlannerInputV1,
+        ) -> Result<PreparedProductionExtractionV1, PersistenceError> {
+            panic!("activation must not plan extraction custody")
         }
     }
 
@@ -1915,6 +2234,76 @@ mod tests {
         )
         .unwrap();
         (routes, lease, runtime)
+    }
+
+    fn boss_exit_fixture() -> (
+        CorePrivateRouteActorDirectory,
+        CorePrivateRouteActorLease,
+        CorePrivateCaldusDefeatHandoff,
+        CorePrivateCaldusRewardCommit,
+    ) {
+        let routes = CorePrivateRouteActorDirectory::new();
+        let route_lease = routes
+            .register_actor(
+                authenticated(),
+                CorePrivateRouteActorSeed {
+                    character_id: CHARACTER_ID,
+                    character_version: 2,
+                    content_revision: route_revision(),
+                    world_flow_revision: world_revision(),
+                    position: CorePrivateRouteActorPosition {
+                        instance_lineage_id: Some(LINEAGE_ID),
+                        scene: CorePrivateRouteSceneV1::BellSepulcher,
+                        room: Some(CorePrivateRouteRoomV1::CaldusArenaB6),
+                        phase: CorePrivateRoutePhaseV1::BossExitReady,
+                    },
+                },
+                7,
+            )
+            .expect("BossExitReady route");
+        let participant = CoreBossParticipant {
+            entity_id: EntityId::new(7_200).expect("participant"),
+            party_slot: 0,
+        };
+        let lock = CoreBossParticipantLock {
+            attempt_ordinal: 1,
+            participants: vec![participant],
+            maximum_health: 7_200,
+        };
+        let identities = sim_core::CoreCaldusVictoryIdentities::derive(LINEAGE_ID, &lock)
+            .expect("Caldus identities");
+        let route = routes
+            .snapshot(route_lease)
+            .expect("BossExitReady snapshot");
+        let handoff = CorePrivateCaldusDefeatHandoff {
+            route_lease,
+            route_state_version: route.state_version.saturating_sub(1),
+            instance_lineage_id: LINEAGE_ID,
+            entry_restore_point_id: [74; 16],
+            lock,
+            active_duration_ticks: 300,
+            defeat_tick: Tick(700),
+            character_id: CHARACTER_ID,
+            expected_progression_version: 1,
+            eligibility: Vec::new(),
+        };
+        let commit = CorePrivateCaldusRewardCommit {
+            route,
+            exit: crate::CaldusExitPresentation {
+                exit_instance_id: identities.exit_instance_id.bytes(),
+                content_id: "portal.exit.dungeon.bell_sepulcher".to_owned(),
+                asset_id: "sprite.portal.exit.dungeon.bell_sepulcher".to_owned(),
+                display_name: "Return to Lantern Halls".to_owned(),
+                description: "Secure pending custody before Hall return.".to_owned(),
+                tags: vec!["portal".to_owned()],
+                point: content_schema::MilliTilePoint { x: 2_500, y: 9_000 },
+                destination_content_id: "hub.lantern_halls_01".to_owned(),
+                arrival: content_schema::CoreCaldusSafeArrival::HallDefault,
+                requires_committed_extraction_receipt: true,
+            },
+            disposition: CorePrivateCaldusRewardCommitDisposition::Committed,
+        };
+        (routes, route_lease, handoff, commit)
     }
 
     async fn commit_bell_route(
@@ -2336,6 +2725,259 @@ mod tests {
         first_client_endpoint.wait_idle().await;
         second_server_endpoint.wait_idle().await;
         second_client_endpoint.wait_idle().await;
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one real-QUIC composition proves exact reservation, registration, shared-writer binding, rollback, and residue"
+    )]
+    async fn caldus_activation_registers_shared_writer_and_known_abort_reopens_route() {
+        let ticks = Arc::new(TickSource(AtomicU64::new(100)));
+        let recall = Arc::new(CoreRecallActorDirectory::<FixedClock, _>::new(ticks));
+        let extraction = Arc::new(CoreExtractionActorDirectory::new(Arc::new(ExtractionTicks)));
+        let (boss_routes, boss_lease, handoff, commit) = boss_exit_fixture();
+        let sessions = Arc::new(
+            CorePrivateLifeSessionDirectory::with_caldus_extraction_runtime(
+                recall,
+                Arc::clone(&extraction),
+                UnusedExtractionPlanner,
+                ExtractionClock,
+            ),
+        );
+        let (dummy_routes, _dummy_lease, runtime) = live_microrealm();
+        let (server_endpoint, client_endpoint, client, server) = live_connection_pair().await;
+        let attached = sessions
+            .attach_transport(authenticated(), server, 5_000)
+            .await
+            .expect("private-life transport");
+        let dummy_binding = sessions
+            .bind_microrealm(attached.lease, runtime)
+            .await
+            .expect("session-owned danger task");
+        let exact_binding = CorePrivateMicrorealmBindingLease {
+            account_id: ACCOUNT_ID,
+            character_id: CHARACTER_ID,
+            actor_generation: boss_lease.actor_generation(),
+            binding_generation: dummy_binding.lease.binding_generation(),
+            route_lease: boss_lease,
+        };
+        {
+            let mut state = sessions.state.lock().await;
+            state
+                .sessions
+                .get_mut(&ACCOUNT_ID)
+                .and_then(|entry| entry.microrealm.as_mut())
+                .expect("bound danger")
+                .lease = exact_binding;
+        }
+        let registrar = sessions
+            .caldus_extraction_registrar
+            .as_ref()
+            .expect("production registrar")
+            .clone();
+        let activator = SessionCaldusExtractionActivator {
+            sessions: Arc::downgrade(&sessions),
+            binding_lease: exact_binding,
+            route_directory: boss_routes.clone(),
+            registrar: Arc::clone(&registrar),
+        };
+        let reservation = ProductionExtractionCaldusReservationV1::reserve(
+            authenticated(),
+            boss_routes.clone(),
+            &handoff,
+            &commit,
+            world_revision(),
+        )
+        .await
+        .expect("exact route reservation");
+        assert_eq!(
+            boss_routes.snapshot(boss_lease).unwrap().phase,
+            CorePrivateRoutePhaseV1::TerminalPending
+        );
+        let early_replay = ProductionExtractionCaldusReservationV1::reserve(
+            authenticated(),
+            boss_routes.clone(),
+            &handoff,
+            &commit,
+            world_revision(),
+        )
+        .await
+        .expect("in-flight reservation replay");
+        assert!(
+            activator
+                .activate(
+                    early_replay,
+                    ProductionExtractionExpectedVersionsV1 {
+                        account: 1,
+                        character: 2,
+                        world: 2,
+                        inventory: 1,
+                        life_metrics: 1,
+                    },
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            extraction
+                .registered_actor_lease(authenticated())
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            boss_routes.snapshot(boss_lease).unwrap().phase,
+            CorePrivateRoutePhaseV1::TerminalPending
+        );
+        activator
+            .activate(
+                reservation,
+                ProductionExtractionExpectedVersionsV1 {
+                    account: 1,
+                    character: 2,
+                    world: 2,
+                    inventory: 1,
+                    life_metrics: 1,
+                },
+            )
+            .await
+            .expect("register and session-bind production extraction");
+
+        let actor_lease = extraction
+            .registered_actor_lease(authenticated())
+            .await
+            .expect("registered actor");
+        assert_eq!(
+            actor_lease.route_generation(),
+            boss_lease.actor_generation()
+        );
+        let transport_lease = sessions
+            .extraction_lease(attached.lease)
+            .await
+            .expect("session extraction lease");
+        assert_eq!(transport_lease.actor(), actor_lease);
+        let extraction_writer = extraction
+            .reliable_writer(transport_lease)
+            .await
+            .expect("extraction writer");
+        assert!(Arc::ptr_eq(&attached.writer, &extraction_writer));
+        assert_eq!(sessions.snapshot().await.extraction_bound_count, 1);
+
+        for changed_versions in [
+            ProductionExtractionExpectedVersionsV1 {
+                account: 1,
+                character: 2,
+                world: 2,
+                inventory: 2,
+                life_metrics: 1,
+            },
+            ProductionExtractionExpectedVersionsV1 {
+                account: 1,
+                character: 3,
+                world: 3,
+                inventory: 1,
+                life_metrics: 1,
+            },
+        ] {
+            let conflicting_reservation = ProductionExtractionCaldusReservationV1::reserve(
+                authenticated(),
+                boss_routes.clone(),
+                &handoff,
+                &commit,
+                world_revision(),
+            )
+            .await
+            .expect("shared exact route permit");
+            assert!(
+                activator
+                    .activate(conflicting_reservation, changed_versions)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                extraction
+                    .registered_actor_lease(authenticated())
+                    .await
+                    .expect("changed replay cannot retire winner"),
+                actor_lease
+            );
+            assert_eq!(
+                boss_routes.snapshot(boss_lease).unwrap().phase,
+                CorePrivateRoutePhaseV1::TerminalPending
+            );
+        }
+
+        let replay_reservation = ProductionExtractionCaldusReservationV1::reserve(
+            authenticated(),
+            boss_routes.clone(),
+            &handoff,
+            &commit,
+            world_revision(),
+        )
+        .await
+        .expect("exact reservation replay");
+        activator
+            .activate(
+                replay_reservation,
+                ProductionExtractionExpectedVersionsV1 {
+                    account: 1,
+                    character: 2,
+                    world: 2,
+                    inventory: 1,
+                    life_metrics: 1,
+                },
+            )
+            .await
+            .expect("exact activation replay");
+        assert_eq!(
+            extraction
+                .registered_actor_lease(authenticated())
+                .await
+                .expect("winner remains registered"),
+            actor_lease
+        );
+        assert_eq!(
+            boss_routes.snapshot(boss_lease).unwrap().phase,
+            CorePrivateRoutePhaseV1::TerminalPending
+        );
+        assert!(matches!(
+            sessions.unbind_microrealm(exact_binding).await,
+            Err(CorePrivateLifeSessionError::UnresolvedExtraction)
+        ));
+
+        assert_eq!(
+            sessions
+                .unbind_registered_extraction(exact_binding)
+                .await
+                .expect("session cleanup"),
+            Some(CoreExtractionTransportDetach::Detached)
+        );
+        registrar
+            .abort(actor_lease)
+            .await
+            .expect("uncommitted actor cleanup");
+        let reopened = boss_routes.snapshot(boss_lease).expect("reopened route");
+        assert_eq!(reopened.phase, CorePrivateRoutePhaseV1::BossExitReady);
+        assert_eq!(sessions.snapshot().await.extraction_bound_count, 0);
+        assert!(
+            sessions
+                .unbind_microrealm(exact_binding)
+                .await
+                .unwrap()
+                .task_joined
+        );
+
+        for connection in sessions.begin_shutdown().await {
+            connection.close(0_u32.into(), b"test shutdown");
+        }
+        assert!(sessions.finish_shutdown().await.unwrap().zero_residue);
+        dummy_routes.begin_shutdown();
+        assert!(dummy_routes.finish_shutdown().await.unwrap().zero_residue);
+        boss_routes.begin_shutdown();
+        assert!(boss_routes.finish_shutdown().await.unwrap().zero_residue);
+        client.close(0_u32.into(), b"test complete");
+        server_endpoint.wait_idle().await;
+        client_endpoint.wait_idle().await;
     }
 
     #[tokio::test]

@@ -96,6 +96,7 @@ pub use core_b3_reward::{
     CoreB3RewardCompositionError, CoreB3RewardCoordinatorError, CoreDurableB3IneligibleCommit,
     CoreDurableB3Resolution, CoreDurableB3RewardCommit, PostgresCoreB3RewardCoordinator,
 };
+pub(crate) use core_extraction_runtime::CoreExtractionActorRegistration;
 pub use core_extraction_runtime::{
     CoreExtractionActorDirectory, CoreExtractionActorLease, CoreExtractionActorRetirementReport,
     CoreExtractionAuthoritativeTick, CoreExtractionConnectionAuthority,
@@ -127,7 +128,8 @@ pub use core_private_caldus_reward::{
 };
 pub(crate) use core_private_caldus_reward_runtime::CorePrivateCaldusRewardRuntimeConfig;
 pub use core_private_caldus_reward_runtime::{
-    CoreCaldusPendingInventoryAuthority, CoreCaldusRewardWriterGeneration,
+    CoreCaldusExtractionActivator, CoreCaldusPendingInventoryAuthority,
+    CoreCaldusPendingInventorySnapshot, CoreCaldusRewardWriterGeneration,
     CorePrivateCaldusRewardRuntime, CorePrivateCaldusRewardRuntimeError,
     CorePrivateCaldusRewardRuntimeReport, CorePrivateCaldusRewardRuntimeState,
 };
