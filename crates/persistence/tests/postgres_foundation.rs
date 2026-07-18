@@ -118,6 +118,8 @@ const EXPECTED_PUBLIC_TABLES: &[&str] = &[
     "item_ledger_events",
     "memorial_records",
     "private_route_generation_allocations_v1",
+    "production_extraction_intent_acceptances_v1",
+    "production_extraction_intent_conflict_audits_v1",
     "recall_terminal_audit_events_v1",
     "recall_terminal_conflict_audits_v1",
     "recall_terminal_item_destructions_v1",
