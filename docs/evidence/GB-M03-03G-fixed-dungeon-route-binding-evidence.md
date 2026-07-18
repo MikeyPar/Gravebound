@@ -30,8 +30,8 @@
 
 ## Explicit boundary
 
-The existing session-owned 30 Hz driver converts in place, never returns its allocation through a caller-owned join, and now produces live fixed-room frames. This slice does not yet persist the B4 Bargain result, construct Sir Caldus, commit room/boss rewards or pending inventory, create the stable B6 exit, or compose all five terminal producers. Normal Character Select `Play`, Realm Gate interaction, dungeon admission, extraction, and Recall remain disabled.
+The existing session-owned 30 Hz driver converts in place, never returns its allocation through a caller-owned join, produces live fixed-room frames, and now accepts only opaque durable B4 outcomes. The disabled normal coordinator does not yet deliver the B3 reward/milestone result; this slice also does not construct Sir Caldus, commit room/boss rewards or pending inventory, create the stable B6 exit, or compose all five terminal producers. Normal Character Select `Play`, Realm Gate interaction, dungeon admission, extraction, and Recall remain disabled.
 
 ## Current Next Step
 
-Bind the durable B4 Bargain result into the same task before constructing Caldus and reward/terminal authority.
+Deliver the committed B3 reward/milestone and B4 proof through the normal coordinator, then implement the B5 bridge before constructing Caldus at B6 and its reward/terminal authority.

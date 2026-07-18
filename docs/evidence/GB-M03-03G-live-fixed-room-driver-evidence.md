@@ -1,6 +1,6 @@
 # GB-M03-03G live fixed-room driver evidence
 
-**Status:** Local implementation evidence accepted for commits `b50a8c0` and `09c9c9e`. Commit `b50a8c0` is green under hosted CI [`29646020543`](https://github.com/MikeyPar/Gravebound/actions/runs/29646020543); run [`29646920076`](https://github.com/MikeyPar/Gravebound/actions/runs/29646920076) for `09c9c9e` is in progress and is not claimed green. Normal route admission remains disabled.
+**Status:** Local implementation evidence accepted for commits `b50a8c0` and `09c9c9e`. Both are green under hosted CI runs [`29646020543`](https://github.com/MikeyPar/Gravebound/actions/runs/29646020543) and [`29646920076`](https://github.com/MikeyPar/Gravebound/actions/runs/29646920076). Normal route admission remains disabled.
 
 ## Three-authority basis
 
@@ -26,16 +26,16 @@
 - `131/131` `sim_content` library tests pass.
 - `326/326` `server_app` library tests pass, along with every enabled binary, integration, and doc target. Existing PostgreSQL and long-soak tests remain behind their explicit disposable-environment gates.
 - `cargo fmt --check`, `git diff --check`, and strict all-target/all-feature Clippy for `sim_content` and `server_app` pass.
-- Hosted CI [`29646020543`](https://github.com/MikeyPar/Gravebound/actions/runs/29646020543) is green for the authoritative live-frame primitive at exact commit `b50a8c0`; the session-task integration run remains pending.
+- Hosted CI [`29646020543`](https://github.com/MikeyPar/Gravebound/actions/runs/29646020543) is green for the authoritative live-frame primitive at exact commit `b50a8c0`; [`29646920076`](https://github.com/MikeyPar/Gravebound/actions/runs/29646920076) is green for the session-task integration at exact commit `09c9c9e`.
 
 ## Presentation candidate
 
-Commit `a6fb62e` adds the unregistered [`Open`/`Selected`/`Refused` B4 shrine-state pack](../../assets/core/dungeons/bell_bargain_state_review/v1/README.md). The deterministic rebuild reproduces twelve manifest hashes; 96px readability plus 1280x720 and 1920x1080 standard/reduced review mocks pass visual inspection. It remains outside registries and content hashes until a stored durable B4 projection and optimized native review exist.
+Commit `a6fb62e` adds the unregistered [`Open`/`Selected`/`Refused` B4 shrine-state pack](../../assets/core/dungeons/bell_bargain_state_review/v1/README.md). The deterministic rebuild reproduces twelve manifest hashes; 96px readability plus 1280x720 and 1920x1080 standard/reduced review mocks pass visual inspection. Commit `e1e4d7c` supplies the stored durable projection; registration/content-hash changes remain blocked on normal-coordinator delivery and optimized native review.
 
 ## Explicit boundary
 
-The driver can traverse live combat rooms only when their server-owned lifecycle permits an advance. It does not yet project the committed/replayed Bargain transaction into B4, construct Sir Caldus at B6, commit room/boss rewards or pending inventory, expose the stable exit, arbitrate all terminal producers, or enable ordinary native admission.
+Commit `e1e4d7c` now projects committed/replayed select, refuse, and authoritative no-offer material into B4 through an opaque account/character/lineage-bound receipt. The disabled ordinary coordinator does not yet commit and deliver the B3 reward/milestone result before B4 response publication. The route also does not yet construct Sir Caldus at B6, commit room/boss rewards or pending inventory, expose the stable exit, arbitrate all terminal producers, or enable ordinary native admission.
 
 ## Current Next Step
 
-Bind the existing durable Bargain transaction to B4 inside the same task. Exact replay must return the stored result; changed material must conflict; dropped/unknown outcomes must remain frozen; only the stored `Selected`, `Refused`, or authoritative no-offer result may permit B4 -> B5. Then construct Sir Caldus, durable rewards/pending inventory, the stable B6 exit, and terminal composition.
+Use the [durable B4 binding](GB-M03-03G-durable-b4-task-binding-evidence.md) from the normal B3 reward coordinator before publishing the reliable Bargain response, then prove response-loss/reconnect/restart convergence. Next implement the B5 bridge, Sir Caldus at B6, durable rewards/pending inventory, the stable B6 exit, and terminal composition.

@@ -31,4 +31,4 @@ The conversion itself stops at B0; the follow-on live-driver slice now synthesiz
 
 ## Current Next Step
 
-Bind the committed/replayed durable B4 Bargain result into the same task before constructing Sir Caldus, committed reward/pending-inventory authority, the stable B6 exit, and terminal composition.
+Commit `e1e4d7c` binds committed/replayed durable B4 outcomes into the same task. Next deliver the B3 reward/milestone result from the normal coordinator before response publication, then implement the B5 bridge, construct Sir Caldus at B6, commit reward/pending-inventory authority, reveal the stable B6 exit, and finish terminal composition.
