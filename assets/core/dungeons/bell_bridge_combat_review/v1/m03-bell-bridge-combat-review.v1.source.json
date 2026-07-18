@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "pack_id": "review.m03.bell_bridge_combat_readability.v1",
+  "generated_date": "2026-07-18",
+  "status": {
+    "classification": "unregistered_review_candidate",
+    "runtime_registered": false,
+    "content_hash_input": false,
+    "runtime_bundle": null,
+    "normal_route_gate_changed": false
+  },
+  "authority": {
+    "gdd": ["DNG-003", "DNG-004", "DNG-005", "ENC-001", "ENC-002", "UI-010", "UI-011", "ART-001", "ART-002", "ART-005", "ART-006", "ART-020", "ART-030"],
+    "content": ["CONT-ROOM-007", "CONT-ENEMY-001", "CONT-ENEMY-002", "CONT-VALID-001", "content/core_dev/encounter_rooms.records.json#room.bell.bridge_01", "content/core_dev/encounter_rooms.records.json#layout.core_private_life_01/B5"],
+    "roadmap": ["GB-M03-03", "GB-M03 exit gate"],
+    "task_evidence": ["docs/tasks/GB-M03-03G.md", "docs/evidence/GB-M03-03G-fixed-dungeon-combat-owner-evidence.md", "docs/evidence/GB-M03-03G-live-fixed-room-driver-evidence.md", "docs/evidence/GB-M03-03G-durable-b4-task-binding-evidence.md"]
+  },
+  "selection_rationale": "Existing packs already cover the B5 Drowned Pilgrim and Chain Sentry silhouettes. Exact Mire Bridge environment geometry and Chain Sentry cardinal/diagonal lane readability were the highest-value uncovered, non-duplicative visual seam.",
+  "source": {
+    "method": "deterministic Pillow raster builder; no diffusion image generation",
+    "builder": "source/build_review_artifacts.py",
+    "exact_brief": "README.md#exact-generation-brief-and-provenance",
+    "external_assets": [],
+    "project_review_dependencies": ["assets/core/enemies/core_bell_encounter_trio/v1/runtime/drowned-pilgrim.48.png", "assets/core/enemies/core_bell_encounter_trio/v1/runtime/chain-sentry.48.png"],
+    "dependency_use": "static review mocks only; files are neither copied nor modified"
+  },
+  "room_contract": {
+    "room_id": "room.bell.bridge_01",
+    "route_node": "B5",
+    "dimensions_milli_tiles": [23000, 11000],
+    "tile_size_pixels": 32,
+    "render_dimensions_pixels": [736, 352],
+    "deep_water": ["north rectangle x=[0,23000), y=[0,3000)", "south rectangle x=[0,23000), y=[9000,11000)"],
+    "doors": ["west centered y=5500 width=3000", "east centered y=5500 width=3000"],
+    "quiet_pattern_lane_centers": [[7500, 5500], [15500, 5500]],
+    "encounter": {"warning_milliseconds": 900, "members": [{"id": "enemy.drowned_pilgrim", "count": 6}, {"id": "enemy.chain_sentry", "count": 1}]}
+  },
+  "telegraph_contract": {
+    "pattern_id": "pattern.enemy.chain_sentry.cross_lanes",
+    "first_axes_degrees": [0, 90],
+    "next_axes_degrees": [45, 135],
+    "alternates": true,
+    "warning_milliseconds": 900,
+    "width_milli_tiles": 900,
+    "length": "to authoritative room collision",
+    "active_milliseconds": 350,
+    "damage": 28,
+    "damage_type": "physical",
+    "disposition": "Major",
+    "visual_language": ["thick outline", "bone-white core", "muted red edge", "chain-notch non-color cue"],
+    "authority_boundary": "simulation/projected cast owns every axis, endpoint, width, tick, collision, hit, and clear; art supplies only repeating material and review compositions"
+  },
+  "assets": [
+    {"candidate_id": "review.tilemap.room.bell.bridge_01", "path": "runtime/mire-bridge.736x352.png", "dimensions": [736, 352], "mode": "RGBA", "anchor": null, "animation_fps": 0, "collision_metadata_reference": "content/core_dev/encounter_rooms.records.json#room.bell.bridge_01", "readability_tags": ["wet_stone", "deep_water", "tarnished_brass", "muted_environment"]},
+    {"candidate_id": "review.pattern.enemy.chain_sentry.cross_lanes.standard", "path": "runtime/chain-lane-pattern.standard.32.png", "dimensions": [32, 32], "mode": "RGBA", "anchor": null, "animation_fps": 0, "collision_metadata_reference": "pattern.enemy.chain_sentry.cross_lanes", "readability_tags": ["physical_major", "white_core", "red_edge", "chain_notches"]},
+    {"candidate_id": "review.pattern.enemy.chain_sentry.cross_lanes.reduced", "path": "runtime/chain-lane-pattern.reduced.32.png", "dimensions": [32, 32], "mode": "RGBA", "anchor": null, "animation_fps": 0, "collision_metadata_reference": "pattern.enemy.chain_sentry.cross_lanes", "readability_tags": ["reduced_effects", "same_bounds", "physical_major", "white_core", "chain_notches"]}
+  ],
+  "frames": {
+    "directory": "frames/cross_lanes",
+    "dimensions_each": [736, 352],
+    "order": ["01-cardinal.standard.png", "02-diagonal.standard.png", "03-cardinal.reduced.png", "04-diagonal.reduced.png"],
+    "classification": "transparent static review overlays; never geometry authority"
+  },
+  "previews": [
+    {"path": "previews/chain-sentry-cross-lanes.room-scale.png", "dimensions": [1472, 704]},
+    {"path": "previews/bridge-combat.50pct.png", "dimensions": [736, 352]},
+    {"path": "previews/mire-bridge.standard.1280x720.review-mock.png", "dimensions": [1280, 720]},
+    {"path": "previews/mire-bridge.reduced.1280x720.review-mock.png", "dimensions": [1280, 720]},
+    {"path": "previews/mire-bridge.standard.1920x1080.review-mock.png", "dimensions": [1920, 1080]},
+    {"path": "previews/mire-bridge.reduced.1920x1080.review-mock.png", "dimensions": [1920, 1080]}
+  ],
+  "hash_manifest": "SHA256SUMS.txt",
+  "license_provenance": "Project-authored original deterministic raster material. Existing project enemy candidates are review-only dependencies. No third-party source or artist reference was used."
+}
