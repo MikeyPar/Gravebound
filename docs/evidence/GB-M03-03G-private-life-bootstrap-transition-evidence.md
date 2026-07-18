@@ -10,11 +10,12 @@
 
 ## Implemented contract
 
-Commit `a30e644` adds one dormant persistent adapter between the terminal-first PostgreSQL bootstrap projection, the shared private-life session writer, the durable route-generation allocator, and the private-route actor directory.
+Commit `a30e644` adds one dormant persistent adapter between the terminal-first PostgreSQL bootstrap projection, the shared private-life session writer, the durable route-generation allocator, and the private-route actor directory. Corrective commit `51be807` closes the terminal-delivery ordering found during the follow-up authority audit.
 
 - Process restart and within-process reconnect are distinct methods. Only process restart can invoke crash restoration; reconnect obtains the current writer from `CorePrivateLifeSessionDirectory` and reuses retained authority.
 - Missing first-time accounts return `AwaitIdentityBootstrap`. Character Select creates no route actor. `HallStorageResolutionRequired` exposes only storage recovery and allocates no generation.
-- `HallReady` allocates one durable monotonic route generation and seeds the exact compiled Hall authority. Exact refresh/reconnect reuses it. Stored extraction and Recall terminals remain ordered before their Hall projection; committed death creates no living route actor.
+- `HallReady` allocates one durable monotonic route generation and seeds the exact compiled Hall authority. Exact refresh/reconnect reuses it. Stored extraction, Recall, and death terminals create no living Hall route actor before terminal delivery acknowledgement.
+- Restart extraction never persists or invents an old transport request sequence. Durable intent acceptance intentionally excludes that delivery metadata; the client must retry the exact mutation, the server responds using the retry frame's current sequence with `replayed=true`, and only then may Hall control install. Recall follows its stored explicit-or-LinkLost request binding and the same terminal-before-Hall rule.
 - A restart-observed danger root is atomically restored to Hall or loses to a committed terminal. Refresh cannot reconstruct danger from a checkpoint.
 - Accepted and replayed non-Bell PostgreSQL transfers reconcile only after commit. Character Select -> Hall registers the durable Hall actor, Hall -> microrealm converges on the exact lineage/version, and Hall -> Character Select retires the exact generation.
 - Reconciliation retains exact transition material. Exact response-loss replay is a no-op even after later microrealm progress; changed transfer, source version, lineage, content, or generation fails closed. A committed database transition is never rolled back because an in-memory callback failed.
