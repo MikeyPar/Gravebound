@@ -154,7 +154,7 @@ Concept images establish mood, hierarchy, and visual language. They are not fina
 
 ## Current Next Step
 
-Commit `83ccbb1` implements and independently clears the durable B3 reward/progression/milestone authority, exact SOC-010 eligibility, durable below-level/already-consumed no-offer disposition, task-owned reward freeze, and generation-safe activity/session evidence; see the [three-authority evidence](docs/evidence/GB-M03-03G-durable-b3-reward-authority-evidence.md). Next wire automatic B3 coordinator execution into the normal server, acknowledge the opaque result in the same task before reliable publication, and prove response-loss/reconnect/process-restart convergence. Then complete B5 and authoritative Sir Caldus B6. Normal admission remains disabled.
+Commits `83ccbb1` and `83c75a5` implement the durable B3 reward/progression/milestone authority and correct its terminal semantics: malformed authority fails closed, SOC-010 ineligibility commits a no-grant `NotEligible` result, exact acknowledgement never re-pends, and granted-no-offer/ineligible outcomes enter resolved B4; see the [three-authority evidence](docs/evidence/GB-M03-03G-durable-b3-reward-authority-evidence.md). Next build the transport-independent automatic B3 executor, acknowledge the opaque `Granted | Ineligible` result in the same task, retain progression/route publication across writer replacement, and prove response-loss/reconnect/process-restart convergence. Then complete B5 and authoritative Sir Caldus B6. Normal admission remains disabled.
 
 ### Historical cumulative record
 

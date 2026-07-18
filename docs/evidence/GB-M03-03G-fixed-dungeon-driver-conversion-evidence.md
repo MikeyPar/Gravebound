@@ -31,4 +31,4 @@ The conversion itself stops at B0; the follow-on live-driver slice now synthesiz
 
 ## Current Next Step
 
-Commits `e1e4d7c` and `83ccbb1` bind durable B4 outcomes and the exact B3 reward/progression/milestone proof into the same task. Next automatically run the normal B3 coordinator at `FixedDungeonRewardPending`, acknowledge the proof before reliable publication, and prove response-loss/reconnect/process-restart convergence. Then implement B5, Sir Caldus B6, pending inventory, the stable exit, and terminal composition.
+Commits `e1e4d7c`, `83ccbb1`, and `83c75a5` bind durable B4 outcomes and exact B3 `Granted | Ineligible` proof into the same task without re-pending. Next build the transport-independent executor at `FixedDungeonRewardPending`, acknowledge the proof before retained progression/route publication, and prove response-loss/reconnect/process-restart convergence. Then implement B5, Sir Caldus B6, pending inventory, the stable exit, and terminal composition.

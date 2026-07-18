@@ -37,4 +37,4 @@ Commit `83ccbb1` now supplies the durable B3 reward/progression/milestone coordi
 
 ## Current Next Step
 
-Automatically consume the task-owned B3 pending handoff through the normal server coordinator, apply its opaque durable proof to the same task, and publish the B4-facing reliable result only after acknowledgement. Prove response-loss/reconnect/process-restart convergence and the integrated inactivity rejection, then implement B5 and Sir Caldus at B6.
+Build the transport-independent B3 executor, apply its opaque durable `Granted | Ineligible` proof to the same task, and retain progression/route publication across writer generations only after acknowledgement. Prove response-loss/reconnect/process-restart convergence and integrated inactivity zero-row behavior, then implement B5 and Sir Caldus at B6.
