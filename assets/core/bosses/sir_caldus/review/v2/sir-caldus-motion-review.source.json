@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "pack_id": "review.m03.sir_caldus.motion.v2",
+  "status": {
+    "classification": "unregistered_review_candidate",
+    "runtime_registered": false,
+    "content_hash_input": false,
+    "runtime_bundle": null,
+    "intended_runtime_asset_id": "sprite.boss.sir_caldus"
+  },
+  "source_revision": "3ce5504dcedfe0de568a3546574ae517513a85c9",
+  "authority": [
+    "Gravebound_Production_GDD_v1_Canonical.md:SIM-002,ART-001..006,ART-020,ART-030,ENC-010",
+    "Gravebound_Content_Production_Spec_v1.md:CONT-ROOM-007,CONT-BOSS-001,CONT-BOSS-002,CONT-PATTERN-003",
+    "Gravebound_Development_Roadmap_v1.md:GB-M03-03",
+    "docs/tasks/GB-M03-03G.md:Current Next Step"
+  ],
+  "generation": {
+    "method": "OpenAI built-in image generation",
+    "reference": {
+      "path": "../v1/sir-caldus-idle-guard.seed.png",
+      "role": "locked identity, palette, scale, facing, and anchor input",
+      "sha256": "da0c0b90ca1cc390ba4a59ea3a8991313c95f2a2a339123c36b174da99ad4ea5"
+    },
+    "prompt_record": "README.md#exact-prompts"
+  },
+  "postprocess": {
+    "chroma_helper": "C:/Users/micha/.codex/skills/.system/imagegen/scripts/remove_chroma_key.py",
+    "chroma_arguments": ["--auto-key", "border", "--soft-matte", "--transparent-threshold", "12", "--opaque-threshold", "220", "--despill"],
+    "normalizer": "C:/Users/micha/.codex/plugins/cache/openai-curated-remote/game-studio/0.1.2/scripts/normalize_sprite_strip.py",
+    "slot_count": 4,
+    "frame_dimensions": [192, 192],
+    "anchor_pixels": [96, 192],
+    "frame_01_locked_to_seed": true,
+    "component_cleanup": {
+      "alpha_threshold": 8,
+      "connectivity": 4,
+      "removed_pixels": {"shield_arc_02": 18, "charge_lane_03": 1}
+    }
+  },
+  "accepted_sources": [
+    {"path": "source/sir-caldus-shield-arc-motion.raw-chroma.png", "dimensions": [1983, 793], "mode": "RGB", "sha256": "58ac656da4f53764653832a9cfbefd336f572186d1085bda8c90c5e7890a0955"},
+    {"path": "source/sir-caldus-shield-arc-motion.alpha.png", "dimensions": [1983, 793], "mode": "RGBA", "sha256": "07e6d48810c9577fd39dce97e40f0ca554067845ca5bbcf10ee096bb36b80814"},
+    {"path": "source/sir-caldus-charge-lane-motion.raw-chroma.png", "dimensions": [2172, 724], "mode": "RGB", "sha256": "e499bb417dcbd0691165adba4907b8f12ccb0de1281115852bf0331289e3c43c"},
+    {"path": "source/sir-caldus-charge-lane-motion.alpha.png", "dimensions": [2172, 724], "mode": "RGBA", "sha256": "1191076867a11f94f49ec2acbeb8fef2b95c0ba83acdf4c5355b9c831d1460a3"}
+  ],
+  "strips": [
+    {"id": "review.sprite.boss.sir_caldus.shield_arc.v2", "path": "frames/shield_arc", "frames": ["guard", "windup", "release", "recovery"], "sha256": ["da0c0b90ca1cc390ba4a59ea3a8991313c95f2a2a339123c36b174da99ad4ea5", "f0a7fc39360f589e27796d1dc9ec2ee20b376ad5f6633c94a801e9f5f210bead", "ff6ce3b51231919e4d6a5d25a09e130ef861d3a5c4ec1b82573b08854f6d2ff1", "59091caa6e51b718f367eb94d0be88691bcfe38b75f186bac8df04a02181c9db"]},
+    {"id": "review.sprite.boss.sir_caldus.charge_lane.v2", "path": "frames/charge_lane", "frames": ["guard", "windup", "travel", "recovery"], "sha256": ["da0c0b90ca1cc390ba4a59ea3a8991313c95f2a2a339123c36b174da99ad4ea5", "8af05af48fd1aa607a050b3dcdc31f8b163ecf8d4429a3a400408adae6d15a83", "03eac3b18ceac56bb5acddec14f6266a82f702e82ee9d93a5caefe1b7eafe50e", "b09b565c36f8e97398ef8d3f7e937cd72080e15291d1d35a64bb333b69130f52"]}
+  ],
+  "rejected": [{"path": "source/rejected/charge-lane-first-attempt", "reason": "Normalized travel frame touched the left canvas edge; rejected before candidate review."}],
+  "license_provenance": "Project-generated review material; no third-party visual source was provided. Commercial-rights, similarity, and registry review remain required."
+}
