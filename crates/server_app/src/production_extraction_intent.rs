@@ -410,6 +410,13 @@ impl ProductionExtractionPlannerInputV1 {
 /// request row, verifies it remains uncommitted evidence authority, then invokes the existing
 /// read-only production extraction planner.
 pub trait ProductionExtractionPlanner: Send + Sync {
+    fn load_intent_acceptance(
+        &self,
+        extraction_request_id: [u8; 16],
+    ) -> impl Future<
+        Output = Result<Option<StoredProductionExtractionIntentAcceptanceV1>, PersistenceError>,
+    > + Send;
+
     fn accept_intent(
         &self,
         attempt: &ProductionExtractionIntentAttemptV1,
@@ -424,6 +431,14 @@ pub trait ProductionExtractionPlanner: Send + Sync {
 }
 
 impl ProductionExtractionPlanner for PostgresPersistence {
+    async fn load_intent_acceptance(
+        &self,
+        extraction_request_id: [u8; 16],
+    ) -> Result<Option<StoredProductionExtractionIntentAcceptanceV1>, PersistenceError> {
+        self.load_production_extraction_intent_acceptance_v1(extraction_request_id)
+            .await
+    }
+
     async fn accept_intent(
         &self,
         attempt: &ProductionExtractionIntentAttemptV1,
@@ -585,24 +600,84 @@ where
                 return pending_reply(frame, existing.server_tick);
             }
         } else {
-            if frame.character_id != self.authority.selected_character_id
-                || frame.payload.extraction_request_id != self.authority.extraction_request_id
-            {
+            if frame.payload.extraction_request_id != self.authority.extraction_request_id {
                 return rejection_reply(
                     frame,
                     server_tick,
                     TerminalInventoryRejectionCodeV1::ForeignAuthority,
                 );
             }
-            let accepted = match self.accept_new_intent(frame, server_tick).await {
-                Ok(accepted) => accepted,
-                Err(code) => return rejection_reply(frame, server_tick, code),
-            };
-            *intent = Some(accepted);
+            match self.recover_persisted_intent(frame, server_tick).await {
+                Ok(Some(recovered)) => *intent = Some(recovered),
+                Ok(None) => {
+                    if frame.character_id != self.authority.selected_character_id {
+                        return rejection_reply(
+                            frame,
+                            server_tick,
+                            TerminalInventoryRejectionCodeV1::ForeignAuthority,
+                        );
+                    }
+                    let accepted = match self.accept_new_intent(frame, server_tick).await {
+                        Ok(accepted) => accepted,
+                        Err(code) => return rejection_reply(frame, server_tick, code),
+                    };
+                    *intent = Some(accepted);
+                }
+                Err(reply) => return reply,
+            }
         }
 
         let pinned = intent.as_mut().expect("intent was installed above");
         self.prepare_pinned_intent(frame, pinned).await
+    }
+
+    async fn recover_persisted_intent(
+        &self,
+        frame: &ExtractionCommitFrameV1,
+        fallback_server_tick: u64,
+    ) -> Result<Option<ProductionExtractionPreparedIntentV1>, CoreExtractionIntentReply> {
+        let acceptance = self
+            .planner
+            .load_intent_acceptance(frame.payload.extraction_request_id)
+            .await
+            .map_err(|error| {
+                rejection_reply(frame, fallback_server_tick, planner_error_code(&error))
+            })?;
+        let Some(acceptance) = acceptance else {
+            return Ok(None);
+        };
+        let pinned_server_tick = acceptance.attempt.observed_tick;
+        if !exact_persisted_frame(&acceptance, frame) {
+            return Err(self.audit_changed_replay(frame, pinned_server_tick).await);
+        }
+        if acceptance.attempt.core_route_revision != self.authority.route_content_revision {
+            return Err(rejection_reply(
+                frame,
+                pinned_server_tick,
+                TerminalInventoryRejectionCodeV1::ContentMismatch,
+            ));
+        }
+        if let Err(code) = self.revalidate_route_permit().await {
+            return Err(rejection_reply(frame, pinned_server_tick, code));
+        }
+        let input = self
+            .authority
+            .planner_input(frame, pinned_server_tick)
+            .map_err(|code| rejection_reply(frame, pinned_server_tick, code))?;
+        if acceptance.attempt.commit_request != *input.commit_request() {
+            return Err(rejection_reply(
+                frame,
+                pinned_server_tick,
+                TerminalInventoryRejectionCodeV1::CorruptStoredAuthority,
+            ));
+        }
+        Ok(Some(ProductionExtractionPreparedIntentV1 {
+            frame: frame.clone(),
+            server_tick: pinned_server_tick,
+            acceptance,
+            input,
+            prepared: None,
+        }))
     }
 
     async fn audit_changed_replay(
@@ -838,6 +913,19 @@ fn pending(frame: &ExtractionCommitFrameV1) -> ExtractionCommitResultV1 {
         character_id: frame.character_id,
         extraction_request_id: frame.payload.extraction_request_id,
     }
+}
+
+fn exact_persisted_frame(
+    acceptance: &StoredProductionExtractionIntentAcceptanceV1,
+    frame: &ExtractionCommitFrameV1,
+) -> bool {
+    let attempt = &acceptance.attempt;
+    attempt.attempted_character_id == frame.character_id
+        && attempt.attempted_mutation_id == frame.mutation_id
+        && attempt.attempted_frame_schema_version == frame.schema_version
+        && attempt.attempted_frame_payload_hash == frame.payload_hash
+        && attempt.extraction_request_id == frame.payload.extraction_request_id
+        && attempt.issued_at_unix_ms == frame.issued_at_unix_millis
 }
 
 fn pending_reply(frame: &ExtractionCommitFrameV1, server_tick: u64) -> CoreExtractionIntentReply {
@@ -1085,6 +1173,22 @@ mod tests {
     }
 
     impl ProductionExtractionPlanner for FakePlanner {
+        async fn load_intent_acceptance(
+            &self,
+            extraction_request_id: [u8; 16],
+        ) -> Result<Option<StoredProductionExtractionIntentAcceptanceV1>, PersistenceError>
+        {
+            Ok(self
+                .acceptance
+                .lock()
+                .expect("intent acceptance")
+                .as_ref()
+                .filter(|acceptance| {
+                    acceptance.attempt.extraction_request_id == extraction_request_id
+                })
+                .cloned())
+        }
+
         async fn accept_intent(
             &self,
             attempt: &ProductionExtractionIntentAttemptV1,
@@ -1491,6 +1595,61 @@ mod tests {
         }
         assert_eq!(planner.calls.load(Ordering::SeqCst), 1);
         assert_eq!(planner.accept_calls.load(Ordering::SeqCst), 5);
+        directory.begin_shutdown();
+        assert!(directory.finish_shutdown().await.unwrap().zero_residue);
+    }
+
+    #[tokio::test]
+    async fn actor_replacement_recovers_the_first_accepted_tick_before_replanning() {
+        let planner = FakePlanner::stable();
+        let (authority, directory, lease) = authority().await;
+        let actor = ProductionExtractionIntentActor::new(
+            authority.clone(),
+            directory.clone(),
+            lease,
+            planner.clone(),
+            FixedClock(10_000),
+        )
+        .expect("intent actor");
+        let frame = frame(1);
+        let first = actor.handle(authenticated(), &frame, 700).await;
+        assert_eq!(first.server_tick, 700);
+        assert!(matches!(
+            first.result,
+            ExtractionCommitResultV1::Pending { .. }
+        ));
+        drop(actor);
+
+        let replacement = ProductionExtractionIntentActor::new(
+            authority,
+            directory.clone(),
+            lease,
+            planner.clone(),
+            FixedClock(10_000),
+        )
+        .expect("replacement intent actor");
+        let mut replay_frame = frame;
+        replay_frame.sequence = 2;
+        let replay = replacement
+            .handle(authenticated(), &replay_frame, 999)
+            .await;
+        assert_eq!(replay.server_tick, 700);
+        assert!(matches!(
+            replay.result,
+            ExtractionCommitResultV1::Pending {
+                request_sequence: 2,
+                ..
+            }
+        ));
+        assert_eq!(planner.accept_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(planner.calls.load(Ordering::SeqCst), 2);
+        let recovered = replacement
+            .prepared_intent()
+            .await
+            .expect("recovered intent");
+        assert_eq!(recovered.server_tick(), 700);
+        assert_eq!(recovered.input().commit_request().observed_tick, 700);
+
         directory.begin_shutdown();
         assert!(directory.finish_shutdown().await.unwrap().zero_residue);
     }

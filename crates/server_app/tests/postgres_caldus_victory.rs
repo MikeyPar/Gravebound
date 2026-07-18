@@ -1264,7 +1264,7 @@ async fn live_caldus_intent_uses_the_route_permit_and_postgres_planner_across_re
     let replay = replay_actor
         .handle(authenticated, &replay_frame, 9_999)
         .await;
-    assert_eq!(replay.server_tick, 9_999);
+    assert_eq!(replay.server_tick, 9_100);
     assert!(matches!(
         replay.result,
         ExtractionCommitResultV1::Pending {
