@@ -21,7 +21,7 @@ use std::{
 use sim_core::{AimDirection, MovementAction, Tick};
 use thiserror::Error;
 use tokio::{
-    sync::watch,
+    sync::{mpsc, oneshot, watch},
     task::{JoinError, JoinHandle},
     time::{Instant, MissedTickBehavior},
 };
@@ -131,6 +131,12 @@ impl SharedIngress {
     fn stop_accepting(&self) {
         if let Ok(mut reducer) = self.reducer.lock() {
             reducer.accepting = false;
+        }
+    }
+
+    fn resume_accepting(&self) {
+        if let Ok(mut reducer) = self.reducer.lock() {
+            reducer.accepting = true;
         }
     }
 
@@ -337,8 +343,79 @@ impl CorePrivateMicrorealmDriverState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CorePrivateMicrorealmDriverOutcome {
     Shutdown,
+    Transferred,
     TerminalPending,
     Faulted,
+}
+
+/// Frame-boundary authority captured when the live Bell portal is still valid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CorePrivateMicrorealmHandoffReady {
+    pub committed_frames: u64,
+    pub final_tick: Tick,
+}
+
+/// Exact runtime returned only after a prepared frame-boundary handoff commits.
+#[derive(Debug)]
+pub struct CorePrivateMicrorealmHandoff {
+    pub report: CorePrivateMicrorealmDriverReport,
+    pub runtime: CorePrivateMicrorealmRuntime,
+}
+
+#[derive(Debug)]
+enum CorePrivateMicrorealmHandoffDecision {
+    Abort(oneshot::Sender<()>),
+    Commit,
+}
+
+#[derive(Debug)]
+struct CorePrivateMicrorealmHandoffRequest {
+    ready_tx: oneshot::Sender<Result<CorePrivateMicrorealmHandoffReady, ()>>,
+    decision_rx: oneshot::Receiver<CorePrivateMicrorealmHandoffDecision>,
+}
+
+/// Non-cloneable two-phase pause. Dropping it closes the decision channel and resumes the exact
+/// runtime; only `commit` consumes the driver's runtime.
+#[derive(Debug)]
+pub struct CorePrivateMicrorealmPreparedHandoff<'driver> {
+    driver: &'driver mut CorePrivateMicrorealmDriver,
+    ready: CorePrivateMicrorealmHandoffReady,
+    decision_tx: Option<oneshot::Sender<CorePrivateMicrorealmHandoffDecision>>,
+}
+
+impl CorePrivateMicrorealmPreparedHandoff<'_> {
+    #[must_use]
+    pub const fn ready(&self) -> CorePrivateMicrorealmHandoffReady {
+        self.ready
+    }
+
+    pub async fn abort(
+        mut self,
+    ) -> Result<CorePrivateMicrorealmHandoffReady, CorePrivateMicrorealmDriverError> {
+        let decision = self
+            .decision_tx
+            .take()
+            .ok_or(CorePrivateMicrorealmDriverError::HandoffDecisionLost)?;
+        let (resumed_tx, resumed_rx) = oneshot::channel();
+        decision
+            .send(CorePrivateMicrorealmHandoffDecision::Abort(resumed_tx))
+            .map_err(|_| CorePrivateMicrorealmDriverError::HandoffDecisionLost)?;
+        resumed_rx
+            .await
+            .map_err(|_| CorePrivateMicrorealmDriverError::HandoffDecisionLost)?;
+        Ok(self.ready)
+    }
+
+    pub async fn commit(
+        mut self,
+    ) -> Result<CorePrivateMicrorealmHandoff, CorePrivateMicrorealmDriverError> {
+        self.decision_tx
+            .take()
+            .ok_or(CorePrivateMicrorealmDriverError::HandoffDecisionLost)?
+            .send(CorePrivateMicrorealmHandoffDecision::Commit)
+            .map_err(|_| CorePrivateMicrorealmDriverError::HandoffDecisionLost)?;
+        self.driver.finish_committed_handoff().await
+    }
 }
 
 /// Joined task report. This is scheduler evidence, not durable terminal evidence.
@@ -361,7 +438,8 @@ pub struct CorePrivateMicrorealmDriverReport {
 pub struct CorePrivateMicrorealmDriver {
     handle: CorePrivateMicrorealmDriverHandle,
     shutdown_tx: watch::Sender<bool>,
-    join: Option<JoinHandle<CorePrivateMicrorealmDriverReport>>,
+    handoff_tx: mpsc::Sender<CorePrivateMicrorealmHandoffRequest>,
+    join: Option<JoinHandle<CorePrivateMicrorealmDriverTaskExit>>,
 }
 
 impl CorePrivateMicrorealmDriver {
@@ -375,6 +453,31 @@ impl CorePrivateMicrorealmDriver {
         self.handle.clone()
     }
 
+    /// Pauses the exclusive owner between frames only when its owned simulation still proves the
+    /// cleared Bell interaction. Cancellation before acknowledgement resumes automatically.
+    pub async fn prepare_handoff(
+        &mut self,
+    ) -> Result<CorePrivateMicrorealmPreparedHandoff<'_>, CorePrivateMicrorealmDriverError> {
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let (decision_tx, decision_rx) = oneshot::channel();
+        self.handoff_tx
+            .send(CorePrivateMicrorealmHandoffRequest {
+                ready_tx,
+                decision_rx,
+            })
+            .await
+            .map_err(|_| CorePrivateMicrorealmDriverError::HandoffControlClosed)?;
+        let ready = ready_rx
+            .await
+            .map_err(|_| CorePrivateMicrorealmDriverError::HandoffControlClosed)?
+            .map_err(|()| CorePrivateMicrorealmDriverError::HandoffNotReady)?;
+        Ok(CorePrivateMicrorealmPreparedHandoff {
+            driver: self,
+            ready,
+            decision_tx: Some(decision_tx),
+        })
+    }
+
     pub async fn shutdown(
         mut self,
     ) -> Result<CorePrivateMicrorealmDriverReport, CorePrivateMicrorealmDriverError> {
@@ -384,11 +487,36 @@ impl CorePrivateMicrorealmDriver {
             .join
             .take()
             .ok_or(CorePrivateMicrorealmDriverError::AlreadyJoined)?;
-        let mut report = join.await.map_err(CorePrivateMicrorealmDriverError::Task)?;
+        let mut exit = join.await.map_err(CorePrivateMicrorealmDriverError::Task)?;
+        let report = &mut exit.report;
         report.task_joined = true;
         report.driver_task_live_after_join = self.handle.ingress.task_live.load(Ordering::Acquire);
         report.active_driver_tasks_after_join = active_core_microrealm_driver_tasks();
-        Ok(report)
+        Ok(*report)
+    }
+
+    async fn finish_committed_handoff(
+        &mut self,
+    ) -> Result<CorePrivateMicrorealmHandoff, CorePrivateMicrorealmDriverError> {
+        let join = self
+            .join
+            .take()
+            .ok_or(CorePrivateMicrorealmDriverError::AlreadyJoined)?;
+        let mut exit = join.await.map_err(CorePrivateMicrorealmDriverError::Task)?;
+        exit.report.task_joined = true;
+        exit.report.driver_task_live_after_join =
+            self.handle.ingress.task_live.load(Ordering::Acquire);
+        exit.report.active_driver_tasks_after_join = active_core_microrealm_driver_tasks();
+        if exit.report.outcome != CorePrivateMicrorealmDriverOutcome::Transferred {
+            return Err(CorePrivateMicrorealmDriverError::HandoffOutcomeMismatch);
+        }
+        let runtime = exit
+            .runtime
+            .ok_or(CorePrivateMicrorealmDriverError::HandoffRuntimeUnavailable)?;
+        Ok(CorePrivateMicrorealmHandoff {
+            report: exit.report,
+            runtime,
+        })
     }
 }
 
@@ -436,6 +564,16 @@ pub enum CorePrivateMicrorealmDriverError {
     AlreadyJoined,
     #[error("Core private-microrealm driver task failed: {0}")]
     Task(#[source] JoinError),
+    #[error("Core private-microrealm handoff control is closed")]
+    HandoffControlClosed,
+    #[error("Core private-microrealm handoff requires a live cleared Bell interaction")]
+    HandoffNotReady,
+    #[error("Core private-microrealm handoff decision was lost")]
+    HandoffDecisionLost,
+    #[error("Core private-microrealm handoff joined with the wrong outcome")]
+    HandoffOutcomeMismatch,
+    #[error("Core private-microrealm handoff did not return its live runtime")]
+    HandoffRuntimeUnavailable,
 }
 
 trait MicrorealmFrameRuntime: Send + 'static {
@@ -443,6 +581,17 @@ trait MicrorealmFrameRuntime: Send + 'static {
         &mut self,
         input: CorePrivateMicrorealmInput,
     ) -> impl Future<Output = Result<CorePrivateMicrorealmStep, CorePrivateMicrorealmRuntimeError>> + Send;
+
+    fn handoff_ready(&self) -> bool {
+        false
+    }
+
+    fn into_live_runtime(self) -> Option<CorePrivateMicrorealmRuntime>
+    where
+        Self: Sized,
+    {
+        None
+    }
 }
 
 impl MicrorealmFrameRuntime for CorePrivateMicrorealmRuntime {
@@ -453,6 +602,20 @@ impl MicrorealmFrameRuntime for CorePrivateMicrorealmRuntime {
     {
         self.step(input)
     }
+
+    fn handoff_ready(&self) -> bool {
+        self.bell_transfer_ready()
+    }
+
+    fn into_live_runtime(self) -> Option<CorePrivateMicrorealmRuntime> {
+        Some(self)
+    }
+}
+
+#[derive(Debug)]
+struct CorePrivateMicrorealmDriverTaskExit {
+    report: CorePrivateMicrorealmDriverReport,
+    runtime: Option<CorePrivateMicrorealmRuntime>,
 }
 
 fn spawn_driver<R>(runtime: R) -> CorePrivateMicrorealmDriver
@@ -469,6 +632,7 @@ where
     let (observation_tx, observation_rx) =
         watch::channel(CorePrivateMicrorealmDriverState::Starting);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let (handoff_tx, handoff_rx) = mpsc::channel(1);
     ACTIVE_CORE_MICROREALM_DRIVER_TASKS.fetch_add(1, Ordering::AcqRel);
     let task_ingress = Arc::clone(&ingress);
     let join = tokio::spawn(async move {
@@ -481,6 +645,7 @@ where
             retained_rx,
             observation_tx,
             shutdown_rx,
+            handoff_rx,
         )
         .await
     });
@@ -490,6 +655,7 @@ where
             observation_rx,
         },
         shutdown_tx,
+        handoff_tx,
         join: Some(join),
     }
 }
@@ -511,7 +677,8 @@ async fn run_driver<R>(
     mut retained_rx: watch::Receiver<RetainedFrameInput>,
     observation_tx: watch::Sender<CorePrivateMicrorealmDriverState>,
     mut shutdown_rx: watch::Receiver<bool>,
-) -> CorePrivateMicrorealmDriverReport
+    mut handoff_rx: mpsc::Receiver<CorePrivateMicrorealmHandoffRequest>,
+) -> CorePrivateMicrorealmDriverTaskExit
 where
     R: MicrorealmFrameRuntime,
 {
@@ -531,6 +698,26 @@ where
                     break;
                 }
                 continue;
+            }
+            request = handoff_rx.recv() => {
+                let Some(request) = request else {
+                    break;
+                };
+                match handle_handoff_request(
+                    runtime.handoff_ready(),
+                    &ingress,
+                    request,
+                    committed_frames,
+                    final_tick,
+                    &mut shutdown_rx,
+                ).await {
+                    HandoffControlOutcome::Continue => continue,
+                    HandoffControlOutcome::Transfer => {
+                        outcome = CorePrivateMicrorealmDriverOutcome::Transferred;
+                        break;
+                    }
+                    HandoffControlOutcome::Shutdown => break,
+                }
             }
             deadline = interval.tick() => deadline,
         };
@@ -554,7 +741,7 @@ where
                             lethal_step: step,
                         },
                     );
-                    wait_for_shutdown(&mut shutdown_rx).await;
+                    wait_for_shutdown(&mut shutdown_rx, &mut handoff_rx).await;
                     break;
                 }
                 observation_tx.send_replace(CorePrivateMicrorealmDriverState::Running {
@@ -569,39 +756,145 @@ where
                     committed_frames,
                     fault: runtime_fault(&error, final_tick),
                 });
-                wait_for_shutdown(&mut shutdown_rx).await;
+                wait_for_shutdown(&mut shutdown_rx, &mut handoff_rx).await;
                 break;
             }
         }
     }
     ingress.stop_accepting();
-    CorePrivateMicrorealmDriverReport {
+    driver_task_exit(
+        runtime,
+        &ingress,
         committed_frames,
         final_tick,
         skipped_deadlines,
-        accepted_input_updates: ingress
-            .metrics
-            .accepted_input_updates
-            .load(Ordering::Relaxed),
-        accepted_ability_presses: ingress
-            .metrics
-            .accepted_ability_presses
-            .load(Ordering::Relaxed),
-        link_lost_neutralizations: ingress
-            .metrics
-            .link_lost_neutralizations
-            .load(Ordering::Relaxed),
         outcome,
-        task_joined: false,
-        driver_task_live_after_join: true,
-        active_driver_tasks_after_join: active_core_microrealm_driver_tasks(),
+    )
+}
+
+fn driver_task_exit<R>(
+    runtime: R,
+    ingress: &SharedIngress,
+    committed_frames: u64,
+    final_tick: Tick,
+    skipped_deadlines: u64,
+    outcome: CorePrivateMicrorealmDriverOutcome,
+) -> CorePrivateMicrorealmDriverTaskExit
+where
+    R: MicrorealmFrameRuntime,
+{
+    CorePrivateMicrorealmDriverTaskExit {
+        report: CorePrivateMicrorealmDriverReport {
+            committed_frames,
+            final_tick,
+            skipped_deadlines,
+            accepted_input_updates: ingress
+                .metrics
+                .accepted_input_updates
+                .load(Ordering::Relaxed),
+            accepted_ability_presses: ingress
+                .metrics
+                .accepted_ability_presses
+                .load(Ordering::Relaxed),
+            link_lost_neutralizations: ingress
+                .metrics
+                .link_lost_neutralizations
+                .load(Ordering::Relaxed),
+            outcome,
+            task_joined: false,
+            driver_task_live_after_join: true,
+            active_driver_tasks_after_join: active_core_microrealm_driver_tasks(),
+        },
+        runtime: runtime.into_live_runtime(),
     }
 }
 
-async fn wait_for_shutdown(shutdown_rx: &mut watch::Receiver<bool>) {
+enum HandoffControlOutcome {
+    Continue,
+    Transfer,
+    Shutdown,
+}
+
+async fn handle_handoff_request(
+    handoff_ready: bool,
+    ingress: &Arc<SharedIngress>,
+    request: CorePrivateMicrorealmHandoffRequest,
+    committed_frames: u64,
+    final_tick: Tick,
+    shutdown_rx: &mut watch::Receiver<bool>,
+) -> HandoffControlOutcome {
+    if !handoff_ready {
+        let _ = request.ready_tx.send(Err(()));
+        return HandoffControlOutcome::Continue;
+    }
+    ingress.stop_accepting();
+    let ready = CorePrivateMicrorealmHandoffReady {
+        committed_frames,
+        final_tick,
+    };
+    if request.ready_tx.send(Ok(ready)).is_err() {
+        ingress.resume_accepting();
+        return HandoffControlOutcome::Continue;
+    }
+    match await_handoff_decision(request.decision_rx, shutdown_rx).await {
+        HandoffWaitOutcome::Abort(resumed_tx) => {
+            ingress.resume_accepting();
+            let _ = resumed_tx.send(());
+            HandoffControlOutcome::Continue
+        }
+        HandoffWaitOutcome::DecisionDropped => {
+            ingress.resume_accepting();
+            HandoffControlOutcome::Continue
+        }
+        HandoffWaitOutcome::Commit => HandoffControlOutcome::Transfer,
+        HandoffWaitOutcome::Shutdown => HandoffControlOutcome::Shutdown,
+    }
+}
+
+enum HandoffWaitOutcome {
+    Abort(oneshot::Sender<()>),
+    DecisionDropped,
+    Commit,
+    Shutdown,
+}
+
+async fn await_handoff_decision(
+    decision_rx: oneshot::Receiver<CorePrivateMicrorealmHandoffDecision>,
+    shutdown_rx: &mut watch::Receiver<bool>,
+) -> HandoffWaitOutcome {
+    tokio::select! {
+        biased;
+        changed = shutdown_rx.changed() => {
+            let _ = changed;
+            HandoffWaitOutcome::Shutdown
+        }
+        decision = decision_rx => match decision {
+            Ok(CorePrivateMicrorealmHandoffDecision::Abort(resumed_tx)) => {
+                HandoffWaitOutcome::Abort(resumed_tx)
+            }
+            Ok(CorePrivateMicrorealmHandoffDecision::Commit) => HandoffWaitOutcome::Commit,
+            Err(_) => HandoffWaitOutcome::DecisionDropped,
+        }
+    }
+}
+
+async fn wait_for_shutdown(
+    shutdown_rx: &mut watch::Receiver<bool>,
+    handoff_rx: &mut mpsc::Receiver<CorePrivateMicrorealmHandoffRequest>,
+) {
     while !*shutdown_rx.borrow() {
-        if shutdown_rx.changed().await.is_err() {
-            break;
+        tokio::select! {
+            changed = shutdown_rx.changed() => {
+                if changed.is_err() {
+                    break;
+                }
+            }
+            request = handoff_rx.recv() => {
+                let Some(request) = request else {
+                    break;
+                };
+                let _ = request.ready_tx.send(Err(()));
+            }
         }
     }
 }
@@ -691,6 +984,7 @@ mod tests {
         entered: Option<Arc<Notify>>,
         release: Option<Arc<Notify>>,
         scripted: VecDeque<CorePrivateMicrorealmStep>,
+        handoff_ready: bool,
     }
 
     impl ScriptedRuntime {
@@ -703,6 +997,7 @@ mod tests {
                 entered: None,
                 release: None,
                 scripted: VecDeque::new(),
+                handoff_ready: false,
             }
         }
     }
@@ -731,6 +1026,10 @@ mod tests {
             step.input_sequence = input.input_sequence;
             step.player_died = self.terminal_at == Some(self.tick);
             Ok(step)
+        }
+
+        fn handoff_ready(&self) -> bool {
+            self.handoff_ready
         }
     }
 
@@ -911,6 +1210,106 @@ mod tests {
         let report = driver.shutdown().await.expect("shutdown");
         assert_eq!(report.committed_frames, 6);
         assert_eq!(report.link_lost_neutralizations, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn prepared_handoff_freezes_between_frames_and_abort_resumes_exact_owner() {
+        let received = Arc::new(StdMutex::new(Vec::new()));
+        let mut runtime = ScriptedRuntime::ordinary(Arc::clone(&received));
+        runtime.handoff_ready = true;
+        let mut driver = spawn_driver(runtime);
+        let handle = driver.handle();
+        let mut observer = handle.observe();
+        tokio::task::yield_now().await;
+        advance_one_frame(&mut observer).await;
+
+        let prepared = driver.prepare_handoff().await.expect("prepared handoff");
+        assert_eq!(
+            prepared.ready(),
+            CorePrivateMicrorealmHandoffReady {
+                committed_frames: 1,
+                final_tick: Tick(1),
+            }
+        );
+        assert_eq!(
+            handle.submit_latest_input(CorePrivateMicrorealmRetainedInput {
+                input_sequence: 1,
+                movement: MovementAction::new(1, 0),
+                aim: AimDirection::east(),
+                primary_held: false,
+                primary_sequence: 0,
+            }),
+            Err(CorePrivateMicrorealmIngressError::DriverFrozen)
+        );
+        tokio::time::advance(DRIVER_TICK_DURATION * 5).await;
+        tokio::task::yield_now().await;
+        assert_eq!(received.lock().expect("received").len(), 1);
+
+        prepared.abort().await.expect("abort handoff");
+        handle
+            .submit_latest_input(CorePrivateMicrorealmRetainedInput {
+                input_sequence: 1,
+                movement: MovementAction::new(1, 0),
+                aim: AimDirection::east(),
+                primary_held: false,
+                primary_sequence: 0,
+            })
+            .expect("resumed ingress");
+        advance_one_frame(&mut observer).await;
+        assert!(received.lock().expect("received").len() >= 2);
+        let report = driver.shutdown().await.expect("shutdown");
+        assert_eq!(report.outcome, CorePrivateMicrorealmDriverOutcome::Shutdown);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn handoff_rejects_non_bell_state_without_freezing_ingress() {
+        let received = Arc::new(StdMutex::new(Vec::new()));
+        let mut driver = spawn_driver(ScriptedRuntime::ordinary(received));
+        tokio::task::yield_now().await;
+        assert!(matches!(
+            driver.prepare_handoff().await,
+            Err(CorePrivateMicrorealmDriverError::HandoffNotReady)
+        ));
+        driver
+            .handle()
+            .submit_latest_input(CorePrivateMicrorealmRetainedInput {
+                input_sequence: 1,
+                movement: MovementAction::default(),
+                aim: AimDirection::east(),
+                primary_held: false,
+                primary_sequence: 0,
+            })
+            .expect("ingress remains live");
+        driver.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dropped_prepared_handoff_resumes_without_reconstructing_runtime() {
+        let received = Arc::new(StdMutex::new(Vec::new()));
+        let mut runtime = ScriptedRuntime::ordinary(Arc::clone(&received));
+        runtime.handoff_ready = true;
+        let mut driver = spawn_driver(runtime);
+        let handle = driver.handle();
+        let mut observer = handle.observe();
+        tokio::task::yield_now().await;
+        advance_one_frame(&mut observer).await;
+
+        let prepared = driver.prepare_handoff().await.expect("prepare");
+        drop(prepared);
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+        handle
+            .submit_latest_input(CorePrivateMicrorealmRetainedInput {
+                input_sequence: 1,
+                movement: MovementAction::default(),
+                aim: AimDirection::east(),
+                primary_held: false,
+                primary_sequence: 0,
+            })
+            .expect("drop resumes ingress");
+        advance_one_frame(&mut observer).await;
+        assert!(received.lock().expect("received").len() >= 2);
+        driver.shutdown().await.expect("shutdown");
     }
 
     #[tokio::test(start_paused = true)]

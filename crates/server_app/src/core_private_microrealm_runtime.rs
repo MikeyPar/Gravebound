@@ -237,6 +237,18 @@ impl CorePrivateMicrorealmRuntime {
         self.tick
     }
 
+    /// Reports the exact live Bell-transfer boundary from owned simulation state. The driver uses
+    /// this only while pausing between frames; a client observation cannot author readiness.
+    #[must_use]
+    pub(crate) fn bell_transfer_ready(&self) -> bool {
+        self.lifecycle.phase() == CoreMicrorealmPhase::Cleared
+            && point_in_circle(
+                self.player_position,
+                self.bell_portal_center,
+                self.bell_portal_radius_milli_tiles,
+            )
+    }
+
     /// Consumes a quiet/cleared microrealm owner and rejoins its one mutable combat allocation for
     /// the next room or terminal owner. Active packs cannot transfer.
     pub fn into_character_combat(
@@ -540,7 +552,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        AccountId, AuthenticatedAccount, AuthenticatedNamespace, CorePrivateRouteActorPosition,
+        AccountId, AuthenticatedAccount, AuthenticatedNamespace, CorePrivateMicrorealmDriver,
+        CorePrivateMicrorealmDriverOutcome, CorePrivateRouteActorPosition,
         CorePrivateRouteActorSeed,
     };
 
@@ -834,5 +847,65 @@ mod tests {
         assert_eq!(combat.character_id, CHARACTER_ID);
         assert_eq!(combat.state.tick(), Tick(0));
         assert_eq!(combat.consumables.vitals().current_health(), 120);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn committed_driver_handoff_returns_the_exact_live_runtime() {
+        let directory = CorePrivateRouteActorDirectory::new();
+        let lease = directory
+            .register_actor(authenticated(), seed(), 12)
+            .expect("actor");
+        let mut runtime = runtime(&directory, lease);
+        let spawn = runtime.player_position;
+        let ordinary = CoreMicrorealmInput {
+            entrant_position: spawn,
+            primary_released: false,
+            living_participants: 1,
+            pack_cleared: false,
+        };
+        runtime
+            .lifecycle
+            .step(
+                Tick(1),
+                CoreMicrorealmInput {
+                    primary_released: true,
+                    ..ordinary
+                },
+            )
+            .expect("trigger");
+        runtime
+            .lifecycle
+            .step(Tick(31), ordinary)
+            .expect("activate");
+        runtime
+            .lifecycle
+            .step(
+                Tick(32),
+                CoreMicrorealmInput {
+                    pack_cleared: true,
+                    ..ordinary
+                },
+            )
+            .expect("clear");
+        runtime.player_position = runtime.bell_portal_center;
+        runtime.tick = Tick(32);
+        assert!(runtime.bell_transfer_ready());
+
+        let mut driver = CorePrivateMicrorealmDriver::spawn(runtime);
+        tokio::task::yield_now().await;
+        let prepared = driver.prepare_handoff().await.expect("prepare handoff");
+        let handoff = prepared.commit().await.expect("commit handoff");
+
+        assert_eq!(
+            handoff.report.outcome,
+            CorePrivateMicrorealmDriverOutcome::Transferred
+        );
+        assert!(handoff.report.task_joined);
+        assert!(!handoff.report.driver_task_live_after_join);
+        assert_eq!(handoff.runtime.account_id(), ACCOUNT_ID);
+        assert_eq!(handoff.runtime.character_id(), CHARACTER_ID);
+        assert_eq!(handoff.runtime.route_lease(), lease);
+        assert_eq!(handoff.runtime.tick(), Tick(32));
+        assert!(handoff.runtime.bell_transfer_ready());
     }
 }
