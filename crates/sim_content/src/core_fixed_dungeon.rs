@@ -8,8 +8,9 @@ use thiserror::Error;
 
 use crate::{
     CoreB2FixedRoomSimulation, CoreB2FixedRoomStep, CoreB3FixedRoomSimulation, CoreB3FixedRoomStep,
-    CoreDevelopmentEncounterRooms, CoreFixedRoomEncounterError, CoreFixedRoomEncounterPlan,
-    CoreImmutableFixedRoomInput, CoreImmutableFixedRoomSimulation, CoreImmutableFixedRoomStep,
+    CoreB3RewardHandoff, CoreB3RewardReceipt, CoreDevelopmentEncounterRooms,
+    CoreFixedRoomEncounterError, CoreFixedRoomEncounterPlan, CoreImmutableFixedRoomInput,
+    CoreImmutableFixedRoomSimulation, CoreImmutableFixedRoomStep,
     compile_core_fixed_room_encounters_from,
 };
 
@@ -353,6 +354,24 @@ impl CoreFixedDungeonCombat {
         }
     }
 
+    #[must_use]
+    pub fn pending_b3_reward_handoff(&self) -> Option<&CoreB3RewardHandoff> {
+        match &self.state {
+            CoreFixedDungeonState::B3(room) => room.pending_reward_handoff(),
+            _ => None,
+        }
+    }
+
+    pub fn acknowledge_b3_reward(
+        &mut self,
+        handoff: &CoreB3RewardHandoff,
+    ) -> Result<CoreB3RewardReceipt, CoreFixedDungeonError> {
+        let CoreFixedDungeonState::B3(room) = &mut self.state else {
+            return Err(CoreFixedDungeonError::B3RewardUnavailable);
+        };
+        room.acknowledge_reward(handoff).map_err(Into::into)
+    }
+
     pub fn step_room(
         &mut self,
         tick: Tick,
@@ -593,6 +612,8 @@ pub enum CoreFixedDungeonError {
     AdvanceUnavailable { node: CoreFixedDungeonNode },
     #[error("B4 requires a committed Bargain selection, refusal, or authoritative no-offer result")]
     RestResolutionRequired,
+    #[error("B3 reward acknowledgement is unavailable outside the Sepulcher Knight room")]
+    B3RewardUnavailable,
     #[error("B4 resolution is unavailable outside the rest room")]
     RestResolutionUnavailable,
     #[error("B4 resolution conflicts with the result already committed in this route")]
@@ -797,6 +818,25 @@ mod tests {
         let (b3_done, reward) = clear_current_room(&mut dungeon, b2_done + 1);
         let reward = reward.expect("B3 reward handoff");
         assert_eq!(reward.reward_profile_id, "reward.miniboss_t1");
+        assert_eq!(reward.xp_profile_id, "xp.miniboss_t1");
+        assert!(matches!(
+            dungeon.advance(),
+            Err(CoreFixedDungeonError::FixedRoom(
+                CoreFixedRoomEncounterError::RoomHandoffUnavailable
+            ))
+        ));
+        assert_eq!(
+            dungeon
+                .acknowledge_b3_reward(&reward)
+                .expect("B3 reward acknowledgement"),
+            CoreB3RewardReceipt::Committed
+        );
+        assert_eq!(
+            dungeon
+                .acknowledge_b3_reward(&reward)
+                .expect("B3 reward acknowledgement replay"),
+            CoreB3RewardReceipt::Replayed
+        );
         dungeon.advance().expect("enter B4");
         assert_eq!(dungeon.node(), CoreFixedDungeonNode::BellRestB4);
         assert!(matches!(

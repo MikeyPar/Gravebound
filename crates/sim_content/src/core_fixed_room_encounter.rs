@@ -1326,6 +1326,10 @@ pub enum CoreFixedRoomEncounterError {
     MissingB2Combat,
     #[error("fixed-room lifecycle requested B3 completion without its Knight owner")]
     MissingB3Combat,
+    #[error("B3 has no completed reward handoff to acknowledge")]
+    B3RewardUnavailable,
+    #[error("B3 reward acknowledgement differs from the completed encounter handoff")]
+    B3RewardConflict,
     #[error("friendly damage is forbidden during the B2 group warning")]
     DamageDuringSpawnWarning,
     #[error("B2 player position is non-finite or outside fixed-point range")]

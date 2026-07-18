@@ -40,6 +40,12 @@ pub struct CoreB3RewardHandoff {
     pub xp_profile_id: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoreB3RewardReceipt {
+    Committed,
+    Replayed,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct CoreB3CombatStep {
     pub tick: Tick,
@@ -290,6 +296,8 @@ pub struct CoreB3FixedRoomSimulation {
     next_spawn_ordinal: u16,
     participant: Option<NormalWaveHandoff>,
     combat: Option<CoreB3CombatSimulation>,
+    pending_reward_handoff: Option<CoreB3RewardHandoff>,
+    reward_acknowledged: bool,
 }
 
 impl CoreB3FixedRoomSimulation {
@@ -319,6 +327,8 @@ impl CoreB3FixedRoomSimulation {
                 hostile_projectile_ids,
             }),
             combat: None,
+            pending_reward_handoff: None,
+            reward_acknowledged: false,
         })
     }
 
@@ -330,11 +340,41 @@ impl CoreB3FixedRoomSimulation {
     /// Transfers the one mutable player/projectile allocation only after committed B3 completion
     /// and its one reward handoff. Active Knight state cannot escape into B4.
     pub fn into_handoff(self) -> Result<NormalWaveHandoff, CoreFixedRoomEncounterError> {
-        if self.authority.phase() != FixedRoomPhase::Cleared || self.combat.is_some() {
+        if self.authority.phase() != FixedRoomPhase::Cleared
+            || self.combat.is_some()
+            || self.pending_reward_handoff.is_none()
+            || !self.reward_acknowledged
+        {
             return Err(CoreFixedRoomEncounterError::RoomHandoffUnavailable);
         }
         self.participant
             .ok_or(CoreFixedRoomEncounterError::MissingParticipantHandoff)
+    }
+
+    #[must_use]
+    pub const fn pending_reward_handoff(&self) -> Option<&CoreB3RewardHandoff> {
+        self.pending_reward_handoff.as_ref()
+    }
+
+    /// Acknowledges only the exact B3 handoff that persistence resolved. The server layer keeps
+    /// the durable receipt opaque; this simulation boundary compares the immutable encounter
+    /// material and makes exact retry read-only.
+    pub fn acknowledge_reward(
+        &mut self,
+        handoff: &CoreB3RewardHandoff,
+    ) -> Result<CoreB3RewardReceipt, CoreFixedRoomEncounterError> {
+        let pending = self
+            .pending_reward_handoff
+            .as_ref()
+            .ok_or(CoreFixedRoomEncounterError::B3RewardUnavailable)?;
+        if pending != handoff {
+            return Err(CoreFixedRoomEncounterError::B3RewardConflict);
+        }
+        if self.reward_acknowledged {
+            return Ok(CoreB3RewardReceipt::Replayed);
+        }
+        self.reward_acknowledged = true;
+        Ok(CoreB3RewardReceipt::Committed)
     }
 
     #[must_use]
@@ -458,13 +498,21 @@ impl CoreB3FixedRoomSimulation {
                     if let Some(step) = &mut combat_step {
                         step.cleared_projectiles.extend(cleared);
                     }
-                    reward_handoff = combat.reward_handoff.take();
+                    let handoff = combat
+                        .reward_handoff
+                        .take()
+                        .ok_or(CoreFixedRoomEncounterError::B3RewardUnavailable)?;
+                    self.pending_reward_handoff = Some(handoff.clone());
+                    self.reward_acknowledged = false;
+                    reward_handoff = Some(handoff);
                     self.participant = Some(NormalWaveHandoff {
                         player: combat.player,
                         hostile_projectile_ids: combat.hostile.into_allocator(),
                     });
                 }
                 FixedRoomEvent::RoomReset => {
+                    self.pending_reward_handoff = None;
+                    self.reward_acknowledged = false;
                     if let Some(mut combat) = self.combat.take() {
                         reset_cleared_projectiles = combat.hostile.clear_projectiles();
                         self.participant = Some(NormalWaveHandoff {
@@ -721,6 +769,7 @@ mod tests {
         ));
 
         let mut actor_id = None;
+        let mut reward_handoff = None;
         for tick in 0..=1_050 {
             let mut room_input = input(tick, 1);
             if tick == 1_050 {
@@ -732,7 +781,8 @@ mod tests {
                 .map(|snapshot| snapshot.actor_id)
                 .or(actor_id);
             if tick == 1_050 {
-                assert!(step.reward_handoff.is_some());
+                reward_handoff = step.reward_handoff;
+                assert!(reward_handoff.is_some());
             }
         }
         assert_eq!(room.phase(), FixedRoomPhase::Quiet);
@@ -740,6 +790,23 @@ mod tests {
             room.clone().into_handoff(),
             Err(CoreFixedRoomEncounterError::RoomHandoffUnavailable)
         ));
+        let reward_handoff = reward_handoff.expect("B3 reward handoff");
+        let mut changed = reward_handoff.clone();
+        changed.reward_due_tick = Tick(changed.reward_due_tick.0 + 1);
+        assert!(matches!(
+            room.acknowledge_reward(&changed),
+            Err(CoreFixedRoomEncounterError::B3RewardConflict)
+        ));
+        assert_eq!(
+            room.acknowledge_reward(&reward_handoff)
+                .expect("durable reward acknowledgement"),
+            CoreB3RewardReceipt::Committed
+        );
+        assert_eq!(
+            room.acknowledge_reward(&reward_handoff)
+                .expect("exact acknowledgement replay"),
+            CoreB3RewardReceipt::Replayed
+        );
 
         for tick in 1_051..1_110 {
             assert!(
