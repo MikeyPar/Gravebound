@@ -1172,15 +1172,20 @@ mod tests {
                 7,
             )
             .unwrap();
-        let scene = sim_content::load_core_development_world_flow(
-            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content"),
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content");
+        let world = sim_content::load_core_development_world_flow(&root).unwrap();
+        let scene = world.compile_microrealm_scene().unwrap();
+        let encounters = sim_content::load_core_development_encounter_rooms(&root).unwrap();
+        let runtime = CorePrivateMicrorealmRuntime::new(
+            routes.clone(),
+            lease,
+            &route_revision(),
+            scene,
+            encounters,
+            world,
+            crate::combat_factory::core_character_combat_test_fixture(CHARACTER_ID),
         )
-        .unwrap()
-        .compile_microrealm_scene()
         .unwrap();
-        let runtime =
-            CorePrivateMicrorealmRuntime::new(routes.clone(), lease, &route_revision(), scene)
-                .unwrap();
         (routes, lease, runtime)
     }
 

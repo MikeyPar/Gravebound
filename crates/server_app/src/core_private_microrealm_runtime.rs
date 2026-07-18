@@ -3,32 +3,36 @@
 //! The three authorities are `Gravebound_Production_GDD_v1_Canonical.md` (`LOOP-001`-`003`,
 //! `TECH-010`-`023`), `Gravebound_Content_Production_Spec_v1.md` (`CONT-WORLD-001` and
 //! `CONT-WORLD-004`), and `Gravebound_Development_Roadmap_v1.md` (`GB-M03-03`). This owner keeps
-//! client movement and primary-release intent below server-owned collision, pack-clear, phase,
-//! and Bell-range authority. Its existence does not enable normal route admission.
+//! client action state below server-owned ticks, displacement, combat, collision, pack-clear,
+//! phase, and Bell-range authority. Its existence does not enable normal route admission.
 
 use protocol::{
     CorePrivateRouteContentRevisionV1, CorePrivateRoutePhaseV1, CorePrivateRouteSceneV1,
     CorePrivateRouteStateV1,
 };
 use sim_core::{
+    AimDirection, CombatAction, CombatError, CombatStep, ConsumableAction, ConsumableError,
     CoreMicrorealmEvent, CoreMicrorealmInput, CoreMicrorealmPhase, CoreMicrorealmSimulation,
-    SceneDisplacement, SceneObjectGeometry, Tick, TilePoint, WorldSceneDefinition, WorldSceneError,
-    WorldSceneKind, WorldScenePlayer,
+    FriendlyProjectileSource, MovementAction, ProjectileCollisionWorld, SceneDisplacement,
+    SceneObjectGeometry, SimulationVector, Tick, TilePoint, WorldSceneDefinition, WorldSceneError,
+    WorldSceneKind, WorldScenePlayer, normal_wave_projectile_allocator, tile_point_to_simulation,
 };
 use thiserror::Error;
 
 use crate::{
+    CoreCharacterCombat, CoreCharacterCombatEnvelope, CoreCombatFactoryError,
     CorePrivateRouteActorDirectory, CorePrivateRouteActorLease, CorePrivateRouteRuntimeError,
 };
 
 const CORE_MICROREALM_SCENE_ID: &str = "world.core_microrealm_01";
 const BELL_PORTAL_OBJECT_ID: &str = "portal.dungeon.bell_sepulcher";
-/// The compiled Grave Arbalist speed is 5,100 milli-tiles/second at the canonical 30 Hz tick.
-const GRAVE_ARBALIST_STEP_MILLI_TILES: i32 = 170;
+const AUTHORITATIVE_TICKS_PER_SECOND: u32 = 30;
+const RUN_ENTITY_ID_STRIDE: u64 = 100_000;
+const PLAYER_ENTITY_ID_OFFSET: u64 = 10_000;
 
 /// Opaque server-owned proof that the live combat owner cleared the microrealm pack on this tick.
 /// The ordinary input decoder cannot construct this value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CoreMicrorealmPackClearProof {
     character_id: [u8; 16],
     actor_generation: u64,
@@ -37,7 +41,7 @@ pub struct CoreMicrorealmPackClearProof {
 }
 
 impl CoreMicrorealmPackClearProof {
-    pub fn from_live_combat(
+    pub(crate) fn from_live_combat(
         character_id: [u8; 16],
         actor_generation: u64,
         instance_lineage_id: [u8; 16],
@@ -59,16 +63,18 @@ impl CoreMicrorealmPackClearProof {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CorePrivateMicrorealmInput {
     pub input_sequence: u64,
-    pub tick: Tick,
-    pub displacement: SceneDisplacement,
-    pub primary_released: bool,
-    pub pack_clear: Option<CoreMicrorealmPackClearProof>,
+    pub movement: MovementAction,
+    pub aim: AimDirection,
+    pub primary_held: bool,
+    pub primary_sequence: u32,
+    pub ability_1_sequence: u32,
+    pub ability_2_sequence: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CorePrivateMicrorealmStep {
     pub input_sequence: u64,
     pub tick: Tick,
@@ -76,6 +82,10 @@ pub struct CorePrivateMicrorealmStep {
     pub phase: CoreMicrorealmPhase,
     pub route: CorePrivateRouteStateV1,
     pub events: Vec<CoreMicrorealmEvent>,
+    pub combat: CombatStep,
+    pub wave: Option<sim_core::NormalWaveStep>,
+    pub pack_clear: Option<CoreMicrorealmPackClearProof>,
+    pub player_died: bool,
     pub bell_portal_in_range: bool,
 }
 
@@ -86,9 +96,26 @@ pub struct CorePrivateMicrorealmRuntime {
     scene: WorldSceneDefinition,
     player: WorldScenePlayer,
     lifecycle: CoreMicrorealmSimulation,
+    combat: sim_content::CoreMicrorealmPackCombat,
+    combat_envelope: CoreCharacterCombatEnvelope,
     bell_portal_center: TilePoint,
     bell_portal_radius_milli_tiles: i32,
+    movement_milli_tiles_per_second: u32,
+    tick: Tick,
     last_input_sequence: Option<u64>,
+}
+
+struct StagedMicrorealmFrame {
+    player: WorldScenePlayer,
+    lifecycle: CoreMicrorealmSimulation,
+    combat: sim_content::CoreMicrorealmPackCombat,
+    player_position: TilePoint,
+    phase: CoreMicrorealmPhase,
+    events: Vec<CoreMicrorealmEvent>,
+    combat_step: CombatStep,
+    wave_step: Option<sim_core::NormalWaveStep>,
+    pack_clear: Option<CoreMicrorealmPackClearProof>,
+    living_participants: u16,
 }
 
 impl CorePrivateMicrorealmRuntime {
@@ -97,6 +124,9 @@ impl CorePrivateMicrorealmRuntime {
         route_lease: CorePrivateRouteActorLease,
         expected_content_revision: &CorePrivateRouteContentRevisionV1,
         scene: WorldSceneDefinition,
+        encounters: sim_content::CoreDevelopmentEncounterRooms,
+        world_flow: sim_content::CoreDevelopmentWorldFlow,
+        character_combat: CoreCharacterCombat,
     ) -> Result<Self, CorePrivateMicrorealmRuntimeError> {
         let route = route_directory.snapshot(route_lease)?;
         if route.content_revision != *expected_content_revision
@@ -111,6 +141,8 @@ impl CorePrivateMicrorealmRuntime {
             || scene.id != CORE_MICROREALM_SCENE_ID
             || scene.kind != WorldSceneKind::PrivateDanger
             || scene.capacity != Some(1)
+            || world_flow.compile_microrealm_scene()? != scene
+            || character_combat.character_id != route.character_id
         {
             return Err(CorePrivateMicrorealmRuntimeError::InvalidComposition);
         }
@@ -127,8 +159,25 @@ impl CorePrivateMicrorealmRuntime {
             })
             .filter(|(_, radius)| *radius > 0)
             .ok_or(CorePrivateMicrorealmRuntimeError::InvalidComposition)?;
-        let player =
-            WorldScenePlayer::new(&scene, scene.player_spawn, GRAVE_ARBALIST_STEP_MILLI_TILES)?;
+        let movement_milli_tiles_per_second = character_combat.movement_milli_tiles_per_second;
+        let maximum_step_milli_tiles =
+            i32::try_from(movement_milli_tiles_per_second.div_ceil(AUTHORITATIVE_TICKS_PER_SECOND))
+                .map_err(|_| CorePrivateMicrorealmRuntimeError::InvalidComposition)?;
+        let player = WorldScenePlayer::new(&scene, scene.player_spawn, maximum_step_milli_tiles)?;
+        let run_ordinal = u32::try_from(route.actor_generation)
+            .map_err(|_| CorePrivateMicrorealmRuntimeError::InvalidComposition)?;
+        let player_entity_id = run_player_entity_id(run_ordinal)?;
+        let (combat_envelope, live_player) = character_combat.into_live_player(
+            player_entity_id,
+            tile_point_to_simulation(scene.player_spawn),
+        )?;
+        let combat = sim_content::CoreMicrorealmPackCombat::new(
+            encounters,
+            world_flow,
+            run_ordinal,
+            live_player,
+            normal_wave_projectile_allocator(run_ordinal)?,
+        )?;
         let lifecycle = CoreMicrorealmSimulation::new(scene.player_spawn);
         Ok(Self {
             route_directory,
@@ -136,8 +185,12 @@ impl CorePrivateMicrorealmRuntime {
             scene,
             player,
             lifecycle,
+            combat,
+            combat_envelope,
             bell_portal_center,
             bell_portal_radius_milli_tiles,
+            movement_milli_tiles_per_second,
+            tick: Tick(0),
             last_input_sequence: None,
         })
     }
@@ -167,6 +220,22 @@ impl CorePrivateMicrorealmRuntime {
         self.lifecycle.phase()
     }
 
+    #[must_use]
+    pub const fn tick(&self) -> Tick {
+        self.tick
+    }
+
+    /// Consumes a quiet/cleared microrealm owner and rejoins its one mutable combat allocation for
+    /// the next room or terminal owner. Active packs cannot transfer.
+    pub fn into_character_combat(
+        self,
+    ) -> Result<CoreCharacterCombat, CorePrivateMicrorealmRuntimeError> {
+        let participant = self.combat.into_handoff()?;
+        self.combat_envelope
+            .rejoin(participant.player)
+            .map_err(Into::into)
+    }
+
     pub async fn step(
         &mut self,
         input: CorePrivateMicrorealmInput,
@@ -178,35 +247,22 @@ impl CorePrivateMicrorealmRuntime {
         {
             return Err(CorePrivateMicrorealmRuntimeError::StaleInputSequence);
         }
+        if input.ability_2_sequence != 0 {
+            return Err(CorePrivateMicrorealmRuntimeError::MovementAbilityUnavailable);
+        }
+        let tick = self
+            .tick
+            .checked_next()
+            .ok_or(CorePrivateMicrorealmRuntimeError::TickExhausted)?;
         let route_before = self.route_directory.snapshot(self.route_lease)?;
         self.validate_route_authority(&route_before)?;
-        let pack_cleared = match input.pack_clear {
-            None => false,
-            Some(proof) => {
-                Self::validate_clear_proof(proof, input.tick, &route_before)?;
-                true
-            }
-        };
 
-        // Stage all fallible simulation work before touching the shared route actor. The actor's
-        // combined command then applies phase and Bell range under one lock; local state is swapped
-        // only after that command succeeds.
-        let mut staged_player = self.player.clone();
-        let player_position = staged_player.step_movement(&self.scene, input.displacement)?;
-        let mut staged_lifecycle = self.lifecycle.clone();
-        let events = staged_lifecycle.step(
-            input.tick,
-            CoreMicrorealmInput {
-                entrant_position: player_position,
-                primary_released: input.primary_released,
-                living_participants: 1,
-                pack_cleared,
-            },
-        )?;
-        let phase = staged_lifecycle.phase();
-        let bell_portal_in_range = phase == CoreMicrorealmPhase::Cleared
+        // All fallible simulation work is staged before the shared route CAS. Local state swaps
+        // only after the actor commits phase and Bell range under its one lock.
+        let frame = self.stage_frame(&input, tick, &route_before)?;
+        let bell_portal_in_range = frame.phase == CoreMicrorealmPhase::Cleared
             && point_in_circle(
-                player_position,
+                frame.player_position,
                 self.bell_portal_center,
                 self.bell_portal_radius_milli_tiles,
             );
@@ -215,23 +271,116 @@ impl CorePrivateMicrorealmRuntime {
             .apply_microrealm_authority(
                 self.route_lease,
                 route_before.state_version,
-                route_phase(phase),
+                route_phase(frame.phase),
                 bell_portal_in_range,
             )
             .await?;
 
-        self.player = staged_player;
-        self.lifecycle = staged_lifecycle;
+        self.player = frame.player;
+        self.lifecycle = frame.lifecycle;
+        self.combat = frame.combat;
+        self.tick = tick;
         self.last_input_sequence = Some(input.input_sequence);
         Ok(CorePrivateMicrorealmStep {
             input_sequence: input.input_sequence,
-            tick: input.tick,
-            player_position,
-            phase,
+            tick,
+            player_position: frame.player_position,
+            phase: frame.phase,
             route,
-            events,
+            events: frame.events,
+            combat: frame.combat_step,
+            wave: frame.wave_step,
+            pack_clear: frame.pack_clear,
+            player_died: frame.living_participants == 0,
             bell_portal_in_range,
         })
+    }
+
+    fn stage_frame(
+        &self,
+        input: &CorePrivateMicrorealmInput,
+        tick: Tick,
+        route_before: &CorePrivateRouteStateV1,
+    ) -> Result<StagedMicrorealmFrame, CorePrivateMicrorealmRuntimeError> {
+        let mut player = self.player.clone();
+        let displacement =
+            scene_displacement(input.movement, self.movement_milli_tiles_per_second)?;
+        let player_position = player.step_movement(&self.scene, displacement)?;
+        let mut combat = self.combat.clone();
+        let arena = combat.arena()?;
+        let collision_world = ProjectileCollisionWorld::new(&arena, combat.alive_hurtboxes()?)?;
+        let player_vector = tile_point_to_simulation(player_position);
+        let combat_step = step_player_combat(&mut combat, input, player_vector, &collision_world)?;
+        if combat_step.tick != tick {
+            return Err(CorePrivateMicrorealmRuntimeError::CombatTickMismatch);
+        }
+        let primary_released = combat_step.shots.iter().any(|shot| {
+            shot.projectile.source() == FriendlyProjectileSource::Primary && shot.tick == tick
+        });
+        let mut wave_step = combat
+            .wave()
+            .is_some()
+            .then(|| combat.step(&combat_step))
+            .transpose()?;
+        let pack_cleared = wave_step.as_ref().is_some_and(|step| {
+            matches!(step.phase_after, sim_core::NormalWavePhase::Cleared { cleared_at } if cleared_at == tick)
+        });
+        let living_participants =
+            u16::from(combat.player().consumables.vitals().current_health() != 0);
+        let mut lifecycle = self.lifecycle.clone();
+        let events = lifecycle.step(
+            tick,
+            CoreMicrorealmInput {
+                entrant_position: player_position,
+                primary_released,
+                living_participants,
+                pack_cleared,
+            },
+        )?;
+        for event in events.iter().copied() {
+            combat.apply_lifecycle_event(tick, event)?;
+            if matches!(event, CoreMicrorealmEvent::BeginPackWarning { .. }) {
+                wave_step = Some(combat.step(&combat_step)?);
+            }
+        }
+        let phase = lifecycle.phase();
+        let pack_clear = Self::pack_clear_proof(&events, tick, route_before)?;
+        Ok(StagedMicrorealmFrame {
+            player,
+            lifecycle,
+            combat,
+            player_position,
+            phase,
+            events,
+            combat_step,
+            wave_step,
+            pack_clear,
+            living_participants,
+        })
+    }
+
+    fn pack_clear_proof(
+        events: &[CoreMicrorealmEvent],
+        tick: Tick,
+        route: &CorePrivateRouteStateV1,
+    ) -> Result<Option<CoreMicrorealmPackClearProof>, CorePrivateMicrorealmRuntimeError> {
+        let proof = events
+            .contains(&CoreMicrorealmEvent::Cleared)
+            .then(|| {
+                CoreMicrorealmPackClearProof::from_live_combat(
+                    route.character_id,
+                    route.actor_generation,
+                    route
+                        .instance_lineage_id
+                        .ok_or(CorePrivateMicrorealmRuntimeError::InvalidComposition)?,
+                    tick,
+                )
+            })
+            .transpose()?;
+        if let Some(proof) = proof {
+            Self::validate_clear_proof(proof, tick, route)?;
+        }
+        Ok(proof)
     }
 
     fn validate_route_authority(
@@ -265,6 +414,72 @@ impl CorePrivateMicrorealmRuntime {
     }
 }
 
+fn run_player_entity_id(
+    run_ordinal: u32,
+) -> Result<sim_core::EntityId, CorePrivateMicrorealmRuntimeError> {
+    let zero_based = run_ordinal
+        .checked_sub(1)
+        .ok_or(CorePrivateMicrorealmRuntimeError::InvalidComposition)?;
+    let value = u64::from(zero_based)
+        .checked_mul(RUN_ENTITY_ID_STRIDE)
+        .and_then(|base| base.checked_add(PLAYER_ENTITY_ID_OFFSET))
+        .and_then(sim_core::EntityId::new)
+        .ok_or(CorePrivateMicrorealmRuntimeError::InvalidComposition)?;
+    Ok(value)
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+fn scene_displacement(
+    movement: MovementAction,
+    movement_milli_tiles_per_second: u32,
+) -> Result<SceneDisplacement, CorePrivateMicrorealmRuntimeError> {
+    let step = movement_milli_tiles_per_second as f32 / AUTHORITATIVE_TICKS_PER_SECOND as f32;
+    let direction = movement.normalized_vector();
+    let x = (direction.x * step).round();
+    let y = (direction.y * step).round();
+    if !x.is_finite()
+        || !y.is_finite()
+        || x < i32::MIN as f32
+        || x > i32::MAX as f32
+        || y < i32::MIN as f32
+        || y > i32::MAX as f32
+    {
+        return Err(CorePrivateMicrorealmRuntimeError::InvalidComposition);
+    }
+    Ok(SceneDisplacement::new(x as i32, y as i32))
+}
+
+fn step_player_combat(
+    combat: &mut sim_content::CoreMicrorealmPackCombat,
+    input: &CorePrivateMicrorealmInput,
+    player_position: SimulationVector,
+    collision_world: &ProjectileCollisionWorld,
+) -> Result<CombatStep, CorePrivateMicrorealmRuntimeError> {
+    let player = combat.player_mut();
+    player.target.position = player_position;
+    let step = player.combat.step(
+        CombatAction {
+            aim: input.aim,
+            movement: input.movement,
+            primary_held: input.primary_held,
+            primary_press_sequence: input.primary_sequence,
+            ability_1_press_sequence: input.ability_1_sequence,
+            ability_2_press_sequence: input.ability_2_sequence,
+        },
+        player_position,
+        collision_world,
+    )?;
+    player.consumables.step(ConsumableAction::default())?;
+    player
+        .target
+        .additional_direct_damage_reductions_basis_points =
+        (step.direct_damage_reduction_basis_points != 0)
+            .then_some(step.direct_damage_reduction_basis_points)
+            .into_iter()
+            .collect();
+    Ok(step)
+}
+
 fn route_phase(phase: CoreMicrorealmPhase) -> CorePrivateRoutePhaseV1 {
     match phase {
         CoreMicrorealmPhase::Dormant => CorePrivateRoutePhaseV1::MicrorealmDormant,
@@ -291,6 +506,26 @@ pub enum CorePrivateMicrorealmRuntimeError {
     RouteAuthorityMismatch,
     #[error("live Core microrealm pack-clear proof is invalid or foreign")]
     InvalidClearProof,
+    #[error("live Core microrealm run-local tick exhausted")]
+    TickExhausted,
+    #[error("live Core microrealm combat tick does not match the server-owned frame")]
+    CombatTickMismatch,
+    #[error("Slipstep movement is not yet composed with the live scene owner")]
+    MovementAbilityUnavailable,
+    #[error(transparent)]
+    Combat(#[from] CombatError),
+    #[error(transparent)]
+    Consumable(#[from] ConsumableError),
+    #[error(transparent)]
+    Collision(#[from] sim_core::CollisionError),
+    #[error(transparent)]
+    Content(#[from] anyhow::Error),
+    #[error(transparent)]
+    Pack(#[from] sim_content::CoreMicrorealmPackError),
+    #[error(transparent)]
+    CombatFactory(#[from] CoreCombatFactoryError),
+    #[error(transparent)]
+    Entity(#[from] sim_core::NormalWaveEntityIdError),
     #[error(transparent)]
     World(#[from] WorldSceneError),
     #[error(transparent)]
@@ -340,13 +575,17 @@ mod tests {
         }
     }
 
-    fn scene() -> WorldSceneDefinition {
-        sim_content::load_core_development_world_flow(
-            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content"),
-        )
-        .expect("Core world content")
-        .compile_microrealm_scene()
-        .expect("microrealm scene")
+    fn content() -> (
+        WorldSceneDefinition,
+        sim_content::CoreDevelopmentEncounterRooms,
+        sim_content::CoreDevelopmentWorldFlow,
+    ) {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content");
+        let world = sim_content::load_core_development_world_flow(&root).expect("Core world");
+        let scene = world.compile_microrealm_scene().expect("microrealm scene");
+        let encounters =
+            sim_content::load_core_development_encounter_rooms(&root).expect("Core encounters");
+        (scene, encounters, world)
     }
 
     fn seed() -> CorePrivateRouteActorSeed {
@@ -364,14 +603,33 @@ mod tests {
         }
     }
 
-    fn input(sequence: u64, tick: u64) -> CorePrivateMicrorealmInput {
+    fn input(sequence: u64) -> CorePrivateMicrorealmInput {
         CorePrivateMicrorealmInput {
             input_sequence: sequence,
-            tick: Tick(tick),
-            displacement: SceneDisplacement::new(0, 0),
-            primary_released: false,
-            pack_clear: None,
+            movement: MovementAction::default(),
+            aim: AimDirection::east(),
+            primary_held: false,
+            primary_sequence: 0,
+            ability_1_sequence: 0,
+            ability_2_sequence: 0,
         }
+    }
+
+    fn runtime(
+        directory: &CorePrivateRouteActorDirectory,
+        lease: CorePrivateRouteActorLease,
+    ) -> CorePrivateMicrorealmRuntime {
+        let (scene, encounters, world) = content();
+        CorePrivateMicrorealmRuntime::new(
+            directory.clone(),
+            lease,
+            &route_revision(),
+            scene,
+            encounters,
+            world,
+            crate::combat_factory::core_character_combat_test_fixture(CHARACTER_ID),
+        )
+        .expect("live runtime")
     }
 
     #[tokio::test]
@@ -380,20 +638,28 @@ mod tests {
         let lease = directory
             .register_actor(authenticated(), seed(), 7)
             .expect("actor");
-        let mut runtime =
-            CorePrivateMicrorealmRuntime::new(directory.clone(), lease, &route_revision(), scene())
-                .expect("live runtime");
+        let mut runtime = runtime(&directory, lease);
 
-        let mut release = input(1, 1);
-        release.primary_released = true;
+        let mut release = input(1);
+        release.primary_held = true;
+        release.primary_sequence = 1;
         let waiting = runtime.step(release).await.expect("waiting");
+        assert_eq!(waiting.tick, Tick(1));
+        assert_eq!(waiting.combat.shots.len(), 1);
         assert_eq!(waiting.phase, CoreMicrorealmPhase::Waiting);
         assert_eq!(
             waiting.route.phase,
             CorePrivateRoutePhaseV1::MicrorealmWaiting
         );
 
-        let active = runtime.step(input(2, 31)).await.expect("active");
+        let mut active = None;
+        for sequence in 2..=31 {
+            let mut waiting_input = input(sequence);
+            waiting_input.primary_sequence = 1;
+            active = Some(runtime.step(waiting_input).await.expect("wait tick"));
+        }
+        let active = active.expect("active step");
+        assert_eq!(active.tick, Tick(31));
         assert_eq!(active.phase, CoreMicrorealmPhase::Active);
         assert_eq!(
             active.route.phase,
@@ -403,68 +669,57 @@ mod tests {
             active.events,
             vec![CoreMicrorealmEvent::BeginPackWarning { warning_ticks: 27 }]
         );
+        let wave = active.wave.expect("warning wave step");
+        assert_eq!(wave.tick, Tick(31));
+        assert_eq!(runtime.combat.wave().expect("pack").snapshots().len(), 8);
+        assert!(
+            runtime
+                .combat
+                .wave()
+                .expect("pack")
+                .snapshots()
+                .iter()
+                .all(|enemy| enemy.health.alive)
+        );
     }
 
     #[tokio::test]
-    async fn only_exact_server_clear_proof_opens_the_bell_range() {
+    async fn tick_displacement_damage_and_clear_are_not_ingress_authority() {
         let directory = CorePrivateRouteActorDirectory::new();
         let lease = directory
             .register_actor(authenticated(), seed(), 9)
             .expect("actor");
-        let mut runtime =
-            CorePrivateMicrorealmRuntime::new(directory.clone(), lease, &route_revision(), scene())
-                .expect("live runtime");
-        let mut release = input(1, 1);
-        release.primary_released = true;
-        runtime.step(release).await.expect("waiting");
-        runtime.step(input(2, 31)).await.expect("active");
+        let mut runtime = runtime(&directory, lease);
+        let start = runtime.player_position();
+        let mut movement = input(1);
+        movement.movement = MovementAction::new(1, 0);
+        let moved = runtime.step(movement).await.expect("server tick");
+        assert_eq!(moved.tick, Tick(1));
+        assert!(moved.player_position.x_milli_tiles > start.x_milli_tiles);
+        assert!(moved.pack_clear.is_none());
+        assert!(moved.wave.is_none());
 
-        let mut foreign = input(3, 32);
-        foreign.pack_clear = Some(
-            CoreMicrorealmPackClearProof::from_live_combat(CHARACTER_ID, 8, LINEAGE_ID, Tick(32))
-                .expect("structured foreign proof"),
-        );
+        let before_tick = runtime.tick();
+        let before_position = runtime.player_position();
+        let mut unsupported = input(2);
+        unsupported.ability_2_sequence = 1;
         assert!(matches!(
-            runtime.step(foreign).await,
-            Err(CorePrivateMicrorealmRuntimeError::InvalidClearProof)
+            runtime.step(unsupported).await,
+            Err(CorePrivateMicrorealmRuntimeError::MovementAbilityUnavailable)
         ));
-        assert_eq!(runtime.phase(), CoreMicrorealmPhase::Active);
+        assert_eq!(runtime.tick(), before_tick);
+        assert_eq!(runtime.player_position(), before_position);
 
-        let mut clear = input(3, 32);
-        clear.displacement = SceneDisplacement::new(0, -170);
-        clear.pack_clear = Some(
-            CoreMicrorealmPackClearProof::from_live_combat(CHARACTER_ID, 9, LINEAGE_ID, Tick(32))
-                .expect("exact proof"),
-        );
-        let cleared = runtime.step(clear).await.expect("cleared");
-        assert_eq!(cleared.phase, CoreMicrorealmPhase::Cleared);
-        assert_eq!(cleared.events, vec![CoreMicrorealmEvent::Cleared]);
-        assert!(!cleared.bell_portal_in_range);
-
-        let mut sequence = 4;
-        let mut tick = 33;
-        for _ in 0..188 {
-            let mut movement = input(sequence, tick);
-            movement.displacement = SceneDisplacement::new(170, 0);
-            runtime.step(movement).await.expect("eastward route step");
-            sequence += 1;
-            tick += 1;
-        }
-        let mut arrived = None;
-        for _ in 0..187 {
-            let mut movement = input(sequence, tick);
-            movement.displacement = SceneDisplacement::new(0, -170);
-            arrived = Some(runtime.step(movement).await.expect("northward route step"));
-            sequence += 1;
-            tick += 1;
-        }
-        let arrived = arrived.expect("at least one northward step");
-        assert_eq!(arrived.phase, CoreMicrorealmPhase::Cleared);
-        assert!(arrived.bell_portal_in_range);
-        assert!(point_in_circle(
-            arrived.player_position,
-            TilePoint::new(40_500, 8_500),
-            3_000
+        let foreign =
+            CoreMicrorealmPackClearProof::from_live_combat(CHARACTER_ID, 8, LINEAGE_ID, Tick(2))
+                .expect("structured proof");
+        assert!(matches!(
+            CorePrivateMicrorealmRuntime::validate_clear_proof(
+                foreign,
+                Tick(2),
+                &directory.snapshot(lease).expect("route"),
+            ),
+            Err(CorePrivateMicrorealmRuntimeError::InvalidClearProof)
         ));
     }
 
@@ -495,9 +750,7 @@ mod tests {
         let lease = directory
             .register_actor(authenticated(), seed(), 11)
             .expect("actor");
-        let mut runtime =
-            CorePrivateMicrorealmRuntime::new(directory.clone(), lease, &route_revision(), scene())
-                .expect("live runtime");
+        let mut runtime = runtime(&directory, lease);
         let start = runtime.player_position();
         directory
             .advance(
@@ -507,8 +760,8 @@ mod tests {
             .await
             .expect("foreign server caller advances actor");
 
-        let mut moved = input(1, 1);
-        moved.displacement = SceneDisplacement::new(170, 0);
+        let mut moved = input(1);
+        moved.movement = MovementAction::new(1, 0);
         assert!(matches!(
             runtime.step(moved).await,
             Err(CorePrivateMicrorealmRuntimeError::RouteAuthorityMismatch)
@@ -517,8 +770,22 @@ mod tests {
         assert_eq!(runtime.phase(), CoreMicrorealmPhase::Dormant);
 
         assert!(matches!(
-            runtime.step(input(0, 2)).await,
+            runtime.step(input(0)).await,
             Err(CorePrivateMicrorealmRuntimeError::StaleInputSequence)
         ));
+    }
+
+    #[tokio::test]
+    async fn dormant_owner_rejoins_the_exact_character_combat_without_a_clone() {
+        let directory = CorePrivateRouteActorDirectory::new();
+        let lease = directory
+            .register_actor(authenticated(), seed(), 6)
+            .expect("actor");
+        let combat = runtime(&directory, lease)
+            .into_character_combat()
+            .expect("quiet handoff");
+        assert_eq!(combat.character_id, CHARACTER_ID);
+        assert_eq!(combat.state.tick(), Tick(0));
+        assert_eq!(combat.consumables.vitals().current_health(), 120);
     }
 }
