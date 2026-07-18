@@ -315,6 +315,16 @@ impl CoreB3FixedRoomSimulation {
         self.authority.phase()
     }
 
+    /// Transfers the one mutable player/projectile allocation only after committed B3 completion
+    /// and its one reward handoff. Active Knight state cannot escape into B4.
+    pub fn into_handoff(self) -> Result<NormalWaveHandoff, CoreFixedRoomEncounterError> {
+        if self.authority.phase() != FixedRoomPhase::Cleared || self.combat.is_some() {
+            return Err(CoreFixedRoomEncounterError::RoomHandoffUnavailable);
+        }
+        self.participant
+            .ok_or(CoreFixedRoomEncounterError::MissingParticipantHandoff)
+    }
+
     #[must_use]
     pub fn snapshot(&self) -> Option<EnemyHealthSnapshot> {
         self.combat
@@ -652,6 +662,59 @@ mod tests {
                 .count(),
             5
         );
+    }
+
+    #[test]
+    fn b3_handoff_requires_doors_open_and_preserves_participant_identity() {
+        let (content, plan, player, allocator) = fixture();
+        let player_entity_id = player.target.entity_id;
+        let initial_projectile_id = allocator.peek();
+        let mut room =
+            CoreB3FixedRoomSimulation::new(plan, &content, player, allocator).expect("B3 room");
+        room.set_damage_policy(HostileDamagePolicy::DebugInvulnerable);
+        assert!(matches!(
+            room.clone().into_handoff(),
+            Err(CoreFixedRoomEncounterError::RoomHandoffUnavailable)
+        ));
+
+        let mut actor_id = None;
+        for tick in 0..=1_050 {
+            let mut room_input = input(tick, 1);
+            if tick == 1_050 {
+                room_input.combat_step = Some(lethal(actor_id.expect("spawned Knight"), tick));
+            }
+            let step = room.step(Tick(tick), &room_input).expect("B3 clear trace");
+            actor_id = room
+                .snapshot()
+                .map(|snapshot| snapshot.actor_id)
+                .or(actor_id);
+            if tick == 1_050 {
+                assert!(step.reward_handoff.is_some());
+            }
+        }
+        assert_eq!(room.phase(), FixedRoomPhase::Quiet);
+        assert!(matches!(
+            room.clone().into_handoff(),
+            Err(CoreFixedRoomEncounterError::RoomHandoffUnavailable)
+        ));
+
+        for tick in 1_051..1_110 {
+            assert!(
+                room.step(Tick(tick), &input(tick, 1))
+                    .expect("B3 quiet period")
+                    .lifecycle_events
+                    .is_empty()
+            );
+        }
+        assert_eq!(
+            room.step(Tick(1_110), &input(1_110, 1))
+                .expect("B3 doors open")
+                .lifecycle_events,
+            [FixedRoomEvent::DoorsOpened]
+        );
+        let handoff = room.into_handoff().expect("completed B3 handoff");
+        assert_eq!(handoff.player.target.entity_id, player_entity_id);
+        assert!(handoff.hostile_projectile_ids.peek() >= initial_projectile_id);
     }
 
     #[test]

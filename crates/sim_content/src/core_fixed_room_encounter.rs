@@ -259,6 +259,16 @@ impl CoreImmutableFixedRoomSimulation {
         self.authority.activation_ordinal()
     }
 
+    /// Transfers the one mutable player/projectile allocation only after authoritative room
+    /// completion. Dormant, warning, active, and resetting rooms fail closed.
+    pub fn into_handoff(self) -> Result<NormalWaveHandoff, CoreFixedRoomEncounterError> {
+        if self.authority.phase() != FixedRoomPhase::Cleared || self.wave.is_some() {
+            return Err(CoreFixedRoomEncounterError::RoomHandoffUnavailable);
+        }
+        self.participant
+            .ok_or(CoreFixedRoomEncounterError::MissingParticipantHandoff)
+    }
+
     #[must_use]
     pub const fn wave(&self) -> Option<&NormalWaveSimulation> {
         self.wave.as_ref()
@@ -712,6 +722,16 @@ impl CoreB2FixedRoomSimulation {
     #[must_use]
     pub const fn activation_ordinal(&self) -> u32 {
         self.authority.activation_ordinal()
+    }
+
+    /// Transfers the one mutable player/projectile allocation only after authoritative B2
+    /// completion. Mixed combat cannot be bypassed or cloned into the next room.
+    pub fn into_handoff(self) -> Result<NormalWaveHandoff, CoreFixedRoomEncounterError> {
+        if self.authority.phase() != FixedRoomPhase::Cleared || self.combat.is_some() {
+            return Err(CoreFixedRoomEncounterError::RoomHandoffUnavailable);
+        }
+        self.participant
+            .ok_or(CoreFixedRoomEncounterError::MissingParticipantHandoff)
     }
 
     #[must_use]
@@ -1178,6 +1198,8 @@ pub enum CoreFixedRoomEncounterError {
     MissingCombatStep,
     #[error("fixed-room lifecycle has no participant handoff")]
     MissingParticipantHandoff,
+    #[error("fixed-room participant handoff is available only after committed completion")]
+    RoomHandoffUnavailable,
     #[error("fixed-room lifecycle requested completion without an owned wave")]
     MissingWave,
     #[error("fixed-room lifecycle requested B2 completion without its mixed combat owner")]
@@ -1508,8 +1530,14 @@ mod tests {
             .expect("plans")
             .remove(0);
         let (player, allocator) = player_fixture();
+        let player_entity_id = player.target.entity_id;
+        let initial_projectile_id = allocator.peek();
         let mut room =
             CoreImmutableFixedRoomSimulation::new(plan, player, allocator).expect("room");
+        assert!(matches!(
+            room.clone().into_handoff(),
+            Err(CoreFixedRoomEncounterError::RoomHandoffUnavailable)
+        ));
 
         let mut blocked = room_input(1, 10);
         blocked.crossed_activation_boundary = true;
@@ -1566,6 +1594,10 @@ mod tests {
         );
         assert_eq!(room.phase(), FixedRoomPhase::Quiet);
         assert!(room.wave().is_none());
+        assert!(matches!(
+            room.clone().into_handoff(),
+            Err(CoreFixedRoomEncounterError::RoomHandoffUnavailable)
+        ));
 
         for tick in 39..98 {
             assert!(
@@ -1582,6 +1614,9 @@ mod tests {
             [FixedRoomEvent::DoorsOpened]
         );
         assert_eq!(room.phase(), FixedRoomPhase::Cleared);
+        let handoff = room.into_handoff().expect("completed B1 handoff");
+        assert_eq!(handoff.player.target.entity_id, player_entity_id);
+        assert!(handoff.hostile_projectile_ids.peek() >= initial_projectile_id);
     }
 
     #[test]
@@ -1608,8 +1643,14 @@ mod tests {
             .expect("Acolyte")
             .entity_id;
         let (player, allocator) = player_fixture();
+        let player_entity_id = player.target.entity_id;
+        let initial_projectile_id = allocator.peek();
         let mut room =
             CoreB2FixedRoomSimulation::new(plan, &content, player, allocator).expect("B2 room");
+        assert!(matches!(
+            room.clone().into_handoff(),
+            Err(CoreFixedRoomEncounterError::RoomHandoffUnavailable)
+        ));
 
         let mut enter = room_input(1, 1);
         enter.crossed_activation_boundary = true;
@@ -1652,6 +1693,10 @@ mod tests {
                 .all(|actor| actor.locomotion.is_some())
         );
         assert_eq!(room.phase(), FixedRoomPhase::Active);
+        assert!(matches!(
+            room.clone().into_handoff(),
+            Err(CoreFixedRoomEncounterError::RoomHandoffUnavailable)
+        ));
 
         for tick in 30..59 {
             room.step(Tick(tick), &room_input(1, tick))
@@ -1680,6 +1725,10 @@ mod tests {
         assert_eq!(room.phase(), FixedRoomPhase::Quiet);
         assert!(room.immutable_snapshots().is_empty());
         assert!(room.authored_snapshots().is_empty());
+        assert!(matches!(
+            room.clone().into_handoff(),
+            Err(CoreFixedRoomEncounterError::RoomHandoffUnavailable)
+        ));
 
         for tick in 60..119 {
             assert!(
@@ -1696,6 +1745,9 @@ mod tests {
             [FixedRoomEvent::DoorsOpened]
         );
         assert_eq!(room.phase(), FixedRoomPhase::Cleared);
+        let handoff = room.into_handoff().expect("completed B2 handoff");
+        assert_eq!(handoff.player.target.entity_id, player_entity_id);
+        assert!(handoff.hostile_projectile_ids.peek() >= initial_projectile_id);
     }
 
     #[test]
