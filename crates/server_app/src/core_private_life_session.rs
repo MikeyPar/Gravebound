@@ -18,7 +18,7 @@ use crate::{
     AuthenticatedAccount, AuthenticatedNamespace, CoreBellPortalTransition,
     CoreExtractionActorDirectory, CoreExtractionAuthoritativeTick, CoreExtractionConnectionLease,
     CoreExtractionHallProjection, CoreExtractionRuntimeError, CoreExtractionRuntimeReport,
-    CoreExtractionTransportAttach, CoreExtractionTransportDetach,
+    CoreExtractionTransportAttach, CoreExtractionTransportDetach, CorePrivateFixedDungeonAdvance,
     CorePrivateFixedDungeonDriverReady, CorePrivateMicrorealmAbility,
     CorePrivateMicrorealmAbilityPress, CorePrivateMicrorealmDriver,
     CorePrivateMicrorealmDriverError, CorePrivateMicrorealmDriverHandle,
@@ -856,6 +856,31 @@ where
         })
     }
 
+    /// Requests the next server-selected fixed-dungeon transition through the current transport
+    /// generation. No destination or phase crosses this boundary: the session validates ownership,
+    /// and the existing danger task decides whether its canonical node is ready to advance.
+    pub async fn advance_fixed_dungeon(
+        &self,
+        lease: CorePrivateLifeTransportLease,
+    ) -> Result<CorePrivateFixedDungeonAdvance, CorePrivateLifeSessionError> {
+        let handle = {
+            let state = self.state.lock().await;
+            let entry = state
+                .sessions
+                .get(&lease.account_id)
+                .ok_or(CorePrivateLifeSessionError::SessionUnavailable)?;
+            if entry.active.as_ref().map(|active| active.lease) != Some(lease) {
+                return Err(CorePrivateLifeSessionError::StaleTransport);
+            }
+            entry
+                .microrealm
+                .as_ref()
+                .map(|bound| bound.driver.handle())
+                .ok_or(CorePrivateLifeSessionError::MicrorealmUnavailable)?
+        };
+        handle.advance_fixed_dungeon().await.map_err(Into::into)
+    }
+
     /// Validates compact input against the negotiated protocol, checks the current transport
     /// generation under the session lock, then submits without retaining that lock.
     pub async fn submit_microrealm_input(
@@ -1331,11 +1356,13 @@ mod tests {
 
     use protocol::{
         ActionResultCode, CorePrivateRouteContentRevisionV1, CorePrivateRoutePhaseV1,
-        CorePrivateRouteSceneV1, ManifestHash, RecallFrameV1, RecallIntentV1, RecallResultV1,
-        ReliableEvent, TERMINAL_INVENTORY_SCHEMA_VERSION, WorldFlowContentRevisionV1,
+        CorePrivateRouteRoomV1, CorePrivateRouteSceneV1, ManifestHash, RecallFrameV1,
+        RecallIntentV1, RecallResultV1, ReliableEvent, TERMINAL_INVENTORY_SCHEMA_VERSION,
+        WorldFlowContentRevisionV1,
     };
     use rcgen::generate_simple_self_signed;
     use rustls::pki_types::PrivatePkcs8KeyDer;
+    use sim_core::Tick;
 
     use super::*;
     use crate::{
@@ -1847,6 +1874,41 @@ mod tests {
             second_binding.observer.changed().await.unwrap(),
             CorePrivateMicrorealmDriverState::FixedDungeonReady { ready: published }
                 if published == ready
+        ));
+        assert!(matches!(
+            sessions.advance_fixed_dungeon(first.lease).await,
+            Err(CorePrivateLifeSessionError::StaleTransport)
+        ));
+        let entered = sessions
+            .advance_fixed_dungeon(second.lease)
+            .await
+            .expect("current transport advances to server-selected B1");
+        assert_eq!(
+            entered.transition.to,
+            sim_content::CoreFixedDungeonNode::BellCrossB1
+        );
+        assert!(matches!(
+            second_binding.observer.changed().await.unwrap(),
+            CorePrivateMicrorealmDriverState::FixedDungeonReady { ready: published }
+                if published.node == sim_content::CoreFixedDungeonNode::BellCrossB1
+        ));
+        let running = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            second_binding.observer.changed(),
+        )
+        .await
+        .expect("fixed-room driver deadline")
+        .expect("fixed-room observation");
+        assert!(matches!(
+            running,
+            CorePrivateMicrorealmDriverState::FixedDungeonRunning { ref frame, .. }
+                if frame.tick == Tick(33)
+                    && frame.route.room == Some(CorePrivateRouteRoomV1::BellCrossB1)
+        ));
+        assert!(matches!(
+            first_binding.observer.changed().await.unwrap(),
+            CorePrivateMicrorealmDriverState::FixedDungeonRunning { ref frame, .. }
+                if frame.tick == Tick(33)
         ));
         assert_eq!(sessions.snapshot().await.microrealm_bound_count, 1);
 

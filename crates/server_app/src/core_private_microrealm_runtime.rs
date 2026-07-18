@@ -561,6 +561,28 @@ pub enum CorePrivateMicrorealmRuntimeError {
 pub(crate) fn core_bell_ready_runtime_test_fixture(
     mut runtime: CorePrivateMicrorealmRuntime,
 ) -> CorePrivateMicrorealmRuntime {
+    let arena = runtime.combat.arena().expect("test fixture arena");
+    let collision_world =
+        ProjectileCollisionWorld::new(&arena, Vec::new()).expect("test fixture collision world");
+    for sequence in 1..=32 {
+        let (combat, _) = step_live_player_combat(
+            runtime.combat.player_mut(),
+            &mut runtime.movement,
+            &CorePrivateMicrorealmInput {
+                input_sequence: sequence,
+                movement: MovementAction::default(),
+                aim: AimDirection::east(),
+                primary_held: false,
+                primary_sequence: 0,
+                ability_1_sequence: 0,
+                ability_2_sequence: 0,
+            },
+            &arena,
+            &collision_world,
+        )
+        .expect("test fixture combat tick");
+        assert_eq!(combat.tick, Tick(sequence));
+    }
     let ordinary = CoreMicrorealmInput {
         entrant_position: runtime.player_position,
         primary_released: false,
@@ -599,7 +621,7 @@ pub(crate) fn core_bell_ready_runtime_test_fixture(
 
 #[cfg(test)]
 mod tests {
-    use protocol::{ManifestHash, WorldFlowContentRevisionV1};
+    use protocol::{CorePrivateRouteRoomV1, ManifestHash, WorldFlowContentRevisionV1};
 
     use super::*;
     use crate::{
@@ -951,6 +973,10 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one contiguous ownership trace proves cancellation, relocation, ticks, input, and shutdown"
+    )]
     async fn dropped_conversion_ack_still_converts_inside_the_exact_live_task() {
         let directory = CorePrivateRouteActorDirectory::new();
         let lease = directory
@@ -961,6 +987,15 @@ mod tests {
         let handle = driver.handle();
         let state_reader = handle.observe();
         tokio::task::yield_now().await;
+        handle
+            .submit_latest_input(crate::CorePrivateMicrorealmRetainedInput {
+                input_sequence: 41,
+                movement: MovementAction::new(1, 0),
+                aim: AimDirection::east(),
+                primary_held: true,
+                primary_sequence: 9,
+            })
+            .expect("Bell-held intent");
         let prepared = driver.prepare_handoff().await.expect("prepare handoff");
         let transition = commit_bell_transition(&directory, lease).await;
         let (_, encounters, _) = content();
@@ -1002,11 +1037,73 @@ mod tests {
             Err(crate::CorePrivateMicrorealmDriverError::HandoffNotReady)
         ));
         assert!(crate::active_core_microrealm_driver_tasks() >= 1);
-        let report = driver.shutdown().await.expect("joined shutdown");
+
+        let entered = handle
+            .advance_fixed_dungeon()
+            .await
+            .expect("server-selected B0 to B1 transition");
         assert_eq!(
-            report.outcome,
-            CorePrivateMicrorealmDriverOutcome::FixedDungeonReady
+            entered.transition.to,
+            sim_content::CoreFixedDungeonNode::BellCrossB1
         );
+        assert!(matches!(
+            state_reader.changed().await.expect("B1 boundary observation"),
+            crate::CorePrivateMicrorealmDriverState::FixedDungeonReady { ready: entered }
+                if entered.node == sim_content::CoreFixedDungeonNode::BellCrossB1
+        ));
+        let neutral = handle.latest_retained_input();
+        assert_eq!(neutral.input_sequence, 41);
+        assert_eq!(neutral.primary_sequence, 9);
+        assert_eq!(neutral.movement, MovementAction::default());
+        assert!(!neutral.primary_held);
+
+        tokio::time::advance(std::time::Duration::from_millis(34)).await;
+        let running = state_reader
+            .changed()
+            .await
+            .expect("first authoritative fixed-room frame");
+        assert!(
+            matches!(
+                &running,
+                crate::CorePrivateMicrorealmDriverState::FixedDungeonRunning {
+                    committed_frames: 1,
+                    frame,
+                } if frame.tick == Tick(33)
+                    && frame.input_sequence == 41
+                    && frame.route.room == Some(CorePrivateRouteRoomV1::BellCrossB1)
+            ),
+            "unexpected first fixed-room observation: {running:?}"
+        );
+        assert!(matches!(
+            handle.advance_fixed_dungeon().await,
+            Err(crate::CorePrivateMicrorealmDriverError::FixedDungeonAdvance(message))
+                if message.contains("cannot advance")
+        ));
+        handle
+            .submit_latest_input(crate::CorePrivateMicrorealmRetainedInput {
+                input_sequence: 42,
+                movement: MovementAction::default(),
+                aim: AimDirection::east(),
+                primary_held: false,
+                primary_sequence: 9,
+            })
+            .expect("early boundary interaction remains non-terminal");
+        tokio::time::advance(std::time::Duration::from_millis(34)).await;
+        let continued = state_reader
+            .changed()
+            .await
+            .expect("driver continues after early advance");
+        assert!(matches!(
+            continued,
+            crate::CorePrivateMicrorealmDriverState::FixedDungeonRunning {
+                committed_frames: 2,
+                ref frame,
+            } if frame.tick == Tick(34) && frame.input_sequence == 42
+        ));
+        let report = driver.shutdown().await.expect("joined shutdown");
+        assert_eq!(report.outcome, CorePrivateMicrorealmDriverOutcome::Shutdown);
+        assert_eq!(report.final_tick, Tick(34));
+        assert_eq!(report.committed_frames, 2);
         assert!(report.task_joined);
         assert!(!report.driver_task_live_after_join);
     }

@@ -27,8 +27,10 @@ use tokio::{
 };
 
 use crate::{
-    CoreBellPortalTransition, CorePrivateFixedDungeonRuntime, CorePrivateMicrorealmInput,
-    CorePrivateMicrorealmRuntime, CorePrivateMicrorealmRuntimeError, CorePrivateMicrorealmStep,
+    CoreBellPortalTransition, CorePrivateFixedDungeonAdvance, CorePrivateFixedDungeonLiveRoomFrame,
+    CorePrivateFixedDungeonRuntime, CorePrivateFixedDungeonRuntimeError,
+    CorePrivateMicrorealmInput, CorePrivateMicrorealmRuntime, CorePrivateMicrorealmRuntimeError,
+    CorePrivateMicrorealmStep,
 };
 
 const NANOS_PER_SECOND: u64 = 1_000_000_000;
@@ -140,6 +142,17 @@ impl SharedIngress {
         }
     }
 
+    /// Clears scene-local held intent at an authoritative room relocation while retaining aim and
+    /// every accepted sequence watermark. A Bell-held move or primary cannot bleed into B1, and
+    /// reconnect cannot replay an older action after the transition.
+    fn neutralize_for_scene_transition(&self) {
+        if let Ok(mut reducer) = self.reducer.lock() {
+            reducer.retained.continuous.movement = MovementAction::default();
+            reducer.retained.continuous.primary_held = false;
+            self.publish_locked(&reducer);
+        }
+    }
+
     fn publish_locked(&self, reducer: &IngressReducer) {
         self.retained_tx.send_replace(reducer.retained);
     }
@@ -151,6 +164,7 @@ pub struct CorePrivateMicrorealmDriverHandle {
     ingress: Arc<SharedIngress>,
     observation_rx: watch::Receiver<CorePrivateMicrorealmDriverState>,
     handoff_tx: mpsc::Sender<CorePrivateMicrorealmHandoffRequest>,
+    fixed_advance_tx: mpsc::Sender<CorePrivateFixedDungeonAdvanceRequest>,
 }
 
 impl CorePrivateMicrorealmDriverHandle {
@@ -177,6 +191,22 @@ impl CorePrivateMicrorealmDriverHandle {
             ready,
             decision_tx: Some(decision_tx),
         })
+    }
+
+    /// Requests the next canonical fixed-route transition without accepting any client-authored
+    /// destination. The existing task resolves B0/B1/... readiness and performs the route CAS.
+    pub async fn advance_fixed_dungeon(
+        &self,
+    ) -> Result<CorePrivateFixedDungeonAdvance, CorePrivateMicrorealmDriverError> {
+        let (result_tx, result_rx) = oneshot::channel();
+        self.fixed_advance_tx
+            .send(CorePrivateFixedDungeonAdvanceRequest { result_tx })
+            .await
+            .map_err(|_| CorePrivateMicrorealmDriverError::FixedDungeonControlClosed)?;
+        result_rx
+            .await
+            .map_err(|_| CorePrivateMicrorealmDriverError::FixedDungeonControlClosed)?
+            .map_err(CorePrivateMicrorealmDriverError::FixedDungeonAdvance)
     }
 
     /// Replaces the single retained compact input when its client sequence is newer.
@@ -355,6 +385,14 @@ pub enum CorePrivateMicrorealmDriverState {
     FixedDungeonReady {
         ready: CorePrivateFixedDungeonDriverReady,
     },
+    FixedDungeonRunning {
+        committed_frames: u64,
+        frame: Arc<CorePrivateFixedDungeonLiveRoomFrame>,
+    },
+    FixedDungeonTerminalPending {
+        committed_frames: u64,
+        lethal_frame: Arc<CorePrivateFixedDungeonLiveRoomFrame>,
+    },
     Faulted {
         committed_frames: u64,
         fault: CorePrivateMicrorealmDriverFault,
@@ -370,6 +408,8 @@ impl CorePrivateMicrorealmDriverState {
             Self::Starting
             | Self::BellResolutionPending { .. }
             | Self::FixedDungeonReady { .. }
+            | Self::FixedDungeonRunning { .. }
+            | Self::FixedDungeonTerminalPending { .. }
             | Self::Faulted { .. } => None,
         }
     }
@@ -382,6 +422,7 @@ pub enum CorePrivateMicrorealmDriverOutcome {
     BellResolutionPending,
     FixedDungeonReady,
     TerminalPending,
+    FixedDungeonTerminalPending,
     Faulted,
 }
 
@@ -392,9 +433,9 @@ pub struct CorePrivateMicrorealmHandoffReady {
     pub final_tick: Tick,
 }
 
-/// Stable observation emitted after the same exclusive task has consumed its microrealm and owns
-/// the route-bound B0-B6 runtime. The task deliberately remains frozen at B0 until fixed-room
-/// frame generation is installed; normal admission therefore remains disabled.
+/// Stable non-frame observation emitted after the same exclusive task has consumed its microrealm
+/// and owns the route-bound B0-B6 runtime. It identifies B0, B4, B6, and the atomic boundary before
+/// the first frame of a newly entered combat room. Normal admission remains independently gated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CorePrivateFixedDungeonDriverReady {
     pub committed_microrealm_frames: u64,
@@ -434,6 +475,11 @@ struct CorePrivateFixedDungeonConversionRequest {
     expected_content_revision: protocol::CorePrivateRouteContentRevisionV1,
     encounters: sim_content::CoreDevelopmentEncounterRooms,
     result_tx: oneshot::Sender<Result<CorePrivateFixedDungeonDriverReady, String>>,
+}
+
+#[derive(Debug)]
+struct CorePrivateFixedDungeonAdvanceRequest {
+    result_tx: oneshot::Sender<Result<CorePrivateFixedDungeonAdvance, String>>,
 }
 
 #[derive(Debug)]
@@ -612,6 +658,10 @@ pub enum CorePrivateMicrorealmDriverError {
     HandoffDecisionLost,
     #[error("Core fixed-dungeon conversion failed: {0}")]
     FixedDungeonConversion(String),
+    #[error("Core fixed-dungeon control is closed")]
+    FixedDungeonControlClosed,
+    #[error("Core fixed-dungeon advance failed: {0}")]
+    FixedDungeonAdvance(String),
 }
 
 trait MicrorealmFrameRuntime: Send + 'static {
@@ -670,6 +720,7 @@ where
         watch::channel(CorePrivateMicrorealmDriverState::Starting);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let (handoff_tx, handoff_rx) = mpsc::channel(1);
+    let (fixed_advance_tx, fixed_advance_rx) = mpsc::channel(1);
     ACTIVE_CORE_MICROREALM_DRIVER_TASKS.fetch_add(1, Ordering::AcqRel);
     let task_ingress = Arc::clone(&ingress);
     let join = tokio::spawn(async move {
@@ -683,6 +734,7 @@ where
             observation_tx,
             shutdown_rx,
             handoff_rx,
+            fixed_advance_rx,
         )
         .await
     });
@@ -691,6 +743,7 @@ where
             ingress,
             observation_rx,
             handoff_tx: handoff_tx.clone(),
+            fixed_advance_tx,
         },
         shutdown_tx,
         join: Some(join),
@@ -708,6 +761,10 @@ impl Drop for ActiveDriverTaskGuard {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "one select loop owns the full frame-boundary handoff and fail-closed shutdown order"
+)]
 async fn run_driver<R>(
     mut runtime: R,
     ingress: Arc<SharedIngress>,
@@ -715,6 +772,7 @@ async fn run_driver<R>(
     observation_tx: watch::Sender<CorePrivateMicrorealmDriverState>,
     mut shutdown_rx: watch::Receiver<bool>,
     mut handoff_rx: mpsc::Receiver<CorePrivateMicrorealmHandoffRequest>,
+    mut fixed_advance_rx: mpsc::Receiver<CorePrivateFixedDungeonAdvanceRequest>,
 ) -> CorePrivateMicrorealmDriverTaskExit
 where
     R: MicrorealmFrameRuntime,
@@ -746,6 +804,7 @@ where
                     committed_frames,
                     final_tick,
                     &mut shutdown_rx,
+                    &mut fixed_advance_rx,
                 ).await {
                     HandoffControlOutcome::Continue => continue,
                     HandoffControlOutcome::Convert(request) => {
@@ -759,15 +818,28 @@ where
                             skipped_deadlines,
                             &mut shutdown_rx,
                             &mut handoff_rx,
+                            &mut fixed_advance_rx,
                         ).await;
                     }
                     HandoffControlOutcome::Indeterminate => {
                         outcome = CorePrivateMicrorealmDriverOutcome::BellResolutionPending;
-                        wait_for_shutdown(&mut shutdown_rx, &mut handoff_rx).await;
+                        wait_for_shutdown(
+                            &mut shutdown_rx,
+                            &mut handoff_rx,
+                            &mut fixed_advance_rx,
+                            "fixed dungeon is unavailable while Bell resolution is indeterminate",
+                        ).await;
                         break;
                     }
                     HandoffControlOutcome::Shutdown => break,
                 }
+            }
+            request = fixed_advance_rx.recv() => {
+                let Some(request) = request else {
+                    break;
+                };
+                reject_fixed_advance(request, "fixed dungeon is not installed");
+                continue;
             }
             deadline = interval.tick() => deadline,
         };
@@ -791,7 +863,13 @@ where
                             lethal_step: step,
                         },
                     );
-                    wait_for_shutdown(&mut shutdown_rx, &mut handoff_rx).await;
+                    wait_for_shutdown(
+                        &mut shutdown_rx,
+                        &mut handoff_rx,
+                        &mut fixed_advance_rx,
+                        "fixed dungeon cannot advance after a terminal frame",
+                    )
+                    .await;
                     break;
                 }
                 observation_tx.send_replace(CorePrivateMicrorealmDriverState::Running {
@@ -806,7 +884,13 @@ where
                     committed_frames,
                     fault: runtime_fault(&error, final_tick),
                 });
-                wait_for_shutdown(&mut shutdown_rx, &mut handoff_rx).await;
+                wait_for_shutdown(
+                    &mut shutdown_rx,
+                    &mut handoff_rx,
+                    &mut fixed_advance_rx,
+                    "fixed dungeon cannot advance after a driver fault",
+                )
+                .await;
                 break;
             }
         }
@@ -839,6 +923,7 @@ async fn convert_runtime_and_wait<R>(
     skipped_deadlines: u64,
     shutdown_rx: &mut watch::Receiver<bool>,
     handoff_rx: &mut mpsc::Receiver<CorePrivateMicrorealmHandoffRequest>,
+    fixed_advance_rx: &mut mpsc::Receiver<CorePrivateFixedDungeonAdvanceRequest>,
 ) -> CorePrivateMicrorealmDriverTaskExit
 where
     R: MicrorealmFrameRuntime,
@@ -863,7 +948,7 @@ where
             )
             .map_err(|error| error.to_string())
         });
-    let (final_tick, outcome) = match converted {
+    match converted {
         Ok(fixed_dungeon) => {
             let final_tick = fixed_dungeon.tick();
             let ready = CorePrivateFixedDungeonDriverReady {
@@ -876,12 +961,19 @@ where
             observation_tx
                 .send_replace(CorePrivateMicrorealmDriverState::FixedDungeonReady { ready });
             let _ = result_tx.send(Ok(ready));
-            wait_for_shutdown(shutdown_rx, handoff_rx).await;
-            drop(fixed_dungeon);
-            (
+            run_fixed_dungeon(
+                fixed_dungeon,
+                ready,
+                ingress,
+                observation_tx,
+                committed_frames,
                 final_tick,
-                CorePrivateMicrorealmDriverOutcome::FixedDungeonReady,
+                skipped_deadlines,
+                shutdown_rx,
+                handoff_rx,
+                fixed_advance_rx,
             )
+            .await
         }
         Err(message) => {
             observation_tx.send_replace(CorePrivateMicrorealmDriverState::Faulted {
@@ -893,10 +985,167 @@ where
                 },
             });
             let _ = result_tx.send(Err(message));
-            wait_for_shutdown(shutdown_rx, handoff_rx).await;
-            (final_tick, CorePrivateMicrorealmDriverOutcome::Faulted)
+            wait_for_shutdown(
+                shutdown_rx,
+                handoff_rx,
+                fixed_advance_rx,
+                "fixed dungeon cannot advance after conversion failed",
+            )
+            .await;
+            driver_task_exit(
+                ingress,
+                committed_frames,
+                final_tick,
+                skipped_deadlines,
+                CorePrivateMicrorealmDriverOutcome::Faulted,
+            )
         }
-    };
+    }
+}
+
+enum FixedDungeonDriverEvent {
+    Shutdown,
+    Handoff(Option<CorePrivateMicrorealmHandoffRequest>),
+    Advance(Option<CorePrivateFixedDungeonAdvanceRequest>),
+    Frame(Instant),
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn run_fixed_dungeon(
+    mut runtime: CorePrivateFixedDungeonRuntime,
+    mut ready: CorePrivateFixedDungeonDriverReady,
+    ingress: &Arc<SharedIngress>,
+    observation_tx: &watch::Sender<CorePrivateMicrorealmDriverState>,
+    mut committed_frames: u64,
+    mut final_tick: Tick,
+    mut skipped_deadlines: u64,
+    shutdown_rx: &mut watch::Receiver<bool>,
+    handoff_rx: &mut mpsc::Receiver<CorePrivateMicrorealmHandoffRequest>,
+    fixed_advance_rx: &mut mpsc::Receiver<CorePrivateFixedDungeonAdvanceRequest>,
+) -> CorePrivateMicrorealmDriverTaskExit {
+    let mut retained_rx = ingress.retained_tx.subscribe();
+    let mut interval = fixed_driver_interval().await;
+    let mut outcome = CorePrivateMicrorealmDriverOutcome::FixedDungeonReady;
+
+    loop {
+        let event = tokio::select! {
+            biased;
+            changed = shutdown_rx.changed() => {
+                let _ = changed;
+                FixedDungeonDriverEvent::Shutdown
+            }
+            request = handoff_rx.recv() => FixedDungeonDriverEvent::Handoff(request),
+            request = fixed_advance_rx.recv() => FixedDungeonDriverEvent::Advance(request),
+            deadline = interval.tick(), if runtime.room_phase().is_some() => {
+                FixedDungeonDriverEvent::Frame(deadline)
+            }
+        };
+
+        match event {
+            FixedDungeonDriverEvent::Shutdown => break,
+            FixedDungeonDriverEvent::Handoff(Some(request)) => {
+                let _ = request.ready_tx.send(Err(()));
+            }
+            FixedDungeonDriverEvent::Handoff(None) | FixedDungeonDriverEvent::Advance(None) => {
+                break;
+            }
+            FixedDungeonDriverEvent::Advance(Some(request)) => match runtime.advance().await {
+                Ok(advance) => {
+                    ready.node = advance.transition.to;
+                    if runtime.room_phase().is_some() {
+                        ingress.neutralize_for_scene_transition();
+                        ingress.resume_accepting();
+                        interval.reset();
+                    } else {
+                        ingress.stop_accepting();
+                    }
+                    observation_tx.send_replace(
+                        CorePrivateMicrorealmDriverState::FixedDungeonReady { ready },
+                    );
+                    outcome = CorePrivateMicrorealmDriverOutcome::Shutdown;
+                    let _ = request.result_tx.send(Ok(advance));
+                }
+                Err(error) => {
+                    let message = error.to_string();
+                    let fatal = fixed_advance_error_is_fatal(&error);
+                    let _ = request.result_tx.send(Err(message));
+                    if fatal {
+                        outcome = CorePrivateMicrorealmDriverOutcome::Faulted;
+                        ingress.stop_accepting();
+                        observation_tx.send_replace(CorePrivateMicrorealmDriverState::Faulted {
+                            committed_frames,
+                            fault: fixed_runtime_fault(&error, final_tick),
+                        });
+                        wait_for_shutdown(
+                            shutdown_rx,
+                            handoff_rx,
+                            fixed_advance_rx,
+                            "fixed dungeon cannot advance after a route fault",
+                        )
+                        .await;
+                        break;
+                    }
+                }
+            },
+            FixedDungeonDriverEvent::Frame(deadline) => {
+                let lateness = Instant::now().saturating_duration_since(deadline);
+                let missed = lateness.as_nanos() / u128::from(DRIVER_TICK_NANOS);
+                skipped_deadlines =
+                    skipped_deadlines.saturating_add(u64::try_from(missed).unwrap_or(u64::MAX));
+                let retained = *retained_rx.borrow_and_update();
+                match runtime.step_live_room(retained.runtime_input()).await {
+                    Ok(frame) => {
+                        committed_frames = committed_frames.saturating_add(1);
+                        final_tick = frame.tick;
+                        let frame = Arc::new(frame);
+                        if frame.player_died {
+                            outcome =
+                                CorePrivateMicrorealmDriverOutcome::FixedDungeonTerminalPending;
+                            ingress.stop_accepting();
+                            observation_tx.send_replace(
+                                CorePrivateMicrorealmDriverState::FixedDungeonTerminalPending {
+                                    committed_frames,
+                                    lethal_frame: frame,
+                                },
+                            );
+                            wait_for_shutdown(
+                                shutdown_rx,
+                                handoff_rx,
+                                fixed_advance_rx,
+                                "fixed dungeon cannot advance after a terminal frame",
+                            )
+                            .await;
+                            break;
+                        }
+                        observation_tx.send_replace(
+                            CorePrivateMicrorealmDriverState::FixedDungeonRunning {
+                                committed_frames,
+                                frame,
+                            },
+                        );
+                    }
+                    Err(error) => {
+                        outcome = CorePrivateMicrorealmDriverOutcome::Faulted;
+                        ingress.stop_accepting();
+                        observation_tx.send_replace(CorePrivateMicrorealmDriverState::Faulted {
+                            committed_frames,
+                            fault: fixed_runtime_fault(&error, final_tick),
+                        });
+                        wait_for_shutdown(
+                            shutdown_rx,
+                            handoff_rx,
+                            fixed_advance_rx,
+                            "fixed dungeon cannot advance after a driver fault",
+                        )
+                        .await;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    ingress.stop_accepting();
     driver_task_exit(
         ingress,
         committed_frames,
@@ -945,6 +1194,10 @@ enum HandoffControlOutcome {
     Shutdown,
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the frame-boundary pause borrows each independent owner without creating a second context owner"
+)]
 async fn handle_handoff_request(
     handoff_ready: bool,
     ingress: &Arc<SharedIngress>,
@@ -953,6 +1206,7 @@ async fn handle_handoff_request(
     committed_frames: u64,
     final_tick: Tick,
     shutdown_rx: &mut watch::Receiver<bool>,
+    fixed_advance_rx: &mut mpsc::Receiver<CorePrivateFixedDungeonAdvanceRequest>,
 ) -> HandoffControlOutcome {
     if !handoff_ready {
         let _ = request.ready_tx.send(Err(()));
@@ -972,7 +1226,7 @@ async fn handle_handoff_request(
             committed_frames,
             final_tick,
         });
-    match await_handoff_decision(request.decision_rx, shutdown_rx).await {
+    match await_handoff_decision(request.decision_rx, shutdown_rx, fixed_advance_rx).await {
         HandoffWaitOutcome::Abort(resumed_tx) => {
             ingress.resume_accepting();
             observation_tx.send_replace(previous_state);
@@ -995,21 +1249,34 @@ enum HandoffWaitOutcome {
 async fn await_handoff_decision(
     decision_rx: oneshot::Receiver<CorePrivateMicrorealmHandoffDecision>,
     shutdown_rx: &mut watch::Receiver<bool>,
+    fixed_advance_rx: &mut mpsc::Receiver<CorePrivateFixedDungeonAdvanceRequest>,
 ) -> HandoffWaitOutcome {
-    tokio::select! {
-        biased;
-        changed = shutdown_rx.changed() => {
-            let _ = changed;
-            HandoffWaitOutcome::Shutdown
-        }
-        decision = decision_rx => match decision {
-            Ok(CorePrivateMicrorealmHandoffDecision::Abort(resumed_tx)) => {
-                HandoffWaitOutcome::Abort(resumed_tx)
+    let mut decision_rx = decision_rx;
+    loop {
+        tokio::select! {
+            biased;
+            changed = shutdown_rx.changed() => {
+                let _ = changed;
+                return HandoffWaitOutcome::Shutdown;
             }
-            Ok(CorePrivateMicrorealmHandoffDecision::Convert(request)) => {
-                HandoffWaitOutcome::Convert(request)
+            decision = &mut decision_rx => return match decision {
+                Ok(CorePrivateMicrorealmHandoffDecision::Abort(resumed_tx)) => {
+                    HandoffWaitOutcome::Abort(resumed_tx)
+                }
+                Ok(CorePrivateMicrorealmHandoffDecision::Convert(request)) => {
+                    HandoffWaitOutcome::Convert(request)
+                }
+                Err(_) => HandoffWaitOutcome::DecisionDropped,
+            },
+            request = fixed_advance_rx.recv() => {
+                let Some(request) = request else {
+                    return HandoffWaitOutcome::Shutdown;
+                };
+                reject_fixed_advance(
+                    request,
+                    "fixed dungeon is unavailable while Bell resolution is pending",
+                );
             }
-            Err(_) => HandoffWaitOutcome::DecisionDropped,
         }
     }
 }
@@ -1017,6 +1284,8 @@ async fn await_handoff_decision(
 async fn wait_for_shutdown(
     shutdown_rx: &mut watch::Receiver<bool>,
     handoff_rx: &mut mpsc::Receiver<CorePrivateMicrorealmHandoffRequest>,
+    fixed_advance_rx: &mut mpsc::Receiver<CorePrivateFixedDungeonAdvanceRequest>,
+    fixed_advance_error: &'static str,
 ) {
     while !*shutdown_rx.borrow() {
         tokio::select! {
@@ -1031,8 +1300,18 @@ async fn wait_for_shutdown(
                 };
                 let _ = request.ready_tx.send(Err(()));
             }
+            request = fixed_advance_rx.recv() => {
+                let Some(request) = request else {
+                    break;
+                };
+                reject_fixed_advance(request, fixed_advance_error);
+            }
         }
     }
+}
+
+fn reject_fixed_advance(request: CorePrivateFixedDungeonAdvanceRequest, message: &'static str) {
+    let _ = request.result_tx.send(Err(message.to_owned()));
 }
 
 fn runtime_fault(
@@ -1045,6 +1324,37 @@ fn runtime_fault(
             CorePrivateMicrorealmFaultKind::RouteAuthority
         }
         CorePrivateMicrorealmRuntimeError::TickExhausted => {
+            CorePrivateMicrorealmFaultKind::TickExhausted
+        }
+        _ => CorePrivateMicrorealmFaultKind::Simulation,
+    };
+    CorePrivateMicrorealmDriverFault {
+        kind,
+        message: Arc::from(error.to_string()),
+        last_committed_tick,
+    }
+}
+
+fn fixed_advance_error_is_fatal(error: &CorePrivateFixedDungeonRuntimeError) -> bool {
+    !matches!(
+        error,
+        CorePrivateFixedDungeonRuntimeError::Dungeon(
+            sim_content::CoreFixedDungeonError::AdvanceUnavailable { .. }
+                | sim_content::CoreFixedDungeonError::RestResolutionRequired,
+        )
+    )
+}
+
+fn fixed_runtime_fault(
+    error: &CorePrivateFixedDungeonRuntimeError,
+    last_committed_tick: Tick,
+) -> CorePrivateMicrorealmDriverFault {
+    let kind = match error {
+        CorePrivateFixedDungeonRuntimeError::RouteAuthorityMismatch
+        | CorePrivateFixedDungeonRuntimeError::Route(_) => {
+            CorePrivateMicrorealmFaultKind::RouteAuthority
+        }
+        CorePrivateFixedDungeonRuntimeError::TickExhausted => {
             CorePrivateMicrorealmFaultKind::TickExhausted
         }
         _ => CorePrivateMicrorealmFaultKind::Simulation,
@@ -1172,6 +1482,22 @@ mod tests {
     async fn advance_one_frame(observer: &mut CorePrivateMicrorealmDriverObserver) {
         tokio::time::advance(DRIVER_TICK_DURATION).await;
         let _ = observer.changed().await.expect("driver observation");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fixed_advance_is_rejected_without_blocking_before_bell_conversion() {
+        let received = Arc::new(StdMutex::new(Vec::new()));
+        let driver = spawn_driver(ScriptedRuntime::ordinary(received));
+        tokio::task::yield_now().await;
+
+        assert!(matches!(
+            driver.handle().advance_fixed_dungeon().await,
+            Err(CorePrivateMicrorealmDriverError::FixedDungeonAdvance(message))
+                if message == "fixed dungeon is not installed"
+        ));
+        let report = driver.shutdown().await.expect("joined shutdown");
+        assert_eq!(report.committed_frames, 0);
+        assert!(report.task_joined);
     }
 
     #[tokio::test(start_paused = true)]
@@ -1380,6 +1706,11 @@ mod tests {
         tokio::time::advance(DRIVER_TICK_DURATION * 5).await;
         tokio::task::yield_now().await;
         assert_eq!(received.lock().expect("received").len(), 1);
+        assert!(matches!(
+            handle.advance_fixed_dungeon().await,
+            Err(CorePrivateMicrorealmDriverError::FixedDungeonAdvance(message))
+                if message == "fixed dungeon is unavailable while Bell resolution is pending"
+        ));
 
         prepared.abort().await.expect("abort handoff");
         handle
