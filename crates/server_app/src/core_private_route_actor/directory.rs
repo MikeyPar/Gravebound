@@ -38,6 +38,29 @@ pub struct CorePrivateRouteActorLease {
     actor_generation: u64,
 }
 
+/// Durable Hall-to-microrealm transition material presented only after the world-flow write has
+/// committed. The actor lease supplies account, character, and generation authority; this value
+/// binds the exact receipt outcome that the in-memory actor must converge on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CorePrivateRouteEnterMicrorealmTransition {
+    pub transfer_id: [u8; 16],
+    pub source_character_version: u64,
+    pub destination_character_version: u64,
+    pub instance_lineage_id: [u8; 16],
+    pub content_revision: WorldFlowContentRevisionV1,
+}
+
+/// Durable Hall-to-Character-Select transition material. Character Select has no route actor, so
+/// successful reconciliation retires the exact Hall generation and retains an in-process replay
+/// tombstone for that generation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CorePrivateRouteReturnToCharacterSelectTransition {
+    pub transfer_id: [u8; 16],
+    pub source_character_version: u64,
+    pub destination_character_version: u64,
+    pub content_revision: WorldFlowContentRevisionV1,
+}
+
 impl CorePrivateRouteActorLease {
     #[must_use]
     pub const fn account_id(self) -> [u8; 16] {
@@ -249,6 +272,7 @@ pub struct CorePrivateRouteRuntimeReport {
     pub remaining_registered_actors: usize,
     pub remaining_portal_reservations: usize,
     pub remaining_terminal_reservations: usize,
+    pub remaining_transition_reconciliations: usize,
     pub zero_residue: bool,
 }
 
@@ -256,6 +280,7 @@ struct CorePrivateRouteActorControl {
     actor: CorePrivateRouteActor,
     bell_reservation: Option<CoreBellPortalPermit>,
     terminal_reservation: Option<CorePrivateRouteExtractionPermit>,
+    enter_microrealm_reconciliation: Option<CorePrivateRouteEnterMicrorealmTransition>,
     retired: bool,
 }
 
@@ -285,6 +310,10 @@ enum CorePrivateRouteActorCommand {
     ReconcileBellPortal {
         transition: CoreBellPortalTransition,
         reply: oneshot::Sender<Result<(), CoreBellPortalRejection>>,
+    },
+    ReconcileEnterMicrorealm {
+        transition: CorePrivateRouteEnterMicrorealmTransition,
+        reply: oneshot::Sender<CorePrivateRouteActorReply>,
     },
     PrepareExtractionTerminal {
         binding: CorePrivateRouteExtractionBinding,
@@ -369,6 +398,20 @@ impl CorePrivateRouteActorHandle {
             .map_err(|_| CoreBellPortalRejection::InstanceUnavailable)?
     }
 
+    async fn reconcile_enter_microrealm(
+        &self,
+        transition: CorePrivateRouteEnterMicrorealmTransition,
+    ) -> CorePrivateRouteActorReply {
+        let (reply, receive) = oneshot::channel();
+        self.commands
+            .send(CorePrivateRouteActorCommand::ReconcileEnterMicrorealm { transition, reply })
+            .await
+            .map_err(|_| CorePrivateRouteRuntimeError::ActorUnavailable)?;
+        receive
+            .await
+            .map_err(|_| CorePrivateRouteRuntimeError::ActorUnavailable)?
+    }
+
     async fn prepare_extraction_terminal(
         &self,
         binding: CorePrivateRouteExtractionBinding,
@@ -418,6 +461,10 @@ struct CorePrivateRouteDirectoryState {
     actors: BTreeMap<CorePrivateRouteActorKey, CorePrivateRouteActorEntry>,
     active_account: BTreeMap<[u8; 16], CorePrivateRouteActorKey>,
     generation_floors: BTreeMap<CorePrivateRouteActorKey, u64>,
+    character_select_reconciliations: BTreeMap<
+        (CorePrivateRouteActorKey, u64),
+        CorePrivateRouteReturnToCharacterSelectTransition,
+    >,
     retired_tasks: Vec<JoinHandle<CorePrivateRouteActorTaskReport>>,
     served_actor_commands: u64,
     abandoned_actor_commands: u64,
@@ -460,6 +507,7 @@ impl CorePrivateRouteActorDirectory {
                     actors: BTreeMap::new(),
                     active_account: BTreeMap::new(),
                     generation_floors: BTreeMap::new(),
+                    character_select_reconciliations: BTreeMap::new(),
                     retired_tasks: Vec::new(),
                     served_actor_commands: 0,
                     abandoned_actor_commands: 0,
@@ -508,6 +556,7 @@ impl CorePrivateRouteActorDirectory {
             actor,
             bell_reservation: None,
             terminal_reservation: None,
+            enter_microrealm_reconciliation: None,
             retired: false,
         }));
         let (commands, inbox) = mpsc::channel(CORE_PRIVATE_ROUTE_ACTOR_MAILBOX_CAPACITY);
@@ -537,6 +586,109 @@ impl CorePrivateRouteActorDirectory {
         advance: CorePrivateRouteActorAdvance,
     ) -> CorePrivateRouteActorReply {
         self.actor_handle(lease)?.advance(advance).await
+    }
+
+    /// Converges one retained Hall actor on an already committed microrealm entry. Exact replay
+    /// is a no-op even after the microrealm phase has advanced; changed lineage, content,
+    /// generation, or character-version authority fails closed.
+    pub(crate) async fn reconcile_enter_microrealm(
+        &self,
+        lease: CorePrivateRouteActorLease,
+        transition: CorePrivateRouteEnterMicrorealmTransition,
+    ) -> CorePrivateRouteActorReply {
+        validate_enter_microrealm_transition(&transition)?;
+        self.actor_handle(lease)?
+            .reconcile_enter_microrealm(transition)
+            .await
+    }
+
+    /// Retires the exact Hall actor after a committed return to Character Select. The transition
+    /// is recorded before the actor task is joined, so an exact response-loss replay cannot retire
+    /// a later generation. Changed replay material remains a typed conflict.
+    pub(crate) async fn reconcile_return_to_character_select(
+        &self,
+        lease: CorePrivateRouteActorLease,
+        transition: CorePrivateRouteReturnToCharacterSelectTransition,
+    ) -> Result<(), CorePrivateRouteRuntimeError> {
+        validate_return_to_character_select_transition(&transition)?;
+        let reconciliation_key = (lease.key, lease.actor_generation);
+        let mut entry = {
+            let mut state = lock(&self.inner.state);
+            if !state.accepting {
+                return Err(CorePrivateRouteRuntimeError::Retired);
+            }
+            if let Some(stored) = state
+                .character_select_reconciliations
+                .get(&reconciliation_key)
+            {
+                return if stored == &transition {
+                    Ok(())
+                } else {
+                    Err(CorePrivateRouteRuntimeError::StaleRouteState)
+                };
+            }
+            let control = state
+                .actors
+                .get(&lease.key)
+                .ok_or(CorePrivateRouteRuntimeError::ActorUnavailable)?
+                .control
+                .clone();
+            {
+                let mut control = lock(&control);
+                let projection = control.actor.projection();
+                if projection.actor_generation != lease.actor_generation {
+                    return Err(CorePrivateRouteRuntimeError::StaleGeneration);
+                }
+                if control.actor.world_flow_revision() != &transition.content_revision {
+                    return Err(CorePrivateRouteRuntimeError::ContentAuthorityMismatch);
+                }
+                if control.bell_reservation.is_some() {
+                    return Err(CorePrivateRouteRuntimeError::TransferInProgress);
+                }
+                if control.terminal_reservation.is_some() {
+                    return Err(CorePrivateRouteRuntimeError::TerminalInProgress);
+                }
+                if projection.character_version != transition.source_character_version
+                    || projection.scene != CorePrivateRouteSceneV1::LanternHalls
+                    || projection.room.is_some()
+                    || projection.instance_lineage_id.is_some()
+                    || projection.phase != CorePrivateRoutePhaseV1::Hall
+                {
+                    return Err(CorePrivateRouteRuntimeError::StaleRouteState);
+                }
+                control.retired = true;
+                control.enter_microrealm_reconciliation = None;
+            }
+            let entry = state
+                .actors
+                .remove(&lease.key)
+                .ok_or(CorePrivateRouteRuntimeError::ActorUnavailable)?;
+            state.active_account.remove(&lease.key.account_id);
+            state
+                .generation_floors
+                .entry(lease.key)
+                .and_modify(|floor| *floor = (*floor).max(lease.actor_generation))
+                .or_insert(lease.actor_generation);
+            state
+                .character_select_reconciliations
+                .insert(reconciliation_key, transition);
+            entry
+        };
+        if let Some(shutdown) = entry.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        let report = entry
+            .task
+            .take()
+            .ok_or(CorePrivateRouteRuntimeError::ActorUnavailable)?
+            .await
+            .map_err(CorePrivateRouteRuntimeError::ActorTaskFailed)?;
+        let mut state = lock(&self.inner.state);
+        state.served_actor_commands = state.served_actor_commands.saturating_add(report.served);
+        state.abandoned_actor_commands = state
+            .abandoned_actor_commands
+            .saturating_add(report.abandoned);
+        Ok(())
     }
 
     pub async fn set_bell_portal_in_range(
@@ -611,6 +763,7 @@ impl CorePrivateRouteActorDirectory {
                 }
                 control.retired = true;
                 control.terminal_reservation = None;
+                control.enter_microrealm_reconciliation = None;
             }
             let entry = state
                 .actors
@@ -650,12 +803,14 @@ impl CorePrivateRouteActorDirectory {
         state.shutdown_started = true;
         let actors = std::mem::take(&mut state.actors);
         state.active_account.clear();
+        state.character_select_reconciliations.clear();
         for (key, mut entry) in actors {
             let generation = {
                 let mut control = lock(&entry.control);
                 control.retired = true;
                 control.bell_reservation = None;
                 control.terminal_reservation = None;
+                control.enter_microrealm_reconciliation = None;
                 control.actor.projection().actor_generation
             };
             state
@@ -711,9 +866,11 @@ impl CorePrivateRouteActorDirectory {
             remaining_registered_actors: state.actors.len(),
             remaining_portal_reservations,
             remaining_terminal_reservations,
+            remaining_transition_reconciliations: state.character_select_reconciliations.len(),
             zero_residue: state.retired_tasks.is_empty()
                 && state.actors.is_empty()
                 && state.active_account.is_empty()
+                && state.character_select_reconciliations.is_empty()
                 && remaining_portal_reservations == 0
                 && remaining_terminal_reservations == 0,
         };
@@ -917,6 +1074,9 @@ async fn serve_actor_mailbox(
             CorePrivateRouteActorCommand::ReconcileBellPortal { transition, reply } => {
                 let _ = reply.send(handle_reconcile_bell_portal(&control, &transition));
             }
+            CorePrivateRouteActorCommand::ReconcileEnterMicrorealm { transition, reply } => {
+                let _ = reply.send(handle_reconcile_enter_microrealm(&control, &transition));
+            }
             CorePrivateRouteActorCommand::PrepareExtractionTerminal { binding, reply } => {
                 // A lost transport response must not reopen control. Exact replay reconstructs the
                 // same permit from the actor-owned reservation.
@@ -932,7 +1092,8 @@ async fn serve_actor_mailbox(
         abandoned = abandoned.saturating_add(1);
         match command {
             CorePrivateRouteActorCommand::Advance { reply, .. }
-            | CorePrivateRouteActorCommand::SetBellPortalRange { reply, .. } => {
+            | CorePrivateRouteActorCommand::SetBellPortalRange { reply, .. }
+            | CorePrivateRouteActorCommand::ReconcileEnterMicrorealm { reply, .. } => {
                 let _ = reply.send(Err(CorePrivateRouteRuntimeError::Retired));
             }
             CorePrivateRouteActorCommand::PrepareBellPortal { reply, .. } => {
@@ -1095,6 +1256,65 @@ fn handle_reconcile_bell_portal(
         .reconcile_bell_portal(transition.destination_character_version)
         .map_err(|_| CoreBellPortalRejection::ServiceUnavailable)?;
     Ok(())
+}
+
+fn handle_reconcile_enter_microrealm(
+    control: &Mutex<CorePrivateRouteActorControl>,
+    transition: &CorePrivateRouteEnterMicrorealmTransition,
+) -> CorePrivateRouteActorReply {
+    let mut control = lock(control);
+    if control.retired {
+        return Err(CorePrivateRouteRuntimeError::Retired);
+    }
+    if control.actor.world_flow_revision() != &transition.content_revision {
+        return Err(CorePrivateRouteRuntimeError::ContentAuthorityMismatch);
+    }
+    let projection = control.actor.projection();
+    if projection.character_version == transition.destination_character_version
+        && projection.scene == CorePrivateRouteSceneV1::CoreMicrorealm
+        && projection.room.is_none()
+        && projection.instance_lineage_id == Some(transition.instance_lineage_id)
+        && matches!(
+            projection.phase,
+            CorePrivateRoutePhaseV1::MicrorealmDormant
+                | CorePrivateRoutePhaseV1::MicrorealmWaiting
+                | CorePrivateRoutePhaseV1::MicrorealmActive
+                | CorePrivateRoutePhaseV1::MicrorealmCleared
+        )
+    {
+        if let Some(stored) = &control.enter_microrealm_reconciliation
+            && stored != transition
+        {
+            return Err(CorePrivateRouteRuntimeError::StaleRouteState);
+        }
+        let projection = projection.clone();
+        control.enter_microrealm_reconciliation = Some(transition.clone());
+        return Ok(projection);
+    }
+    if control.bell_reservation.is_some() {
+        return Err(CorePrivateRouteRuntimeError::TransferInProgress);
+    }
+    if control.terminal_reservation.is_some() {
+        return Err(CorePrivateRouteRuntimeError::TerminalInProgress);
+    }
+    if projection.character_version != transition.source_character_version
+        || projection.scene != CorePrivateRouteSceneV1::LanternHalls
+        || projection.room.is_some()
+        || projection.instance_lineage_id.is_some()
+        || projection.phase != CorePrivateRoutePhaseV1::Hall
+    {
+        return Err(CorePrivateRouteRuntimeError::StaleRouteState);
+    }
+    let projection = control
+        .actor
+        .advance(CorePrivateRouteActorAdvance::EnterMicrorealm {
+            instance_lineage_id: transition.instance_lineage_id,
+            destination_character_version: transition.destination_character_version,
+        })
+        .cloned()
+        .map_err(CorePrivateRouteRuntimeError::from)?;
+    control.enter_microrealm_reconciliation = Some(transition.clone());
+    Ok(projection)
 }
 
 fn handle_prepare_extraction_terminal(
@@ -1379,6 +1599,35 @@ fn valid_transition(
             == Some(transition.destination_character_version)
 }
 
+fn validate_enter_microrealm_transition(
+    transition: &CorePrivateRouteEnterMicrorealmTransition,
+) -> Result<(), CorePrivateRouteRuntimeError> {
+    if transition.transfer_id == [0; 16]
+        || transition.instance_lineage_id == [0; 16]
+        || transition.source_character_version == 0
+        || transition.source_character_version.checked_add(1)
+            != Some(transition.destination_character_version)
+        || zero_world_flow_revision(&transition.content_revision)
+    {
+        return Err(CorePrivateRouteRuntimeError::InvalidActorBinding);
+    }
+    Ok(())
+}
+
+fn validate_return_to_character_select_transition(
+    transition: &CorePrivateRouteReturnToCharacterSelectTransition,
+) -> Result<(), CorePrivateRouteRuntimeError> {
+    if transition.transfer_id == [0; 16]
+        || transition.source_character_version == 0
+        || transition.source_character_version.checked_add(1)
+            != Some(transition.destination_character_version)
+        || zero_world_flow_revision(&transition.content_revision)
+    {
+        return Err(CorePrivateRouteRuntimeError::InvalidActorBinding);
+    }
+    Ok(())
+}
+
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
@@ -1401,9 +1650,9 @@ pub enum CorePrivateRouteRuntimeError {
     StaleGeneration,
     #[error("private-route extraction binding is invalid")]
     InvalidExtractionBinding,
-    #[error("private-route extraction content authority does not match the actor")]
+    #[error("private-route content authority does not match the actor")]
     ContentAuthorityMismatch,
-    #[error("private-route extraction state authority is stale")]
+    #[error("private-route state authority is stale")]
     StaleRouteState,
     #[error("private-route extraction is not ready")]
     ExtractionNotReady,

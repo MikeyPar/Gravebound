@@ -5,7 +5,7 @@
 //! production mutation rules: durable safe arrival, one safe-to-danger restore capture, and the
 //! same-lineage microrealm-to-fixed-dungeon transition authorized only by a live actor.
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use persistence::{
     PersistenceError, PostgresPersistence, StoredDangerEntryRootV3, StoredSafeArrival,
@@ -22,11 +22,11 @@ use serde::{Deserialize, Serialize};
 use crate::{
     AshWalletRestoreV3, AuthenticatedAccount, AuthenticatedNamespace, CoreBellPortalAbortReason,
     CoreBellPortalAuthority, CoreBellPortalBinding, CoreBellPortalPermitLease,
-    CoreBellPortalRejection, CoreBellPortalTransition, DisabledCoreBellPortalAuthority,
-    EntryCaptureContext, EntryRestoreProvider, IdentityClock, InventorySecurityRestoreV3,
-    LifeMetricsRestoreV3, OathBargainRestoreV3, PostgresProgressionRestoreProvider,
-    RestorePointError, RestorePointProvidersV3, SafeInventoryServiceError,
-    WorldFlowRepositoryError,
+    CoreBellPortalRejection, CoreBellPortalTransition, CorePrivateLifeRuntimeBootstrapAdapter,
+    DisabledCoreBellPortalAuthority, EntryCaptureContext, EntryRestoreProvider, IdentityClock,
+    InventorySecurityRestoreV3, LifeMetricsRestoreV3, OathBargainRestoreV3,
+    PostgresProgressionRestoreProvider, RestorePointError, RestorePointProvidersV3,
+    SafeInventoryServiceError, WorldFlowRepositoryError,
     safe_inventory::plan_danger_entry_safe_deposit,
     world_flow_gate::{CoreWorldFlowAuthority, stored_location_snapshot},
 };
@@ -430,6 +430,7 @@ pub struct PostgresCorePrivateWorldFlowCoordinator<
     persistence: PostgresPersistence,
     planner: CorePrivateWorldFlowPlanner<Generator, Clock>,
     bell_portal: BellPortal,
+    route_transitions: Option<Arc<CorePrivateLifeRuntimeBootstrapAdapter<PostgresPersistence>>>,
     restore_providers: RestorePointProvidersV3<
         PostgresProgressionRestoreProvider,
         Inventory,
@@ -553,8 +554,42 @@ where
             persistence,
             planner: CorePrivateWorldFlowPlanner::new(generator, clock, required_content_revision),
             bell_portal,
+            route_transitions: None,
             restore_providers,
         }
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the production composition keeps every restore provider and runtime authority explicit"
+    )]
+    pub(crate) fn with_runtime_authorities(
+        persistence: PostgresPersistence,
+        generator: Generator,
+        clock: Clock,
+        required_content_revision: WorldFlowContentRevisionV1,
+        progression: PostgresProgressionRestoreProvider,
+        inventory: Inventory,
+        oath_bargains: OathBargains,
+        life_metrics: LifeMetrics,
+        ash_wallet: AshWallet,
+        bell_portal: BellPortal,
+        route_transitions: Arc<CorePrivateLifeRuntimeBootstrapAdapter<PostgresPersistence>>,
+    ) -> Self {
+        let mut coordinator = Self::with_bell_portal_authority(
+            persistence,
+            generator,
+            clock,
+            required_content_revision,
+            progression,
+            inventory,
+            oath_bargains,
+            life_metrics,
+            ash_wallet,
+            bell_portal,
+        );
+        coordinator.route_transitions = Some(route_transitions);
+        coordinator
     }
 
     #[allow(
@@ -598,11 +633,14 @@ where
             .await;
         let mut write = match begin {
             Ok(WorldFlowBegin::Replayed(receipt)) => {
-                return DormantWorldFlowPlanner::<Generator, Clock>::replay(
+                let result = DormantWorldFlowPlanner::<Generator, Clock>::replay(
                     frame.sequence,
                     mutation,
                     &receipt,
                 );
+                return self
+                    .reconcile_non_bell_transition(authenticated, frame.sequence, mutation, result)
+                    .await;
             }
             Ok(WorldFlowBegin::Fresh(write)) => *write,
             Err(PersistenceError::WorldFlowCharacterNotFound) => {
@@ -727,7 +765,10 @@ where
             return staged_result(frame.sequence, mutation, code, None, None);
         }
         match write.commit(result).await {
-            Ok(WorldFlowTransaction::Committed(result)) => result,
+            Ok(WorldFlowTransaction::Committed(result)) => {
+                self.reconcile_non_bell_transition(authenticated, frame.sequence, mutation, result)
+                    .await
+            }
             Ok(WorldFlowTransaction::Replayed(_)) => unreachable!("fresh write cannot replay"),
             Err(_) => staged_result(
                 frame.sequence,
@@ -737,6 +778,32 @@ where
                 None,
             ),
         }
+    }
+
+    async fn reconcile_non_bell_transition(
+        &self,
+        authenticated: AuthenticatedAccount,
+        request_sequence: u32,
+        mutation: &WorldTransferMutation,
+        result: WorldFlowResult,
+    ) -> WorldFlowResult {
+        let Some(route_transitions) = &self.route_transitions else {
+            return result;
+        };
+        if route_transitions
+            .reconcile_committed_world_transition(authenticated, mutation, &result)
+            .await
+            .is_err()
+        {
+            return staged_result(
+                request_sequence,
+                mutation,
+                WorldTransferResultCode::ServiceUnavailable,
+                None,
+                None,
+            );
+        }
+        result
     }
 
     /// Bell admission is a two-phase cross-authority operation. The first serializable read

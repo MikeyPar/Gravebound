@@ -24,18 +24,18 @@ use thiserror::Error;
 
 use crate::{
     Blake3CharacterIds, Blake3WorldFlowIds, CoreBargainAuthority, CoreOathSelectionAuthority,
-    CorePrivateRouteActorDirectory, CorePrivateRouteRuntimeError, CorePrivateRouteRuntimeReport,
-    CorePrivateWorldFlowRouter, CoreResolutionHoldAuthority, CoreSafeInventoryAuthority,
-    CoreSuccessorAuthority, DeathViewService, IdentityClock, IdentityService,
-    NoopIdentityEventSink, PostgresAccountRepository, PostgresBargainService,
-    PostgresDangerEntryAshWalletProviderV3, PostgresDangerEntryInventoryProviderV3,
-    PostgresDangerEntryLifeMetricsProviderV3, PostgresDangerEntryOathBargainProviderV3,
-    PostgresDeathViewRepository, PostgresDurableDeathExecutionService,
-    PostgresOathSelectionService, PostgresProductionExtractionExecutionService,
-    PostgresProductionRecallExecutionService, PostgresProgressionQueryRepository,
-    PostgresProgressionRestoreProvider, PostgresSafeInventoryService,
-    PostgresWorldFlowLocationRepository, ProgressionQueryService, ResolutionHoldService,
-    SuccessorService, WorldFlowGateService,
+    CorePrivateLifeRuntimeBootstrapAdapter, CorePrivateRouteActorDirectory,
+    CorePrivateRouteRuntimeError, CorePrivateRouteRuntimeReport, CorePrivateWorldFlowRouter,
+    CoreResolutionHoldAuthority, CoreSafeInventoryAuthority, CoreSuccessorAuthority,
+    DeathViewService, IdentityClock, IdentityService, NoopIdentityEventSink,
+    PostgresAccountRepository, PostgresBargainService, PostgresDangerEntryAshWalletProviderV3,
+    PostgresDangerEntryInventoryProviderV3, PostgresDangerEntryLifeMetricsProviderV3,
+    PostgresDangerEntryOathBargainProviderV3, PostgresDeathViewRepository,
+    PostgresDurableDeathExecutionService, PostgresOathSelectionService,
+    PostgresProductionExtractionExecutionService, PostgresProductionRecallExecutionService,
+    PostgresProgressionQueryRepository, PostgresProgressionRestoreProvider,
+    PostgresSafeInventoryService, PostgresWorldFlowLocationRepository, ProgressionQueryService,
+    ResolutionHoldService, SuccessorService, WorldFlowGateService,
     world_flow_coordinator::PostgresCorePrivateWorldFlowCoordinator,
 };
 
@@ -76,6 +76,8 @@ type PersistentWorldFlow = CorePrivateWorldFlowRouter<
     PersistentWorldFlowCoordinator,
 >;
 
+type PersistentRuntimeBootstrap = CorePrivateLifeRuntimeBootstrapAdapter<PostgresPersistence>;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct DormantNormalAdmission {
     world_flow: bool,
@@ -110,6 +112,7 @@ pub(crate) struct CorePrivateLifePersistentFoundation {
     successor: Arc<CoreSuccessorAuthority>,
     extraction_execution: Arc<PostgresProductionExtractionExecutionService>,
     recall_execution: Arc<PostgresProductionRecallExecutionService>,
+    runtime_bootstrap: Arc<PersistentRuntimeBootstrap>,
     route_directory: CorePrivateRouteActorDirectory,
     admission: DormantNormalAdmission,
 }
@@ -144,10 +147,17 @@ impl CorePrivateLifePersistentFoundation {
             .map_err(content_error("Oath/Bargain"))?;
         let death_view_revision = load_death_view_revision(content_root)?;
         let world_flow_revision = world_flow_revision(content.world_flow())?;
+        let route_revision = route_revision(content.revision())?;
 
         let route_directory = CorePrivateRouteActorDirectory::new();
+        let runtime_bootstrap = Arc::new(CorePrivateLifeRuntimeBootstrapAdapter::new(
+            persistence.clone(),
+            route_directory.clone(),
+            route_revision,
+            world_flow_revision.clone(),
+        )?);
         let world_flow_coordinator =
-            PostgresCorePrivateWorldFlowCoordinator::with_bell_portal_authority(
+            PostgresCorePrivateWorldFlowCoordinator::with_runtime_authorities(
                 persistence.clone(),
                 Blake3WorldFlowIds,
                 SystemIdentityClock,
@@ -159,6 +169,7 @@ impl CorePrivateLifePersistentFoundation {
                 PostgresDangerEntryLifeMetricsProviderV3,
                 PostgresDangerEntryAshWalletProviderV3,
                 route_directory.clone(),
+                Arc::clone(&runtime_bootstrap),
             );
         let world_flow = CorePrivateWorldFlowRouter::new(
             WorldFlowGateService::new(
@@ -215,6 +226,7 @@ impl CorePrivateLifePersistentFoundation {
                 persistence.clone(),
             )),
             recall_execution: Arc::new(PostgresProductionRecallExecutionService::new(persistence)),
+            runtime_bootstrap,
             route_directory,
             admission: DormantNormalAdmission::DISABLED,
         };
@@ -227,6 +239,7 @@ impl CorePrivateLifePersistentFoundation {
     }
 
     pub(crate) fn begin_shutdown(&self) {
+        self.runtime_bootstrap.begin_shutdown();
         self.route_directory.begin_shutdown();
     }
 
@@ -265,7 +278,9 @@ impl CorePrivateLifePersistentFoundation {
             Arc::strong_count(&self.extraction_execution),
             Arc::strong_count(&self.recall_execution),
         ];
-        if owner_counts.into_iter().any(|count| count != 1) {
+        if owner_counts.into_iter().any(|count| count != 1)
+            || Arc::strong_count(&self.runtime_bootstrap) != 2
+        {
             return Err(CorePrivateLifeFoundationError::InvalidComposition);
         }
         Ok(())
@@ -280,6 +295,8 @@ pub(crate) enum CorePrivateLifeFoundationError {
     InvalidComposition,
     #[error("private-life foundation route runtime failed: {0}")]
     RouteRuntime(#[source] CorePrivateRouteRuntimeError),
+    #[error("private-life runtime bootstrap failed: {0}")]
+    RuntimeBootstrap(#[from] crate::CorePrivateLifeBootstrapError),
     #[error(transparent)]
     Bounded(#[from] protocol::BoundedValueError),
 }
@@ -315,6 +332,16 @@ fn world_flow_revision(
         records_blake3: ManifestHash::new(hashes.records_blake3.clone())?,
         assets_blake3: ManifestHash::new(hashes.assets_blake3.clone())?,
         localization_blake3: ManifestHash::new(hashes.localization_blake3.clone())?,
+    })
+}
+
+fn route_revision(
+    content: &sim_content::CorePrivateLifeContentRevision,
+) -> Result<protocol::CorePrivateRouteContentRevisionV1, CorePrivateLifeFoundationError> {
+    Ok(protocol::CorePrivateRouteContentRevisionV1 {
+        records_blake3: ManifestHash::new(content.records_blake3.clone())?,
+        assets_blake3: ManifestHash::new(content.assets_blake3.clone())?,
+        localization_blake3: ManifestHash::new(content.localization_blake3.clone())?,
     })
 }
 

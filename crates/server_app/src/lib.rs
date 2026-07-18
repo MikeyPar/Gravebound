@@ -15,6 +15,7 @@ mod core_extraction_runtime;
 mod core_journey_world_flow;
 mod core_lifecycle;
 mod core_private_life_foundation;
+mod core_private_life_runtime_bootstrap;
 mod core_private_life_session;
 mod core_private_route_actor;
 mod core_private_world_flow;
@@ -91,6 +92,11 @@ pub use core_lifecycle::{
     CoreCheckpointBinding, CoreCheckpointServiceError, CoreDangerCheckpointRepository,
     CoreDangerCheckpointService, CoreLifeKey, CoreLiveBindingId, CoreLiveCharacter,
     CoreLiveDirectory, CoreLiveError, CoreResumeOutcome, DANGER_CHECKPOINT_INTERVAL_TICKS,
+};
+pub use core_private_life_runtime_bootstrap::{
+    CorePrivateLifeBootstrapDisposition, CorePrivateLifeBootstrapError,
+    CorePrivateLifeBootstrapOutcome, CorePrivateLifeBootstrapRepository,
+    CorePrivateLifeReattachOutcome, CorePrivateLifeRuntimeBootstrapAdapter,
 };
 pub use core_private_life_session::{
     CorePrivateLifeSessionDirectory, CorePrivateLifeSessionError, CorePrivateLifeSessionReport,

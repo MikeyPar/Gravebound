@@ -5,8 +5,9 @@ use protocol::{
 
 use super::{
     CorePrivateRouteActorAdvance, CorePrivateRouteActorDirectory, CorePrivateRouteActorPosition,
-    CorePrivateRouteActorSeed, CorePrivateRouteExtractionBinding,
-    CorePrivateRouteExtractionExitBinding, CorePrivateRouteRuntimeError,
+    CorePrivateRouteActorSeed, CorePrivateRouteEnterMicrorealmTransition,
+    CorePrivateRouteExtractionBinding, CorePrivateRouteExtractionExitBinding,
+    CorePrivateRouteReturnToCharacterSelectTransition, CorePrivateRouteRuntimeError,
 };
 use crate::{
     AccountId, AuthenticatedAccount, AuthenticatedNamespace, CoreBellPortalAuthority,
@@ -285,6 +286,136 @@ async fn actor_trace_is_exactly_hall_microrealm_b0_through_b6_terminal() {
             .expect("shutdown")
             .zero_residue
     );
+}
+
+#[tokio::test]
+async fn committed_microrealm_entry_reconciles_once_and_exact_replay_never_rewinds() {
+    let directory = CorePrivateRouteActorDirectory::new();
+    let lease = directory
+        .register_actor(authenticated(), hall_seed(CHARACTER_ID, 4), 70)
+        .expect("Hall actor registers");
+    let transition = CorePrivateRouteEnterMicrorealmTransition {
+        transfer_id: [70; 16],
+        source_character_version: 4,
+        destination_character_version: 5,
+        instance_lineage_id: LINEAGE_ID,
+        content_revision: world_revision(),
+    };
+
+    let entered = directory
+        .reconcile_enter_microrealm(lease, transition.clone())
+        .await
+        .expect("committed entry converges the retained Hall actor");
+    assert_eq!(entered.character_version, 5);
+    assert_eq!(entered.instance_lineage_id, Some(LINEAGE_ID));
+    assert_eq!(entered.scene, CorePrivateRouteSceneV1::CoreMicrorealm);
+    assert_eq!(entered.phase, CorePrivateRoutePhaseV1::MicrorealmDormant);
+
+    directory
+        .advance(lease, CorePrivateRouteActorAdvance::MicrorealmWaiting)
+        .await
+        .expect("runtime may advance after durable entry");
+    let replayed = directory
+        .reconcile_enter_microrealm(lease, transition.clone())
+        .await
+        .expect("exact receipt replay is a no-op after later phase progress");
+    assert_eq!(replayed.phase, CorePrivateRoutePhaseV1::MicrorealmWaiting);
+    assert_eq!(replayed.state_version, entered.state_version + 1);
+
+    let mut changed_transfer = transition.clone();
+    changed_transfer.transfer_id = [72; 16];
+    assert!(matches!(
+        directory
+            .reconcile_enter_microrealm(lease, changed_transfer)
+            .await,
+        Err(CorePrivateRouteRuntimeError::StaleRouteState)
+    ));
+
+    let mut changed_lineage = transition.clone();
+    changed_lineage.instance_lineage_id = [71; 16];
+    assert!(matches!(
+        directory
+            .reconcile_enter_microrealm(lease, changed_lineage)
+            .await,
+        Err(CorePrivateRouteRuntimeError::StaleRouteState)
+    ));
+    let mut changed_content = transition.clone();
+    changed_content.content_revision.records_blake3 = hash('9');
+    assert!(matches!(
+        directory
+            .reconcile_enter_microrealm(lease, changed_content)
+            .await,
+        Err(CorePrivateRouteRuntimeError::ContentAuthorityMismatch)
+    ));
+    let mut skipped_version = transition;
+    skipped_version.destination_character_version = 6;
+    assert!(matches!(
+        directory
+            .reconcile_enter_microrealm(lease, skipped_version)
+            .await,
+        Err(CorePrivateRouteRuntimeError::InvalidActorBinding)
+    ));
+
+    directory.begin_shutdown();
+    let report = directory.finish_shutdown().await.expect("shutdown");
+    assert!(report.zero_residue);
+    assert_eq!(report.remaining_transition_reconciliations, 0);
+}
+
+#[tokio::test]
+async fn committed_character_select_return_retires_only_its_exact_hall_generation() {
+    let directory = CorePrivateRouteActorDirectory::new();
+    let lease = directory
+        .register_actor(authenticated(), hall_seed(CHARACTER_ID, 8), 80)
+        .expect("Hall actor registers");
+    let transition = CorePrivateRouteReturnToCharacterSelectTransition {
+        transfer_id: [80; 16],
+        source_character_version: 8,
+        destination_character_version: 9,
+        content_revision: world_revision(),
+    };
+
+    directory
+        .reconcile_return_to_character_select(lease, transition.clone())
+        .await
+        .expect("committed return retires its Hall actor");
+    assert!(matches!(
+        directory.snapshot(lease),
+        Err(CorePrivateRouteRuntimeError::ActorUnavailable)
+    ));
+    directory
+        .reconcile_return_to_character_select(lease, transition.clone())
+        .await
+        .expect("exact response-loss replay uses the retirement tombstone");
+
+    let mut changed_replay = transition.clone();
+    changed_replay.transfer_id = [81; 16];
+    assert!(matches!(
+        directory
+            .reconcile_return_to_character_select(lease, changed_replay)
+            .await,
+        Err(CorePrivateRouteRuntimeError::StaleRouteState)
+    ));
+
+    let replacement = directory
+        .register_actor(authenticated(), hall_seed(CHARACTER_ID, 9), 81)
+        .expect("a persistently newer Hall generation registers");
+    directory
+        .reconcile_return_to_character_select(lease, transition)
+        .await
+        .expect("old exact replay cannot retire the replacement");
+    assert_eq!(
+        directory
+            .snapshot(replacement)
+            .expect("replacement remains live")
+            .actor_generation,
+        81
+    );
+
+    directory.begin_shutdown();
+    let report = directory.finish_shutdown().await.expect("shutdown");
+    assert!(report.zero_residue);
+    assert_eq!(report.remaining_transition_reconciliations, 0);
 }
 
 #[tokio::test]

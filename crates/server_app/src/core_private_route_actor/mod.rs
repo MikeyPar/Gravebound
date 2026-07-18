@@ -19,6 +19,9 @@ pub use directory::{
     CorePrivateRouteExtractionExitBinding, CorePrivateRouteExtractionPermit,
     CorePrivateRouteRuntimeError, CorePrivateRouteRuntimeReport,
 };
+pub(crate) use directory::{
+    CorePrivateRouteEnterMicrorealmTransition, CorePrivateRouteReturnToCharacterSelectTransition,
+};
 pub use state::{
     CorePrivateRouteActor, CorePrivateRouteActorAdvance, CorePrivateRouteActorError,
     CorePrivateRouteActorPosition, CorePrivateRouteActorSeed,
