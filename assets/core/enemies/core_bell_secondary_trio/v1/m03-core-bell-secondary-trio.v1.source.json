@@ -1,0 +1,147 @@
+{
+  "schema_version": 1,
+  "pack_id": "review.m03.core_bell_secondary_trio.v1",
+  "generated_date": "2026-07-18",
+  "status": {
+    "classification": "unregistered_runtime_candidate",
+    "runtime_registered": false,
+    "content_hash_input": false,
+    "runtime_bundle": null,
+    "integration_note": "This isolated art package does not modify Core asset records, content hashes, renderer behavior, collision, attack origins, telegraphs, route gates, or normal-route authority."
+  },
+  "selection_rationale": "Core requires six normal enemies at M03. Existing candidate art covers Drowned Pilgrim, Bell Reed, and Chain Sentry; this pack covers the remaining Mire Leech, Bell Acolyte, and Choir Skull records so the complete six-enemy roster can enter native readability review.",
+  "design_authority": [
+    "Gravebound_Production_GDD_v1_Canonical.md:ENC-001, ENC-002, ART-001, ART-002, ART-004, ART-005, ART-020, ART-030",
+    "Gravebound_Content_Production_Spec_v1.md:CONT-002, CONT-ENEMY-001, CONT-ENEMY-002, CONT-VALID-001",
+    "Gravebound_Development_Roadmap_v1.md:GB-M03 cumulative content and asset burn-up"
+  ],
+  "generation": {
+    "method": "OpenAI built-in image generation",
+    "use_case": "stylized-concept",
+    "input_images": [
+      {
+        "path": "assets/core/enemies/core_bell_encounter_trio/v1/previews/core-bell-encounter-trio.96px.png",
+        "role": "existing project palette, pixel-cluster, framing, and scale reference only; not an edit target"
+      }
+    ],
+    "prompt": "Create one exact three-column sprite atlas containing, from left to right, Mire Leech, Bell Acolyte, and Choir Skull. Each cell contains exactly one isolated normal-enemy idle seed. Match the reference's polished 2D dark-fantasy pixel art, shape-first silhouettes, restrained detail, top-down three-quarter framing, hard-edged pixel clusters, muted wet-stone/tarnished-brass/ash/bone/moss palette, identical apparent scale, generous padding, and bottom-center alignment. Mire Leech is a low nonhumanoid charcoal segmented swamp rusher with a bone-toothed lamprey mouth. Bell Acolyte is a slim upright ranged parish acolyte with a bone mask, ash-gray vestments, low handbell, and hooked censer staff, clearly distinct from Drowned Pilgrim. Choir Skull is an oversized floating skull in a sparse black iron choir halo with two brass chimes, no body, flame, or smoke. Use a perfectly flat solid #ff00ff chroma-key background. No shadows, scenery, attack poses, projectiles, telegraphs, loot beams, exits, safe-zone rings, labels, dividers, text, UI, borders, logos, watermarks, or subject overlap.",
+    "generated_source": "source/core-bell-secondary-trio.raw-chroma.png",
+    "generated_dimensions": [2172, 724],
+    "generated_mode": "RGB"
+  },
+  "postprocess": {
+    "chroma_key_sample": "#fb03f9",
+    "chroma_helper": "C:/Users/micha/.codex/skills/.system/imagegen/scripts/remove_chroma_key.py",
+    "chroma_arguments": [
+      "--auto-key",
+      "border",
+      "--soft-matte",
+      "--transparent-threshold",
+      "12",
+      "--opaque-threshold",
+      "220",
+      "--despill"
+    ],
+    "normalization": "Split the source into equal thirds, trim each nonempty alpha bound with 12 source-pixel padding, nearest-neighbor fit into a 44-pixel content box, horizontally center, and bottom-align on a transparent 48x48 canvas.",
+    "anchor_pixels": [24, 48],
+    "runtime_format": "PNG RGBA",
+    "animation_fps": 0,
+    "collision_authority": "None. Authoritative collision, hurtbox, attack, telegraph, locomotion, and state-machine data remain in Core content and simulation records."
+  },
+  "assets": [
+    {
+      "asset_id": "sprite.enemy.mire_leech",
+      "asset_type": "normal_enemy_idle_seed",
+      "source_path": "source/mire-leech.alpha.png",
+      "runtime_path": "runtime/mire-leech.48.png",
+      "runtime_sha256": "81005cd8e9f92adca35b5e8e826868636b31737856b746933a24d1d1cc067595",
+      "dimensions": [48, 48],
+      "alpha_bbox": [3, 14, 45, 47],
+      "anchor_pixels": [24, 48],
+      "content_dependencies": [
+        "enemy.mire_leech",
+        "pattern.enemy.mire_leech.charge"
+      ],
+      "readability_tags": [
+        "enemy",
+        "fodder",
+        "low_nonhumanoid",
+        "segmented_wet_body",
+        "lamprey_mouth",
+        "no_combat_vfx"
+      ]
+    },
+    {
+      "asset_id": "sprite.enemy.bell_acolyte",
+      "asset_type": "normal_enemy_idle_seed",
+      "source_path": "source/bell-acolyte.alpha.png",
+      "runtime_path": "runtime/bell-acolyte.48.png",
+      "runtime_sha256": "8fc37bcf496d1b86979e5431369dfa0bb1e131370d3d480b9e1e62cb02cfb1a0",
+      "dimensions": [48, 48],
+      "alpha_bbox": [8, 5, 39, 47],
+      "anchor_pixels": [24, 48],
+      "content_dependencies": [
+        "enemy.bell_acolyte",
+        "pattern.enemy.bell_acolyte.alternating_fan"
+      ],
+      "readability_tags": [
+        "enemy",
+        "pressure",
+        "slim_humanoid",
+        "bone_mask",
+        "handbell",
+        "censer_staff",
+        "no_combat_vfx"
+      ]
+    },
+    {
+      "asset_id": "sprite.enemy.choir_skull",
+      "asset_type": "normal_enemy_idle_seed",
+      "source_path": "source/choir-skull.alpha.png",
+      "runtime_path": "runtime/choir-skull.48.png",
+      "runtime_sha256": "a9d45f297ccd85612854702884db2056720c15c83cbdd5f1cf43682aecfbfbfe",
+      "dimensions": [48, 48],
+      "alpha_bbox": [7, 5, 41, 47],
+      "anchor_pixels": [24, 48],
+      "content_dependencies": [
+        "enemy.choir_skull",
+        "pattern.enemy.choir_skull.rotor"
+      ],
+      "readability_tags": [
+        "enemy",
+        "disruptor",
+        "floating_skull",
+        "iron_choir_halo",
+        "brass_chimes",
+        "no_combat_vfx"
+      ]
+    }
+  ],
+  "source_sha256": {
+    "raw_chroma": "31b3c58b43271d9b32a6b4061dd1afdb61d019383573859ac1b5091a24632155",
+    "alpha_atlas": "643748f428bbd0d7d7418c783eca8844169475d7731a6be92fbf2c6c497366cd",
+    "mire_leech_alpha": "44d5ad06f0d1d50ddfe300aaf01e7d714cccb12f6111002b760ccbf7703be9ef",
+    "bell_acolyte_alpha": "6b93b5fc57319b9bd9b39d611ba8c8b35692c52cbdf16ac8816c1b68e6c34abc",
+    "choir_skull_alpha": "46225d5e54c116ec0ff61608680229d6adefc1469e6c888efad55a00cf8b9d2c"
+  },
+  "previews": [
+    {
+      "path": "previews/core-bell-secondary-trio.48px.png",
+      "sha256": "add41bcab1338a15e8498c58a8d114ef66bfe560d6198e36915f593c69d0187e"
+    },
+    {
+      "path": "previews/core-bell-secondary-trio.96px.png",
+      "sha256": "9f52bf5606f579e2319817102d3d919e26932e542316943eca7257ca956c9580"
+    },
+    {
+      "path": "previews/core-bell-secondary-trio.96px.grayscale.png",
+      "sha256": "3ccef39acdfa786f15ea33faccad8aacf916526356f3c5ebd3cbd91126dfeb1a"
+    }
+  ],
+  "validation": {
+    "automated": "All three runtime candidates are RGBA 48x48, have transparent corners, nonempty alpha coverage, and bottom-center anchors. Runtime alpha bounds remain distinct and fully inside the canvas.",
+    "visual": "Inspected at 48px, nearest-neighbor 96px, and grayscale. The low horizontal leech, tall narrow acolyte, and circular floating skull remain distinguishable without color. No projectile, telegraph, loot, exit, safe-zone, or scenery cue is baked into the sprites.",
+    "remaining_gate": "Before registry or content-hash changes, review the candidates in an optimized native Core room against the actual player sprite, wet-stone background, enemy telegraphs, hostile projectiles, and 1280x720/1920x1080 standard and reduced-effects captures. Confirm scale, anchor, grayscale hierarchy, collision implication, attack-origin implication, and Bell Acolyte separation from Drowned Pilgrim."
+  },
+  "license_provenance": "Project-generated original material using OpenAI built-in image generation. Existing project imagery was used only as an in-project visual style reference. Commercial-rights and registry review remain required before shipping."
+}
