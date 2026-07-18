@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "pack_id": "review.m03.core_bell_encounter_trio.v1",
+  "generated_date": "2026-07-18",
+  "status": {
+    "classification": "unregistered_runtime_candidate",
+    "runtime_registered": false,
+    "content_hash_input": false,
+    "runtime_bundle": null,
+    "integration_note": "This isolated art package does not modify existing Core asset records, content hashes, renderer behavior, collision, telegraphs, route gates, or normal-route authority."
+  },
+  "scope": {
+    "route": "Core micro-realm -> Bell Sepulcher B1/B5",
+    "selection_rationale": "The trio covers M03's first recurring Fodder/Pressure composition (six Drowned Pilgrims plus two Bell Reeds in pack.bell.01 and B1) and B5's repeated Anchor threat (Chain Sentry plus Pilgrims).",
+    "asset_ids": [
+      "sprite.enemy.drowned_pilgrim",
+      "sprite.enemy.bell_reed",
+      "sprite.enemy.chain_sentry"
+    ]
+  },
+  "design_authority": [
+    "Gravebound_Production_GDD_v1_Canonical.md:ENC-001, ENC-002, ART-001, ART-002, ART-004, ART-005, ART-020, ART-030",
+    "Gravebound_Content_Production_Spec_v1.md:CONT-ROOM-007, CONT-ENEMY-001, CONT-ENEMY-002, CONT-PATTERN-001",
+    "Gravebound_Development_Roadmap_v1.md:GB-M03 private character-life route and M03 cumulative asset target"
+  ],
+  "generation": {
+    "method": "OpenAI built-in image generation",
+    "input_images": [
+      {
+        "path": "assets/core/death/core_death_portraits.runtime.png",
+        "role": "existing Core material/palette/style reference; not an edit target"
+      }
+    ],
+    "common_prompt": "Create one isolated dark-fantasy 2D pixel-art normal-enemy idle reference frame on a perfectly flat #00ff00 chroma-key background. Use a top-down three-quarter game-sprite view, disciplined high-contrast pixel clusters, generous padding, no scenery, shadow, labels, UI, watermarks, attack pose, projectile, hostile telegraph, loot beam, exit ring, or safe-zone ring. The result must read at a 48 px normal-enemy footprint.",
+    "asset_prompts": {
+      "sprite.enemy.drowned_pilgrim": "A narrow hunched drowned pilgrim: rain-heavy charcoal hood, wet ash-brown robes, small tarnished-brass chest bell, lowered thin bone-and-wood wand, and a dark drowned void instead of a skull. It must be visibly human Fodder and distinct from armor or a shrine.",
+      "sprite.enemy.bell_reed": "A compact stationary hostile cluster: black dried marsh reeds around a cracked tarnished-brass bell and a small iron root cage. The bell faces slightly south; it reads as a Pressure enemy, not a doorway, safe lantern, shrine, loot, or playable object.",
+      "sprite.enemy.chain_sentry": "A broad squat faceless iron-and-charcoal sentry torso bound in thick black chains, with a short base, small vertical locked visor slit, and battered brass lock plate. It reads as an immovable Anchor enemy, never a door, chest, shrine, landmark, or player character."
+    }
+  },
+  "postprocess": {
+    "chroma_key": "auto-sampled border (#10f80a / #12ed0f / #16ec10 from generated sources)",
+    "chroma_helper": "C:/Users/micha/.codex/skills/.system/imagegen/scripts/remove_chroma_key.py",
+    "chroma_arguments": ["--auto-key", "border", "--soft-matte", "--transparent-threshold", "12", "--opaque-threshold", "220", "--despill"],
+    "normalization": "Trim alpha bounds, nearest-neighbor scale to fit a 44 px content box, center horizontally, and align the content bottom to y=48 on a transparent 48x48 canvas.",
+    "anchor_pixels": [24, 48],
+    "runtime_format": "PNG RGBA",
+    "animation_fps": 0,
+    "collision_authority": "None. Authoritative collision/hurtbox radii, telegraph timing, attack geometry, and enemy state remain in Core content/simulation records."
+  },
+  "assets": [
+    {
+      "asset_id": "sprite.enemy.drowned_pilgrim",
+      "asset_type": "normal_enemy_idle_seed",
+      "source_paths": ["source/drowned-pilgrim.raw-chroma.png", "source/drowned-pilgrim.alpha.png"],
+      "source_sha256": {"raw_chroma": "2de8fb00cc434c35fd5f2b29b87eaada41cd1b28b45720ae0c095c5623a80dc7", "alpha": "2ff984a4a8bd43fb13932684a8cc80cd245c4ba9e5d1c69828e14e3261a24050"},
+      "runtime_path": "runtime/drowned-pilgrim.48.png",
+      "runtime_sha256": "921edd2bf9c977d8f1761dd2976d1683723d0c96ca3a2f0c9c2180461b37f16b",
+      "dimensions": [48, 48],
+      "anchor_pixels": [24, 48],
+      "content_dependencies": ["enemy.drowned_pilgrim", "pattern.enemy.drowned_pilgrim.fan"],
+      "readability_tags": ["enemy", "fodder", "narrow_human", "wet_robe", "brass_bell", "no_combat_vfx"]
+    },
+    {
+      "asset_id": "sprite.enemy.bell_reed",
+      "asset_type": "normal_enemy_idle_seed",
+      "source_paths": ["source/bell-reed.raw-chroma.png", "source/bell-reed.alpha.png"],
+      "source_sha256": {"raw_chroma": "c1a73d73730e6a92e5c5f349112cf74c5a362e8001f4582aee2535c50cd4de61", "alpha": "2488de7eba8dec84c7f2e742fbd6fb3cc584ae4c62fe3e91ff383ac43184d95c"},
+      "runtime_path": "runtime/bell-reed.48.png",
+      "runtime_sha256": "82110c794b8aa9b093f214c39d424db84daa8c647ab4df64393f24473ffcab50",
+      "dimensions": [48, 48],
+      "anchor_pixels": [24, 48],
+      "content_dependencies": ["enemy.bell_reed", "pattern.enemy.bell_reed.gap_ring"],
+      "readability_tags": ["enemy", "pressure", "stationary", "reed_cluster", "brass_bell", "no_combat_vfx"]
+    },
+    {
+      "asset_id": "sprite.enemy.chain_sentry",
+      "asset_type": "normal_enemy_idle_seed",
+      "source_paths": ["source/chain-sentry.raw-chroma.png", "source/chain-sentry.alpha.png"],
+      "source_sha256": {"raw_chroma": "dda0f4394e037a52fed50eb77a410ac1bfe195254152092e00cbdbe8beb2035b", "alpha": "5078957ae1ce83db6c69d51b4d2dd31d7c4affda44aa7247a37659a089a26f9f"},
+      "runtime_path": "runtime/chain-sentry.48.png",
+      "runtime_sha256": "2d136687045ced6a3b62ff19fd1e86141a97cf96a3a4d586894b2c401b1e422f",
+      "dimensions": [48, 48],
+      "anchor_pixels": [24, 48],
+      "content_dependencies": ["enemy.chain_sentry", "pattern.enemy.chain_sentry.cross_lanes"],
+      "readability_tags": ["enemy", "anchor", "broad_armor", "chains", "brass_lock", "no_combat_vfx"]
+    }
+  ],
+  "previews": [
+    {"path": "previews/core-bell-encounter-trio.48px.png", "sha256": "88a465504e26ff20f5e12fb5e52d8b351612ce4513a9cdb76f5fd4f86fd09961"},
+    {"path": "previews/core-bell-encounter-trio.96px.png", "sha256": "416376e57604e7b2475ac1ae1505defa0c803c893d7abad3cac2afe3d4727558"}
+  ],
+  "validation": {
+    "alpha": "Every runtime candidate is RGBA 48x48, has transparent corners, nonempty alpha coverage, and was inspected at 48 px and nearest-neighbor 96 px preview scales.",
+    "visual_read": "The trio is intentionally differentiated by narrow humanoid, warm brass/reed fixture, and broad chained plate silhouettes. No attack, projectile, telegraph, exit, loot, or safe-state visual is baked into the sprites.",
+    "remaining_gate": "Before any registry change, verify the 48 px candidates against the optimized native dungeon background and authoritative telegraphs at B1/B5. Confirm player/hostile/projectile hierarchy, position anchors, rendered scale, grayscale readability, and no collision or attack-origin implication."
+  },
+  "license_provenance": "Project-generated original material using OpenAI built-in image generation; existing project imagery was used only as an in-project visual reference. Commercial-rights and registry review remain required before shipping."
+}
