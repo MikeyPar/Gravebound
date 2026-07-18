@@ -1,0 +1,152 @@
+{
+  "schema_version": 1,
+  "pack_id": "review.m03.caldus_resolution_states.v1",
+  "status": {
+    "classification": "unregistered_review_candidate",
+    "runtime_registered": false,
+    "content_hash_input": false,
+    "runtime_bundle": null,
+    "intended_surface": "B6 boss-resolution HUD status"
+  },
+  "source_revision": "65088e310bdc94cafe220cd813c2784576b0a5d5",
+  "design_authority": [
+    "Gravebound_Production_GDD_v1_Canonical.md:DNG-003,DNG-005,DNG-006,ENC-005,ENC-010,LOOT-002,LOOT-010,DTH-011,UI-003,UI-005,UI-006,ART-001,ART-002,ART-004,ART-005,ART-006,ART-020,ART-030",
+    "Gravebound_Content_Production_Spec_v1.md:CONT-ROOM-007,CONT-BOSS-001,CONT-BOSS-002,CONT-REWARD-003,CONT-REWARD-004",
+    "Gravebound_Development_Roadmap_v1.md:GB-M03-03,GB-M03-04,GB-M03-08"
+  ],
+  "route_correction": {
+    "requested_shorthand": "B5 Caldus",
+    "canonical_mapping": "B5 is room.bell.bridge_01 combat; Sir Caldus is B6 arena.boss.caldus_01",
+    "pack_binding": "B6 only"
+  },
+  "inventory_audit": {
+    "existing_caldus_defeat": "assets/core/bosses/sir_caldus/review/v6",
+    "existing_pending_loot": "assets/core/ui/pending_loot_risk/v1",
+    "existing_post_reward_exit": "assets/core/dungeons/bell_fixed_route_landmarks/v1/runtime/bell-post-reward-exit.192.png",
+    "selected_gap": "shape-first distinction between defeated/reward-unresolved and reward-committed/still-at-risk"
+  },
+  "generation": {
+    "method": "OpenAI built-in image generation",
+    "use_case": "stylized-concept",
+    "references": [],
+    "prompt_record": "README.md#exact-generation-prompt"
+  },
+  "postprocess": {
+    "chroma_helper": "C:/Users/micha/.codex/skills/.system/imagegen/scripts/remove_chroma_key.py",
+    "sampled_key": "#f905e6",
+    "chroma_arguments": [
+      "--auto-key",
+      "border",
+      "--soft-matte",
+      "--transparent-threshold",
+      "12",
+      "--opaque-threshold",
+      "220",
+      "--despill"
+    ],
+    "sprite_normalizer": "C:/Users/micha/.codex/plugins/cache/openai-curated-remote/game-studio/0.1.2/scripts/normalize_sprite_strip.py",
+    "slot_count": 2,
+    "frame_dimensions": [96, 96],
+    "anchor_pixels": [48, 48],
+    "alpha_threshold": 8,
+    "review_builder": {
+      "path": "source/build_review_artifacts.py",
+      "sha256": "35bad7b5e3f5208afed21bd5636f96f7138c8f9424ae1058605291858a45e4aa"
+    }
+  },
+  "sources": [
+    {
+      "path": "source/caldus-resolution-state-strip.raw-chroma.png",
+      "dimensions": [1774, 887],
+      "mode": "RGB",
+      "sha256": "d0dbacfd67252704c82644993fa690f359b1b50e3314ae3f409000de697f758f"
+    },
+    {
+      "path": "source/caldus-resolution-state-strip.alpha.png",
+      "dimensions": [1774, 887],
+      "mode": "RGBA",
+      "sha256": "6b6c1242d2503fea46c31456dc783e813049dbca94b137854009da7f83a5b945"
+    }
+  ],
+  "frames": [
+    {
+      "path": "frames/state/01.png",
+      "projection": "DefeatedRewardUnresolved",
+      "state_read": "inert bell inside incomplete open seal",
+      "dimensions": [96, 96],
+      "anchor_pixels": [48, 48],
+      "alpha_bounds": [7, 9, 88, 96],
+      "connected_components_at_alpha_8": 2,
+      "sha256": "5702fa22ff475a01240c372b69416d53688fcc72e58d8d9f0dea07c93c7618a6"
+    },
+    {
+      "path": "frames/state/02.png",
+      "projection": "RewardCommittedAtRisk",
+      "state_read": "upper receipt clasp closes seal while broken lower tether preserves at-risk read",
+      "dimensions": [96, 96],
+      "anchor_pixels": [48, 48],
+      "alpha_bounds": [7, 0, 88, 96],
+      "connected_components_at_alpha_8": 2,
+      "sha256": "0fa2163b2217c514754bdf6e19ad72ebfa0abcbcfd038a5805e24ff5348c91b7"
+    }
+  ],
+  "previews": [
+    {
+      "path": "previews/caldus-resolution-states.96px.png",
+      "dimensions": [204, 96],
+      "sha256": "d45fb33a74baffaf787d50f3afa1c2748fc4a141afd03611883c10d424bf5842"
+    },
+    {
+      "path": "previews/caldus-resolution-states.48px.png",
+      "dimensions": [104, 48],
+      "sha256": "2ac149300622ef2aaeb20ab05eaf7e42e0527992b152f36617a9a547cef78c1e"
+    },
+    {
+      "path": "previews/caldus-resolution-states.standard.1280x720.review-mock.png",
+      "dimensions": [1280, 720],
+      "sha256": "2d4ef3bfc62adecd6bb073722a3bd996466d3d9a301637a7af9c51a8b1dd5fb0"
+    },
+    {
+      "path": "previews/caldus-resolution-states.reduced.1280x720.review-mock.png",
+      "dimensions": [1280, 720],
+      "sha256": "3c72f7f7b289cd2152afd6c311a2661e379882d8766cb642242b16f1acdd5f70"
+    },
+    {
+      "path": "previews/caldus-resolution-states.standard.1920x1080.review-mock.png",
+      "dimensions": [1920, 1080],
+      "sha256": "b20530636eece81885a159aee8d5fed72c78f4b79c5b3cf523667fca51fc332c"
+    },
+    {
+      "path": "previews/caldus-resolution-states.reduced.1920x1080.review-mock.png",
+      "dimensions": [1920, 1080],
+      "sha256": "0fde25cbaba60c993eaa1c677fa34b36f8d0f83ba5d2619b7c9d9a6125c98f20"
+    }
+  ],
+  "mock_dependencies": {
+    "purpose": "static sequencing/readability review only; dependencies are not copied or registered by this pack",
+    "caldus_defeated_frame_sha256": "f8cd7015a02016fd8d7ecb830e1923ce4b8a1999bfa79583c4824ea03bc82083",
+    "pending_risk_frame_sha256": "b83c8f2f9fa51d20307c49bce56b8917bcebc4b6d48c7c8a68c9a51f7cf6df8d",
+    "stable_exit_sha256": "a557fd0780af62ae67f5b9a67c37fb969bc3a5cf73ee5129c84249854df7b531"
+  },
+  "authority_boundaries": {
+    "server_projection_selects_state": true,
+    "may_resolve_boss_defeat": false,
+    "may_cancel_attacks_or_clear_hostiles": false,
+    "may_generate_or_commit_reward": false,
+    "may_author_item_identity_or_destination": false,
+    "may_secure_pending_inventory": false,
+    "may_create_or_authorize_exit": false,
+    "may_extract_or_advance_route": false,
+    "normal_route_enabled": false
+  },
+  "review_gates": [
+    "bind unresolved badge only to stored boss-defeated/reward-unresolved authority, never animation completion",
+    "bind committed-at-risk badge and stable exit only after the durable reward result commits",
+    "retain explicit text that pending items remain lost on death until successful extraction",
+    "prove exact replay, response loss, reconnect, restart, rollback, and no transient false-commit state",
+    "optimized native B6 review at 1280x720 and 1920x1080 in standard and reduced-effects modes",
+    "grayscale/colorblind, minimum-scale, HUD hierarchy, registry/content-hash, rollback, licensing, and similarity review"
+  ],
+  "integration_recommendation": "Use the badges as a compact supplemental HUD projection beside explicit localized status text. Keep the defeated Caldus sprite, pending-item border, and stable exit as their existing separately owned renderer assets.",
+  "license_provenance": "Project-generated review material; no third-party game, artist, brand, trademark, or commercial asset reference was supplied. Commercial-rights and similarity review remain required."
+}
