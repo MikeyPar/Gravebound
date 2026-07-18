@@ -17,8 +17,8 @@ use server_app::{
     AccountId, AuthenticatedAccount, AuthenticatedNamespace, CoreDurableB3Resolution,
     CoreDurableB3RewardCommit, EntryCaptureContext, EntryRestoreProvider, IdentityClock,
     PostgresBargainService, PostgresCoreB3RewardCoordinator, PostgresProgressionAwardService,
-    PostgresProgressionRestoreProvider, PostgresRewardService, ProgressionAwardCode,
-    ProgressionAwardCommand, ProgressionAwardEvidence, ProgressionAwardPayload, SecretRewardEpoch,
+    PostgresProgressionRestoreProvider, ProgressionAwardCode, ProgressionAwardCommand,
+    ProgressionAwardEvidence, ProgressionAwardPayload, SecretRewardEpoch,
 };
 use sim_core::{
     EncounterXpEvidence, EntityId, RewardLifeState, RewardRecallState, RewardTrustState,
@@ -288,24 +288,13 @@ fn b3_handoff(run_ordinal: u32) -> sim_content::CoreB3RewardHandoff {
     }
 }
 
-fn b3_coordinator(
-    persistence: &PostgresPersistence,
-    progression_content: &sim_content::CoreDevelopmentProgression,
-    oath_bargain: &sim_content::CompiledOathBargainCatalog,
-) -> PostgresCoreB3RewardCoordinator {
-    let rewards = PostgresRewardService::load(
+fn b3_coordinator(persistence: &PostgresPersistence) -> PostgresCoreB3RewardCoordinator {
+    PostgresCoreB3RewardCoordinator::load(
         persistence.clone(),
         &content_root(),
         SecretRewardEpoch::new("core-b3-hosted-v1", [0x5a; 32]).unwrap(),
     )
-    .unwrap();
-    let progression = PostgresProgressionAwardService::new(
-        persistence.clone(),
-        progression_content,
-        oath_bargain,
-    )
-    .unwrap();
-    PostgresCoreB3RewardCoordinator::new(rewards, progression)
+    .unwrap()
 }
 
 fn granted_b3(resolution: CoreDurableB3Resolution) -> CoreDurableB3RewardCommit {
@@ -1025,10 +1014,9 @@ async fn postgres_b3_coordinator_commits_reward_progression_and_milestone_then_r
     reset_level_five_fixture(&persistence, B3_FIXTURE).await;
     let progression_content =
         sim_content::load_core_development_progression(&content_root()).unwrap();
-    let oath_bargain = sim_content::load_core_development_oaths_bargains(&content_root()).unwrap();
     let restores = PostgresProgressionRestoreProvider::new(&progression_content).unwrap();
     begin_core_danger_entry(&persistence, &restores, B3_FIXTURE).await;
-    let coordinator = b3_coordinator(&persistence, &progression_content, &oath_bargain);
+    let coordinator = b3_coordinator(&persistence);
     let handoff = b3_handoff(7);
     let first = granted_b3(
         coordinator
@@ -1050,7 +1038,7 @@ async fn postgres_b3_coordinator_commits_reward_progression_and_milestone_then_r
     assert_b3_reward_items(&persistence, B3_FIXTURE, first.reward_event_id()).await;
 
     drop(coordinator);
-    let restarted = b3_coordinator(&persistence, &progression_content, &oath_bargain);
+    let restarted = b3_coordinator(&persistence);
     let replay = granted_b3(
         restarted
             .commit(
@@ -1122,11 +1110,10 @@ async fn postgres_b3_ineligible_terminal_grants_nothing_and_replays_without_stra
     let persistence = disposable_database().await;
     let progression_content =
         sim_content::load_core_development_progression(&content_root()).unwrap();
-    let oath_bargain = sim_content::load_core_development_oaths_bargains(&content_root()).unwrap();
     let restores = PostgresProgressionRestoreProvider::new(&progression_content).unwrap();
     reset_level_five_fixture(&persistence, B3_INELIGIBLE_FIXTURE).await;
     begin_core_danger_entry(&persistence, &restores, B3_INELIGIBLE_FIXTURE).await;
-    let coordinator = b3_coordinator(&persistence, &progression_content, &oath_bargain);
+    let coordinator = b3_coordinator(&persistence);
     let mut ineligible_handoff = b3_handoff(9);
     ineligible_handoff.longest_inactivity_ticks = 120;
     let ineligible = coordinator

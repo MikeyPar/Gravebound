@@ -7,8 +7,9 @@
 //! A session therefore exists from handshake onward, before a danger actor or Recall channel is
 //! available, and later binds those dynamic owners to the same reliable writer.
 
-use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc};
+use std::{collections::BTreeMap, future::Future, path::Path, pin::Pin, sync::Arc};
 
+use persistence::PostgresPersistence;
 use protocol::{ActionFrame, ActionKind, CorePrivateRouteContentRevisionV1, InputFrame};
 use sim_core::{AimDirection, MovementAction, SimulationVector};
 use thiserror::Error;
@@ -16,8 +17,8 @@ use tokio::sync::Mutex;
 
 use crate::{
     AuthenticatedAccount, AuthenticatedNamespace, CoreB3RewardAuthority,
-    CoreB3RewardWriterGeneration, CoreBellPortalTransition, CoreDurableB3Resolution,
-    CoreDurableBargainRestResolution, CoreExtractionActorDirectory,
+    CoreB3RewardCompositionError, CoreB3RewardWriterGeneration, CoreBellPortalTransition,
+    CoreDurableB3Resolution, CoreDurableBargainRestResolution, CoreExtractionActorDirectory,
     CoreExtractionAuthoritativeTick, CoreExtractionConnectionLease, CoreExtractionHallProjection,
     CoreExtractionRuntimeError, CoreExtractionRuntimeReport, CoreExtractionTransportAttach,
     CoreExtractionTransportDetach, CorePrivateB3RewardRuntime, CorePrivateB3RewardRuntimeError,
@@ -31,8 +32,8 @@ use crate::{
     CoreRecallActorDirectory, CoreRecallActorRetirementReport, CoreRecallAuthoritativeTick,
     CoreRecallConnectionAuthority, CoreRecallConnectionLease, CoreRecallRuntimeError,
     CoreRecallRuntimeReport, CoreRecallTransportAttach, CoreReliableWriter, IdentityClock,
-    ProductionExtractionPlanner, ProductionRecallClock, ProductionRecallDetachOutcome,
-    TRANSPORT_REPLACED_CLOSE_CODE,
+    PostgresCoreB3RewardCoordinator, ProductionExtractionPlanner, ProductionRecallClock,
+    ProductionRecallDetachOutcome, SecretRewardEpoch, TRANSPORT_REPLACED_CLOSE_CODE,
 };
 use crate::{
     core_extraction_runtime::CoreExtractionPreparedWriterHandoff,
@@ -425,6 +426,23 @@ where
     pub fn with_b3_reward_authority(mut self, authority: Arc<dyn CoreB3RewardAuthority>) -> Self {
         self.b3_rewards = Some(authority);
         self
+    }
+
+    /// Installs the one production `PostgreSQL` B3 authority at private-life session construction.
+    /// The caller owns reward-epoch loading so one redacted epoch can be shared for the complete
+    /// server process rather than re-read or rotated per account, connection, or retry.
+    pub fn with_persistent_b3_reward_authority(
+        self,
+        persistence: PostgresPersistence,
+        content_root: &Path,
+        epoch: SecretRewardEpoch,
+    ) -> Result<Self, CoreB3RewardCompositionError> {
+        let authority = Arc::new(PostgresCoreB3RewardCoordinator::load(
+            persistence,
+            content_root,
+            epoch,
+        )?);
+        Ok(self.with_b3_reward_authority(authority))
     }
 
     async fn prepare_dynamic_writer_handoffs(

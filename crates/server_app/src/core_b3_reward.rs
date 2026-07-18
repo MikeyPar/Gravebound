@@ -8,14 +8,17 @@
 //! immutable handoff produced by the B3 simulation owner. It never accepts client-authored reward
 //! IDs, item destinations, XP values, Bargain candidates, or aggregate versions.
 
+use std::path::Path;
+
+use persistence::PostgresPersistence;
 use sim_core::EncounterXpEvidence;
 use thiserror::Error;
 
 use crate::{
     AuthenticatedAccount, AuthenticatedNamespace, CoreDurableBargainRestResolution,
     PostgresProgressionAwardService, PostgresRewardService, ProgressionAwardAuthorityResult,
-    ProgressionAwardCode, ProgressionAwardOutcome, RewardGrantContext, RewardGrantError,
-    RewardGrantTransaction,
+    ProgressionAwardCode, ProgressionAwardError, ProgressionAwardOutcome, RewardGrantContext,
+    RewardGrantError, RewardGrantTransaction, SecretRewardEpoch,
 };
 
 const B3_SOURCE_CONTENT_ID: &str = "miniboss.sepulcher_knight";
@@ -339,6 +342,28 @@ impl PostgresCoreB3RewardCoordinator {
         }
     }
 
+    /// Constructs the complete production B3 authority from one persistence handle, one validated
+    /// content root, and one process-owned reward epoch. The dormant identity endpoint never calls
+    /// this loader; the future normal private-life server must construct it once, then inject the
+    /// resulting coordinator into every account session.
+    pub fn load(
+        persistence: PostgresPersistence,
+        content_root: &Path,
+        epoch: SecretRewardEpoch,
+    ) -> Result<Self, CoreB3RewardCompositionError> {
+        let progression_content = sim_content::load_core_development_progression(content_root)
+            .map_err(|_| CoreB3RewardCompositionError::ProgressionContent)?;
+        let oath_bargain_content = sim_content::load_core_development_oaths_bargains(content_root)
+            .map_err(|_| CoreB3RewardCompositionError::OathBargainContent)?;
+        let rewards = PostgresRewardService::load(persistence.clone(), content_root, epoch)?;
+        let progression = PostgresProgressionAwardService::new(
+            persistence,
+            &progression_content,
+            &oath_bargain_content,
+        )?;
+        Ok(Self::new(rewards, progression))
+    }
+
     pub async fn commit(
         &self,
         authenticated: AuthenticatedAccount,
@@ -579,6 +604,18 @@ pub enum CoreB3RewardCoordinatorError {
     Reward(#[from] RewardGrantError),
     #[error(transparent)]
     Persistence(#[from] persistence::PersistenceError),
+}
+
+#[derive(Debug, Error)]
+pub enum CoreB3RewardCompositionError {
+    #[error("Core progression content could not be loaded for B3 rewards")]
+    ProgressionContent,
+    #[error("Core Oath/Bargain content could not be loaded for B3 rewards")]
+    OathBargainContent,
+    #[error(transparent)]
+    Reward(#[from] RewardGrantError),
+    #[error(transparent)]
+    Progression(#[from] ProgressionAwardError),
 }
 
 #[cfg(test)]
