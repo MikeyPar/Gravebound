@@ -1,6 +1,6 @@
 # GB-M03-03G fixed-dungeon route binding evidence
 
-**Status:** Local route-binding and same-task conversion evidence accepted; hosted CI for `a2a5b09` remains in progress. Normal route admission remains disabled.
+**Status:** Route binding and same-task conversion are accepted; commit `a2a5b09` is green under hosted CI [`29645411895`](https://github.com/MikeyPar/Gravebound/actions/runs/29645411895). Follow-on live fixed-room evidence is local. Normal route admission remains disabled.
 
 ## Three-authority basis
 
@@ -17,6 +17,7 @@
 - The Bell handoff rebases the envelope's character state version exactly once from the transition's source to its stored `+1` destination. Skipped, stale, repeated, or foreign version material fails closed.
 - `CorePrivateFixedDungeonRuntime` stages B0-B6 simulation changes, maps their resulting node/phase to the persistent route actor, and replaces local combat/tick state only after the route CAS commits. Its first room frame is exactly the final microrealm tick plus one.
 - Commit `a2a5b09` now consumes the committed Bell handoff inside the existing session-owned task. Explicit rejection resumes the exact microrealm; unknown durable outcome remains frozen; committed/replayed authority publishes B0 readiness through the original observer; reconnect preserves the same binding and writer; and a dropped acknowledgement cannot lose the allocation. Detailed proof is in [`GB-M03-03G-fixed-dungeon-driver-conversion-evidence.md`](GB-M03-03G-fixed-dungeon-driver-conversion-evidence.md).
+- Commits `b50a8c0` and `09c9c9e` generate authoritative fixed-room movement/combat frames and run them inside that same task with destination-free control, scene-transition neutralization, stale-transport rejection, and exact tick/observer continuity. Detailed proof is in [`GB-M03-03G-live-fixed-room-driver-evidence.md`](GB-M03-03G-live-fixed-room-driver-evidence.md).
 
 ## Verification
 
@@ -25,12 +26,12 @@
 - The complete server suite passed `324/324` library tests plus every enabled server binary/integration/doc target. PostgreSQL tests that require the explicitly authorized disposable database remain ignored by their existing gate.
 - Strict `cargo clippy -p sim_content --all-targets --all-features -- -D warnings` and `cargo clippy -p server_app --all-targets --all-features -- -D warnings` passed.
 - Formatting and `git diff --check` passed.
-- Hosted CI is green for `5deee6d`, `f044a61`, `8d62f6f`, and `6749141`. The exact `a2a5b09` run is still in progress and is not claimed green here.
+- Hosted CI is green for `5deee6d`, `f044a61`, `8d62f6f`, `6749141`, `a2a5b09`, and `b50a8c0`. The run for follow-on session-task commit `09c9c9e` remains in progress and is not claimed green here.
 
 ## Explicit boundary
 
-The existing session-owned 30 Hz driver now converts in place and never returns its allocation through a caller-owned join. This slice does not yet generate fixed-room movement/combat frames from retained input, persist the B4 Bargain result, construct Sir Caldus, commit room/boss rewards or pending inventory, create the stable B6 exit, or compose all five terminal producers. Normal Character Select `Play`, Realm Gate interaction, dungeon admission, extraction, and Recall remain disabled.
+The existing session-owned 30 Hz driver converts in place, never returns its allocation through a caller-owned join, and now produces live fixed-room frames. This slice does not yet persist the B4 Bargain result, construct Sir Caldus, commit room/boss rewards or pending inventory, create the stable B6 exit, or compose all five terminal producers. Normal Character Select `Play`, Realm Gate interaction, dungeon admission, extraction, and Recall remain disabled.
 
 ## Current Next Step
 
-Keep the converted session-owned task alive at 30 Hz by generating server-owned fixed-room movement/combat frames from retained input and committing them through the existing route CAS. Then bind the durable B4 Bargain result before constructing Caldus and reward/terminal authority.
+Bind the durable B4 Bargain result into the same task before constructing Caldus and reward/terminal authority.

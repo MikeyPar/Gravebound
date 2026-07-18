@@ -1,6 +1,6 @@
 # GB-M03-03G fixed-dungeon driver conversion evidence
 
-**Status:** Local implementation evidence accepted at commit `a2a5b09`; hosted CI is in progress. Normal route admission remains disabled.
+**Status:** Commit `a2a5b09` is green under hosted CI [`29645411895`](https://github.com/MikeyPar/Gravebound/actions/runs/29645411895). Follow-on live fixed-room evidence is recorded separately. Normal route admission remains disabled.
 
 ## Three-authority basis
 
@@ -15,7 +15,7 @@
 - A committed or replayed Bell transition is consumed inside the existing driver task. The task converts its sole `CorePrivateMicrorealmRuntime` into `CorePrivateFixedDungeonRuntime`; it never returns the mutable allocation through a caller-owned join and never creates a second driver.
 - Dropping the conversion acknowledgement cannot cancel or detach the conversion. The original observer publishes the immutable transfer ID, final microrealm tick, route lease, and `BellVestibuleB0` ownership.
 - The session retains the same binding lease, driver task, observer channel, and shared reliable writer across transport replacement. Reconnect neither reconstructs combat state nor creates a second authority.
-- Fixed-dungeon input remains deliberately frozen at B0 until the next slice adds server-generated movement/combat frames. This commit does not open normal admission or claim playable dungeon traversal.
+- This conversion commit stops at B0. Follow-on commits `b50a8c0` and `09c9c9e` add server-generated live room frames inside the same task under [`GB-M03-03G-live-fixed-room-driver-evidence.md`](GB-M03-03G-live-fixed-room-driver-evidence.md); neither change opens normal admission.
 
 ## Verification
 
@@ -23,12 +23,12 @@
 - A focused real-QUIC session test replaces the transport while Bell resolution is paused, commits the route transition, converts in place, and proves both pre- and post-reconnect observers see the same binding and fixed-dungeon readiness with one retained session driver.
 - The complete server matrix passes `324/324` library tests plus every enabled binary, integration, and doc target. Tests requiring the explicitly gated disposable PostgreSQL stack or long soak profile remain ignored by their existing gates.
 - `cargo clippy -p server_app --all-targets --all-features -- -D warnings`, `cargo fmt --check`, and `git diff --check` pass.
-- Hosted CI for `a2a5b09` is not claimed green until its run completes.
+- Hosted CI [`29645411895`](https://github.com/MikeyPar/Gravebound/actions/runs/29645411895) is green for exact commit `a2a5b09`.
 
 ## Explicit boundary
 
-The converted task currently owns B0 but does not yet synthesize fixed-room movement/combat input from retained player intent. Durable B4 Bargain resolution, Sir Caldus combat, room/boss reward commits, pending inventory, stable B6 exit, all five terminal producers, ordinary native admission, restart journeys, and visual evidence remain open.
+The conversion itself stops at B0; the follow-on live-driver slice now synthesizes fixed-room frames. Durable B4 Bargain resolution, Sir Caldus combat, room/boss reward commits, pending inventory, stable B6 exit, all five terminal producers, ordinary native admission, restart journeys, and optimized native visual evidence remain open.
 
 ## Current Next Step
 
-Keep the converted session task alive at 30 Hz by generating authoritative fixed-room movement/combat frames from retained input and committing each frame through the existing route CAS. Then integrate the durable B4 Bargain result before constructing Sir Caldus, committed reward/pending-inventory authority, stable B6 exit, and terminal composition.
+Bind the committed/replayed durable B4 Bargain result into the same task before constructing Sir Caldus, committed reward/pending-inventory authority, the stable B6 exit, and terminal composition.

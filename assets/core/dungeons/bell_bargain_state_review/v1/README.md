@@ -86,4 +86,3 @@ Constraints: preserve shrine geometry and talisman count exactly; state changes 
 Before registry or content-hash work, the renderer owner must choose one explicit binding strategy: three full shrine-state sprites, or one base shrine plus state overlays. The full-sprite strategy is the current recommendation because all three candidates share exact bounds and anchor, but only optimized native B4 review can validate tile/collision alignment, prompt priority, modal world-continuation behavior, reconnect/pending ordering, grayscale/colorblind distinction, and no apparent state change before the durable projection arrives.
 
 No runtime registry, content hash, Rust module, root README, task status, Current Next Step, distribution artifact, feature gate, commit, or push is changed by this pack.
-
