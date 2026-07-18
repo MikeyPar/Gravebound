@@ -2,18 +2,27 @@ use std::path::{Path, PathBuf};
 
 use persistence::{
     CaldusExtractionCommit, CaldusExtractionRequest, CaldusVictoryExitCommit, PersistenceConfig,
-    PersistenceError, PostgresPersistence, StoredCaldusVictoryOwner, StoredExtractionAuthority,
-    StoredExtractionState, StoredWorldFlowRevisionV1, WIPEABLE_CORE_NAMESPACE,
+    PersistenceError, PostgresPersistence, ProductionExtractionExpectedVersionsV1,
+    StoredCaldusVictoryOwner, StoredExtractionAuthority, StoredExtractionState,
+    StoredWorldFlowRevisionV1, WIPEABLE_CORE_NAMESPACE,
 };
-use protocol::ManifestHash;
+use protocol::{
+    CorePrivateRouteContentRevisionV1, CorePrivateRoutePhaseV1, CorePrivateRouteRoomV1,
+    CorePrivateRouteSceneV1, ExtractionCommitFrameV1, ExtractionCommitPayloadV1,
+    ExtractionCommitResultV1, ManifestHash, TERMINAL_INVENTORY_SCHEMA_VERSION,
+    TerminalExpectedVersionsV1, TerminalInventoryRejectionCodeV1,
+};
 use server_app::{
     AccountId, AuthenticatedAccount, AuthenticatedNamespace, CaldusExtractionEvidenceCommand,
     CaldusInstancePresentation, CaldusVictoryCoordinatorError, CaldusVictoryOwnerCommand,
-    EntryCaptureContext, EntryRestoreProvider, IdentityClock, PostgresCaldusExtractionAuthority,
+    CorePrivateRouteActorDirectory, CorePrivateRouteActorPosition, CorePrivateRouteActorSeed,
+    CorePrivateRouteExtractionBinding, CorePrivateRouteExtractionExitBinding, EntryCaptureContext,
+    EntryRestoreProvider, IdentityClock, PostgresCaldusExtractionAuthority,
     PostgresCaldusHallTransferCoordinator, PostgresCaldusVictoryCoordinator,
     PostgresProgressionAwardService, PostgresProgressionRestoreProvider, PostgresRewardService,
-    ProgressionAwardCode, ProgressionAwardEvidence, ProgressionAwardPayload, RewardGrantContext,
-    RewardGrantTransaction, SecretRewardEpoch,
+    ProductionExtractionBossExitAuthorityV1, ProductionExtractionIntentActor, ProgressionAwardCode,
+    ProgressionAwardEvidence, ProgressionAwardPayload, RewardGrantContext, RewardGrantTransaction,
+    SecretRewardEpoch, derive_production_extraction_terminal_id_v1,
 };
 use sim_core::{
     CoreBossParticipant, CoreBossParticipantLock, CoreCaldusAntiCheatState,
@@ -287,6 +296,91 @@ fn world_flow_revision() -> protocol::WorldFlowContentRevisionV1 {
         records_blake3: ManifestHash::new(world.hashes().records_blake3.clone()).unwrap(),
         assets_blake3: ManifestHash::new(world.hashes().assets_blake3.clone()).unwrap(),
         localization_blake3: ManifestHash::new(world.hashes().localization_blake3.clone()).unwrap(),
+    }
+}
+
+fn private_route_revision() -> CorePrivateRouteContentRevisionV1 {
+    let route = sim_content::load_core_private_life_content(&content_root()).unwrap();
+    CorePrivateRouteContentRevisionV1 {
+        records_blake3: ManifestHash::new(route.revision().records_blake3.clone()).unwrap(),
+        assets_blake3: ManifestHash::new(route.revision().assets_blake3.clone()).unwrap(),
+        localization_blake3: ManifestHash::new(route.revision().localization_blake3.clone())
+            .unwrap(),
+    }
+}
+
+async fn live_extraction_versions(
+    persistence: &PostgresPersistence,
+    account_id: [u8; 16],
+    character_id: [u8; 16],
+) -> ProductionExtractionExpectedVersionsV1 {
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let versions: (i64, i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT account.state_version,character.character_state_version,
+                world.character_version,inventory.inventory_version,life.life_metrics_version
+           FROM accounts AS account
+           JOIN characters AS character
+             ON character.namespace_id=account.namespace_id
+            AND character.account_id=account.account_id
+           JOIN character_world_locations AS world
+             ON world.namespace_id=character.namespace_id
+            AND world.account_id=character.account_id
+            AND world.character_id=character.character_id
+           JOIN character_inventories AS inventory
+             ON inventory.namespace_id=character.namespace_id
+            AND inventory.account_id=character.account_id
+            AND inventory.character_id=character.character_id
+           JOIN character_life_metrics AS life
+             ON life.namespace_id=character.namespace_id
+            AND life.account_id=character.account_id
+            AND life.character_id=character.character_id
+          WHERE account.namespace_id=$1 AND account.account_id=$2
+            AND character.character_id=$3",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    transaction.rollback().await.unwrap();
+    let versions = ProductionExtractionExpectedVersionsV1 {
+        account: u64::try_from(versions.0).unwrap(),
+        character: u64::try_from(versions.1).unwrap(),
+        world: u64::try_from(versions.2).unwrap(),
+        inventory: u64::try_from(versions.3).unwrap(),
+        life_metrics: u64::try_from(versions.4).unwrap(),
+    };
+    assert_eq!(versions.character, versions.world);
+    versions
+}
+
+fn live_extraction_frame(
+    sequence: u32,
+    mutation_id: [u8; 16],
+    character_id: [u8; 16],
+    extraction_request_id: [u8; 16],
+    versions: ProductionExtractionExpectedVersionsV1,
+) -> ExtractionCommitFrameV1 {
+    let payload = ExtractionCommitPayloadV1 {
+        extraction_request_id,
+        expected_versions: TerminalExpectedVersionsV1 {
+            account: versions.account,
+            character: versions.character,
+            world: versions.world,
+            inventory: versions.inventory,
+            life_clock: versions.life_metrics,
+        },
+        content_revision: world_flow_revision(),
+    };
+    ExtractionCommitFrameV1 {
+        schema_version: TERMINAL_INVENTORY_SCHEMA_VERSION,
+        sequence,
+        mutation_id,
+        character_id,
+        issued_at_unix_millis: 10_000,
+        payload_hash: payload.canonical_hash(),
+        payload,
     }
 }
 
@@ -993,4 +1087,229 @@ async fn another_terminal_between_request_and_receipt_supersedes_caldus_extracti
             if result.state == StoredExtractionState::Requested
                 && result.extraction_receipt_id.is_none()
     ));
+}
+
+#[tokio::test]
+#[ignore = "requires explicitly authorized disposable PostgreSQL"]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the hosted journey keeps the actor permit, durable acceptance, reconnect, and conflict evidence in one ordered trace"
+)]
+async fn live_caldus_intent_uses_the_route_permit_and_postgres_planner_across_reconnect() {
+    let persistence = disposable_database().await;
+    let account_id = [181; 16];
+    let character_id = [182; 16];
+    let lineage_id = [183; 16];
+    let restore_id = [184; 16];
+    let mutation_id = [185; 16];
+    let lock = lock(186, 1);
+    let participant = lock.participants[0];
+    reset_fixture(&persistence, account_id, character_id, lineage_id, &lock).await;
+    stage_danger_binding(
+        &persistence,
+        account_id,
+        character_id,
+        lineage_id,
+        restore_id,
+    )
+    .await;
+
+    let authenticated = AuthenticatedAccount {
+        account_id: AccountId::new(account_id).unwrap(),
+        namespace: AuthenticatedNamespace::WipeableTest,
+    };
+    let (_, _, victory_coordinator) = services(&persistence);
+    let victory = victory_coordinator
+        .commit(
+            lineage_id,
+            &lock,
+            ACTIVE_TICKS,
+            CURRENT_TICK,
+            &[owner(account_id, character_id, 186)],
+        )
+        .await
+        .unwrap();
+    let caldus_content = sim_content::load_core_development_caldus(&content_root()).unwrap();
+    let mut presentation = CaldusInstancePresentation::new(lineage_id, 1).unwrap();
+    victory
+        .present_exit(&caldus_content, &mut presentation)
+        .unwrap();
+
+    let versions = live_extraction_versions(&persistence, account_id, character_id).await;
+    let generation = persistence
+        .allocate_private_route_generation_v1(account_id, character_id)
+        .await
+        .unwrap();
+    let directory = CorePrivateRouteActorDirectory::new();
+    let lease = directory
+        .register_actor(
+            authenticated,
+            CorePrivateRouteActorSeed {
+                character_id,
+                character_version: versions.character,
+                content_revision: private_route_revision(),
+                world_flow_revision: world_flow_revision(),
+                position: CorePrivateRouteActorPosition {
+                    instance_lineage_id: Some(lineage_id),
+                    scene: CorePrivateRouteSceneV1::BellSepulcher,
+                    room: Some(CorePrivateRouteRoomV1::CaldusArenaB6),
+                    phase: CorePrivateRoutePhaseV1::BossExitReady,
+                },
+            },
+            generation.actor_generation,
+        )
+        .unwrap();
+    let accepted_route = directory.snapshot(lease).unwrap();
+    let identities = CoreCaldusVictoryIdentities::derive(lineage_id, &lock).unwrap();
+    let extraction = identities.extraction_for(participant).unwrap();
+    let terminal_id = derive_production_extraction_terminal_id_v1(
+        account_id,
+        character_id,
+        identities.encounter_id.bytes(),
+        extraction.request_id.bytes(),
+        extraction.receipt_id.bytes(),
+    )
+    .unwrap();
+    let exit = CorePrivateRouteExtractionExitBinding::new(
+        identities.encounter_id.bytes(),
+        identities.exit_instance_id.bytes(),
+        extraction.request_id.bytes(),
+        extraction.receipt_id.bytes(),
+        terminal_id,
+    )
+    .unwrap();
+    let binding = CorePrivateRouteExtractionBinding::new(
+        account_id,
+        accepted_route,
+        world_flow_revision(),
+        restore_id,
+        exit,
+    )
+    .unwrap();
+    let permit = directory
+        .prepare_extraction_terminal(lease, binding)
+        .await
+        .unwrap();
+    let authority = ProductionExtractionBossExitAuthorityV1::seal(
+        authenticated,
+        character_id,
+        permit,
+        &presentation,
+        &lock,
+        participant,
+        versions,
+    )
+    .unwrap();
+    let frame = live_extraction_frame(
+        1,
+        mutation_id,
+        character_id,
+        extraction.request_id.bytes(),
+        versions,
+    );
+
+    let actor = ProductionExtractionIntentActor::new(
+        authority.clone(),
+        directory.clone(),
+        lease,
+        persistence.clone(),
+        ExtractionClock,
+    )
+    .unwrap();
+    let fresh = actor.handle(authenticated, &frame, 9_100).await;
+    assert_eq!(fresh.server_tick, 9_100);
+    assert!(matches!(
+        fresh.result,
+        ExtractionCommitResultV1::Pending {
+            request_sequence: 1,
+            mutation_id: id,
+            character_id: owner,
+            extraction_request_id: request,
+            ..
+        } if id == mutation_id
+            && owner == character_id
+            && request == extraction.request_id.bytes()
+    ));
+    let fresh_intent = actor.prepared_intent().await.unwrap();
+    assert!(fresh_intent.prepared().is_some());
+    assert_eq!(
+        fresh_intent.acceptance().attempt.actor_generation,
+        generation.actor_generation
+    );
+    assert_eq!(
+        fresh_intent
+            .acceptance()
+            .attempt
+            .accepted_pre_route_state_version
+            + 1,
+        fresh_intent
+            .acceptance()
+            .attempt
+            .accepted_post_route_state_version
+    );
+    let accepted_hash = fresh_intent.acceptance().canonical_attempt_hash;
+    drop(actor);
+
+    let restarted_persistence = reconnect_database().await;
+    let replay_actor = ProductionExtractionIntentActor::new(
+        authority,
+        directory.clone(),
+        lease,
+        restarted_persistence.clone(),
+        ExtractionClock,
+    )
+    .unwrap();
+    let mut replay_frame = frame.clone();
+    replay_frame.sequence = 2;
+    let replay = replay_actor
+        .handle(authenticated, &replay_frame, 9_999)
+        .await;
+    assert_eq!(replay.server_tick, 9_999);
+    assert!(matches!(
+        replay.result,
+        ExtractionCommitResultV1::Pending {
+            request_sequence: 2,
+            ..
+        }
+    ));
+    let replayed_intent = replay_actor.prepared_intent().await.unwrap();
+    assert_eq!(
+        replayed_intent.acceptance().canonical_attempt_hash,
+        accepted_hash
+    );
+    assert!(replayed_intent.prepared().is_some());
+
+    let mut changed = replay_frame;
+    changed.sequence = 3;
+    changed.mutation_id = [187; 16];
+    let conflict = replay_actor.handle(authenticated, &changed, 10_000).await;
+    assert!(matches!(
+        conflict.result,
+        ExtractionCommitResultV1::Rejected {
+            request_sequence: 3,
+            code: TerminalInventoryRejectionCodeV1::IdempotencyConflict,
+            ..
+        }
+    ));
+
+    let mut verification = restarted_persistence.begin_transaction().await.unwrap();
+    let state: (i16, i64, i64) = sqlx::query_as(
+        "SELECT extraction.extraction_state,
+                (SELECT count(*) FROM production_extraction_intent_acceptances_v1
+                  WHERE namespace_id=$1 AND extraction_request_id=$2),
+                (SELECT count(*) FROM production_extraction_intent_conflict_audits_v1
+                  WHERE namespace_id=$1 AND extraction_request_id=$2)
+           FROM character_extraction_results AS extraction
+          WHERE extraction.namespace_id=$1 AND extraction.extraction_request_id=$2",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(extraction.request_id.bytes().as_slice())
+    .fetch_one(verification.connection())
+    .await
+    .unwrap();
+    verification.rollback().await.unwrap();
+    assert_eq!(state, (0, 1, 1));
+
+    directory.begin_shutdown();
+    assert!(directory.finish_shutdown().await.unwrap().zero_residue);
 }

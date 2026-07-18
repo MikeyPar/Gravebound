@@ -31,6 +31,25 @@ use crate::{
     TerminalCandidate, TerminalKind, TerminalValidationError,
 };
 
+/// Result returned by the asynchronous live extraction-intent boundary. The server tick comes
+/// from the serialized gameplay actor rather than transport queue timing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreExtractionIntentReply {
+    pub server_tick: u64,
+    pub result: ExtractionCommitResultV1,
+}
+
+/// Transport-facing successful-extraction intent seam. Identity/regression servers inject the
+/// disabled implementation; the normal private-life server will inject a bounded character actor.
+pub trait CoreExtractionIntentAuthority: Send + Sync {
+    fn handle_extraction<'a>(
+        &'a self,
+        authenticated: AuthenticatedAccount,
+        frame: &'a ExtractionCommitFrameV1,
+        server_tick: u64,
+    ) -> impl Future<Output = CoreExtractionIntentReply> + Send + 'a;
+}
+
 /// Reliable transport boundary. The ordinary Core endpoint keeps this disabled until the live
 /// character actor supplies server-owned exit and terminal-coordinator authority.
 #[derive(Debug, Clone, Copy, Default)]
@@ -67,6 +86,26 @@ impl CoreExtractionTerminalAuthority {
             character_id: frame.character_id,
             extraction_request_id: frame.payload.extraction_request_id,
             code,
+        }
+    }
+}
+
+impl CoreExtractionIntentAuthority for CoreExtractionTerminalAuthority {
+    #[allow(
+        clippy::manual_async_fn,
+        reason = "the desugared public trait contract guarantees a Send future for spawned QUIC workers"
+    )]
+    fn handle_extraction<'a>(
+        &'a self,
+        authenticated: AuthenticatedAccount,
+        frame: &'a ExtractionCommitFrameV1,
+        server_tick: u64,
+    ) -> impl Future<Output = CoreExtractionIntentReply> + Send + 'a {
+        async move {
+            CoreExtractionIntentReply {
+                server_tick,
+                result: self.handle(authenticated, frame),
+            }
         }
     }
 }

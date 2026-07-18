@@ -30,6 +30,7 @@ mod lifecycle;
 mod live_damage_trace_service;
 mod oath_selection;
 mod production_extraction;
+mod production_extraction_intent;
 mod production_recall;
 mod production_recall_channel;
 mod production_recall_driver;
@@ -85,7 +86,8 @@ pub use core_private_route_actor::{
     CORE_PRIVATE_ROUTE_ACTOR_MAILBOX_CAPACITY, CorePrivateRouteActor, CorePrivateRouteActorAdvance,
     CorePrivateRouteActorDirectory, CorePrivateRouteActorError, CorePrivateRouteActorLease,
     CorePrivateRouteActorPosition, CorePrivateRouteActorSeed, CorePrivateRouteBellPermitLease,
-    CorePrivateRouteRuntimeError, CorePrivateRouteRuntimeReport,
+    CorePrivateRouteExtractionBinding, CorePrivateRouteExtractionExitBinding,
+    CorePrivateRouteExtractionPermit, CorePrivateRouteRuntimeError, CorePrivateRouteRuntimeReport,
 };
 pub use core_private_world_flow::{
     CoreBellPortalAbortReason, CoreBellPortalAuthority, CoreBellPortalBinding,
@@ -159,13 +161,21 @@ pub use live_damage_trace_service::{
 };
 pub use oath_selection::{CoreOathSelectionAuthority, PostgresOathSelectionService};
 pub use production_extraction::{
-    CoreExtractionTerminalAuthority, PostgresProductionExtractionExecutionService,
-    ProductionExtractionExecutionError, ProductionExtractionExecutionOutcome,
-    ProductionExtractionExecutionService, ProductionExtractionReplayOutcome,
-    ProductionExtractionTerminalReader, ProductionExtractionWriter,
-    committed_extraction_terminal_receipt, committed_extraction_terminal_receipt_from_stored,
-    hall_snapshot_from_stored_extraction, production_extraction_terminal_candidate,
-    protocol_extraction_terminal_result, recover_committed_extraction_arbiter,
+    CoreExtractionIntentAuthority, CoreExtractionIntentReply, CoreExtractionTerminalAuthority,
+    PostgresProductionExtractionExecutionService, ProductionExtractionExecutionError,
+    ProductionExtractionExecutionOutcome, ProductionExtractionExecutionService,
+    ProductionExtractionReplayOutcome, ProductionExtractionTerminalReader,
+    ProductionExtractionWriter, committed_extraction_terminal_receipt,
+    committed_extraction_terminal_receipt_from_stored, hall_snapshot_from_stored_extraction,
+    production_extraction_terminal_candidate, protocol_extraction_terminal_result,
+    recover_committed_extraction_arbiter,
+};
+pub use production_extraction_intent::{
+    CORE_EXTRACTION_ACTOR_MAILBOX_CAPACITY, CoreExtractionActorHandle, CoreExtractionActorInbox,
+    ProductionExtractionBossExitAuthorityV1, ProductionExtractionIntentActor,
+    ProductionExtractionIntentError, ProductionExtractionPlanner,
+    ProductionExtractionPlannerInputV1, ProductionExtractionPreparedIntentV1,
+    derive_production_extraction_terminal_id_v1, production_extraction_actor_mailbox,
 };
 pub use production_recall::{
     CoreRecallIntentAuthority, CoreRecallIntentReply, CoreRecallTerminalAuthority,
@@ -638,7 +648,7 @@ pub(crate) async fn write_reliable_response(
 /// World-flow messages share the reliable transport but cannot mutate identity state, and the
 /// normal world-flow authority remains fail-closed until its downstream packages are complete.
 #[allow(clippy::too_many_arguments)]
-pub async fn serve_core_reliable<R, C, G, E, W, P, D, OC, BC, HA, SA, RA>(
+pub async fn serve_core_reliable<R, C, G, E, W, P, D, OC, BC, HA, SA, EA, RA>(
     connection: &quinn::Connection,
     identity: &IdentityService<R, C, G, E>,
     world_flow: &W,
@@ -649,7 +659,7 @@ pub async fn serve_core_reliable<R, C, G, E, W, P, D, OC, BC, HA, SA, RA>(
     safe_inventory: &CoreSafeInventoryAuthority,
     resolution_hold: &HA,
     successor: &SA,
-    extraction: &CoreExtractionTerminalAuthority,
+    extraction: &EA,
     recall: &RA,
     authenticated: AuthenticatedAccount,
     response_writer: &CoreReliableWriter,
@@ -667,6 +677,7 @@ where
     BC: IdentityClock,
     HA: CoreResolutionHoldIntentAuthority,
     SA: CoreSuccessorIntentAuthority,
+    EA: CoreExtractionIntentAuthority,
     RA: CoreRecallIntentAuthority,
 {
     let (send, mut receive) = connection
@@ -732,9 +743,11 @@ where
             ))
         }
         WireMessage::ExtractionCommitFrame(frame) => {
-            protocol::ReliableEvent::ExtractionCommitResult(Box::new(
-                extraction.handle(authenticated, &frame),
-            ))
+            let reply = extraction
+                .handle_extraction(authenticated, &frame, server_tick)
+                .await;
+            response_server_tick = reply.server_tick;
+            protocol::ReliableEvent::ExtractionCommitResult(Box::new(reply.result))
         }
         WireMessage::SuccessorCreateFrame(frame) => {
             protocol::ReliableEvent::SuccessorCreateResult(Box::new(
