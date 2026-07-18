@@ -61,7 +61,7 @@ impl SequentialIds {
 }
 
 impl CharacterIdGenerator for SequentialIds {
-    fn next_id(&self) -> [u8; 16] {
+    fn next_id(&self, _authenticated: AuthenticatedAccount, _mutation_id: [u8; 16]) -> [u8; 16] {
         [self.0.fetch_add(1, Ordering::Relaxed) + 1; 16]
     }
 }

@@ -13,8 +13,8 @@ use persistence::{
 use protocol::{AccountErrorCode, CharacterMutationFrame, CharacterMutationPayload, ManifestHash};
 use protocol::{SuccessorCreatePayloadV1, WireText};
 use server_app::{
-    CharacterIdGenerator, IdentityClock, IdentityService, NoopIdentityEventSink,
-    PostgresAccountRepository, StarterItemPlan,
+    AuthenticatedAccount, CharacterIdGenerator, IdentityClock, IdentityService,
+    NoopIdentityEventSink, PostgresAccountRepository, StarterItemPlan,
 };
 use sqlx::Row;
 
@@ -39,7 +39,7 @@ impl IdentityClock for FixedIdentityClock {
 struct ReservedCreateId;
 
 impl CharacterIdGenerator for ReservedCreateId {
-    fn next_id(&self) -> [u8; 16] {
+    fn next_id(&self, _authenticated: AuthenticatedAccount, _mutation_id: [u8; 16]) -> [u8; 16] {
         ORDINARY_CREATE_CHARACTER_ID
     }
 }

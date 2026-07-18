@@ -68,7 +68,7 @@ impl IdentityClock for FixedAuthority {
 }
 
 impl CharacterIdGenerator for FixedAuthority {
-    fn next_id(&self) -> [u8; 16] {
+    fn next_id(&self, _authenticated: AuthenticatedAccount, _mutation_id: [u8; 16]) -> [u8; 16] {
         [230; 16]
     }
 }

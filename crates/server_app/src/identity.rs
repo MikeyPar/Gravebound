@@ -459,7 +459,45 @@ pub trait IdentityClock: Send + Sync {
 }
 
 pub trait CharacterIdGenerator: Send + Sync {
-    fn next_id(&self) -> [u8; CHARACTER_ID_BYTES];
+    /// Returns the stable character identity for one authenticated Create mutation. A persistent
+    /// implementation must not depend on process-local counters or clocks.
+    fn next_id(
+        &self,
+        authenticated: AuthenticatedAccount,
+        mutation_id: [u8; MUTATION_ID_BYTES],
+    ) -> [u8; CHARACTER_ID_BYTES];
+}
+
+/// Restart-stable character identities for the wipeable Core namespace.
+///
+/// The canonical GDD owns persistent account/character identity and retry safety, the Content
+/// Production Specification fixes the one-class Core creation boundary, and the Development
+/// Roadmap requires character mutation retries and server restarts to remain nonduplicating.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Blake3CharacterIds;
+
+impl CharacterIdGenerator for Blake3CharacterIds {
+    fn next_id(
+        &self,
+        authenticated: AuthenticatedAccount,
+        mutation_id: [u8; MUTATION_ID_BYTES],
+    ) -> [u8; CHARACTER_ID_BYTES] {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"gravebound/core-character-id/v1\0");
+        hasher.update(&[match authenticated.namespace {
+            AuthenticatedNamespace::WipeableTest => 1,
+            AuthenticatedNamespace::Production => 2,
+        }]);
+        hasher.update(&authenticated.account_id.as_bytes());
+        hasher.update(&mutation_id);
+        let hash = hasher.finalize();
+        let mut character_id = [0_u8; CHARACTER_ID_BYTES];
+        character_id.copy_from_slice(&hash.as_bytes()[..CHARACTER_ID_BYTES]);
+        if all_zero(&character_id) {
+            character_id[CHARACTER_ID_BYTES - 1] = 1;
+        }
+        character_id
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -598,7 +636,7 @@ where
         let result = self
             .repository
             .transact(account.account_id, |aggregate| {
-                self.apply_mutation(aggregate, frame, foreign_owner.is_some())
+                self.apply_mutation(account, aggregate, frame, foreign_owner.is_some())
             })
             .await;
         let result = match result {
@@ -647,6 +685,7 @@ where
 
     fn apply_mutation(
         &self,
+        authenticated: AuthenticatedAccount,
         aggregate: &mut AccountAggregate,
         frame: &CharacterMutationFrame,
         foreign_character: bool,
@@ -688,7 +727,7 @@ where
         } else {
             match &frame.payload {
                 CharacterMutationPayload::Create { class_id } => {
-                    self.create_character(aggregate, frame.mutation_id, class_id)
+                    self.create_character(authenticated, aggregate, frame.mutation_id, class_id)
                 }
                 CharacterMutationPayload::Select { character_id } => {
                     self.select_character(aggregate, frame.mutation_id, *character_id)
@@ -708,6 +747,7 @@ where
 
     fn create_character(
         &self,
+        authenticated: AuthenticatedAccount,
         aggregate: &mut AccountAggregate,
         mutation_id: [u8; MUTATION_ID_BYTES],
         class_id: &WireText<96>,
@@ -722,7 +762,7 @@ where
                 aggregate,
             );
         }
-        let character_id = self.id_generator.next_id();
+        let character_id = self.id_generator.next_id(authenticated, mutation_id);
         if all_zero(&character_id)
             || aggregate
                 .characters
@@ -851,7 +891,11 @@ mod tests {
     struct SequentialIds(AtomicU8);
 
     impl CharacterIdGenerator for SequentialIds {
-        fn next_id(&self) -> [u8; CHARACTER_ID_BYTES] {
+        fn next_id(
+            &self,
+            _authenticated: AuthenticatedAccount,
+            _mutation_id: [u8; MUTATION_ID_BYTES],
+        ) -> [u8; CHARACTER_ID_BYTES] {
             [self.0.fetch_add(1, Ordering::Relaxed) + 1; CHARACTER_ID_BYTES]
         }
     }
@@ -877,6 +921,42 @@ mod tests {
             account_id: AccountId::new([value; 16]).unwrap(),
             namespace: AuthenticatedNamespace::WipeableTest,
         }
+    }
+
+    #[test]
+    fn blake3_character_ids_are_restart_stable_account_mutation_and_namespace_bound() {
+        let generator = Blake3CharacterIds;
+        let authenticated = account(7);
+        let character_id = generator.next_id(authenticated, [9; MUTATION_ID_BYTES]);
+        assert_eq!(
+            character_id,
+            [
+                194, 80, 85, 215, 19, 91, 5, 1, 102, 82, 69, 199, 225, 229, 48, 165,
+            ]
+        );
+        assert_eq!(
+            Blake3CharacterIds.next_id(authenticated, [9; MUTATION_ID_BYTES]),
+            character_id
+        );
+        assert_ne!(
+            generator.next_id(account(8), [9; MUTATION_ID_BYTES]),
+            character_id
+        );
+        assert_ne!(
+            generator.next_id(authenticated, [10; MUTATION_ID_BYTES]),
+            character_id
+        );
+        assert_ne!(
+            generator.next_id(
+                AuthenticatedAccount {
+                    account_id: authenticated.account_id,
+                    namespace: AuthenticatedNamespace::Production,
+                },
+                [9; MUTATION_ID_BYTES],
+            ),
+            character_id
+        );
+        assert!(character_id.iter().any(|byte| *byte != 0));
     }
 
     fn bootstrap_frame() -> AccountBootstrapFrame {

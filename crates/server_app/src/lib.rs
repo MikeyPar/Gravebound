@@ -133,8 +133,8 @@ pub use field_equipment::{
 pub use ground_expiry::{GROUND_EXPIRY_CONTEXT, GroundExpiryError, PostgresGroundExpiryService};
 pub use identity::{
     AccountAggregate, AccountId, AccountRepository, AccountRepositoryError, AuthenticatedAccount,
-    AuthenticatedNamespace, CharacterIdGenerator, IdentityClock, IdentityEvent, IdentityEventSink,
-    IdentityService, InMemoryAccountRepository, MAX_ACCOUNT_MUTATION_RESULTS,
+    AuthenticatedNamespace, Blake3CharacterIds, CharacterIdGenerator, IdentityClock, IdentityEvent,
+    IdentityEventSink, IdentityService, InMemoryAccountRepository, MAX_ACCOUNT_MUTATION_RESULTS,
     NoopIdentityEventSink, PostgresAccountRepository,
 };
 pub use instance::{

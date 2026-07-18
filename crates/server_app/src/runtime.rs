@@ -32,7 +32,7 @@ use tracing::{debug, info, warn};
 
 use crate::{
     AccountId, AccountRepository, AdmissionState, AuthenticatedAccount, AuthenticatedNamespace,
-    AuthenticationDecision, CharacterIdGenerator, CoreBargainAuthority,
+    AuthenticationDecision, Blake3CharacterIds, CoreBargainAuthority,
     CoreExtractionTerminalAuthority, CoreOathSelectionAuthority, CoreRecallTerminalAuthority,
     CoreResolutionHoldAuthority, CoreSafeInventoryAuthority, CoreSuccessorAuthority,
     DeathViewRepository, DeathViewService, DisabledDeathViewRepository,
@@ -66,19 +66,6 @@ impl IdentityClock for SystemIdentityClock {
                 .as_millis(),
         )
         .unwrap_or(u64::MAX)
-    }
-}
-
-#[derive(Debug, Default)]
-struct ProcessCharacterIds(AtomicU64);
-
-impl CharacterIdGenerator for ProcessCharacterIds {
-    fn next_id(&self) -> [u8; 16] {
-        let ordinal = self.0.fetch_add(1, Ordering::Relaxed).saturating_add(1);
-        let hash = blake3::hash(&ordinal.to_le_bytes());
-        let mut id = [0; 16];
-        id.copy_from_slice(&hash.as_bytes()[..16]);
-        id
     }
 }
 
@@ -512,7 +499,7 @@ pub fn core_account_id_from_auth_ticket(ticket: &protocol::AuthTicket) -> Option
 }
 
 type CoreIdentityAuthority<R> =
-    IdentityService<R, SystemIdentityClock, ProcessCharacterIds, NoopIdentityEventSink>;
+    IdentityService<R, SystemIdentityClock, Blake3CharacterIds, NoopIdentityEventSink>;
 
 struct CoreShrineAuthorities {
     oath: CoreOathSelectionAuthority<SystemIdentityClock>,
@@ -688,7 +675,7 @@ where
         let authority = Arc::new(IdentityService::new(
             repository,
             SystemIdentityClock,
-            ProcessCharacterIds::default(),
+            Blake3CharacterIds,
             NoopIdentityEventSink,
             required_manifest_hash.clone(),
         ));
