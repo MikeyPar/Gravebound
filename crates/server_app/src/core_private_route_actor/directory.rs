@@ -79,6 +79,19 @@ enum CorePrivateRouteActorCommand {
         in_range: bool,
         reply: oneshot::Sender<CorePrivateRouteActorReply>,
     },
+    PrepareBellPortal {
+        binding: CoreBellPortalBinding,
+        reply: oneshot::Sender<Result<CoreBellPortalPermit, CoreBellPortalRejection>>,
+    },
+    CommitBellPortal {
+        permit: CoreBellPortalPermit,
+        transition: CoreBellPortalTransition,
+        reply: oneshot::Sender<Result<(), CoreBellPortalRejection>>,
+    },
+    ReconcileBellPortal {
+        transition: CoreBellPortalTransition,
+        reply: oneshot::Sender<Result<(), CoreBellPortalRejection>>,
+    },
 }
 
 type CorePrivateRouteActorReply = Result<CorePrivateRouteStateV1, CorePrivateRouteRuntimeError>;
@@ -104,6 +117,53 @@ impl CorePrivateRouteActorHandle {
         receive
             .await
             .map_err(|_| CorePrivateRouteRuntimeError::ActorUnavailable)?
+    }
+
+    async fn prepare_bell_portal(
+        &self,
+        binding: CoreBellPortalBinding,
+    ) -> Result<CoreBellPortalPermit, CoreBellPortalRejection> {
+        let (reply, receive) = oneshot::channel();
+        self.commands
+            .send(CorePrivateRouteActorCommand::PrepareBellPortal { binding, reply })
+            .await
+            .map_err(|_| CoreBellPortalRejection::InstanceUnavailable)?;
+        receive
+            .await
+            .map_err(|_| CoreBellPortalRejection::InstanceUnavailable)?
+    }
+
+    async fn commit_bell_portal(
+        &self,
+        permit: CoreBellPortalPermit,
+        transition: CoreBellPortalTransition,
+    ) -> Result<(), CoreBellPortalRejection> {
+        let (reply, receive) = oneshot::channel();
+        self.commands
+            .send(CorePrivateRouteActorCommand::CommitBellPortal {
+                permit,
+                transition,
+                reply,
+            })
+            .await
+            .map_err(|_| CoreBellPortalRejection::InstanceUnavailable)?;
+        receive
+            .await
+            .map_err(|_| CoreBellPortalRejection::InstanceUnavailable)?
+    }
+
+    async fn reconcile_bell_portal(
+        &self,
+        transition: CoreBellPortalTransition,
+    ) -> Result<(), CoreBellPortalRejection> {
+        let (reply, receive) = oneshot::channel();
+        self.commands
+            .send(CorePrivateRouteActorCommand::ReconcileBellPortal { transition, reply })
+            .await
+            .map_err(|_| CoreBellPortalRejection::InstanceUnavailable)?;
+        receive
+            .await
+            .map_err(|_| CoreBellPortalRejection::InstanceUnavailable)?
     }
 }
 
@@ -424,10 +484,16 @@ impl CorePrivateRouteActorDirectory {
         Ok(Arc::clone(&entry.control))
     }
 
-    fn control_for_binding(
+    fn actor_for_binding(
         &self,
         binding: &CoreBellPortalBinding,
-    ) -> Result<Arc<Mutex<CorePrivateRouteActorControl>>, CoreBellPortalRejection> {
+    ) -> Result<
+        (
+            Arc<Mutex<CorePrivateRouteActorControl>>,
+            CorePrivateRouteActorHandle,
+        ),
+        CoreBellPortalRejection,
+    > {
         let state = lock(&self.inner.state);
         if !state.accepting {
             return Err(CoreBellPortalRejection::InstanceUnavailable);
@@ -439,11 +505,10 @@ impl CorePrivateRouteActorDirectory {
         if key.character_id != binding.character_id {
             return Err(CoreBellPortalRejection::InstanceUnavailable);
         }
-        state
-            .actors
-            .get(key)
-            .map(|entry| Arc::clone(&entry.control))
-            .ok_or(CoreBellPortalRejection::InstanceUnavailable)
+        state.actors.get(key).map_or_else(
+            || Err(CoreBellPortalRejection::InstanceUnavailable),
+            |entry| Ok((Arc::clone(&entry.control), entry.handle.clone())),
+        )
     }
 }
 
@@ -458,10 +523,7 @@ impl CorePrivateRouteBellPermitLease {
         if !self.armed {
             return;
         }
-        let mut control = lock(&self.control);
-        if control.reservation.as_ref() == Some(&self.permit) {
-            control.reservation = None;
-        }
+        release_bell_reservation(&self.control, &self.permit);
         self.armed = false;
     }
 }
@@ -495,42 +557,8 @@ impl CoreBellPortalAuthority for CorePrivateRouteActorDirectory {
         &self,
         binding: CoreBellPortalBinding,
     ) -> Result<Self::PermitLease, CoreBellPortalRejection> {
-        let control = self.control_for_binding(&binding)?;
-        let mut actor = lock(&control);
-        if actor.retired {
-            return Err(CoreBellPortalRejection::InstanceUnavailable);
-        }
-        let projection = actor.actor.projection();
-        if actor.actor.world_flow_revision() != &binding.content_revision {
-            return Err(CoreBellPortalRejection::ServiceUnavailable);
-        }
-        if projection.character_id != binding.character_id
-            || projection.character_version != binding.character_version
-            || projection.instance_lineage_id != Some(binding.instance_lineage_id)
-        {
-            return Err(CoreBellPortalRejection::InstanceUnavailable);
-        }
-        if projection.scene != CorePrivateRouteSceneV1::CoreMicrorealm
-            || projection.phase != CorePrivateRoutePhaseV1::MicrorealmCleared
-        {
-            return Err(CoreBellPortalRejection::NotCleared);
-        }
-        if !actor.actor.bell_portal_in_range() {
-            return Err(CoreBellPortalRejection::OutOfRange);
-        }
-        if actor.reservation.is_some() {
-            return Err(CoreBellPortalRejection::TransferInProgress);
-        }
-        let permit_id = derive_permit_id(projection, &binding);
-        let permit = CoreBellPortalPermit {
-            binding,
-            permit_id,
-            actor_generation: projection.actor_generation,
-            route_state_version: projection.state_version,
-        };
-        actor.reservation = Some(permit.clone());
-        drop(actor);
-        // No suspension occurs between installing the reservation and constructing this guard.
+        let (control, handle) = self.actor_for_binding(&binding)?;
+        let permit = handle.prepare_bell_portal(binding).await?;
         Ok(CorePrivateRouteBellPermitLease {
             control,
             permit,
@@ -546,25 +574,17 @@ impl CoreBellPortalAuthority for CorePrivateRouteActorDirectory {
         if !valid_transition(&lease.permit.binding, &transition) {
             return Err(CoreBellPortalRejection::ServiceUnavailable);
         }
-        let current = self.control_for_binding(&transition.binding)?;
+        let (current, handle) = self.actor_for_binding(&transition.binding)?;
         if !Arc::ptr_eq(&current, &lease.control) {
             return Err(CoreBellPortalRejection::InstanceUnavailable);
         }
-        let mut control = lock(&current);
-        if control.retired
-            || control.reservation.as_ref() != Some(&lease.permit)
-            || control.actor.projection().actor_generation != lease.permit.actor_generation
-            || control.actor.projection().state_version != lease.permit.route_state_version
-        {
-            return Err(CoreBellPortalRejection::InstanceUnavailable);
+        let result = handle
+            .commit_bell_portal(lease.permit.clone(), transition)
+            .await;
+        if result.is_ok() {
+            lease.armed = false;
         }
-        control
-            .actor
-            .commit_bell_portal(transition.destination_character_version)
-            .map_err(|_| CoreBellPortalRejection::ServiceUnavailable)?;
-        control.reservation = None;
-        lease.armed = false;
-        Ok(())
+        result
     }
 
     async fn abort_bell_portal(
@@ -582,40 +602,8 @@ impl CoreBellPortalAuthority for CorePrivateRouteActorDirectory {
         if !valid_transition(&transition.binding, &transition) {
             return Err(CoreBellPortalRejection::ServiceUnavailable);
         }
-        let control = self.control_for_binding(&transition.binding)?;
-        let mut control = lock(&control);
-        if control.retired
-            || control.actor.world_flow_revision() != &transition.binding.content_revision
-        {
-            return Err(CoreBellPortalRejection::InstanceUnavailable);
-        }
-        if let Some(reservation) = &control.reservation {
-            if reservation.binding != transition.binding {
-                return Err(CoreBellPortalRejection::TransferInProgress);
-            }
-            control.reservation = None;
-        }
-        let projection = control.actor.projection();
-        if projection.character_version > transition.destination_character_version {
-            return Ok(());
-        }
-        if projection.character_version == transition.destination_character_version
-            && projection.scene == CorePrivateRouteSceneV1::BellSepulcher
-            && projection.instance_lineage_id == Some(transition.binding.instance_lineage_id)
-        {
-            return Ok(());
-        }
-        if projection.character_version != transition.binding.character_version
-            || projection.character_id != transition.binding.character_id
-            || projection.instance_lineage_id != Some(transition.binding.instance_lineage_id)
-        {
-            return Err(CoreBellPortalRejection::InstanceUnavailable);
-        }
-        control
-            .actor
-            .reconcile_bell_portal(transition.destination_character_version)
-            .map_err(|_| CoreBellPortalRejection::ServiceUnavailable)?;
-        Ok(())
+        let (_, handle) = self.actor_for_binding(&transition.binding)?;
+        handle.reconcile_bell_portal(transition).await
     }
 }
 
@@ -642,6 +630,25 @@ async fn serve_actor_mailbox(
             CorePrivateRouteActorCommand::SetBellPortalRange { in_range, reply } => {
                 let _ = reply.send(handle_portal_range(&control, in_range));
             }
+            CorePrivateRouteActorCommand::PrepareBellPortal { binding, reply } => {
+                let result = handle_prepare_bell_portal(&control, binding);
+                let prepared = result.as_ref().ok().cloned();
+                if reply.send(result).is_err()
+                    && let Some(permit) = prepared
+                {
+                    release_bell_reservation(&control, &permit);
+                }
+            }
+            CorePrivateRouteActorCommand::CommitBellPortal {
+                permit,
+                transition,
+                reply,
+            } => {
+                let _ = reply.send(handle_commit_bell_portal(&control, &permit, &transition));
+            }
+            CorePrivateRouteActorCommand::ReconcileBellPortal { transition, reply } => {
+                let _ = reply.send(handle_reconcile_bell_portal(&control, &transition));
+            }
         }
     }
     let mut abandoned = 0_u64;
@@ -651,6 +658,13 @@ async fn serve_actor_mailbox(
             CorePrivateRouteActorCommand::Advance { reply, .. }
             | CorePrivateRouteActorCommand::SetBellPortalRange { reply, .. } => {
                 let _ = reply.send(Err(CorePrivateRouteRuntimeError::Retired));
+            }
+            CorePrivateRouteActorCommand::PrepareBellPortal { reply, .. } => {
+                let _ = reply.send(Err(CoreBellPortalRejection::InstanceUnavailable));
+            }
+            CorePrivateRouteActorCommand::CommitBellPortal { reply, .. }
+            | CorePrivateRouteActorCommand::ReconcileBellPortal { reply, .. } => {
+                let _ = reply.send(Err(CoreBellPortalRejection::InstanceUnavailable));
             }
         }
     }
@@ -684,6 +698,121 @@ fn handle_portal_range(
     }
     control.actor.set_bell_portal_in_range(in_range)?;
     Ok(control.actor.projection().clone())
+}
+
+fn handle_prepare_bell_portal(
+    control: &Mutex<CorePrivateRouteActorControl>,
+    binding: CoreBellPortalBinding,
+) -> Result<CoreBellPortalPermit, CoreBellPortalRejection> {
+    let mut control = lock(control);
+    if control.retired {
+        return Err(CoreBellPortalRejection::InstanceUnavailable);
+    }
+    let projection = control.actor.projection();
+    if control.actor.world_flow_revision() != &binding.content_revision {
+        return Err(CoreBellPortalRejection::ServiceUnavailable);
+    }
+    if projection.character_id != binding.character_id
+        || projection.character_version != binding.character_version
+        || projection.instance_lineage_id != Some(binding.instance_lineage_id)
+    {
+        return Err(CoreBellPortalRejection::InstanceUnavailable);
+    }
+    if projection.scene != CorePrivateRouteSceneV1::CoreMicrorealm
+        || projection.phase != CorePrivateRoutePhaseV1::MicrorealmCleared
+    {
+        return Err(CoreBellPortalRejection::NotCleared);
+    }
+    if !control.actor.bell_portal_in_range() {
+        return Err(CoreBellPortalRejection::OutOfRange);
+    }
+    if control.reservation.is_some() {
+        return Err(CoreBellPortalRejection::TransferInProgress);
+    }
+    let permit = CoreBellPortalPermit {
+        permit_id: derive_permit_id(projection, &binding),
+        actor_generation: projection.actor_generation,
+        route_state_version: projection.state_version,
+        binding,
+    };
+    control.reservation = Some(permit.clone());
+    Ok(permit)
+}
+
+fn handle_commit_bell_portal(
+    control: &Mutex<CorePrivateRouteActorControl>,
+    permit: &CoreBellPortalPermit,
+    transition: &CoreBellPortalTransition,
+) -> Result<(), CoreBellPortalRejection> {
+    if !valid_transition(&permit.binding, transition) {
+        return Err(CoreBellPortalRejection::ServiceUnavailable);
+    }
+    let mut control = lock(control);
+    if control.retired
+        || control.reservation.as_ref() != Some(permit)
+        || control.actor.projection().actor_generation != permit.actor_generation
+        || control.actor.projection().state_version != permit.route_state_version
+    {
+        return Err(CoreBellPortalRejection::InstanceUnavailable);
+    }
+    control
+        .actor
+        .commit_bell_portal(transition.destination_character_version)
+        .map_err(|_| CoreBellPortalRejection::ServiceUnavailable)?;
+    control.reservation = None;
+    Ok(())
+}
+
+fn handle_reconcile_bell_portal(
+    control: &Mutex<CorePrivateRouteActorControl>,
+    transition: &CoreBellPortalTransition,
+) -> Result<(), CoreBellPortalRejection> {
+    if !valid_transition(&transition.binding, transition) {
+        return Err(CoreBellPortalRejection::ServiceUnavailable);
+    }
+    let mut control = lock(control);
+    if control.retired
+        || control.actor.world_flow_revision() != &transition.binding.content_revision
+    {
+        return Err(CoreBellPortalRejection::InstanceUnavailable);
+    }
+    if let Some(reservation) = &control.reservation {
+        if reservation.binding != transition.binding {
+            return Err(CoreBellPortalRejection::TransferInProgress);
+        }
+        control.reservation = None;
+    }
+    let projection = control.actor.projection();
+    if projection.character_version > transition.destination_character_version {
+        return Ok(());
+    }
+    if projection.character_version == transition.destination_character_version
+        && projection.scene == CorePrivateRouteSceneV1::BellSepulcher
+        && projection.instance_lineage_id == Some(transition.binding.instance_lineage_id)
+    {
+        return Ok(());
+    }
+    if projection.character_version != transition.binding.character_version
+        || projection.character_id != transition.binding.character_id
+        || projection.instance_lineage_id != Some(transition.binding.instance_lineage_id)
+    {
+        return Err(CoreBellPortalRejection::InstanceUnavailable);
+    }
+    control
+        .actor
+        .reconcile_bell_portal(transition.destination_character_version)
+        .map_err(|_| CoreBellPortalRejection::ServiceUnavailable)?;
+    Ok(())
+}
+
+fn release_bell_reservation(
+    control: &Mutex<CorePrivateRouteActorControl>,
+    permit: &CoreBellPortalPermit,
+) {
+    let mut control = lock(control);
+    if control.reservation.as_ref() == Some(permit) {
+        control.reservation = None;
+    }
 }
 
 fn derive_permit_id(

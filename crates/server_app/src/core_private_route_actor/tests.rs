@@ -361,12 +361,11 @@ async fn reconcile_applies_committed_bell_once_and_never_rewinds_later_room_stat
     assert_eq!(snapshot.phase, CorePrivateRoutePhaseV1::RoomDormant);
 
     directory.begin_shutdown();
-    assert!(
-        directory
-            .finish_shutdown()
-            .await
-            .expect("shutdown")
-            .zero_residue
+    let report = directory.finish_shutdown().await.expect("shutdown");
+    assert!(report.zero_residue);
+    assert_eq!(
+        report.served_actor_commands, 7,
+        "four micro-realm advances, two reconciliations, and one room advance share the mailbox"
     );
 }
 
