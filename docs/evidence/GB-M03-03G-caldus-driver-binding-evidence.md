@@ -36,4 +36,4 @@ The PostgreSQL reward coordinator still performs personal item, progression, and
 
 ## Current Next Step
 
-Add the durable Caldus danger-lineage and terminal-winner precondition under the shared PostgreSQL lock order, with injected races between personal item, progression, and exit finalization. Then install the session-owned automatic retry/acknowledgement worker and bind production extraction only from its committed `BossExitReady` result. Keep normal admission disabled.
+Commits `308767f` and `57e4ca2` close the durable danger-root/terminal-winner precondition under [terminal-arbitration evidence](GB-M03-03G-caldus-terminal-arbitration-evidence.md). Next install the session-owned automatic retry/acknowledgement worker, publish pending-at-risk inventory, and bind production extraction only from its committed `BossExitReady` result. Keep normal admission disabled.

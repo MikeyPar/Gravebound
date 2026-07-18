@@ -4,7 +4,7 @@ Gravebound is a server-authoritative, permanent-death, 2D dark-fantasy bullet-he
 
 Every character life is temporary. The account remembers what happened, and exceptional deaths can return as personalized Fallen Hero Echo encounters. The design emphasizes readable combat, rapid recovery, fair monetization, solo viability, and long-term replayability without permanent account-level combat power.
 
-> **Project status:** M01 and M02 are closed. GB-M03 is approximately **92% complete**. Identity, PostgreSQL persistence, Hall/private-world foundations, progression, the complete item/Vault lifecycle, Oath/Bargain, Ash, atomic death/Memorial/Echo persistence, extraction/Emergency Recall/ResolutionHold, and successor recovery are closed under hosted evidence. The active private-route integration now reaches deterministic Sir Caldus defeat and freezes exact reward eligibility until a matching durable result alone unlocks the stable exit. Remaining work is PostgreSQL/session composition for that result and pending inventory, production extraction binding, bound normal admission, telemetry/support/hosting packages, and final hosted/private-cohort/platform gates.
+> **Project status:** M01 and M02 are closed. GB-M03 is approximately **92% complete**. Identity, PostgreSQL persistence, Hall/private-world foundations, progression, the complete item/Vault lifecycle, Oath/Bargain, Ash, atomic death/Memorial/Echo persistence, extraction/Emergency Recall/ResolutionHold, and successor recovery are closed under hosted evidence. The active private-route integration now reaches deterministic Sir Caldus defeat; its item, XP, and exit writes share account-first terminal arbitration and exact danger-root validation. Remaining work is automatic session execution and pending-inventory publication, production extraction binding, bound normal admission, telemetry/support/hosting packages, and final hosted/private-cohort/platform gates.
 
 ![Bell Sepulcher gameplay concept](Concept%20Art/01-bell-sepulcher-gameplay.png)
 
@@ -156,7 +156,7 @@ Concept images establish mood, hierarchy, and visual language. They are not fina
 
 ## Current Next Step
 
-Commit `0cb44f0` now consumes B5 into Caldus inside the same persistent 30 Hz task, pins validated presentation content at Bell conversion, exposes frozen reward/terminal/exit observations, rejects stale acknowledgements without faulting, and carries the exact accepted B3 progression version into B6; see the [driver-binding evidence](docs/evidence/GB-M03-03G-caldus-driver-binding-evidence.md). Next add the durable danger-lineage/terminal-winner precondition across Caldus item, progression, and exit finalization, then install the automatic session executor and production extraction binding. Bound normal-server construction, hosted adverse/restart proof, and normal admission remain disabled.
+Commits `308767f` and `57e4ca2` carry the exact Bell restore root into the frozen Caldus defeat and make fresh item, XP, and exit writes share account-first terminal arbitration; exact stored results still replay after a terminal winner. See the [terminal-arbitration evidence](docs/evidence/GB-M03-03G-caldus-terminal-arbitration-evidence.md). Next install the session-owned automatic Caldus executor, publish pending-at-risk inventory, and bind production extraction only after committed `BossExitReady`; then run hosted PostgreSQL/real-QUIC adverse and restart proof. Bound normal-server construction and normal admission remain disabled.
 
 ### Historical cumulative record
 

@@ -38,4 +38,4 @@ This slice freezes and acknowledges one exact durable Caldus result but does not
 
 ## Current Next Step
 
-Commit `0cb44f0` closes the same-task B6 driver and authenticated coordinator seam under [driver-binding evidence](GB-M03-03G-caldus-driver-binding-evidence.md). Next add the durable danger-lineage/terminal-winner precondition across personal item, progression, and exit finalization, then install the automatic session retry/acknowledgement worker and bind production extraction only from committed `BossExitReady`. Keep normal admission disabled.
+Commits `308767f` and `57e4ca2` close restore-root propagation and shared terminal arbitration under [terminal-arbitration evidence](GB-M03-03G-caldus-terminal-arbitration-evidence.md). Next install the automatic session retry/acknowledgement worker, publish pending-at-risk inventory, and bind production extraction only from committed `BossExitReady`. Keep normal admission disabled.
