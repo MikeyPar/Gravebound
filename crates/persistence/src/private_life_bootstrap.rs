@@ -12,6 +12,8 @@
 //! restart resolver then invokes the existing atomic crash-restoration writer with a stable
 //! mutation identity. A committed death, extraction, or Recall wins that race.
 
+use std::collections::BTreeSet;
+
 use sqlx::{PgConnection, Row};
 
 use crate::danger_crash_restore::derived_identity;
@@ -23,7 +25,8 @@ use crate::world_flow::decode_location;
 use crate::{
     DangerCrashRestoreCode, DangerCrashRestoreReceipt, DangerCrashRestoreRequest,
     DangerCrashRestoreTransaction, DangerCrashRestoreVersions, PersistenceError,
-    PostgresPersistence, StoredCommittedDeathTerminalV1, StoredCommittedExtractionTerminalV1,
+    PostgresPersistence, ProductionExtractionExpectedVersionsV1, StoredActiveDangerAuthorityV1,
+    StoredCommittedDeathTerminalV1, StoredCommittedExtractionTerminalV1,
     StoredCommittedRecallTerminalV1, StoredResolutionHoldSnapshotV1, StoredSafeArrival,
     StoredWorldFlowRevisionV1, StoredWorldLocation, WIPEABLE_CORE_NAMESPACE,
     is_retryable_transaction_failure,
@@ -35,6 +38,9 @@ pub const PRIVATE_LIFE_LAYOUT_ID_V1: &str = "layout.core_private_life_01";
 pub const PRIVATE_LIFE_CLASS_ID_V1: &str = "class.grave_arbalist";
 pub const PRIVATE_LIFE_CHARACTER_SELECT_RETURN_SPAWN_ID_V1: &str =
     "spawn.hub.character_select_return";
+pub const CURRENT_DANGER_EXTRACTION_SNAPSHOT_SCHEMA_VERSION_V1: u16 = 1;
+pub const MAX_CURRENT_DANGER_PENDING_ITEMS_V1: usize = 64;
+pub const MAX_CURRENT_DANGER_PENDING_MATERIALS_V1: usize = 4;
 
 const MAX_TRANSACTION_ATTEMPTS: u8 = 8;
 const LIFE_LIVING: i16 = 0;
@@ -46,6 +52,11 @@ const LINEAGE_ACTIVE: i16 = 1;
 const CORE_RESTORE_CONTRACT_VERSION: i16 = 3;
 const CORE_RESTORE_COMPONENT_MASK: i16 = 31;
 const CRASH_MUTATION_CONTEXT_V1: &str = "gravebound.private-life-process-restart-crash-mutation.v1";
+const ITEM_EQUIPMENT: i16 = 0;
+const ITEM_CONSUMABLE: i16 = 1;
+const SECURITY_AT_RISK_PENDING: i16 = 2;
+const LOCATION_RUN_BACKPACK: i16 = 2;
+const LOCATION_PERSONAL_GROUND: i16 = 3;
 
 const SELECTED_CHARACTER_SQL: &str =
     "SELECT character.class_id,character.level,character.life_state,
@@ -301,6 +312,121 @@ pub struct StoredPrivateLifeBootstrapV1 {
     pub state: StoredPrivateLifeBootstrapStateV1,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoredCurrentDangerPendingItemKindV1 {
+    Equipment,
+    Consumable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum StoredCurrentDangerPendingItemLocationV1 {
+    RunBackpack(u8),
+    PersonalGround {
+        instance_id: [u8; 16],
+        pickup_id: [u8; 16],
+        expires_at_tick: u64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredCurrentDangerPendingItemV1 {
+    pub item_uid: [u8; 16],
+    pub template_id: String,
+    pub kind: StoredCurrentDangerPendingItemKindV1,
+    pub item_version: u64,
+    pub location: StoredCurrentDangerPendingItemLocationV1,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredCurrentDangerPendingMaterialV1 {
+    pub material_id: String,
+    pub quantity: u16,
+    pub material_version: u64,
+}
+
+/// One coherent, production read-only view of the currently selected danger route.
+///
+/// This projection is intentionally loaded through the same terminal-first private-life bootstrap
+/// path used by normal admission. It never invokes process-restart crash restoration. The
+/// authority comes from `Gravebound_Production_GDD_v1_Canonical.md` `TECH-015`/`021`-`023` and
+/// `LOOT-033`/`050`; `Gravebound_Content_Production_Spec_v1.md` Core private-life and Bell
+/// Sepulcher/Caldus records; and `Gravebound_Development_Roadmap_v1.md` `GB-M03-03`/`08`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredCurrentDangerExtractionSnapshotV1 {
+    pub schema_version: u16,
+    pub authority: StoredActiveDangerAuthorityV1,
+    pub location_content_id: String,
+    pub content_revision: StoredWorldFlowRevisionV1,
+    pub expected_versions: ProductionExtractionExpectedVersionsV1,
+    pub pending_items: Vec<StoredCurrentDangerPendingItemV1>,
+    pub pending_materials: Vec<StoredCurrentDangerPendingMaterialV1>,
+}
+
+impl StoredCurrentDangerExtractionSnapshotV1 {
+    pub fn validate(&self) -> Result<(), PersistenceError> {
+        self.authority.validate()?;
+        if self.schema_version != CURRENT_DANGER_EXTRACTION_SNAPSHOT_SCHEMA_VERSION_V1
+            || self.location_content_id.is_empty()
+            || !valid_revision(&self.content_revision)
+            || self.pending_items.len() > MAX_CURRENT_DANGER_PENDING_ITEMS_V1
+            || self.pending_materials.len() > MAX_CURRENT_DANGER_PENDING_MATERIALS_V1
+            || [
+                self.expected_versions.account,
+                self.expected_versions.character,
+                self.expected_versions.world,
+                self.expected_versions.inventory,
+                self.expected_versions.life_metrics,
+            ]
+            .contains(&0)
+            || self.expected_versions.character != self.expected_versions.world
+        {
+            return Err(corrupt_current_danger_snapshot());
+        }
+        let mut item_uids = BTreeSet::new();
+        let mut previous_item_key = None;
+        for item in &self.pending_items {
+            let location_key = match item.location {
+                StoredCurrentDangerPendingItemLocationV1::RunBackpack(slot) if slot < 8 => {
+                    (0_u8, [0; 16], [0; 16], u64::from(slot))
+                }
+                StoredCurrentDangerPendingItemLocationV1::PersonalGround {
+                    instance_id,
+                    pickup_id,
+                    expires_at_tick,
+                } if instance_id != [0; 16] && pickup_id != [0; 16] && expires_at_tick > 0 => {
+                    (1, instance_id, pickup_id, expires_at_tick)
+                }
+                _ => return Err(corrupt_current_danger_snapshot()),
+            };
+            let key = (location_key, item.item_uid);
+            if item.item_uid == [0; 16]
+                || !(3..=96).contains(&item.template_id.len())
+                || item.item_version == 0
+                || !item_uids.insert(item.item_uid)
+                || previous_item_key.is_some_and(|previous| previous >= key)
+            {
+                return Err(corrupt_current_danger_snapshot());
+            }
+            previous_item_key = Some(key);
+        }
+        let mut material_ids = BTreeSet::new();
+        let mut previous_material_id: Option<&str> = None;
+        for material in &self.pending_materials {
+            if !(3..=96).contains(&material.material_id.len())
+                || material.quantity == 0
+                || material.material_version == 0
+                || !material_ids.insert(material.material_id.as_str())
+                || previous_material_id
+                    .is_some_and(|previous| previous >= material.material_id.as_str())
+            {
+                return Err(corrupt_current_danger_snapshot());
+            }
+            previous_material_id = Some(&material.material_id);
+        }
+        Ok(())
+    }
+}
+
 impl StoredPrivateLifeBootstrapV1 {
     pub fn validate(&self) -> Result<(), PersistenceError> {
         if self.schema_version != PRIVATE_LIFE_BOOTSTRAP_SCHEMA_VERSION_V1
@@ -413,29 +539,100 @@ impl PostgresPersistence {
         account_id: [u8; 16],
     ) -> Result<StoredPrivateLifeBootstrapV1, PersistenceError> {
         let mut transaction = self.begin_transaction().await?;
-        let (account_version, selected_character_id) =
-            lock_bootstrap_account(transaction.connection(), account_id).await?;
-        let state = match selected_character_id {
-            None => load_unselected_state(transaction.connection(), account_id).await?,
-            Some(character_id) => {
-                load_selected_state(
-                    transaction.connection(),
-                    account_id,
-                    account_version,
-                    character_id,
-                )
-                .await?
-            }
-        };
-        let bootstrap = StoredPrivateLifeBootstrapV1 {
-            schema_version: PRIVATE_LIFE_BOOTSTRAP_SCHEMA_VERSION_V1,
-            account_id,
-            account_version,
-            state,
-        };
-        bootstrap.validate()?;
+        let bootstrap =
+            load_private_life_bootstrap_v1_on(transaction.connection(), account_id).await?;
         transaction.rollback().await?;
         Ok(bootstrap)
+    }
+
+    /// Loads exact post-mutation extraction versions and pending run custody without repairing or
+    /// resuming danger. The expected authority and content revision are server-owned bindings.
+    pub async fn load_current_danger_extraction_snapshot_v1(
+        &self,
+        authority: StoredActiveDangerAuthorityV1,
+        expected_content_revision: &StoredWorldFlowRevisionV1,
+    ) -> Result<StoredCurrentDangerExtractionSnapshotV1, PersistenceError> {
+        authority.validate()?;
+        if !valid_revision(expected_content_revision) {
+            return Err(PersistenceError::CurrentDangerExtractionSnapshotContentMismatch);
+        }
+        for attempt in 1..=MAX_TRANSACTION_ATTEMPTS {
+            match self
+                .load_current_danger_extraction_snapshot_once_v1(
+                    authority,
+                    expected_content_revision,
+                )
+                .await
+            {
+                Err(error)
+                    if attempt < MAX_TRANSACTION_ATTEMPTS
+                        && is_retryable_transaction_failure(&error) => {}
+                result => return result,
+            }
+        }
+        unreachable!("bounded current-danger snapshot loop always returns")
+    }
+
+    async fn load_current_danger_extraction_snapshot_once_v1(
+        &self,
+        authority: StoredActiveDangerAuthorityV1,
+        expected_content_revision: &StoredWorldFlowRevisionV1,
+    ) -> Result<StoredCurrentDangerExtractionSnapshotV1, PersistenceError> {
+        let mut transaction = self.begin_transaction().await?;
+        let bootstrap =
+            load_private_life_bootstrap_v1_on(transaction.connection(), authority.account_id)
+                .await?;
+        let StoredPrivateLifeBootstrapStateV1::DangerRequiresCrashRestore { character, danger } =
+            bootstrap.state
+        else {
+            return Err(PersistenceError::CurrentDangerExtractionSnapshotBindingMismatch);
+        };
+        if character.character_id != authority.character_id
+            || danger.lineage_id != authority.instance_lineage_id
+            || danger.restore_point_id != authority.entry_restore_point_id
+        {
+            return Err(PersistenceError::CurrentDangerExtractionSnapshotBindingMismatch);
+        }
+        if danger.content_revision != *expected_content_revision {
+            return Err(PersistenceError::CurrentDangerExtractionSnapshotContentMismatch);
+        }
+        reject_current_danger_unresolved_reward_v1(
+            transaction.connection(),
+            authority.account_id,
+            authority.character_id,
+        )
+        .await?;
+        let pending_items = load_current_danger_pending_items_v1(
+            transaction.connection(),
+            authority.account_id,
+            authority.character_id,
+        )
+        .await?;
+        let pending_materials = load_current_danger_pending_materials_v1(
+            transaction.connection(),
+            authority.account_id,
+            authority.character_id,
+        )
+        .await?;
+        let versions = character.versions;
+        let snapshot = StoredCurrentDangerExtractionSnapshotV1 {
+            schema_version: CURRENT_DANGER_EXTRACTION_SNAPSHOT_SCHEMA_VERSION_V1,
+            authority,
+            location_content_id: danger.location_content_id,
+            content_revision: danger.content_revision,
+            expected_versions: ProductionExtractionExpectedVersionsV1 {
+                account: versions.account,
+                character: versions.character,
+                world: versions.world,
+                inventory: versions.inventory,
+                life_metrics: versions.life_metrics,
+            },
+            pending_items,
+            pending_materials,
+        };
+        snapshot.validate()?;
+        transaction.rollback().await?;
+        Ok(snapshot)
     }
 
     /// Process-restart-only resolver. Within-process reconnect must reattach the retained actor
@@ -507,6 +704,175 @@ pub fn derive_private_life_crash_mutation_id_v1(
         return Err(corrupt());
     }
     Ok(mutation_id)
+}
+
+async fn load_private_life_bootstrap_v1_on(
+    connection: &mut PgConnection,
+    account_id: [u8; 16],
+) -> Result<StoredPrivateLifeBootstrapV1, PersistenceError> {
+    let (account_version, selected_character_id) =
+        lock_bootstrap_account(connection, account_id).await?;
+    let state = match selected_character_id {
+        None => load_unselected_state(connection, account_id).await?,
+        Some(character_id) => {
+            load_selected_state(connection, account_id, account_version, character_id).await?
+        }
+    };
+    let bootstrap = StoredPrivateLifeBootstrapV1 {
+        schema_version: PRIVATE_LIFE_BOOTSTRAP_SCHEMA_VERSION_V1,
+        account_id,
+        account_version,
+        state,
+    };
+    bootstrap.validate()?;
+    Ok(bootstrap)
+}
+
+async fn load_current_danger_pending_items_v1(
+    connection: &mut PgConnection,
+    account_id: [u8; 16],
+    character_id: [u8; 16],
+) -> Result<Vec<StoredCurrentDangerPendingItemV1>, PersistenceError> {
+    let rows = sqlx::query(
+        "SELECT item_uid,template_id,content_revision,item_kind,item_version,security_state,
+                location_kind,slot_index,instance_id,pickup_id,expires_at_tick
+           FROM item_instances
+          WHERE namespace_id=$1 AND account_id=$2 AND character_id=$3
+            AND security_state=$4 AND location_kind IN ($5,$6)
+          ORDER BY location_kind,slot_index NULLS LAST,instance_id NULLS FIRST,
+                   pickup_id NULLS FIRST,item_uid
+          LIMIT $7
+          FOR SHARE",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
+    .bind(SECURITY_AT_RISK_PENDING)
+    .bind(LOCATION_RUN_BACKPACK)
+    .bind(LOCATION_PERSONAL_GROUND)
+    .bind(
+        i64::try_from(MAX_CURRENT_DANGER_PENDING_ITEMS_V1 + 1)
+            .map_err(|_| corrupt_current_danger_snapshot())?,
+    )
+    .fetch_all(connection)
+    .await?;
+    if rows.len() > MAX_CURRENT_DANGER_PENDING_ITEMS_V1 {
+        return Err(corrupt_current_danger_snapshot());
+    }
+    rows.into_iter()
+        .map(|row| {
+            if row.try_get::<String, _>("content_revision")? != crate::CORE_ITEM_CONTENT_REVISION {
+                return Err(PersistenceError::CurrentDangerExtractionSnapshotContentMismatch);
+            }
+            if row.try_get::<i16, _>("security_state")? != SECURITY_AT_RISK_PENDING {
+                return Err(corrupt_current_danger_snapshot());
+            }
+            let kind = match row.try_get::<i16, _>("item_kind")? {
+                ITEM_EQUIPMENT => StoredCurrentDangerPendingItemKindV1::Equipment,
+                ITEM_CONSUMABLE => StoredCurrentDangerPendingItemKindV1::Consumable,
+                _ => return Err(corrupt_current_danger_snapshot()),
+            };
+            let location = match row.try_get::<i16, _>("location_kind")? {
+                LOCATION_RUN_BACKPACK => StoredCurrentDangerPendingItemLocationV1::RunBackpack(
+                    required_u8(row.try_get("slot_index")?)?,
+                ),
+                LOCATION_PERSONAL_GROUND => {
+                    StoredCurrentDangerPendingItemLocationV1::PersonalGround {
+                        instance_id: current_snapshot_exact_id(
+                            row.try_get::<Option<Vec<u8>>, _>("instance_id")?
+                                .ok_or_else(corrupt_current_danger_snapshot)?,
+                        )?,
+                        pickup_id: current_snapshot_exact_id(
+                            row.try_get::<Option<Vec<u8>>, _>("pickup_id")?
+                                .ok_or_else(corrupt_current_danger_snapshot)?,
+                        )?,
+                        expires_at_tick: optional_positive_u64(row.try_get("expires_at_tick")?)?
+                            .ok_or_else(corrupt_current_danger_snapshot)?,
+                    }
+                }
+                _ => return Err(corrupt_current_danger_snapshot()),
+            };
+            Ok(StoredCurrentDangerPendingItemV1 {
+                item_uid: current_snapshot_exact_id(row.try_get("item_uid")?)?,
+                template_id: row.try_get("template_id")?,
+                kind,
+                item_version: current_snapshot_positive_u64(row.try_get("item_version")?)?,
+                location,
+            })
+        })
+        .collect()
+}
+
+async fn reject_current_danger_unresolved_reward_v1(
+    connection: &mut PgConnection,
+    account_id: [u8; 16],
+    character_id: [u8; 16],
+) -> Result<(), PersistenceError> {
+    let unresolved: Option<Vec<u8>> = sqlx::query_scalar(
+        "SELECT reward_request_id FROM reward_requests
+          WHERE namespace_id=$1 AND account_id=$2 AND character_id=$3 AND request_state=0
+          ORDER BY reward_request_id LIMIT 1 FOR SHARE",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
+    .fetch_optional(connection)
+    .await?;
+    if unresolved.is_some() {
+        return Err(PersistenceError::ProductionExtractionUnresolvedMutation);
+    }
+    Ok(())
+}
+
+async fn load_current_danger_pending_materials_v1(
+    connection: &mut PgConnection,
+    account_id: [u8; 16],
+    character_id: [u8; 16],
+) -> Result<Vec<StoredCurrentDangerPendingMaterialV1>, PersistenceError> {
+    let rows = sqlx::query(
+        "SELECT material_id,quantity,material_version,security_state
+           FROM character_run_material_stacks
+          WHERE namespace_id=$1 AND account_id=$2 AND character_id=$3
+            AND security_state=$4 AND quantity>0
+          ORDER BY material_id COLLATE \"C\"
+          LIMIT $5
+          FOR SHARE",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
+    .bind(SECURITY_AT_RISK_PENDING)
+    .bind(
+        i64::try_from(MAX_CURRENT_DANGER_PENDING_MATERIALS_V1 + 1)
+            .map_err(|_| corrupt_current_danger_snapshot())?,
+    )
+    .fetch_all(connection)
+    .await?;
+    if rows.len() > MAX_CURRENT_DANGER_PENDING_MATERIALS_V1 {
+        return Err(corrupt_current_danger_snapshot());
+    }
+    rows.into_iter()
+        .map(|row| {
+            if row.try_get::<i16, _>("security_state")? != SECURITY_AT_RISK_PENDING {
+                return Err(corrupt_current_danger_snapshot());
+            }
+            let material_id: String = row.try_get("material_id")?;
+            if !matches!(
+                material_id.as_str(),
+                "material.bell_brass"
+                    | "material.echo_ember"
+                    | "material.funeral_root"
+                    | "material.saltglass_shard"
+            ) {
+                return Err(PersistenceError::CurrentDangerExtractionSnapshotContentMismatch);
+            }
+            Ok(StoredCurrentDangerPendingMaterialV1 {
+                material_id,
+                quantity: positive_u16(row.try_get("quantity")?)?,
+                material_version: current_snapshot_positive_u64(row.try_get("material_version")?)?,
+            })
+        })
+        .collect()
 }
 
 async fn lock_bootstrap_account(
@@ -932,12 +1298,50 @@ fn positive_u64(value: i64) -> Result<u64, PersistenceError> {
         .ok_or_else(corrupt)
 }
 
+fn optional_positive_u64(value: Option<i64>) -> Result<Option<u64>, PersistenceError> {
+    value.map(current_snapshot_positive_u64).transpose()
+}
+
+fn current_snapshot_positive_u64(value: i64) -> Result<u64, PersistenceError> {
+    u64::try_from(value)
+        .ok()
+        .filter(|value| *value > 0)
+        .ok_or_else(corrupt_current_danger_snapshot)
+}
+
+fn current_snapshot_exact_id(value: Vec<u8>) -> Result<[u8; 16], PersistenceError> {
+    let value: [u8; 16] = value
+        .try_into()
+        .map_err(|_| corrupt_current_danger_snapshot())?;
+    if value == [0; 16] {
+        return Err(corrupt_current_danger_snapshot());
+    }
+    Ok(value)
+}
+
+fn required_u8(value: Option<i16>) -> Result<u8, PersistenceError> {
+    value
+        .and_then(|value| u8::try_from(value).ok())
+        .ok_or_else(corrupt_current_danger_snapshot)
+}
+
+fn positive_u16(value: i32) -> Result<u16, PersistenceError> {
+    u16::try_from(value)
+        .ok()
+        .filter(|value| *value > 0)
+        .ok_or_else(corrupt_current_danger_snapshot)
+}
+
 fn i64_value(value: u64) -> Result<i64, PersistenceError> {
     i64::try_from(value).map_err(|_| corrupt())
 }
 
 const fn corrupt() -> PersistenceError {
     PersistenceError::CorruptStoredPrivateLifeBootstrap
+}
+
+const fn corrupt_current_danger_snapshot() -> PersistenceError {
+    PersistenceError::CorruptStoredCurrentDangerExtractionSnapshot
 }
 
 #[cfg(test)]
@@ -1035,6 +1439,114 @@ mod tests {
             assets_blake3: "b".repeat(64),
             localization_blake3: "c".repeat(64),
         }));
+    }
+
+    #[test]
+    fn current_danger_snapshot_accepts_canonical_bounded_pending_custody() {
+        let snapshot = current_danger_snapshot();
+        snapshot.validate().unwrap();
+        assert_eq!(snapshot.expected_versions.inventory, 4);
+        assert!(matches!(
+            snapshot.pending_items[0].location,
+            StoredCurrentDangerPendingItemLocationV1::RunBackpack(0)
+        ));
+        assert!(matches!(
+            snapshot.pending_items[1].location,
+            StoredCurrentDangerPendingItemLocationV1::PersonalGround { .. }
+        ));
+    }
+
+    #[test]
+    fn current_danger_snapshot_rejects_stale_or_unbounded_projection_material() {
+        let mut stale = current_danger_snapshot();
+        stale.expected_versions.world += 1;
+        assert!(matches!(
+            stale.validate(),
+            Err(PersistenceError::CorruptStoredCurrentDangerExtractionSnapshot)
+        ));
+
+        let mut duplicate = current_danger_snapshot();
+        duplicate.pending_items[1].item_uid = duplicate.pending_items[0].item_uid;
+        assert!(duplicate.validate().is_err());
+
+        let mut invalid_slot = current_danger_snapshot();
+        invalid_slot.pending_items[0].location =
+            StoredCurrentDangerPendingItemLocationV1::RunBackpack(8);
+        assert!(invalid_slot.validate().is_err());
+
+        let mut oversized = current_danger_snapshot();
+        oversized.pending_items = (0..=MAX_CURRENT_DANGER_PENDING_ITEMS_V1)
+            .map(|index| StoredCurrentDangerPendingItemV1 {
+                item_uid: {
+                    let mut uid = [1; 16];
+                    uid[..8].copy_from_slice(&(index as u64 + 1).to_be_bytes());
+                    uid
+                },
+                template_id: "item.tonic".into(),
+                kind: StoredCurrentDangerPendingItemKindV1::Consumable,
+                item_version: 1,
+                location: StoredCurrentDangerPendingItemLocationV1::PersonalGround {
+                    instance_id: [3; 16],
+                    pickup_id: {
+                        let mut pickup = [4; 16];
+                        pickup[..8].copy_from_slice(&(index as u64 + 1).to_be_bytes());
+                        pickup
+                    },
+                    expires_at_tick: 1_800,
+                },
+            })
+            .collect();
+        assert!(oversized.validate().is_err());
+    }
+
+    fn current_danger_snapshot() -> StoredCurrentDangerExtractionSnapshotV1 {
+        StoredCurrentDangerExtractionSnapshotV1 {
+            schema_version: CURRENT_DANGER_EXTRACTION_SNAPSHOT_SCHEMA_VERSION_V1,
+            authority: StoredActiveDangerAuthorityV1 {
+                account_id: [1; 16],
+                character_id: [2; 16],
+                instance_lineage_id: [3; 16],
+                entry_restore_point_id: [4; 16],
+            },
+            location_content_id: "world.core_microrealm_01".into(),
+            content_revision: StoredWorldFlowRevisionV1 {
+                records_blake3: "a".repeat(64),
+                assets_blake3: "b".repeat(64),
+                localization_blake3: "c".repeat(64),
+            },
+            expected_versions: ProductionExtractionExpectedVersionsV1 {
+                account: 3,
+                character: 2,
+                world: 2,
+                inventory: 4,
+                life_metrics: 5,
+            },
+            pending_items: vec![
+                StoredCurrentDangerPendingItemV1 {
+                    item_uid: [5; 16],
+                    template_id: "item.weapon".into(),
+                    kind: StoredCurrentDangerPendingItemKindV1::Equipment,
+                    item_version: 1,
+                    location: StoredCurrentDangerPendingItemLocationV1::RunBackpack(0),
+                },
+                StoredCurrentDangerPendingItemV1 {
+                    item_uid: [6; 16],
+                    template_id: "item.tonic".into(),
+                    kind: StoredCurrentDangerPendingItemKindV1::Consumable,
+                    item_version: 1,
+                    location: StoredCurrentDangerPendingItemLocationV1::PersonalGround {
+                        instance_id: [7; 16],
+                        pickup_id: [8; 16],
+                        expires_at_tick: 1_800,
+                    },
+                },
+            ],
+            pending_materials: vec![StoredCurrentDangerPendingMaterialV1 {
+                material_id: "material.bell_brass".into(),
+                quantity: 2,
+                material_version: 1,
+            }],
+        }
     }
 
     fn hall_bootstrap(

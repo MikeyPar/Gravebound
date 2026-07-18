@@ -321,50 +321,13 @@ fn private_route_revision() -> CorePrivateRouteContentRevisionV1 {
     }
 }
 
-async fn live_extraction_versions(
-    persistence: &PostgresPersistence,
-    account_id: [u8; 16],
-    character_id: [u8; 16],
-) -> ProductionExtractionExpectedVersionsV1 {
-    let mut transaction = persistence.begin_transaction().await.unwrap();
-    let versions: (i64, i64, i64, i64, i64) = sqlx::query_as(
-        "SELECT account.state_version,character.character_state_version,
-                world.character_version,inventory.inventory_version,life.life_metrics_version
-           FROM accounts AS account
-           JOIN characters AS character
-             ON character.namespace_id=account.namespace_id
-            AND character.account_id=account.account_id
-           JOIN character_world_locations AS world
-             ON world.namespace_id=character.namespace_id
-            AND world.account_id=character.account_id
-            AND world.character_id=character.character_id
-           JOIN character_inventories AS inventory
-             ON inventory.namespace_id=character.namespace_id
-            AND inventory.account_id=character.account_id
-            AND inventory.character_id=character.character_id
-           JOIN character_life_metrics AS life
-             ON life.namespace_id=character.namespace_id
-            AND life.account_id=character.account_id
-            AND life.character_id=character.character_id
-          WHERE account.namespace_id=$1 AND account.account_id=$2
-            AND character.character_id=$3",
-    )
-    .bind(WIPEABLE_CORE_NAMESPACE)
-    .bind(account_id.as_slice())
-    .bind(character_id.as_slice())
-    .fetch_one(transaction.connection())
-    .await
-    .unwrap();
-    transaction.rollback().await.unwrap();
-    let versions = ProductionExtractionExpectedVersionsV1 {
-        account: u64::try_from(versions.0).unwrap(),
-        character: u64::try_from(versions.1).unwrap(),
-        world: u64::try_from(versions.2).unwrap(),
-        inventory: u64::try_from(versions.3).unwrap(),
-        life_metrics: u64::try_from(versions.4).unwrap(),
-    };
-    assert_eq!(versions.character, versions.world);
-    versions
+fn stored_world_flow_revision() -> StoredWorldFlowRevisionV1 {
+    let revision = world_flow_revision();
+    StoredWorldFlowRevisionV1 {
+        records_blake3: revision.records_blake3.as_str().to_owned(),
+        assets_blake3: revision.assets_blake3.as_str().to_owned(),
+        localization_blake3: revision.localization_blake3.as_str().to_owned(),
+    }
 }
 
 fn live_extraction_frame(
@@ -620,7 +583,6 @@ fn extraction_request(
 ) -> CaldusExtractionRequest {
     let identities = CoreCaldusVictoryIdentities::derive(lineage_id, lock).unwrap();
     let extraction = identities.extraction_for(lock.participants[0]).unwrap();
-    let revision = world_flow_revision();
     CaldusExtractionRequest {
         account_id,
         character_id,
@@ -633,12 +595,103 @@ fn extraction_request(
         party_slot: lock.participants[0].party_slot,
         participant_entity_id: lock.participants[0].entity_id.get(),
         expected_character_version: 2,
-        content_revision: StoredWorldFlowRevisionV1 {
-            records_blake3: revision.records_blake3.as_str().to_owned(),
-            assets_blake3: revision.assets_blake3.as_str().to_owned(),
-            localization_blake3: revision.localization_blake3.as_str().to_owned(),
-        },
+        content_revision: stored_world_flow_revision(),
     }
+}
+
+#[tokio::test]
+#[ignore = "requires explicitly authorized disposable PostgreSQL"]
+async fn current_danger_snapshot_reads_exact_pending_ground_and_material_custody() {
+    let persistence = disposable_database().await;
+    let account_id = [221; 16];
+    let character_id = [222; 16];
+    let lineage_id = [223; 16];
+    let restore_id = [224; 16];
+    let lock = lock(225, 1);
+    reset_fixture(&persistence, account_id, character_id, lineage_id, &lock).await;
+
+    let mut fixture = persistence.begin_transaction().await.unwrap();
+    sqlx::query(
+        "INSERT INTO item_instances
+         (namespace_id,item_uid,account_id,character_id,template_id,content_revision,
+          item_kind,item_level,rarity,creation_kind,creation_request_id,roll_index,
+          unit_ordinal,item_version,security_state,location_kind,instance_id,pickup_id,
+          expires_at_tick,provenance_kind,salvage_band,salvage_value)
+         VALUES ($1,$2,$3,$4,'item.charm.ember_tooth.t1',$5,
+          0,1,0,1,$2,0,0,1,2,3,$6,$7,31000,1,1,4)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind([226_u8; 16].as_slice())
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
+    .bind(persistence::CORE_ITEM_CONTENT_REVISION)
+    .bind([227_u8; 16].as_slice())
+    .bind([228_u8; 16].as_slice())
+    .execute(fixture.connection())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO character_run_material_stacks
+         (namespace_id,account_id,character_id,material_id,quantity,
+          material_version,security_state)
+         VALUES ($1,$2,$3,'material.bell_brass',3,1,2)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
+    .execute(fixture.connection())
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE character_inventories SET inventory_version=2
+          WHERE namespace_id=$1 AND account_id=$2 AND character_id=$3
+            AND inventory_version=1",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
+    .execute(fixture.connection())
+    .await
+    .unwrap();
+    fixture.commit().await.unwrap();
+
+    let authority = persistence::StoredActiveDangerAuthorityV1 {
+        account_id,
+        character_id,
+        instance_lineage_id: lineage_id,
+        entry_restore_point_id: restore_id,
+    };
+    let snapshot = persistence
+        .load_current_danger_extraction_snapshot_v1(authority, &stored_world_flow_revision())
+        .await
+        .unwrap();
+    assert_eq!(snapshot.expected_versions.inventory, 2);
+    assert!(snapshot.pending_items.iter().any(|item| {
+        matches!(
+            item.location,
+            persistence::StoredCurrentDangerPendingItemLocationV1::PersonalGround {
+                instance_id,
+                pickup_id,
+                expires_at_tick: 31_000,
+            } if instance_id == [227; 16] && pickup_id == [228; 16]
+        )
+    }));
+    assert_eq!(snapshot.pending_materials.len(), 1);
+    assert_eq!(
+        snapshot.pending_materials[0].material_id,
+        "material.bell_brass"
+    );
+    assert_eq!(snapshot.pending_materials[0].quantity, 3);
+
+    let mut wrong_revision = stored_world_flow_revision();
+    wrong_revision.records_blake3 = "d".repeat(64);
+    assert!(matches!(
+        persistence
+            .load_current_danger_extraction_snapshot_v1(authority, &wrong_revision)
+            .await,
+        Err(PersistenceError::CurrentDangerExtractionSnapshotContentMismatch)
+    ));
+    persistence.close().await;
 }
 
 #[tokio::test]
@@ -1304,7 +1357,22 @@ async fn live_caldus_intent_uses_the_route_permit_and_postgres_planner_across_re
         .present_exit(&caldus_content, &mut presentation)
         .unwrap();
 
-    let versions = live_extraction_versions(&persistence, account_id, character_id).await;
+    let snapshot = persistence
+        .load_current_danger_extraction_snapshot_v1(
+            persistence::StoredActiveDangerAuthorityV1 {
+                account_id,
+                character_id,
+                instance_lineage_id: lineage_id,
+                entry_restore_point_id: restore_id,
+            },
+            &stored_world_flow_revision(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(snapshot.authority.character_id, character_id);
+    assert_eq!(snapshot.content_revision, stored_world_flow_revision());
+    assert!(!snapshot.pending_items.is_empty());
+    let versions = snapshot.expected_versions;
     let generation = persistence
         .allocate_private_route_generation_v1(account_id, character_id)
         .await

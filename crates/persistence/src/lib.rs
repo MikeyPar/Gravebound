@@ -214,9 +214,13 @@ pub use oath::{
     StoredOathCharacter, StoredOathInventory, StoredOathMutationResult,
 };
 pub use private_life_bootstrap::{
-    PRIVATE_LIFE_BOOTSTRAP_SCHEMA_VERSION_V1, PRIVATE_LIFE_CHARACTER_SELECT_RETURN_SPAWN_ID_V1,
-    PRIVATE_LIFE_CLASS_ID_V1, PRIVATE_LIFE_HALL_ID_V1, PRIVATE_LIFE_LAYOUT_ID_V1,
-    ResolvedPrivateLifeProcessRestartV1, StoredPrivateLifeBootstrapStateV1,
+    CURRENT_DANGER_EXTRACTION_SNAPSHOT_SCHEMA_VERSION_V1, MAX_CURRENT_DANGER_PENDING_ITEMS_V1,
+    MAX_CURRENT_DANGER_PENDING_MATERIALS_V1, PRIVATE_LIFE_BOOTSTRAP_SCHEMA_VERSION_V1,
+    PRIVATE_LIFE_CHARACTER_SELECT_RETURN_SPAWN_ID_V1, PRIVATE_LIFE_CLASS_ID_V1,
+    PRIVATE_LIFE_HALL_ID_V1, PRIVATE_LIFE_LAYOUT_ID_V1, ResolvedPrivateLifeProcessRestartV1,
+    StoredCurrentDangerExtractionSnapshotV1, StoredCurrentDangerPendingItemKindV1,
+    StoredCurrentDangerPendingItemLocationV1, StoredCurrentDangerPendingItemV1,
+    StoredCurrentDangerPendingMaterialV1, StoredPrivateLifeBootstrapStateV1,
     StoredPrivateLifeBootstrapV1, StoredPrivateLifeDangerRootV1, StoredPrivateLifeHallV1,
     StoredPrivateLifeLifeStateV1, StoredPrivateLifeSecurityStateV1,
     StoredPrivateLifeSelectedCharacterV1, StoredPrivateLifeVersionsV1,
@@ -438,6 +442,12 @@ pub enum PersistenceError {
     PrivateLifeBootstrapAccountNotFound,
     #[error("stored private-life bootstrap authority is incomplete or corrupt")]
     CorruptStoredPrivateLifeBootstrap,
+    #[error("current-danger extraction snapshot does not match selected living route authority")]
+    CurrentDangerExtractionSnapshotBindingMismatch,
+    #[error("current-danger extraction snapshot does not match promoted Core content")]
+    CurrentDangerExtractionSnapshotContentMismatch,
+    #[error("stored current-danger extraction snapshot violates its bounded contract")]
+    CorruptStoredCurrentDangerExtractionSnapshot,
     #[error("stored danger-entry restore graph violates the v2 authority contract")]
     CorruptStoredDangerEntryRestore,
     #[error("a fresh world-flow transaction must append one typed result")]
