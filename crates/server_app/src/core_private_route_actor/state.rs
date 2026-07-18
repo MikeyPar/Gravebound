@@ -49,6 +49,7 @@ pub enum CorePrivateRouteActorAdvance {
     RoomActive,
     RoomQuiet,
     RoomCleared,
+    RoomReset,
     EnterRest,
     EnterBoss,
     BossReadyCountdown,
@@ -192,6 +193,7 @@ impl CorePrivateRouteActor {
                 CorePrivateRoutePhaseV1::RoomQuiet,
                 CorePrivateRoutePhaseV1::RoomCleared,
             )?,
+            CorePrivateRouteActorAdvance::RoomReset => self.room_reset()?,
             CorePrivateRouteActorAdvance::EnterRest => self.enter_rest()?,
             CorePrivateRouteActorAdvance::EnterBoss => self.enter_boss()?,
             CorePrivateRouteActorAdvance::BossReadyCountdown => self.boss_phase(
@@ -401,6 +403,22 @@ impl CorePrivateRouteActor {
         self.replace_position(
             self.state.character_version,
             self.position_with_phase(destination),
+        )
+    }
+
+    fn room_reset(&mut self) -> Result<(), CorePrivateRouteActorError> {
+        self.require_combat_room()?;
+        if !matches!(
+            self.state.phase,
+            CorePrivateRoutePhaseV1::RoomAwaitingDoorSafety
+                | CorePrivateRoutePhaseV1::RoomSpawnWarning
+                | CorePrivateRoutePhaseV1::RoomActive
+        ) {
+            return Err(CorePrivateRouteActorError::InvalidTransition);
+        }
+        self.replace_position(
+            self.state.character_version,
+            self.position_with_phase(CorePrivateRoutePhaseV1::RoomDormant),
         )
     }
 

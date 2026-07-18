@@ -127,6 +127,26 @@ impl CoreCharacterCombatEnvelope {
         self.movement_milli_tiles_per_second
     }
 
+    #[must_use]
+    pub(crate) const fn character_state_version(&self) -> u64 {
+        self.character_state_version
+    }
+
+    /// Rebases only the character aggregate version after an exact committed scene transfer.
+    /// Mutable combat remains in the moved player allocation; skipped, repeated, or stale
+    /// versions fail closed.
+    pub(crate) fn rebase_character_state_version(
+        &mut self,
+        source: u64,
+        destination: u64,
+    ) -> Result<(), CoreCombatFactoryError> {
+        if self.character_state_version != source || source.checked_add(1) != Some(destination) {
+            return Err(CoreCombatFactoryError::InvalidLiveHandoff);
+        }
+        self.character_state_version = destination;
+        Ok(())
+    }
+
     /// Rejoins the exact player allocation after a scene handoff. Foreign entity identity or
     /// immutable combat-axis drift fails closed instead of silently rebuilding mutable state.
     pub fn rejoin(

@@ -304,6 +304,12 @@ enum CorePrivateRouteActorCommand {
         bell_portal_in_range: bool,
         reply: oneshot::Sender<CorePrivateRouteActorReply>,
     },
+    ApplyFixedDungeonAuthority {
+        expected_state_version: u64,
+        room: CorePrivateRouteRoomV1,
+        phase: CorePrivateRoutePhaseV1,
+        reply: oneshot::Sender<CorePrivateRouteActorReply>,
+    },
     PrepareBellPortal {
         binding: CoreBellPortalBinding,
         reply: oneshot::Sender<Result<CoreBellPortalPermit, CoreBellPortalRejection>>,
@@ -369,6 +375,27 @@ impl CorePrivateRouteActorHandle {
                 expected_state_version,
                 phase,
                 bell_portal_in_range,
+                reply,
+            })
+            .await
+            .map_err(|_| CorePrivateRouteRuntimeError::ActorUnavailable)?;
+        receive
+            .await
+            .map_err(|_| CorePrivateRouteRuntimeError::ActorUnavailable)?
+    }
+
+    async fn apply_fixed_dungeon_authority(
+        &self,
+        expected_state_version: u64,
+        room: CorePrivateRouteRoomV1,
+        phase: CorePrivateRoutePhaseV1,
+    ) -> CorePrivateRouteActorReply {
+        let (reply, receive) = oneshot::channel();
+        self.commands
+            .send(CorePrivateRouteActorCommand::ApplyFixedDungeonAuthority {
+                expected_state_version,
+                room,
+                phase,
                 reply,
             })
             .await
@@ -743,6 +770,21 @@ impl CorePrivateRouteActorDirectory {
             .await
     }
 
+    /// Atomically converges one server-owned fixed-dungeon simulation result. A single frame may
+    /// legitimately lock a participant and close a clear doorway, or activate and immediately
+    /// clear the final hostile; the complete canonical phase path commits under one actor lock.
+    pub(crate) async fn apply_fixed_dungeon_authority(
+        &self,
+        lease: CorePrivateRouteActorLease,
+        expected_state_version: u64,
+        room: CorePrivateRouteRoomV1,
+        phase: CorePrivateRoutePhaseV1,
+    ) -> CorePrivateRouteActorReply {
+        self.actor_handle(lease)?
+            .apply_fixed_dungeon_authority(expected_state_version, room, phase)
+            .await
+    }
+
     /// Atomically reserves one exact successful-extraction authority and revokes ordinary route
     /// control. Exact replay returns the same permit; changed material cannot replace it.
     pub async fn prepare_extraction_terminal(
@@ -1110,6 +1152,14 @@ async fn serve_actor_mailbox(
                     bell_portal_in_range,
                 ));
             }
+            CorePrivateRouteActorCommand::ApplyFixedDungeonAuthority {
+                expected_state_version,
+                room,
+                phase,
+                reply,
+            } => {
+                reply_fixed_dungeon_authority(&control, expected_state_version, room, phase, reply);
+            }
             CorePrivateRouteActorCommand::PrepareBellPortal { binding, reply } => {
                 let result = handle_prepare_bell_portal(&control, binding);
                 let prepared = result.as_ref().ok().cloned();
@@ -1149,6 +1199,7 @@ async fn serve_actor_mailbox(
             CorePrivateRouteActorCommand::Advance { reply, .. }
             | CorePrivateRouteActorCommand::SetBellPortalRange { reply, .. }
             | CorePrivateRouteActorCommand::ApplyMicrorealmAuthority { reply, .. }
+            | CorePrivateRouteActorCommand::ApplyFixedDungeonAuthority { reply, .. }
             | CorePrivateRouteActorCommand::ReconcileEnterMicrorealm { reply, .. } => {
                 let _ = reply.send(Err(CorePrivateRouteRuntimeError::Retired));
             }
@@ -1250,6 +1301,174 @@ fn handle_microrealm_authority(
         .actor
         .set_bell_portal_in_range(bell_portal_in_range)?;
     Ok(control.actor.projection().clone())
+}
+
+fn handle_fixed_dungeon_authority(
+    control: &Mutex<CorePrivateRouteActorControl>,
+    expected_state_version: u64,
+    room: CorePrivateRouteRoomV1,
+    phase: CorePrivateRoutePhaseV1,
+) -> CorePrivateRouteActorReply {
+    let mut control = lock(control);
+    if control.retired {
+        return Err(CorePrivateRouteRuntimeError::Retired);
+    }
+    if control.bell_reservation.is_some() {
+        return Err(CorePrivateRouteRuntimeError::TransferInProgress);
+    }
+    if control.terminal_reservation.is_some() {
+        return Err(CorePrivateRouteRuntimeError::TerminalInProgress);
+    }
+    let projection = control.actor.projection();
+    if projection.state_version != expected_state_version
+        || projection.scene != CorePrivateRouteSceneV1::BellSepulcher
+        || projection.instance_lineage_id.is_none()
+    {
+        return Err(CorePrivateRouteRuntimeError::StaleRouteState);
+    }
+    let advances = fixed_dungeon_advances(projection.room, projection.phase, room, phase)
+        .ok_or(CorePrivateRouteRuntimeError::StaleRouteState)?;
+    for advance in advances {
+        control.actor.advance(advance)?;
+    }
+    Ok(control.actor.projection().clone())
+}
+
+fn reply_fixed_dungeon_authority(
+    control: &Mutex<CorePrivateRouteActorControl>,
+    expected_state_version: u64,
+    room: CorePrivateRouteRoomV1,
+    phase: CorePrivateRoutePhaseV1,
+    reply: oneshot::Sender<CorePrivateRouteActorReply>,
+) {
+    let _ = reply.send(handle_fixed_dungeon_authority(
+        control,
+        expected_state_version,
+        room,
+        phase,
+    ));
+}
+
+fn fixed_dungeon_advances(
+    current_room: Option<CorePrivateRouteRoomV1>,
+    current_phase: CorePrivateRoutePhaseV1,
+    target_room: CorePrivateRouteRoomV1,
+    target_phase: CorePrivateRoutePhaseV1,
+) -> Option<Vec<CorePrivateRouteActorAdvance>> {
+    use CorePrivateRouteActorAdvance as Advance;
+    use CorePrivateRoutePhaseV1 as Phase;
+    use CorePrivateRouteRoomV1 as Room;
+
+    let same = current_room == Some(target_room) && current_phase == target_phase;
+    if same && canonical_fixed_dungeon_position(target_room, target_phase) {
+        return Some(Vec::new());
+    }
+    let advances = match (current_room, current_phase, target_room, target_phase) {
+        (
+            Some(Room::BellVestibuleB0),
+            Phase::DungeonVestibule,
+            Room::BellCrossB1,
+            Phase::RoomDormant,
+        ) => {
+            vec![Advance::EnterCombatRoom(Room::BellCrossB1)]
+        }
+        (Some(Room::BellCrossB1), Phase::RoomCleared, Room::BellNaveB2, Phase::RoomDormant) => {
+            vec![Advance::EnterCombatRoom(Room::BellNaveB2)]
+        }
+        (Some(Room::BellNaveB2), Phase::RoomCleared, Room::BellKnightB3, Phase::RoomDormant) => {
+            vec![Advance::EnterCombatRoom(Room::BellKnightB3)]
+        }
+        (Some(Room::BellKnightB3), Phase::RoomCleared, Room::BellRestB4, Phase::Rest) => {
+            vec![Advance::EnterRest]
+        }
+        (Some(Room::BellRestB4), Phase::Rest, Room::BellBridgeB5, Phase::RoomDormant) => {
+            vec![Advance::EnterCombatRoom(Room::BellBridgeB5)]
+        }
+        (Some(Room::BellBridgeB5), Phase::RoomCleared, Room::CaldusArenaB6, Phase::BossStaging) => {
+            vec![Advance::EnterBoss]
+        }
+        (Some(current), Phase::RoomDormant, target, Phase::RoomAwaitingDoorSafety)
+            if current == target && is_fixed_combat_room(target) =>
+        {
+            vec![Advance::RoomAwaitingDoorSafety]
+        }
+        (Some(current), Phase::RoomDormant, target, Phase::RoomSpawnWarning)
+            if current == target && is_fixed_combat_room(target) =>
+        {
+            vec![Advance::RoomAwaitingDoorSafety, Advance::RoomSpawnWarning]
+        }
+        (Some(current), Phase::RoomAwaitingDoorSafety, target, Phase::RoomSpawnWarning)
+            if current == target && is_fixed_combat_room(target) =>
+        {
+            vec![Advance::RoomSpawnWarning]
+        }
+        (Some(current), Phase::RoomSpawnWarning, target, Phase::RoomActive)
+            if current == target && is_fixed_combat_room(target) =>
+        {
+            vec![Advance::RoomActive]
+        }
+        (Some(current), Phase::RoomSpawnWarning, target, Phase::RoomQuiet)
+            if current == target && is_fixed_combat_room(target) =>
+        {
+            vec![Advance::RoomActive, Advance::RoomQuiet]
+        }
+        (Some(current), Phase::RoomActive, target, Phase::RoomQuiet)
+            if current == target && is_fixed_combat_room(target) =>
+        {
+            vec![Advance::RoomQuiet]
+        }
+        (Some(current), Phase::RoomQuiet, target, Phase::RoomCleared)
+            if current == target && is_fixed_combat_room(target) =>
+        {
+            vec![Advance::RoomCleared]
+        }
+        (Some(current), current_phase, target, Phase::RoomDormant)
+            if current == target
+                && is_fixed_combat_room(target)
+                && matches!(
+                    current_phase,
+                    Phase::RoomAwaitingDoorSafety | Phase::RoomSpawnWarning | Phase::RoomActive
+                ) =>
+        {
+            vec![Advance::RoomReset]
+        }
+        _ => return None,
+    };
+    Some(advances)
+}
+
+const fn canonical_fixed_dungeon_position(
+    room: CorePrivateRouteRoomV1,
+    phase: CorePrivateRoutePhaseV1,
+) -> bool {
+    use CorePrivateRoutePhaseV1 as Phase;
+    use CorePrivateRouteRoomV1 as Room;
+    match room {
+        Room::BellVestibuleB0 => matches!(phase, Phase::DungeonVestibule),
+        Room::BellCrossB1 | Room::BellNaveB2 | Room::BellKnightB3 | Room::BellBridgeB5 => {
+            matches!(
+                phase,
+                Phase::RoomDormant
+                    | Phase::RoomAwaitingDoorSafety
+                    | Phase::RoomSpawnWarning
+                    | Phase::RoomActive
+                    | Phase::RoomQuiet
+                    | Phase::RoomCleared
+            )
+        }
+        Room::BellRestB4 => matches!(phase, Phase::Rest),
+        Room::CaldusArenaB6 => matches!(phase, Phase::BossStaging),
+    }
+}
+
+const fn is_fixed_combat_room(room: CorePrivateRouteRoomV1) -> bool {
+    matches!(
+        room,
+        CorePrivateRouteRoomV1::BellCrossB1
+            | CorePrivateRouteRoomV1::BellNaveB2
+            | CorePrivateRouteRoomV1::BellKnightB3
+            | CorePrivateRouteRoomV1::BellBridgeB5
+    )
 }
 
 fn handle_prepare_bell_portal(

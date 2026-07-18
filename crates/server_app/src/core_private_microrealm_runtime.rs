@@ -22,9 +22,20 @@ use sim_core::{
 use thiserror::Error;
 
 use crate::{
-    CoreCharacterCombat, CoreCharacterCombatEnvelope, CoreCombatFactoryError,
-    CorePrivateRouteActorDirectory, CorePrivateRouteActorLease, CorePrivateRouteRuntimeError,
+    CoreBellPortalTransition, CoreCharacterCombat, CoreCharacterCombatEnvelope,
+    CoreCombatFactoryError, CorePrivateRouteActorDirectory, CorePrivateRouteActorLease,
+    CorePrivateRouteRuntimeError,
 };
+
+#[derive(Debug)]
+pub(crate) struct CorePrivateMicrorealmDungeonHandoff {
+    pub route_directory: CorePrivateRouteActorDirectory,
+    pub route_lease: CorePrivateRouteActorLease,
+    pub combat_envelope: CoreCharacterCombatEnvelope,
+    pub participant: sim_core::NormalWaveHandoff,
+    pub next_hostile_spawn_ordinal: u16,
+    pub final_tick: Tick,
+}
 
 const CORE_MICROREALM_SCENE_ID: &str = "world.core_microrealm_01";
 const BELL_PORTAL_OBJECT_ID: &str = "portal.dungeon.bell_sepulcher";
@@ -258,6 +269,47 @@ impl CorePrivateMicrorealmRuntime {
         self.combat_envelope
             .rejoin(participant.player)
             .map_err(Into::into)
+    }
+
+    /// Consumes the paused microrealm only after the durable Bell transition has converged the
+    /// exact route generation on B0. It preserves the player, hostile-projectile allocator,
+    /// next hostile spawn ordinal, combat envelope, and server tick for the fixed dungeon owner.
+    pub(crate) fn into_fixed_dungeon_handoff(
+        self,
+        transition: &CoreBellPortalTransition,
+    ) -> Result<CorePrivateMicrorealmDungeonHandoff, CorePrivateMicrorealmRuntimeError> {
+        if !self.bell_transfer_ready() {
+            return Err(CorePrivateMicrorealmRuntimeError::RouteAuthorityMismatch);
+        }
+        let route = self.route_directory.snapshot(self.route_lease)?;
+        let binding = &transition.binding;
+        if binding.account_id != self.account_id()
+            || binding.character_id != self.character_id()
+            || binding.character_version != self.combat_envelope.character_state_version()
+            || binding.instance_lineage_id != route.instance_lineage_id.unwrap_or([0; 16])
+            || transition.destination_character_version != route.character_version
+            || route.scene != CorePrivateRouteSceneV1::BellSepulcher
+            || route.room != Some(protocol::CorePrivateRouteRoomV1::BellVestibuleB0)
+            || route.phase != CorePrivateRoutePhaseV1::DungeonVestibule
+            || route.actor_generation != self.route_lease.actor_generation()
+        {
+            return Err(CorePrivateMicrorealmRuntimeError::RouteAuthorityMismatch);
+        }
+        let next_hostile_spawn_ordinal = self.combat.next_spawn_ordinal();
+        let participant = self.combat.into_handoff()?;
+        let mut combat_envelope = self.combat_envelope;
+        combat_envelope.rebase_character_state_version(
+            binding.character_version,
+            transition.destination_character_version,
+        )?;
+        Ok(CorePrivateMicrorealmDungeonHandoff {
+            route_directory: self.route_directory,
+            route_lease: self.route_lease,
+            combat_envelope,
+            participant,
+            next_hostile_spawn_ordinal,
+            final_tick: self.tick,
+        })
     }
 
     /// Advances one server-owned simulation frame with the driver's retained action state. The
@@ -552,9 +604,9 @@ mod tests {
 
     use super::*;
     use crate::{
-        AccountId, AuthenticatedAccount, AuthenticatedNamespace, CorePrivateMicrorealmDriver,
-        CorePrivateMicrorealmDriverOutcome, CorePrivateRouteActorPosition,
-        CorePrivateRouteActorSeed,
+        AccountId, AuthenticatedAccount, AuthenticatedNamespace, CoreBellPortalAuthority,
+        CoreBellPortalBinding, CorePrivateMicrorealmDriver, CorePrivateMicrorealmDriverOutcome,
+        CorePrivateRouteActorPosition, CorePrivateRouteActorSeed,
     };
 
     const ACCOUNT_ID: [u8; 16] = [0x11; 16];
@@ -907,5 +959,103 @@ mod tests {
         assert_eq!(handoff.runtime.route_lease(), lease);
         assert_eq!(handoff.runtime.tick(), Tick(32));
         assert!(handoff.runtime.bell_transfer_ready());
+    }
+
+    #[tokio::test]
+    async fn committed_bell_handoff_rebases_version_and_preserves_every_run_local_identity() {
+        let directory = CorePrivateRouteActorDirectory::new();
+        let lease = directory
+            .register_actor(authenticated(), seed(), 13)
+            .expect("actor");
+        let mut runtime = runtime(&directory, lease);
+        let spawn = runtime.player_position;
+        let ordinary = CoreMicrorealmInput {
+            entrant_position: spawn,
+            primary_released: false,
+            living_participants: 1,
+            pack_cleared: false,
+        };
+        runtime
+            .lifecycle
+            .step(
+                Tick(1),
+                CoreMicrorealmInput {
+                    primary_released: true,
+                    ..ordinary
+                },
+            )
+            .expect("trigger");
+        runtime
+            .lifecycle
+            .step(Tick(31), ordinary)
+            .expect("activate");
+        runtime
+            .lifecycle
+            .step(
+                Tick(32),
+                CoreMicrorealmInput {
+                    pack_cleared: true,
+                    ..ordinary
+                },
+            )
+            .expect("clear");
+        runtime.player_position = runtime.bell_portal_center;
+        runtime.tick = Tick(32);
+        let quiet_participant = runtime
+            .combat
+            .clone()
+            .into_handoff()
+            .expect("quiet combat handoff");
+        let player_id = quiet_participant.player.target.entity_id;
+        let projectile_peek = quiet_participant.hostile_projectile_ids.peek();
+        for advance in [
+            crate::CorePrivateRouteActorAdvance::MicrorealmWaiting,
+            crate::CorePrivateRouteActorAdvance::MicrorealmActive,
+            crate::CorePrivateRouteActorAdvance::MicrorealmCleared,
+        ] {
+            directory
+                .advance(lease, advance)
+                .await
+                .expect("route phase");
+        }
+        directory
+            .set_bell_portal_in_range(lease, true)
+            .await
+            .expect("Bell range");
+        let binding = CoreBellPortalBinding {
+            account_id: ACCOUNT_ID,
+            character_id: CHARACTER_ID,
+            mutation_id: [0x44; 16],
+            instance_lineage_id: LINEAGE_ID,
+            entry_restore_point_id: [0x55; 16],
+            character_version: 2,
+            content_revision: world_revision(),
+        };
+        let permit = directory
+            .prepare_bell_portal(binding.clone())
+            .await
+            .expect("Bell permit");
+        let transition = CoreBellPortalTransition {
+            binding,
+            transfer_id: [0x66; 16],
+            destination_character_version: 3,
+        };
+        directory
+            .commit_bell_portal(permit, transition.clone())
+            .await
+            .expect("Bell commit");
+
+        let handoff = runtime
+            .into_fixed_dungeon_handoff(&transition)
+            .expect("fixed-dungeon handoff");
+
+        assert_eq!(handoff.final_tick, Tick(32));
+        assert_eq!(handoff.combat_envelope.character_state_version(), 3);
+        assert_eq!(handoff.next_hostile_spawn_ordinal, 1);
+        assert_eq!(handoff.participant.player.target.entity_id, player_id);
+        assert_eq!(
+            handoff.participant.hostile_projectile_ids.peek(),
+            projectile_peek
+        );
     }
 }

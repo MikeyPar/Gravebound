@@ -289,6 +289,114 @@ async fn actor_trace_is_exactly_hall_microrealm_b0_through_b6_terminal() {
 }
 
 #[tokio::test]
+async fn fixed_dungeon_cas_commits_multiphase_frames_resets_and_rejects_stale_authority() {
+    let directory = CorePrivateRouteActorDirectory::new();
+    let lease = directory
+        .register_actor(authenticated(), hall_seed(CHARACTER_ID, 1), 12)
+        .expect("actor registers");
+    commit_bell_entry(&directory, lease).await;
+    let b0 = directory.snapshot(lease).expect("B0 snapshot");
+
+    let b1 = directory
+        .apply_fixed_dungeon_authority(
+            lease,
+            b0.state_version,
+            CorePrivateRouteRoomV1::BellCrossB1,
+            CorePrivateRoutePhaseV1::RoomDormant,
+        )
+        .await
+        .expect("B0 enters B1 under one route CAS");
+    let warning = directory
+        .apply_fixed_dungeon_authority(
+            lease,
+            b1.state_version,
+            CorePrivateRouteRoomV1::BellCrossB1,
+            CorePrivateRoutePhaseV1::RoomSpawnWarning,
+        )
+        .await
+        .expect("one frame locks the participant and closes a clear doorway");
+    assert_eq!(warning.room, Some(CorePrivateRouteRoomV1::BellCrossB1));
+    assert_eq!(warning.phase, CorePrivateRoutePhaseV1::RoomSpawnWarning);
+    assert_eq!(warning.state_version, b0.state_version + 3);
+
+    let replay = directory
+        .apply_fixed_dungeon_authority(
+            lease,
+            warning.state_version,
+            CorePrivateRouteRoomV1::BellCrossB1,
+            CorePrivateRoutePhaseV1::RoomSpawnWarning,
+        )
+        .await
+        .expect("same fixed-dungeon projection is an exact no-op");
+    assert_eq!(replay.state_version, warning.state_version);
+
+    assert!(matches!(
+        directory
+            .apply_fixed_dungeon_authority(
+                lease,
+                b0.state_version,
+                CorePrivateRouteRoomV1::BellCrossB1,
+                CorePrivateRoutePhaseV1::RoomActive,
+            )
+            .await,
+        Err(CorePrivateRouteRuntimeError::StaleRouteState)
+    ));
+    assert_eq!(
+        directory
+            .snapshot(lease)
+            .expect("unchanged after stale CAS"),
+        warning
+    );
+
+    let active = directory
+        .apply_fixed_dungeon_authority(
+            lease,
+            warning.state_version,
+            CorePrivateRouteRoomV1::BellCrossB1,
+            CorePrivateRoutePhaseV1::RoomActive,
+        )
+        .await
+        .expect("warning reaches active");
+    let reset = directory
+        .apply_fixed_dungeon_authority(
+            lease,
+            active.state_version,
+            CorePrivateRouteRoomV1::BellCrossB1,
+            CorePrivateRoutePhaseV1::RoomDormant,
+        )
+        .await
+        .expect("empty-room reset returns to dormant atomically");
+    assert_eq!(reset.phase, CorePrivateRoutePhaseV1::RoomDormant);
+
+    assert!(matches!(
+        directory
+            .apply_fixed_dungeon_authority(
+                lease,
+                reset.state_version,
+                CorePrivateRouteRoomV1::BellRestB4,
+                CorePrivateRoutePhaseV1::RoomActive,
+            )
+            .await,
+        Err(CorePrivateRouteRuntimeError::StaleRouteState)
+    ));
+    assert_eq!(
+        directory
+            .snapshot(lease)
+            .expect("invalid target rolls back"),
+        reset
+    );
+
+    directory.begin_shutdown();
+    assert!(
+        directory
+            .finish_shutdown()
+            .await
+            .expect("shutdown")
+            .zero_residue
+    );
+}
+
+#[tokio::test]
 async fn committed_microrealm_entry_reconciles_once_and_exact_replay_never_rewinds() {
     let directory = CorePrivateRouteActorDirectory::new();
     let lease = directory
