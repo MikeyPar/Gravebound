@@ -1,0 +1,142 @@
+{
+  "schema_version": 1,
+  "pack_id": "review.m03.sir_caldus.defeat.v6",
+  "status": {
+    "classification": "unregistered_review_candidate",
+    "runtime_registered": false,
+    "content_hash_input": false,
+    "runtime_bundle": null,
+    "intended_runtime_asset_id": "sprite.boss.sir_caldus",
+    "presentation_state": "defeated_pre_reward"
+  },
+  "source_revision": "1eecc272103ec8e18539ec386366da94b72bf712",
+  "design_authority": [
+    "Gravebound_Production_GDD_v1_Canonical.md:ENC-010,DNG-006,DTH-011,LOOT-010,TECH-004,ART-001,ART-002,ART-004,ART-005,ART-006,ART-020,ART-030",
+    "Gravebound_Content_Production_Spec_v1.md:CONT-ROOM-002,CONT-ROOM-007,CONT-BOSS-001,CONT-BOSS-002,CONT-REWARD-003,CONT-REWARD-004",
+    "Gravebound_Development_Roadmap_v1.md:GB-M03-03,GB-M03-04,GB-M03-08"
+  ],
+  "generation": {
+    "method": "OpenAI built-in image generation",
+    "references": [
+      {
+        "path": "../v1/sir-caldus-idle-guard.seed.png",
+        "role": "immutable identity, frame-one, palette, and renderer-scale seed",
+        "sha256": "da0c0b90ca1cc390ba4a59ea3a8991313c95f2a2a339123c36b174da99ad4ea5"
+      },
+      {
+        "path": "../v3/previews/sir-caldus-recovery-loop.192px.png",
+        "role": "accepted motion-continuity and sprite-language reference",
+        "sha256": "a03eef25af1c3d40774c1d2675ff7f2df8a3591ec7d6f832faa5dc271c5f1218"
+      }
+    ],
+    "prompt_record": "README.md#exact-generation-prompt"
+  },
+  "postprocess": {
+    "chroma_helper": "C:/Users/micha/.codex/skills/.system/imagegen/scripts/remove_chroma_key.py",
+    "chroma_arguments": [
+      "--auto-key",
+      "border",
+      "--soft-matte",
+      "--transparent-threshold",
+      "12",
+      "--opaque-threshold",
+      "220",
+      "--despill"
+    ],
+    "sampled_key": "#f903f8",
+    "splitter": "C:/Users/micha/.codex/plugins/cache/openai-curated-remote/game-studio/0.1.2/scripts/normalize_sprite_strip.py",
+    "slot_count": 4,
+    "frame_dimensions": [192, 192],
+    "anchor_pixels": [96, 192],
+    "frame_01_locked_to_seed": true,
+    "shared_generated_scale_correction": "176/188",
+    "alpha_threshold_for_bounds_and_cleanup": 8,
+    "connected_component_cleanup": {
+      "connectivity": 4,
+      "removed_isolated_pixels": {
+        "02": 21,
+        "03": 11,
+        "04": 15
+      },
+      "manual_repaint": false
+    }
+  },
+  "sources": [
+    {
+      "path": "source/sir-caldus-defeat.raw-chroma.png",
+      "dimensions": [2172, 724],
+      "mode": "RGB",
+      "sha256": "abacad68fa1a18d4c0eba2d972907d10899b6c4f72f1902118d0f5c9200c81f3"
+    },
+    {
+      "path": "source/sir-caldus-defeat.alpha.png",
+      "dimensions": [2172, 724],
+      "mode": "RGBA",
+      "sha256": "743b3e8ae645c3dcc191fd3dd61c463dee5bc04c152a3e420f8e9bcf3f41b94b"
+    }
+  ],
+  "strip": {
+    "id": "review.sprite.boss.sir_caldus.defeat.v6",
+    "path": "frames/defeat",
+    "frame_labels": [
+      "guard_seed",
+      "lethal_stagger",
+      "one_knee_collapse",
+      "inert_pre_reward"
+    ],
+    "frame_sha256": [
+      "da0c0b90ca1cc390ba4a59ea3a8991313c95f2a2a339123c36b174da99ad4ea5",
+      "faaa902fc7189dbbd14a3386a79ccec03c8a22d7afa48f376aba75b35d65aee7",
+      "ef12d80438b91c19a2a837b95e0acf033bc2068909698b836aa7992c54f31258",
+      "f8cd7015a02016fd8d7ecb830e1923ce4b8a1999bfa79583c4824ea03bc82083"
+    ],
+    "nontransparent_bounds": [
+      [36, 16, 156, 192],
+      [21, 16, 171, 192],
+      [25, 57, 167, 192],
+      [15, 70, 177, 192]
+    ],
+    "connected_components_at_alpha_8": [1, 1, 1, 1],
+    "uncompressed_frame_bytes": 147456,
+    "uncompressed_strip_bytes": 589824
+  },
+  "preview_hashes": {
+    "sheet_192": "cb96d6e31587f3d5581e0a435b6e20251a12ed5f9b39babb03d0b6c1381e2f52",
+    "sheet_96": "380c5d7fd40a702a32b8848fcfdcfef189c796cdb9efe6bf1e2ed2bfa32a316f",
+    "standard_1280_mock": "20f8351b636ba79f624220faeea5aa005b6553d5dd2a65ea951ecbb3032ca5aa",
+    "standard_1920_mock": "409b13c3afa14deda9b6610b8d0abc2dd6c272a947d45b430a44f1491434c5e0",
+    "reduced_1280_mock": "55380f6a6677b4080916fec53de67b40a293a22728da9e3296fb159e0701f390",
+    "reduced_1920_mock": "f83074411367c3e9a94745c89a2615b171eebb2769432e117d4d1901d446eeea"
+  },
+  "mock_backdrops": {
+    "purpose": "worst-case minimum-scale silhouette review only; not defeat sequencing evidence",
+    "paths": [
+      "docs/evidence/GB-M03-03E-final-rings-standard-1280x720.png",
+      "docs/evidence/GB-M03-03E-final-rings-standard-1920x1080.png",
+      "docs/evidence/GB-M03-03E-final-rings-reduced-1280x720.png",
+      "docs/evidence/GB-M03-03E-final-rings-reduced-1920x1080.png"
+    ]
+  },
+  "authority_boundaries": {
+    "exact_body_animation_authored": false,
+    "animation_is_presentation_only": true,
+    "may_resolve_boss_defeat": false,
+    "may_clear_hostiles": false,
+    "may_commit_reward": false,
+    "may_place_pending_inventory": false,
+    "may_create_or_show_exit": false,
+    "may_resolve_terminal_outcome": false,
+    "may_enable_route": false
+  },
+  "review_gates": [
+    "authoritative lethal resolution and hostile cleanup ordering",
+    "distinct read from phase break, recovery, player death, and fault states",
+    "shared anchor and no apparent hurtbox/collision/origin drift",
+    "independent reward-pending and committed-state UI",
+    "stable B6 exit hidden until committed reward authority",
+    "standard/reduced effects and grayscale/colorblind review at both certified resolutions",
+    "optimized native capture, registry/content-hash validation, rollback evidence",
+    "commercial-rights and visual-similarity review"
+  ],
+  "license_provenance": "Project-generated review material; no third-party visual reference was supplied. Commercial-rights, similarity, registry, and native runtime review remain required."
+}
