@@ -2,12 +2,13 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    env,
-    path::PathBuf,
+    env, fs,
+    path::{Path, PathBuf},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use bevy::{
+    asset::io::{AssetSourceBuilder, AssetSourceId, file::FileAssetReader},
     camera::ScalingMode,
     prelude::*,
     render::view::screenshot::Screenshot,
@@ -36,6 +37,45 @@ const HUD_GLOBAL_Z_INDEX: i32 = 100;
 const EVIDENCE_SETTLE_FRAMES: u8 = 30;
 const CARDINAL_STEP_MILLI_TILES: i32 = 170;
 const DIAGONAL_STEP_MILLI_TILES: i32 = 120;
+const LANDMARK_MANIFEST_PATH: &str =
+    "core/world/microrealm_route_landmarks/v1/m03-microrealm-route-landmarks.v1.source.json";
+const LANDMARK_MANIFEST_BLAKE3: &str =
+    "e03ee05fea2990e1b97521cd5a179cb728e46fd3ebdc682535007c618c54b6a6";
+const REALM_GATE_RUNTIME_BLAKE3: &str =
+    "a8c180f6146e7e075b7d9ab3aea17d4bf6440486ea45703181384b5a972f90de";
+const LANTERN_FORK_RUNTIME_BLAKE3: &str =
+    "47387d51ec49c64d394d21fb94cc6342c4d62f2b183363b091e49255ff591f18";
+const BELL_SEPULCHER_RUNTIME_BLAKE3: &str =
+    "5198edee532fb254d71f074815c6cfc5e83b0a5a8c898bf0c2401d4bcd896f4d";
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct LandmarkAssetSpec {
+    object_id: &'static str,
+    runtime_path: &'static str,
+    runtime_blake3: &'static str,
+    rendered_size_tiles: f32,
+}
+
+const LANDMARK_ASSETS: [LandmarkAssetSpec; 3] = [
+    LandmarkAssetSpec {
+        object_id: "landmark.realm_gate",
+        runtime_path: "core/world/microrealm_route_landmarks/v1/runtime/realm-gate.192.png",
+        runtime_blake3: REALM_GATE_RUNTIME_BLAKE3,
+        rendered_size_tiles: 3.0,
+    },
+    LandmarkAssetSpec {
+        object_id: "landmark.lantern_fork",
+        runtime_path: "core/world/microrealm_route_landmarks/v1/runtime/lantern-fork.192.png",
+        runtime_blake3: LANTERN_FORK_RUNTIME_BLAKE3,
+        rendered_size_tiles: 2.6,
+    },
+    LandmarkAssetSpec {
+        object_id: "portal.dungeon.bell_sepulcher",
+        runtime_path: "core/world/microrealm_route_landmarks/v1/runtime/bell-sepulcher.192.png",
+        runtime_blake3: BELL_SEPULCHER_RUNTIME_BLAKE3,
+        rendered_size_tiles: 2.8,
+    },
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoreWorldShowcaseScene {
@@ -46,6 +86,7 @@ pub enum CoreWorldShowcaseScene {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoreWorldShowcaseEvidenceState {
     HallStageDisabled,
+    MicrorealmFork,
     MicrorealmWarning,
     MicrorealmCleared,
 }
@@ -211,7 +252,18 @@ struct CaptureProgress {
 
 #[allow(clippy::needless_pass_by_value)] // Matches the other owned native-client launch configs.
 pub fn run_core_world_showcase(config: CoreWorldShowcaseConfig) -> Result<()> {
-    let compiled = load_core_development_world_flow(&config.content_root)
+    let content_root = fs::canonicalize(&config.content_root).with_context(|| {
+        format!(
+            "could not resolve content root {}",
+            config.content_root.display()
+        )
+    })?;
+    let repository_root = content_root
+        .parent()
+        .context("content root has no repository parent")?;
+    let asset_root = repository_root.join("assets");
+    validate_landmark_artifacts(&asset_root)?;
+    let compiled = load_core_development_world_flow(&content_root)
         .context("unpromoted Core world-flow content failed validation")?;
     let definition = match config.scene {
         CoreWorldShowcaseScene::Hall => compiled.compile_hall_scene()?,
@@ -230,6 +282,7 @@ pub fn run_core_world_showcase(config: CoreWorldShowcaseConfig) -> Result<()> {
     let screenshot_request = env::var_os("GRAVEBOUND_SCREENSHOT_PATH").map(PathBuf::from);
     let (window_width, window_height) = crate::configured_window_size()?;
     let mut app = App::new();
+    let asset_reader_root = asset_root.clone();
     let scene = ShowcaseScene {
         definition,
         labels,
@@ -237,36 +290,40 @@ pub fn run_core_world_showcase(config: CoreWorldShowcaseConfig) -> Result<()> {
         reduced_motion: config.reduced_motion,
     };
     let runtime = prepare_showcase_runtime(&scene, config.evidence_state)?;
-    app.insert_resource(ClearColor(Color::srgb_u8(7, 9, 12)))
-        .insert_resource(Time::<Fixed>::from_hz(f64::from(
-            sim_core::TICKS_PER_SECOND,
-        )))
-        .insert_resource(scene)
-        .insert_resource(runtime)
-        .add_plugins(
-            crate::gravebound_default_plugins()
-                .set(ImagePlugin::default_nearest())
-                .set(WindowPlugin {
-                    primary_window: Some(Window {
-                        title: format!("Gravebound - {scene_name} [Disposable Core Showcase]"),
-                        resolution: WindowResolution::new(window_width, window_height),
-                        present_mode: PresentMode::AutoVsync,
-                        ..default()
-                    }),
+    app.register_asset_source(
+        AssetSourceId::Default,
+        AssetSourceBuilder::new(move || Box::new(FileAssetReader::new(asset_reader_root.clone()))),
+    )
+    .insert_resource(ClearColor(Color::srgb_u8(7, 9, 12)))
+    .insert_resource(Time::<Fixed>::from_hz(f64::from(
+        sim_core::TICKS_PER_SECOND,
+    )))
+    .insert_resource(scene)
+    .insert_resource(runtime)
+    .add_plugins(
+        crate::gravebound_default_plugins()
+            .set(ImagePlugin::default_nearest())
+            .set(WindowPlugin {
+                primary_window: Some(Window {
+                    title: format!("Gravebound - {scene_name} [Disposable Core Showcase]"),
+                    resolution: WindowResolution::new(window_width, window_height),
+                    present_mode: PresentMode::AutoVsync,
                     ..default()
                 }),
+                ..default()
+            }),
+    )
+    .add_systems(Startup, spawn_world_showcase)
+    .add_systems(FixedUpdate, step_world_showcase)
+    .add_systems(
+        Update,
+        (
+            sync_showcase_presentation,
+            sync_showcase_copy,
+            animate_safe_markers,
         )
-        .add_systems(Startup, spawn_world_showcase)
-        .add_systems(FixedUpdate, step_world_showcase)
-        .add_systems(
-            Update,
-            (
-                sync_showcase_presentation,
-                sync_showcase_copy,
-                animate_safe_markers,
-            )
-                .chain(),
-        );
+            .chain(),
+    );
     if let Some(path) = screenshot_request {
         app.insert_resource(ShowcaseScreenshotRequest(path))
             .add_systems(
@@ -280,6 +337,35 @@ pub fn run_core_world_showcase(config: CoreWorldShowcaseConfig) -> Result<()> {
     Ok(())
 }
 
+fn validate_landmark_artifacts(asset_root: &Path) -> Result<()> {
+    validate_artifact_hash(
+        &asset_root.join(LANDMARK_MANIFEST_PATH),
+        LANDMARK_MANIFEST_BLAKE3,
+    )?;
+    for asset in LANDMARK_ASSETS {
+        validate_artifact_hash(&asset_root.join(asset.runtime_path), asset.runtime_blake3)?;
+    }
+    Ok(())
+}
+
+fn validate_artifact_hash(path: &Path, expected_blake3: &str) -> Result<()> {
+    let bytes = fs::read(path).with_context(|| format!("missing {}", path.display()))?;
+    let actual = blake3::hash(&bytes).to_hex().to_string();
+    if actual != expected_blake3 {
+        bail!(
+            "Core microrealm landmark artifact hash mismatch: path={}, expected={expected_blake3}, actual={actual}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn landmark_asset_spec(object_id: &str) -> Option<LandmarkAssetSpec> {
+    LANDMARK_ASSETS
+        .into_iter()
+        .find(|asset| asset.object_id == object_id)
+}
+
 fn prepare_showcase_runtime(
     scene: &ShowcaseScene,
     evidence_state: Option<CoreWorldShowcaseEvidenceState>,
@@ -290,6 +376,9 @@ fn prepare_showcase_runtime(
         Some(CoreWorldShowcaseEvidenceState::HallStageDisabled) => {
             prepare_hall_stage_disabled_runtime(scene)
         }
+        Some(CoreWorldShowcaseEvidenceState::MicrorealmFork) => {
+            prepare_microrealm_fork_runtime(scene)
+        }
         Some(CoreWorldShowcaseEvidenceState::MicrorealmWarning) => {
             prepare_microrealm_warning_runtime(scene)
         }
@@ -297,6 +386,28 @@ fn prepare_showcase_runtime(
             prepare_microrealm_cleared_runtime(scene)
         }
     }
+}
+
+fn prepare_microrealm_fork_runtime(scene: &ShowcaseScene) -> Result<ShowcaseRuntime> {
+    anyhow::ensure!(
+        scene.definition.kind == WorldSceneKind::PrivateDanger,
+        "Lantern Fork evidence requires the microrealm scene"
+    );
+    let fork_position = scene
+        .definition
+        .objects
+        .iter()
+        .find_map(|object| (object.id == "landmark.lantern_fork").then_some(object.geometry))
+        .and_then(|geometry| match geometry {
+            SceneObjectGeometry::Circle { center, .. } => Some(center),
+            _ => None,
+        })
+        .context("compiled microrealm is missing its Lantern Fork circle")?;
+    let mut runtime = new_showcase_runtime(&scene.definition, fork_position)
+        .context("Lantern Fork evidence position is invalid")?;
+    "LANDMARK REVIEW  /  AUTHORITY GEOMETRY PRESERVED".clone_into(&mut runtime.state);
+    runtime.frozen_for_evidence = true;
+    Ok(runtime)
 }
 
 fn prepare_hall_stage_disabled_runtime(scene: &ShowcaseScene) -> Result<ShowcaseRuntime> {
@@ -598,7 +709,11 @@ fn milli_to_tiles(value: i32) -> f32 {
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn spawn_world_showcase(mut commands: Commands, scene: Res<ShowcaseScene>) {
+fn spawn_world_showcase(
+    mut commands: Commands,
+    scene: Res<ShowcaseScene>,
+    asset_server: Res<AssetServer>,
+) {
     let plan = build_render_plan(&scene.definition);
     commands.spawn((
         Name::new("Core world showcase camera"),
@@ -640,7 +755,7 @@ fn spawn_world_showcase(mut commands: Commands, scene: Res<ShowcaseScene>) {
         spawn_stone_block(&mut commands, format!("Hall solid {index}"), solid);
     }
     for object in &plan.objects {
-        spawn_scene_object(&mut commands, object, &scene);
+        spawn_scene_object(&mut commands, object, &scene, &asset_server);
     }
     spawn_player(&mut commands, plan.player_spawn);
     spawn_hud(&mut commands, &scene);
@@ -746,7 +861,12 @@ fn spawn_rectangle_outline(
     }
 }
 
-fn spawn_scene_object(commands: &mut Commands, object: &ObjectRenderPlan, scene: &ShowcaseScene) {
+fn spawn_scene_object(
+    commands: &mut Commands,
+    object: &ObjectRenderPlan,
+    scene: &ShowcaseScene,
+    asset_server: &AssetServer,
+) {
     let label = scene
         .labels
         .get(&object.id)
@@ -761,7 +881,13 @@ fn spawn_scene_object(commands: &mut Commands, object: &ObjectRenderPlan, scene:
         }
         ObjectRenderGeometry::Rectangle(rectangle) => {
             let color = object_color(&object.id, object.integration_gated);
-            spawn_rectangle(commands, &object.id, rectangle, color, Z_OBJECT);
+            spawn_rectangle(
+                commands,
+                &object.id,
+                rectangle,
+                color.with_alpha(0.10),
+                Z_OBJECT,
+            );
             spawn_rectangle_outline(
                 commands,
                 &object.id,
@@ -771,6 +897,33 @@ fn spawn_scene_object(commands: &mut Commands, object: &ObjectRenderPlan, scene:
             spawn_object_label(commands, object, label);
         }
     }
+    spawn_landmark_art(commands, object, asset_server);
+}
+
+fn spawn_landmark_art(
+    commands: &mut Commands,
+    object: &ObjectRenderPlan,
+    asset_server: &AssetServer,
+) {
+    let Some(asset) = landmark_asset_spec(&object.id) else {
+        return;
+    };
+    let position = object_label_focus(object);
+    let anchor = if matches!(object.geometry, ObjectRenderGeometry::Rectangle(_)) {
+        Anchor::CENTER
+    } else {
+        Anchor::BOTTOM_CENTER
+    };
+    commands.spawn((
+        Name::new(format!("{} presentation art", object.id)),
+        Sprite {
+            image: asset_server.load(asset.runtime_path),
+            custom_size: Some(Vec2::splat(asset.rendered_size_tiles)),
+            ..default()
+        },
+        anchor,
+        Transform::from_xyz(position.x, position.y, Z_OBJECT + 0.25),
+    ));
 }
 
 fn spawn_object_marker(
@@ -1455,6 +1608,33 @@ mod tests {
     }
 
     #[test]
+    fn landmark_art_maps_only_the_three_authorized_microrealm_objects() {
+        assert_eq!(LANDMARK_ASSETS.len(), 3);
+        assert_eq!(
+            landmark_asset_spec("landmark.realm_gate"),
+            Some(LandmarkAssetSpec {
+                object_id: "landmark.realm_gate",
+                runtime_path: "core/world/microrealm_route_landmarks/v1/runtime/realm-gate.192.png",
+                runtime_blake3: REALM_GATE_RUNTIME_BLAKE3,
+                rendered_size_tiles: 3.0,
+            })
+        );
+        assert!(landmark_asset_spec("station.realm_gate").is_none());
+        assert!(landmark_asset_spec("portal.return.lantern_halls").is_none());
+    }
+
+    #[test]
+    fn landmark_artifacts_match_the_reviewed_manifest_and_runtime_hashes() {
+        let asset_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        validate_landmark_artifacts(&asset_root).expect("reviewed landmark artifacts");
+        assert!(
+            asset_root
+                .join("core/world/microrealm_route_landmarks/v1")
+                .is_dir()
+        );
+    }
+
+    #[test]
     fn every_rendered_object_has_exact_localized_copy() {
         let compiled = compiled();
         for scene in [
@@ -1659,6 +1839,10 @@ mod tests {
         );
 
         assert!(prepare_hall_stage_disabled_runtime(&microrealm).is_err());
+        let fork = prepare_microrealm_fork_runtime(&microrealm).expect("Lantern Fork");
+        assert_eq!(fork.player.position(), TilePoint::new(24_500, 24_500));
+        assert!(fork.frozen_for_evidence);
         assert!(prepare_microrealm_warning_runtime(&hall).is_err());
+        assert!(prepare_microrealm_fork_runtime(&hall).is_err());
     }
 }

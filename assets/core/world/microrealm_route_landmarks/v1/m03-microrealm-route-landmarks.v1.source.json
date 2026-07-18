@@ -1,0 +1,121 @@
+{
+  "schema_version": 1,
+  "pack_id": "review.m03.microrealm_route_landmarks.v1",
+  "generated_date": "2026-07-18",
+  "status": {
+    "classification": "disposable_native_showcase_presentation",
+    "runtime_registered": true,
+    "content_hash_input": false,
+    "runtime_bundle": "client_bevy core-world-showcase",
+    "integration_note": "The optimized disposable Core microrealm showcase loads this pack by stable object ID and preserves the compiled records as the sole collision, interaction, terminal, session, and route authority. The existing Core content records remain graybox_marker assets and this pack is not yet admitted to the persistent normal route."
+  },
+  "scope": {
+    "route": "Character Select -> Hall -> Core micro-realm -> Bell Sepulcher",
+    "purpose": "Replace the three highest-value graybox route markers with visually distinct, non-combat presentation in the disposable native review route without promoting normal-route admission.",
+    "asset_ids": [
+      "sprite.landmark.realm_gate",
+      "sprite.landmark.lantern_fork",
+      "sprite.portal.dungeon.bell_sepulcher"
+    ]
+  },
+  "design_authority": [
+    "Gravebound_Production_GDD_v1_Canonical.md:ART-001, ART-002, ART-004, ART-020, ART-030",
+    "Gravebound_Content_Production_Spec_v1.md:CONT-WORLD-001, CONT-WORLD-004",
+    "Gravebound_Development_Roadmap_v1.md:GB-M03 cumulative landmark-kit target and M03 graybox Lantern Halls/Core micro-realm scope",
+    "docs/tasks/GB-M03-03G.md:ordinary private route and visual-review gate"
+  ],
+  "generation": {
+    "method": "OpenAI built-in image generation",
+    "input_images": [
+      {
+        "path": "Concept Art/02-lantern-halls-nexus.png",
+        "role": "style reference inspected before generation"
+      },
+      {
+        "path": "Concept Art/01-bell-sepulcher-gameplay.png",
+        "role": "dungeon material/palette reference inspected before generation"
+      }
+    ],
+    "common_prompt": "Create one isolated M03 route landmark as handcrafted 2D top-down three-quarter dark-fantasy pixel art. Match wet charcoal stone, tarnished brass, ash, faint moss, restrained warm candle gold, nearest-neighbor pixel clusters, and a clear non-combat silhouette. Use a perfectly flat #00ff00 chroma-key background with no shadows, gradients, texture, floor plane, labels, characters, UI, watermark, hostile telegraphs, loot beams, or safe-zone rings.",
+    "asset_prompts": {
+      "sprite.landmark.realm_gate": "A squat weathered stone archway, iron-bound, with one restrained warm lantern flame in the central opening. It reads as a safe arrival point, never a hostile effect, loot, or combat portal.",
+      "sprite.landmark.lantern_fork": "A sturdy three-way stone road-marker/waystone with a hanging open lantern, unwritten tarnished-brass directional plates, and a subtle circular base. It reads as the quiet safe fork in a wet marsh road, never a hostile effect, loot, exit, combat portal, or shrine.",
+      "sprite.portal.dungeon.bell_sepulcher": "A narrow arched stone sepulcher doorway with a heavy closed iron gate, one large tarnished-brass funeral bell above the arch, two small warm candles at the threshold, and a faint restrained violet seal behind the bars. It reads as a locked or cleared dungeon entrance, not a safe exit or enemy attack."
+    }
+  },
+  "postprocess": {
+    "chroma_key": "auto-sampled border (#04f804 / #03f803 / #04f802 from the generated sources)",
+    "chroma_helper": "C:/Users/micha/.codex/skills/.system/imagegen/scripts/remove_chroma_key.py",
+    "chroma_arguments": [
+      "--auto-key",
+      "border",
+      "--soft-matte",
+      "--transparent-threshold",
+      "12",
+      "--opaque-threshold",
+      "220",
+      "--despill"
+    ],
+    "normalization": "Trim alpha bounds, nearest-neighbor scale to fit a 176 px content box, center horizontally, align the content bottom to y=192 in a 192x192 transparent canvas.",
+    "anchor_pixels": [96, 192],
+    "runtime_format": "PNG RGBA",
+    "collision_authority": "None. All collision, interaction radii, portal state, and route authority remain the compiled Core records."
+  },
+  "assets": [
+    {
+      "asset_id": "sprite.landmark.realm_gate",
+      "runtime_path": "runtime/realm-gate.192.png",
+      "source_paths": ["source/realm-gate.raw-chroma.png", "source/realm-gate.alpha.png"],
+      "source_sha256": {
+        "raw_chroma": "3296689a367df9633cd873329ae40ebe4f52b28071a9bdd428c91a18abcdc1fa",
+        "alpha": "5937cabe8b724e6c05585faaf07e835bc42a928d565c16c795bbc0b96fc68f71"
+      },
+      "dimensions": [192, 192],
+      "anchor_pixels": [96, 192],
+      "readability_tags": ["landmark", "safe_arrival", "warm_gold", "non_combat"],
+      "runtime_sha256": "8dcefc17df015508e0c21af04d9fb147e9ecf14c5d8a6e83ad059ecb51f7055b"
+    },
+    {
+      "asset_id": "sprite.landmark.lantern_fork",
+      "runtime_path": "runtime/lantern-fork.192.png",
+      "source_paths": ["source/lantern-fork.raw-chroma.png", "source/lantern-fork.alpha.png"],
+      "source_sha256": {
+        "raw_chroma": "5ffb23798356f6ece35ccd4b257c9f07a5bdafec2dd600653f96cbb23042da62",
+        "alpha": "2aea12659a621df0900b03e0a01dde43a7d80f53247564bb23de2b812199bad5"
+      },
+      "dimensions": [192, 192],
+      "anchor_pixels": [96, 192],
+      "readability_tags": ["landmark", "safe_fork", "warm_gold", "non_combat"],
+      "runtime_sha256": "63b7efcc72edebdb802339b95318807224e631b492673a99917fadd185bb091f"
+    },
+    {
+      "asset_id": "sprite.portal.dungeon.bell_sepulcher",
+      "runtime_path": "runtime/bell-sepulcher.192.png",
+      "source_paths": ["source/bell-sepulcher.raw-chroma.png", "source/bell-sepulcher.alpha.png"],
+      "source_sha256": {
+        "raw_chroma": "f95adabafff952934ebd3ab723477ba0a6d610365ebb45b5fff47c96b21cc117",
+        "alpha": "67b5384e3e48f27171dfade5e403cc4b256a1ef19defbe5c0e13a1b9e70801a7"
+      },
+      "dimensions": [192, 192],
+      "anchor_pixels": [96, 192],
+      "readability_tags": ["portal", "dungeon_entrance", "bell", "muted_violet", "non_combat"],
+      "runtime_sha256": "1e4c32918ae4916906137a00538dcfe06971cc943470806443f029b3f42a9880"
+    }
+  ],
+  "previews": [
+    {
+      "path": "previews/microrealm-route-landmarks.192px.png",
+      "sha256": "cba3cc53279785affce97f847ce583cc80cdcc10bc29af3ae4a7cfe32c28317f"
+    },
+    {
+      "path": "previews/microrealm-route-landmarks.96px.png",
+      "sha256": "60c4b9a4bac608e19b41586223372de236d6b3827275b6c65b96460c38a6b82b"
+    }
+  ],
+  "validation": {
+    "alpha": "Each runtime image is RGBA 192x192 with all four corners alpha=0; all three were manually inspected at 192 px and 96 px checkerboard previews.",
+    "composition": "No text, UI, character, hostile projectile, loot beam, large safe-zone ring, or combat telegraph is present.",
+    "remaining_gate": "Before persistent normal-route registration, compose these assets with the live session renderer and re-check entity, prompt, route-label, portal-state, and combat readability in the full-loop evidence matrix."
+  },
+  "license_provenance": "Project-generated original material using OpenAI built-in image generation; no third-party source image was used as an input. Commercial-rights and registry review remain required before shipping."
+}

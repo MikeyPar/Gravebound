@@ -11,6 +11,7 @@ enum CoreWorldSceneArg {
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum CoreWorldEvidenceStateArg {
     HallStageDisabled,
+    MicrorealmFork,
     MicrorealmWarning,
     MicrorealmCleared,
 }
@@ -345,6 +346,9 @@ fn run() -> anyhow::Result<()> {
             evidence_state: evidence_state.map(|state| match state {
                 CoreWorldEvidenceStateArg::HallStageDisabled => {
                     client_bevy::CoreWorldShowcaseEvidenceState::HallStageDisabled
+                }
+                CoreWorldEvidenceStateArg::MicrorealmFork => {
+                    client_bevy::CoreWorldShowcaseEvidenceState::MicrorealmFork
                 }
                 CoreWorldEvidenceStateArg::MicrorealmWarning => {
                     client_bevy::CoreWorldShowcaseEvidenceState::MicrorealmWarning
