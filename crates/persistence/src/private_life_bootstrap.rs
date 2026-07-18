@@ -12,7 +12,7 @@
 //! restart resolver then invokes the existing atomic crash-restoration writer with a stable
 //! mutation identity. A committed death, extraction, or Recall wins that race.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use sqlx::{PgConnection, Row};
 
@@ -49,6 +49,7 @@ const SECURITY_STORAGE_RESOLUTION_REQUIRED: i16 = 1;
 const RESTORE_ACTIVE: i16 = 0;
 const LINEAGE_STAGED: i16 = 0;
 const LINEAGE_ACTIVE: i16 = 1;
+const LINEAGE_ACTIVE_U8: u8 = 1;
 const CORE_RESTORE_CONTRACT_VERSION: i16 = 3;
 const CORE_RESTORE_COMPONENT_MASK: i16 = 31;
 const CRASH_MUTATION_CONTEXT_V1: &str = "gravebound.private-life-process-restart-crash-mutation.v1";
@@ -57,6 +58,9 @@ const ITEM_CONSUMABLE: i16 = 1;
 const SECURITY_AT_RISK_PENDING: i16 = 2;
 const LOCATION_RUN_BACKPACK: i16 = 2;
 const LOCATION_PERSONAL_GROUND: i16 = 3;
+const CORE_RED_TONIC_ID: &str = "consumable.red_tonic";
+const CORE_RED_TONIC_STACK_CAP: usize = 6;
+const RUN_MATERIAL_STACK_CAP: u16 = 99;
 
 const SELECTED_CHARACTER_SQL: &str =
     "SELECT character.class_id,character.level,character.life_state,
@@ -383,6 +387,10 @@ impl StoredCurrentDangerExtractionSnapshotV1 {
             return Err(corrupt_current_danger_snapshot());
         }
         let mut item_uids = BTreeSet::new();
+        let mut stacks: BTreeMap<
+            StoredCurrentDangerPendingItemLocationV1,
+            (StoredCurrentDangerPendingItemKindV1, &str, usize),
+        > = BTreeMap::new();
         let mut previous_item_key = None;
         for item in &self.pending_items {
             let location_key = match item.location {
@@ -407,6 +415,27 @@ impl StoredCurrentDangerExtractionSnapshotV1 {
             {
                 return Err(corrupt_current_danger_snapshot());
             }
+            let stack =
+                stacks
+                    .entry(item.location)
+                    .or_insert((item.kind, item.template_id.as_str(), 0));
+            stack.2 = stack.2.saturating_add(1);
+            let valid_stack = match item.kind {
+                StoredCurrentDangerPendingItemKindV1::Equipment => {
+                    stack.0 == StoredCurrentDangerPendingItemKindV1::Equipment
+                        && stack.1 == item.template_id.as_str()
+                        && stack.2 == 1
+                }
+                StoredCurrentDangerPendingItemKindV1::Consumable => {
+                    stack.0 == StoredCurrentDangerPendingItemKindV1::Consumable
+                        && stack.1 == item.template_id.as_str()
+                        && stack.1 == CORE_RED_TONIC_ID
+                        && stack.2 <= CORE_RED_TONIC_STACK_CAP
+                }
+            };
+            if !valid_stack {
+                return Err(corrupt_current_danger_snapshot());
+            }
             previous_item_key = Some(key);
         }
         let mut material_ids = BTreeSet::new();
@@ -414,6 +443,7 @@ impl StoredCurrentDangerExtractionSnapshotV1 {
         for material in &self.pending_materials {
             if !(3..=96).contains(&material.material_id.len())
                 || material.quantity == 0
+                || material.quantity > RUN_MATERIAL_STACK_CAP
                 || material.material_version == 0
                 || !material_ids.insert(material.material_id.as_str())
                 || previous_material_id
@@ -590,6 +620,7 @@ impl PostgresPersistence {
         if character.character_id != authority.character_id
             || danger.lineage_id != authority.instance_lineage_id
             || danger.restore_point_id != authority.entry_restore_point_id
+            || danger.lineage_state != LINEAGE_ACTIVE_U8
         {
             return Err(PersistenceError::CurrentDangerExtractionSnapshotBindingMismatch);
         }
@@ -614,6 +645,9 @@ impl PostgresPersistence {
             authority.character_id,
         )
         .await?;
+        if !pending_materials.is_empty() {
+            return Err(PersistenceError::CurrentDangerExtractionSnapshotContentMismatch);
+        }
         let versions = character.versions;
         let snapshot = StoredCurrentDangerExtractionSnapshotV1 {
             schema_version: CURRENT_DANGER_EXTRACTION_SNAPSHOT_SCHEMA_VERSION_V1,
@@ -1482,7 +1516,7 @@ mod tests {
                     uid[..8].copy_from_slice(&(index as u64 + 1).to_be_bytes());
                     uid
                 },
-                template_id: "item.tonic".into(),
+                template_id: "consumable.red_tonic".into(),
                 kind: StoredCurrentDangerPendingItemKindV1::Consumable,
                 item_version: 1,
                 location: StoredCurrentDangerPendingItemLocationV1::PersonalGround {
@@ -1497,6 +1531,35 @@ mod tests {
             })
             .collect();
         assert!(oversized.validate().is_err());
+
+        let mut duplicate_equipment = current_danger_snapshot();
+        duplicate_equipment.pending_items.insert(
+            1,
+            StoredCurrentDangerPendingItemV1 {
+                item_uid: [9; 16],
+                template_id: "item.weapon".into(),
+                kind: StoredCurrentDangerPendingItemKindV1::Equipment,
+                item_version: 1,
+                location: StoredCurrentDangerPendingItemLocationV1::RunBackpack(0),
+            },
+        );
+        assert!(duplicate_equipment.validate().is_err());
+
+        let mut over_cap_tonics = current_danger_snapshot();
+        over_cap_tonics.pending_items = (1_u8..=7)
+            .map(|uid| StoredCurrentDangerPendingItemV1 {
+                item_uid: [uid; 16],
+                template_id: "consumable.red_tonic".into(),
+                kind: StoredCurrentDangerPendingItemKindV1::Consumable,
+                item_version: 1,
+                location: StoredCurrentDangerPendingItemLocationV1::RunBackpack(0),
+            })
+            .collect();
+        assert!(over_cap_tonics.validate().is_err());
+
+        let mut over_cap_material = current_danger_snapshot();
+        over_cap_material.pending_materials[0].quantity = 100;
+        assert!(over_cap_material.validate().is_err());
     }
 
     fn current_danger_snapshot() -> StoredCurrentDangerExtractionSnapshotV1 {
@@ -1531,7 +1594,7 @@ mod tests {
                 },
                 StoredCurrentDangerPendingItemV1 {
                     item_uid: [6; 16],
-                    template_id: "item.tonic".into(),
+                    template_id: "consumable.red_tonic".into(),
                     kind: StoredCurrentDangerPendingItemKindV1::Consumable,
                     item_version: 1,
                     location: StoredCurrentDangerPendingItemLocationV1::PersonalGround {

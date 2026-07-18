@@ -601,7 +601,11 @@ fn extraction_request(
 
 #[tokio::test]
 #[ignore = "requires explicitly authorized disposable PostgreSQL"]
-async fn current_danger_snapshot_reads_exact_pending_ground_and_material_custody() {
+#[expect(
+    clippy::too_many_lines,
+    reason = "one hosted custody journey proves active-lineage, content, ground, and material fail-closed boundaries"
+)]
+async fn current_danger_snapshot_reads_exact_core_pending_ground_custody() {
     let persistence = disposable_database().await;
     let account_id = [221; 16];
     let character_id = [222; 16];
@@ -627,18 +631,6 @@ async fn current_danger_snapshot_reads_exact_pending_ground_and_material_custody
     .bind(persistence::CORE_ITEM_CONTENT_REVISION)
     .bind([227_u8; 16].as_slice())
     .bind([228_u8; 16].as_slice())
-    .execute(fixture.connection())
-    .await
-    .unwrap();
-    sqlx::query(
-        "INSERT INTO character_run_material_stacks
-         (namespace_id,account_id,character_id,material_id,quantity,
-          material_version,security_state)
-         VALUES ($1,$2,$3,'material.bell_brass',3,1,2)",
-    )
-    .bind(WIPEABLE_CORE_NAMESPACE)
-    .bind(account_id.as_slice())
-    .bind(character_id.as_slice())
     .execute(fixture.connection())
     .await
     .unwrap();
@@ -676,18 +668,67 @@ async fn current_danger_snapshot_reads_exact_pending_ground_and_material_custody
             } if instance_id == [227; 16] && pickup_id == [228; 16]
         )
     }));
-    assert_eq!(snapshot.pending_materials.len(), 1);
-    assert_eq!(
-        snapshot.pending_materials[0].material_id,
-        "material.bell_brass"
-    );
-    assert_eq!(snapshot.pending_materials[0].quantity, 3);
+    assert!(snapshot.pending_materials.is_empty());
 
     let mut wrong_revision = stored_world_flow_revision();
     wrong_revision.records_blake3 = "d".repeat(64);
     assert!(matches!(
         persistence
             .load_current_danger_extraction_snapshot_v1(authority, &wrong_revision)
+            .await,
+        Err(PersistenceError::CurrentDangerExtractionSnapshotContentMismatch)
+    ));
+
+    let mut staged = persistence.begin_transaction().await.unwrap();
+    sqlx::query(
+        "UPDATE character_instance_lineages SET lineage_state=0
+          WHERE namespace_id=$1 AND account_id=$2 AND character_id=$3 AND lineage_id=$4",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
+    .bind(lineage_id.as_slice())
+    .execute(staged.connection())
+    .await
+    .unwrap();
+    staged.commit().await.unwrap();
+    assert!(matches!(
+        persistence
+            .load_current_danger_extraction_snapshot_v1(authority, &stored_world_flow_revision())
+            .await,
+        Err(PersistenceError::CurrentDangerExtractionSnapshotBindingMismatch)
+    ));
+    let mut active = persistence.begin_transaction().await.unwrap();
+    sqlx::query(
+        "UPDATE character_instance_lineages SET lineage_state=1
+          WHERE namespace_id=$1 AND account_id=$2 AND character_id=$3 AND lineage_id=$4",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
+    .bind(lineage_id.as_slice())
+    .execute(active.connection())
+    .await
+    .unwrap();
+    active.commit().await.unwrap();
+
+    let mut non_core = persistence.begin_transaction().await.unwrap();
+    sqlx::query(
+        "INSERT INTO character_run_material_stacks
+         (namespace_id,account_id,character_id,material_id,quantity,
+          material_version,security_state)
+         VALUES ($1,$2,$3,'material.bell_brass',3,1,2)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
+    .execute(non_core.connection())
+    .await
+    .unwrap();
+    non_core.commit().await.unwrap();
+    assert!(matches!(
+        persistence
+            .load_current_danger_extraction_snapshot_v1(authority, &stored_world_flow_revision())
             .await,
         Err(PersistenceError::CurrentDangerExtractionSnapshotContentMismatch)
     ));

@@ -8,7 +8,7 @@
 //! The projection is read-only. It exposes current custody and the exact version vector a client
 //! must echo when requesting extraction, but never accepts destinations or placement authority.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -23,6 +23,9 @@ pub const CORE_PENDING_INVENTORY_FEATURE_FLAG: &str = "core_pending_inventory_v1
 pub const CORE_PENDING_BACKPACK_CAPACITY: u8 = 8;
 pub const CORE_PENDING_ITEM_CAPACITY: usize = 64;
 pub const CORE_PENDING_MATERIAL_CAPACITY: usize = 4;
+const CORE_RED_TONIC_ID: &str = "consumable.red_tonic";
+const CORE_RED_TONIC_STACK_CAP: usize = 6;
+const RUN_MATERIAL_STACK_CAP: u16 = 99;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -130,6 +133,8 @@ impl CorePendingInventoryStateV1 {
         }
 
         let mut item_uids = BTreeSet::new();
+        let mut stacks: BTreeMap<CorePendingItemLocationV1, (CorePendingItemKindV1, &str, usize)> =
+            BTreeMap::new();
         let mut previous_item_key = None;
         for item in &self.items {
             let key = (item.order_key()?, item.item_uid);
@@ -138,12 +143,34 @@ impl CorePendingInventoryStateV1 {
             {
                 return Err(CorePendingInventoryValidationError::NonCanonicalOrder);
             }
+            let stack =
+                stacks
+                    .entry(item.location)
+                    .or_insert((item.kind, item.template_id.as_str(), 0));
+            stack.2 = stack.2.saturating_add(1);
+            let valid_stack = match item.kind {
+                CorePendingItemKindV1::Equipment => {
+                    stack.0 == CorePendingItemKindV1::Equipment
+                        && stack.1 == item.template_id.as_str()
+                        && stack.2 == 1
+                }
+                CorePendingItemKindV1::Consumable => {
+                    stack.0 == CorePendingItemKindV1::Consumable
+                        && stack.1 == item.template_id.as_str()
+                        && stack.1 == CORE_RED_TONIC_ID
+                        && stack.2 <= CORE_RED_TONIC_STACK_CAP
+                }
+            };
+            if !valid_stack {
+                return Err(CorePendingInventoryValidationError::InvalidStack);
+            }
             previous_item_key = Some(key);
         }
 
         let mut previous_material = None;
         for material in &self.materials {
             if material.quantity == 0
+                || material.quantity > RUN_MATERIAL_STACK_CAP
                 || material.material_version == 0
                 || previous_material
                     .is_some_and(|previous: &str| previous >= material.material_id.as_str())
@@ -193,6 +220,8 @@ pub enum CorePendingInventoryValidationError {
     InvalidItem,
     #[error("pending item location is invalid")]
     InvalidItemLocation,
+    #[error("pending item stack shape is invalid")]
+    InvalidStack,
     #[error("pending items or materials are not in canonical order")]
     NonCanonicalOrder,
     #[error("pending material is invalid")]
@@ -237,7 +266,7 @@ mod tests {
                 },
                 CorePendingItemV1 {
                     item_uid: [5; 16],
-                    template_id: WireText::new("item.consumable.red_tonic").expect("template"),
+                    template_id: WireText::new("consumable.red_tonic").expect("template"),
                     kind: CorePendingItemKindV1::Consumable,
                     item_version: 1,
                     location: CorePendingItemLocationV1::PersonalGround {
@@ -247,11 +276,7 @@ mod tests {
                     },
                 },
             ],
-            materials: vec![CorePendingMaterialV1 {
-                material_id: WireText::new("material.bell_brass").expect("material"),
-                quantity: 2,
-                material_version: 1,
-            }],
+            materials: Vec::new(),
         }
     }
 
@@ -284,6 +309,52 @@ mod tests {
         assert_eq!(
             changed.validate(),
             Err(CorePendingInventoryValidationError::InvalidItemLocation)
+        );
+    }
+
+    #[test]
+    fn impossible_equipment_consumable_and_material_stacks_fail_closed() {
+        let mut changed = state();
+        changed.items.insert(
+            1,
+            CorePendingItemV1 {
+                item_uid: [8; 16],
+                template_id: WireText::new("item.weapon.sword.bell_cleaver_caldus")
+                    .expect("template"),
+                kind: CorePendingItemKindV1::Equipment,
+                item_version: 1,
+                location: CorePendingItemLocationV1::RunBackpack { index: 0 },
+            },
+        );
+        assert_eq!(
+            changed.validate(),
+            Err(CorePendingInventoryValidationError::InvalidStack)
+        );
+
+        let mut changed = state();
+        changed.items = (0_u8..7)
+            .map(|uid| CorePendingItemV1 {
+                item_uid: [uid.saturating_add(1); 16],
+                template_id: WireText::new("consumable.red_tonic").expect("template"),
+                kind: CorePendingItemKindV1::Consumable,
+                item_version: 1,
+                location: CorePendingItemLocationV1::RunBackpack { index: 0 },
+            })
+            .collect();
+        assert_eq!(
+            changed.validate(),
+            Err(CorePendingInventoryValidationError::InvalidStack)
+        );
+
+        let mut changed = state();
+        changed.materials.push(CorePendingMaterialV1 {
+            material_id: WireText::new("material.bell_brass").expect("material"),
+            quantity: 100,
+            material_version: 1,
+        });
+        assert_eq!(
+            changed.validate(),
+            Err(CorePendingInventoryValidationError::InvalidMaterial)
         );
     }
 

@@ -22,6 +22,9 @@ pub fn project_core_pending_inventory(
     snapshot
         .validate()
         .map_err(CorePendingInventoryProjectionError::Persistence)?;
+    if !snapshot.pending_materials.is_empty() {
+        return Err(CorePendingInventoryProjectionError::CoreContentAuthority);
+    }
     let state = CorePendingInventoryStateV1 {
         schema_version: CORE_PENDING_INVENTORY_SCHEMA_VERSION,
         character_id: snapshot.authority.character_id,
@@ -104,6 +107,8 @@ pub enum CorePendingInventoryProjectionError {
     Persistence(#[source] persistence::PersistenceError),
     #[error("stored current-danger snapshot exceeds protocol bounds")]
     WireBounds,
+    #[error("Core pending inventory contains content unavailable in the Core release stage")]
+    CoreContentAuthority,
     #[error("projected current-danger snapshot is invalid")]
     Protocol(#[source] protocol::CorePendingInventoryValidationError),
 }
@@ -147,11 +152,7 @@ mod tests {
                 item_version: 1,
                 location: StoredCurrentDangerPendingItemLocationV1::RunBackpack(0),
             }],
-            pending_materials: vec![StoredCurrentDangerPendingMaterialV1 {
-                material_id: "material.bell_brass".to_owned(),
-                quantity: 2,
-                material_version: 1,
-            }],
+            pending_materials: Vec::new(),
         }
     }
 
@@ -161,7 +162,7 @@ mod tests {
         assert_eq!(projected.character_id, [2; 16]);
         assert_eq!(projected.expected_extraction_versions.inventory, 6);
         assert_eq!(projected.items[0].item_uid, [5; 16]);
-        assert_eq!(projected.materials[0].quantity, 2);
+        assert!(projected.materials.is_empty());
     }
 
     #[test]
@@ -171,6 +172,22 @@ mod tests {
         assert!(matches!(
             project_core_pending_inventory(&snapshot),
             Err(CorePendingInventoryProjectionError::Persistence(_))
+        ));
+    }
+
+    #[test]
+    fn non_core_run_material_never_becomes_core_wire_authority() {
+        let mut snapshot = snapshot();
+        snapshot
+            .pending_materials
+            .push(StoredCurrentDangerPendingMaterialV1 {
+                material_id: "material.bell_brass".to_owned(),
+                quantity: 2,
+                material_version: 1,
+            });
+        assert!(matches!(
+            project_core_pending_inventory(&snapshot),
+            Err(CorePendingInventoryProjectionError::CoreContentAuthority)
         ));
     }
 }
