@@ -34,4 +34,4 @@ The hosted PostgreSQL suite now includes two additional adverse contracts: termi
 
 ## Current Next Step
 
-Install the session-owned automatic Caldus executor around the frozen handoff and `PostgresCaldusVictoryCoordinator`: pin one retryable attempt, acknowledge only the matching durable result, publish the pending-at-risk inventory projection, and bind production extraction only after committed `BossExitReady`. Then run the hosted PostgreSQL/real-QUIC adverse and restart matrix. Keep normal admission disabled.
+Commits `f4ad323`, `e5f7dc8`, `1bd230a`, and `47ad6c3` add the automatic executor and the coherent custody, wire-projection, and reconnect-binding prerequisites; see [extraction-prerequisite evidence](GB-M03-03G-caldus-extraction-prerequisites-evidence.md). Next publish/retain the snapshot and construct/register production extraction only from the exact committed `BossExitReady` result, then run the hosted PostgreSQL/real-QUIC adverse and restart matrix. Keep normal admission disabled.

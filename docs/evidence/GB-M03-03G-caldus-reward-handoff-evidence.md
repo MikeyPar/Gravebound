@@ -38,4 +38,4 @@ This slice freezes and acknowledges one exact durable Caldus result but does not
 
 ## Current Next Step
 
-Commits `308767f` and `57e4ca2` close restore-root propagation and shared terminal arbitration under [terminal-arbitration evidence](GB-M03-03G-caldus-terminal-arbitration-evidence.md). Next install the automatic session retry/acknowledgement worker, publish pending-at-risk inventory, and bind production extraction only from committed `BossExitReady`. Keep normal admission disabled.
+Commit `f4ad323` installs the automatic session retry/acknowledgement worker; commits `e5f7dc8`, `1bd230a`, and `47ad6c3` add its coherent custody, wire-projection, and reconnect-binding prerequisites under [extraction-prerequisite evidence](GB-M03-03G-caldus-extraction-prerequisites-evidence.md). Next publish/retain that snapshot and construct/register production extraction only from committed `BossExitReady`. Keep normal admission disabled.
