@@ -105,6 +105,7 @@ pub use core_private_life_session::{
     CorePrivateLifeSessionDirectory, CorePrivateLifeSessionError, CorePrivateLifeSessionReport,
     CorePrivateLifeSessionSnapshot, CorePrivateLifeTransportAttach, CorePrivateLifeTransportDetach,
     CorePrivateLifeTransportGeneration, CorePrivateLifeTransportLease,
+    CorePrivateMicrorealmBinding, CorePrivateMicrorealmBindingLease,
 };
 pub use core_private_microrealm_driver::{
     CorePrivateMicrorealmAbility, CorePrivateMicrorealmAbilityPress, CorePrivateMicrorealmDriver,

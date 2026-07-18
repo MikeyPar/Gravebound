@@ -9,6 +9,8 @@
 
 use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc};
 
+use protocol::{ActionFrame, ActionKind, InputFrame};
+use sim_core::{AimDirection, MovementAction, SimulationVector};
 use thiserror::Error;
 use tokio::sync::Mutex;
 
@@ -16,7 +18,11 @@ use crate::{
     AuthenticatedAccount, AuthenticatedNamespace, CoreExtractionActorDirectory,
     CoreExtractionAuthoritativeTick, CoreExtractionConnectionLease, CoreExtractionHallProjection,
     CoreExtractionRuntimeError, CoreExtractionRuntimeReport, CoreExtractionTransportAttach,
-    CoreExtractionTransportDetach, CorePrivateMicrorealmRuntime, CorePrivateRouteActorLease,
+    CoreExtractionTransportDetach, CorePrivateMicrorealmAbility, CorePrivateMicrorealmAbilityPress,
+    CorePrivateMicrorealmDriver, CorePrivateMicrorealmDriverError,
+    CorePrivateMicrorealmDriverHandle, CorePrivateMicrorealmDriverObserver,
+    CorePrivateMicrorealmDriverReport, CorePrivateMicrorealmIngressError,
+    CorePrivateMicrorealmRetainedInput, CorePrivateMicrorealmRuntime, CorePrivateRouteActorLease,
     CoreRecallActorDirectory, CoreRecallActorRetirementReport, CoreRecallAuthoritativeTick,
     CoreRecallConnectionAuthority, CoreRecallConnectionLease, CoreRecallRuntimeError,
     CoreRecallRuntimeReport, CoreRecallTransportAttach, CoreReliableWriter, IdentityClock,
@@ -47,6 +53,52 @@ pub struct CorePrivateLifeTransportLease {
     generation: CorePrivateLifeTransportGeneration,
 }
 
+/// Transport-independent authority for retiring exactly one live microrealm allocation. A
+/// terminal owner may retain this across `LinkLost`, when no transport lease remains valid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CorePrivateMicrorealmBindingLease {
+    account_id: [u8; 16],
+    character_id: [u8; 16],
+    actor_generation: u64,
+    binding_generation: u64,
+    route_lease: CorePrivateRouteActorLease,
+}
+
+impl CorePrivateMicrorealmBindingLease {
+    #[must_use]
+    pub const fn account_id(self) -> [u8; 16] {
+        self.account_id
+    }
+
+    #[must_use]
+    pub const fn character_id(self) -> [u8; 16] {
+        self.character_id
+    }
+
+    #[must_use]
+    pub const fn actor_generation(self) -> u64 {
+        self.actor_generation
+    }
+
+    #[must_use]
+    pub const fn binding_generation(self) -> u64 {
+        self.binding_generation
+    }
+
+    #[must_use]
+    pub const fn route_lease(self) -> CorePrivateRouteActorLease {
+        self.route_lease
+    }
+}
+
+/// Reconnect-visible binding exposes immutable retirement identity and read-only committed state.
+/// All ingress must pass back through the generation-validating session directory.
+#[derive(Debug, Clone)]
+pub struct CorePrivateMicrorealmBinding {
+    pub lease: CorePrivateMicrorealmBindingLease,
+    pub observer: CorePrivateMicrorealmDriverObserver,
+}
+
 impl CorePrivateLifeTransportLease {
     #[must_use]
     pub const fn account_id(self) -> [u8; 16] {
@@ -65,7 +117,7 @@ pub struct CorePrivateLifeTransportAttach {
     pub writer: Arc<CoreReliableWriter>,
     pub recall_lease: Option<CoreRecallConnectionLease>,
     pub extraction_lease: Option<CoreExtractionConnectionLease>,
-    pub microrealm: Option<Arc<Mutex<CorePrivateMicrorealmRuntime>>>,
+    pub microrealm: Option<CorePrivateMicrorealmBinding>,
     pub invalidated_connection: Option<quinn::Connection>,
 }
 
@@ -97,6 +149,7 @@ pub struct CorePrivateLifeSessionReport {
     pub recall: CoreRecallRuntimeReport,
     pub extraction: Option<CoreExtractionRuntimeReport>,
     pub remaining_microrealm_bindings: usize,
+    pub microrealm_shutdown_failures: usize,
     pub zero_residue: bool,
 }
 
@@ -126,6 +179,12 @@ pub enum CorePrivateLifeSessionError {
     MicrorealmAlreadyBound,
     #[error("Core private-life microrealm authority is not bound")]
     MicrorealmUnavailable,
+    #[error("Core private-life microrealm binding generation overflowed")]
+    MicrorealmBindingGenerationExhausted,
+    #[error("Core private-life microrealm input is invalid")]
+    InvalidMicrorealmInput,
+    #[error("Core private-life action is not a microrealm ability press")]
+    MicrorealmActionUnavailable,
     #[error("Core private-life dynamic writer handoff could not restore one-owner authority")]
     DynamicWriterHandoffInconsistent,
     #[error("Core private-life session shutdown has not started")]
@@ -134,6 +193,10 @@ pub enum CorePrivateLifeSessionError {
     Recall(#[from] CoreRecallRuntimeError),
     #[error("Core private-life extraction runtime failed: {0}")]
     Extraction(#[from] CoreExtractionRuntimeError),
+    #[error("Core private-life microrealm ingress failed: {0}")]
+    MicrorealmIngress(#[from] CorePrivateMicrorealmIngressError),
+    #[error("Core private-life microrealm driver failed: {0}")]
+    MicrorealmDriver(#[from] CorePrivateMicrorealmDriverError),
 }
 
 #[derive(Debug)]
@@ -151,14 +214,21 @@ struct SessionEntry {
     recall_lease: Option<CoreRecallConnectionLease>,
     extraction_bound: bool,
     extraction_lease: Option<CoreExtractionConnectionLease>,
-    microrealm: Option<Arc<Mutex<CorePrivateMicrorealmRuntime>>>,
-    microrealm_route_lease: Option<CorePrivateRouteActorLease>,
+    microrealm: Option<BoundMicrorealmDriver>,
+    next_microrealm_binding_generation: u64,
+}
+
+#[derive(Debug)]
+struct BoundMicrorealmDriver {
+    lease: CorePrivateMicrorealmBindingLease,
+    driver: CorePrivateMicrorealmDriver,
 }
 
 #[derive(Debug)]
 struct SessionState {
     accepting: bool,
     shutdown_started: bool,
+    microrealm_shutdown_failures: usize,
     sessions: BTreeMap<[u8; 16], SessionEntry>,
 }
 
@@ -286,6 +356,7 @@ where
             state: Mutex::new(SessionState {
                 accepting: true,
                 shutdown_started: false,
+                microrealm_shutdown_failures: 0,
                 sessions: BTreeMap::new(),
             }),
         }
@@ -530,7 +601,7 @@ where
             extraction_bound: false,
             extraction_lease: None,
             microrealm: None,
-            microrealm_route_lease: None,
+            next_microrealm_binding_generation: 1,
         });
         if entry.authenticated != authenticated {
             writer.retire(
@@ -584,7 +655,13 @@ where
             writer,
             recall_lease: entry.recall_lease,
             extraction_lease: entry.extraction_lease,
-            microrealm: entry.microrealm.clone(),
+            microrealm: entry
+                .microrealm
+                .as_ref()
+                .map(|bound| CorePrivateMicrorealmBinding {
+                    lease: bound.lease,
+                    observer: bound.driver.handle().observe(),
+                }),
             invalidated_connection,
         })
     }
@@ -644,7 +721,7 @@ where
         &self,
         lease: CorePrivateLifeTransportLease,
         runtime: CorePrivateMicrorealmRuntime,
-    ) -> Result<Arc<Mutex<CorePrivateMicrorealmRuntime>>, CorePrivateLifeSessionError> {
+    ) -> Result<CorePrivateMicrorealmBinding, CorePrivateLifeSessionError> {
         let mut state = self.state.lock().await;
         if !state.accepting {
             return Err(CorePrivateLifeSessionError::Retired);
@@ -664,11 +741,29 @@ where
         if entry.microrealm.is_some() {
             return Err(CorePrivateLifeSessionError::MicrorealmAlreadyBound);
         }
-        let runtime_route_lease = runtime.route_lease();
-        let runtime = Arc::new(Mutex::new(runtime));
-        entry.microrealm_route_lease = Some(runtime_route_lease);
-        entry.microrealm = Some(Arc::clone(&runtime));
-        Ok(runtime)
+        let binding_generation = entry.next_microrealm_binding_generation;
+        let Some(next_binding_generation) = binding_generation.checked_add(1) else {
+            return Err(CorePrivateLifeSessionError::MicrorealmBindingGenerationExhausted);
+        };
+        let route_lease = runtime.route_lease();
+        let binding_lease = CorePrivateMicrorealmBindingLease {
+            account_id: lease.account_id,
+            character_id: route_lease.character_id(),
+            actor_generation: route_lease.actor_generation(),
+            binding_generation,
+            route_lease,
+        };
+        let driver = CorePrivateMicrorealmDriver::spawn(runtime);
+        let binding = CorePrivateMicrorealmBinding {
+            lease: binding_lease,
+            observer: driver.handle().observe(),
+        };
+        entry.next_microrealm_binding_generation = next_binding_generation;
+        entry.microrealm = Some(BoundMicrorealmDriver {
+            lease: binding_lease,
+            driver,
+        });
+        Ok(binding)
     }
 
     /// Returns live danger authority only to the current transport generation. The returned owner
@@ -676,7 +771,7 @@ where
     pub async fn microrealm_authority(
         &self,
         lease: CorePrivateLifeTransportLease,
-    ) -> Result<Arc<Mutex<CorePrivateMicrorealmRuntime>>, CorePrivateLifeSessionError> {
+    ) -> Result<CorePrivateMicrorealmBinding, CorePrivateLifeSessionError> {
         let state = self.state.lock().await;
         let entry = state
             .sessions
@@ -688,17 +783,101 @@ where
         entry
             .microrealm
             .as_ref()
-            .map(Arc::clone)
+            .map(|bound| CorePrivateMicrorealmBinding {
+                lease: bound.lease,
+                observer: bound.driver.handle().observe(),
+            })
             .ok_or(CorePrivateLifeSessionError::MicrorealmUnavailable)
+    }
+
+    /// Validates compact input against the negotiated protocol, checks the current transport
+    /// generation under the session lock, then submits without retaining that lock.
+    pub async fn submit_microrealm_input(
+        &self,
+        lease: CorePrivateLifeTransportLease,
+        frame: &InputFrame,
+    ) -> Result<(), CorePrivateLifeSessionError> {
+        frame
+            .validate()
+            .map_err(|_| CorePrivateLifeSessionError::InvalidMicrorealmInput)?;
+        let movement =
+            MovementAction::try_from_milli(frame.movement_x_milli, frame.movement_y_milli)
+                .map_err(|_| CorePrivateLifeSessionError::InvalidMicrorealmInput)?;
+        let aim = AimDirection::new(SimulationVector::new(
+            f32::from(frame.aim_x_milli),
+            f32::from(frame.aim_y_milli),
+        ))
+        .map_err(|_| CorePrivateLifeSessionError::InvalidMicrorealmInput)?;
+        self.submit_microrealm_ingress(lease, |handle| {
+            handle.submit_latest_input(CorePrivateMicrorealmRetainedInput {
+                input_sequence: u64::from(frame.sequence),
+                movement,
+                aim,
+                primary_held: frame.held_primary,
+                primary_sequence: frame.primary_sequence,
+            })
+        })
+        .await
+    }
+
+    /// Submits only reliable ability presses. Recall and interactions retain their dedicated
+    /// owners and cannot be smuggled into the combat driver.
+    pub async fn submit_microrealm_action(
+        &self,
+        lease: CorePrivateLifeTransportLease,
+        frame: &ActionFrame,
+    ) -> Result<(), CorePrivateLifeSessionError> {
+        frame
+            .validate()
+            .map_err(|_| CorePrivateLifeSessionError::InvalidMicrorealmInput)?;
+        let ability = match frame.action {
+            ActionKind::Ability1Press => CorePrivateMicrorealmAbility::Ability1,
+            ActionKind::Ability2Press => CorePrivateMicrorealmAbility::Ability2,
+            ActionKind::RecallStart | ActionKind::RecallCancel | ActionKind::Interact => {
+                return Err(CorePrivateLifeSessionError::MicrorealmActionUnavailable);
+            }
+        };
+        self.submit_microrealm_ingress(lease, |handle| {
+            handle.submit_ability_press(CorePrivateMicrorealmAbilityPress {
+                action_sequence: frame.sequence,
+                ability,
+            })
+        })
+        .await
+    }
+
+    async fn submit_microrealm_ingress(
+        &self,
+        lease: CorePrivateLifeTransportLease,
+        submit: impl FnOnce(
+            &CorePrivateMicrorealmDriverHandle,
+        ) -> Result<(), CorePrivateMicrorealmIngressError>,
+    ) -> Result<(), CorePrivateLifeSessionError> {
+        let state = self.state.lock().await;
+        let entry = state
+            .sessions
+            .get(&lease.account_id)
+            .ok_or(CorePrivateLifeSessionError::SessionUnavailable)?;
+        if entry.active.as_ref().map(|active| active.lease) != Some(lease) {
+            return Err(CorePrivateLifeSessionError::StaleTransport);
+        }
+        let handle = entry
+            .microrealm
+            .as_ref()
+            .map(|bound| bound.driver.handle())
+            .ok_or(CorePrivateLifeSessionError::MicrorealmUnavailable)?;
+        // This non-awaiting reducer enqueue is linearized with transport replacement/detach. The
+        // one-way lock order is session -> ingress; the driver never calls back into the session.
+        submit(&handle)?;
+        Ok(())
     }
 
     /// Removes exactly one terminal or transfer-retired live owner without touching the shared
     /// writer. A later danger generation must bind a fresh runtime.
     pub async fn unbind_microrealm(
         &self,
-        lease: CorePrivateLifeTransportLease,
-        route_lease: CorePrivateRouteActorLease,
-    ) -> Result<(), CorePrivateLifeSessionError> {
+        lease: CorePrivateMicrorealmBindingLease,
+    ) -> Result<CorePrivateMicrorealmDriverReport, CorePrivateLifeSessionError> {
         let mut state = self.state.lock().await;
         if !state.accepting {
             return Err(CorePrivateLifeSessionError::Retired);
@@ -707,15 +886,20 @@ where
             .sessions
             .get_mut(&lease.account_id)
             .ok_or(CorePrivateLifeSessionError::SessionUnavailable)?;
-        if entry.active.as_ref().map(|active| active.lease) != Some(lease) {
-            return Err(CorePrivateLifeSessionError::StaleTransport);
-        }
-        if entry.microrealm.is_none() || entry.microrealm_route_lease != Some(route_lease) {
+        if entry.authenticated.account_id.as_bytes() != lease.account_id
+            || entry
+                .microrealm
+                .as_ref()
+                .is_none_or(|bound| bound.lease != lease)
+        {
             return Err(CorePrivateLifeSessionError::MicrorealmUnavailable);
         }
-        entry.microrealm = None;
-        entry.microrealm_route_lease = None;
-        Ok(())
+        let bound = entry
+            .microrealm
+            .take()
+            .ok_or(CorePrivateLifeSessionError::MicrorealmUnavailable)?;
+        drop(state);
+        bound.driver.shutdown().await.map_err(Into::into)
     }
 
     /// Binds the current Boss-exit extraction actor to the exact private-life writer. This is
@@ -921,6 +1105,7 @@ where
         if entry.active.as_ref().map(|active| active.lease) != Some(lease) {
             return Ok(CorePrivateLifeTransportDetach::StaleGenerationIgnored);
         }
+        let microrealm = entry.microrealm.as_ref().map(|bound| bound.driver.handle());
         let extraction = if let Some(extraction_lease) = entry.extraction_lease.take() {
             Some(
                 self.extraction
@@ -946,6 +1131,13 @@ where
                 .writer
                 .retire(SESSION_DETACHED_CLOSE_CODE, SESSION_DETACHED_REASON);
         }
+        drop(state);
+        if let Some(handle) = microrealm {
+            match handle.neutralize_for_link_lost() {
+                Ok(()) | Err(CorePrivateMicrorealmIngressError::DriverFrozen) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
         Ok(CorePrivateLifeTransportDetach::Detached { recall, extraction })
     }
 
@@ -956,6 +1148,7 @@ where
         state.accepting = false;
         state.shutdown_started = true;
         let mut connections = Vec::new();
+        let mut microrealm_drivers = Vec::new();
         for entry in state.sessions.values_mut() {
             if let Some(active) = entry.active.take() {
                 active.writer.retire(
@@ -966,10 +1159,20 @@ where
             }
             entry.recall_lease = None;
             entry.extraction_lease = None;
-            entry.microrealm = None;
-            entry.microrealm_route_lease = None;
+            if let Some(bound) = entry.microrealm.take() {
+                microrealm_drivers.push(bound.driver);
+            }
         }
         drop(state);
+        let mut microrealm_shutdown_failures = 0_usize;
+        for driver in microrealm_drivers {
+            if driver.shutdown().await.is_err() {
+                microrealm_shutdown_failures = microrealm_shutdown_failures.saturating_add(1);
+            }
+        }
+        if microrealm_shutdown_failures > 0 {
+            self.state.lock().await.microrealm_shutdown_failures = microrealm_shutdown_failures;
+        }
         connections.extend(self.recall.begin_shutdown().await);
         if let Some(extraction) = &self.extraction {
             connections.extend(extraction.begin_shutdown().await);
@@ -1005,6 +1208,7 @@ where
             .values()
             .filter(|entry| entry.microrealm.is_some())
             .count();
+        let microrealm_shutdown_failures = state.microrealm_shutdown_failures;
         state.sessions.clear();
         Ok(CorePrivateLifeSessionReport {
             retired_account_count,
@@ -1012,10 +1216,12 @@ where
             recall,
             extraction,
             remaining_microrealm_bindings,
+            microrealm_shutdown_failures,
             zero_residue: remaining_active_transports == 0
                 && recall.zero_residue
                 && extraction_zero_residue
-                && remaining_microrealm_bindings == 0,
+                && remaining_microrealm_bindings == 0
+                && microrealm_shutdown_failures == 0,
         })
     }
 
@@ -1323,6 +1529,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one real-QUIC lifecycle proves generation-safe ingress, handoff, LinkLost, reconnect, transport-independent retirement, and residue"
+    )]
     async fn live_microrealm_survives_handoff_and_link_lost_until_exact_unbind() {
         let ticks = Arc::new(TickSource(AtomicU64::new(100)));
         let recall = Arc::new(CoreRecallActorDirectory::<FixedClock, _>::new(ticks));
@@ -1339,7 +1549,55 @@ mod tests {
             .bind_microrealm(first.lease, runtime)
             .await
             .unwrap();
+        assert_eq!(bound.lease.route_lease(), route_lease);
         assert_eq!(sessions.snapshot().await.microrealm_bound_count, 1);
+        sessions
+            .submit_microrealm_input(
+                first.lease,
+                &InputFrame {
+                    sequence: 1,
+                    client_tick: 1,
+                    movement_x_milli: 1_000,
+                    movement_y_milli: 0,
+                    aim_x_milli: 0,
+                    aim_y_milli: 1_000,
+                    held_primary: true,
+                    primary_sequence: 1,
+                    ability_1_sequence: 0,
+                    ability_2_sequence: 0,
+                },
+            )
+            .await
+            .unwrap();
+        sessions
+            .submit_microrealm_input(
+                first.lease,
+                &InputFrame {
+                    sequence: 2,
+                    client_tick: 2,
+                    movement_x_milli: 1_000,
+                    movement_y_milli: 0,
+                    aim_x_milli: 0,
+                    aim_y_milli: 1_000,
+                    held_primary: false,
+                    primary_sequence: 0,
+                    ability_1_sequence: 0,
+                    ability_2_sequence: 0,
+                },
+            )
+            .await
+            .unwrap();
+        sessions
+            .submit_microrealm_action(
+                first.lease,
+                &ActionFrame {
+                    sequence: 1,
+                    client_tick: 2,
+                    action: ActionKind::Ability2Press,
+                },
+            )
+            .await
+            .unwrap();
 
         let (second_server_endpoint, second_client_endpoint, second_client, second_server) =
             live_connection_pair().await;
@@ -1347,7 +1605,38 @@ mod tests {
             .attach_transport(authenticated(), second_server, 5_100)
             .await
             .unwrap();
-        assert!(Arc::ptr_eq(second.microrealm.as_ref().unwrap(), &bound));
+        assert_eq!(second.microrealm.as_ref().unwrap().lease, bound.lease);
+        assert!(matches!(
+            sessions
+                .submit_microrealm_input(
+                    first.lease,
+                    &InputFrame {
+                        sequence: 3,
+                        client_tick: 3,
+                        movement_x_milli: 0,
+                        movement_y_milli: 0,
+                        aim_x_milli: 1_000,
+                        aim_y_milli: 0,
+                        held_primary: false,
+                        primary_sequence: 0,
+                        ability_1_sequence: 0,
+                        ability_2_sequence: 0,
+                    },
+                )
+                .await,
+            Err(CorePrivateLifeSessionError::StaleTransport)
+        ));
+        sessions
+            .submit_microrealm_action(
+                second.lease,
+                &ActionFrame {
+                    sequence: 2,
+                    client_tick: 3,
+                    action: ActionKind::Ability1Press,
+                },
+            )
+            .await
+            .unwrap();
         assert!(matches!(
             sessions.microrealm_authority(first.lease).await,
             Err(CorePrivateLifeSessionError::StaleTransport)
@@ -1370,11 +1659,16 @@ mod tests {
             .await
             .unwrap();
         let rebound = sessions.microrealm_authority(third.lease).await.unwrap();
-        assert!(Arc::ptr_eq(&rebound, &bound));
-        sessions
-            .unbind_microrealm(third.lease, route_lease)
-            .await
-            .unwrap();
+        assert_eq!(rebound.lease, bound.lease);
+        assert_eq!(third.microrealm.as_ref().unwrap().lease, bound.lease);
+        assert!(matches!(
+            sessions.detach_transport(third.lease, 5_400).await.unwrap(),
+            CorePrivateLifeTransportDetach::Detached { .. }
+        ));
+        let driver_report = sessions.unbind_microrealm(bound.lease).await.unwrap();
+        assert!(driver_report.task_joined);
+        assert!(!driver_report.driver_task_live_after_join);
+        assert_eq!(driver_report.link_lost_neutralizations, 2);
         assert_eq!(sessions.snapshot().await.microrealm_bound_count, 0);
 
         for connection in sessions.begin_shutdown().await {
