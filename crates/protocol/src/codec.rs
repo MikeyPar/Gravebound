@@ -2,9 +2,9 @@ use postcard::{from_bytes, to_stdvec};
 use thiserror::Error;
 
 use crate::{
-    DEATH_VIEW_PROTOCOL_MINOR, M02_PROTOCOL_MINOR, MessageKind, PROTOCOL_MAJOR, ProtocolVersion,
-    RESOLUTION_HOLD_PROTOCOL_MINOR, SAFE_INVENTORY_PROTOCOL_MINOR, SUCCESSOR_PROTOCOL_MINOR,
-    TERMINAL_INVENTORY_PROTOCOL_MINOR, WireMessage,
+    CORE_PRIVATE_ROUTE_PROTOCOL_MINOR, DEATH_VIEW_PROTOCOL_MINOR, M02_PROTOCOL_MINOR, MessageKind,
+    PROTOCOL_MAJOR, ProtocolVersion, RESOLUTION_HOLD_PROTOCOL_MINOR, SAFE_INVENTORY_PROTOCOL_MINOR,
+    SUCCESSOR_PROTOCOL_MINOR, TERMINAL_INVENTORY_PROTOCOL_MINOR, WireMessage,
 };
 
 const MAGIC: [u8; 4] = *b"GBN1";
@@ -144,6 +144,23 @@ pub fn encode_protocol_1_17_compatibility_frame(
     )
 }
 
+/// Reproduces protocol 1.18 bytes for immutable private-route and earlier compatibility
+/// fixtures. Pending-at-risk inventory was appended in 1.19.
+pub fn encode_protocol_1_18_compatibility_frame(
+    message: &WireMessage,
+) -> Result<Vec<u8>, WireCodecError> {
+    if message_uses_core_pending_inventory(message) {
+        return Err(WireCodecError::MessageUnavailableAtVersion);
+    }
+    encode_frame_for_version(
+        message,
+        ProtocolVersion {
+            major: PROTOCOL_MAJOR,
+            minor: CORE_PRIVATE_ROUTE_PROTOCOL_MINOR,
+        },
+    )
+}
+
 const fn message_uses_death_view(message: &WireMessage) -> bool {
     matches!(
         message,
@@ -200,7 +217,18 @@ const fn message_uses_core_private_route(message: &WireMessage) -> bool {
     matches!(
         message,
         WireMessage::ReliableEvent(crate::ReliableEventFrame {
-            event: crate::ReliableEvent::CorePrivateRouteState(_),
+            event: crate::ReliableEvent::CorePrivateRouteState(_)
+                | crate::ReliableEvent::CorePendingInventoryState(_),
+            ..
+        })
+    )
+}
+
+const fn message_uses_core_pending_inventory(message: &WireMessage) -> bool {
+    matches!(
+        message,
+        WireMessage::ReliableEvent(crate::ReliableEventFrame {
+            event: crate::ReliableEvent::CorePendingInventoryState(_),
             ..
         })
     )
@@ -1182,7 +1210,7 @@ mod tests {
         assert!(request_frame.len() <= RELIABLE_FRAME_LIMIT);
         assert_eq!(
             u16::from_le_bytes([request_frame[6], request_frame[7]]),
-            crate::CORE_PRIVATE_ROUTE_PROTOCOL_MINOR
+            crate::PROTOCOL_MINOR
         );
         assert_eq!(request_frame[8], 23);
         assert_eq!(request.channel(), crate::NetworkChannel::Mutation);
@@ -1297,7 +1325,7 @@ mod tests {
         assert!(frame.len() <= RELIABLE_FRAME_LIMIT);
         assert_eq!(
             u16::from_le_bytes([frame[6], frame[7]]),
-            crate::CORE_PRIVATE_ROUTE_PROTOCOL_MINOR
+            crate::PROTOCOL_MINOR
         );
         assert_eq!(frame[8], message_kind_byte(MessageKind::ReliableEvent));
         assert_eq!(message.channel(), crate::NetworkChannel::Control);
@@ -1306,8 +1334,9 @@ mod tests {
             encode_protocol_1_17_compatibility_frame(&message),
             Err(WireCodecError::MessageUnavailableAtVersion)
         );
+        let compatibility_frame = encode_protocol_1_18_compatibility_frame(&message).unwrap();
         assert_eq!(
-            blake3::hash(&frame).to_hex().to_string(),
+            blake3::hash(&compatibility_frame).to_hex().to_string(),
             "e3bf316608b5749e4ccb3bd02653690b70a6c15a5445e63dd0382e6b4a0c9770"
         );
 

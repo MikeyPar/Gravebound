@@ -8,6 +8,7 @@ mod account;
 mod bargain;
 mod bounded;
 mod codec;
+mod core_pending_inventory;
 mod core_private_route;
 mod death_view;
 mod field_equipment;
@@ -44,6 +45,14 @@ pub use codec::{
     encode_frame, encode_m02_compatibility_frame, encode_protocol_1_12_compatibility_frame,
     encode_protocol_1_14_compatibility_frame, encode_protocol_1_15_compatibility_frame,
     encode_protocol_1_16_compatibility_frame, encode_protocol_1_17_compatibility_frame,
+    encode_protocol_1_18_compatibility_frame,
+};
+pub use core_pending_inventory::{
+    CORE_PENDING_BACKPACK_CAPACITY, CORE_PENDING_INVENTORY_FEATURE_FLAG,
+    CORE_PENDING_INVENTORY_SCHEMA_VERSION, CORE_PENDING_ITEM_CAPACITY,
+    CORE_PENDING_MATERIAL_CAPACITY, CorePendingInventoryStateV1,
+    CorePendingInventoryValidationError, CorePendingItemKindV1, CorePendingItemLocationV1,
+    CorePendingItemV1, CorePendingMaterialV1,
 };
 pub use core_private_route::{
     CORE_PRIVATE_ROUTE_SCHEMA_VERSION, CorePrivateRouteAvailabilityV1,
@@ -147,7 +156,9 @@ use thiserror::Error;
 /// First incompatible protocol generation.
 pub const PROTOCOL_MAJOR: u16 = 1;
 /// Backward-compatible feature generation within [`PROTOCOL_MAJOR`].
-pub const PROTOCOL_MINOR: u16 = CORE_PRIVATE_ROUTE_PROTOCOL_MINOR;
+pub const PROTOCOL_MINOR: u16 = CORE_PENDING_INVENTORY_PROTOCOL_MINOR;
+/// Exact pending-at-risk inventory projection generation.
+pub const CORE_PENDING_INVENTORY_PROTOCOL_MINOR: u16 = 19;
 /// Exact ordinary Core private-route projection generation.
 pub const CORE_PRIVATE_ROUTE_PROTOCOL_MINOR: u16 = 18;
 /// Exact M03 successor recovery generation.
@@ -408,8 +419,9 @@ mod tests {
     }
 
     #[test]
-    fn private_route_appends_protocol_1_18_and_reuses_truthful_route_negotiation() {
-        assert_eq!(PROTOCOL_MINOR, 18);
+    fn pending_inventory_appends_protocol_1_19_with_explicit_negotiation() {
+        assert_eq!(PROTOCOL_MINOR, 19);
+        assert_eq!(CORE_PENDING_INVENTORY_PROTOCOL_MINOR, 19);
         assert_eq!(CORE_PRIVATE_ROUTE_PROTOCOL_MINOR, 18);
         assert_eq!(SUCCESSOR_PROTOCOL_MINOR, 17);
         assert_eq!(RESOLUTION_HOLD_PROTOCOL_MINOR, 16);
@@ -423,6 +435,7 @@ mod tests {
             CORE_RESOLUTION_HOLD_FEATURE_FLAG,
             CORE_SUCCESSOR_FEATURE_FLAG,
             CORE_WORLD_FLOW_FEATURE_FLAG,
+            CORE_PENDING_INVENTORY_FEATURE_FLAG,
         ] {
             assert!(WireText::<{ crate::handshake::FEATURE_FLAG_MAX_BYTES }>::new(feature).is_ok());
         }

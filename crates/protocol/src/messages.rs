@@ -6,8 +6,8 @@ use thiserror::Error;
 use crate::{
     AccountBootstrapFrame, AccountBootstrapResult, BargainDecisionFrame, BargainDecisionResult,
     BargainViewFrame, BargainViewResult, CharacterMutationFrame, CharacterMutationResult,
-    ClientHello, CorePrivateRouteStateV1, DeathViewFrameV1, DeathViewResultV1,
-    ExtractionCommitFrameV1, ExtractionCommitResultV1, HandshakeResponse,
+    ClientHello, CorePendingInventoryStateV1, CorePrivateRouteStateV1, DeathViewFrameV1,
+    DeathViewResultV1, ExtractionCommitFrameV1, ExtractionCommitResultV1, HandshakeResponse,
     InitialOathSelectionFrame, InitialOathSelectionResult, NetworkChannel, OathViewFrame,
     OathViewResult, ProgressionQueryFrame, ProgressionResult, RecallFrameV1, RecallResultV1,
     ResolutionHoldMutationFrameV1, ResolutionHoldMutationResultV1, ResolutionHoldQueryFrameV1,
@@ -458,6 +458,7 @@ pub enum ReliableEvent {
     ResolutionHoldMutationResult(Box<ResolutionHoldMutationResultV1>),
     SuccessorCreateResult(Box<SuccessorCreateResultV1>),
     CorePrivateRouteState(Box<CorePrivateRouteStateV1>),
+    CorePendingInventoryState(Box<CorePendingInventoryStateV1>),
 }
 
 impl ReliableEvent {
@@ -482,7 +483,8 @@ impl ReliableEvent {
             | Self::BargainViewResult(_)
             | Self::DeathViewResult(_)
             | Self::ResolutionHoldQueryResult(_)
-            | Self::CorePrivateRouteState(_) => NetworkChannel::Control,
+            | Self::CorePrivateRouteState(_)
+            | Self::CorePendingInventoryState(_) => NetworkChannel::Control,
             Self::SocialPing { .. } => NetworkChannel::Social,
         }
     }
@@ -545,6 +547,9 @@ impl ReliableEvent {
             Self::CorePrivateRouteState(state) => state
                 .validate()
                 .map_err(|_| MessageValidationError::CorePrivateRoute),
+            Self::CorePendingInventoryState(state) => state
+                .validate()
+                .map_err(|_| MessageValidationError::CorePendingInventory),
             _ => Ok(()),
         }
     }
@@ -744,6 +749,8 @@ pub enum MessageValidationError {
     Successor,
     #[error("Core private-route projection failed semantic validation")]
     CorePrivateRoute,
+    #[error("Core pending-inventory projection failed semantic validation")]
+    CorePendingInventory,
     #[error("message sequence must be nonzero")]
     ZeroSequence,
     #[error("fixed-point vector component must remain within -1000..=1000")]

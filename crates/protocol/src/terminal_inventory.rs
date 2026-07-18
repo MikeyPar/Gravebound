@@ -69,7 +69,7 @@ pub struct TerminalExpectedVersionsV1 {
 }
 
 impl TerminalExpectedVersionsV1 {
-    fn validate(self) -> Result<(), TerminalInventoryValidationError> {
+    pub(crate) fn validate(self) -> Result<(), TerminalInventoryValidationError> {
         if [
             self.account,
             self.character,

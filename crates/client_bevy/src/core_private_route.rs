@@ -8,8 +8,8 @@ use protocol::{
     CHARACTER_ID_BYTES, CORE_PRIVATE_ROUTE_PROTOCOL_MINOR, CORE_WORLD_FLOW_FEATURE_FLAG,
     CharacterLocation, CharacterLocationSnapshot, CorePrivateRouteAvailabilityV1,
     CorePrivateRouteContentRevisionV1, CorePrivateRoutePhaseV1, CorePrivateRouteRoomV1,
-    CorePrivateRouteSceneV1, CorePrivateRouteStateV1, PROTOCOL_MAJOR, ReliableEvent,
-    ReliableEventFrame, ServerHello, WorldFlowContentRevisionV1,
+    CorePrivateRouteSceneV1, CorePrivateRouteStateV1, PROTOCOL_MAJOR, PROTOCOL_MINOR,
+    ReliableEvent, ReliableEventFrame, ServerHello, WorldFlowContentRevisionV1,
 };
 use thiserror::Error;
 
@@ -160,7 +160,8 @@ impl CorePrivateRouteClientModel {
     ) -> Result<bool, CorePrivateRouteClientError> {
         if hello.validate().is_err()
             || hello.protocol_major != PROTOCOL_MAJOR
-            || hello.protocol_minor != CORE_PRIVATE_ROUTE_PROTOCOL_MINOR
+            || hello.protocol_minor < CORE_PRIVATE_ROUTE_PROTOCOL_MINOR
+            || hello.protocol_minor > PROTOCOL_MINOR
         {
             return self.fail(
                 CorePrivateRouteClientFailure::InvalidServerHello,
