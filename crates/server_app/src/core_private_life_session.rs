@@ -16,11 +16,12 @@ use tokio::sync::Mutex;
 
 use crate::{
     AuthenticatedAccount, AuthenticatedNamespace, CoreBellPortalTransition,
-    CoreExtractionActorDirectory, CoreExtractionAuthoritativeTick, CoreExtractionConnectionLease,
-    CoreExtractionHallProjection, CoreExtractionRuntimeError, CoreExtractionRuntimeReport,
-    CoreExtractionTransportAttach, CoreExtractionTransportDetach, CorePrivateFixedDungeonAdvance,
-    CorePrivateFixedDungeonDriverReady, CorePrivateMicrorealmAbility,
-    CorePrivateMicrorealmAbilityPress, CorePrivateMicrorealmDriver,
+    CoreDurableBargainRestResolution, CoreExtractionActorDirectory,
+    CoreExtractionAuthoritativeTick, CoreExtractionConnectionLease, CoreExtractionHallProjection,
+    CoreExtractionRuntimeError, CoreExtractionRuntimeReport, CoreExtractionTransportAttach,
+    CoreExtractionTransportDetach, CorePrivateFixedDungeonAdvance,
+    CorePrivateFixedDungeonDriverReady, CorePrivateFixedDungeonRestCommit,
+    CorePrivateMicrorealmAbility, CorePrivateMicrorealmAbilityPress, CorePrivateMicrorealmDriver,
     CorePrivateMicrorealmDriverError, CorePrivateMicrorealmDriverHandle,
     CorePrivateMicrorealmDriverObserver, CorePrivateMicrorealmDriverReport,
     CorePrivateMicrorealmIngressError, CorePrivateMicrorealmPreparedHandoff,
@@ -879,6 +880,38 @@ where
                 .ok_or(CorePrivateLifeSessionError::MicrorealmUnavailable)?
         };
         handle.advance_fixed_dungeon().await.map_err(Into::into)
+    }
+
+    /// Applies an opaque persistence-produced B4 outcome through the current transport
+    /// generation. Account binding is checked before the value reaches the sole runtime owner;
+    /// character and dangerous-instance lineage are checked again inside that owner.
+    pub async fn resolve_fixed_dungeon_rest(
+        &self,
+        lease: CorePrivateLifeTransportLease,
+        durable: CoreDurableBargainRestResolution,
+    ) -> Result<CorePrivateFixedDungeonRestCommit, CorePrivateLifeSessionError> {
+        if durable.account_id() != lease.account_id {
+            return Err(CorePrivateLifeSessionError::InvalidAccountBinding);
+        }
+        let handle = {
+            let state = self.state.lock().await;
+            let entry = state
+                .sessions
+                .get(&lease.account_id)
+                .ok_or(CorePrivateLifeSessionError::SessionUnavailable)?;
+            if entry.active.as_ref().map(|active| active.lease) != Some(lease) {
+                return Err(CorePrivateLifeSessionError::StaleTransport);
+            }
+            entry
+                .microrealm
+                .as_ref()
+                .map(|bound| bound.driver.handle())
+                .ok_or(CorePrivateLifeSessionError::MicrorealmUnavailable)?
+        };
+        handle
+            .resolve_fixed_dungeon_rest(durable)
+            .await
+            .map_err(Into::into)
     }
 
     /// Validates compact input against the negotiated protocol, checks the current transport

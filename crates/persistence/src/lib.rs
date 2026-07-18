@@ -65,7 +65,7 @@ pub use ash_wallet::{
 pub use bargain::{
     BargainDecisionTransaction, BargainDecisionTransactionState, StoredActiveBargain,
     StoredBargainCandidate, StoredBargainDecisionResult, StoredBargainLife, StoredBargainOffer,
-    StoredBargainSnapshot,
+    StoredBargainRestBinding, StoredBargainSnapshot,
 };
 pub use bargain_cleanup::{
     BARGAIN_LIFE_CLEANUP_EVENT_SCHEMA_VERSION, BargainLifeCleanupCommand,

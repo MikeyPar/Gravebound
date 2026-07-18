@@ -66,7 +66,10 @@ pub use ash_wallet::{
     AshWalletMutationResult, AshWalletProjection, AshWalletResultCode, AshWalletServiceError,
     PostgresAshWalletService,
 };
-pub use bargain_selection::{CoreBargainAuthority, PostgresBargainService};
+pub use bargain_selection::{
+    CoreBargainAuthority, CoreBargainDecisionAuthorityResult, CoreDurableBargainRestResolution,
+    PostgresBargainService,
+};
 pub use caldus_extraction::{
     CaldusExtractionError, CaldusExtractionEvidenceCommand, CaldusExtractionEvidenceResult,
     PostgresCaldusExtractionAuthority, PostgresCaldusHallTransferCoordinator,
@@ -100,8 +103,8 @@ pub use core_lifecycle::{
 };
 pub use core_private_fixed_dungeon_runtime::{
     CorePrivateFixedDungeonAdvance, CorePrivateFixedDungeonLiveRoomFrame,
-    CorePrivateFixedDungeonRoomFrame, CorePrivateFixedDungeonRuntime,
-    CorePrivateFixedDungeonRuntimeError,
+    CorePrivateFixedDungeonRestCommit, CorePrivateFixedDungeonRoomFrame,
+    CorePrivateFixedDungeonRuntime, CorePrivateFixedDungeonRuntimeError,
 };
 pub use core_private_life_runtime_bootstrap::{
     CorePrivateLifeBootstrapDisposition, CorePrivateLifeBootstrapError,

@@ -95,6 +95,16 @@ pub struct StoredBargainDecisionResult {
     pub result_payload: Vec<u8>,
 }
 
+/// Immutable route binding for one committed/replayed Bargain decision. This is intentionally
+/// derived from the stored decision receipt and its source offer together so a gameplay runtime
+/// never has to trust client-carried lineage or destination material.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredBargainRestBinding {
+    pub decision: StoredBargainDecisionResult,
+    pub instance_lineage_id: [u8; ID_BYTES],
+    pub entry_restore_point_id: [u8; ID_BYTES],
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BargainDecisionTransactionState {
     pub life: StoredBargainLife,
@@ -158,6 +168,51 @@ impl PostgresPersistence {
         };
         transaction.rollback().await?;
         Ok(StoredBargainSnapshot { life, open_offer })
+    }
+
+    /// Loads the exact durable decision and its immutable source-route binding. The decision
+    /// receipt is found before current life/location state is considered, preserving replay-first
+    /// semantics; the joined offer only proves where that already-committed decision originated.
+    pub async fn bargain_rest_binding(
+        &self,
+        account_id: [u8; ID_BYTES],
+        mutation_id: [u8; ID_BYTES],
+    ) -> Result<StoredBargainRestBinding, PersistenceError> {
+        if [account_id, mutation_id].iter().any(all_zero) {
+            return Err(PersistenceError::CorruptStoredBargain);
+        }
+        let mut transaction = self.begin_transaction().await?;
+        let decision = load_replay(transaction.connection(), &account_id, &mutation_id)
+            .await?
+            .ok_or(PersistenceError::BargainOfferNotFound)?;
+        let offer = lock_offer(
+            transaction.connection(),
+            &account_id,
+            &decision.character_id,
+            &decision.offer_id,
+        )
+        .await?;
+        validate_offer(&offer)?;
+        let expected_offer_state = match decision.result_code {
+            SELECTED_RESULT_CODE => SELECTED_OFFER_STATE,
+            REFUSED_RESULT_CODE => REFUSED_OFFER_STATE,
+            _ => return Err(PersistenceError::CorruptStoredBargain),
+        };
+        if offer.offer_state != expected_offer_state
+            || offer.resolved_oath_bargain_version != Some(decision.post_oath_bargain_version)
+            || (expected_offer_state == SELECTED_OFFER_STATE
+                && offer.selected_bargain_id != decision.bargain_id)
+            || (expected_offer_state == REFUSED_OFFER_STATE
+                && (offer.selected_bargain_id.is_some() || decision.bargain_id.is_some()))
+        {
+            return Err(PersistenceError::CorruptStoredBargain);
+        }
+        transaction.rollback().await?;
+        Ok(StoredBargainRestBinding {
+            decision,
+            instance_lineage_id: offer.instance_lineage_id,
+            entry_restore_point_id: offer.entry_restore_point_id,
+        })
     }
 
     /// Applies one offer selection/refusal or returns the exact stored result before inspecting

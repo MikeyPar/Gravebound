@@ -1,9 +1,11 @@
 //! Authoritative Veil Bargain shrine projection and terminal decision service.
 
 use persistence::{
-    BargainDecisionTransaction, BargainDecisionTransactionState, PersistenceError,
-    PostgresPersistence, StoredActiveBargain, StoredBargainDecisionResult, StoredBargainLife,
-    StoredBargainOffer, StoredCharacterLifeEvent,
+    BargainDecisionTransaction, BargainDecisionTransactionState, CORE_BARGAIN_LAYOUT_ID,
+    CORE_BARGAIN_MILESTONE_ID, CORE_BARGAIN_SOURCE_ID, PersistenceError, PostgresPersistence,
+    StoredActiveBargain, StoredBargainDecisionResult, StoredBargainLife,
+    StoredBargainMilestoneResult, StoredBargainOffer, StoredBargainRestBinding,
+    StoredCharacterLifeEvent,
 };
 use protocol::{
     BELL_DEBT_ID, BargainContentRevisionV1, BargainDecision, BargainDecisionFrame,
@@ -17,6 +19,108 @@ use crate::{AuthenticatedAccount, AuthenticatedNamespace, IdentityClock};
 const OPEN: i16 = 0;
 const SELECTED: i16 = 1;
 const REFUSED: i16 = 2;
+
+/// Server-only durable proof that a B4 rest-room outcome already committed. Fields are private and
+/// there is no public constructor: transport code can carry this value after an authority call,
+/// but cannot manufacture account, character, lineage, offer, version, or outcome material.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreDurableBargainRestResolution {
+    account_id: [u8; 16],
+    character_id: [u8; 16],
+    instance_lineage_id: [u8; 16],
+    entry_restore_point_id: [u8; 16],
+    source_receipt_id: [u8; 16],
+    offer_id: Option<[u8; 16]>,
+    oath_bargain_version: u64,
+    resolution: sim_content::CoreFixedDungeonRestResolution,
+}
+
+impl CoreDurableBargainRestResolution {
+    #[must_use]
+    pub const fn account_id(&self) -> [u8; 16] {
+        self.account_id
+    }
+
+    #[must_use]
+    pub const fn character_id(&self) -> [u8; 16] {
+        self.character_id
+    }
+
+    #[must_use]
+    pub const fn instance_lineage_id(&self) -> [u8; 16] {
+        self.instance_lineage_id
+    }
+
+    #[must_use]
+    pub const fn entry_restore_point_id(&self) -> [u8; 16] {
+        self.entry_restore_point_id
+    }
+
+    #[must_use]
+    pub const fn source_receipt_id(&self) -> [u8; 16] {
+        self.source_receipt_id
+    }
+
+    #[must_use]
+    pub const fn offer_id(&self) -> Option<[u8; 16]> {
+        self.offer_id
+    }
+
+    #[must_use]
+    pub const fn oath_bargain_version(&self) -> u64 {
+        self.oath_bargain_version
+    }
+
+    #[must_use]
+    pub const fn resolution(&self) -> sim_content::CoreFixedDungeonRestResolution {
+        self.resolution
+    }
+
+    /// Converts a milestone result already returned by the progression transaction into a B4
+    /// proof. Callers must pass the stored result, never client-authored milestone material.
+    pub fn from_no_offer_milestone(
+        authenticated: AuthenticatedAccount,
+        result: &StoredBargainMilestoneResult,
+    ) -> Result<Self, PersistenceError> {
+        let unavailable_offer = result.result_code == 1 && result.offer_id.is_some();
+        let no_slot = result.result_code == 2 && result.offer_id.is_none();
+        if result.account_id != authenticated.account_id.as_bytes()
+            || authenticated.namespace != AuthenticatedNamespace::WipeableTest
+            || !(unavailable_offer || no_slot)
+            || result.milestone_id != CORE_BARGAIN_MILESTONE_ID
+            || result.source_content_id != CORE_BARGAIN_SOURCE_ID
+            || result.source_layout_id != CORE_BARGAIN_LAYOUT_ID
+            || result.post_oath_bargain_version <= 0
+            || [
+                result.character_id,
+                result.source_reward_event_id,
+                result.instance_lineage_id,
+                result.entry_restore_point_id,
+            ]
+            .iter()
+            .any(|value| value.iter().all(|byte| *byte == 0))
+        {
+            return Err(PersistenceError::CorruptStoredBargain);
+        }
+        Ok(Self {
+            account_id: result.account_id,
+            character_id: result.character_id,
+            instance_lineage_id: result.instance_lineage_id,
+            entry_restore_point_id: result.entry_restore_point_id,
+            source_receipt_id: result.source_reward_event_id,
+            offer_id: result.offer_id,
+            oath_bargain_version: u64::try_from(result.post_oath_bargain_version)
+                .map_err(|_| PersistenceError::CorruptStoredBargain)?,
+            resolution: sim_content::CoreFixedDungeonRestResolution::NoOffer,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreBargainDecisionAuthorityResult {
+    pub response: BargainDecisionResult,
+    pub rest_resolution: Option<CoreDurableBargainRestResolution>,
+}
 
 #[derive(Debug, Clone)]
 pub enum CoreBargainAuthority<Clock> {
@@ -57,6 +161,26 @@ where
                 decision_error(frame.mutation_id, BargainResultCode::ServiceUnavailable)
             }
             Self::Persistent(service) => service.decide(authenticated, frame).await,
+        }
+    }
+
+    /// Returns the wire result plus an optional opaque B4 proof. Error results still return their
+    /// exact wire response but can never advance the rest room.
+    pub async fn decide_with_rest_resolution(
+        &self,
+        authenticated: AuthenticatedAccount,
+        frame: &BargainDecisionFrame,
+    ) -> CoreBargainDecisionAuthorityResult {
+        match self {
+            Self::Disabled => CoreBargainDecisionAuthorityResult {
+                response: decision_error(frame.mutation_id, BargainResultCode::ServiceUnavailable),
+                rest_resolution: None,
+            },
+            Self::Persistent(service) => {
+                service
+                    .decide_with_rest_resolution(authenticated, frame)
+                    .await
+            }
         }
     }
 }
@@ -147,6 +271,47 @@ where
         authenticated: AuthenticatedAccount,
         frame: &BargainDecisionFrame,
     ) -> BargainDecisionResult {
+        self.decide_response(authenticated, frame).await
+    }
+
+    pub async fn decide_with_rest_resolution(
+        &self,
+        authenticated: AuthenticatedAccount,
+        frame: &BargainDecisionFrame,
+    ) -> CoreBargainDecisionAuthorityResult {
+        let response = self.decide_response(authenticated, frame).await;
+        let rest_resolution = if matches!(
+            response.code,
+            BargainResultCode::Accepted | BargainResultCode::Refused
+        ) {
+            self.persistence
+                .bargain_rest_binding(authenticated.account_id.as_bytes(), frame.mutation_id)
+                .await
+                .ok()
+                .and_then(|binding| {
+                    durable_rest_resolution(
+                        authenticated,
+                        frame,
+                        &response,
+                        &binding,
+                        &self.content_revision,
+                    )
+                    .ok()
+                })
+        } else {
+            None
+        };
+        CoreBargainDecisionAuthorityResult {
+            response,
+            rest_resolution,
+        }
+    }
+
+    async fn decide_response(
+        &self,
+        authenticated: AuthenticatedAccount,
+        frame: &BargainDecisionFrame,
+    ) -> BargainDecisionResult {
         if frame.validate().is_err()
             || authenticated.namespace != AuthenticatedNamespace::WipeableTest
         {
@@ -187,6 +352,58 @@ where
             Err(_) => decision_error(frame.mutation_id, BargainResultCode::ServiceUnavailable),
         }
     }
+}
+
+fn durable_rest_resolution(
+    authenticated: AuthenticatedAccount,
+    frame: &BargainDecisionFrame,
+    response: &BargainDecisionResult,
+    binding: &StoredBargainRestBinding,
+    required_revision: &BargainContentRevisionV1,
+) -> Result<CoreDurableBargainRestResolution, PersistenceError> {
+    let decision = &binding.decision;
+    let stored_response: BargainDecisionResult = postcard::from_bytes(&decision.result_payload)
+        .map_err(|_| PersistenceError::CorruptStoredBargain)?;
+    let resolution = match response.code {
+        BargainResultCode::Accepted => {
+            sim_content::CoreFixedDungeonRestResolution::BargainSelected(
+                match decision.bargain_id.as_deref() {
+                    Some(CINDER_HUNGER_ID) => sim_core::CoreBargainKind::CinderHunger,
+                    Some(BELL_DEBT_ID) => sim_core::CoreBargainKind::BellDebt,
+                    Some(LANTERN_ASH_ID) => sim_core::CoreBargainKind::LanternAsh,
+                    _ => return Err(PersistenceError::CorruptStoredBargain),
+                },
+            )
+        }
+        BargainResultCode::Refused => sim_content::CoreFixedDungeonRestResolution::BargainRefused,
+        _ => return Err(PersistenceError::CorruptStoredBargain),
+    };
+    if authenticated.namespace != AuthenticatedNamespace::WipeableTest
+        || decision.account_id != authenticated.account_id.as_bytes()
+        || decision.character_id != frame.payload.character_id
+        || decision.offer_id != frame.payload.offer_id
+        || decision.mutation_id != frame.mutation_id
+        || decision.payload_hash != frame.payload_hash
+        || frame.payload.content_revision != *required_revision
+        || stored_response != *response
+        || decision.post_oath_bargain_version <= 0
+        || [binding.instance_lineage_id, binding.entry_restore_point_id]
+            .iter()
+            .any(|value| value.iter().all(|byte| *byte == 0))
+    {
+        return Err(PersistenceError::CorruptStoredBargain);
+    }
+    Ok(CoreDurableBargainRestResolution {
+        account_id: decision.account_id,
+        character_id: decision.character_id,
+        instance_lineage_id: binding.instance_lineage_id,
+        entry_restore_point_id: binding.entry_restore_point_id,
+        source_receipt_id: decision.mutation_id,
+        offer_id: Some(decision.offer_id),
+        oath_bargain_version: u64::try_from(decision.post_oath_bargain_version)
+            .map_err(|_| PersistenceError::CorruptStoredBargain)?,
+        resolution,
+    })
 }
 
 fn plan_decision(
@@ -500,6 +717,13 @@ mod tests {
         }
     }
 
+    fn authenticated() -> AuthenticatedAccount {
+        AuthenticatedAccount {
+            account_id: crate::AccountId::new([1; 16]).unwrap(),
+            namespace: AuthenticatedNamespace::WipeableTest,
+        }
+    }
+
     fn state() -> BargainDecisionTransactionState {
         BargainDecisionTransactionState {
             life: StoredBargainLife {
@@ -585,5 +809,111 @@ mod tests {
         assert!(refused.life.active_bargains.is_empty());
         assert_eq!(refused.life.oath_bargain_version, 2);
         assert!(refused.new_event.is_none());
+    }
+
+    #[test]
+    fn stored_selection_creates_an_opaque_lineage_bound_b4_resolution() {
+        let request = frame(BargainDecision::Select {
+            bargain_id: WireText::new(CINDER_HUNGER_ID).unwrap(),
+        });
+        let mut transaction = state();
+        let response = plan_decision(&mut transaction, [1; 16], &request, &revision()).unwrap();
+        let decision = transaction.new_result.clone().expect("stored receipt");
+        let binding = StoredBargainRestBinding {
+            decision,
+            instance_lineage_id: [5; 16],
+            entry_restore_point_id: [6; 16],
+        };
+
+        let durable =
+            durable_rest_resolution(authenticated(), &request, &response, &binding, &revision())
+                .expect("durable B4 resolution");
+
+        assert_eq!(durable.account_id(), [1; 16]);
+        assert_eq!(durable.character_id(), [2; 16]);
+        assert_eq!(durable.instance_lineage_id(), [5; 16]);
+        assert_eq!(durable.entry_restore_point_id(), [6; 16]);
+        assert_eq!(durable.source_receipt_id(), [4; 16]);
+        assert_eq!(durable.offer_id(), Some([3; 16]));
+        assert_eq!(durable.oath_bargain_version(), 3);
+        assert_eq!(
+            durable.resolution(),
+            sim_content::CoreFixedDungeonRestResolution::BargainSelected(
+                sim_core::CoreBargainKind::CinderHunger
+            )
+        );
+    }
+
+    #[test]
+    fn altered_or_error_results_cannot_create_b4_authority() {
+        let request = frame(BargainDecision::Refuse);
+        let mut transaction = state();
+        let response = plan_decision(&mut transaction, [1; 16], &request, &revision()).unwrap();
+        let mut decision = transaction.new_result.clone().expect("stored receipt");
+        decision.payload_hash = [0xAA; 32];
+        let binding = StoredBargainRestBinding {
+            decision,
+            instance_lineage_id: [5; 16],
+            entry_restore_point_id: [6; 16],
+        };
+        assert!(
+            durable_rest_resolution(authenticated(), &request, &response, &binding, &revision(),)
+                .is_err()
+        );
+        let error = decision_error(request.mutation_id, BargainResultCode::IdempotencyConflict);
+        let mut valid_transaction = state();
+        let _ = plan_decision(&mut valid_transaction, [1; 16], &request, &revision()).unwrap();
+        let valid_binding = StoredBargainRestBinding {
+            decision: valid_transaction.new_result.expect("stored receipt"),
+            instance_lineage_id: [5; 16],
+            entry_restore_point_id: [6; 16],
+        };
+        assert!(
+            durable_rest_resolution(
+                authenticated(),
+                &request,
+                &error,
+                &valid_binding,
+                &revision(),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn durable_no_offer_requires_the_exact_core_milestone_contract() {
+        let result = StoredBargainMilestoneResult {
+            account_id: [1; 16],
+            character_id: [2; 16],
+            source_reward_event_id: [8; 16],
+            payload_hash: [9; 32],
+            result_code: 2,
+            pre_oath_bargain_version: 2,
+            post_oath_bargain_version: 2,
+            pre_earned_bargain_slots: 1,
+            post_earned_bargain_slots: 1,
+            offer_id: None,
+            ash_mutation_id: Some([8; 16]),
+            milestone_id: CORE_BARGAIN_MILESTONE_ID.into(),
+            source_content_id: CORE_BARGAIN_SOURCE_ID.into(),
+            source_layout_id: CORE_BARGAIN_LAYOUT_ID.into(),
+            instance_lineage_id: [5; 16],
+            entry_restore_point_id: [6; 16],
+            result_payload: vec![1],
+        };
+        let durable =
+            CoreDurableBargainRestResolution::from_no_offer_milestone(authenticated(), &result)
+                .expect("durable no-offer result");
+        assert_eq!(
+            durable.resolution(),
+            sim_content::CoreFixedDungeonRestResolution::NoOffer
+        );
+
+        let mut foreign = result;
+        foreign.account_id = [0xFF; 16];
+        assert!(
+            CoreDurableBargainRestResolution::from_no_offer_milestone(authenticated(), &foreign,)
+                .is_err()
+        );
     }
 }

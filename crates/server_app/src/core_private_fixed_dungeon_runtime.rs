@@ -17,8 +17,8 @@ use sim_core::{
 use thiserror::Error;
 
 use crate::{
-    CoreBellPortalTransition, CoreCharacterCombatEnvelope, CorePrivateMicrorealmInput,
-    CorePrivateMicrorealmRuntime, CorePrivateMicrorealmRuntimeError,
+    CoreBellPortalTransition, CoreCharacterCombatEnvelope, CoreDurableBargainRestResolution,
+    CorePrivateMicrorealmInput, CorePrivateMicrorealmRuntime, CorePrivateMicrorealmRuntimeError,
     CorePrivateRouteActorDirectory, CorePrivateRouteActorLease, CorePrivateRouteRuntimeError,
     core_private_combat_frame::{core_player_movement_config, step_live_player_combat},
     core_private_microrealm_runtime::CorePrivateMicrorealmDungeonHandoff,
@@ -35,6 +35,16 @@ pub struct CorePrivateFixedDungeonRoomFrame {
 pub struct CorePrivateFixedDungeonAdvance {
     pub route: CorePrivateRouteStateV1,
     pub transition: sim_content::CoreFixedDungeonAdvance,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CorePrivateFixedDungeonRestCommit {
+    pub route: CorePrivateRouteStateV1,
+    pub receipt: sim_content::CoreFixedDungeonRestReceipt,
+    pub resolution: sim_content::CoreFixedDungeonRestResolution,
+    pub source_receipt_id: [u8; 16],
+    pub offer_id: Option<[u8; 16]>,
+    pub oath_bargain_version: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -158,6 +168,47 @@ impl CorePrivateFixedDungeonRuntime {
         self.combat = staged;
         self.movement = movement;
         Ok(CorePrivateFixedDungeonAdvance { route, transition })
+    }
+
+    /// Applies only an opaque result produced from committed Bargain persistence. The receipt is
+    /// bound to this account, character, and dangerous-instance lineage; the route actor CAS makes
+    /// the first local application atomic with B4 authority. Exact retries are read-only replays.
+    pub async fn resolve_rest(
+        &mut self,
+        durable: &CoreDurableBargainRestResolution,
+    ) -> Result<CorePrivateFixedDungeonRestCommit, CorePrivateFixedDungeonRuntimeError> {
+        let route_before = self.route_directory.snapshot(self.route_lease)?;
+        self.validate_route_authority(&route_before)?;
+        if self.combat.node() != sim_content::CoreFixedDungeonNode::BellRestB4
+            || durable.account_id() != self.account_id()
+            || durable.character_id() != self.character_id()
+            || route_before.instance_lineage_id != Some(durable.instance_lineage_id())
+        {
+            return Err(CorePrivateFixedDungeonRuntimeError::BargainAuthorityMismatch);
+        }
+        let mut staged = self.combat.clone();
+        let receipt = staged.resolve_rest(durable.resolution())?;
+        let route = if receipt == sim_content::CoreFixedDungeonRestReceipt::Committed {
+            self.route_directory
+                .apply_fixed_dungeon_authority(
+                    self.route_lease,
+                    route_before.state_version,
+                    CorePrivateRouteRoomV1::BellRestB4,
+                    CorePrivateRoutePhaseV1::Rest,
+                )
+                .await?
+        } else {
+            route_before
+        };
+        self.combat = staged;
+        Ok(CorePrivateFixedDungeonRestCommit {
+            route,
+            receipt,
+            resolution: durable.resolution(),
+            source_receipt_id: durable.source_receipt_id(),
+            offer_id: durable.offer_id(),
+            oath_bargain_version: durable.oath_bargain_version(),
+        })
     }
 
     /// Generates one complete room frame from retained player intent. Movement, player attacks,
@@ -362,6 +413,8 @@ pub enum CorePrivateFixedDungeonRuntimeError {
     InvalidComposition,
     #[error("live Core fixed-dungeon route authority no longer matches local state")]
     RouteAuthorityMismatch,
+    #[error("durable Bargain result does not belong to this B4 route authority")]
+    BargainAuthorityMismatch,
     #[error("live Core fixed-dungeon run-local tick exhausted")]
     TickExhausted,
     #[error("live Core fixed-dungeon combat tick does not match the server-owned frame")]
@@ -386,7 +439,9 @@ mod tests {
 
     use protocol::{ManifestHash, WorldFlowContentRevisionV1};
     use sim_core::{
-        AimDirection, CombatStep, EntityId, EntityIdAllocator, MovementAction, SimulationVector,
+        AimDirection, CollisionTarget, CombatStep, EntityId, EntityIdAllocator,
+        FriendlyProjectileSource, MovementAction, ProjectileCollision, RawDamageIntent,
+        RawDamageIntentSource, SimulationVector,
     };
 
     use super::*;
@@ -514,6 +569,106 @@ mod tests {
         }
     }
 
+    fn lethal_step(tick: Tick, targets: &[EntityId]) -> CombatStep {
+        let mut combat = CombatStep {
+            tick,
+            ..CombatStep::default()
+        };
+        for (index, target) in targets.iter().copied().enumerate() {
+            let projectile_id = EntityId::new(60_000 + u64::try_from(index).unwrap()).unwrap();
+            combat.collisions.push(ProjectileCollision {
+                tick,
+                projectile_id,
+                source: FriendlyProjectileSource::Primary,
+                target: CollisionTarget::Enemy(target),
+                final_position: SimulationVector::new(5.0, 5.0),
+                distance_travelled_tiles: 1.0,
+                contact_ordinal: 0,
+                empowered_by_slipstep: false,
+                focused_by_stillness: false,
+                projectile_continues: false,
+            });
+            combat.raw_damage_intents.push(RawDamageIntent {
+                tick,
+                projectile_id,
+                source: RawDamageIntentSource::Primary,
+                target,
+                base_raw_damage: 10_000,
+                multiplier_basis_points: 10_000,
+                resolved_raw_damage: 10_000,
+                contact_ordinal: 0,
+            });
+        }
+        combat
+    }
+
+    async fn clear_current_room(runtime: &mut CorePrivateFixedDungeonRuntime) {
+        let crossed = runtime.tick().checked_next().unwrap();
+        runtime
+            .step_room(&room_input(crossed, true))
+            .await
+            .expect("participant lock");
+        let warning = runtime.tick().checked_next().unwrap();
+        runtime
+            .step_room(&room_input(warning, false))
+            .await
+            .expect("warning");
+        let delay = match runtime.node() {
+            sim_content::CoreFixedDungeonNode::BellNaveB2 => 57,
+            sim_content::CoreFixedDungeonNode::BellKnightB3 => 90,
+            sim_content::CoreFixedDungeonNode::BellCrossB1
+            | sim_content::CoreFixedDungeonNode::BellBridgeB5 => 27,
+            _ => panic!("not a combat room"),
+        };
+        for _ in 1..delay {
+            let tick = runtime.tick().checked_next().unwrap();
+            runtime
+                .step_room(&room_input(tick, false))
+                .await
+                .expect("warning progression");
+        }
+        let tick = runtime.tick().checked_next().unwrap();
+        let targets = runtime.combat.hostile_entity_ids();
+        let mut input = room_input(tick, false);
+        input.combat_step = Some(lethal_step(tick, &targets));
+        let clear = runtime.step_room(&input).await.expect("clear room");
+        assert_eq!(clear.step.phase_after(), FixedRoomPhase::Quiet);
+        for _ in 1..=60 {
+            let tick = runtime.tick().checked_next().unwrap();
+            runtime
+                .step_room(&room_input(tick, false))
+                .await
+                .expect("quiet progression");
+        }
+        assert_eq!(runtime.room_phase(), Some(FixedRoomPhase::Cleared));
+    }
+
+    fn no_offer(lineage: [u8; 16]) -> CoreDurableBargainRestResolution {
+        CoreDurableBargainRestResolution::from_no_offer_milestone(
+            authenticated(),
+            &persistence::StoredBargainMilestoneResult {
+                account_id: ACCOUNT_ID,
+                character_id: CHARACTER_ID,
+                source_reward_event_id: [0x44; 16],
+                payload_hash: [0x45; 32],
+                result_code: 2,
+                pre_oath_bargain_version: 1,
+                post_oath_bargain_version: 1,
+                pre_earned_bargain_slots: 0,
+                post_earned_bargain_slots: 0,
+                offer_id: None,
+                ash_mutation_id: Some([0x44; 16]),
+                milestone_id: persistence::CORE_BARGAIN_MILESTONE_ID.into(),
+                source_content_id: persistence::CORE_BARGAIN_SOURCE_ID.into(),
+                source_layout_id: persistence::CORE_BARGAIN_LAYOUT_ID.into(),
+                instance_lineage_id: lineage,
+                entry_restore_point_id: [0x46; 16],
+                result_payload: vec![1],
+            },
+        )
+        .expect("no-offer authority")
+    }
+
     #[tokio::test]
     async fn carried_tick_and_route_cas_enter_b1_then_commit_one_multiphase_frame() {
         let (directory, _, mut runtime) = fixture();
@@ -602,5 +757,51 @@ mod tests {
                 .expect("shutdown")
                 .zero_residue
         );
+    }
+
+    #[tokio::test]
+    async fn durable_b4_resolution_is_lineage_bound_replay_safe_and_advances_to_b5() {
+        let (directory, _, mut runtime) = fixture_at(Tick(0));
+        runtime.advance().await.expect("enter B1");
+        clear_current_room(&mut runtime).await;
+        runtime.advance().await.expect("enter B2");
+        clear_current_room(&mut runtime).await;
+        runtime.advance().await.expect("enter B3");
+        clear_current_room(&mut runtime).await;
+        runtime.advance().await.expect("enter B4");
+
+        let before = directory.snapshot(runtime.route_lease()).unwrap();
+        assert!(matches!(
+            runtime.resolve_rest(&no_offer([0xFF; 16])).await,
+            Err(CorePrivateFixedDungeonRuntimeError::BargainAuthorityMismatch)
+        ));
+        assert_eq!(directory.snapshot(runtime.route_lease()).unwrap(), before);
+
+        let durable = no_offer(LINEAGE_ID);
+        let committed = runtime.resolve_rest(&durable).await.expect("commit B4");
+        assert_eq!(
+            committed.receipt,
+            sim_content::CoreFixedDungeonRestReceipt::Committed
+        );
+        assert_eq!(committed.route.state_version, before.state_version);
+        let replayed = runtime.resolve_rest(&durable).await.expect("replay B4");
+        assert_eq!(
+            replayed.receipt,
+            sim_content::CoreFixedDungeonRestReceipt::Replayed
+        );
+        assert_eq!(replayed.route.state_version, committed.route.state_version);
+
+        let entered = runtime.advance().await.expect("enter B5");
+        assert_eq!(
+            entered.transition.rest_resolution,
+            Some(sim_content::CoreFixedDungeonRestResolution::NoOffer)
+        );
+        assert_eq!(
+            entered.route.room,
+            Some(CorePrivateRouteRoomV1::BellBridgeB5)
+        );
+
+        directory.begin_shutdown();
+        assert!(directory.finish_shutdown().await.unwrap().zero_residue);
     }
 }
