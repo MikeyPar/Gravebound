@@ -11,11 +11,13 @@ use protocol::{
     CorePrivateRouteStateV1,
 };
 use sim_core::{
-    AimDirection, CombatAction, CombatError, CombatStep, ConsumableAction, ConsumableError,
-    CoreMicrorealmEvent, CoreMicrorealmInput, CoreMicrorealmPhase, CoreMicrorealmSimulation,
-    FriendlyProjectileSource, MovementAction, ProjectileCollisionWorld, SceneDisplacement,
-    SceneObjectGeometry, SimulationVector, Tick, TilePoint, WorldSceneDefinition, WorldSceneError,
-    WorldSceneKind, WorldScenePlayer, normal_wave_projectile_allocator, tile_point_to_simulation,
+    AimDirection, ArenaGeometry, CombatAction, CombatError, CombatStep, ConsumableAction,
+    ConsumableError, CoreMicrorealmEvent, CoreMicrorealmInput, CoreMicrorealmPhase,
+    CoreMicrorealmSimulation, FriendlyProjectileSource, MOVEMENT_RESPONSE_TICKS, MovementAction,
+    MovementError, MovementStep, PlayerMovementConfig, PlayerMovementState,
+    ProjectileCollisionWorld, SceneObjectGeometry, Tick, TilePoint, WorldSceneDefinition,
+    WorldSceneKind, normal_wave_projectile_allocator, simulation_to_tile_point,
+    tile_point_to_simulation,
 };
 use thiserror::Error;
 
@@ -26,7 +28,6 @@ use crate::{
 
 const CORE_MICROREALM_SCENE_ID: &str = "world.core_microrealm_01";
 const BELL_PORTAL_OBJECT_ID: &str = "portal.dungeon.bell_sepulcher";
-const AUTHORITATIVE_TICKS_PER_SECOND: u32 = 30;
 const RUN_ENTITY_ID_STRIDE: u64 = 100_000;
 const PLAYER_ENTITY_ID_OFFSET: u64 = 10_000;
 
@@ -82,6 +83,7 @@ pub struct CorePrivateMicrorealmStep {
     pub phase: CoreMicrorealmPhase,
     pub route: CorePrivateRouteStateV1,
     pub events: Vec<CoreMicrorealmEvent>,
+    pub movement: MovementStep,
     pub combat: CombatStep,
     pub wave: Option<sim_core::NormalWaveStep>,
     pub pack_clear: Option<CoreMicrorealmPackClearProof>,
@@ -93,25 +95,25 @@ pub struct CorePrivateMicrorealmStep {
 pub struct CorePrivateMicrorealmRuntime {
     route_directory: CorePrivateRouteActorDirectory,
     route_lease: CorePrivateRouteActorLease,
-    scene: WorldSceneDefinition,
-    player: WorldScenePlayer,
+    movement: PlayerMovementState,
+    player_position: TilePoint,
     lifecycle: CoreMicrorealmSimulation,
     combat: sim_content::CoreMicrorealmPackCombat,
     combat_envelope: CoreCharacterCombatEnvelope,
     bell_portal_center: TilePoint,
     bell_portal_radius_milli_tiles: i32,
-    movement_milli_tiles_per_second: u32,
     tick: Tick,
     last_input_sequence: Option<u64>,
 }
 
 struct StagedMicrorealmFrame {
-    player: WorldScenePlayer,
+    movement: PlayerMovementState,
     lifecycle: CoreMicrorealmSimulation,
     combat: sim_content::CoreMicrorealmPackCombat,
     player_position: TilePoint,
     phase: CoreMicrorealmPhase,
     events: Vec<CoreMicrorealmEvent>,
+    movement_step: MovementStep,
     combat_step: CombatStep,
     wave_step: Option<sim_core::NormalWaveStep>,
     pack_clear: Option<CoreMicrorealmPackClearProof>,
@@ -123,7 +125,7 @@ impl CorePrivateMicrorealmRuntime {
         route_directory: CorePrivateRouteActorDirectory,
         route_lease: CorePrivateRouteActorLease,
         expected_content_revision: &CorePrivateRouteContentRevisionV1,
-        scene: WorldSceneDefinition,
+        scene: &WorldSceneDefinition,
         encounters: sim_content::CoreDevelopmentEncounterRooms,
         world_flow: sim_content::CoreDevelopmentWorldFlow,
         character_combat: CoreCharacterCombat,
@@ -141,7 +143,7 @@ impl CorePrivateMicrorealmRuntime {
             || scene.id != CORE_MICROREALM_SCENE_ID
             || scene.kind != WorldSceneKind::PrivateDanger
             || scene.capacity != Some(1)
-            || world_flow.compile_microrealm_scene()? != scene
+            || world_flow.compile_microrealm_scene()? != *scene
             || character_combat.character_id != route.character_id
         {
             return Err(CorePrivateMicrorealmRuntimeError::InvalidComposition);
@@ -159,11 +161,10 @@ impl CorePrivateMicrorealmRuntime {
             })
             .filter(|(_, radius)| *radius > 0)
             .ok_or(CorePrivateMicrorealmRuntimeError::InvalidComposition)?;
-        let movement_milli_tiles_per_second = character_combat.movement_milli_tiles_per_second;
-        let maximum_step_milli_tiles =
-            i32::try_from(movement_milli_tiles_per_second.div_ceil(AUTHORITATIVE_TICKS_PER_SECOND))
-                .map_err(|_| CorePrivateMicrorealmRuntimeError::InvalidComposition)?;
-        let player = WorldScenePlayer::new(&scene, scene.player_spawn, maximum_step_milli_tiles)?;
+        let movement_config = movement_config(
+            character_combat.movement_milli_tiles_per_second,
+            scene.player_radius_milli_tiles,
+        )?;
         let run_ordinal = u32::try_from(route.actor_generation)
             .map_err(|_| CorePrivateMicrorealmRuntimeError::InvalidComposition)?;
         let player_entity_id = run_player_entity_id(run_ordinal)?;
@@ -178,18 +179,31 @@ impl CorePrivateMicrorealmRuntime {
             live_player,
             normal_wave_projectile_allocator(run_ordinal)?,
         )?;
+        let arena = combat.arena()?;
+        if arena.width_milli_tiles != scene.width_milli_tiles
+            || arena.height_milli_tiles != scene.height_milli_tiles
+            || arena.shell_thickness_milli_tiles != scene.shell_thickness_milli_tiles
+            || arena.player_spawn != scene.player_spawn
+            || !scene.solid_rectangles.is_empty()
+        {
+            return Err(CorePrivateMicrorealmRuntimeError::InvalidComposition);
+        }
+        let movement = PlayerMovementState::new_with_config(
+            tile_point_to_simulation(scene.player_spawn),
+            movement_config,
+            &arena,
+        )?;
         let lifecycle = CoreMicrorealmSimulation::new(scene.player_spawn);
         Ok(Self {
             route_directory,
             route_lease,
-            scene,
-            player,
+            movement,
+            player_position: scene.player_spawn,
             lifecycle,
             combat,
             combat_envelope,
             bell_portal_center,
             bell_portal_radius_milli_tiles,
-            movement_milli_tiles_per_second,
             tick: Tick(0),
             last_input_sequence: None,
         })
@@ -212,7 +226,7 @@ impl CorePrivateMicrorealmRuntime {
 
     #[must_use]
     pub const fn player_position(&self) -> TilePoint {
-        self.player.position()
+        self.player_position
     }
 
     #[must_use]
@@ -247,9 +261,6 @@ impl CorePrivateMicrorealmRuntime {
         {
             return Err(CorePrivateMicrorealmRuntimeError::StaleInputSequence);
         }
-        if input.ability_2_sequence != 0 {
-            return Err(CorePrivateMicrorealmRuntimeError::MovementAbilityUnavailable);
-        }
         let tick = self
             .tick
             .checked_next()
@@ -276,7 +287,8 @@ impl CorePrivateMicrorealmRuntime {
             )
             .await?;
 
-        self.player = frame.player;
+        self.movement = frame.movement;
+        self.player_position = frame.player_position;
         self.lifecycle = frame.lifecycle;
         self.combat = frame.combat;
         self.tick = tick;
@@ -288,6 +300,7 @@ impl CorePrivateMicrorealmRuntime {
             phase: frame.phase,
             route,
             events: frame.events,
+            movement: frame.movement_step,
             combat: frame.combat_step,
             wave: frame.wave_step,
             pack_clear: frame.pack_clear,
@@ -302,15 +315,13 @@ impl CorePrivateMicrorealmRuntime {
         tick: Tick,
         route_before: &CorePrivateRouteStateV1,
     ) -> Result<StagedMicrorealmFrame, CorePrivateMicrorealmRuntimeError> {
-        let mut player = self.player.clone();
-        let displacement =
-            scene_displacement(input.movement, self.movement_milli_tiles_per_second)?;
-        let player_position = player.step_movement(&self.scene, displacement)?;
+        let mut movement = self.movement;
         let mut combat = self.combat.clone();
         let arena = combat.arena()?;
         let collision_world = ProjectileCollisionWorld::new(&arena, combat.alive_hurtboxes()?)?;
-        let player_vector = tile_point_to_simulation(player_position);
-        let combat_step = step_player_combat(&mut combat, input, player_vector, &collision_world)?;
+        let (combat_step, movement_step) =
+            step_player_combat(&mut combat, &mut movement, input, &arena, &collision_world)?;
+        let player_position = simulation_to_tile_point(movement_step.position)?;
         if combat_step.tick != tick {
             return Err(CorePrivateMicrorealmRuntimeError::CombatTickMismatch);
         }
@@ -346,12 +357,13 @@ impl CorePrivateMicrorealmRuntime {
         let phase = lifecycle.phase();
         let pack_clear = Self::pack_clear_proof(&events, tick, route_before)?;
         Ok(StagedMicrorealmFrame {
-            player,
+            movement,
             lifecycle,
             combat,
             player_position,
             phase,
             events,
+            movement_step,
             combat_step,
             wave_step,
             pack_clear,
@@ -428,36 +440,34 @@ fn run_player_entity_id(
     Ok(value)
 }
 
-#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
-fn scene_displacement(
-    movement: MovementAction,
+#[allow(clippy::cast_precision_loss)]
+fn movement_config(
     movement_milli_tiles_per_second: u32,
-) -> Result<SceneDisplacement, CorePrivateMicrorealmRuntimeError> {
-    let step = movement_milli_tiles_per_second as f32 / AUTHORITATIVE_TICKS_PER_SECOND as f32;
-    let direction = movement.normalized_vector();
-    let x = (direction.x * step).round();
-    let y = (direction.y * step).round();
-    if !x.is_finite()
-        || !y.is_finite()
-        || x < i32::MIN as f32
-        || x > i32::MAX as f32
-        || y < i32::MIN as f32
-        || y > i32::MAX as f32
-    {
+    player_radius_milli_tiles: i32,
+) -> Result<PlayerMovementConfig, CorePrivateMicrorealmRuntimeError> {
+    if movement_milli_tiles_per_second == 0 || player_radius_milli_tiles <= 0 {
         return Err(CorePrivateMicrorealmRuntimeError::InvalidComposition);
     }
-    Ok(SceneDisplacement::new(x as i32, y as i32))
+    Ok(PlayerMovementConfig {
+        final_speed_tiles_per_second: movement_milli_tiles_per_second as f32 / 1_000.0,
+        response_ticks: MOVEMENT_RESPONSE_TICKS,
+        collision_radius_tiles: player_radius_milli_tiles as f32 / 1_000.0,
+    })
 }
 
 fn step_player_combat(
     combat: &mut sim_content::CoreMicrorealmPackCombat,
+    movement: &mut PlayerMovementState,
     input: &CorePrivateMicrorealmInput,
-    player_position: SimulationVector,
+    arena: &ArenaGeometry,
     collision_world: &ProjectileCollisionWorld,
-) -> Result<CombatStep, CorePrivateMicrorealmRuntimeError> {
+) -> Result<(CombatStep, MovementStep), CorePrivateMicrorealmRuntimeError> {
     let player = combat.player_mut();
-    player.target.position = player_position;
-    let step = player.combat.step(
+    if player.target.position != movement.position() {
+        return Err(CorePrivateMicrorealmRuntimeError::InvalidComposition);
+    }
+    let (step, movement_step) = player.combat.step_with_movement_outcome(
+        movement,
         CombatAction {
             aim: input.aim,
             movement: input.movement,
@@ -466,9 +476,10 @@ fn step_player_combat(
             ability_1_press_sequence: input.ability_1_sequence,
             ability_2_press_sequence: input.ability_2_sequence,
         },
-        player_position,
+        arena,
         collision_world,
     )?;
+    player.target.position = movement_step.position;
     player.consumables.step(ConsumableAction::default())?;
     player
         .target
@@ -477,7 +488,7 @@ fn step_player_combat(
             .then_some(step.direct_damage_reduction_basis_points)
             .into_iter()
             .collect();
-    Ok(step)
+    Ok((step, movement_step))
 }
 
 fn route_phase(phase: CoreMicrorealmPhase) -> CorePrivateRoutePhaseV1 {
@@ -510,14 +521,14 @@ pub enum CorePrivateMicrorealmRuntimeError {
     TickExhausted,
     #[error("live Core microrealm combat tick does not match the server-owned frame")]
     CombatTickMismatch,
-    #[error("Slipstep movement is not yet composed with the live scene owner")]
-    MovementAbilityUnavailable,
     #[error(transparent)]
     Combat(#[from] CombatError),
     #[error(transparent)]
     Consumable(#[from] ConsumableError),
     #[error(transparent)]
     Collision(#[from] sim_core::CollisionError),
+    #[error(transparent)]
+    Movement(#[from] MovementError),
     #[error(transparent)]
     Content(#[from] anyhow::Error),
     #[error(transparent)]
@@ -526,8 +537,6 @@ pub enum CorePrivateMicrorealmRuntimeError {
     CombatFactory(#[from] CoreCombatFactoryError),
     #[error(transparent)]
     Entity(#[from] sim_core::NormalWaveEntityIdError),
-    #[error(transparent)]
-    World(#[from] WorldSceneError),
     #[error(transparent)]
     Lifecycle(#[from] sim_core::CoreMicrorealmError),
     #[error(transparent)]
@@ -624,7 +633,7 @@ mod tests {
             directory.clone(),
             lease,
             &route_revision(),
-            scene,
+            &scene,
             encounters,
             world,
             crate::combat_factory::core_character_combat_test_fixture(CHARACTER_ID),
@@ -684,7 +693,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tick_displacement_damage_and_clear_are_not_ingress_authority() {
+    async fn tick_displacement_slipstep_damage_and_clear_are_not_ingress_authority() {
         let directory = CorePrivateRouteActorDirectory::new();
         let lease = directory
             .register_actor(authenticated(), seed(), 9)
@@ -699,16 +708,30 @@ mod tests {
         assert!(moved.pack_clear.is_none());
         assert!(moved.wave.is_none());
 
-        let before_tick = runtime.tick();
         let before_position = runtime.player_position();
-        let mut unsupported = input(2);
-        unsupported.ability_2_sequence = 1;
-        assert!(matches!(
-            runtime.step(unsupported).await,
-            Err(CorePrivateMicrorealmRuntimeError::MovementAbilityUnavailable)
-        ));
-        assert_eq!(runtime.tick(), before_tick);
-        assert_eq!(runtime.player_position(), before_position);
+        let mut slipstep = input(2);
+        slipstep.movement = MovementAction::new(1, 0);
+        slipstep.ability_2_sequence = 1;
+        let slipped = runtime.step(slipstep).await.expect("Slipstep frame");
+        assert_eq!(slipped.tick, Tick(2));
+        assert!(slipped.player_position.x_milli_tiles > before_position.x_milli_tiles);
+        assert!(slipped.combat.slipstep_inputs.iter().any(|event| {
+            event.result == sim_core::SlipstepInputResult::Began && event.press_sequence == 1
+        }));
+        assert!(
+            slipped
+                .combat
+                .slipstep_transitions
+                .iter()
+                .any(|transition| {
+                    matches!(
+                        transition.kind,
+                        sim_core::SlipstepTransitionKind::Travelled
+                            | sim_core::SlipstepTransitionKind::Completed
+                    )
+                })
+        );
+        assert!(slipped.combat.direct_damage_reduction_basis_points > 0);
 
         let foreign =
             CoreMicrorealmPackClearProof::from_live_combat(CHARACTER_ID, 8, LINEAGE_ID, Tick(2))
@@ -721,6 +744,44 @@ mod tests {
             ),
             Err(CorePrivateMicrorealmRuntimeError::InvalidClearProof)
         ));
+    }
+
+    #[tokio::test]
+    async fn slipstep_stops_at_the_compiled_world_shell_in_the_same_combat_frame() {
+        let directory = CorePrivateRouteActorDirectory::new();
+        let lease = directory
+            .register_actor(authenticated(), seed(), 8)
+            .expect("actor");
+        let mut runtime = runtime(&directory, lease);
+        let arena = runtime.combat.arena().expect("arena");
+        let start = sim_core::SimulationVector::new(1.4, 20.0);
+        runtime.movement =
+            PlayerMovementState::new_with_config(start, runtime.movement.config(), &arena)
+                .expect("near-shell movement");
+        runtime.player_position = simulation_to_tile_point(start).expect("projection");
+        runtime.combat.player_mut().target.position = start;
+
+        let mut slipstep = input(1);
+        slipstep.movement = MovementAction::new(-1, 0);
+        slipstep.ability_2_sequence = 1;
+        let stopped = runtime.step(slipstep).await.expect("collision frame");
+
+        assert!(stopped.movement.collided);
+        assert_eq!(stopped.player_position.x_milli_tiles, 1_300);
+        assert!(
+            stopped
+                .combat
+                .slipstep_transitions
+                .iter()
+                .any(|transition| {
+                    transition.kind == sim_core::SlipstepTransitionKind::Collided
+                        && transition.solid.is_some()
+                })
+        );
+        assert_eq!(
+            runtime.combat.player().target.position,
+            runtime.movement.position()
+        );
     }
 
     #[tokio::test]

@@ -1180,7 +1180,7 @@ mod tests {
             routes.clone(),
             lease,
             &route_revision(),
-            scene,
+            &scene,
             encounters,
             world,
             crate::combat_factory::core_character_combat_test_fixture(CHARACTER_ID),
