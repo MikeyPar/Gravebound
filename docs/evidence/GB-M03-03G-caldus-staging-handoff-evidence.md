@@ -39,4 +39,4 @@ This increment does not construct `CorePrivateCaldusRuntime`, accept boss inputs
 
 ## Current Next Step
 
-Construct `CorePrivateCaldusRuntime` from the consuming staging handoff. It must own the exact B6 arena, one inherited-tick boss-lock simulation, one Caldus encounter aggregate, authoritative player input/movement/collision, route compare-and-swap projection, and fail-closed staging/countdown/introduction/combat transitions before any reward or exit authority is composed.
+The consuming handoff is now integrated by `CorePrivateCaldusRuntime` under [route-runtime evidence](GB-M03-03G-caldus-route-runtime-evidence.md). Next add the separate `0.70` Caldus physical-body collision path for walking, Slipstep, and deterministic post-charge de-overlap while preserving the `0.62` damage hurtbox, then prove the complete route-bound fight through defeat before reward/exit composition.
