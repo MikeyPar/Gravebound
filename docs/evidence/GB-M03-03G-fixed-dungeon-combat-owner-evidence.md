@@ -34,8 +34,8 @@ Hosted runs [`29642037538`](https://github.com/MikeyPar/Gravebound/actions/runs/
 
 ## Explicit boundary
 
-This component is not yet bound to the persistent `CorePrivateRouteActor`, the session-owned independent 30 Hz driver, real QUIC, PostgreSQL reward/pending-inventory transactions, Sir Caldus, the stable exit, or the shared five-producer terminal coordinator. It cannot enable Character Select `Play`, production Realm Gate interaction, normal extraction/Recall, or any other ordinary route capability.
+Commit `6749141` now binds this component to the persistent `CorePrivateRouteActor` through a staged, rollback-safe runtime and one actor-lock CAS. It is not yet converted into the session-owned independent 30 Hz task or bound to real QUIC, PostgreSQL Bargain/reward/pending-inventory transactions, Sir Caldus, the stable exit, or the shared five-producer terminal coordinator. It cannot enable Character Select `Play`, production Realm Gate interaction, normal extraction/Recall, or any other ordinary route capability.
 
 ## Current Next Step
 
-Bind `CoreFixedDungeonCombat` to the persistent route actor and session-owned 30 Hz driver so a cleared microrealm transfers the exact mutable allocation into B0 and server-derived room events advance B1-B5. Then add authoritative Sir Caldus combat, committed reward/pending-inventory placement, stable B6 exit, and all five terminal producers before opening the ordinary route.
+Convert the existing session-owned 30 Hz task in place after the durable Bell result, preserving the new exact B0 handoff and route CAS through cancellation/reconnect. Then bind server-generated fixed-room frames and durable B4 resolution before adding authoritative Sir Caldus combat, committed reward/pending-inventory placement, stable B6 exit, and all five terminal producers.
