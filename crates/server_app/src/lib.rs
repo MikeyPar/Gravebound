@@ -264,8 +264,8 @@ pub use production_extraction::{
 };
 pub use production_extraction_intent::{
     CORE_EXTRACTION_ACTOR_MAILBOX_CAPACITY, CoreExtractionActorHandle, CoreExtractionActorInbox,
-    ProductionExtractionBossExitAuthorityV1, ProductionExtractionIntentActor,
-    ProductionExtractionIntentError, ProductionExtractionPlanner,
+    ProductionExtractionBossExitAuthorityV1, ProductionExtractionCaldusReservationV1,
+    ProductionExtractionIntentActor, ProductionExtractionIntentError, ProductionExtractionPlanner,
     ProductionExtractionPlannerInputV1, ProductionExtractionPreparedIntentV1,
     derive_production_extraction_terminal_id_v1, production_extraction_actor_mailbox,
 };

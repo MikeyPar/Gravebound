@@ -71,6 +71,139 @@ pub struct ProductionExtractionBossExitAuthorityV1 {
     content_revision: StoredWorldFlowRevisionV1,
 }
 
+/// Exact route reservation held while `PostgreSQL` produces the final coherent custody snapshot.
+/// Callers must consume it through [`Self::seal`] or [`Self::abort`]; dropping it would leave the
+/// route intentionally fail-closed in `TerminalPending` for restart reconciliation.
+#[derive(Debug)]
+#[must_use = "an extraction reservation must be sealed or explicitly aborted"]
+pub struct ProductionExtractionCaldusReservationV1 {
+    authenticated: AuthenticatedAccount,
+    route_directory: CorePrivateRouteActorDirectory,
+    route_lease: CorePrivateRouteActorLease,
+    permit: CorePrivateRouteExtractionPermit,
+    handoff: CorePrivateCaldusDefeatHandoff,
+    exit: CaldusExitPresentation,
+    participant: CoreBossParticipant,
+}
+
+impl ProductionExtractionCaldusReservationV1 {
+    /// Freezes the exact `BossExitReady` generation before the final custody read. This prevents
+    /// ordinary item/world mutations from racing between snapshot and extraction construction.
+    pub async fn reserve(
+        authenticated: AuthenticatedAccount,
+        route_directory: CorePrivateRouteActorDirectory,
+        handoff: &CorePrivateCaldusDefeatHandoff,
+        commit: &CorePrivateCaldusRewardCommit,
+        world_flow_revision: WorldFlowContentRevisionV1,
+    ) -> Result<Self, ProductionExtractionIntentError> {
+        let lock = handoff.lock();
+        let [participant] = lock.participants.as_slice() else {
+            return Err(ProductionExtractionIntentError::InvalidRouteAuthority);
+        };
+        let participant = *participant;
+        let route = &commit.route;
+        if authenticated.namespace != AuthenticatedNamespace::WipeableTest
+            || authenticated.account_id.as_bytes() != handoff.route_lease().account_id()
+            || handoff.character_id() != handoff.route_lease().character_id()
+            || route.character_id != handoff.character_id()
+            || route.actor_generation != handoff.route_lease().actor_generation()
+            || route.instance_lineage_id != Some(handoff.instance_lineage_id())
+            || route.phase != CorePrivateRoutePhaseV1::BossExitReady
+        {
+            return Err(ProductionExtractionIntentError::InvalidRouteAuthority);
+        }
+        let identities = CoreCaldusVictoryIdentities::derive(handoff.instance_lineage_id(), lock)
+            .map_err(|_| ProductionExtractionIntentError::InvalidExitAuthority)?;
+        let extraction = identities
+            .extraction_for(participant)
+            .ok_or(ProductionExtractionIntentError::InvalidExitAuthority)?;
+        let terminal_id = derive_production_extraction_terminal_id_v1(
+            authenticated.account_id.as_bytes(),
+            handoff.character_id(),
+            identities.encounter_id.bytes(),
+            extraction.request_id.bytes(),
+            extraction.receipt_id.bytes(),
+        )?;
+        if commit.exit.exit_instance_id != identities.exit_instance_id.bytes() {
+            return Err(ProductionExtractionIntentError::InvalidExitAuthority);
+        }
+        let exit_binding = CorePrivateRouteExtractionExitBinding::new(
+            identities.encounter_id.bytes(),
+            identities.exit_instance_id.bytes(),
+            extraction.request_id.bytes(),
+            extraction.receipt_id.bytes(),
+            terminal_id,
+        )
+        .map_err(|_| ProductionExtractionIntentError::InvalidExitAuthority)?;
+        let binding = CorePrivateRouteExtractionBinding::new(
+            authenticated.account_id.as_bytes(),
+            route.clone(),
+            world_flow_revision,
+            handoff.entry_restore_point_id(),
+            exit_binding,
+        )
+        .map_err(|_| ProductionExtractionIntentError::InvalidRouteAuthority)?;
+        let route_lease = handoff.route_lease();
+        let permit = route_directory
+            .prepare_extraction_terminal(route_lease, binding)
+            .await
+            .map_err(|_| ProductionExtractionIntentError::InvalidRouteAuthority)?;
+        Ok(Self {
+            authenticated,
+            route_directory,
+            route_lease,
+            permit,
+            handoff: handoff.clone(),
+            exit: commit.exit.clone(),
+            participant,
+        })
+    }
+
+    #[must_use]
+    pub const fn accepted_route(&self) -> &protocol::CorePrivateRouteStateV1 {
+        self.permit.binding().accepted_route()
+    }
+
+    #[must_use]
+    pub const fn permit(&self) -> &CorePrivateRouteExtractionPermit {
+        &self.permit
+    }
+
+    /// Seals the reserved route against the post-reservation coherent storage versions. A known
+    /// mismatch reopens the exact route before returning the validation error.
+    pub async fn seal(
+        self,
+        expected_versions: ProductionExtractionExpectedVersionsV1,
+    ) -> Result<ProductionExtractionBossExitAuthorityV1, ProductionExtractionIntentError> {
+        let result = ProductionExtractionBossExitAuthorityV1::seal_committed_exit(
+            self.authenticated,
+            self.handoff.character_id(),
+            self.permit.clone(),
+            self.handoff.instance_lineage_id(),
+            self.handoff.lock().attempt_ordinal,
+            &self.exit,
+            self.handoff.lock(),
+            self.participant,
+            expected_versions,
+        );
+        match result {
+            Ok(authority) => Ok(authority),
+            Err(error) => {
+                self.abort().await?;
+                Err(error)
+            }
+        }
+    }
+
+    pub async fn abort(self) -> Result<(), ProductionExtractionIntentError> {
+        self.route_directory
+            .abort_extraction_terminal(self.route_lease, &self.permit)
+            .await
+            .map(|_| ())
+            .map_err(|_| ProductionExtractionIntentError::RouteReservationAbortFailed)
+    }
+}
+
 impl ProductionExtractionBossExitAuthorityV1 {
     #[allow(
         clippy::too_many_arguments,
@@ -115,74 +248,16 @@ impl ProductionExtractionBossExitAuthorityV1 {
         world_flow_revision: WorldFlowContentRevisionV1,
         expected_versions: ProductionExtractionExpectedVersionsV1,
     ) -> Result<Self, ProductionExtractionIntentError> {
-        let lock = handoff.lock();
-        let [participant] = lock.participants.as_slice() else {
-            return Err(ProductionExtractionIntentError::InvalidRouteAuthority);
-        };
-        let participant = *participant;
-        let route = &commit.route;
-        if authenticated.namespace != AuthenticatedNamespace::WipeableTest
-            || authenticated.account_id.as_bytes() != handoff.route_lease().account_id()
-            || handoff.character_id() != handoff.route_lease().character_id()
-            || route.character_id != handoff.character_id()
-            || route.actor_generation != handoff.route_lease().actor_generation()
-            || route.instance_lineage_id != Some(handoff.instance_lineage_id())
-            || route.phase != CorePrivateRoutePhaseV1::BossExitReady
-        {
-            return Err(ProductionExtractionIntentError::InvalidRouteAuthority);
-        }
-        let identities = CoreCaldusVictoryIdentities::derive(handoff.instance_lineage_id(), lock)
-            .map_err(|_| ProductionExtractionIntentError::InvalidExitAuthority)?;
-        let extraction = identities
-            .extraction_for(participant)
-            .ok_or(ProductionExtractionIntentError::InvalidExitAuthority)?;
-        let terminal_id = derive_production_extraction_terminal_id_v1(
-            authenticated.account_id.as_bytes(),
-            handoff.character_id(),
-            identities.encounter_id.bytes(),
-            extraction.request_id.bytes(),
-            extraction.receipt_id.bytes(),
-        )?;
-        let exit = CorePrivateRouteExtractionExitBinding::new(
-            identities.encounter_id.bytes(),
-            identities.exit_instance_id.bytes(),
-            extraction.request_id.bytes(),
-            extraction.receipt_id.bytes(),
-            terminal_id,
-        )
-        .map_err(|_| ProductionExtractionIntentError::InvalidExitAuthority)?;
-        let binding = CorePrivateRouteExtractionBinding::new(
-            authenticated.account_id.as_bytes(),
-            route.clone(),
-            world_flow_revision,
-            handoff.entry_restore_point_id(),
-            exit,
-        )
-        .map_err(|_| ProductionExtractionIntentError::InvalidRouteAuthority)?;
-        let permit = route_directory
-            .prepare_extraction_terminal(handoff.route_lease(), binding)
-            .await
-            .map_err(|_| ProductionExtractionIntentError::InvalidRouteAuthority)?;
-        match Self::seal_committed_exit(
+        ProductionExtractionCaldusReservationV1::reserve(
             authenticated,
-            handoff.character_id(),
-            permit.clone(),
-            handoff.instance_lineage_id(),
-            lock.attempt_ordinal,
-            &commit.exit,
-            lock,
-            participant,
-            expected_versions,
-        ) {
-            Ok(authority) => Ok(authority),
-            Err(error) => {
-                route_directory
-                    .abort_extraction_terminal(handoff.route_lease(), &permit)
-                    .await
-                    .map_err(|_| ProductionExtractionIntentError::RouteReservationAbortFailed)?;
-                Err(error)
-            }
-        }
+            route_directory.clone(),
+            handoff,
+            commit,
+            world_flow_revision,
+        )
+        .await?
+        .seal(expected_versions)
+        .await
     }
 
     #[expect(
@@ -319,6 +394,25 @@ impl ProductionExtractionBossExitAuthorityV1 {
     #[must_use]
     pub const fn route_permit(&self) -> &CorePrivateRouteExtractionPermit {
         &self.route_permit
+    }
+
+    /// Reopens only this uncommitted exact reservation. Construction/session composition uses
+    /// this after removing an actor that never accepted client intent or retained a terminal.
+    pub async fn abort_uncommitted_route(
+        &self,
+        route_directory: &CorePrivateRouteActorDirectory,
+        route_lease: CorePrivateRouteActorLease,
+    ) -> Result<(), CorePrivateRouteRuntimeError> {
+        if route_lease.account_id() != self.account_id
+            || route_lease.character_id() != self.selected_character_id
+            || route_lease.actor_generation() != self.actor_generation()
+        {
+            return Err(CorePrivateRouteRuntimeError::InvalidExtractionBinding);
+        }
+        route_directory
+            .abort_extraction_terminal(route_lease, &self.route_permit)
+            .await
+            .map(|_| ())
     }
 
     #[must_use]
@@ -690,6 +784,16 @@ impl<Planner, Clock> ProductionExtractionIntentActor<Planner, Clock> {
     /// terminal result. Durable bootstrap owns recovery if the process ends before this cleanup.
     pub async fn retire_route_after_terminal(&self) -> Result<(), CorePrivateRouteRuntimeError> {
         self.route_directory.retire_actor(self.route_lease).await
+    }
+
+    /// Reopens the exact reserved route when actor registration/session activation fails before
+    /// any client intent or terminal result exists.
+    pub async fn abort_route_after_failed_construction(
+        &self,
+    ) -> Result<(), CorePrivateRouteRuntimeError> {
+        self.authority
+            .abort_uncommitted_route(&self.route_directory, self.route_lease)
+            .await
     }
 }
 
@@ -1711,16 +1815,24 @@ mod tests {
         let commit = reward_commit(&directory, lease);
         let accepted_version = commit.route.state_version;
 
-        let authority = ProductionExtractionBossExitAuthorityV1::prepare_from_caldus_commit(
+        let reservation = ProductionExtractionCaldusReservationV1::reserve(
             authenticated(),
-            &directory,
+            directory.clone(),
             &handoff,
             &commit,
             revision(),
-            versions(),
         )
         .await
-        .expect("exact Caldus authority");
+        .expect("exact Caldus reservation");
+        assert_eq!(reservation.accepted_route(), &commit.route);
+        assert_eq!(
+            reservation.permit().accepted_route_state_version(),
+            accepted_version
+        );
+        let authority = reservation
+            .seal(versions())
+            .await
+            .expect("exact Caldus authority");
         assert_eq!(authority.selected_character_id(), [2; 16]);
         assert_eq!(authority.instance_lineage_id(), [3; 16]);
         assert_eq!(authority.route_state_version(), accepted_version);
@@ -1773,6 +1885,91 @@ mod tests {
             .expect("retry cleanup");
         directory.begin_shutdown();
         assert!(directory.finish_shutdown().await.unwrap().zero_residue);
+    }
+
+    #[tokio::test]
+    async fn uncommitted_actor_abort_reopens_same_route_generation_for_retry() {
+        let route_directory = CorePrivateRouteActorDirectory::new();
+        let route_lease = route_directory
+            .register_actor(authenticated(), route_seed(), 7)
+            .expect("route actor");
+        let extraction = Arc::new(CoreExtractionActorDirectory::new(Arc::new(
+            ExtractionTicks::new(700),
+        )));
+
+        let register = |authority| {
+            Arc::new(
+                ProductionExtractionIntentActor::new(
+                    authority,
+                    route_directory.clone(),
+                    route_lease,
+                    FakePlanner::stable(),
+                    FixedClock(10_000),
+                )
+                .expect("extraction actor"),
+            )
+        };
+        let first_commit = reward_commit(&route_directory, route_lease);
+        let first_authority = ProductionExtractionBossExitAuthorityV1::prepare_from_caldus_commit(
+            authenticated(),
+            &route_directory,
+            &defeat_handoff(route_lease),
+            &first_commit,
+            revision(),
+            versions(),
+        )
+        .await
+        .expect("first authority");
+        let first_lease = extraction
+            .register_actor(authenticated(), register(first_authority))
+            .await
+            .expect("first registration");
+        let first_report = extraction
+            .abort_uncommitted_actor(first_lease)
+            .await
+            .expect("known construction abort");
+        assert!(first_report.zero_actor_residue);
+        assert!(!first_report.committed_result_retained);
+        assert_eq!(
+            route_directory
+                .snapshot(route_lease)
+                .expect("reopened route")
+                .phase,
+            CorePrivateRoutePhaseV1::BossExitReady
+        );
+
+        let retry_commit = reward_commit(&route_directory, route_lease);
+        let retry_authority = ProductionExtractionBossExitAuthorityV1::prepare_from_caldus_commit(
+            authenticated(),
+            &route_directory,
+            &defeat_handoff(route_lease),
+            &retry_commit,
+            revision(),
+            versions(),
+        )
+        .await
+        .expect("retry authority");
+        let retry_lease = extraction
+            .register_actor(authenticated(), register(retry_authority))
+            .await
+            .expect("same route generation may retry");
+        extraction
+            .abort_uncommitted_actor(retry_lease)
+            .await
+            .expect("retry cleanup");
+
+        for connection in extraction.begin_shutdown().await {
+            connection.close(0_u32.into(), b"test shutdown");
+        }
+        assert!(extraction.finish_shutdown().await.unwrap().zero_residue);
+        route_directory.begin_shutdown();
+        assert!(
+            route_directory
+                .finish_shutdown()
+                .await
+                .unwrap()
+                .zero_residue
+        );
     }
 
     fn frame(sequence: u32) -> ExtractionCommitFrameV1 {

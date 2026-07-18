@@ -188,6 +188,10 @@ pub enum CoreExtractionRuntimeError {
     ActorAlreadyRegistered,
     #[error("Core extraction actor is unavailable")]
     ActorUnavailable,
+    #[error(
+        "Core extraction actor has intent, transport, or terminal authority and cannot be construction-aborted"
+    )]
+    UncommittedActorAbortUnavailable,
     #[error("Core extraction transport is stale or unavailable")]
     TransportUnavailable,
     #[error("Core extraction reliable writer is unavailable")]
@@ -498,6 +502,90 @@ where
             return Err(CoreExtractionRuntimeError::InvalidActorBinding);
         }
         Ok(entry.lease)
+    }
+
+    /// Removes one exact actor whose construction never became player-visible, then reopens its
+    /// route reservation. Unlike terminal retirement, this does not advance the route-generation
+    /// floor, so the same still-live danger generation may retry after a known activation failure.
+    pub async fn abort_uncommitted_actor(
+        &self,
+        actor_lease: CoreExtractionActorLease,
+    ) -> Result<CoreExtractionActorRetirementReport, CoreExtractionRuntimeError> {
+        let actor = {
+            let state = self.state.lock().await;
+            let entry = state
+                .actors
+                .get(&actor_lease.account_id)
+                .ok_or(CoreExtractionRuntimeError::ActorUnavailable)?;
+            if entry.lease != actor_lease {
+                return Err(CoreExtractionRuntimeError::InvalidActorBinding);
+            }
+            if state.committed.contains_key(&actor_lease.account_id)
+                || state.transports.contains_key(&actor_lease.account_id)
+                || state.delivery.contains_key(&actor_lease.account_id)
+                || state
+                    .pending_writer_handoffs
+                    .contains_key(&actor_lease.account_id)
+            {
+                return Err(CoreExtractionRuntimeError::UncommittedActorAbortUnavailable);
+            }
+            Arc::clone(&entry.actor)
+        };
+        if actor.prepared_intent().await.is_some() {
+            return Err(CoreExtractionRuntimeError::UncommittedActorAbortUnavailable);
+        }
+        let mut entry = {
+            let mut state = self.state.lock().await;
+            let entry = state
+                .actors
+                .get(&actor_lease.account_id)
+                .ok_or(CoreExtractionRuntimeError::ActorUnavailable)?;
+            if entry.lease != actor_lease
+                || state.committed.contains_key(&actor_lease.account_id)
+                || state.transports.contains_key(&actor_lease.account_id)
+                || state.delivery.contains_key(&actor_lease.account_id)
+                || state
+                    .pending_writer_handoffs
+                    .contains_key(&actor_lease.account_id)
+            {
+                return Err(CoreExtractionRuntimeError::UncommittedActorAbortUnavailable);
+            }
+            let entry = state
+                .actors
+                .remove(&actor_lease.account_id)
+                .ok_or(CoreExtractionRuntimeError::ActorUnavailable)?;
+            state
+                .retiring_actors
+                .insert(actor_lease.account_id, actor_lease);
+            entry
+        };
+        let route_result = entry.actor.abort_route_after_failed_construction().await;
+        if let Some(shutdown) = entry.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        let task_result = entry
+            .task
+            .take()
+            .ok_or(CoreExtractionRuntimeError::ActorUnavailable)?
+            .await;
+        let mut state = self.state.lock().await;
+        state.retiring_actors.remove(&actor_lease.account_id);
+        let task = task_result.map_err(CoreExtractionRuntimeError::ActorTaskFailed)?;
+        state.served_commands = state.served_commands.saturating_add(task.served);
+        state.abandoned_commands = state.abandoned_commands.saturating_add(task.abandoned);
+        state.tick_authority_losses = state
+            .tick_authority_losses
+            .saturating_add(task.tick_authority_losses);
+        let zero_actor_residue = !state.actors.contains_key(&actor_lease.account_id)
+            && !state.retiring_actors.contains_key(&actor_lease.account_id);
+        route_result?;
+        Ok(CoreExtractionActorRetirementReport {
+            served_commands: task.served,
+            abandoned_commands: task.abandoned,
+            tick_authority_losses: task.tick_authority_losses,
+            committed_result_retained: false,
+            zero_actor_residue,
+        })
     }
 
     /// Attaches the reliable writer already owned by the private-life session. A pending durable
