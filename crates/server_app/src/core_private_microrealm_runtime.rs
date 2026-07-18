@@ -30,6 +30,7 @@ use crate::{
 pub(crate) struct CorePrivateMicrorealmDungeonHandoff {
     pub route_directory: CorePrivateRouteActorDirectory,
     pub route_lease: CorePrivateRouteActorLease,
+    pub entry_restore_point_id: [u8; 16],
     pub combat_envelope: CoreCharacterCombatEnvelope,
     pub participant: sim_core::NormalWaveHandoff,
     pub next_hostile_spawn_ordinal: u16,
@@ -309,6 +310,7 @@ impl CorePrivateMicrorealmRuntime {
         Ok(CorePrivateMicrorealmDungeonHandoff {
             route_directory: self.route_directory,
             route_lease: self.route_lease,
+            entry_restore_point_id: binding.entry_restore_point_id,
             combat_envelope,
             participant,
             next_hostile_spawn_ordinal,

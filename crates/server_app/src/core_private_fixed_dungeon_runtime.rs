@@ -80,6 +80,7 @@ pub struct CorePrivateCaldusStagingHandoff {
     pub(crate) route_directory: CorePrivateRouteActorDirectory,
     pub(crate) route_lease: CorePrivateRouteActorLease,
     pub(crate) content_revision: CorePrivateRouteContentRevisionV1,
+    pub(crate) entry_restore_point_id: [u8; 16],
     pub(crate) combat_envelope: CoreCharacterCombatEnvelope,
     pub(crate) participant: sim_core::NormalWaveHandoff,
     pub(crate) arena: sim_core::ArenaGeometry,
@@ -101,6 +102,11 @@ impl CorePrivateCaldusStagingHandoff {
     #[must_use]
     pub const fn content_revision(&self) -> &CorePrivateRouteContentRevisionV1 {
         &self.content_revision
+    }
+
+    #[must_use]
+    pub const fn entry_restore_point_id(&self) -> [u8; 16] {
+        self.entry_restore_point_id
     }
 
     #[must_use]
@@ -128,6 +134,7 @@ pub struct CorePrivateFixedDungeonRuntime {
     route_directory: CorePrivateRouteActorDirectory,
     route_lease: CorePrivateRouteActorLease,
     content_revision: CorePrivateRouteContentRevisionV1,
+    entry_restore_point_id: [u8; 16],
     combat_envelope: CoreCharacterCombatEnvelope,
     combat: sim_content::CoreFixedDungeonCombat,
     movement: Option<PlayerMovementState>,
@@ -175,6 +182,7 @@ impl CorePrivateFixedDungeonRuntime {
             route_directory: handoff.route_directory,
             route_lease: handoff.route_lease,
             content_revision: expected_content_revision.clone(),
+            entry_restore_point_id: handoff.entry_restore_point_id,
             combat_envelope: handoff.combat_envelope,
             combat,
             movement: None,
@@ -239,6 +247,7 @@ impl CorePrivateFixedDungeonRuntime {
             route_directory: self.route_directory,
             route_lease: self.route_lease,
             content_revision: self.content_revision,
+            entry_restore_point_id: self.entry_restore_point_id,
             combat_envelope: self.combat_envelope,
             participant,
             arena,
@@ -734,6 +743,7 @@ mod tests {
         let handoff = CorePrivateMicrorealmDungeonHandoff {
             route_directory: directory.clone(),
             route_lease: lease,
+            entry_restore_point_id: [0x74; 16],
             combat_envelope: envelope,
             participant: sim_core::NormalWaveHandoff {
                 player,
@@ -1082,7 +1092,7 @@ mod tests {
             .expect("consume exact B6 staging handoff");
         assert_eq!(handoff.route_lease(), lease);
         assert_eq!(handoff.tick(), inherited_tick);
-        assert_eq!(handoff.content_revision(), &route_revision());
+        assert_eq!(handoff.entry_restore_point_id(), [0x74; 16]);
         assert_eq!(handoff.combat_envelope().character_id(), CHARACTER_ID);
         assert_eq!(handoff.combat_envelope().progression_version(), 2);
         assert_eq!(handoff.player().target.entity_id, player_entity_id);

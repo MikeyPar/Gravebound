@@ -59,6 +59,7 @@ pub struct CorePrivateCaldusFrame {
 pub struct CorePrivateCaldusRuntime {
     route_directory: CorePrivateRouteActorDirectory,
     route_lease: CorePrivateRouteActorLease,
+    entry_restore_point_id: [u8; 16],
     combat_envelope: CoreCharacterCombatEnvelope,
     arena: sim_core::ArenaGeometry,
     movement: PlayerMovementState,
@@ -131,6 +132,7 @@ impl CorePrivateCaldusRuntime {
         Ok(Self {
             route_directory: handoff.route_directory,
             route_lease: handoff.route_lease,
+            entry_restore_point_id: handoff.entry_restore_point_id,
             combat_envelope: handoff.combat_envelope,
             arena: handoff.arena,
             movement,
@@ -332,6 +334,7 @@ impl CorePrivateCaldusRuntime {
                 instance_lineage_id: route
                     .instance_lineage_id
                     .ok_or(CorePrivateCaldusRuntimeError::InvalidComposition)?,
+                entry_restore_point_id: self.entry_restore_point_id,
                 lock: encounter.participant_lock().clone(),
                 active_duration_ticks,
                 defeat_tick: tick,
@@ -717,6 +720,7 @@ pub(crate) fn core_private_caldus_runtime_test_fixture()
         route_directory: directory.clone(),
         route_lease: lease,
         content_revision: route_revision,
+        entry_restore_point_id: [0x74; 16],
         combat_envelope: envelope,
         participant: sim_core::NormalWaveHandoff {
             player,
@@ -852,6 +856,7 @@ mod tests {
             route_directory: directory.clone(),
             route_lease: lease,
             content_revision: route_revision(),
+            entry_restore_point_id: [0x54; 16],
             combat_envelope: envelope,
             participant: sim_core::NormalWaveHandoff {
                 player,
@@ -1229,6 +1234,7 @@ mod tests {
             .clone();
         let frozen_route = directory.snapshot(lease).expect("defeated route");
         assert_eq!(frozen.route_state_version(), frozen_route.state_version);
+        assert_eq!(frozen.entry_restore_point_id(), [0x54; 16]);
         assert_eq!(frozen.defeat_tick(), Tick(950));
         assert_eq!(frozen.active_duration_ticks(), 725);
         assert_eq!(frozen.lock().maximum_health, 7_200);

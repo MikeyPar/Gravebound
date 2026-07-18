@@ -32,6 +32,7 @@ pub struct CorePrivateCaldusDefeatHandoff {
     pub(crate) route_lease: CorePrivateRouteActorLease,
     pub(crate) route_state_version: u64,
     pub(crate) instance_lineage_id: [u8; 16],
+    pub(crate) entry_restore_point_id: [u8; 16],
     pub(crate) lock: CoreBossParticipantLock,
     pub(crate) active_duration_ticks: u32,
     pub(crate) defeat_tick: Tick,
@@ -54,6 +55,11 @@ impl CorePrivateCaldusDefeatHandoff {
     #[must_use]
     pub const fn instance_lineage_id(&self) -> [u8; 16] {
         self.instance_lineage_id
+    }
+
+    #[must_use]
+    pub const fn entry_restore_point_id(&self) -> [u8; 16] {
+        self.entry_restore_point_id
     }
 
     #[must_use]
