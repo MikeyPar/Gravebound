@@ -132,6 +132,11 @@ impl CoreCharacterCombatEnvelope {
         self.character_state_version
     }
 
+    #[must_use]
+    pub(crate) const fn progression_version(&self) -> u64 {
+        self.progression_version
+    }
+
     /// Rebases only the character aggregate version after an exact committed scene transfer.
     /// Mutable combat remains in the moved player allocation; skipped, repeated, or stale
     /// versions fail closed.

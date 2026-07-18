@@ -4,8 +4,9 @@
 //! `DNG-006`, `ENC-010`, `TECH-012`), `Gravebound_Content_Production_Spec_v1.md`
 //! (`CONT-ROOM-002`, `CONT-BOSS-001`-`002`), and
 //! `Gravebound_Development_Roadmap_v1.md` (`GB-M03-03`). Loading, lock, player simulation,
-//! encounter simulation, and route CAS are staged and committed as one frame. Reward and exit
-//! authority remain outside this owner and normal route admission remains disabled.
+//! encounter simulation, eligibility evidence, and route CAS are staged and committed as one
+//! frame. Durable reward persistence remains outside this owner; only its exact frozen result may
+//! unlock the stable exit. Normal route admission remains disabled.
 
 use std::collections::BTreeMap;
 
@@ -24,9 +25,12 @@ use sim_core::{
 use thiserror::Error;
 
 use crate::{
-    CoreCharacterCombatEnvelope, CorePrivateCaldusStagingHandoff, CorePrivateMicrorealmInput,
-    CorePrivateMicrorealmRuntimeError, CorePrivateRouteActorDirectory, CorePrivateRouteActorLease,
-    CorePrivateRouteRuntimeError,
+    CaldusInstancePresentation, CoreCharacterCombatEnvelope, CoreDurableCaldusResolution,
+    CorePrivateCaldusDefeatHandoff, CorePrivateCaldusRewardCommit,
+    CorePrivateCaldusRewardCommitDisposition, CorePrivateCaldusRewardError,
+    CorePrivateCaldusStagingHandoff, CorePrivateMicrorealmInput, CorePrivateMicrorealmRuntimeError,
+    CorePrivateRouteActorDirectory, CorePrivateRouteActorLease, CorePrivateRouteRuntimeError,
+    core_private_caldus_reward::CoreCaldusRewardTracker,
     core_private_combat_frame::{core_player_movement_config, step_live_player_combat_with_bodies},
 };
 
@@ -66,6 +70,10 @@ pub struct CorePrivateCaldusRuntime {
     boss_entity_id: EntityId,
     route_phase: CorePrivateRoutePhaseV1,
     tick: Tick,
+    reward_tracker: CoreCaldusRewardTracker,
+    defeat_handoff: Option<CorePrivateCaldusDefeatHandoff>,
+    reward_resolution: Option<CoreDurableCaldusResolution>,
+    presentation: Option<CaldusInstancePresentation>,
 }
 
 struct StagedCaldusFrame {
@@ -79,6 +87,7 @@ struct StagedCaldusFrame {
     combat: sim_core::CombatStep,
     lock: CoreBossLockStep,
     encounter: Option<CoreCaldusEncounterStep>,
+    reward_tracker: CoreCaldusRewardTracker,
 }
 
 impl CorePrivateCaldusRuntime {
@@ -133,6 +142,10 @@ impl CorePrivateCaldusRuntime {
             boss_entity_id,
             route_phase: CorePrivateRoutePhaseV1::BossStaging,
             tick: handoff.tick,
+            reward_tracker: CoreCaldusRewardTracker::new(handoff.last_reward_activity_sequence),
+            defeat_handoff: None,
+            reward_resolution: None,
+            presentation: None,
         })
     }
 
@@ -168,11 +181,90 @@ impl CorePrivateCaldusRuntime {
             .expect("constructor installs immutable participant")
     }
 
+    #[must_use]
+    pub const fn pending_reward_handoff(&self) -> Option<&CorePrivateCaldusDefeatHandoff> {
+        self.defeat_handoff.as_ref()
+    }
+
+    #[must_use]
+    pub fn presentation(&self) -> Option<&CaldusInstancePresentation> {
+        self.presentation.as_ref()
+    }
+
     pub async fn step(
         &mut self,
         input: CorePrivateCaldusRuntimeInput,
     ) -> Result<CorePrivateCaldusFrame, CorePrivateCaldusRuntimeError> {
         self.step_inner(input, None).await
+    }
+
+    pub async fn commit_reward_resolution(
+        &mut self,
+        content: &sim_content::CoreDevelopmentCaldus,
+        resolution: CoreDurableCaldusResolution,
+    ) -> Result<CorePrivateCaldusRewardCommit, CorePrivateCaldusRuntimeError> {
+        if let Some(stored) = &self.reward_resolution {
+            if stored != &resolution {
+                return Err(CorePrivateCaldusRuntimeError::RewardResolutionConflict);
+            }
+            let route = self.route_directory.snapshot(self.route_lease)?;
+            self.validate_route_authority(&route)?;
+            if route.phase != CorePrivateRoutePhaseV1::BossExitReady {
+                return Err(CorePrivateCaldusRuntimeError::RewardAuthorityMismatch);
+            }
+            let exit = self
+                .presentation
+                .as_ref()
+                .and_then(CaldusInstancePresentation::exit)
+                .cloned()
+                .ok_or(CorePrivateCaldusRuntimeError::InvalidComposition)?;
+            return Ok(CorePrivateCaldusRewardCommit {
+                route,
+                exit,
+                disposition: CorePrivateCaldusRewardCommitDisposition::Replayed,
+            });
+        }
+        let handoff = self
+            .defeat_handoff
+            .as_ref()
+            .ok_or(CorePrivateCaldusRuntimeError::RewardResolutionUnavailable)?;
+        if resolution.handoff() != handoff {
+            return Err(CorePrivateCaldusRuntimeError::RewardAuthorityMismatch);
+        }
+        let route_before = self.route_directory.snapshot(self.route_lease)?;
+        self.validate_route_authority(&route_before)?;
+        if route_before.phase != CorePrivateRoutePhaseV1::BossDefeated
+            || route_before.state_version != handoff.route_state_version()
+        {
+            return Err(CorePrivateCaldusRuntimeError::RewardAuthorityMismatch);
+        }
+        let mut presentation = CaldusInstancePresentation::new(
+            handoff.instance_lineage_id(),
+            handoff.lock().attempt_ordinal,
+        )?;
+        presentation.present_committed_exit(content, resolution.exit())?;
+        let route = self
+            .route_directory
+            .apply_fixed_dungeon_authority(
+                self.route_lease,
+                route_before.state_version,
+                CorePrivateRouteRoomV1::CaldusArenaB6,
+                CorePrivateRoutePhaseV1::BossExitReady,
+            )
+            .await?;
+        let exit = presentation
+            .exit()
+            .cloned()
+            .ok_or(CorePrivateCaldusRuntimeError::InvalidComposition)?;
+        self.route_phase = CorePrivateRoutePhaseV1::BossExitReady;
+        self.reward_resolution = Some(resolution);
+        self.defeat_handoff = None;
+        self.presentation = Some(presentation);
+        Ok(CorePrivateCaldusRewardCommit {
+            route,
+            exit,
+            disposition: CorePrivateCaldusRewardCommitDisposition::Committed,
+        })
     }
 
     #[cfg(test)]
@@ -189,6 +281,12 @@ impl CorePrivateCaldusRuntime {
         input: CorePrivateCaldusRuntimeInput,
         friendly_inputs: Option<Vec<CoreCaldusFriendlyInput>>,
     ) -> Result<CorePrivateCaldusFrame, CorePrivateCaldusRuntimeError> {
+        if self.reward_resolution.is_some() {
+            return Err(CorePrivateCaldusRuntimeError::ExitReady);
+        }
+        if self.defeat_handoff.is_some() {
+            return Err(CorePrivateCaldusRuntimeError::RewardResolutionRequired);
+        }
         let tick = self
             .tick
             .checked_next()
@@ -215,6 +313,35 @@ impl CorePrivateCaldusRuntime {
             .encounter_simulation
             .as_ref()
             .map(|boss| (boss.current_health(), boss.maximum_health()));
+        let defeat_handoff = if route.phase == CorePrivateRoutePhaseV1::BossDefeated {
+            let encounter = staged
+                .encounter_simulation
+                .as_ref()
+                .ok_or(CorePrivateCaldusRuntimeError::InvalidComposition)?;
+            let living = !player_died;
+            let contribution = encounter
+                .contribution_damage(self.participant)
+                .ok_or(CorePrivateCaldusRuntimeError::InvalidComposition)?;
+            let (active_duration_ticks, eligibility) =
+                staged
+                    .reward_tracker
+                    .finish(self.participant, tick, contribution, living)?;
+            Some(CorePrivateCaldusDefeatHandoff {
+                route_lease: self.route_lease,
+                route_state_version: route.state_version,
+                instance_lineage_id: route
+                    .instance_lineage_id
+                    .ok_or(CorePrivateCaldusRuntimeError::InvalidComposition)?,
+                lock: encounter.participant_lock().clone(),
+                active_duration_ticks,
+                defeat_tick: tick,
+                character_id: self.combat_envelope.character_id(),
+                expected_progression_version: self.combat_envelope.progression_version(),
+                eligibility: vec![eligibility],
+            })
+        } else {
+            None
+        };
 
         self.lock = staged.lock_simulation;
         self.players = staged.players;
@@ -223,6 +350,8 @@ impl CorePrivateCaldusRuntime {
         self.projectile_ids = staged.projectile_ids;
         self.route_phase = staged.route_phase;
         self.tick = tick;
+        self.reward_tracker = staged.reward_tracker;
+        self.defeat_handoff = defeat_handoff;
         Ok(CorePrivateCaldusFrame {
             input_sequence: input.action.input_sequence,
             tick,
@@ -249,6 +378,7 @@ impl CorePrivateCaldusRuntime {
         let mut movement_state = self.movement;
         let mut encounter_simulation = self.encounter.clone();
         let mut projectile_ids = self.projectile_ids.clone();
+        let mut reward_tracker = self.reward_tracker.clone();
         let life = participant_life(&players, self.participant.entity_id)?;
         let lock = lock_simulation.step(&CoreBossLockInput {
             tick,
@@ -304,6 +434,14 @@ impl CorePrivateCaldusRuntime {
             friendly_inputs,
             &mut players,
         )?;
+        observe_reward_evidence(
+            &mut reward_tracker,
+            tick,
+            &input,
+            &players,
+            self.participant,
+            &lock.phase,
+        )?;
         let resolved_player_position = players
             .get(&self.participant.entity_id)
             .ok_or(CorePrivateCaldusRuntimeError::InvalidComposition)?
@@ -313,14 +451,12 @@ impl CorePrivateCaldusRuntime {
             movement =
                 movement_state.apply_body_separation(resolved_player_position, &self.arena)?;
         }
-        if lock
-            .events
-            .iter()
-            .any(|event| matches!(event, CoreBossLockEvent::EmptyResetCompleted { .. }))
-            && let Some(encounter) = encounter_simulation.take()
-        {
-            projectile_ids = Some(encounter.into_cleared_projectile_allocator());
-        }
+        recover_empty_reset(
+            &lock,
+            &mut encounter_simulation,
+            &mut projectile_ids,
+            &mut reward_tracker,
+        );
         let route_phase =
             projected_route_phase(&lock.phase, encounter_simulation.as_ref(), self.route_phase)?;
         Ok(StagedCaldusFrame {
@@ -334,6 +470,7 @@ impl CorePrivateCaldusRuntime {
             combat,
             lock,
             encounter,
+            reward_tracker,
         })
     }
 
@@ -369,6 +506,41 @@ fn participant_life(
     } else {
         CoreBossLifeState::Living
     })
+}
+
+fn observe_reward_evidence(
+    tracker: &mut CoreCaldusRewardTracker,
+    tick: Tick,
+    input: &CorePrivateCaldusRuntimeInput,
+    players: &BTreeMap<EntityId, EnemyLabPlayer>,
+    participant: CoreBossParticipant,
+    lock: &CoreBossLockPhase,
+) -> Result<(), CorePrivateCaldusRuntimeError> {
+    let living = participant_life(players, participant.entity_id)? == CoreBossLifeState::Living;
+    tracker.observe(
+        tick,
+        input,
+        living,
+        matches!(lock, CoreBossLockPhase::Combat { .. }),
+    )?;
+    Ok(())
+}
+
+fn recover_empty_reset(
+    lock: &CoreBossLockStep,
+    encounter: &mut Option<CoreCaldusEncounterSimulation>,
+    projectile_ids: &mut Option<EntityIdAllocator>,
+    reward_tracker: &mut CoreCaldusRewardTracker,
+) {
+    if lock
+        .events
+        .iter()
+        .any(|event| matches!(event, CoreBossLockEvent::EmptyResetCompleted { .. }))
+        && let Some(encounter) = encounter.take()
+    {
+        *projectile_ids = Some(encounter.into_cleared_projectile_allocator());
+        reward_tracker.reset_for_attempt();
+    }
 }
 
 fn start_encounter_if_due(
@@ -504,6 +676,16 @@ pub enum CorePrivateCaldusRuntimeError {
     TickExhausted,
     #[error("route-bound player combat tick diverged from the Caldus danger tick")]
     CombatTickMismatch,
+    #[error("Sir Caldus is defeated and its frozen reward result must be resolved")]
+    RewardResolutionRequired,
+    #[error("the stable Sir Caldus exit is already ready")]
+    ExitReady,
+    #[error("no frozen Sir Caldus defeat is available for reward resolution")]
+    RewardResolutionUnavailable,
+    #[error("a different durable Sir Caldus reward result was already accepted")]
+    RewardResolutionConflict,
+    #[error("the durable Sir Caldus reward result does not match live route authority")]
+    RewardAuthorityMismatch,
     #[error(transparent)]
     Movement(#[from] sim_core::MovementError),
     #[error(transparent)]
@@ -515,6 +697,10 @@ pub enum CorePrivateCaldusRuntimeError {
     #[error(transparent)]
     Encounter(#[from] sim_core::CoreCaldusEncounterError),
     #[error(transparent)]
+    Reward(#[from] CorePrivateCaldusRewardError),
+    #[error(transparent)]
+    Presentation(#[from] crate::CaldusInstancePresentationError),
+    #[error(transparent)]
     Route(#[from] CorePrivateRouteRuntimeError),
 }
 
@@ -522,10 +708,12 @@ pub enum CorePrivateCaldusRuntimeError {
 mod tests {
     use std::{num::NonZeroU64, path::Path};
 
+    use persistence::{StoredCaldusVictoryExit, StoredCaldusVictoryOwner};
     use protocol::{CorePrivateRouteContentRevisionV1, ManifestHash, WorldFlowContentRevisionV1};
     use sim_core::{
-        AimDirection, CollisionTarget, CombatStep, FriendlyProjectileSource, MovementAction,
-        ProjectileCollision, RawDamageIntent, RawDamageIntentSource, SimulationVector,
+        AimDirection, CollisionTarget, CombatStep, CoreCaldusVictoryIdentities,
+        FriendlyProjectileSource, MovementAction, ProjectileCollision, RawDamageIntent,
+        RawDamageIntentSource, SimulationVector,
     };
 
     use super::*;
@@ -607,6 +795,7 @@ mod tests {
             },
             arena: encounters.compile_caldus_arena().expect("B6 arena"),
             tick: Tick(0),
+            last_reward_activity_sequence: 0,
         };
         let runtime =
             CorePrivateCaldusRuntime::from_staging_handoff(handoff).expect("Caldus runtime");
@@ -699,6 +888,67 @@ mod tests {
             550 => scripted_damage(runtime, Tick(sequence), 2_400),
             950 => scripted_damage(runtime, Tick(sequence), 3_000),
             _ => Vec::new(),
+        }
+    }
+
+    async fn drive_to_defeat() -> (
+        CorePrivateRouteActorDirectory,
+        CorePrivateRouteActorLease,
+        CorePrivateCaldusRuntime,
+    ) {
+        let (directory, lease, mut runtime) = fixture();
+        for sequence in 1..=226 {
+            runtime.step(input(sequence)).await.expect("boss entry");
+        }
+        runtime
+            .encounter
+            .as_mut()
+            .expect("active encounter")
+            .set_damage_policy(sim_core::HostileDamagePolicy::DebugInvulnerable);
+        for sequence in 227..=950 {
+            if sequence == 420 {
+                relocate_for_scripted_charge(&mut runtime);
+            }
+            let scripted = scripted_fight_damage(&runtime, sequence);
+            let frame = runtime
+                .step_with_test_friendly_inputs(input(sequence), scripted)
+                .await
+                .unwrap_or_else(|error| panic!("defeat tick {sequence}: {error}"));
+            if frame.route.phase == CorePrivateRoutePhaseV1::BossDefeated {
+                return (directory, lease, runtime);
+            }
+        }
+        panic!("scripted fight did not defeat Sir Caldus");
+    }
+
+    fn stored_exit(
+        handoff: &CorePrivateCaldusDefeatHandoff,
+        replayed: bool,
+        request_hash_byte: u8,
+    ) -> StoredCaldusVictoryExit {
+        let identities =
+            CoreCaldusVictoryIdentities::derive(handoff.instance_lineage_id(), handoff.lock())
+                .expect("victory identities");
+        let participant = handoff.lock().participants[0];
+        StoredCaldusVictoryExit {
+            replayed,
+            encounter_id: identities.encounter_id.bytes(),
+            instance_lineage_id: handoff.instance_lineage_id(),
+            attempt_ordinal: handoff.lock().attempt_ordinal,
+            exit_instance_id: identities.exit_instance_id.bytes(),
+            canonical_request_hash: [request_hash_byte; 32],
+            owners: vec![StoredCaldusVictoryOwner {
+                party_slot: participant.party_slot,
+                participant_entity_id: participant.entity_id.get(),
+                account_id: handoff.route_lease().account_id(),
+                character_id: handoff.character_id(),
+                reward_request_id: identities
+                    .reward_for(participant)
+                    .expect("participant reward identity")
+                    .bytes(),
+                reward_result_hash: [0x91; 32],
+                progression_payload_hash: [0x92; 32],
+            }],
         }
     }
 
@@ -901,6 +1151,105 @@ mod tests {
                 CorePrivateRoutePhaseV1::BossPhaseThree,
                 CorePrivateRoutePhaseV1::BossDefeated,
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn defeat_freezes_evidence_and_only_exact_durable_result_unlocks_exit() {
+        let (directory, lease, mut runtime) = drive_to_defeat().await;
+        let frozen = runtime
+            .pending_reward_handoff()
+            .expect("frozen defeat")
+            .clone();
+        let frozen_route = directory.snapshot(lease).expect("defeated route");
+        assert_eq!(frozen.route_state_version(), frozen_route.state_version);
+        assert_eq!(frozen.defeat_tick(), Tick(950));
+        assert_eq!(frozen.active_duration_ticks(), 725);
+        assert_eq!(frozen.lock().maximum_health, 7_200);
+        assert_eq!(frozen.eligibility().len(), 1);
+        assert_eq!(frozen.eligibility()[0].presence_ticks, 725);
+        assert_eq!(frozen.eligibility()[0].direct_damage, 7_200);
+
+        assert!(matches!(
+            runtime.step(input(951)).await,
+            Err(CorePrivateCaldusRuntimeError::RewardResolutionRequired)
+        ));
+        assert_eq!(runtime.tick(), Tick(950));
+        assert_eq!(
+            directory.snapshot(lease).expect("still defeated"),
+            frozen_route
+        );
+
+        let fresh = CoreDurableCaldusResolution::from_stored_for_test(
+            frozen.clone(),
+            stored_exit(&frozen, false, 0xa1),
+        )
+        .expect("fresh durable result");
+        let replayed = CoreDurableCaldusResolution::from_stored_for_test(
+            frozen.clone(),
+            stored_exit(&frozen, true, 0xa1),
+        )
+        .expect("replayed durable result");
+        assert_eq!(fresh, replayed);
+        let changed = CoreDurableCaldusResolution::from_stored_for_test(
+            frozen.clone(),
+            stored_exit(&frozen, false, 0xa2),
+        )
+        .expect("changed durable material");
+        let content_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content");
+        let content = sim_content::load_core_development_caldus(&content_root).expect("content");
+
+        let committed = runtime
+            .commit_reward_resolution(&content, fresh)
+            .await
+            .expect("commit reward result");
+        assert_eq!(
+            committed.disposition,
+            CorePrivateCaldusRewardCommitDisposition::Committed
+        );
+        assert_eq!(
+            committed.route.phase,
+            CorePrivateRoutePhaseV1::BossExitReady
+        );
+        assert_eq!(
+            committed.route.state_version,
+            frozen_route.state_version + 1
+        );
+        assert_eq!(
+            runtime
+                .presentation()
+                .and_then(CaldusInstancePresentation::exit),
+            Some(&committed.exit)
+        );
+        assert!(runtime.pending_reward_handoff().is_none());
+
+        let replay = runtime
+            .commit_reward_resolution(&content, replayed)
+            .await
+            .expect("exact replay");
+        assert_eq!(
+            replay.disposition,
+            CorePrivateCaldusRewardCommitDisposition::Replayed
+        );
+        assert_eq!(replay.route.state_version, committed.route.state_version);
+        assert_eq!(replay.exit, committed.exit);
+        assert!(matches!(
+            runtime.commit_reward_resolution(&content, changed).await,
+            Err(CorePrivateCaldusRuntimeError::RewardResolutionConflict)
+        ));
+        assert!(matches!(
+            runtime.step(input(951)).await,
+            Err(CorePrivateCaldusRuntimeError::ExitReady)
+        ));
+
+        drop(runtime);
+        directory.begin_shutdown();
+        assert!(
+            directory
+                .finish_shutdown()
+                .await
+                .expect("shutdown")
+                .zero_residue
         );
     }
 

@@ -135,6 +135,16 @@ impl CoreCaldusEncounterSimulation {
     }
 
     #[must_use]
+    pub const fn participant_lock(&self) -> &CoreBossParticipantLock {
+        &self.lock
+    }
+
+    #[must_use]
+    pub fn contribution_damage(&self, participant: CoreBossParticipant) -> Option<u64> {
+        self.health.contribution_damage(participant)
+    }
+
+    #[must_use]
     pub const fn state(&self) -> &crate::CoreCaldusState {
         self.scheduler.state()
     }

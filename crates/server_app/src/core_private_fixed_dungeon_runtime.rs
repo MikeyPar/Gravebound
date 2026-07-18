@@ -84,6 +84,7 @@ pub struct CorePrivateCaldusStagingHandoff {
     pub(crate) participant: sim_core::NormalWaveHandoff,
     pub(crate) arena: sim_core::ArenaGeometry,
     pub(crate) tick: Tick,
+    pub(crate) last_reward_activity_sequence: u64,
 }
 
 impl CorePrivateCaldusStagingHandoff {
@@ -242,6 +243,7 @@ impl CorePrivateFixedDungeonRuntime {
             participant,
             arena,
             tick: self.tick,
+            last_reward_activity_sequence: self.last_reward_activity_sequence,
         })
     }
 
