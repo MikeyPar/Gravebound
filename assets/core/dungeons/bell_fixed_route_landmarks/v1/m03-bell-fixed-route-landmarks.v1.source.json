@@ -1,0 +1,153 @@
+{
+  "schema_version": 1,
+  "package_id": "review.m03.bell_fixed_route_landmarks.v1",
+  "status": {
+    "classification": "unregistered_runtime_candidate",
+    "runtime_registered": false,
+    "content_hash_input": false,
+    "runtime_bundle": null,
+    "integration_note": "This isolated art package does not alter compiled room records, existing graybox asset bindings, content/runtime hashes, collision, interaction ranges, room activation, Bargain offers, reward commits, extraction, or terminal authority."
+  },
+  "scope": {
+    "layout": "layout.core_private_life_01 fixed B0 -> B1 -> B2 -> B3 -> B4 -> B5 -> B6 chain",
+    "purpose": "Player-visible candidate landmarks for the three non-combat state pivots that are currently only tilemap/graybox record surfaces: B0 safe vestibule arrival, B4 rest/Bargain anchor, and B6 post-reward stable exit.",
+    "out_of_scope": [
+      "asset registration or replacement of existing asset records",
+      "room layout, encounter, reward, safety, bargain, boss, or extraction behavior",
+      "content/runtime hash changes",
+      "code, task documentation, README, tests, commit, and push"
+    ]
+  },
+  "authority": {
+    "design_documents": [
+      "Gravebound_Production_GDD_v1_Canonical.md",
+      "Gravebound_Content_Production_Spec_v1.md",
+      "Gravebound_Development_Roadmap_v1.md"
+    ],
+    "gdd": [
+      "Gravebound_Production_GDD_v1_Canonical.md#DNG-003",
+      "Gravebound_Production_GDD_v1_Canonical.md#DNG-004",
+      "Gravebound_Production_GDD_v1_Canonical.md#DNG-005",
+      "Gravebound_Production_GDD_v1_Canonical.md#DNG-006",
+      "Gravebound_Production_GDD_v1_Canonical.md#BRG-001",
+      "Gravebound_Production_GDD_v1_Canonical.md#BRG-002",
+      "Gravebound_Production_GDD_v1_Canonical.md#DTH-011",
+      "Gravebound_Production_GDD_v1_Canonical.md#ART-001",
+      "Gravebound_Production_GDD_v1_Canonical.md#ART-002",
+      "Gravebound_Production_GDD_v1_Canonical.md#ART-004",
+      "Gravebound_Production_GDD_v1_Canonical.md#ART-020",
+      "Gravebound_Production_GDD_v1_Canonical.md#ART-030"
+    ],
+    "content": [
+      "Gravebound_Content_Production_Spec_v1.md#CONT-ROOM-002",
+      "Gravebound_Content_Production_Spec_v1.md#CONT-ROOM-007",
+      "Gravebound_Content_Production_Spec_v1.md#CONT-BOSS-001",
+      "content/core_dev/encounter_rooms.records.json#room.bell.vestibule_01",
+      "content/core_dev/encounter_rooms.records.json#room.bell.rest_01",
+      "content/core_dev/encounter_rooms.records.json#layout.core_private_life_01",
+      "content/core_dev/caldus.records.json#portal.exit.dungeon.bell_sepulcher"
+    ],
+    "roadmap": [
+      "Gravebound_Development_Roadmap_v1.md#GB-M03-03",
+      "Gravebound_Development_Roadmap_v1.md#GB-M03-05",
+      "Gravebound_Development_Roadmap_v1.md#GB-M03-08"
+    ],
+    "current_task": "docs/tasks/GB-M03-03G.md#Current Next Step; fixed-room combat, rewards/pending inventory, terminal producers, and ordinary route remain open.",
+    "existing_asset_audit": [
+      "content/core_dev/encounter_rooms.assets.json",
+      "content/core_dev/caldus.assets.json",
+      "assets/core/world/microrealm_route_landmarks/v1/m03-microrealm-route-landmarks.v1.source.json",
+      "assets/core/enemies/core_bell_encounter_trio/v1/m03-core-bell-encounter-trio.v1.source.json",
+      "assets/core/effects/core_bell_microrealm_vfx/v1/m03-core-bell-microrealm-vfx.v1.source.json",
+      "assets/core/ui/pending_loot_risk/v1/m03-pending-loot-risk.v1.source.json"
+    ]
+  },
+  "selection_rationale": "The current candidates cover the microrealm route entrance, repeated Bell enemy silhouettes, initial hostile VFX, and pending-loot risk. The fixed M03 layout still has three distinct player-facing noncombat pivots with no dedicated runtime art candidate: safe B0, the B4 rest/Bargain shrine anchor, and the stable B6 exit that may exist only after committed boss reward. This route-state landmark set is therefore more immediate and less duplicative than a new terminal/successor surface, which already has death portrait/font material and cannot truthfully advance before terminal authority is live.",
+  "authored_record_alignment": {
+    "B0": "CONT-ROOM-007 classifies B0 as the safe vestibule outside the six-room count. The ward is a visual arrival marker only; it cannot grant safety, readiness, admission, or room transition.",
+    "B4": "CONT-ROOM-007 requires B4 as the rest room and core records bind its shrine anchor. The three suspended talismans are a visual review motif for the three-choice Bargain surface; they do not choose, reveal, validate, or apply any Bargain.",
+    "B6": "CONT-BOSS-001 and the Caldus record create the stable exit only after committed boss reward. The open gate candidate must never be shown before that authority and cannot prove reward/extraction state itself.",
+    "existing_asset_boundary": "The current `sprite.portal.exit.dungeon.bell_sepulcher` remains an existing graybox marker. The B6 image is a review candidate for a later explicit binding, not a registration or replacement."
+  },
+  "generation": {
+    "tool": "built-in image generation",
+    "mode": "stylized-concept",
+    "reference_image": {
+      "path": "assets/core/world/microrealm_route_landmarks/v1/runtime/bell-sepulcher.192.png",
+      "role": "visual-language reference only: charcoal stone, tarnished brass, and pixel density"
+    },
+    "source_provenance": "All raw chroma sources were generated during this task and copied unchanged from the default generated-images directory to source/. No third-party asset was used.",
+    "alpha_postprocess": "C:/Users/micha/.codex/skills/.system/imagegen/scripts/remove_chroma_key.py --auto-key border --soft-matte --transparent-threshold 12 --opaque-threshold 220 --despill. Auto-sampled source key colors: vestibule #0af70c; Bargain shrine #0df20f; exit #0af80d.",
+    "normalization": "Pillow RGBA crop-to-alpha bounds, nearest-neighbor scale into a maximum 176px content box, center horizontally, and bottom-align to a transparent 192x192 runtime canvas.",
+    "preview_process": "Original and 2x sheets use an opaque checkerboard only to display alpha; runtime files retain transparent corners."
+  },
+  "prompts": {
+    "B0_vestibule": "Use case: stylized-concept. Asset type: M03 Bell Sepulcher B0 safe-vestibule landmark candidate, single static transparent-runtime-ready sprite. Input image: existing Bell Sepulcher entrance candidate, used only for dark stone, tarnished brass, and pixel-density visual language. Primary request: one in-dungeon safe vestibule marker: squat waist-high ash-stone plinth topped by one hooded lantern and small iron ward plate. It reads as quiet B0 dungeon arrival/ready point before combat, not hostile spawn, loot, exit portal, shrine, merchant, or healing zone. Scene/backdrop: perfectly flat #00ff00 chroma-key background, no floor/shadow/reflection/gradient/texture. Style: top-down three-quarter 2D dark-fantasy pixel-art-like landmark; wet charcoal stone, tarnished brass, ash, muted warm lantern light, crisp nearest-neighbor clusters. Centered square, bottom-center anchor, readable 96-192px. No text/letters/numbers/UI/arrows/characters/weapons/skulls/treasure/chest/coin/violet magic/red hostile effect/green/blue/map pin/doorway/portal swirl/cross/safe-zone circle/cast shadow/watermark/#00ff00. No combat telegraph or prompt; hard crisp silhouette, no blur.",
+    "B4_bargain_shrine": "Use case: stylized-concept. Asset type: M03 Bell Sepulcher B4 rest/Bargain-room shrine landmark candidate, single static transparent-runtime-ready sprite. Input image: existing Bell Sepulcher entrance candidate, used only for dark stone, tarnished brass, and pixel-density visual language. Primary request: optional Veil Bargain shrine for safe noncombat B4: low cracked ash-stone altar, small suspended dark iron censer, exactly three dim violet glass talismans in a compact triangle. It reads as optional risky choice/rest landmark, not enemy, attack telegraph, healing well, loot chest, exit, merchant, or ordinary safe arrival. Flat #00ff00 chroma background. Style: wet charcoal stone, tarnished iron/brass, ash, restrained muted violet only on three hanging talismans, crisp clusters. Centered square, bottom anchor, readable 96-192px. No text/letters/numbers/UI/arrows/characters/weapons/skulls/treasure/chest/coin/lantern/cross/bright gold/cyan/green/red hostile effect/safe-zone ring/portal swirl/shadow/watermark/#00ff00. Exactly three talismans; no fourth offering; no combat telegraph/prompt; hard crisp silhouette/no blur.",
+    "B6_post_reward_exit": "Use case: stylized-concept. Asset type: M03 Bell Sepulcher B6 post-reward stable-exit landmark candidate, single static transparent-runtime-ready sprite. Input image: existing Bell Sepulcher entrance candidate, used only for dark stone, tarnished brass, and pixel-density visual language. Primary request: compact stable dungeon-exit interactable appearing only after committed Caldus reward: open narrow stone sepulcher gate, broken iron chain across threshold, one small tarnished-brass bell over lintel, calm pale ash-white passage light beyond open bars. It reads successful return path, not dungeon entrance, unsafe combat portal, loot chest, merchant, healing well, hostile magic, or generic safe-zone. Flat #00ff00 chroma background. Style: wet charcoal stone, tarnished brass, iron, ash-white interior light only, crisp clusters. Centered square, bottom anchor, readable 96-192px. No text/letters/numbers/UI/arrows/characters/weapons/skulls/treasure/chest/coin/lantern/cross/violet magic/red hostile effect/green/cyan/gold glow/safe-zone ring/portal swirl/shadow/watermark/#00ff00. Broken chain visibly separate from open gate; no combat telegraph/prompt; hard crisp silhouette/no blur."
+  },
+  "assets": [
+    {
+      "candidate_id": "review.dungeon.bell.vestibule_ward",
+      "registered_asset_id": null,
+      "room_node": "B0",
+      "source_record": "room.bell.vestibule_01",
+      "runtime_path": "runtime/bell-vestibule-ward.192.png",
+      "source_path": "source/bell-vestibule-ward.raw-chroma.png",
+      "runtime_sha256": "99708039e032b26e0143deddc2bca580b4868b7a37190eed9ffbad1f5c39263a",
+      "source_sha256": "25ae4d8c9be7c8cb2082b7575a3af4cb43d6c950424d9b7c070e54e5533938fe",
+      "dimensions_px": [192, 192],
+      "anchor_px": [96, 192],
+      "readability_tags": ["safe_vestibule", "arrival", "warm_noncombat"]
+    },
+    {
+      "candidate_id": "review.dungeon.bell.bargain_shrine",
+      "registered_asset_id": null,
+      "room_node": "B4",
+      "source_record": "room.bell.rest_01#anchor.shrine",
+      "runtime_path": "runtime/bell-bargain-shrine.192.png",
+      "source_path": "source/bell-bargain-shrine.raw-chroma.png",
+      "runtime_sha256": "c394735455ec95c7eed0449d67661786b9f7afd06d585a5c1ef23ab497c19b81",
+      "source_sha256": "35f0074b12ef6e66f1ea20450d9b41752b5ca47828fc22aad4ff77c1bd42a135",
+      "dimensions_px": [192, 192],
+      "anchor_px": [96, 192],
+      "readability_tags": ["rest_room", "bargain", "optional_risk", "muted_violet_noncombat"]
+    },
+    {
+      "candidate_id": "review.dungeon.bell.post_reward_exit",
+      "registered_asset_id": null,
+      "existing_content_asset_id": "sprite.portal.exit.dungeon.bell_sepulcher",
+      "room_node": "B6",
+      "source_record": "portal.exit.dungeon.bell_sepulcher",
+      "runtime_path": "runtime/bell-post-reward-exit.192.png",
+      "source_path": "source/bell-post-reward-exit.raw-chroma.png",
+      "runtime_sha256": "a557fd0780af62ae67f5b9a67c37fb969bc3a5cf73ee5129c84249854df7b531",
+      "source_sha256": "dab544b3e6ebb8f978f5164ba9b3bbfaae32775c9618dd47e655481800190217",
+      "dimensions_px": [192, 192],
+      "anchor_px": [96, 192],
+      "readability_tags": ["post_reward_only", "successful_extraction", "ash_white_return_path"]
+    }
+  ],
+  "preview_files": [
+    {
+      "path": "previews/bell-fixed-route-landmarks.original.png",
+      "dimensions_px": [576, 192],
+      "sha256": "db08a0ad70d64570e7e94b319c38106e7ba540ecb9c3bb6f4fe711b6cf535239",
+      "note": "Original-scale checkerboard review: B0 vestibule ward, B4 Bargain shrine, B6 post-reward exit, left to right."
+    },
+    {
+      "path": "previews/bell-fixed-route-landmarks.2x.png",
+      "dimensions_px": [1152, 384],
+      "sha256": "9ed82275bccca97d565b2d1bc3a39f410feb4628a9baead08e29a39b4d52e63c",
+      "note": "Nearest-neighbor 2x checkerboard review sheet."
+    }
+  ],
+  "review_gates": [
+    "B0 review: the warm ward must read as a safe vestibule landmark without implying a mechanical safety grant, heal, portal, or interactable range.",
+    "B4 review: three visible talismans must communicate optional Bargain choice without looking like three selected offers, enemy projectiles, or a safe exit; the actual Bargain panel remains authoritative.",
+    "B6 review: only display after the committed reward/exit authority; distinguish it from the closed microrealm dungeon entrance and reject any pre-commit presentation.",
+    "Route review: inspect B0/B4/B6 at 1280x720 and 1920x1080 in standard and reduced-effects modes alongside gameplay HUD/telegraphs; preserve readable playfield and collision/anchor alignment.",
+    "Integration review: explicit renderer and record binding, collision/range validation, interaction prompt, room activation, reward receipt, and terminal evidence are all still required."
+  ],
+  "license": "Generated for this workspace during this task. Retain raw sources, exact prompts, and hashes with any future integration."
+}
