@@ -36,8 +36,8 @@ Hosted CI [`29641751122`](https://github.com/MikeyPar/Gravebound/actions/runs/29
 
 ## Explicit boundary
 
-This driver publishes `TerminalPending` or a fault; it does not claim durable death, automatic Recall commitment, extraction, fixed-room combat, reward persistence, or pending-inventory authority. The shared five-producer terminal coordinator and one authoritative tick domain remain required before normal admission.
+This driver publishes `TerminalPending` or a fault; it does not claim durable death, automatic Recall commitment, extraction, persistent fixed-dungeon binding, reward persistence, or pending-inventory authority. Commits `42d9f85` and `9694790` now supply the lifecycle-free fixed-room traversal owner, but the shared five-producer terminal coordinator and one authoritative tick domain remain required before normal admission.
 
 ## Current Next Step
 
-Extend the same exclusive mutable combat handoff from the cleared microrealm into fixed B0-B6: B0 readiness, B1-B3/B5 encounters, B4 rest/Bargain, Sir Caldus, committed rewards, pending inventory, stable B6 exit, and all five terminal producers. Keep Character Select `Play`, production Realm Gate interaction, and ordinary extraction/Recall admission disabled until cumulative real-QUIC restart, 25-journey, performance, cleanup, and visual evidence pass.
+Bind `CoreFixedDungeonCombat` to the persistent route actor and this exclusive 30 Hz session driver, transferring the exact cleared-microrealm allocation into B0 and deriving route advances from live B1-B5 events. Then add Sir Caldus, committed rewards, pending inventory, stable B6 exit, and all five terminal producers. Keep Character Select `Play`, production Realm Gate interaction, and ordinary extraction/Recall admission disabled until cumulative real-QUIC restart, 25-journey, performance, cleanup, and visual evidence pass.
