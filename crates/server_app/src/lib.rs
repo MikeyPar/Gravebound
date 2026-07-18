@@ -77,8 +77,8 @@ pub use caldus_victory::{
     CaldusVictoryOwnerCommit, PostgresCaldusVictoryCoordinator,
 };
 pub use combat_factory::{
-    CoreCharacterCombat, CoreCharacterCombatCompiler, CoreCharacterCombatFactory,
-    CoreCombatFactoryError,
+    CoreCharacterCombat, CoreCharacterCombatCompiler, CoreCharacterCombatEnvelope,
+    CoreCharacterCombatFactory, CoreCombatFactoryError,
 };
 pub use core_extraction_runtime::{
     CoreExtractionActorDirectory, CoreExtractionActorLease, CoreExtractionActorRetirementReport,

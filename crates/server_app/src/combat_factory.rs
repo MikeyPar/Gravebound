@@ -5,8 +5,9 @@ use std::path::Path;
 use persistence::{PostgresPersistence, StoredCombatBeltStack, StoredCoreCombatLoadout};
 use protocol::GRAVE_ARBALIST_CLASS_ID;
 use sim_core::{
-    BeltSlot, CoreBargainLoadout, EquipmentRarity, PlayerCombatState, PlayerVitals,
-    RedTonicSimulation, ResolvedCoreBargainModifiers, TonicBelt, TonicBeltPolicy,
+    BeltSlot, CoreBargainLoadout, EnemyLabPlayer, EntityId, EquipmentRarity, HostileTargetState,
+    PlayerCombatState, PlayerVitals, RedTonicSimulation, ResolvedCoreBargainModifiers,
+    SimulationVector, TonicBelt, TonicBeltPolicy,
 };
 use thiserror::Error;
 
@@ -34,6 +35,137 @@ pub struct CoreCharacterCombat {
     pub maximum_health_multiplier_basis_points: u32,
     pub state: PlayerCombatState,
     pub consumables: RedTonicSimulation,
+}
+
+/// Immutable/versioned half of one live Core combat aggregate. Mutable combat, health, Belt,
+/// Bell Debt, cooldown, and projectile authority move into exactly one `EnemyLabPlayer`; they are
+/// never cloned into a scene owner. The envelope rejoins that player at a safe/terminal handoff.
+#[derive(Debug, Clone)]
+pub struct CoreCharacterCombatEnvelope {
+    character_id: [u8; 16],
+    character_state_version: u64,
+    progression_version: u64,
+    inventory_version: u64,
+    oath_bargain_version: u64,
+    level: u16,
+    maximum_health: u32,
+    armor: u32,
+    resistance_basis_points: i32,
+    movement_milli_tiles_per_second: u32,
+    healing_received_multiplier_basis_points: u32,
+    negative_status_reduction_basis_points: u32,
+    direct_hit_barrier_health: Option<u32>,
+    rested_primary_bonus_basis_points: u32,
+    rested_primary_idle_millis: u32,
+    relic_resonance_basis_points: u32,
+    equipment: sim_content::ResolvedCoreEquipmentLoadout,
+    bargains: CoreBargainLoadout,
+    bargain_modifiers: ResolvedCoreBargainModifiers,
+    maximum_health_multiplier_basis_points: u32,
+    player_entity_id: EntityId,
+}
+
+impl CoreCharacterCombat {
+    /// Moves the one mutable combat aggregate into a live scene participant.
+    pub fn into_live_player(
+        self,
+        player_entity_id: EntityId,
+        position: SimulationVector,
+    ) -> Result<(CoreCharacterCombatEnvelope, EnemyLabPlayer), CoreCombatFactoryError> {
+        if !position.is_finite() || self.character_id == [0; 16] {
+            return Err(CoreCombatFactoryError::InvalidLiveHandoff);
+        }
+        let envelope = CoreCharacterCombatEnvelope {
+            character_id: self.character_id,
+            character_state_version: self.character_state_version,
+            progression_version: self.progression_version,
+            inventory_version: self.inventory_version,
+            oath_bargain_version: self.oath_bargain_version,
+            level: self.level,
+            maximum_health: self.maximum_health,
+            armor: self.armor,
+            resistance_basis_points: self.resistance_basis_points,
+            movement_milli_tiles_per_second: self.movement_milli_tiles_per_second,
+            healing_received_multiplier_basis_points: self.healing_received_multiplier_basis_points,
+            negative_status_reduction_basis_points: self.negative_status_reduction_basis_points,
+            direct_hit_barrier_health: self.direct_hit_barrier_health,
+            rested_primary_bonus_basis_points: self.rested_primary_bonus_basis_points,
+            rested_primary_idle_millis: self.rested_primary_idle_millis,
+            relic_resonance_basis_points: self.relic_resonance_basis_points,
+            equipment: self.equipment,
+            bargains: self.bargains,
+            bargain_modifiers: self.bargain_modifiers,
+            maximum_health_multiplier_basis_points: self.maximum_health_multiplier_basis_points,
+            player_entity_id,
+        };
+        let player = EnemyLabPlayer {
+            target: HostileTargetState {
+                entity_id: player_entity_id,
+                position,
+                target_is_immune: false,
+                resistance_basis_points: envelope.resistance_basis_points,
+                additional_direct_damage_reductions_basis_points: Vec::new(),
+                armor: envelope.armor,
+                current_barrier: 0,
+                health_damage_cap_basis_points: None,
+            },
+            consumables: self.consumables,
+            combat: self.state,
+        };
+        Ok((envelope, player))
+    }
+}
+
+impl CoreCharacterCombatEnvelope {
+    #[must_use]
+    pub const fn character_id(&self) -> [u8; 16] {
+        self.character_id
+    }
+
+    #[must_use]
+    pub const fn movement_milli_tiles_per_second(&self) -> u32 {
+        self.movement_milli_tiles_per_second
+    }
+
+    /// Rejoins the exact player allocation after a scene handoff. Foreign entity identity or
+    /// immutable combat-axis drift fails closed instead of silently rebuilding mutable state.
+    pub fn rejoin(
+        self,
+        player: EnemyLabPlayer,
+    ) -> Result<CoreCharacterCombat, CoreCombatFactoryError> {
+        if player.target.entity_id != self.player_entity_id
+            || player.target.armor != self.armor
+            || player.target.resistance_basis_points != self.resistance_basis_points
+            || player.target.target_is_immune
+            || player.consumables.vitals().maximum_health() != self.maximum_health
+        {
+            return Err(CoreCombatFactoryError::InvalidLiveHandoff);
+        }
+        Ok(CoreCharacterCombat {
+            character_id: self.character_id,
+            character_state_version: self.character_state_version,
+            progression_version: self.progression_version,
+            inventory_version: self.inventory_version,
+            oath_bargain_version: self.oath_bargain_version,
+            level: self.level,
+            maximum_health: self.maximum_health,
+            armor: self.armor,
+            resistance_basis_points: self.resistance_basis_points,
+            movement_milli_tiles_per_second: self.movement_milli_tiles_per_second,
+            healing_received_multiplier_basis_points: self.healing_received_multiplier_basis_points,
+            negative_status_reduction_basis_points: self.negative_status_reduction_basis_points,
+            direct_hit_barrier_health: self.direct_hit_barrier_health,
+            rested_primary_bonus_basis_points: self.rested_primary_bonus_basis_points,
+            rested_primary_idle_millis: self.rested_primary_idle_millis,
+            relic_resonance_basis_points: self.relic_resonance_basis_points,
+            equipment: self.equipment,
+            bargains: self.bargains,
+            bargain_modifiers: self.bargain_modifiers,
+            maximum_health_multiplier_basis_points: self.maximum_health_multiplier_basis_points,
+            state: player.combat,
+            consumables: player.consumables,
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -72,6 +204,8 @@ pub enum CoreCombatFactoryError {
     EquipmentRarityUnavailable,
     #[error("compiled combat content is invalid")]
     InvalidContent,
+    #[error("live Core combat handoff is invalid or foreign")]
+    InvalidLiveHandoff,
 }
 
 impl CoreCharacterCombatFactory {
@@ -374,6 +508,40 @@ fn compile_belt_slot(
 }
 
 #[cfg(test)]
+pub(crate) fn core_character_combat_test_fixture(character_id: [u8; 16]) -> CoreCharacterCombat {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../content");
+    let compiler = CoreCharacterCombatCompiler::load(&root).expect("Core combat compiler");
+    compiler
+        .build_from_snapshot(&StoredCoreCombatLoadout {
+            character_id,
+            selected_character_id: Some(character_id),
+            class_id: GRAVE_ARBALIST_CLASS_ID.into(),
+            level: 1,
+            current_health: 120,
+            oath_id: None,
+            oath_bargain_version: 1,
+            active_bargains: Vec::new(),
+            life_state: 0,
+            security_state: 0,
+            character_state_version: 2,
+            progression_version: 1,
+            inventory_version: Some(1),
+            equipped_weapon: Some(persistence::StoredEquippedWeapon {
+                item_uid: [0xA5; 16],
+                template_id: "item.weapon.crossbow.pine_crossbow".into(),
+                content_revision: compiler.items.revision_label().into(),
+                item_level: 1,
+                rarity: 0,
+            }),
+            equipped_armor: None,
+            equipped_relic: None,
+            equipped_charm: None,
+            belt_slots: [None, None],
+        })
+        .expect("Core combat fixture")
+}
+
+#[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
@@ -621,6 +789,48 @@ mod tests {
         assert_eq!(
             combat.consumables.belt().slot(1),
             Some(BeltSlot::RedTonic(3))
+        );
+    }
+
+    #[test]
+    fn live_player_handoff_moves_and_rejoins_the_single_mutable_combat_owner() {
+        let compiler = compiler();
+        let combat = compiler
+            .build_from_snapshot(&snapshot(&compiler, LONG_VIGIL_ID))
+            .expect("compiled combat");
+        let player_id = EntityId::new(10_001).expect("player ID");
+        let (envelope, player) = combat
+            .into_live_player(player_id, SimulationVector::new(8.5, 40.5))
+            .expect("live handoff");
+
+        assert_eq!(envelope.character_id(), [2; 16]);
+        assert_eq!(player.target.entity_id, player_id);
+        assert_eq!(player.target.position, SimulationVector::new(8.5, 40.5));
+        assert_eq!(player.combat.tick(), sim_core::Tick(0));
+        assert_eq!(player.consumables.vitals().current_health(), 120);
+
+        let rejoined = envelope.rejoin(player).expect("safe handoff");
+        assert_eq!(rejoined.character_id, [2; 16]);
+        assert_eq!(rejoined.state.tick(), sim_core::Tick(0));
+        assert_eq!(rejoined.consumables.vitals().current_health(), 120);
+    }
+
+    #[test]
+    fn live_player_rejoin_rejects_foreign_entity_or_immutable_axis_drift() {
+        let compiler = compiler();
+        let combat = compiler
+            .build_from_snapshot(&snapshot(&compiler, LONG_VIGIL_ID))
+            .expect("compiled combat");
+        let (envelope, mut player) = combat
+            .into_live_player(
+                EntityId::new(10_001).expect("player ID"),
+                SimulationVector::new(8.5, 40.5),
+            )
+            .expect("live handoff");
+        player.target.entity_id = EntityId::new(10_002).expect("foreign player ID");
+        assert_eq!(
+            envelope.rejoin(player).unwrap_err(),
+            CoreCombatFactoryError::InvalidLiveHandoff
         );
     }
 }
