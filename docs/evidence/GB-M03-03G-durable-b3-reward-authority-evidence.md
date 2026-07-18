@@ -1,6 +1,6 @@
 # GB-M03-03G durable B3 reward-authority evidence
 
-**Status:** Local implementation is accepted through automatic-runtime commit `3f4ecaf`. Normal route admission remains disabled. Production PostgreSQL coordinator/secret composition, hosted inactivity and restart execution, end-to-end response-loss proof, and hosted cumulative CI remain required before this slice can close the parent route.
+**Status:** Local implementation is accepted through canonical-composition commit `8a4898d`. Normal route admission remains disabled. Bound normal-server construction, hosted inactivity and restart execution, end-to-end response-loss proof, and hosted cumulative CI remain required before this slice can close the parent route.
 
 ## Three-authority basis
 
@@ -18,6 +18,7 @@
 - Reward participation is driver-owned. Production-cadence no-op packets do not count as activity; movement, aim/primary edges, held movement/primary, and reliable abilities do. `LinkLost` marks the participant absent and session-invalid while danger ticks continue. Reconnect restores session authority under the same generation lock, so an old detach cannot overwrite a replacement transport.
 - `CorePrivateB3RewardRuntime` follows the route binding rather than a QUIC connection. It observes the immutable pending frame, retries transient PostgreSQL failures with bounded shutdown-aware backoff, acknowledges the opaque durable result through the same single-writer driver task, and only then constructs reliable publication.
 - Granted publication emits the existing progression event immediately before the existing route-state event; ineligible publication emits only the route result. The runtime retains that exact publication across transport loss, replays it once to every newer writer generation, ignores stale-generation detach, and joins before its driver owner shuts down. Session construction remains opt-in until the production coordinator and process-bound secret epoch are composed and proven.
+- `PostgresCoreB3RewardCoordinator::load` is the single production composition seam for PostgreSQL, reward catalog, progression rules, Oath/Bargain milestones, and one caller-owned `SecretRewardEpoch`. `CorePrivateLifeSessionDirectory::with_persistent_b3_reward_authority` injects that process authority without rereading or rotating the secret per account, connection, or retry. The hosted B3 tests now use this same loader instead of duplicating construction.
 
 ## Verification
 
@@ -31,6 +32,7 @@
 - The hosted PostgreSQL test compiles and covers commit/replay, restart reconstruction, item provenance/security/location, and below-level no-offer. `TEST_DATABASE_URL` was unavailable locally, so hosted execution remains explicitly open.
 - Commit `3f4ecaf` passes two focused automatic-runtime tests: transport-free transient retry followed by one same-task acknowledgement, and real-QUIC granted progression/route publication with exact contiguous replay across two writer generations plus stale-detach protection.
 - `cargo check -p server_app --all-targets --all-features`, all four private-life session real-QUIC lifecycle tests, `cargo test --workspace --all-targets --all-features`, and strict workspace all-target/all-feature Clippy pass for `3f4ecaf`.
+- Commit `8a4898d` passes the focused B3 tests, `cargo check -p server_app --all-targets --all-features`, `cargo test --workspace --all-targets --all-features`, and strict workspace all-target/all-feature Clippy. The dormant identity endpoint still does not read a reward secret or advertise normal-route admission.
 
 ## Evidence strengthening still open
 
@@ -40,4 +42,4 @@
 
 ## Current Next Step
 
-Inject `PostgresCoreB3RewardCoordinator` with a process-bound `SecretRewardEpoch` at normal-route construction, then prove the integrated inactivity zero-row case and exact response-loss/reconnect/process-restart convergence against hosted PostgreSQL. After that evidence is green, implement the B5 bridge and authoritative Sir Caldus B6 route.
+Construct the bound normal private-life server root, load `SecretRewardEpoch` once at that process boundary, and inject the canonical persistent B3 authority into its shared session directory. Then prove the integrated inactivity zero-row case and exact response-loss/reconnect/process-restart convergence against hosted PostgreSQL before implementing the B5 bridge and authoritative Sir Caldus B6 route.

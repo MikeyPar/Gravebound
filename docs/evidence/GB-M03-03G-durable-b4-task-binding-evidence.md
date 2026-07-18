@@ -37,4 +37,4 @@ Commits `83ccbb1`, `83c75a5`, and `3f4ecaf` supply the durable B3 reward/progres
 
 ## Current Next Step
 
-Inject the real B3 PostgreSQL coordinator and process-bound reward secret at production route construction, then prove hosted inactivity zero-row and response-loss/reconnect/process-restart convergence. After that evidence is green, implement B5 and Sir Caldus at B6.
+Use the canonical persistent B3 loader from bound normal-server construction, reading the process reward epoch once, then prove hosted inactivity zero-row and response-loss/reconnect/process-restart convergence. After that evidence is green, implement B5 and Sir Caldus at B6.

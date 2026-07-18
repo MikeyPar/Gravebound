@@ -31,4 +31,4 @@ The conversion itself stops at B0; the follow-on live-driver slice now synthesiz
 
 ## Current Next Step
 
-Commits `e1e4d7c`, `83ccbb1`, `83c75a5`, and `3f4ecaf` bind durable B4 outcomes and exact B3 `Granted | Ineligible` proof into the same task without re-pending, then automatically resolve and publish it across reliable-writer generations only after acknowledgement. Next compose the real PostgreSQL coordinator and process-bound reward secret at production construction and prove hosted response-loss/reconnect/process-restart convergence. Then implement B5, Sir Caldus B6, pending inventory, the stable exit, and terminal composition.
+Commits `e1e4d7c`, `83ccbb1`, `83c75a5`, `3f4ecaf`, and `8a4898d` bind durable B4 outcomes and exact B3 `Granted | Ineligible` proof into the same task, automatically publish it across writer generations, and provide one canonical persistent authority loader. Next construct the bound normal server with a once-read process reward epoch and prove hosted response-loss/reconnect/process-restart convergence. Then implement B5, Sir Caldus B6, pending inventory, the stable exit, and terminal composition.
