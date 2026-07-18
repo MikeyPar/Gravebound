@@ -10,7 +10,7 @@ use crate::{
     CoreB2FixedRoomSimulation, CoreB2FixedRoomStep, CoreB3FixedRoomSimulation, CoreB3FixedRoomStep,
     CoreDevelopmentEncounterRooms, CoreFixedRoomEncounterError, CoreFixedRoomEncounterPlan,
     CoreImmutableFixedRoomInput, CoreImmutableFixedRoomSimulation, CoreImmutableFixedRoomStep,
-    compile_core_fixed_room_encounters,
+    compile_core_fixed_room_encounters_from,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -100,8 +100,10 @@ impl CoreFixedDungeonPlans {
     fn compile(
         content: &CoreDevelopmentEncounterRooms,
         run_ordinal: u32,
+        first_spawn_ordinal: u16,
     ) -> Result<Self, CoreFixedDungeonError> {
-        let plans = compile_core_fixed_room_encounters(content, run_ordinal)?;
+        let plans =
+            compile_core_fixed_room_encounters_from(content, run_ordinal, first_spawn_ordinal)?;
         let [b1, b2, b3, b5]: [CoreFixedRoomEncounterPlan; 4] = plans
             .try_into()
             .map_err(|_| CoreFixedDungeonError::DefinitionDrift)?;
@@ -163,7 +165,17 @@ impl CoreFixedDungeonCombat {
         player: EnemyLabPlayer,
         hostile_projectile_ids: EntityIdAllocator,
     ) -> Result<Self, CoreFixedDungeonError> {
-        let plans = CoreFixedDungeonPlans::compile(&content, run_ordinal)?;
+        Self::new_at_ordinal(content, run_ordinal, 1, player, hostile_projectile_ids)
+    }
+
+    fn new_at_ordinal(
+        content: CoreDevelopmentEncounterRooms,
+        run_ordinal: u32,
+        first_spawn_ordinal: u16,
+        player: EnemyLabPlayer,
+        hostile_projectile_ids: EntityIdAllocator,
+    ) -> Result<Self, CoreFixedDungeonError> {
+        let plans = CoreFixedDungeonPlans::compile(&content, run_ordinal, first_spawn_ordinal)?;
         Ok(Self {
             content,
             plans,
@@ -182,6 +194,21 @@ impl CoreFixedDungeonCombat {
         Self::new(
             content,
             run_ordinal,
+            handoff.player,
+            handoff.hostile_projectile_ids,
+        )
+    }
+
+    pub fn from_handoff_at(
+        content: CoreDevelopmentEncounterRooms,
+        run_ordinal: u32,
+        first_spawn_ordinal: u16,
+        handoff: NormalWaveHandoff,
+    ) -> Result<Self, CoreFixedDungeonError> {
+        Self::new_at_ordinal(
+            content,
+            run_ordinal,
+            first_spawn_ordinal,
             handoff.player,
             handoff.hostile_projectile_ids,
         )
@@ -795,5 +822,23 @@ mod tests {
             relocated.player.target.position,
             SimulationVector::new(1.75, 9.25)
         );
+    }
+
+    #[test]
+    fn carried_spawn_ordinal_offsets_every_fixed_room_identity_without_overlap() {
+        let root = content_root();
+        let content = crate::load_core_development_encounter_rooms(&root).expect("room content");
+        let dungeon = fixture();
+        let CoreFixedDungeonState::Vestibule(handoff) = dungeon.state else {
+            panic!("fixture starts at B0");
+        };
+
+        let carried = CoreFixedDungeonCombat::from_handoff_at(content, 1, 17, handoff)
+            .expect("carried ordinal constructs the fixed route");
+
+        assert_eq!(carried.plans.b1.first_spawn_ordinal, 17);
+        assert_eq!(carried.plans.b2.first_spawn_ordinal, 25);
+        assert_eq!(carried.plans.b3.first_spawn_ordinal, 34);
+        assert_eq!(carried.plans.b5.first_spawn_ordinal, 35);
     }
 }

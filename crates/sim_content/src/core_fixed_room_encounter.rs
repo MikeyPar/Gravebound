@@ -969,13 +969,26 @@ pub fn compile_core_fixed_room_encounters(
     content: &CoreDevelopmentEncounterRooms,
     run_ordinal: u32,
 ) -> Result<Vec<CoreFixedRoomEncounterPlan>, CoreFixedRoomEncounterError> {
+    compile_core_fixed_room_encounters_from(content, run_ordinal, 1)
+}
+
+/// Compiles the four exact room attempts after an earlier owner has consumed run-local hostile
+/// ordinals. Zero remains invalid because it is not a legal `SpawnInstanceId` ordinal.
+pub fn compile_core_fixed_room_encounters_from(
+    content: &CoreDevelopmentEncounterRooms,
+    run_ordinal: u32,
+    first_spawn_ordinal: u16,
+) -> Result<Vec<CoreFixedRoomEncounterPlan>, CoreFixedRoomEncounterError> {
     if run_ordinal == 0 {
         return Err(CoreFixedRoomEncounterError::EntityId(
             NormalWaveEntityIdError::ZeroRunOrdinal,
         ));
     }
+    if first_spawn_ordinal == 0 {
+        return Err(CoreFixedRoomEncounterError::DefinitionDrift);
+    }
     let definitions = content.compile_room_definitions()?;
-    let mut next_spawn_ordinal = 1_u16;
+    let mut next_spawn_ordinal = first_spawn_ordinal;
     let mut plans = Vec::with_capacity(FIXED_COMBAT_NODE_IDS.len());
     for expected_node_id in FIXED_COMBAT_NODE_IDS {
         let node = content

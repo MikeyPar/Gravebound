@@ -314,6 +314,13 @@ impl CoreMicrorealmPackCombat {
         }
     }
 
+    /// Next run-local hostile spawn ordinal after every committed microrealm attempt. The Bell
+    /// handoff carries this value into B1 so later rooms cannot reuse an entity identity.
+    #[must_use]
+    pub const fn next_spawn_ordinal(&self) -> u16 {
+        self.next_spawn_ordinal
+    }
+
     pub fn alive_hurtboxes(&self) -> Result<Vec<sim_core::EnemyHurtbox>, CoreMicrorealmPackError> {
         match &self.state {
             CoreMicrorealmPackCombatState::Handoff(_) => Ok(Vec::new()),
