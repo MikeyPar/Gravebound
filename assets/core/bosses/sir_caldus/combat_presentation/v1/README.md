@@ -90,4 +90,8 @@ The mocks are explicitly watermarked static, unregistered, and non-native. They 
 
 Before any registry or content-hash proposal, optimized native playback must prove world-space alignment, target/axis rotation, exact 30 Hz timing, collision/hurtbox/origin visibility, no false warnings, standard/reduced/grayscale/colorblind parity at both certified resolutions, response-loss/reconnect stability, and clean transition into authoritative defeat/reward/exit states. Commercial-rights and visual-similarity review also remain required.
 
-No gameplay logic, content record, registry, content hash, route gate, task/audit document, Current Next Step section, root README, distribution artifact, commit, or push is changed by this pack.
+## Current Next Step
+
+Integrate this pack only into a disposable, route-bound B6 renderer review behind the existing disabled normal-route gate. Bind the arena floor to compiled `arena.boss.caldus_01` geometry and generate every hostile mask from authoritative Caldus pattern descriptors; then capture one complete optimized native fight at `1280×720` and `1920×1080` in standard and reduced-effects modes. The capture must include Phase 1 Shield/Bell learning, Phase 2 cardinal Charge plus child Stop Ring, ordered Phase 3 A/B/C previews and emissions, phase cancellation, defeat silence, durable reward projection, and the separately owned stable exit. Confirm exact 30 Hz timing, standard/reduced core-mask parity, grayscale/colorblind readability, target rotation, collision clipping, no false reward/exit state, and reconnect/replay stability before proposing any asset registry or content-hash change.
+
+No gameplay logic, content record, registry, content hash, route gate, project task/audit document, project-level Current Next Step section, root README, distribution artifact, commit, or push is changed by this pack. Only the asset-local Current Next Step above is introduced.
