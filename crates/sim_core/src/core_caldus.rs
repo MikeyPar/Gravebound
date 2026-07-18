@@ -215,11 +215,18 @@ pub struct CoreCaldusSimulation {
 
 impl CoreCaldusSimulation {
     pub fn new(lock: CoreBossParticipantLock) -> Result<Self, CoreCaldusError> {
+        Self::new_at_tick(lock, Tick(0))
+    }
+
+    pub fn new_at_tick(
+        lock: CoreBossParticipantLock,
+        start_tick: Tick,
+    ) -> Result<Self, CoreCaldusError> {
         validate_lock(&lock)?;
         Ok(Self {
             current_health: lock.maximum_health,
             lock,
-            tick: Tick(0),
+            tick: start_tick,
             local_tick: 0,
             state: CoreCaldusState::Active {
                 phase: CoreCaldusPhase::Phase1,

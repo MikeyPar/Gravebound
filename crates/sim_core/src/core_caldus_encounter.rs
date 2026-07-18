@@ -59,11 +59,24 @@ impl CoreCaldusEncounterSimulation {
         entity_id: EntityId,
         projectile_ids: EntityIdAllocator,
     ) -> Result<Self, CoreCaldusEncounterError> {
+        Self::new_at_tick(lock, arena, entity_id, projectile_ids, Tick(0))
+    }
+
+    pub fn new_at_tick(
+        lock: CoreBossParticipantLock,
+        arena: ArenaGeometry,
+        entity_id: EntityId,
+        projectile_ids: EntityIdAllocator,
+        start_tick: Tick,
+    ) -> Result<Self, CoreCaldusEncounterError> {
         Ok(Self {
-            scheduler: CoreCaldusSimulation::new(lock.clone())?,
-            body: CoreCaldusBodySimulation::new(lock.clone())?,
-            health: CoreCaldusHealthSimulation::new(lock.clone(), entity_id)?,
-            hostile_projectiles: HostileProjectileSimulation::with_allocator(projectile_ids),
+            scheduler: CoreCaldusSimulation::new_at_tick(lock.clone(), start_tick)?,
+            body: CoreCaldusBodySimulation::new_at_tick(lock.clone(), start_tick)?,
+            health: CoreCaldusHealthSimulation::new_at_tick(lock.clone(), entity_id, start_tick)?,
+            hostile_projectiles: HostileProjectileSimulation::with_allocator_at_tick(
+                projectile_ids,
+                start_tick,
+            ),
             lock,
             arena,
             damage_policy: HostileDamagePolicy::Standard,
@@ -531,6 +544,34 @@ mod tests {
             EntityIdAllocator::starting_at(NonZeroU64::new(1_000).expect("nonzero")),
         )
         .expect("encounter")
+    }
+
+    #[test]
+    fn inherited_authoritative_tick_starts_every_caldus_owner_without_rewind() {
+        let start_tick = Tick(4_123);
+        let mut encounter = CoreCaldusEncounterSimulation::new_at_tick(
+            lock(),
+            arena(),
+            id(99),
+            EntityIdAllocator::starting_at(NonZeroU64::new(1_000).expect("nonzero")),
+            start_tick,
+        )
+        .expect("inherited-tick encounter");
+        assert_eq!(encounter.tick(), start_tick);
+        assert_eq!(encounter.body().tick(), start_tick);
+
+        let step = encounter
+            .step(&[friendly_damage(start_tick.0, 500, 20)], &mut players())
+            .expect("first inherited-tick frame");
+        assert_eq!(step.tick, start_tick);
+        assert_eq!(step.hostile_step.tick, start_tick);
+        assert!(
+            step.friendly_damage
+                .iter()
+                .all(|damage| damage.tick == start_tick)
+        );
+        assert_eq!(encounter.tick(), Tick(start_tick.0 + 1));
+        assert_eq!(encounter.body().tick(), Tick(start_tick.0 + 1));
     }
 
     #[test]

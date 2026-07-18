@@ -242,8 +242,13 @@ impl Default for HostileProjectileSimulation {
 impl HostileProjectileSimulation {
     #[must_use]
     pub fn with_allocator(projectile_ids: EntityIdAllocator) -> Self {
+        Self::with_allocator_at_tick(projectile_ids, Tick(0))
+    }
+
+    #[must_use]
+    pub fn with_allocator_at_tick(projectile_ids: EntityIdAllocator, start_tick: Tick) -> Self {
         Self {
-            tick: Tick(0),
+            tick: start_tick,
             projectile_ids,
             projectiles: Vec::new(),
             projectile_damage_allowed_at: BTreeMap::new(),

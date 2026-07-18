@@ -123,12 +123,19 @@ pub struct CoreCaldusBodySimulation {
 
 impl CoreCaldusBodySimulation {
     pub fn new(lock: CoreBossParticipantLock) -> Result<Self, CoreCaldusBodyError> {
+        Self::new_at_tick(lock, Tick(0))
+    }
+
+    pub fn new_at_tick(
+        lock: CoreBossParticipantLock,
+        start_tick: Tick,
+    ) -> Result<Self, CoreCaldusBodyError> {
         if lock.participants.is_empty() {
             return Err(CoreCaldusBodyError::EmptyParticipantLock);
         }
         Ok(Self {
             lock,
-            tick: Tick(0),
+            tick: start_tick,
             position: ARENA_CENTER,
             locked_charge: None,
             active_charge: None,

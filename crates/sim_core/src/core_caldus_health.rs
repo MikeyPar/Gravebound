@@ -69,6 +69,14 @@ impl CoreCaldusHealthSimulation {
         lock: CoreBossParticipantLock,
         entity_id: EntityId,
     ) -> Result<Self, CoreCaldusHealthError> {
+        Self::new_at_tick(lock, entity_id, Tick(0))
+    }
+
+    pub fn new_at_tick(
+        lock: CoreBossParticipantLock,
+        entity_id: EntityId,
+        start_tick: Tick,
+    ) -> Result<Self, CoreCaldusHealthError> {
         if lock.participants.is_empty() || lock.maximum_health == 0 {
             return Err(CoreCaldusHealthError::InvalidParticipantLock);
         }
@@ -88,7 +96,7 @@ impl CoreCaldusHealthSimulation {
             current_health: lock.maximum_health,
             lock,
             entity_id,
-            tick: Tick(0),
+            tick: start_tick,
             defeated: false,
             contribution_damage,
         })
