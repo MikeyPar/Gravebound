@@ -1455,7 +1455,14 @@ fn boss_advances(
         (Phase::BossBreakToTwo, Phase::BossPhaseTwo) => Advance::BossPhaseTwo,
         (Phase::BossPhaseTwo, Phase::BossBreakToThree) => Advance::BossBreakToThree,
         (Phase::BossBreakToThree, Phase::BossPhaseThree) => Advance::BossPhaseThree,
-        (Phase::BossPhaseThree, Phase::BossDefeated) => Advance::BossDefeated,
+        (
+            Phase::BossPhaseOne
+            | Phase::BossBreakToTwo
+            | Phase::BossPhaseTwo
+            | Phase::BossBreakToThree
+            | Phase::BossPhaseThree,
+            Phase::BossDefeated,
+        ) => Advance::BossDefeated,
         (Phase::BossDefeated, Phase::BossExitReady) => Advance::BossExitReady,
         (
             Phase::BossReadyCountdown

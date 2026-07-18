@@ -138,7 +138,7 @@ pub use core_boss_lock::{
     CORE_CALDUS_INTRODUCTION_TICKS, CoreBossConnectionState, CoreBossEntrantInput,
     CoreBossLifeState, CoreBossLockError, CoreBossLockEvent, CoreBossLockInput, CoreBossLockPhase,
     CoreBossLockSimulation, CoreBossLockStep, CoreBossParticipant, CoreBossParticipantLock,
-    scaled_caldus_health,
+    CoreBossResetResume, scaled_caldus_health,
 };
 pub use core_caldus::{
     CALDUS_PHASE_BREAK_TICKS, CALDUS_PHASE_ONE_LOOP_TICKS, CALDUS_PHASE_THREE_LOOP_TICKS,

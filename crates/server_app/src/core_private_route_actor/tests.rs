@@ -1,6 +1,7 @@
 use protocol::{
     CorePrivateRouteAvailabilityV1, CorePrivateRouteContentRevisionV1, CorePrivateRoutePhaseV1,
-    CorePrivateRouteRoomV1, CorePrivateRouteSceneV1, ManifestHash, WorldFlowContentRevisionV1,
+    CorePrivateRouteRoomV1, CorePrivateRouteSceneV1, CorePrivateRouteStateV1, ManifestHash,
+    WorldFlowContentRevisionV1,
 };
 
 use super::{
@@ -323,15 +324,13 @@ async fn boss_authority_cas_is_atomic_replay_safe_and_resettable_before_defeat()
         .await
         .expect("enter B6 staging");
 
-    let countdown = directory
-        .apply_fixed_dungeon_authority(
-            lease,
-            staging.state_version,
-            CorePrivateRouteRoomV1::CaldusArenaB6,
-            CorePrivateRoutePhaseV1::BossReadyCountdown,
-        )
-        .await
-        .expect("commit countdown");
+    let countdown = commit_boss_phase(
+        &directory,
+        lease,
+        staging.state_version,
+        CorePrivateRoutePhaseV1::BossReadyCountdown,
+    )
+    .await;
     assert_eq!(countdown.phase, CorePrivateRoutePhaseV1::BossReadyCountdown);
     assert!(matches!(
         directory
@@ -345,38 +344,61 @@ async fn boss_authority_cas_is_atomic_replay_safe_and_resettable_before_defeat()
         Err(CorePrivateRouteRuntimeError::StaleRouteState)
     ));
 
-    let introduction = directory
-        .apply_fixed_dungeon_authority(
-            lease,
-            countdown.state_version,
-            CorePrivateRouteRoomV1::CaldusArenaB6,
-            CorePrivateRoutePhaseV1::BossIntroduction,
-        )
-        .await
-        .expect("commit introduction");
-    let reset = directory
-        .apply_fixed_dungeon_authority(
-            lease,
-            introduction.state_version,
-            CorePrivateRouteRoomV1::CaldusArenaB6,
-            CorePrivateRoutePhaseV1::BossStaging,
-        )
-        .await
-        .expect("commit DNG-006 reset");
+    let introduction = commit_boss_phase(
+        &directory,
+        lease,
+        countdown.state_version,
+        CorePrivateRoutePhaseV1::BossIntroduction,
+    )
+    .await;
+    let reset = commit_boss_phase(
+        &directory,
+        lease,
+        introduction.state_version,
+        CorePrivateRoutePhaseV1::BossStaging,
+    )
+    .await;
     assert_eq!(reset.phase, CorePrivateRoutePhaseV1::BossStaging);
-    let replay = directory
-        .apply_fixed_dungeon_authority(
-            lease,
-            reset.state_version,
-            CorePrivateRouteRoomV1::CaldusArenaB6,
-            CorePrivateRoutePhaseV1::BossStaging,
-        )
-        .await
-        .expect("exact staging replay");
+    let replay = commit_boss_phase(
+        &directory,
+        lease,
+        reset.state_version,
+        CorePrivateRoutePhaseV1::BossStaging,
+    )
+    .await;
     assert_eq!(replay, reset);
+
+    let mut phase = replay;
+    for target in [
+        CorePrivateRoutePhaseV1::BossReadyCountdown,
+        CorePrivateRoutePhaseV1::BossIntroduction,
+        CorePrivateRoutePhaseV1::BossPhaseOne,
+        CorePrivateRoutePhaseV1::BossDefeated,
+    ] {
+        phase = commit_boss_phase(&directory, lease, phase.state_version, target).await;
+    }
+    let defeated = phase;
+    assert_eq!(defeated.phase, CorePrivateRoutePhaseV1::BossDefeated);
 
     directory.begin_shutdown();
     assert!(directory.finish_shutdown().await.unwrap().zero_residue);
+}
+
+async fn commit_boss_phase(
+    directory: &CorePrivateRouteActorDirectory,
+    lease: super::CorePrivateRouteActorLease,
+    expected_state_version: u64,
+    phase: CorePrivateRoutePhaseV1,
+) -> CorePrivateRouteStateV1 {
+    directory
+        .apply_fixed_dungeon_authority(
+            lease,
+            expected_state_version,
+            CorePrivateRouteRoomV1::CaldusArenaB6,
+            phase,
+        )
+        .await
+        .expect("commit boss phase")
 }
 
 #[tokio::test]

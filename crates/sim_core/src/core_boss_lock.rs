@@ -81,7 +81,17 @@ pub enum CoreBossLockPhase {
         started_at: Tick,
         resets_at: Tick,
         lock: CoreBossParticipantLock,
+        resume: CoreBossResetResume,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CoreBossResetResume {
+    Introduction {
+        started_at: Tick,
+        remaining_ticks: u32,
+    },
+    Combat,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -287,11 +297,24 @@ impl CoreBossLockSimulation {
                 self.maybe_begin_empty_reset(&entrants, &mut events)?;
             }
             CoreBossLockPhase::ResetPending {
-                resets_at, lock, ..
+                resets_at,
+                lock,
+                resume,
+                ..
             } => {
                 if any_locked_living_inside(&lock, &entrants) {
                     events.push(CoreBossLockEvent::EmptyResetCancelled { tick: self.tick });
-                    self.phase = CoreBossLockPhase::Combat { lock };
+                    self.phase = match resume {
+                        CoreBossResetResume::Introduction {
+                            started_at,
+                            remaining_ticks,
+                        } => CoreBossLockPhase::Introduction {
+                            started_at,
+                            activates_at: add_ticks(self.tick, remaining_ticks)?,
+                            lock,
+                        },
+                        CoreBossResetResume::Combat => CoreBossLockPhase::Combat { lock },
+                    };
                 } else if self.tick >= resets_at {
                     events.push(CoreBossLockEvent::EmptyResetCompleted {
                         tick: self.tick,
@@ -407,12 +430,28 @@ impl CoreBossLockSimulation {
         entrants: &BTreeMap<EntityId, CoreBossEntrantInput>,
         events: &mut Vec<CoreBossLockEvent>,
     ) -> Result<(), CoreBossLockError> {
-        let (CoreBossLockPhase::Introduction { lock, .. } | CoreBossLockPhase::Combat { lock }) =
-            &self.phase
-        else {
-            return Ok(());
+        let (lock, resume) = match &self.phase {
+            CoreBossLockPhase::Introduction {
+                started_at,
+                activates_at,
+                lock,
+            } => {
+                let remaining_ticks = activates_at
+                    .0
+                    .checked_sub(self.tick.0)
+                    .and_then(|ticks| u32::try_from(ticks).ok())
+                    .ok_or(CoreBossLockError::ArithmeticOverflow)?;
+                (
+                    lock.clone(),
+                    CoreBossResetResume::Introduction {
+                        started_at: *started_at,
+                        remaining_ticks,
+                    },
+                )
+            }
+            CoreBossLockPhase::Combat { lock } => (lock.clone(), CoreBossResetResume::Combat),
+            _ => return Ok(()),
         };
-        let lock = lock.clone();
         if !any_locked_living(&lock, entrants) && any_living_party_outside(&lock, entrants) {
             let resets_at = add_ticks(self.tick, CORE_BOSS_EMPTY_RESET_TICKS)?;
             events.push(CoreBossLockEvent::EmptyResetStarted {
@@ -423,6 +462,7 @@ impl CoreBossLockSimulation {
                 started_at: self.tick,
                 resets_at,
                 lock,
+                resume,
             };
         }
         Ok(())
@@ -880,6 +920,52 @@ mod tests {
         }
         let completed = step(&mut simulation, vec![dead, outside]);
         assert!(matches!(completed.phase, CoreBossLockPhase::BossWarning));
+    }
+
+    #[test]
+    fn introduction_reset_cancellation_restores_every_remaining_intro_tick() {
+        let mut simulation = CoreBossLockSimulation::default();
+        step(&mut simulation, vec![entrant(1, 0)]);
+        for _ in 1..=150 {
+            step(&mut simulation, vec![entrant(1, 0)]);
+        }
+        let CoreBossLockPhase::Introduction { activates_at, .. } = simulation.phase() else {
+            panic!("introduction");
+        };
+        assert_eq!(*activates_at, Tick(225));
+
+        let mut dead = entrant(1, 0);
+        dead.life = CoreBossLifeState::Dead;
+        dead.inside_boundary = false;
+        let mut outside = entrant(2, 1);
+        outside.inside_boundary = false;
+        let reset = step(&mut simulation, vec![dead, outside]);
+        assert!(matches!(
+            reset.phase,
+            CoreBossLockPhase::ResetPending {
+                resume: CoreBossResetResume::Introduction {
+                    remaining_ticks: 74,
+                    ..
+                },
+                ..
+            }
+        ));
+
+        let cancelled = step(&mut simulation, vec![entrant(1, 0), outside]);
+        let CoreBossLockPhase::Introduction { activates_at, .. } = cancelled.phase else {
+            panic!("resumed introduction");
+        };
+        assert_eq!(activates_at, Tick(226));
+        for _ in 153..226 {
+            assert!(matches!(
+                step(&mut simulation, vec![entrant(1, 0), outside]).phase,
+                CoreBossLockPhase::Introduction { .. }
+            ));
+        }
+        assert!(matches!(
+            step(&mut simulation, vec![entrant(1, 0), outside]).phase,
+            CoreBossLockPhase::Combat { .. }
+        ));
     }
 
     #[test]

@@ -225,10 +225,7 @@ impl CorePrivateRouteActor {
                 CorePrivateRoutePhaseV1::BossBreakToThree,
                 CorePrivateRoutePhaseV1::BossPhaseThree,
             )?,
-            CorePrivateRouteActorAdvance::BossDefeated => self.boss_phase(
-                CorePrivateRoutePhaseV1::BossPhaseThree,
-                CorePrivateRoutePhaseV1::BossDefeated,
-            )?,
+            CorePrivateRouteActorAdvance::BossDefeated => self.boss_defeated()?,
             CorePrivateRouteActorAdvance::BossExitReady => self.boss_phase(
                 CorePrivateRoutePhaseV1::BossDefeated,
                 CorePrivateRoutePhaseV1::BossExitReady,
@@ -460,6 +457,26 @@ impl CorePrivateRouteActor {
         self.replace_position(
             self.state.character_version,
             self.position_with_phase(CorePrivateRoutePhaseV1::BossStaging),
+        )
+    }
+
+    fn boss_defeated(&mut self) -> Result<(), CorePrivateRouteActorError> {
+        if self.state.scene != CorePrivateRouteSceneV1::BellSepulcher
+            || self.state.room != Some(CorePrivateRouteRoomV1::CaldusArenaB6)
+            || !matches!(
+                self.state.phase,
+                CorePrivateRoutePhaseV1::BossPhaseOne
+                    | CorePrivateRoutePhaseV1::BossBreakToTwo
+                    | CorePrivateRoutePhaseV1::BossPhaseTwo
+                    | CorePrivateRoutePhaseV1::BossBreakToThree
+                    | CorePrivateRoutePhaseV1::BossPhaseThree
+            )
+        {
+            return Err(CorePrivateRouteActorError::InvalidTransition);
+        }
+        self.replace_position(
+            self.state.character_version,
+            self.position_with_phase(CorePrivateRoutePhaseV1::BossDefeated),
         )
     }
 
