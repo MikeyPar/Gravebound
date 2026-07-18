@@ -130,9 +130,15 @@ impl CorePrivateLifePreparedBellHandoff {
         transition: CoreBellPortalTransition,
         expected_content_revision: CorePrivateRouteContentRevisionV1,
         encounters: sim_content::CoreDevelopmentEncounterRooms,
+        caldus_content: Arc<sim_content::CoreDevelopmentCaldus>,
     ) -> Result<CorePrivateFixedDungeonDriverReady, CorePrivateLifeSessionError> {
         self.prepared
-            .commit_into_fixed_dungeon(transition, expected_content_revision, encounters)?
+            .commit_into_fixed_dungeon(
+                transition,
+                expected_content_revision,
+                encounters,
+                caldus_content,
+            )?
             .wait()
             .await
             .map_err(Into::into)
@@ -2008,8 +2014,9 @@ mod tests {
         let transition = commit_bell_route(&routes, route_lease).await;
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content");
         let encounters = sim_content::load_core_development_encounter_rooms(&root).unwrap();
+        let caldus = Arc::new(sim_content::load_core_development_caldus(&root).unwrap());
         let ready = prepared
-            .commit_into_fixed_dungeon(transition, route_revision(), encounters)
+            .commit_into_fixed_dungeon(transition, route_revision(), encounters, caldus)
             .await
             .unwrap();
         assert_eq!(ready.route_lease, route_lease);

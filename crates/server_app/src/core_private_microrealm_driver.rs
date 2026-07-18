@@ -28,11 +28,13 @@ use tokio::{
 
 use crate::{
     CoreBellPortalTransition, CoreDurableB3Resolution, CoreDurableBargainRestResolution,
-    CorePrivateFixedDungeonAdvance, CorePrivateFixedDungeonB3RewardCommit,
-    CorePrivateFixedDungeonLiveRoomFrame, CorePrivateFixedDungeonRestCommit,
-    CorePrivateFixedDungeonRuntime, CorePrivateFixedDungeonRuntimeError,
-    CorePrivateMicrorealmInput, CorePrivateMicrorealmRuntime, CorePrivateMicrorealmRuntimeError,
-    CorePrivateMicrorealmStep,
+    CoreDurableCaldusResolution, CorePrivateCaldusDefeatHandoff, CorePrivateCaldusFrame,
+    CorePrivateCaldusRewardCommit, CorePrivateCaldusRuntime, CorePrivateCaldusRuntimeError,
+    CorePrivateCaldusRuntimeInput, CorePrivateFixedDungeonAdvance,
+    CorePrivateFixedDungeonB3RewardCommit, CorePrivateFixedDungeonLiveRoomFrame,
+    CorePrivateFixedDungeonRestCommit, CorePrivateFixedDungeonRuntime,
+    CorePrivateFixedDungeonRuntimeError, CorePrivateMicrorealmInput, CorePrivateMicrorealmRuntime,
+    CorePrivateMicrorealmRuntimeError, CorePrivateMicrorealmStep,
 };
 
 const NANOS_PER_SECOND: u64 = 1_000_000_000;
@@ -265,6 +267,26 @@ impl CorePrivateMicrorealmDriverHandle {
             .await
             .map_err(|_| CorePrivateMicrorealmDriverError::FixedDungeonControlClosed)?
             .map_err(CorePrivateMicrorealmDriverError::FixedDungeonB3Reward)
+    }
+
+    /// Acknowledges the exact frozen Caldus defeat only after personal reward, progression, and
+    /// victory-exit terminals are durable. The compiled presentation authority is process-owned.
+    pub async fn commit_caldus_reward(
+        &self,
+        durable: CoreDurableCaldusResolution,
+    ) -> Result<CorePrivateCaldusRewardCommit, CorePrivateMicrorealmDriverError> {
+        let (result_tx, result_rx) = oneshot::channel();
+        self.fixed_advance_tx
+            .send(CorePrivateFixedDungeonControlRequest::CommitCaldusReward {
+                durable: Box::new(durable),
+                result_tx,
+            })
+            .await
+            .map_err(|_| CorePrivateMicrorealmDriverError::FixedDungeonControlClosed)?;
+        result_rx
+            .await
+            .map_err(|_| CorePrivateMicrorealmDriverError::FixedDungeonControlClosed)?
+            .map_err(CorePrivateMicrorealmDriverError::CaldusReward)
     }
 
     /// Replaces the single retained compact input when its client sequence is newer.
@@ -501,6 +523,23 @@ pub enum CorePrivateMicrorealmDriverState {
         committed_frames: u64,
         lethal_frame: Arc<CorePrivateFixedDungeonLiveRoomFrame>,
     },
+    CaldusRunning {
+        committed_frames: u64,
+        frame: Arc<CorePrivateCaldusFrame>,
+    },
+    CaldusRewardPending {
+        committed_frames: u64,
+        frame: Arc<CorePrivateCaldusFrame>,
+        reward_handoff: Arc<CorePrivateCaldusDefeatHandoff>,
+    },
+    CaldusTerminalPending {
+        committed_frames: u64,
+        lethal_frame: Arc<CorePrivateCaldusFrame>,
+    },
+    CaldusExitReady {
+        committed_frames: u64,
+        commit: Arc<CorePrivateCaldusRewardCommit>,
+    },
     Faulted {
         committed_frames: u64,
         fault: CorePrivateMicrorealmDriverFault,
@@ -519,6 +558,10 @@ impl CorePrivateMicrorealmDriverState {
             | Self::FixedDungeonRunning { .. }
             | Self::FixedDungeonRewardPending { .. }
             | Self::FixedDungeonTerminalPending { .. }
+            | Self::CaldusRunning { .. }
+            | Self::CaldusRewardPending { .. }
+            | Self::CaldusTerminalPending { .. }
+            | Self::CaldusExitReady { .. }
             | Self::Faulted { .. } => None,
         }
     }
@@ -532,6 +575,9 @@ pub enum CorePrivateMicrorealmDriverOutcome {
     FixedDungeonReady,
     TerminalPending,
     FixedDungeonTerminalPending,
+    CaldusRewardPending,
+    CaldusTerminalPending,
+    CaldusExitReady,
     Faulted,
 }
 
@@ -583,6 +629,7 @@ struct CorePrivateFixedDungeonConversionRequest {
     transition: CoreBellPortalTransition,
     expected_content_revision: protocol::CorePrivateRouteContentRevisionV1,
     encounters: sim_content::CoreDevelopmentEncounterRooms,
+    caldus_content: Arc<sim_content::CoreDevelopmentCaldus>,
     result_tx: oneshot::Sender<Result<CorePrivateFixedDungeonDriverReady, String>>,
 }
 
@@ -598,6 +645,10 @@ enum CorePrivateFixedDungeonControlRequest {
     CommitB3Reward {
         durable: Box<CoreDurableB3Resolution>,
         result_tx: oneshot::Sender<Result<CorePrivateFixedDungeonB3RewardCommit, String>>,
+    },
+    CommitCaldusReward {
+        durable: Box<CoreDurableCaldusResolution>,
+        result_tx: oneshot::Sender<Result<CorePrivateCaldusRewardCommit, String>>,
     },
 }
 
@@ -647,6 +698,7 @@ impl CorePrivateMicrorealmPreparedHandoff {
         transition: CoreBellPortalTransition,
         expected_content_revision: protocol::CorePrivateRouteContentRevisionV1,
         encounters: sim_content::CoreDevelopmentEncounterRooms,
+        caldus_content: Arc<sim_content::CoreDevelopmentCaldus>,
     ) -> Result<CorePrivateFixedDungeonConversion, CorePrivateMicrorealmDriverError> {
         let (result_tx, result_rx) = oneshot::channel();
         self.decision_tx
@@ -657,6 +709,7 @@ impl CorePrivateMicrorealmPreparedHandoff {
                     transition,
                     expected_content_revision,
                     encounters,
+                    caldus_content,
                     result_tx,
                 },
             )))
@@ -787,6 +840,8 @@ pub enum CorePrivateMicrorealmDriverError {
     FixedDungeonRestResolution(String),
     #[error("Core fixed-dungeon B3 reward commit failed: {0}")]
     FixedDungeonB3Reward(String),
+    #[error("Core Sir Caldus reward commit failed: {0}")]
+    CaldusReward(String),
 }
 
 trait MicrorealmFrameRuntime: Send + 'static {
@@ -1058,6 +1113,7 @@ where
         transition,
         expected_content_revision,
         encounters,
+        caldus_content,
         result_tx,
     } = *request;
     let transfer_id = transition.transfer_id;
@@ -1086,8 +1142,9 @@ where
             observation_tx
                 .send_replace(CorePrivateMicrorealmDriverState::FixedDungeonReady { ready });
             let _ = result_tx.send(Ok(ready));
-            run_fixed_dungeon(
+            Box::pin(run_fixed_dungeon(
                 fixed_dungeon,
+                caldus_content,
                 ready,
                 ingress,
                 observation_tx,
@@ -1097,7 +1154,7 @@ where
                 shutdown_rx,
                 handoff_rx,
                 fixed_advance_rx,
-            )
+            ))
             .await
         }
         Err(message) => {
@@ -1138,6 +1195,7 @@ enum FixedDungeonDriverEvent {
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn run_fixed_dungeon(
     mut runtime: CorePrivateFixedDungeonRuntime,
+    caldus_content: Arc<sim_content::CoreDevelopmentCaldus>,
     mut ready: CorePrivateFixedDungeonDriverReady,
     ingress: &Arc<SharedIngress>,
     observation_tx: &watch::Sender<CorePrivateMicrorealmDriverState>,
@@ -1181,6 +1239,67 @@ async fn run_fixed_dungeon(
             )) => match runtime.advance().await {
                 Ok(advance) => {
                     ready.node = advance.transition.to;
+                    if ready.node == sim_content::CoreFixedDungeonNode::CaldusArenaB6 {
+                        let caldus = runtime
+                            .into_caldus_staging_handoff()
+                            .map_err(|error| error.to_string())
+                            .and_then(|handoff| {
+                                CorePrivateCaldusRuntime::from_staging_handoff(handoff)
+                                    .map_err(|error| error.to_string())
+                            });
+                        return match caldus {
+                            Ok(caldus) => {
+                                final_tick = caldus.tick();
+                                ingress.neutralize_for_scene_transition();
+                                ingress.resume_accepting();
+                                observation_tx.send_replace(
+                                    CorePrivateMicrorealmDriverState::FixedDungeonReady { ready },
+                                );
+                                let _ = result_tx.send(Ok(advance));
+                                run_caldus(
+                                    caldus,
+                                    caldus_content,
+                                    ingress,
+                                    observation_tx,
+                                    committed_frames,
+                                    final_tick,
+                                    skipped_deadlines,
+                                    shutdown_rx,
+                                    handoff_rx,
+                                    fixed_advance_rx,
+                                )
+                                .await
+                            }
+                            Err(message) => {
+                                ingress.stop_accepting();
+                                observation_tx.send_replace(
+                                    CorePrivateMicrorealmDriverState::Faulted {
+                                        committed_frames,
+                                        fault: CorePrivateMicrorealmDriverFault {
+                                            kind: CorePrivateMicrorealmFaultKind::RouteAuthority,
+                                            message: Arc::from(message.clone()),
+                                            last_committed_tick: final_tick,
+                                        },
+                                    },
+                                );
+                                let _ = result_tx.send(Err(message));
+                                wait_for_shutdown(
+                                    shutdown_rx,
+                                    handoff_rx,
+                                    fixed_advance_rx,
+                                    "Caldus conversion failed after B6 route commit",
+                                )
+                                .await;
+                                driver_task_exit(
+                                    ingress,
+                                    committed_frames,
+                                    final_tick,
+                                    skipped_deadlines,
+                                    CorePrivateMicrorealmDriverOutcome::Faulted,
+                                )
+                            }
+                        };
+                    }
                     if runtime.room_phase().is_some() {
                         ingress.neutralize_for_scene_transition();
                         ingress.resume_accepting();
@@ -1290,6 +1409,11 @@ async fn run_fixed_dungeon(
                     }
                 }
             },
+            FixedDungeonDriverEvent::Control(Some(
+                CorePrivateFixedDungeonControlRequest::CommitCaldusReward { result_tx, .. },
+            )) => {
+                let _ = result_tx.send(Err("Sir Caldus is not installed".to_owned()));
+            }
             FixedDungeonDriverEvent::Frame(deadline) => {
                 let lateness = Instant::now().saturating_duration_since(deadline);
                 let missed = lateness.as_nanos() / u128::from(DRIVER_TICK_NANOS);
@@ -1371,6 +1495,178 @@ async fn run_fixed_dungeon(
         skipped_deadlines,
         outcome,
     )
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn run_caldus(
+    mut runtime: CorePrivateCaldusRuntime,
+    content: Arc<sim_content::CoreDevelopmentCaldus>,
+    ingress: &Arc<SharedIngress>,
+    observation_tx: &watch::Sender<CorePrivateMicrorealmDriverState>,
+    mut committed_frames: u64,
+    mut final_tick: Tick,
+    mut skipped_deadlines: u64,
+    shutdown_rx: &mut watch::Receiver<bool>,
+    handoff_rx: &mut mpsc::Receiver<CorePrivateMicrorealmHandoffRequest>,
+    fixed_advance_rx: &mut mpsc::Receiver<CorePrivateFixedDungeonControlRequest>,
+) -> CorePrivateMicrorealmDriverTaskExit {
+    let mut retained_rx = ingress.retained_tx.subscribe();
+    let mut interval = fixed_driver_interval().await;
+    let mut outcome = CorePrivateMicrorealmDriverOutcome::Shutdown;
+    let mut reward_pending = false;
+    let mut exit_ready = false;
+
+    loop {
+        let event = tokio::select! {
+            biased;
+            changed = shutdown_rx.changed() => {
+                let _ = changed;
+                FixedDungeonDriverEvent::Shutdown
+            }
+            request = handoff_rx.recv() => FixedDungeonDriverEvent::Handoff(request),
+            request = fixed_advance_rx.recv() => FixedDungeonDriverEvent::Control(request),
+            deadline = interval.tick(), if !reward_pending && !exit_ready => {
+                FixedDungeonDriverEvent::Frame(deadline)
+            }
+        };
+
+        match event {
+            FixedDungeonDriverEvent::Shutdown => break,
+            FixedDungeonDriverEvent::Handoff(Some(request)) => {
+                let _ = request.ready_tx.send(Err(()));
+            }
+            FixedDungeonDriverEvent::Handoff(None) | FixedDungeonDriverEvent::Control(None) => {
+                break;
+            }
+            FixedDungeonDriverEvent::Control(Some(
+                CorePrivateFixedDungeonControlRequest::CommitCaldusReward { durable, result_tx },
+            )) => match runtime.commit_reward_resolution(&content, *durable).await {
+                Ok(commit) => {
+                    reward_pending = false;
+                    exit_ready = true;
+                    outcome = CorePrivateMicrorealmDriverOutcome::CaldusExitReady;
+                    ingress.stop_accepting();
+                    let commit = Arc::new(commit);
+                    observation_tx.send_replace(
+                        CorePrivateMicrorealmDriverState::CaldusExitReady {
+                            committed_frames,
+                            commit: Arc::clone(&commit),
+                        },
+                    );
+                    let _ = result_tx.send(Ok((*commit).clone()));
+                }
+                Err(error) => {
+                    let _ = result_tx.send(Err(error.to_string()));
+                    if caldus_reward_error_is_fatal(&error) {
+                        outcome = CorePrivateMicrorealmDriverOutcome::Faulted;
+                        ingress.stop_accepting();
+                        observation_tx.send_replace(CorePrivateMicrorealmDriverState::Faulted {
+                            committed_frames,
+                            fault: caldus_runtime_fault(&error, final_tick),
+                        });
+                        wait_for_shutdown(
+                            shutdown_rx,
+                            handoff_rx,
+                            fixed_advance_rx,
+                            "Caldus cannot advance after reward acknowledgement failed",
+                        )
+                        .await;
+                        break;
+                    }
+                }
+            },
+            FixedDungeonDriverEvent::Control(Some(request)) => {
+                reject_fixed_advance(request, "only Caldus reward acknowledgement is available");
+            }
+            FixedDungeonDriverEvent::Frame(deadline) => {
+                let lateness = Instant::now().saturating_duration_since(deadline);
+                let missed = lateness.as_nanos() / u128::from(DRIVER_TICK_NANOS);
+                skipped_deadlines =
+                    skipped_deadlines.saturating_add(u64::try_from(missed).unwrap_or(u64::MAX));
+                let retained = *retained_rx.borrow_and_update();
+                match runtime.step(caldus_runtime_input(retained)).await {
+                    Ok(frame) => {
+                        committed_frames = committed_frames.saturating_add(1);
+                        final_tick = frame.tick;
+                        let frame = Arc::new(frame);
+                        if frame.player_died {
+                            outcome = CorePrivateMicrorealmDriverOutcome::CaldusTerminalPending;
+                            ingress.stop_accepting();
+                            observation_tx.send_replace(
+                                CorePrivateMicrorealmDriverState::CaldusTerminalPending {
+                                    committed_frames,
+                                    lethal_frame: frame,
+                                },
+                            );
+                            wait_for_shutdown(
+                                shutdown_rx,
+                                handoff_rx,
+                                fixed_advance_rx,
+                                "Caldus cannot advance after a terminal frame",
+                            )
+                            .await;
+                            break;
+                        }
+                        if let Some(handoff) = runtime.pending_reward_handoff() {
+                            reward_pending = true;
+                            outcome = CorePrivateMicrorealmDriverOutcome::CaldusRewardPending;
+                            ingress.stop_accepting();
+                            observation_tx.send_replace(
+                                CorePrivateMicrorealmDriverState::CaldusRewardPending {
+                                    committed_frames,
+                                    frame,
+                                    reward_handoff: Arc::new(handoff.clone()),
+                                },
+                            );
+                        } else {
+                            observation_tx.send_replace(
+                                CorePrivateMicrorealmDriverState::CaldusRunning {
+                                    committed_frames,
+                                    frame,
+                                },
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        outcome = CorePrivateMicrorealmDriverOutcome::Faulted;
+                        ingress.stop_accepting();
+                        observation_tx.send_replace(CorePrivateMicrorealmDriverState::Faulted {
+                            committed_frames,
+                            fault: caldus_runtime_fault(&error, final_tick),
+                        });
+                        wait_for_shutdown(
+                            shutdown_rx,
+                            handoff_rx,
+                            fixed_advance_rx,
+                            "Caldus cannot advance after a driver fault",
+                        )
+                        .await;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    ingress.stop_accepting();
+    driver_task_exit(
+        ingress,
+        committed_frames,
+        final_tick,
+        skipped_deadlines,
+        outcome,
+    )
+}
+
+fn caldus_runtime_input(retained: RetainedFrameInput) -> CorePrivateCaldusRuntimeInput {
+    CorePrivateCaldusRuntimeInput {
+        action: retained.runtime_input(),
+        connection: if retained.reward_session_active {
+            sim_core::CoreBossConnectionState::ConnectedLoaded
+        } else {
+            sim_core::CoreBossConnectionState::Disconnected
+        },
+    }
 }
 
 fn driver_task_exit(
@@ -1539,6 +1835,9 @@ fn reject_fixed_advance(request: CorePrivateFixedDungeonControlRequest, message:
         CorePrivateFixedDungeonControlRequest::CommitB3Reward { result_tx, .. } => {
             let _ = result_tx.send(Err(message.to_owned()));
         }
+        CorePrivateFixedDungeonControlRequest::CommitCaldusReward { result_tx, .. } => {
+            let _ = result_tx.send(Err(message.to_owned()));
+        }
     }
 }
 
@@ -1622,6 +1921,35 @@ fn fixed_runtime_fault(
     }
 }
 
+fn caldus_runtime_fault(
+    error: &CorePrivateCaldusRuntimeError,
+    last_committed_tick: Tick,
+) -> CorePrivateMicrorealmDriverFault {
+    let kind = match error {
+        CorePrivateCaldusRuntimeError::RouteAuthorityMismatch
+        | CorePrivateCaldusRuntimeError::RewardAuthorityMismatch
+        | CorePrivateCaldusRuntimeError::Route(_) => CorePrivateMicrorealmFaultKind::RouteAuthority,
+        CorePrivateCaldusRuntimeError::TickExhausted => {
+            CorePrivateMicrorealmFaultKind::TickExhausted
+        }
+        _ => CorePrivateMicrorealmFaultKind::Simulation,
+    };
+    CorePrivateMicrorealmDriverFault {
+        kind,
+        message: Arc::from(error.to_string()),
+        last_committed_tick,
+    }
+}
+
+fn caldus_reward_error_is_fatal(error: &CorePrivateCaldusRuntimeError) -> bool {
+    !matches!(
+        error,
+        CorePrivateCaldusRuntimeError::RewardResolutionUnavailable
+            | CorePrivateCaldusRuntimeError::RewardResolutionConflict
+            | CorePrivateCaldusRuntimeError::RewardAuthorityMismatch
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::{collections::VecDeque, sync::Mutex as StdMutex};
@@ -1637,6 +1965,55 @@ mod tests {
 
     fn hash(byte: char) -> ManifestHash {
         ManifestHash::new(byte.to_string().repeat(64)).expect("valid hash")
+    }
+
+    fn spawn_caldus_test_driver(
+        runtime: CorePrivateCaldusRuntime,
+        content: Arc<sim_content::CoreDevelopmentCaldus>,
+    ) -> CorePrivateMicrorealmDriver {
+        let (retained_tx, _) = watch::channel(RetainedFrameInput::default());
+        let ingress = Arc::new(SharedIngress {
+            reducer: Mutex::new(IngressReducer::default()),
+            retained_tx,
+            metrics: SharedMetrics::default(),
+            task_live: AtomicBool::new(true),
+        });
+        let (observation_tx, observation_rx) =
+            watch::channel(CorePrivateMicrorealmDriverState::Starting);
+        let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+        let (handoff_tx, mut handoff_rx) = mpsc::channel(1);
+        let (fixed_advance_tx, mut fixed_advance_rx) = mpsc::channel(1);
+        ACTIVE_CORE_MICROREALM_DRIVER_TASKS.fetch_add(1, Ordering::AcqRel);
+        let task_ingress = Arc::clone(&ingress);
+        let final_tick = runtime.tick();
+        let join = tokio::spawn(async move {
+            let _task_guard = ActiveDriverTaskGuard {
+                ingress: Arc::clone(&task_ingress),
+            };
+            run_caldus(
+                runtime,
+                content,
+                &task_ingress,
+                &observation_tx,
+                0,
+                final_tick,
+                0,
+                &mut shutdown_rx,
+                &mut handoff_rx,
+                &mut fixed_advance_rx,
+            )
+            .await
+        });
+        CorePrivateMicrorealmDriver {
+            handle: CorePrivateMicrorealmDriverHandle {
+                ingress,
+                observation_rx,
+                handoff_tx,
+                fixed_advance_tx,
+            },
+            shutdown_tx,
+            join: Some(join),
+        }
     }
 
     fn no_offer_authority() -> CoreDurableBargainRestResolution {
@@ -1666,6 +2043,50 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn same_driver_task_advances_route_bound_caldus_at_thirty_hertz() {
+        let (directory, runtime) =
+            crate::core_private_caldus_runtime::core_private_caldus_runtime_test_fixture();
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content");
+        let content = Arc::new(sim_content::load_core_development_caldus(&root).unwrap());
+        let driver = spawn_caldus_test_driver(runtime, content);
+        let mut observer = driver.handle().observe();
+
+        tokio::time::advance(Duration::from_millis(34)).await;
+        let state = observer.changed().await.expect("first Caldus frame");
+        assert!(matches!(
+            state,
+            CorePrivateMicrorealmDriverState::CaldusRunning {
+                committed_frames: 1,
+                ref frame,
+            } if frame.tick == Tick(1)
+                && frame.route.phase == protocol::CorePrivateRoutePhaseV1::BossReadyCountdown
+        ));
+
+        let report = driver.shutdown().await.expect("joined driver");
+        assert_eq!(report.committed_frames, 1);
+        assert_eq!(report.final_tick, Tick(1));
+        assert_eq!(report.outcome, CorePrivateMicrorealmDriverOutcome::Shutdown);
+        directory.begin_shutdown();
+        assert!(directory.finish_shutdown().await.unwrap().zero_residue);
+    }
+
+    #[test]
+    fn stale_caldus_reward_acknowledgements_remain_nonfatal() {
+        assert!(!caldus_reward_error_is_fatal(
+            &CorePrivateCaldusRuntimeError::RewardResolutionUnavailable
+        ));
+        assert!(!caldus_reward_error_is_fatal(
+            &CorePrivateCaldusRuntimeError::RewardResolutionConflict
+        ));
+        assert!(!caldus_reward_error_is_fatal(
+            &CorePrivateCaldusRuntimeError::RewardAuthorityMismatch
+        ));
+        assert!(caldus_reward_error_is_fatal(
+            &CorePrivateCaldusRuntimeError::InvalidComposition
+        ));
     }
 
     fn b3_reward_authority() -> CoreDurableB3Resolution {

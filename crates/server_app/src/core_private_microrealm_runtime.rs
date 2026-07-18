@@ -629,6 +629,8 @@ pub(crate) fn core_bell_ready_runtime_test_fixture(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use protocol::{CorePrivateRouteRoomV1, ManifestHash, WorldFlowContentRevisionV1};
 
     use super::*;
@@ -1010,8 +1012,10 @@ mod tests {
         let prepared = driver.prepare_handoff().await.expect("prepare handoff");
         let transition = commit_bell_transition(&directory, lease).await;
         let (_, encounters, _) = content();
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content");
+        let caldus = Arc::new(sim_content::load_core_development_caldus(&root).unwrap());
         let conversion = prepared
-            .commit_into_fixed_dungeon(transition, route_revision(), encounters)
+            .commit_into_fixed_dungeon(transition, route_revision(), encounters, caldus)
             .expect("conversion decision");
         drop(conversion);
         let mut state_reader = state_reader;

@@ -152,6 +152,24 @@ impl CoreCharacterCombatEnvelope {
         Ok(())
     }
 
+    /// Reconciles the exact durable progression terminal produced inside the current danger run.
+    /// Fresh application advances once; acknowledgement replay is read-only.
+    pub(crate) fn reconcile_progression_version(
+        &mut self,
+        character_id: [u8; 16],
+        destination: u64,
+    ) -> Result<(), CoreCombatFactoryError> {
+        if character_id != self.character_id
+            || destination == 0
+            || (self.progression_version != destination
+                && self.progression_version.checked_add(1) != Some(destination))
+        {
+            return Err(CoreCombatFactoryError::InvalidLiveHandoff);
+        }
+        self.progression_version = destination;
+        Ok(())
+    }
+
     /// Rejoins the exact player allocation after a scene handoff. Foreign entity identity or
     /// immutable combat-axis drift fails closed instead of silently rebuilding mutable state.
     pub fn rejoin(

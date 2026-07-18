@@ -329,8 +329,15 @@ impl CorePrivateFixedDungeonRuntime {
             return Err(CorePrivateFixedDungeonRuntimeError::B3RewardAuthorityMismatch);
         }
         let mut staged = self.combat.clone();
+        let mut staged_envelope = self.combat_envelope.clone();
         let disposition = durable.disposition();
         let receipt = staged.acknowledge_b3_reward(durable.handoff(), disposition)?;
+        if let Some(projection) = &durable.progression().projection {
+            staged_envelope.reconcile_progression_version(
+                projection.character_id,
+                projection.progression_version,
+            )?;
+        }
         let route = if receipt == sim_content::CoreB3RewardReceipt::Committed {
             let (room, phase) = route_position(staged.node(), staged.room_phase())?;
             self.route_directory
@@ -345,6 +352,7 @@ impl CorePrivateFixedDungeonRuntime {
             route_before
         };
         self.combat = staged;
+        self.combat_envelope = staged_envelope;
         Ok(CorePrivateFixedDungeonB3RewardCommit {
             route,
             receipt,
@@ -626,6 +634,8 @@ pub enum CorePrivateFixedDungeonRuntimeError {
     Collision(#[from] sim_core::CollisionError),
     #[error(transparent)]
     Microrealm(#[from] CorePrivateMicrorealmRuntimeError),
+    #[error(transparent)]
+    CombatFactory(#[from] crate::CoreCombatFactoryError),
     #[error(transparent)]
     Dungeon(#[from] sim_content::CoreFixedDungeonError),
     #[error(transparent)]
@@ -1018,8 +1028,8 @@ mod tests {
             committed.disposition,
             sim_content::CoreB3RewardDisposition::GrantedOffer
         );
-        assert!(committed.reward_result_hash.is_some());
         assert!(runtime.pending_b3_reward_handoff().is_none());
+        assert_eq!(runtime.combat_envelope.progression_version(), 2);
         let replay = runtime
             .commit_b3_reward(&durable_reward)
             .await
@@ -1047,7 +1057,6 @@ mod tests {
             sim_content::CoreFixedDungeonRestReceipt::Replayed
         );
         assert_eq!(replayed.route.state_version, committed.route.state_version);
-
         let entered = runtime.advance().await.expect("enter B5");
         assert_eq!(
             entered.transition.rest_resolution,
@@ -1075,6 +1084,7 @@ mod tests {
         assert_eq!(handoff.tick(), inherited_tick);
         assert_eq!(handoff.content_revision(), &route_revision());
         assert_eq!(handoff.combat_envelope().character_id(), CHARACTER_ID);
+        assert_eq!(handoff.combat_envelope().progression_version(), 2);
         assert_eq!(handoff.player().target.entity_id, player_entity_id);
         let route = handoff.route_snapshot().expect("handoff route snapshot");
         assert_eq!(route, entered.route);

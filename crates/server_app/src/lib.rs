@@ -83,8 +83,8 @@ pub use caldus_instance_presentation::{
     CaldusInstancePresentationError,
 };
 pub use caldus_victory::{
-    CaldusVictoryCommitResult, CaldusVictoryCoordinatorError, CaldusVictoryOwnerCommand,
-    CaldusVictoryOwnerCommit, PostgresCaldusVictoryCoordinator,
+    CaldusVictoryCommitResult, CaldusVictoryCompositionError, CaldusVictoryCoordinatorError,
+    CaldusVictoryOwnerCommand, CaldusVictoryOwnerCommit, PostgresCaldusVictoryCoordinator,
 };
 pub use combat_factory::{
     CoreCharacterCombat, CoreCharacterCombatCompiler, CoreCharacterCombatEnvelope,
@@ -115,7 +115,9 @@ pub use core_private_b3_reward_runtime::{
     CorePrivateB3RewardRuntimeReport, CorePrivateB3RewardRuntimeState,
 };
 pub use core_private_caldus_reward::{
-    CoreDurableCaldusResolution, CorePrivateCaldusDefeatHandoff, CorePrivateCaldusRewardCommit,
+    CoreCaldusRewardAuthority, CoreCaldusRewardAuthorityFailure,
+    CoreCaldusRewardAuthorityFailureKind, CoreDurableCaldusResolution,
+    CorePrivateCaldusDefeatHandoff, CorePrivateCaldusRewardCommit,
     CorePrivateCaldusRewardCommitDisposition, CorePrivateCaldusRewardError,
 };
 pub use core_private_caldus_runtime::{

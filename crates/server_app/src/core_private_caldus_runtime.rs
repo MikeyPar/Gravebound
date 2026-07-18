@@ -666,6 +666,72 @@ fn projected_route_phase(
     Ok(phase)
 }
 
+#[cfg(test)]
+pub(crate) fn core_private_caldus_runtime_test_fixture()
+-> (CorePrivateRouteActorDirectory, CorePrivateCaldusRuntime) {
+    use std::{num::NonZeroU64, path::Path};
+
+    use protocol::{CorePrivateRouteContentRevisionV1, ManifestHash, WorldFlowContentRevisionV1};
+
+    let hash = |byte: char| ManifestHash::new(byte.to_string().repeat(64)).expect("hash");
+    let route_revision = CorePrivateRouteContentRevisionV1 {
+        records_blake3: hash('a'),
+        assets_blake3: hash('b'),
+        localization_blake3: hash('c'),
+    };
+    let directory = CorePrivateRouteActorDirectory::new();
+    let lease = directory
+        .register_actor(
+            crate::AuthenticatedAccount {
+                account_id: crate::AccountId::new([0x71; 16]).expect("account"),
+                namespace: crate::AuthenticatedNamespace::WipeableTest,
+            },
+            crate::CorePrivateRouteActorSeed {
+                character_id: [0x72; 16],
+                character_version: 2,
+                content_revision: route_revision.clone(),
+                world_flow_revision: WorldFlowContentRevisionV1 {
+                    records_blake3: hash('d'),
+                    assets_blake3: hash('e'),
+                    localization_blake3: hash('f'),
+                },
+                position: crate::CorePrivateRouteActorPosition {
+                    instance_lineage_id: Some([0x73; 16]),
+                    scene: CorePrivateRouteSceneV1::BellSepulcher,
+                    room: Some(CorePrivateRouteRoomV1::CaldusArenaB6),
+                    phase: CorePrivateRoutePhaseV1::BossStaging,
+                },
+            },
+            7,
+        )
+        .expect("route actor");
+    let combat = crate::combat_factory::core_character_combat_test_fixture([0x72; 16]);
+    let player_id = EntityId::new(710_000).expect("player");
+    let (envelope, player) = combat
+        .into_live_player(player_id, sim_core::SimulationVector::new(1.0, 1.0))
+        .expect("live player");
+    let content_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content");
+    let encounters =
+        sim_content::load_core_development_encounter_rooms(&content_root).expect("encounters");
+    let handoff = CorePrivateCaldusStagingHandoff {
+        route_directory: directory.clone(),
+        route_lease: lease,
+        content_revision: route_revision,
+        combat_envelope: envelope,
+        participant: sim_core::NormalWaveHandoff {
+            player,
+            hostile_projectile_ids: EntityIdAllocator::starting_at(
+                NonZeroU64::new(900_000).expect("allocator"),
+            ),
+        },
+        arena: encounters.compile_caldus_arena().expect("B6 arena"),
+        tick: Tick(0),
+        last_reward_activity_sequence: 1,
+    };
+    let runtime = CorePrivateCaldusRuntime::from_staging_handoff(handoff).expect("Caldus runtime");
+    (directory, runtime)
+}
+
 #[derive(Debug, Error)]
 pub enum CorePrivateCaldusRuntimeError {
     #[error("route-bound Sir Caldus composition is invalid")]

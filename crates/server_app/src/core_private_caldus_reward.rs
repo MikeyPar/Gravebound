@@ -6,7 +6,10 @@
 //! reward-gated stable exit. This module carries that evidence without becoming a persistence
 //! writer or exposing client-authored eligibility.
 
-use persistence::StoredCaldusVictoryExit;
+use std::{future::Future, pin::Pin, sync::Arc};
+
+use persistence::{PersistenceError, StoredCaldusVictoryExit};
+use protocol::ManifestHash;
 use sim_core::{
     CoreBossConnectionState, CoreBossParticipant, CoreBossParticipantLock,
     CoreCaldusAntiCheatState, CoreCaldusDefeatPresence, CoreCaldusEligibilityEvidence,
@@ -16,9 +19,13 @@ use sim_core::{
 use thiserror::Error;
 
 use crate::{
-    CaldusExitPresentation, CaldusVictoryCommitResult, CorePrivateCaldusRuntimeInput,
-    CorePrivateRouteActorLease,
+    AuthenticatedAccount, AuthenticatedNamespace, CaldusExitPresentation,
+    CaldusVictoryCommitResult, CaldusVictoryCoordinatorError, CaldusVictoryOwnerCommand,
+    CorePrivateCaldusRuntimeInput, CorePrivateRouteActorLease, PostgresCaldusVictoryCoordinator,
+    ProgressionAwardCode, RewardGrantError,
 };
+
+type CaldusRewardFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CorePrivateCaldusDefeatHandoff {
@@ -187,6 +194,94 @@ pub struct CorePrivateCaldusRewardCommit {
     pub route: protocol::CorePrivateRouteStateV1,
     pub exit: CaldusExitPresentation,
     pub disposition: CorePrivateCaldusRewardCommitDisposition,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoreCaldusRewardAuthorityFailureKind {
+    Retryable,
+    Fatal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreCaldusRewardAuthorityFailure {
+    pub kind: CoreCaldusRewardAuthorityFailureKind,
+    pub message: Arc<str>,
+}
+
+pub trait CoreCaldusRewardAuthority: Send + Sync {
+    fn resolve(
+        &self,
+        authenticated: AuthenticatedAccount,
+        progression_content_revision: ManifestHash,
+        handoff: CorePrivateCaldusDefeatHandoff,
+    ) -> CaldusRewardFuture<'_, Result<CoreDurableCaldusResolution, CoreCaldusRewardAuthorityFailure>>;
+}
+
+impl CoreCaldusRewardAuthority for PostgresCaldusVictoryCoordinator {
+    fn resolve(
+        &self,
+        authenticated: AuthenticatedAccount,
+        progression_content_revision: ManifestHash,
+        handoff: CorePrivateCaldusDefeatHandoff,
+    ) -> CaldusRewardFuture<'_, Result<CoreDurableCaldusResolution, CoreCaldusRewardAuthorityFailure>>
+    {
+        Box::pin(async move {
+            if authenticated.namespace != AuthenticatedNamespace::WipeableTest
+                || authenticated.account_id.as_bytes() != handoff.route_lease().account_id()
+                || handoff.character_id() != handoff.route_lease().character_id()
+                || handoff.lock().participants.len() != 1
+                || handoff.eligibility().len() != 1
+            {
+                return Err(CoreCaldusRewardAuthorityFailure {
+                    kind: CoreCaldusRewardAuthorityFailureKind::Fatal,
+                    message: Arc::from("Caldus session authority does not match frozen defeat"),
+                });
+            }
+            let owners = [CaldusVictoryOwnerCommand {
+                participant: handoff.lock().participants[0],
+                authenticated,
+                character_id: handoff.character_id(),
+                expected_progression_version: handoff.expected_progression_version(),
+                progression_content_revision,
+                eligibility: handoff.eligibility()[0],
+            }];
+            let committed = self
+                .commit(
+                    handoff.instance_lineage_id(),
+                    handoff.lock(),
+                    handoff.active_duration_ticks(),
+                    handoff.defeat_tick().0,
+                    &owners,
+                )
+                .await
+                .map_err(|error| classify_caldus_authority_failure(&error))?;
+            CoreDurableCaldusResolution::from_commit(handoff, &committed).map_err(|error| {
+                CoreCaldusRewardAuthorityFailure {
+                    kind: CoreCaldusRewardAuthorityFailureKind::Fatal,
+                    message: Arc::from(error.to_string()),
+                }
+            })
+        })
+    }
+}
+
+fn classify_caldus_authority_failure(
+    error: &CaldusVictoryCoordinatorError,
+) -> CoreCaldusRewardAuthorityFailure {
+    let kind = match &error {
+        CaldusVictoryCoordinatorError::Reward(RewardGrantError::Persistence(
+            PersistenceError::Database(_),
+        ))
+        | CaldusVictoryCoordinatorError::Persistence(PersistenceError::Database(_))
+        | CaldusVictoryCoordinatorError::ProgressionNotCommitted(
+            ProgressionAwardCode::ServiceUnavailable,
+        ) => CoreCaldusRewardAuthorityFailureKind::Retryable,
+        _ => CoreCaldusRewardAuthorityFailureKind::Fatal,
+    };
+    CoreCaldusRewardAuthorityFailure {
+        kind,
+        message: Arc::from(error.to_string()),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

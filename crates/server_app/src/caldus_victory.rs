@@ -4,6 +4,8 @@
 //! committed personal results replayable; the exit gate remains absent until every eligible
 //! owner has both exact terminals.
 
+use std::path::Path;
+
 use persistence::{
     CaldusVictoryExitCommit, PostgresPersistence, StoredCaldusVictoryExit, StoredCaldusVictoryOwner,
 };
@@ -20,9 +22,9 @@ use thiserror::Error;
 use crate::{
     AuthenticatedAccount, AuthenticatedNamespace, CaldusExitPresentationCommit,
     CaldusInstancePresentation, CaldusInstancePresentationError, PostgresProgressionAwardService,
-    PostgresRewardService, ProgressionAwardCode, ProgressionAwardCommand, ProgressionAwardEvidence,
-    ProgressionAwardOutcome, ProgressionAwardPayload, RewardGrantContext, RewardGrantError,
-    RewardGrantTransaction,
+    PostgresRewardService, ProgressionAwardCode, ProgressionAwardCommand, ProgressionAwardError,
+    ProgressionAwardEvidence, ProgressionAwardOutcome, ProgressionAwardPayload, RewardGrantContext,
+    RewardGrantError, RewardGrantTransaction, SecretRewardEpoch,
 };
 
 const CALDUS_SOURCE_ID: &str = "boss.sir_caldus";
@@ -83,6 +85,24 @@ impl PostgresCaldusVictoryCoordinator {
             rewards,
             progression,
         }
+    }
+
+    pub fn load(
+        persistence: PostgresPersistence,
+        content_root: &Path,
+        epoch: SecretRewardEpoch,
+    ) -> Result<Self, CaldusVictoryCompositionError> {
+        let progression_content = sim_content::load_core_development_progression(content_root)
+            .map_err(|_| CaldusVictoryCompositionError::ProgressionContent)?;
+        let oath_bargain_content = sim_content::load_core_development_oaths_bargains(content_root)
+            .map_err(|_| CaldusVictoryCompositionError::OathBargainContent)?;
+        let rewards = PostgresRewardService::load(persistence.clone(), content_root, epoch)?;
+        let progression = PostgresProgressionAwardService::new(
+            persistence.clone(),
+            &progression_content,
+            &oath_bargain_content,
+        )?;
+        Ok(Self::new(persistence, rewards, progression))
     }
 
     pub async fn commit(
@@ -263,6 +283,18 @@ pub enum CaldusVictoryCoordinatorError {
     Reward(#[from] RewardGrantError),
     #[error(transparent)]
     Persistence(#[from] persistence::PersistenceError),
+}
+
+#[derive(Debug, Error)]
+pub enum CaldusVictoryCompositionError {
+    #[error("Core progression content could not be loaded for Caldus rewards")]
+    ProgressionContent,
+    #[error("Core Oath/Bargain content could not be loaded for Caldus rewards")]
+    OathBargainContent,
+    #[error(transparent)]
+    Reward(#[from] RewardGrantError),
+    #[error(transparent)]
+    Progression(#[from] ProgressionAwardError),
 }
 
 #[cfg(test)]
