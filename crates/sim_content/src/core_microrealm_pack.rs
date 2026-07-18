@@ -11,7 +11,7 @@ use sim_core::{
     CoreMicrorealmSimulation, EnemyLabPlayer, EntityId, EntityIdAllocator,
     NormalWaveClearedHostiles, NormalWaveDefinitions, NormalWaveEnemyKind, NormalWaveEntityIdError,
     NormalWaveError, NormalWaveHandoff, NormalWavePhase, NormalWaveSimulation, NormalWaveSpawn,
-    NormalWaveStep, SpawnInstanceId, Tick, TilePoint, normal_wave_entity_id,
+    NormalWaveStep, SpawnInstanceId, Tick, TilePoint, TileRectangle, normal_wave_entity_id,
 };
 use thiserror::Error;
 
@@ -554,27 +554,45 @@ fn microrealm_combat_arena(
     }
     let enabled_count = usize::try_from(world.enabled_spawn_anchor_count)
         .map_err(|_| CoreMicrorealmPackError::DefinitionDrift)?;
+    let width = i32::try_from(world.width_tiles)
+        .ok()
+        .and_then(|tiles| tiles.checked_mul(1_000))
+        .ok_or(CoreMicrorealmPackError::DefinitionDrift)?;
+    let height = i32::try_from(world.height_tiles)
+        .ok()
+        .and_then(|tiles| tiles.checked_mul(1_000))
+        .ok_or(CoreMicrorealmPackError::DefinitionDrift)?;
+    let shell = i32::try_from(world.solid_shell_tiles)
+        .ok()
+        .and_then(|tiles| tiles.checked_mul(1_000))
+        .ok_or(CoreMicrorealmPackError::DefinitionDrift)?;
+    let interior_height = height
+        .checked_sub(
+            shell
+                .checked_mul(2)
+                .ok_or(CoreMicrorealmPackError::DefinitionDrift)?,
+        )
+        .ok_or(CoreMicrorealmPackError::DefinitionDrift)?;
     ArenaGeometry {
         id: world.header.id.to_string(),
-        width_milli_tiles: i32::try_from(world.width_tiles)
-            .ok()
-            .and_then(|tiles| tiles.checked_mul(1_000))
-            .ok_or(CoreMicrorealmPackError::DefinitionDrift)?,
-        height_milli_tiles: i32::try_from(world.height_tiles)
-            .ok()
-            .and_then(|tiles| tiles.checked_mul(1_000))
-            .ok_or(CoreMicrorealmPackError::DefinitionDrift)?,
-        shell_thickness_milli_tiles: i32::try_from(world.solid_shell_tiles)
-            .ok()
-            .and_then(|tiles| tiles.checked_mul(1_000))
-            .ok_or(CoreMicrorealmPackError::DefinitionDrift)?,
+        width_milli_tiles: width,
+        height_milli_tiles: height,
+        shell_thickness_milli_tiles: shell,
         player_spawn: TilePoint::new(world.player_spawn.x, world.player_spawn.y),
         // `ArenaGeometry` carries a compatibility boss point; the Core microrealm has no boss.
         boss_spawn: TilePoint::new(
             world.bell_portal_area.center.x,
             world.bell_portal_area.center.y,
         ),
-        pillars: Vec::new(),
+        // `WorldSceneDefinition` treats the authored shell as interior blocked terrain. Materialize
+        // that same shell as non-overlapping arena solids so avatar, projectile, and Slipstep
+        // collision share one geometry interpretation.
+        pillars: vec![
+            TileRectangle::new(0, 0, width, shell),
+            TileRectangle::new(0, height - shell, width, shell),
+            TileRectangle::new(0, shell, shell, interior_height),
+            TileRectangle::new(width - shell, shell, shell, interior_height),
+        ],
         anchors: world
             .candidate_spawn_anchors
             .iter()
@@ -875,6 +893,30 @@ mod tests {
             active.into_handoff(),
             Err(CoreMicrorealmPackError::HandoffBeforeClear)
         ));
+    }
+
+    #[test]
+    fn combat_arena_materializes_the_exact_compiled_world_shell() {
+        let combat = combat_fixture();
+        let arena = combat.arena().expect("combat arena");
+        assert_eq!(arena.pillars.len(), 4);
+
+        let root = content_root();
+        let scene = load_core_development_world_flow(&root)
+            .expect("world")
+            .compile_microrealm_scene()
+            .expect("scene");
+        let mut movement = sim_core::PlayerMovementState::at_arena_spawn(&arena).expect("player");
+        let collision =
+            sim_core::ProjectileCollisionWorld::new(&arena, Vec::new()).expect("collision world");
+        let stopped = movement
+            .apply_forced_displacement(SimulationVector::new(-20.0, 0.0), &collision, &arena)
+            .expect("forced movement");
+        let projected = sim_core::simulation_to_tile_point(stopped.position).expect("projection");
+        assert_eq!(projected.x_milli_tiles, 1_300);
+        assert!(stopped.solid.is_some());
+        assert!(scene.can_occupy(projected));
+        assert!(!scene.can_occupy(TilePoint::new(1_299, projected.y_milli_tiles)));
     }
 
     #[test]
