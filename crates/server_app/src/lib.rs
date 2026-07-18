@@ -14,6 +14,7 @@ mod combat_factory;
 mod core_extraction_runtime;
 mod core_journey_world_flow;
 mod core_lifecycle;
+mod core_private_combat_frame;
 mod core_private_fixed_dungeon_runtime;
 mod core_private_life_foundation;
 mod core_private_life_runtime_bootstrap;
@@ -98,8 +99,9 @@ pub use core_lifecycle::{
     CoreLiveDirectory, CoreLiveError, CoreResumeOutcome, DANGER_CHECKPOINT_INTERVAL_TICKS,
 };
 pub use core_private_fixed_dungeon_runtime::{
-    CorePrivateFixedDungeonAdvance, CorePrivateFixedDungeonRoomFrame,
-    CorePrivateFixedDungeonRuntime, CorePrivateFixedDungeonRuntimeError,
+    CorePrivateFixedDungeonAdvance, CorePrivateFixedDungeonLiveRoomFrame,
+    CorePrivateFixedDungeonRoomFrame, CorePrivateFixedDungeonRuntime,
+    CorePrivateFixedDungeonRuntimeError,
 };
 pub use core_private_life_runtime_bootstrap::{
     CorePrivateLifeBootstrapDisposition, CorePrivateLifeBootstrapError,

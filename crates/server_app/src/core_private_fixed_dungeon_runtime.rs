@@ -10,13 +10,17 @@ use protocol::{
     CorePrivateRouteContentRevisionV1, CorePrivateRoutePhaseV1, CorePrivateRouteRoomV1,
     CorePrivateRouteSceneV1, CorePrivateRouteStateV1,
 };
-use sim_core::{FixedRoomPhase, Tick};
+use sim_core::{
+    FixedRoomPhase, PlayerMovementState, ProjectileCollisionWorld, Tick, TilePoint,
+    simulation_to_tile_point,
+};
 use thiserror::Error;
 
 use crate::{
-    CoreBellPortalTransition, CoreCharacterCombatEnvelope, CorePrivateMicrorealmRuntime,
-    CorePrivateMicrorealmRuntimeError, CorePrivateRouteActorDirectory, CorePrivateRouteActorLease,
-    CorePrivateRouteRuntimeError,
+    CoreBellPortalTransition, CoreCharacterCombatEnvelope, CorePrivateMicrorealmInput,
+    CorePrivateMicrorealmRuntime, CorePrivateMicrorealmRuntimeError,
+    CorePrivateRouteActorDirectory, CorePrivateRouteActorLease, CorePrivateRouteRuntimeError,
+    core_private_combat_frame::{core_player_movement_config, step_live_player_combat},
     core_private_microrealm_runtime::CorePrivateMicrorealmDungeonHandoff,
 };
 
@@ -33,6 +37,18 @@ pub struct CorePrivateFixedDungeonAdvance {
     pub transition: sim_content::CoreFixedDungeonAdvance,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct CorePrivateFixedDungeonLiveRoomFrame {
+    pub input_sequence: u64,
+    pub tick: Tick,
+    pub player_position: TilePoint,
+    pub movement: sim_core::MovementStep,
+    pub combat: sim_core::CombatStep,
+    pub route: CorePrivateRouteStateV1,
+    pub step: sim_content::CoreFixedDungeonRoomStep,
+    pub player_died: bool,
+}
+
 #[derive(Debug)]
 pub struct CorePrivateFixedDungeonRuntime {
     route_directory: CorePrivateRouteActorDirectory,
@@ -40,6 +56,7 @@ pub struct CorePrivateFixedDungeonRuntime {
     content_revision: CorePrivateRouteContentRevisionV1,
     combat_envelope: CoreCharacterCombatEnvelope,
     combat: sim_content::CoreFixedDungeonCombat,
+    movement: Option<PlayerMovementState>,
     tick: Tick,
 }
 
@@ -85,6 +102,7 @@ impl CorePrivateFixedDungeonRuntime {
             content_revision: expected_content_revision.clone(),
             combat_envelope: handoff.combat_envelope,
             combat,
+            movement: None,
             tick: handoff.final_tick,
         })
     }
@@ -126,6 +144,7 @@ impl CorePrivateFixedDungeonRuntime {
         self.validate_route_authority(&route_before)?;
         let mut staged = self.combat.clone();
         let transition = staged.advance()?;
+        let movement = movement_for_combat(&staged, &self.combat_envelope)?;
         let (room, phase) = route_position(transition.to, staged.room_phase())?;
         let route = self
             .route_directory
@@ -137,7 +156,88 @@ impl CorePrivateFixedDungeonRuntime {
             )
             .await?;
         self.combat = staged;
+        self.movement = movement;
         Ok(CorePrivateFixedDungeonAdvance { route, transition })
+    }
+
+    /// Generates one complete room frame from retained player intent. Movement, player attacks,
+    /// hostile room simulation, lifecycle, route CAS, and local state commit share one staged
+    /// transaction; client input cannot author combat results or room authority.
+    pub async fn step_live_room(
+        &mut self,
+        input: CorePrivateMicrorealmInput,
+    ) -> Result<CorePrivateFixedDungeonLiveRoomFrame, CorePrivateFixedDungeonRuntimeError> {
+        let tick = self
+            .tick
+            .checked_next()
+            .ok_or(CorePrivateFixedDungeonRuntimeError::TickExhausted)?;
+        let route_before = self.route_directory.snapshot(self.route_lease)?;
+        self.validate_route_authority(&route_before)?;
+        let mut staged_combat = self.combat.clone();
+        let mut staged_movement = self
+            .movement
+            .ok_or(CorePrivateFixedDungeonRuntimeError::RoomMovementUnavailable)?;
+        let arena = staged_combat
+            .arena()
+            .cloned()
+            .ok_or(CorePrivateFixedDungeonRuntimeError::RoomMovementUnavailable)?;
+        let collision_world =
+            ProjectileCollisionWorld::new(&arena, staged_combat.alive_hurtboxes()?)?;
+        let (combat_step, movement_step) = step_live_player_combat(
+            staged_combat.player_mut()?,
+            &mut staged_movement,
+            &input,
+            &arena,
+            &collision_world,
+        )?;
+        if combat_step.tick != tick {
+            return Err(CorePrivateFixedDungeonRuntimeError::CombatTickMismatch);
+        }
+        let living_inside = u16::from(
+            staged_combat
+                .player()?
+                .consumables
+                .vitals()
+                .current_health()
+                != 0,
+        );
+        let room_input = sim_content::CoreImmutableFixedRoomInput {
+            crossed_activation_boundary: matches!(
+                staged_combat.room_phase(),
+                Some(FixedRoomPhase::Dormant)
+            ),
+            living_inside,
+            living_party_outside: 0,
+            doorway_hurtbox_blocked: false,
+            combat_step: Some(combat_step.clone()),
+        };
+        let step = staged_combat.step_room(tick, &room_input)?;
+        let player = staged_combat.player()?;
+        let player_position = simulation_to_tile_point(player.target.position)?;
+        let player_died = player.consumables.vitals().current_health() == 0;
+        let (room, phase) = route_position(staged_combat.node(), Some(step.phase_after()))?;
+        let route = self
+            .route_directory
+            .apply_fixed_dungeon_authority(
+                self.route_lease,
+                route_before.state_version,
+                room,
+                phase,
+            )
+            .await?;
+        self.combat = staged_combat;
+        self.movement = Some(staged_movement);
+        self.tick = tick;
+        Ok(CorePrivateFixedDungeonLiveRoomFrame {
+            input_sequence: input.input_sequence,
+            tick,
+            player_position,
+            movement: movement_step,
+            combat: combat_step,
+            route,
+            step,
+            player_died,
+        })
     }
 
     pub async fn step_room(
@@ -192,6 +292,22 @@ impl CorePrivateFixedDungeonRuntime {
         }
         Ok(())
     }
+}
+
+fn movement_for_combat(
+    combat: &sim_content::CoreFixedDungeonCombat,
+    envelope: &CoreCharacterCombatEnvelope,
+) -> Result<Option<PlayerMovementState>, CorePrivateFixedDungeonRuntimeError> {
+    let Some(arena) = combat.arena() else {
+        return Ok(None);
+    };
+    let config = core_player_movement_config(
+        envelope.movement_milli_tiles_per_second(),
+        sim_core::PLAYER_COLLISION_RADIUS_MILLI_TILES,
+    )?;
+    let movement =
+        PlayerMovementState::new_with_config(combat.player()?.target.position, config, arena)?;
+    Ok(Some(movement))
 }
 
 fn route_position(
@@ -250,6 +366,12 @@ pub enum CorePrivateFixedDungeonRuntimeError {
     TickExhausted,
     #[error("live Core fixed-dungeon combat tick does not match the server-owned frame")]
     CombatTickMismatch,
+    #[error("live Core fixed-dungeon room movement is unavailable")]
+    RoomMovementUnavailable,
+    #[error(transparent)]
+    Movement(#[from] sim_core::MovementError),
+    #[error(transparent)]
+    Collision(#[from] sim_core::CollisionError),
     #[error(transparent)]
     Microrealm(#[from] CorePrivateMicrorealmRuntimeError),
     #[error(transparent)]
@@ -263,7 +385,9 @@ mod tests {
     use std::{num::NonZeroU64, path::Path};
 
     use protocol::{ManifestHash, WorldFlowContentRevisionV1};
-    use sim_core::{CombatStep, EntityId, EntityIdAllocator, SimulationVector};
+    use sim_core::{
+        AimDirection, CombatStep, EntityId, EntityIdAllocator, MovementAction, SimulationVector,
+    };
 
     use super::*;
     use crate::{
@@ -306,6 +430,16 @@ mod tests {
         CorePrivateRouteActorLease,
         CorePrivateFixedDungeonRuntime,
     ) {
+        fixture_at(Tick(32))
+    }
+
+    fn fixture_at(
+        final_tick: Tick,
+    ) -> (
+        CorePrivateRouteActorDirectory,
+        CorePrivateRouteActorLease,
+        CorePrivateFixedDungeonRuntime,
+    ) {
         let directory = CorePrivateRouteActorDirectory::new();
         let lease = directory
             .register_actor(
@@ -344,7 +478,7 @@ mod tests {
                 ),
             },
             next_hostile_spawn_ordinal: 9,
-            final_tick: Tick(32),
+            final_tick,
         };
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content");
         let encounters =
@@ -353,6 +487,18 @@ mod tests {
             CorePrivateFixedDungeonRuntime::from_handoff(handoff, &route_revision(), encounters)
                 .expect("fixed dungeon runtime");
         (directory, lease, runtime)
+    }
+
+    fn live_input(sequence: u64) -> CorePrivateMicrorealmInput {
+        CorePrivateMicrorealmInput {
+            input_sequence: sequence,
+            movement: MovementAction::default(),
+            aim: AimDirection::east(),
+            primary_held: false,
+            primary_sequence: 0,
+            ability_1_sequence: 0,
+            ability_2_sequence: 0,
+        }
     }
 
     fn room_input(tick: Tick, crossed: bool) -> sim_content::CoreImmutableFixedRoomInput {
@@ -401,6 +547,32 @@ mod tests {
                 .expect("shutdown")
                 .zero_residue
         );
+    }
+
+    #[tokio::test]
+    async fn retained_intent_generates_the_first_authoritative_b1_frame() {
+        let (directory, _, mut runtime) = fixture_at(Tick(0));
+        runtime.advance().await.expect("enter B1");
+
+        let frame = runtime
+            .step_live_room(live_input(7))
+            .await
+            .expect("live room frame");
+
+        assert_eq!(frame.input_sequence, 7);
+        assert_eq!(frame.tick, Tick(1));
+        assert_eq!(frame.combat.tick, Tick(1));
+        assert_eq!(
+            frame.player_position,
+            simulation_to_tile_point(runtime.combat.player().unwrap().target.position).unwrap()
+        );
+        assert_eq!(frame.route.phase, CorePrivateRoutePhaseV1::RoomSpawnWarning);
+        assert_eq!(frame.step.phase_after(), FixedRoomPhase::SpawnWarning);
+        assert!(!frame.player_died);
+        assert_eq!(runtime.tick(), Tick(1));
+
+        directory.begin_shutdown();
+        assert!(directory.finish_shutdown().await.unwrap().zero_residue);
     }
 
     #[tokio::test]

@@ -244,6 +244,51 @@ impl CoreFixedDungeonCombat {
         self.plans.arena(self.node())
     }
 
+    pub fn player(&self) -> Result<&EnemyLabPlayer, CoreFixedDungeonError> {
+        match &self.state {
+            CoreFixedDungeonState::Vestibule(handoff)
+            | CoreFixedDungeonState::Rest {
+                participant: handoff,
+                ..
+            }
+            | CoreFixedDungeonState::BossStaging(handoff) => Ok(&handoff.player),
+            CoreFixedDungeonState::B1(room) | CoreFixedDungeonState::B5(room) => {
+                room.player().map_err(Into::into)
+            }
+            CoreFixedDungeonState::B2(room) => room.player().map_err(Into::into),
+            CoreFixedDungeonState::B3(room) => room.player().map_err(Into::into),
+        }
+    }
+
+    pub fn player_mut(&mut self) -> Result<&mut EnemyLabPlayer, CoreFixedDungeonError> {
+        match &mut self.state {
+            CoreFixedDungeonState::Vestibule(handoff)
+            | CoreFixedDungeonState::Rest {
+                participant: handoff,
+                ..
+            }
+            | CoreFixedDungeonState::BossStaging(handoff) => Ok(&mut handoff.player),
+            CoreFixedDungeonState::B1(room) | CoreFixedDungeonState::B5(room) => {
+                room.player_mut().map_err(Into::into)
+            }
+            CoreFixedDungeonState::B2(room) => room.player_mut().map_err(Into::into),
+            CoreFixedDungeonState::B3(room) => room.player_mut().map_err(Into::into),
+        }
+    }
+
+    pub fn alive_hurtboxes(&self) -> Result<Vec<sim_core::EnemyHurtbox>, CoreFixedDungeonError> {
+        match &self.state {
+            CoreFixedDungeonState::B1(room) | CoreFixedDungeonState::B5(room) => {
+                room.alive_hurtboxes().map_err(Into::into)
+            }
+            CoreFixedDungeonState::B2(room) => room.alive_hurtboxes().map_err(Into::into),
+            CoreFixedDungeonState::B3(room) => room.alive_hurtboxes().map_err(Into::into),
+            CoreFixedDungeonState::Vestibule(_)
+            | CoreFixedDungeonState::Rest { .. }
+            | CoreFixedDungeonState::BossStaging(_) => Ok(Vec::new()),
+        }
+    }
+
     #[must_use]
     pub fn hostile_entity_ids(&self) -> Vec<EntityId> {
         let mut ids = match &self.state {

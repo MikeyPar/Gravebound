@@ -152,6 +152,18 @@ impl CoreB3CombatSimulation {
             .ok_or(CoreFixedRoomEncounterError::DefinitionDrift)
     }
 
+    fn player(&self) -> &EnemyLabPlayer {
+        &self.player
+    }
+
+    fn player_mut(&mut self) -> &mut EnemyLabPlayer {
+        &mut self.player
+    }
+
+    fn alive_hurtboxes(&self) -> Result<Vec<sim_core::EnemyHurtbox>, CoreFixedRoomEncounterError> {
+        self.health.alive_hurtboxes().map_err(Into::into)
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "the single-actor combat transaction keeps exact ordering auditable"
@@ -330,6 +342,37 @@ impl CoreB3FixedRoomSimulation {
         self.combat
             .as_ref()
             .and_then(|combat| combat.snapshot().ok())
+    }
+
+    pub fn player(&self) -> Result<&EnemyLabPlayer, CoreFixedRoomEncounterError> {
+        if let Some(combat) = &self.combat {
+            return Ok(combat.player());
+        }
+        self.participant
+            .as_ref()
+            .map(|handoff| &handoff.player)
+            .ok_or(CoreFixedRoomEncounterError::MissingParticipantHandoff)
+    }
+
+    pub fn player_mut(&mut self) -> Result<&mut EnemyLabPlayer, CoreFixedRoomEncounterError> {
+        if let Some(combat) = &mut self.combat {
+            return Ok(combat.player_mut());
+        }
+        self.participant
+            .as_mut()
+            .map(|handoff| &mut handoff.player)
+            .ok_or(CoreFixedRoomEncounterError::MissingParticipantHandoff)
+    }
+
+    pub fn alive_hurtboxes(
+        &self,
+    ) -> Result<Vec<sim_core::EnemyHurtbox>, CoreFixedRoomEncounterError> {
+        if self.authority.phase() != FixedRoomPhase::Active {
+            return Ok(Vec::new());
+        }
+        self.combat
+            .as_ref()
+            .map_or_else(|| Ok(Vec::new()), CoreB3CombatSimulation::alive_hurtboxes)
     }
 
     pub fn set_damage_policy(&mut self, policy: HostileDamagePolicy) {

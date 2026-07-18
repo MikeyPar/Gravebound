@@ -11,16 +11,15 @@ use protocol::{
     CorePrivateRouteStateV1,
 };
 use sim_core::{
-    AimDirection, ArenaGeometry, CombatAction, CombatError, CombatStep, ConsumableAction,
-    ConsumableError, CoreMicrorealmEvent, CoreMicrorealmInput, CoreMicrorealmPhase,
-    CoreMicrorealmSimulation, FriendlyProjectileSource, MOVEMENT_RESPONSE_TICKS, MovementAction,
-    MovementError, MovementStep, PlayerMovementConfig, PlayerMovementState,
-    ProjectileCollisionWorld, SceneObjectGeometry, Tick, TilePoint, WorldSceneDefinition,
-    WorldSceneKind, normal_wave_projectile_allocator, simulation_to_tile_point,
-    tile_point_to_simulation,
+    AimDirection, ArenaGeometry, CombatError, CombatStep, ConsumableError, CoreMicrorealmEvent,
+    CoreMicrorealmInput, CoreMicrorealmPhase, CoreMicrorealmSimulation, FriendlyProjectileSource,
+    MovementAction, MovementError, MovementStep, PlayerMovementState, ProjectileCollisionWorld,
+    SceneObjectGeometry, Tick, TilePoint, WorldSceneDefinition, WorldSceneKind,
+    normal_wave_projectile_allocator, simulation_to_tile_point, tile_point_to_simulation,
 };
 use thiserror::Error;
 
+use crate::core_private_combat_frame::{core_player_movement_config, step_live_player_combat};
 use crate::{
     CoreBellPortalTransition, CoreCharacterCombat, CoreCharacterCombatEnvelope,
     CoreCombatFactoryError, CorePrivateRouteActorDirectory, CorePrivateRouteActorLease,
@@ -171,7 +170,7 @@ impl CorePrivateMicrorealmRuntime {
             })
             .filter(|(_, radius)| *radius > 0)
             .ok_or(CorePrivateMicrorealmRuntimeError::InvalidComposition)?;
-        let movement_config = movement_config(
+        let movement_config = core_player_movement_config(
             character_combat.movement_milli_tiles_per_second,
             scene.player_radius_milli_tiles,
         )?;
@@ -497,21 +496,6 @@ fn run_player_entity_id(
     Ok(value)
 }
 
-#[allow(clippy::cast_precision_loss)]
-fn movement_config(
-    movement_milli_tiles_per_second: u32,
-    player_radius_milli_tiles: i32,
-) -> Result<PlayerMovementConfig, CorePrivateMicrorealmRuntimeError> {
-    if movement_milli_tiles_per_second == 0 || player_radius_milli_tiles <= 0 {
-        return Err(CorePrivateMicrorealmRuntimeError::InvalidComposition);
-    }
-    Ok(PlayerMovementConfig {
-        final_speed_tiles_per_second: movement_milli_tiles_per_second as f32 / 1_000.0,
-        response_ticks: MOVEMENT_RESPONSE_TICKS,
-        collision_radius_tiles: player_radius_milli_tiles as f32 / 1_000.0,
-    })
-}
-
 fn step_player_combat(
     combat: &mut sim_content::CoreMicrorealmPackCombat,
     movement: &mut PlayerMovementState,
@@ -520,32 +504,7 @@ fn step_player_combat(
     collision_world: &ProjectileCollisionWorld,
 ) -> Result<(CombatStep, MovementStep), CorePrivateMicrorealmRuntimeError> {
     let player = combat.player_mut();
-    if player.target.position != movement.position() {
-        return Err(CorePrivateMicrorealmRuntimeError::InvalidComposition);
-    }
-    let (step, movement_step) = player.combat.step_with_movement_outcome(
-        movement,
-        CombatAction {
-            aim: input.aim,
-            movement: input.movement,
-            primary_held: input.primary_held,
-            primary_press_sequence: input.primary_sequence,
-            ability_1_press_sequence: input.ability_1_sequence,
-            ability_2_press_sequence: input.ability_2_sequence,
-        },
-        arena,
-        collision_world,
-    )?;
-    player.target.position = movement_step.position;
-    player.consumables.step(ConsumableAction::default())?;
-    player
-        .target
-        .additional_direct_damage_reductions_basis_points =
-        (step.direct_damage_reduction_basis_points != 0)
-            .then_some(step.direct_damage_reduction_basis_points)
-            .into_iter()
-            .collect();
-    Ok((step, movement_step))
+    step_live_player_combat(player, movement, input, arena, collision_world)
 }
 
 fn route_phase(phase: CoreMicrorealmPhase) -> CorePrivateRoutePhaseV1 {

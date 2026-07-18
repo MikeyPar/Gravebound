@@ -274,6 +274,35 @@ impl CoreImmutableFixedRoomSimulation {
         self.wave.as_ref()
     }
 
+    pub fn player(&self) -> Result<&EnemyLabPlayer, CoreFixedRoomEncounterError> {
+        if let Some(wave) = &self.wave {
+            return Ok(wave.player());
+        }
+        self.participant
+            .as_ref()
+            .map(|handoff| &handoff.player)
+            .ok_or(CoreFixedRoomEncounterError::MissingParticipantHandoff)
+    }
+
+    pub fn player_mut(&mut self) -> Result<&mut EnemyLabPlayer, CoreFixedRoomEncounterError> {
+        if let Some(wave) = &mut self.wave {
+            return Ok(wave.player_mut());
+        }
+        self.participant
+            .as_mut()
+            .map(|handoff| &mut handoff.player)
+            .ok_or(CoreFixedRoomEncounterError::MissingParticipantHandoff)
+    }
+
+    pub fn alive_hurtboxes(
+        &self,
+    ) -> Result<Vec<sim_core::EnemyHurtbox>, CoreFixedRoomEncounterError> {
+        self.wave.as_ref().map_or_else(
+            || Ok(Vec::new()),
+            |wave| wave.alive_hurtboxes().map_err(Into::into),
+        )
+    }
+
     pub fn step(
         &mut self,
         tick: Tick,
@@ -673,6 +702,21 @@ impl CoreB2CombatSimulation {
     ) -> Result<sim_core::NormalWaveResetHandoff, CoreFixedRoomEncounterError> {
         self.immutable_wave.into_reset_handoff().map_err(Into::into)
     }
+
+    fn player(&self) -> &EnemyLabPlayer {
+        self.immutable_wave.player()
+    }
+
+    fn player_mut(&mut self) -> &mut EnemyLabPlayer {
+        self.immutable_wave.player_mut()
+    }
+
+    fn alive_hurtboxes(&self) -> Result<Vec<sim_core::EnemyHurtbox>, CoreFixedRoomEncounterError> {
+        let mut hurtboxes = self.immutable_wave.alive_hurtboxes()?;
+        hurtboxes.extend(self.authored_health.alive_hurtboxes()?);
+        hurtboxes.sort_by_key(|hurtbox| hurtbox.id());
+        Ok(hurtboxes)
+    }
 }
 
 /// Owns the exact mixed B2 roster under one player/projectile/lifecycle transaction.
@@ -739,6 +783,37 @@ impl CoreB2FixedRoomSimulation {
         self.combat
             .as_ref()
             .map_or_else(Vec::new, |combat| combat.immutable_wave.snapshots())
+    }
+
+    pub fn player(&self) -> Result<&EnemyLabPlayer, CoreFixedRoomEncounterError> {
+        if let Some(combat) = &self.combat {
+            return Ok(combat.player());
+        }
+        self.participant
+            .as_ref()
+            .map(|handoff| &handoff.player)
+            .ok_or(CoreFixedRoomEncounterError::MissingParticipantHandoff)
+    }
+
+    pub fn player_mut(&mut self) -> Result<&mut EnemyLabPlayer, CoreFixedRoomEncounterError> {
+        if let Some(combat) = &mut self.combat {
+            return Ok(combat.player_mut());
+        }
+        self.participant
+            .as_mut()
+            .map(|handoff| &mut handoff.player)
+            .ok_or(CoreFixedRoomEncounterError::MissingParticipantHandoff)
+    }
+
+    pub fn alive_hurtboxes(
+        &self,
+    ) -> Result<Vec<sim_core::EnemyHurtbox>, CoreFixedRoomEncounterError> {
+        if self.authority.phase() != FixedRoomPhase::Active {
+            return Ok(Vec::new());
+        }
+        self.combat
+            .as_ref()
+            .map_or_else(|| Ok(Vec::new()), CoreB2CombatSimulation::alive_hurtboxes)
     }
 
     #[must_use]
