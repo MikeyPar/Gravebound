@@ -1,0 +1,158 @@
+{
+  "schema_version": 1,
+  "pack_id": "review.m03.bell_bargain_shrine.states.v1",
+  "status": {
+    "classification": "unregistered_review_candidate",
+    "runtime_registered": false,
+    "content_hash_input": false,
+    "runtime_bundle": null,
+    "intended_base_candidate": "review.dungeon.bell.bargain_shrine"
+  },
+  "source_revision": "b50a8c02bd7f8a0567c797c4f3e7f23ce12c0a51",
+  "design_authority": [
+    "Gravebound_Production_GDD_v1_Canonical.md:BRG-001,BRG-002,BRG-005,DNG-003,DNG-004,DNG-005,UI-001,UI-002,UI-010,UI-011,ART-001,ART-002,ART-004,ART-005,ART-006,ART-020,ART-030",
+    "Gravebound_Content_Production_Spec_v1.md:CONT-014,CONT-ROOM-007,CONT-VALID-001",
+    "Gravebound_Development_Roadmap_v1.md:GB-M03-03,GB-M03-05"
+  ],
+  "inventory_audit": {
+    "base_shrine": "assets/core/dungeons/bell_fixed_route_landmarks/v1/runtime/bell-bargain-shrine.192.png",
+    "choice_icons": "assets/core/oaths_bargains/core_choice_icons.svg",
+    "authoritative_ui_evidence": "docs/evidence/GB-M03-05D-shrine-1280x720.png",
+    "prior_caldus_review_versions": [1, 2, 3, 4, 5, 6],
+    "selected_gap": "in-world Open versus durable Selected/Refused state distinction"
+  },
+  "generation": {
+    "method": "OpenAI built-in image generation",
+    "use_case": "stylized-concept",
+    "reference": {
+      "path": "../../bell_fixed_route_landmarks/v1/runtime/bell-bargain-shrine.192.png",
+      "role": "immutable identity, architecture, palette, camera, scale, and bottom-anchor seed",
+      "sha256": "c394735455ec95c7eed0449d67661786b9f7afd06d585a5c1ef23ab497c19b81"
+    },
+    "prompt_record": "README.md#exact-generation-prompt"
+  },
+  "postprocess": {
+    "chroma_helper": "C:/Users/micha/.codex/skills/.system/imagegen/scripts/remove_chroma_key.py",
+    "sampled_key": "#fb03f8",
+    "chroma_arguments": [
+      "--auto-key",
+      "border",
+      "--soft-matte",
+      "--transparent-threshold",
+      "12",
+      "--opaque-threshold",
+      "220",
+      "--despill"
+    ],
+    "sprite_normalizer": "C:/Users/micha/.codex/plugins/cache/openai-curated-remote/game-studio/0.1.2/scripts/normalize_sprite_strip.py",
+    "slot_count": 3,
+    "frame_dimensions": [192, 192],
+    "anchor_pixels": [96, 192],
+    "frame_01_locked_to_seed": true,
+    "shared_generated_scale_correction": "176/192",
+    "alpha_threshold": 8,
+    "review_builder": {
+      "path": "source/build_review_artifacts.py",
+      "sha256": "e2981a55d87c1edc776b281d7cc0f22c572aa91102a39ac9ee670d59365008ad"
+    }
+  },
+  "sources": [
+    {
+      "path": "source/bell-bargain-state-strip.raw-chroma.png",
+      "dimensions": [2172, 724],
+      "mode": "RGB",
+      "sha256": "f54ad49d14ae2a1f477165790c3b8ea27cd6b1252784e665dbd2702dba8185f5"
+    },
+    {
+      "path": "source/bell-bargain-state-strip.alpha.png",
+      "dimensions": [2172, 724],
+      "mode": "RGBA",
+      "sha256": "de097daf2c0185796012f7add17ac2a5cce4b417f525fce949f5b2875d014419"
+    }
+  ],
+  "frames": [
+    {
+      "path": "frames/state/01.png",
+      "projection": "Open",
+      "state_read": "three equal lit talismans; unresolved",
+      "dimensions": [192, 192],
+      "anchor_pixels": [96, 192],
+      "alpha_bounds": [40, 16, 152, 192],
+      "connected_components_at_alpha_8": 4,
+      "sha256": "c394735455ec95c7eed0449d67661786b9f7afd06d585a5c1ef23ab497c19b81"
+    },
+    {
+      "path": "frames/state/02.png",
+      "projection": "Selected",
+      "state_read": "one sealed lit talisman; committed selection",
+      "dimensions": [192, 192],
+      "anchor_pixels": [96, 192],
+      "alpha_bounds": [40, 16, 152, 192],
+      "connected_components_at_alpha_8": 1,
+      "sha256": "98b6193ad2742b02762886446c002f3cb7055843498bccdeb13f142126247770"
+    },
+    {
+      "path": "frames/state/03.png",
+      "projection": "Refused",
+      "state_read": "three inert talismans and broken ash loop; committed refusal",
+      "dimensions": [192, 192],
+      "anchor_pixels": [96, 192],
+      "alpha_bounds": [40, 16, 152, 192],
+      "connected_components_at_alpha_8": 1,
+      "sha256": "ff93b07aca480e82353986bf0a9f031201a3af6b86477fbfb91cce94f8e56fa0"
+    }
+  ],
+  "previews": [
+    {
+      "path": "previews/bell-bargain-states.192px.png",
+      "dimensions": [600, 192],
+      "sha256": "5d9dc5db01b6cca526576af0be5baaab12d82ab85dea3c8aab04e60ec42b82fb"
+    },
+    {
+      "path": "previews/bell-bargain-states.96px.png",
+      "dimensions": [312, 96],
+      "sha256": "7e1dcf7554ca1777ce1055b03e75cf6fa2be71f5d86c8d203712c35be52e3b6f"
+    },
+    {
+      "path": "previews/bell-bargain-states.standard.1280x720.review-mock.png",
+      "dimensions": [1280, 720],
+      "sha256": "c6d3d4745942a3c157abb2fdf5f3d49ba4126861d85386ad8d69e6d54964563c"
+    },
+    {
+      "path": "previews/bell-bargain-states.reduced.1280x720.review-mock.png",
+      "dimensions": [1280, 720],
+      "sha256": "57c9d661aa17a72508d5ada36c0dce81efbd774f8e51ff944b4fef60e454387c"
+    },
+    {
+      "path": "previews/bell-bargain-states.standard.1920x1080.review-mock.png",
+      "dimensions": [1920, 1080],
+      "sha256": "dc19f2115bc27ba895d6d11a722e43ef1c98c476ef984f15ccf225cad8075e27"
+    },
+    {
+      "path": "previews/bell-bargain-states.reduced.1920x1080.review-mock.png",
+      "dimensions": [1920, 1080],
+      "sha256": "8504168f485bbb18d75faaf31158b2e98e2900119ec98ceb628681e35720d784"
+    }
+  ],
+  "authority_boundaries": {
+    "server_projection_selects_state": true,
+    "may_author_bargain_id": false,
+    "may_select_or_refuse": false,
+    "may_apply_bargain_mechanics": false,
+    "may_advance_aggregate_version": false,
+    "may_authorize_b4_to_b5": false,
+    "may_resolve_unknown_or_in_flight_outcome": false,
+    "may_replace_native_choice_ui": false,
+    "unavailable_state_intentionally_omitted": true,
+    "normal_route_enabled": false
+  },
+  "review_gates": [
+    "bind only to stored Open, Selected, or Refused server projection",
+    "retain last acknowledged state through in-flight, response-loss, and reconnect ambiguity",
+    "optimized native B4 review at 1280x720 and 1920x1080 in standard and reduced-effects modes",
+    "tile, collision, interaction prompt, modal input, anchor, and grayscale/colorblind validation",
+    "registry/content-hash proposal, rollback evidence, and commercial visual-similarity review"
+  ],
+  "remaining_integration_decision": "Choose full-state sprites or base-plus-overlays; full-state sprites are recommended subject to optimized native B4 validation.",
+  "license_provenance": "Project-generated review material using one project-local unregistered seed; no third-party game, artist, brand, or commercial asset reference was supplied. Commercial-rights and similarity review remain required."
+}
