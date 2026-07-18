@@ -1,0 +1,166 @@
+{
+  "schema_version": 1,
+  "pack_id": "review.m03.sir_caldus.combat_presentation.v1",
+  "status": {
+    "classification": "unregistered_review_candidate",
+    "runtime_registered": false,
+    "content_hash_input": false,
+    "runtime_bundle": null,
+    "promotes_content": false,
+    "normal_route_enabled": false
+  },
+  "source_revision": "7719264d58c35b119e31099cb44ebee508174d68",
+  "design_authority": [
+    "Gravebound_Production_GDD_v1_Canonical.md:SIM-010,SIM-011,SIM-014,COM-005,COM-006,DNG-003,DNG-005,DNG-006,ENC-005,ENC-010,ART-001,ART-002,ART-005,ART-006,ART-020,ART-030,QA-007",
+    "Gravebound_Content_Production_Spec_v1.md:CONT-010,CONT-013,CONT-ROOM-002,CONT-ROOM-007,CONT-PATTERN-003,CONT-BOSS-001,CONT-BOSS-002",
+    "Gravebound_Development_Roadmap_v1.md:GB-M03-03,GB-M03-exit-gate,M03-content-and-asset-burn-up"
+  ],
+  "supplemental_approved_resolutions": [
+    "docs/spec-conflicts/SPEC-CONFLICT-022-m03-caldus-phase-charge-and-targeting.md",
+    "docs/spec-conflicts/SPEC-CONFLICT-024-m03-caldus-cardinal-charge-axis.md"
+  ],
+  "inventory_audit": {
+    "existing_character_packs": "assets/core/bosses/sir_caldus/review/v1..v6",
+    "existing_resolution_states": "assets/core/ui/caldus_resolution_states/v1",
+    "existing_pending_risk": "assets/core/ui/pending_loot_risk/v1",
+    "existing_stable_exit": "assets/core/dungeons/bell_fixed_route_landmarks/v1",
+    "selected_gap": "exact Bell Court floor and external simulation-driven telegraph language",
+    "copied_existing_assets": []
+  },
+  "generation": {
+    "method": "deterministic project-authored Pillow raster pipeline",
+    "image_generation_used": false,
+    "image_generation_decision": "Exact authored geometry, standard/reduced parity, and deterministic rebuild made code-native raster work the appropriate path under the image-generation skill.",
+    "brief_record": "README.md#exact-deterministic-art-brief-and-provenance",
+    "builder": "source/build_review_artifacts.py",
+    "hash_manifest": "SHA256SUMS.txt",
+    "third_party_visual_references": []
+  },
+  "arena": {
+    "id": "arena.boss.caldus_01",
+    "path": "runtime/caldus-bell-court.576x576.png",
+    "dimensions": [576, 576],
+    "mode": "RGBA",
+    "pixels_per_tile": 32,
+    "room_size_tiles": [18, 18],
+    "origin": "northwest",
+    "walkable_circle": {"center_tiles": [9, 9], "radius_tiles": 8},
+    "west_door": {"point_tiles": [0, 9], "width_tiles": 3},
+    "boss_anchor_tiles": [9, 9],
+    "stage_anchor_tiles": [2.5, 9],
+    "group_anchor_tiles": [[2.5, 6], [2.5, 12]],
+    "charge_endpoint_tiles": [[1, 9], [17, 9], [9, 1], [9, 17]],
+    "authority": "presentation_only_compiled_arena_data_owns_geometry"
+  },
+  "runtime_materials": [
+    {"path": "runtime/telegraph-physical-major.standard.32.png", "family": "physical_major_or_severe", "effects": "standard", "dimensions": [32, 32], "mode": "RGBA"},
+    {"path": "runtime/telegraph-physical-major.reduced.32.png", "family": "physical_major_or_severe", "effects": "reduced", "dimensions": [32, 32], "mode": "RGBA"},
+    {"path": "runtime/telegraph-veil-major.standard.32.png", "family": "veil_major", "effects": "standard", "dimensions": [32, 32], "mode": "RGBA"},
+    {"path": "runtime/telegraph-veil-major.reduced.32.png", "family": "veil_major", "effects": "reduced", "dimensions": [32, 32], "mode": "RGBA"}
+  ],
+  "pattern_review_contracts": [
+    {
+      "pattern_id": "boss.caldus.shield_arc",
+      "frame_paths": ["frames/telegraphs/01-shield-arc.standard.png", "frames/telegraphs/02-shield-arc.reduced.png"],
+      "review_orientation": "east",
+      "projectile_count": 5,
+      "total_arc_degrees": 60,
+      "review_offsets_degrees": [-30, -15, 0, 15, 30],
+      "warning_milliseconds": 650,
+      "damage_family": "physical_major",
+      "counterplay": "strafe"
+    },
+    {
+      "pattern_id": "boss.caldus.bell_ring",
+      "frame_paths": ["frames/telegraphs/03-bell-ring.standard.png", "frames/telegraphs/04-bell-ring.reduced.png"],
+      "index_zero_degrees": 0,
+      "clockwise_indices": 18,
+      "review_gap_start_index": 0,
+      "omitted_indices": [0, 1, 2],
+      "ordinary_gap_advance": 5,
+      "warning_milliseconds": 800,
+      "damage_family": "veil_major",
+      "counterplay": "follow_gap"
+    },
+    {
+      "pattern_id": "boss.caldus.charge_lane",
+      "frame_paths": ["frames/telegraphs/05-charge-lane.standard.png", "frames/telegraphs/06-charge-lane.reduced.png"],
+      "review_axis": "east_cardinal",
+      "width_tiles": 1.2,
+      "nominal_travel_tiles": 6.5,
+      "warning_milliseconds": 1000,
+      "direction_lock_milliseconds": 700,
+      "movement_start_milliseconds": 1000,
+      "movement_end_milliseconds": 1550,
+      "damage_family": "physical_severe",
+      "counterplay": "leave_telegraph"
+    },
+    {
+      "pattern_id": "boss.caldus.charge_stop_ring",
+      "frame_paths": ["frames/telegraphs/07-charge-stop-ring.standard.png", "frames/telegraphs/08-charge-stop-ring.reduced.png"],
+      "review_parent_axis": "east_cardinal",
+      "index_zero_degrees": 0,
+      "clockwise_indices": 14,
+      "omitted_indices": [6, 7],
+      "release": "child_at_charge_end",
+      "standalone_warning": false,
+      "damage_family": "physical_major",
+      "counterplay": "follow_opposite_gap"
+    }
+  ],
+  "phase_three_preview_contract": {
+    "standard_paths": [
+      "frames/telegraphs/09-phase3-preview-a.standard.png",
+      "frames/telegraphs/10-phase3-preview-b.standard.png",
+      "frames/telegraphs/11-phase3-preview-c.standard.png"
+    ],
+    "reduced_paths": [
+      "frames/telegraphs/12-phase3-preview-a.reduced.png",
+      "frames/telegraphs/13-phase3-preview-b.reduced.png",
+      "frames/telegraphs/14-phase3-preview-c.reduced.png"
+    ],
+    "reserved_gap_starts": [0, 5, 10],
+    "preview_windows_milliseconds": [[0, 600], [600, 1200], [1200, 1800]],
+    "ring_emissions_milliseconds": [2200, 3000, 3800],
+    "implicit_ordinary_ring_warning": false,
+    "non_color_order_cue_count": [1, 2, 3]
+  },
+  "previews": [
+    {"path": "previews/caldus-telegraphs.arena-scale.png", "dimensions": [1728, 1152], "role": "six-scene exact-arena contact sheet"},
+    {"path": "previews/caldus-combat.standard.50pct.png", "dimensions": [864, 576], "role": "standard minimum-scale nearest-neighbor sheet"},
+    {"path": "previews/caldus-combat.reduced.50pct.png", "dimensions": [864, 576], "role": "reduced minimum-scale nearest-neighbor sheet"},
+    {"path": "previews/caldus-combat.reduced.50pct.grayscale.png", "dimensions": [864, 576], "role": "reduced grayscale stress sheet"},
+    {"path": "previews/caldus-combat.standard.1280x720.review-mock.png", "dimensions": [1280, 720], "role": "static non-native review mock"},
+    {"path": "previews/caldus-combat.reduced.1280x720.review-mock.png", "dimensions": [1280, 720], "role": "static non-native review mock"},
+    {"path": "previews/caldus-combat.standard.1920x1080.review-mock.png", "dimensions": [1920, 1080], "role": "static non-native review mock"},
+    {"path": "previews/caldus-combat.reduced.1920x1080.review-mock.png", "dimensions": [1920, 1080], "role": "static non-native review mock"}
+  ],
+  "validation": {
+    "frame_count": 14,
+    "frame_dimensions": [576, 576],
+    "frame_mode": "RGBA",
+    "transparent_corners": true,
+    "core_geometry_alpha_threshold": 128,
+    "standard_reduced_core_geometry_identical": true,
+    "standard_reduced_optional_effects_visually_distinct": true,
+    "minimum_standard_reduced_rgba_difference_pixels": 2345,
+    "all_mechanic_and_preview_core_masks_pairwise_distinct": true,
+    "minimum_pairwise_core_mask_difference_pixels": 2358,
+    "runtime_material_grayscale_core_edge_checked": true,
+    "required_review_dimensions_checked": true,
+    "deterministic_rebuild": true
+  },
+  "authority_boundaries": {
+    "may_author_target_or_axis": false,
+    "may_author_projectile_or_gap_indices": false,
+    "may_author_width_length_or_endpoint": false,
+    "may_author_ticks_phase_or_damage": false,
+    "may_author_collision_hurtbox_or_attack_origin": false,
+    "may_start_cancel_or_resolve_attack": false,
+    "may_commit_reward_or_pending_inventory": false,
+    "may_create_or_show_stable_exit": false,
+    "may_extract_or_advance_route": false,
+    "may_enable_normal_route": false
+  },
+  "licensing_provenance": "Project-authored deterministic code-native review material. No third-party visual asset or generative image was used. Commercial-rights, similarity, registry, and native runtime review remain required."
+}
