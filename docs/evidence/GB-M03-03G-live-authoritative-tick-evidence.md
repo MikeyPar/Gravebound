@@ -24,8 +24,8 @@ Recall attachment, `LinkLost`, explicit intent, and extraction command dequeue a
 - `route_fault_is_fail_closed_and_shutdown_finishes_an_in_flight_frame`: pass; proves a failed first frame leaves no published tick and a successful in-flight frame publishes only after commit.
 - Existing real-QUIC Recall and private-session tests now require an actual private-route lease; the PostgreSQL `LinkLost`/lethal matrix also drains that route actor explicitly.
 
-Hosted verification for the cumulative source is pending. Run [`29667827330`](https://github.com/MikeyPar/Gravebound/actions/runs/29667827330) predates this commit; it proves Windows release construction and the repaired B3/Caldus PostgreSQL boundaries, then exposes the independent lifecycle fixture collision fixed by `3da08c5`.
+Hosted run [`29668693282`](https://github.com/MikeyPar/Gravebound/actions/runs/29668693282) is fully green for exact source `84d9b39`, including Linux formatting/lint/tests/content/schema validation, mandatory PostgreSQL transactions, optimized Windows release construction, and optimized native death frames.
 
 ## Current Next Step
 
-Obtain a fully green mandatory hosted run for `467b313`, `3da08c5`, and this evidence update. Then bind this source inside the all-or-nothing private-life authority builder and compose live lethal death, all five terminal producers, danger activation, and ordinary request/snapshot dispatch. Normal capability advertisement remains disabled until the complete owner graph and shutdown order pass together.
+The next scene dependency is now implemented in [`GB-M03-03G-live-player-damage-evidence.md`](GB-M03-03G-live-player-damage-evidence.md). Add its bounded, lossless, acknowledged driver-to-terminal feed, then bind tick, trace, clocks, deeds, custody, and all five terminal producers inside the all-or-nothing private-life authority builder. Normal capability advertisement remains disabled until the complete owner graph and shutdown order pass together.
