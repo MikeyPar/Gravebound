@@ -1,4 +1,4 @@
-//! Lossless acknowledged handoff of committed private-route frames.
+//! Lossless acknowledged handoff of committed private-route events.
 //!
 //! Authority: `Gravebound_Production_GDD_v1_Canonical.md` (`SIM-004`, `SIM-010`,
 //! `COM-002`, `DTH-001`, and `DTH-010`), `Gravebound_Content_Production_Spec_v1.md`
@@ -6,20 +6,24 @@
 //! `Gravebound_Development_Roadmap_v1.md` (`GB-M03-03`, `GB-M03-06`, and `GB-M03-08`).
 //!
 //! Presentation uses a coalescing `watch` channel. Terminal authority cannot. This capacity-one
-//! channel transfers every committed simulation frame to one pre-bound terminal owner and requires
-//! an exact acknowledgement before the driver exposes the tick, publishes presentation, or advances.
+//! channel transfers every committed simulation frame and durable route control to one pre-bound
+//! terminal owner. It requires an exact acknowledgement before the driver exposes the simulation
+//! tick, publishes presentation, returns a control result, or advances.
 
 use std::{num::NonZeroU64, sync::Arc};
 
 use protocol::{
-    CorePrivateRouteContentRevisionV1, CorePrivateRouteRoomV1, CorePrivateRouteSceneV1,
-    CorePrivateRouteStateV1,
+    CorePrivateRouteContentRevisionV1, CorePrivateRoutePhaseV1, CorePrivateRouteRoomV1,
+    CorePrivateRouteSceneV1, CorePrivateRouteStateV1,
 };
 use sim_core::{Tick, TilePoint};
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{
+    CoreBellPortalTransition, CoreDurableB3Resolution, CoreDurableBargainRestResolution,
+    CoreDurableCaldusResolution, CorePrivateCaldusRewardCommit,
+    CorePrivateFixedDungeonB3RewardCommit, CorePrivateFixedDungeonRestCommit,
     CorePrivatePlayerDamageFactV1, CorePrivateRouteActorLease, StoredTerminalReceipt,
     TerminalBinding, TerminalKind,
 };
@@ -50,6 +54,110 @@ pub enum CorePrivateTerminalFrameDisposition {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CorePrivateTerminalRouteControlKindV1 {
+    BellDungeonEntered,
+    FixedDungeonAdvanced,
+    B3RewardCommitted,
+    B4RestResolved,
+    CaldusRewardCommitted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CorePrivateTerminalRouteControlAuthorityV1 {
+    BellDungeonEntered {
+        transition: CoreBellPortalTransition,
+    },
+    FixedDungeonAdvanced {
+        transition: sim_content::CoreFixedDungeonAdvance,
+    },
+    B3RewardCommitted {
+        durable: CoreDurableB3Resolution,
+        commit: CorePrivateFixedDungeonB3RewardCommit,
+    },
+    B4RestResolved {
+        durable: CoreDurableBargainRestResolution,
+        commit: CorePrivateFixedDungeonRestCommit,
+    },
+    CaldusRewardCommitted {
+        durable: CoreDurableCaldusResolution,
+        commit: CorePrivateCaldusRewardCommit,
+    },
+}
+
+impl CorePrivateTerminalRouteControlAuthorityV1 {
+    #[must_use]
+    pub const fn kind(&self) -> CorePrivateTerminalRouteControlKindV1 {
+        match self {
+            Self::BellDungeonEntered { .. } => {
+                CorePrivateTerminalRouteControlKindV1::BellDungeonEntered
+            }
+            Self::FixedDungeonAdvanced { .. } => {
+                CorePrivateTerminalRouteControlKindV1::FixedDungeonAdvanced
+            }
+            Self::B3RewardCommitted { .. } => {
+                CorePrivateTerminalRouteControlKindV1::B3RewardCommitted
+            }
+            Self::B4RestResolved { .. } => CorePrivateTerminalRouteControlKindV1::B4RestResolved,
+            Self::CaldusRewardCommitted { .. } => {
+                CorePrivateTerminalRouteControlKindV1::CaldusRewardCommitted
+            }
+        }
+    }
+
+    fn route(&self) -> Option<&CorePrivateRouteStateV1> {
+        match self {
+            Self::BellDungeonEntered { .. } | Self::FixedDungeonAdvanced { .. } => None,
+            Self::B3RewardCommitted { commit, .. } => Some(&commit.route),
+            Self::B4RestResolved { commit, .. } => Some(&commit.route),
+            Self::CaldusRewardCommitted { commit, .. } => Some(&commit.route),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CorePrivateTerminalRouteControlV1 {
+    pub delivery_sequence: NonZeroU64,
+    /// Inherited simulation tick; controls do not advance time. Lifetime and permadeath clocks
+    /// remain independent continuously advancing authorities owned by the terminal runtime.
+    pub simulation_tick: Tick,
+    pub authority: CorePrivateTerminalRouteControlAuthorityV1,
+    pub route: CorePrivateRouteStateV1,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum CorePrivateTerminalDeliveryV1 {
+    Frame(CorePrivateTerminalFrameV1),
+    RouteControl(Box<CorePrivateTerminalRouteControlV1>),
+}
+
+impl CorePrivateTerminalDeliveryV1 {
+    const fn delivery_sequence(&self) -> NonZeroU64 {
+        match self {
+            Self::Frame(frame) => frame.delivery_sequence,
+            Self::RouteControl(control) => control.delivery_sequence,
+        }
+    }
+
+    const fn tick(&self) -> Tick {
+        match self {
+            Self::Frame(frame) => frame.tick,
+            Self::RouteControl(control) => control.simulation_tick,
+        }
+    }
+
+    const fn route(&self) -> &CorePrivateRouteStateV1 {
+        match self {
+            Self::Frame(frame) => &frame.route,
+            Self::RouteControl(control) => &control.route,
+        }
+    }
+
+    const fn player_died(&self) -> bool {
+        matches!(self, Self::Frame(frame) if frame.player_died)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct CorePrivateTerminalFrameAck {
     delivery_sequence: NonZeroU64,
     tick: Tick,
@@ -59,7 +167,7 @@ struct CorePrivateTerminalFrameAck {
 
 #[derive(Debug)]
 struct CorePrivateTerminalFrameRequest {
-    frame: CorePrivateTerminalFrameV1,
+    delivery: CorePrivateTerminalDeliveryV1,
     acknowledgement_tx: oneshot::Sender<CorePrivateTerminalFrameAck>,
 }
 
@@ -101,6 +209,7 @@ impl CorePrivateTerminalFeedBinding {
 struct CorePrivateTerminalFeedCursor {
     tick: Tick,
     route: Option<CorePrivateRouteStateV1>,
+    equal_version_control: Option<CorePrivateTerminalRouteControlKindV1>,
 }
 
 #[derive(Debug)]
@@ -121,6 +230,7 @@ impl CorePrivateTerminalFrameSender {
             cursor: CorePrivateTerminalFeedCursor {
                 tick: Tick(0),
                 route: None,
+                equal_version_control: None,
             },
         }
     }
@@ -161,6 +271,62 @@ impl CorePrivateTerminalFrameSender {
             damage: damage.into(),
             player_died,
         };
+        self.deliver_validated(CorePrivateTerminalDeliveryV1::Frame(frame))
+            .await
+    }
+
+    pub async fn deliver_route_control(
+        &mut self,
+        authority: CorePrivateTerminalRouteControlAuthorityV1,
+        route: CorePrivateRouteStateV1,
+        tick: Tick,
+    ) -> Result<CorePrivateTerminalFrameDisposition, CorePrivateTerminalFeedError> {
+        let Some(binding) = self.binding.as_ref() else {
+            return Ok(CorePrivateTerminalFrameDisposition::Continue);
+        };
+        validate_route_control(binding, &authority, &route, tick, &self.cursor)?;
+        let delivery_sequence = NonZeroU64::new(self.next_delivery_sequence)
+            .ok_or(CorePrivateTerminalFeedError::SequenceExhausted)?;
+        self.deliver_validated(CorePrivateTerminalDeliveryV1::RouteControl(Box::new(
+            CorePrivateTerminalRouteControlV1 {
+                delivery_sequence,
+                simulation_tick: tick,
+                authority,
+                route,
+            },
+        )))
+        .await
+    }
+
+    async fn deliver_validated(
+        &mut self,
+        delivery: CorePrivateTerminalDeliveryV1,
+    ) -> Result<CorePrivateTerminalFrameDisposition, CorePrivateTerminalFeedError> {
+        let delivery_sequence = delivery.delivery_sequence();
+        let tick = delivery.tick();
+        let route_state_version = delivery.route().state_version;
+        let player_died = delivery.player_died();
+        let route = delivery.route().clone();
+        let equal_version_control = match &delivery {
+            CorePrivateTerminalDeliveryV1::RouteControl(control)
+                if self
+                    .cursor
+                    .route
+                    .as_ref()
+                    .is_some_and(|previous| previous.state_version == route_state_version) =>
+            {
+                Some(control.authority.kind())
+            }
+            _ if self
+                .cursor
+                .route
+                .as_ref()
+                .is_some_and(|previous| previous.state_version == route_state_version) =>
+            {
+                self.cursor.equal_version_control
+            }
+            _ => None,
+        };
         let sender = self
             .sender
             .as_ref()
@@ -168,7 +334,7 @@ impl CorePrivateTerminalFrameSender {
         let (acknowledgement_tx, acknowledgement_rx) = oneshot::channel();
         sender
             .send(CorePrivateTerminalFrameRequest {
-                frame: frame.clone(),
+                delivery,
                 acknowledgement_tx,
             })
             .await
@@ -178,7 +344,7 @@ impl CorePrivateTerminalFrameSender {
             .map_err(|_| CorePrivateTerminalFeedError::AcknowledgementDropped)?;
         if acknowledgement.delivery_sequence != delivery_sequence
             || acknowledgement.tick != tick
-            || acknowledgement.route_state_version != frame.route.state_version
+            || acknowledgement.route_state_version != route_state_version
         {
             return Err(CorePrivateTerminalFeedError::AcknowledgementMismatch);
         }
@@ -194,7 +360,8 @@ impl CorePrivateTerminalFrameSender {
         }
         self.cursor = CorePrivateTerminalFeedCursor {
             tick,
-            route: Some(frame.route.clone()),
+            route: Some(route),
+            equal_version_control,
         };
         self.next_delivery_sequence = self
             .next_delivery_sequence
@@ -204,14 +371,143 @@ impl CorePrivateTerminalFrameSender {
     }
 }
 
-fn validate_frame(
+#[allow(
+    clippy::too_many_lines,
+    reason = "one exhaustive authority match keeps every control variant's pre/post-route contract adjacent"
+)]
+fn validate_route_control(
     binding: &CorePrivateTerminalFeedBinding,
-    scene: CorePrivateTerminalSceneV1,
+    authority: &CorePrivateTerminalRouteControlAuthorityV1,
     route: &CorePrivateRouteStateV1,
     tick: Tick,
-    damage: &[CorePrivatePlayerDamageFactV1],
-    player_died: bool,
     cursor: &CorePrivateTerminalFeedCursor,
+) -> Result<(), CorePrivateTerminalFeedError> {
+    validate_bound_route(binding, route)?;
+    let previous = cursor
+        .route
+        .as_ref()
+        .ok_or(CorePrivateTerminalFeedError::ControlBeforeFirstFrame)?;
+    if tick != cursor.tick || route.state_version < previous.state_version {
+        return Err(CorePrivateTerminalFeedError::IncoherentRouteControl);
+    }
+    if route.state_version == previous.state_version && cursor.equal_version_control.is_some() {
+        return Err(CorePrivateTerminalFeedError::DuplicateRouteControl);
+    }
+    if route.schema_version != previous.schema_version
+        || route.character_id != previous.character_id
+        || route.content_revision != previous.content_revision
+        || route.actor_generation != previous.actor_generation
+        || route.instance_lineage_id != previous.instance_lineage_id
+    {
+        return Err(CorePrivateTerminalFeedError::ForeignBinding);
+    }
+    if !matches!(
+        authority,
+        CorePrivateTerminalRouteControlAuthorityV1::BellDungeonEntered { .. }
+    ) && route.character_version != previous.character_version
+    {
+        return Err(CorePrivateTerminalFeedError::ForeignBinding);
+    }
+    if authority
+        .route()
+        .is_some_and(|committed| committed != route)
+    {
+        return Err(CorePrivateTerminalFeedError::IncoherentRouteControl);
+    }
+    let coherent = match authority {
+        CorePrivateTerminalRouteControlAuthorityV1::BellDungeonEntered { transition } => {
+            previous.scene == CorePrivateRouteSceneV1::CoreMicrorealm
+                && previous.phase == CorePrivateRoutePhaseV1::MicrorealmCleared
+                && route.scene == CorePrivateRouteSceneV1::BellSepulcher
+                && route.room == Some(CorePrivateRouteRoomV1::BellVestibuleB0)
+                && route.phase == CorePrivateRoutePhaseV1::DungeonVestibule
+                && previous.state_version.checked_add(1) == Some(route.state_version)
+                && transition.binding.account_id == *binding.terminal.account_id()
+                && transition.binding.character_id == *binding.terminal.character_id()
+                && transition.binding.instance_lineage_id == *binding.terminal.lineage_id()
+                && transition.binding.entry_restore_point_id == *binding.terminal.restore_point_id()
+                && transition.binding.character_version == previous.character_version
+                && transition.destination_character_version == route.character_version
+                && transition.transfer_id.iter().any(|byte| *byte != 0)
+                && transition.binding.mutation_id.iter().any(|byte| *byte != 0)
+        }
+        CorePrivateTerminalRouteControlAuthorityV1::FixedDungeonAdvanced { transition } => {
+            previous.scene == CorePrivateRouteSceneV1::BellSepulcher
+                && route.scene == CorePrivateRouteSceneV1::BellSepulcher
+                && (route.room != previous.room || route.phase != previous.phase)
+                && previous.state_version.checked_add(1) == Some(route.state_version)
+                && Some(fixed_room_for_node(transition.from)) == previous.room
+                && Some(fixed_room_for_node(transition.to)) == route.room
+        }
+        CorePrivateTerminalRouteControlAuthorityV1::B3RewardCommitted { durable, commit } => {
+            previous.room == Some(CorePrivateRouteRoomV1::BellKnightB3)
+                && route.room == previous.room
+                && route.phase == CorePrivateRoutePhaseV1::RoomCleared
+                && route.state_version == previous.state_version
+                && durable.account_id() == *binding.terminal.account_id()
+                && durable.character_id() == *binding.terminal.character_id()
+                && durable.instance_lineage_id() == *binding.terminal.lineage_id()
+                && durable.reward_event_id() == commit.reward_event_id
+                && durable.reward_result_hash() == commit.reward_result_hash
+                && durable.progression_payload_hash() == commit.progression_payload_hash
+                && durable.disposition() == commit.disposition
+                && durable.bargain_offer_id() == commit.bargain_offer_id
+                && durable.has_no_offer_resolution() == commit.has_no_offer_resolution
+        }
+        CorePrivateTerminalRouteControlAuthorityV1::B4RestResolved { durable, commit } => {
+            previous.room == Some(CorePrivateRouteRoomV1::BellRestB4)
+                && route.room == previous.room
+                && route.phase == CorePrivateRoutePhaseV1::Rest
+                && route.state_version == previous.state_version
+                && durable.account_id() == *binding.terminal.account_id()
+                && durable.character_id() == *binding.terminal.character_id()
+                && durable.instance_lineage_id() == *binding.terminal.lineage_id()
+                && durable.entry_restore_point_id() == *binding.terminal.restore_point_id()
+                && durable.source_receipt_id() == commit.source_receipt_id
+                && durable.offer_id() == commit.offer_id
+                && durable.oath_bargain_version() == commit.oath_bargain_version
+                && durable.resolution() == commit.resolution
+        }
+        CorePrivateTerminalRouteControlAuthorityV1::CaldusRewardCommitted { durable, commit } => {
+            let handoff = durable.handoff();
+            previous.room == Some(CorePrivateRouteRoomV1::CaldusArenaB6)
+                && previous.phase == CorePrivateRoutePhaseV1::BossDefeated
+                && route.room == previous.room
+                && route.phase == CorePrivateRoutePhaseV1::BossExitReady
+                && previous.state_version.checked_add(1) == Some(route.state_version)
+                && handoff.route_lease().account_id() == *binding.terminal.account_id()
+                && handoff.character_id() == *binding.terminal.character_id()
+                && handoff.instance_lineage_id() == *binding.terminal.lineage_id()
+                && handoff.entry_restore_point_id() == *binding.terminal.restore_point_id()
+                && handoff.route_state_version() == previous.state_version
+                && handoff.defeat_tick() == tick
+                && durable.exit().exit_instance_id == commit.exit.exit_instance_id
+                && commit.disposition == crate::CorePrivateCaldusRewardCommitDisposition::Committed
+        }
+    };
+    if coherent {
+        Ok(())
+    } else {
+        Err(CorePrivateTerminalFeedError::IncoherentRouteControl)
+    }
+}
+
+fn fixed_room_for_node(node: sim_content::CoreFixedDungeonNode) -> CorePrivateRouteRoomV1 {
+    use sim_content::CoreFixedDungeonNode as Node;
+    match node {
+        Node::BellVestibuleB0 => CorePrivateRouteRoomV1::BellVestibuleB0,
+        Node::BellCrossB1 => CorePrivateRouteRoomV1::BellCrossB1,
+        Node::BellNaveB2 => CorePrivateRouteRoomV1::BellNaveB2,
+        Node::BellKnightB3 => CorePrivateRouteRoomV1::BellKnightB3,
+        Node::BellRestB4 => CorePrivateRouteRoomV1::BellRestB4,
+        Node::BellBridgeB5 => CorePrivateRouteRoomV1::BellBridgeB5,
+        Node::CaldusArenaB6 => CorePrivateRouteRoomV1::CaldusArenaB6,
+    }
+}
+
+fn validate_bound_route(
+    binding: &CorePrivateTerminalFeedBinding,
+    route: &CorePrivateRouteStateV1,
 ) -> Result<(), CorePrivateTerminalFeedError> {
     route
         .validate()
@@ -226,6 +522,19 @@ fn validate_frame(
     {
         return Err(CorePrivateTerminalFeedError::ForeignBinding);
     }
+    Ok(())
+}
+
+fn validate_frame(
+    binding: &CorePrivateTerminalFeedBinding,
+    scene: CorePrivateTerminalSceneV1,
+    route: &CorePrivateRouteStateV1,
+    tick: Tick,
+    damage: &[CorePrivatePlayerDamageFactV1],
+    player_died: bool,
+    cursor: &CorePrivateTerminalFeedCursor,
+) -> Result<(), CorePrivateTerminalFeedError> {
+    validate_bound_route(binding, route)?;
     if tick.0 == 0 || tick.0 != cursor.tick.0.saturating_add(1) {
         return Err(CorePrivateTerminalFeedError::NonSequentialTick);
     }
@@ -314,6 +623,7 @@ impl CorePrivateTerminalFrameReceiver {
                 cursor: CorePrivateTerminalFeedCursor {
                     tick: Tick(0),
                     route: None,
+                    equal_version_control: None,
                 },
             },
             Self {
@@ -333,7 +643,7 @@ impl CorePrivateTerminalFrameReceiver {
             .recv()
             .await
             .map(|request| CorePrivateTerminalFrameDelivery {
-                frame: request.frame,
+                delivery: request.delivery,
                 binding: self.binding,
                 acknowledgement_tx: Some(request.acknowledgement_tx),
             })
@@ -347,19 +657,35 @@ impl CorePrivateTerminalFrameReceiver {
 
 #[derive(Debug)]
 pub struct CorePrivateTerminalFrameDelivery {
-    frame: CorePrivateTerminalFrameV1,
+    delivery: CorePrivateTerminalDeliveryV1,
     binding: TerminalBinding,
     acknowledgement_tx: Option<oneshot::Sender<CorePrivateTerminalFrameAck>>,
 }
 
 impl CorePrivateTerminalFrameDelivery {
     #[must_use]
-    pub const fn frame(&self) -> &CorePrivateTerminalFrameV1 {
-        &self.frame
+    pub const fn delivery(&self) -> &CorePrivateTerminalDeliveryV1 {
+        &self.delivery
+    }
+
+    #[must_use]
+    pub const fn frame(&self) -> Option<&CorePrivateTerminalFrameV1> {
+        match &self.delivery {
+            CorePrivateTerminalDeliveryV1::Frame(frame) => Some(frame),
+            CorePrivateTerminalDeliveryV1::RouteControl(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn route_control(&self) -> Option<&CorePrivateTerminalRouteControlV1> {
+        match &self.delivery {
+            CorePrivateTerminalDeliveryV1::Frame(_) => None,
+            CorePrivateTerminalDeliveryV1::RouteControl(control) => Some(control),
+        }
     }
 
     pub fn acknowledge_continue(mut self) -> Result<(), CorePrivateTerminalAcknowledgementError> {
-        if self.frame.player_died {
+        if self.delivery.player_died() {
             return Err(CorePrivateTerminalAcknowledgementError::InvalidDisposition);
         }
         self.send_acknowledgement(CorePrivateTerminalFrameDisposition::Continue)
@@ -372,10 +698,10 @@ impl CorePrivateTerminalFrameDelivery {
         receipt
             .validate()
             .map_err(|_| CorePrivateTerminalAcknowledgementError::InvalidReceipt)?;
-        if !self.frame.player_died
+        if !self.delivery.player_died()
             || receipt.kind() != TerminalKind::LethalDeath
             || receipt.binding() != self.binding
-            || receipt.observed_tick() != self.frame.tick.0
+            || receipt.observed_tick() != self.delivery.tick().0
         {
             return Err(CorePrivateTerminalAcknowledgementError::InvalidDisposition);
         }
@@ -389,9 +715,9 @@ impl CorePrivateTerminalFrameDelivery {
         disposition: CorePrivateTerminalFrameDisposition,
     ) -> Result<(), CorePrivateTerminalAcknowledgementError> {
         let acknowledgement = CorePrivateTerminalFrameAck {
-            delivery_sequence: self.frame.delivery_sequence,
-            tick: self.frame.tick,
-            route_state_version: self.frame.route.state_version,
+            delivery_sequence: self.delivery.delivery_sequence(),
+            tick: self.delivery.tick(),
+            route_state_version: self.delivery.route().state_version,
             disposition,
         };
         self.acknowledgement_tx
@@ -430,6 +756,12 @@ pub enum CorePrivateTerminalFeedError {
     RouteVersionRegression,
     #[error("private terminal-frame route changed without a version advance")]
     EqualVersionRouteDrift,
+    #[error("private terminal route control arrived before the first simulation frame")]
+    ControlBeforeFirstFrame,
+    #[error("private terminal route control is incoherent")]
+    IncoherentRouteControl,
+    #[error("private terminal route control duplicates an acknowledged equal-version event")]
+    DuplicateRouteControl,
     #[error("private terminal-frame damage is incoherent")]
     IncoherentDamage,
     #[error("private terminal-frame lethality is incoherent")]

@@ -218,6 +218,14 @@ impl CorePrivateFixedDungeonRuntime {
         self.combat.node()
     }
 
+    pub fn route_snapshot(
+        &self,
+    ) -> Result<CorePrivateRouteStateV1, CorePrivateFixedDungeonRuntimeError> {
+        let route = self.route_directory.snapshot(self.route_lease)?;
+        self.validate_route_authority(&route)?;
+        Ok(route)
+    }
+
     #[must_use]
     pub fn room_phase(&self) -> Option<FixedRoomPhase> {
         self.combat.room_phase()

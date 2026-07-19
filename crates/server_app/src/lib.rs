@@ -189,10 +189,12 @@ pub use core_private_route_actor::{
     CorePrivateRouteExtractionPermit, CorePrivateRouteRuntimeError, CorePrivateRouteRuntimeReport,
 };
 pub use core_private_terminal_feed::{
-    CorePrivateTerminalAcknowledgementError, CorePrivateTerminalFeedBinding,
-    CorePrivateTerminalFeedError, CorePrivateTerminalFrameDelivery,
+    CorePrivateTerminalAcknowledgementError, CorePrivateTerminalDeliveryV1,
+    CorePrivateTerminalFeedBinding, CorePrivateTerminalFeedError, CorePrivateTerminalFrameDelivery,
     CorePrivateTerminalFrameDisposition, CorePrivateTerminalFrameReceiver,
-    CorePrivateTerminalFrameSender, CorePrivateTerminalFrameV1, CorePrivateTerminalSceneV1,
+    CorePrivateTerminalFrameSender, CorePrivateTerminalFrameV1,
+    CorePrivateTerminalRouteControlAuthorityV1, CorePrivateTerminalRouteControlKindV1,
+    CorePrivateTerminalRouteControlV1, CorePrivateTerminalSceneV1,
 };
 pub use core_private_world_flow::{
     CoreBellPortalAbortReason, CoreBellPortalAuthority, CoreBellPortalBinding,

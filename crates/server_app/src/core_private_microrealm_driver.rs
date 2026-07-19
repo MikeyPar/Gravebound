@@ -36,7 +36,8 @@ use crate::{
     CorePrivateFixedDungeonRuntimeError, CorePrivateMicrorealmInput, CorePrivateMicrorealmRuntime,
     CorePrivateMicrorealmRuntimeError, CorePrivateMicrorealmStep, CorePrivatePlayerDamageFactV1,
     CorePrivateTerminalFeedError, CorePrivateTerminalFrameDisposition,
-    CorePrivateTerminalFrameSender, CorePrivateTerminalSceneV1,
+    CorePrivateTerminalFrameSender, CorePrivateTerminalRouteControlAuthorityV1,
+    CorePrivateTerminalSceneV1,
 };
 
 const NANOS_PER_SECOND: u64 = 1_000_000_000;
@@ -1180,7 +1181,11 @@ async fn fixed_driver_interval() -> tokio::time::Interval {
     interval
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "the consuming Bell conversion keeps acknowledgement, publication, and shutdown ordering in one owner"
+)]
 async fn convert_runtime_and_wait<R>(
     runtime: R,
     request: Box<CorePrivateFixedDungeonConversionRequest>,
@@ -1221,6 +1226,63 @@ where
     match converted {
         Ok(fixed_dungeon) => {
             let final_tick = fixed_dungeon.tick();
+            let route = match fixed_dungeon.route_snapshot() {
+                Ok(route) => route,
+                Err(error) => {
+                    let message = error.to_string();
+                    observation_tx.send_replace(CorePrivateMicrorealmDriverState::Faulted {
+                        committed_frames,
+                        fault: fixed_runtime_fault(&error, final_tick),
+                    });
+                    let _ = result_tx.send(Err(message));
+                    wait_for_shutdown(
+                        shutdown_rx,
+                        handoff_rx,
+                        fixed_advance_rx,
+                        "fixed dungeon route snapshot failed after Bell conversion",
+                    )
+                    .await;
+                    return driver_task_exit(
+                        ingress,
+                        committed_frames,
+                        final_tick,
+                        skipped_deadlines,
+                        CorePrivateMicrorealmDriverOutcome::Faulted,
+                    );
+                }
+            };
+            if let Err(error) = acknowledge_terminal_route_control(
+                terminal_feed,
+                CorePrivateTerminalRouteControlAuthorityV1::BellDungeonEntered {
+                    transition: transition.clone(),
+                },
+                route,
+                final_tick,
+                shutdown_rx,
+            )
+            .await
+            {
+                let message = error.to_string();
+                observation_tx.send_replace(CorePrivateMicrorealmDriverState::Faulted {
+                    committed_frames,
+                    fault: terminal_feed_fault(&error, final_tick),
+                });
+                let _ = result_tx.send(Err(message));
+                wait_for_shutdown(
+                    shutdown_rx,
+                    handoff_rx,
+                    fixed_advance_rx,
+                    "Bell conversion committed without terminal control acknowledgement",
+                )
+                .await;
+                return driver_task_exit(
+                    ingress,
+                    committed_frames,
+                    final_tick,
+                    skipped_deadlines,
+                    CorePrivateMicrorealmDriverOutcome::Faulted,
+                );
+            }
             let ready = CorePrivateFixedDungeonDriverReady {
                 committed_microrealm_frames: committed_frames,
                 final_microrealm_tick: final_tick,
@@ -1327,110 +1389,190 @@ async fn run_fixed_dungeon(
             }
             FixedDungeonDriverEvent::Control(Some(
                 CorePrivateFixedDungeonControlRequest::Advance { result_tx },
-            )) => match runtime.advance().await {
-                Ok(advance) => {
-                    ready.node = advance.transition.to;
-                    if ready.node == sim_content::CoreFixedDungeonNode::CaldusArenaB6 {
-                        let caldus = runtime
-                            .into_caldus_staging_handoff()
-                            .map_err(|error| error.to_string())
-                            .and_then(|handoff| {
-                                CorePrivateCaldusRuntime::from_staging_handoff(handoff)
-                                    .map_err(|error| error.to_string())
-                            });
-                        return match caldus {
-                            Ok(caldus) => {
-                                final_tick = caldus.tick();
-                                ingress.neutralize_for_scene_transition();
-                                ingress.resume_accepting();
-                                observation_tx.send_replace(
-                                    CorePrivateMicrorealmDriverState::FixedDungeonReady { ready },
-                                );
-                                let _ = result_tx.send(Ok(advance));
-                                run_caldus(
-                                    caldus,
-                                    caldus_content,
-                                    terminal_feed,
-                                    ingress,
-                                    observation_tx,
-                                    committed_frames,
-                                    final_tick,
-                                    skipped_deadlines,
-                                    shutdown_rx,
-                                    handoff_rx,
-                                    fixed_advance_rx,
-                                )
-                                .await
-                            }
-                            Err(message) => {
-                                ingress.stop_accepting();
-                                observation_tx.send_replace(
-                                    CorePrivateMicrorealmDriverState::Faulted {
-                                        committed_frames,
-                                        fault: CorePrivateMicrorealmDriverFault {
-                                            kind: CorePrivateMicrorealmFaultKind::RouteAuthority,
-                                            message: Arc::from(message.clone()),
-                                            last_committed_tick: final_tick,
-                                        },
-                                    },
-                                );
-                                let _ = result_tx.send(Err(message));
-                                wait_for_shutdown(
-                                    shutdown_rx,
-                                    handoff_rx,
-                                    fixed_advance_rx,
-                                    "Caldus conversion failed after B6 route commit",
-                                )
-                                .await;
-                                driver_task_exit(
-                                    ingress,
-                                    committed_frames,
-                                    final_tick,
-                                    skipped_deadlines,
-                                    CorePrivateMicrorealmDriverOutcome::Faulted,
-                                )
-                            }
-                        };
-                    }
-                    if runtime.room_phase().is_some() {
-                        ingress.neutralize_for_scene_transition();
-                        ingress.resume_accepting();
-                        interval.reset();
-                    } else {
-                        ingress.stop_accepting();
-                    }
-                    observation_tx.send_replace(
-                        CorePrivateMicrorealmDriverState::FixedDungeonReady { ready },
-                    );
-                    outcome = CorePrivateMicrorealmDriverOutcome::Shutdown;
-                    let _ = result_tx.send(Ok(advance));
-                }
-                Err(error) => {
-                    let message = error.to_string();
-                    let fatal = fixed_advance_error_is_fatal(&error);
-                    let _ = result_tx.send(Err(message));
-                    if fatal {
-                        outcome = CorePrivateMicrorealmDriverOutcome::Faulted;
-                        ingress.stop_accepting();
-                        observation_tx.send_replace(CorePrivateMicrorealmDriverState::Faulted {
-                            committed_frames,
-                            fault: fixed_runtime_fault(&error, final_tick),
-                        });
-                        wait_for_shutdown(
+            )) => {
+                ingress.stop_accepting();
+                match runtime.advance().await {
+                    Ok(advance) => {
+                        if let Err(error) = acknowledge_terminal_route_control(
+                            terminal_feed,
+                            CorePrivateTerminalRouteControlAuthorityV1::FixedDungeonAdvanced {
+                                transition: advance.transition,
+                            },
+                            advance.route.clone(),
+                            final_tick,
                             shutdown_rx,
-                            handoff_rx,
-                            fixed_advance_rx,
-                            "fixed dungeon cannot advance after a route fault",
                         )
-                        .await;
-                        break;
+                        .await
+                        {
+                            let message = error.to_string();
+                            ingress.stop_accepting();
+                            observation_tx.send_replace(
+                                CorePrivateMicrorealmDriverState::Faulted {
+                                    committed_frames,
+                                    fault: terminal_feed_fault(&error, final_tick),
+                                },
+                            );
+                            let _ = result_tx.send(Err(message));
+                            wait_for_shutdown(
+                                shutdown_rx,
+                                handoff_rx,
+                                fixed_advance_rx,
+                                "fixed route control committed without terminal acknowledgement",
+                            )
+                            .await;
+                            return driver_task_exit(
+                                ingress,
+                                committed_frames,
+                                final_tick,
+                                skipped_deadlines,
+                                CorePrivateMicrorealmDriverOutcome::Faulted,
+                            );
+                        }
+                        ready.node = advance.transition.to;
+                        if ready.node == sim_content::CoreFixedDungeonNode::CaldusArenaB6 {
+                            let caldus = runtime
+                                .into_caldus_staging_handoff()
+                                .map_err(|error| error.to_string())
+                                .and_then(|handoff| {
+                                    CorePrivateCaldusRuntime::from_staging_handoff(handoff)
+                                        .map_err(|error| error.to_string())
+                                });
+                            return match caldus {
+                                Ok(caldus) => {
+                                    final_tick = caldus.tick();
+                                    ingress.neutralize_for_scene_transition();
+                                    ingress.resume_accepting();
+                                    observation_tx.send_replace(
+                                        CorePrivateMicrorealmDriverState::FixedDungeonReady {
+                                            ready,
+                                        },
+                                    );
+                                    let _ = result_tx.send(Ok(advance));
+                                    run_caldus(
+                                        caldus,
+                                        caldus_content,
+                                        terminal_feed,
+                                        ingress,
+                                        observation_tx,
+                                        committed_frames,
+                                        final_tick,
+                                        skipped_deadlines,
+                                        shutdown_rx,
+                                        handoff_rx,
+                                        fixed_advance_rx,
+                                    )
+                                    .await
+                                }
+                                Err(message) => {
+                                    ingress.stop_accepting();
+                                    observation_tx.send_replace(
+                                        CorePrivateMicrorealmDriverState::Faulted {
+                                            committed_frames,
+                                            fault: CorePrivateMicrorealmDriverFault {
+                                                kind:
+                                                    CorePrivateMicrorealmFaultKind::RouteAuthority,
+                                                message: Arc::from(message.clone()),
+                                                last_committed_tick: final_tick,
+                                            },
+                                        },
+                                    );
+                                    let _ = result_tx.send(Err(message));
+                                    wait_for_shutdown(
+                                        shutdown_rx,
+                                        handoff_rx,
+                                        fixed_advance_rx,
+                                        "Caldus conversion failed after B6 route commit",
+                                    )
+                                    .await;
+                                    driver_task_exit(
+                                        ingress,
+                                        committed_frames,
+                                        final_tick,
+                                        skipped_deadlines,
+                                        CorePrivateMicrorealmDriverOutcome::Faulted,
+                                    )
+                                }
+                            };
+                        }
+                        if runtime.room_phase().is_some() {
+                            ingress.neutralize_for_scene_transition();
+                            ingress.resume_accepting();
+                            interval.reset();
+                        } else {
+                            ingress.stop_accepting();
+                        }
+                        observation_tx.send_replace(
+                            CorePrivateMicrorealmDriverState::FixedDungeonReady { ready },
+                        );
+                        outcome = CorePrivateMicrorealmDriverOutcome::Shutdown;
+                        let _ = result_tx.send(Ok(advance));
+                    }
+                    Err(error) => {
+                        let message = error.to_string();
+                        let fatal = fixed_advance_error_is_fatal(&error);
+                        let _ = result_tx.send(Err(message));
+                        if fatal {
+                            outcome = CorePrivateMicrorealmDriverOutcome::Faulted;
+                            ingress.stop_accepting();
+                            observation_tx.send_replace(
+                                CorePrivateMicrorealmDriverState::Faulted {
+                                    committed_frames,
+                                    fault: fixed_runtime_fault(&error, final_tick),
+                                },
+                            );
+                            wait_for_shutdown(
+                                shutdown_rx,
+                                handoff_rx,
+                                fixed_advance_rx,
+                                "fixed dungeon cannot advance after a route fault",
+                            )
+                            .await;
+                            break;
+                        } else if runtime.room_phase().is_some() {
+                            ingress.resume_accepting();
+                        }
                     }
                 }
-            },
+            }
             FixedDungeonDriverEvent::Control(Some(
                 CorePrivateFixedDungeonControlRequest::ResolveRest { durable, result_tx },
             )) => match runtime.resolve_rest(&durable).await {
                 Ok(commit) => {
+                    if commit.receipt == sim_content::CoreFixedDungeonRestReceipt::Committed
+                        && let Err(error) = acknowledge_terminal_route_control(
+                            terminal_feed,
+                            CorePrivateTerminalRouteControlAuthorityV1::B4RestResolved {
+                                durable: durable.clone(),
+                                commit: commit.clone(),
+                            },
+                            commit.route.clone(),
+                            final_tick,
+                            shutdown_rx,
+                        )
+                        .await
+                    {
+                        let message = error.to_string();
+                        ingress.stop_accepting();
+                        observation_tx.send_replace(CorePrivateMicrorealmDriverState::Faulted {
+                            committed_frames,
+                            fault: terminal_feed_fault(&error, final_tick),
+                        });
+                        let _ = result_tx.send(Err(message));
+                        wait_for_shutdown(
+                            shutdown_rx,
+                            handoff_rx,
+                            fixed_advance_rx,
+                            "B4 result committed without terminal acknowledgement",
+                        )
+                        .await;
+                        return driver_task_exit(
+                            ingress,
+                            committed_frames,
+                            final_tick,
+                            skipped_deadlines,
+                            CorePrivateMicrorealmDriverOutcome::Faulted,
+                        );
+                    }
                     observation_tx.send_replace(
                         CorePrivateMicrorealmDriverState::FixedDungeonReady { ready },
                     );
@@ -1462,6 +1604,41 @@ async fn run_fixed_dungeon(
                 CorePrivateFixedDungeonControlRequest::CommitB3Reward { durable, result_tx },
             )) => match runtime.commit_b3_reward(&durable).await {
                 Ok(commit) => {
+                    if commit.receipt == sim_content::CoreB3RewardReceipt::Committed
+                        && let Err(error) = acknowledge_terminal_route_control(
+                            terminal_feed,
+                            CorePrivateTerminalRouteControlAuthorityV1::B3RewardCommitted {
+                                durable: (*durable).clone(),
+                                commit: commit.clone(),
+                            },
+                            commit.route.clone(),
+                            final_tick,
+                            shutdown_rx,
+                        )
+                        .await
+                    {
+                        let message = error.to_string();
+                        ingress.stop_accepting();
+                        observation_tx.send_replace(CorePrivateMicrorealmDriverState::Faulted {
+                            committed_frames,
+                            fault: terminal_feed_fault(&error, final_tick),
+                        });
+                        let _ = result_tx.send(Err(message));
+                        wait_for_shutdown(
+                            shutdown_rx,
+                            handoff_rx,
+                            fixed_advance_rx,
+                            "B3 reward committed without terminal acknowledgement",
+                        )
+                        .await;
+                        return driver_task_exit(
+                            ingress,
+                            committed_frames,
+                            final_tick,
+                            skipped_deadlines,
+                            CorePrivateMicrorealmDriverOutcome::Faulted,
+                        );
+                    }
                     b3_reward_pending = false;
                     ingress.resume_accepting();
                     interval.reset();
@@ -1678,8 +1855,47 @@ async fn run_caldus(
             }
             FixedDungeonDriverEvent::Control(Some(
                 CorePrivateFixedDungeonControlRequest::CommitCaldusReward { durable, result_tx },
-            )) => match runtime.commit_reward_resolution(&content, *durable).await {
+            )) => match runtime
+                .commit_reward_resolution(&content, (*durable).clone())
+                .await
+            {
                 Ok(commit) => {
+                    if commit.disposition
+                        == crate::CorePrivateCaldusRewardCommitDisposition::Committed
+                        && let Err(error) = acknowledge_terminal_route_control(
+                            terminal_feed,
+                            CorePrivateTerminalRouteControlAuthorityV1::CaldusRewardCommitted {
+                                durable: *durable,
+                                commit: commit.clone(),
+                            },
+                            commit.route.clone(),
+                            final_tick,
+                            shutdown_rx,
+                        )
+                        .await
+                    {
+                        let message = error.to_string();
+                        ingress.stop_accepting();
+                        observation_tx.send_replace(CorePrivateMicrorealmDriverState::Faulted {
+                            committed_frames,
+                            fault: terminal_feed_fault(&error, final_tick),
+                        });
+                        let _ = result_tx.send(Err(message));
+                        wait_for_shutdown(
+                            shutdown_rx,
+                            handoff_rx,
+                            fixed_advance_rx,
+                            "Caldus reward committed without terminal acknowledgement",
+                        )
+                        .await;
+                        return driver_task_exit(
+                            ingress,
+                            committed_frames,
+                            final_tick,
+                            skipped_deadlines,
+                            CorePrivateMicrorealmDriverOutcome::Faulted,
+                        );
+                    }
                     reward_pending = false;
                     exit_ready = true;
                     outcome = CorePrivateMicrorealmDriverOutcome::CaldusExitReady;
@@ -2057,6 +2273,30 @@ async fn acknowledge_terminal_frame(
     }
 }
 
+async fn acknowledge_terminal_route_control(
+    feed: &mut CorePrivateTerminalFrameSender,
+    authority: CorePrivateTerminalRouteControlAuthorityV1,
+    route: protocol::CorePrivateRouteStateV1,
+    tick: Tick,
+    shutdown_rx: &mut watch::Receiver<bool>,
+) -> Result<(), CorePrivateTerminalFeedError> {
+    let delivery = feed.deliver_route_control(authority, route, tick);
+    tokio::pin!(delivery);
+    let disposition = tokio::select! {
+        biased;
+        result = &mut delivery => result?,
+        changed = shutdown_rx.changed() => {
+            let _ = changed;
+            return Err(CorePrivateTerminalFeedError::ShutdownWithUnresolvedFrame);
+        }
+    };
+    if disposition == CorePrivateTerminalFrameDisposition::Continue {
+        Ok(())
+    } else {
+        Err(CorePrivateTerminalFeedError::InvalidDisposition)
+    }
+}
+
 fn terminal_feed_fault(
     error: &CorePrivateTerminalFeedError,
     final_tick: Tick,
@@ -2184,8 +2424,8 @@ mod tests {
     use crate::{CorePrivateTerminalFrameReceiver, TerminalBinding, TerminalKind};
     use protocol::{
         CORE_PRIVATE_ROUTE_SCHEMA_VERSION, CorePrivateRouteContentRevisionV1,
-        CorePrivateRoutePhaseV1, CorePrivateRouteReadinessV1, CorePrivateRouteSceneV1,
-        CorePrivateRouteStateV1, ManifestHash,
+        CorePrivateRoutePhaseV1, CorePrivateRouteReadinessV1, CorePrivateRouteRoomV1,
+        CorePrivateRouteSceneV1, CorePrivateRouteStateV1, ManifestHash, WorldFlowContentRevisionV1,
     };
     use tokio::sync::Notify;
 
@@ -2910,13 +3150,15 @@ mod tests {
         let (terminal_sender, mut terminal_receiver) = terminal_frame_channel();
         let terminal_owner = tokio::spawn(async move {
             let first = terminal_receiver.receive().await.expect("first frame");
-            assert_eq!(first.frame().tick, Tick(1));
-            assert!(first.frame().damage.is_empty());
+            let first_frame = first.frame().expect("frame delivery");
+            assert_eq!(first_frame.tick, Tick(1));
+            assert!(first_frame.damage.is_empty());
             first.acknowledge_continue().expect("first acknowledgement");
             let lethal = terminal_receiver.receive().await.expect("lethal frame");
-            assert_eq!(lethal.frame().delivery_sequence.get(), 2);
-            assert_eq!(lethal.frame().tick, Tick(2));
-            assert_eq!(lethal.frame().damage.len(), 1);
+            let lethal_frame = lethal.frame().expect("frame delivery");
+            assert_eq!(lethal_frame.delivery_sequence.get(), 2);
+            assert_eq!(lethal_frame.tick, Tick(2));
+            assert_eq!(lethal_frame.damage.len(), 1);
             let receipt = lethal_terminal_receipt(Tick(2));
             lethal
                 .acknowledge_terminal_owned(&receipt)
@@ -2965,8 +3207,9 @@ mod tests {
 
         tokio::time::advance(DRIVER_TICK_DURATION).await;
         let delivery = terminal_receiver.receive().await.expect("terminal frame");
-        assert_eq!(delivery.frame().delivery_sequence.get(), 1);
-        assert_eq!(delivery.frame().tick, Tick(1));
+        let frame = delivery.frame().expect("frame delivery");
+        assert_eq!(frame.delivery_sequence.get(), 1);
+        assert_eq!(frame.tick, Tick(1));
         assert!(matches!(
             observer.latest(),
             CorePrivateMicrorealmDriverState::Starting
@@ -3043,7 +3286,7 @@ mod tests {
             .receive()
             .await
             .expect("ambiguous committed delivery retained");
-        assert_eq!(delivery.frame().tick, Tick(1));
+        assert_eq!(delivery.frame().expect("frame delivery").tick, Tick(1));
         assert_eq!(
             delivery.acknowledge_continue(),
             Err(crate::CorePrivateTerminalAcknowledgementError::DriverGone)
@@ -3104,6 +3347,219 @@ mod tests {
                 )
                 .await,
             Err(CorePrivateTerminalFeedError::ForeignBinding)
+        );
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one linear assertion proves the exact frame/control/frame delivery sequence"
+    )]
+    async fn terminal_feed_totally_orders_bell_b0_and_first_b1_frame() {
+        let (mut sender, mut receiver) = terminal_frame_channel();
+        let mut final_microrealm = template_step(1);
+        final_microrealm.route.phase = CorePrivateRoutePhaseV1::MicrorealmCleared;
+        final_microrealm.route.readiness =
+            CorePrivateRouteReadinessV1::canonical(CorePrivateRoutePhaseV1::MicrorealmCleared);
+
+        let frame_delivery = async {
+            let delivery = receiver.receive().await.expect("final microrealm frame");
+            assert_eq!(
+                delivery
+                    .frame()
+                    .expect("simulation frame")
+                    .delivery_sequence
+                    .get(),
+                1
+            );
+            delivery
+                .acknowledge_continue()
+                .expect("frame acknowledgement");
+        };
+        let frame_send = sender.deliver(
+            CorePrivateTerminalSceneV1::Microrealm,
+            final_microrealm.route.clone(),
+            final_microrealm.tick,
+            final_microrealm.player_position,
+            Vec::new(),
+            false,
+        );
+        let (frame_result, ()) = tokio::join!(frame_send, frame_delivery);
+        assert_eq!(
+            frame_result.expect("frame accepted"),
+            CorePrivateTerminalFrameDisposition::Continue
+        );
+
+        let transition = CoreBellPortalTransition {
+            binding: crate::CoreBellPortalBinding {
+                account_id: [0x11; 16],
+                character_id: [0x22; 16],
+                mutation_id: [0x61; 16],
+                instance_lineage_id: [0x33; 16],
+                entry_restore_point_id: [0x44; 16],
+                character_version: 1,
+                content_revision: WorldFlowContentRevisionV1 {
+                    records_blake3: hash('d'),
+                    assets_blake3: hash('e'),
+                    localization_blake3: hash('f'),
+                },
+            },
+            transfer_id: [0x62; 16],
+            destination_character_version: 2,
+        };
+        let mut b0 = final_microrealm.route.clone();
+        b0.character_version = 2;
+        b0.state_version = 2;
+        b0.scene = CorePrivateRouteSceneV1::BellSepulcher;
+        b0.room = Some(CorePrivateRouteRoomV1::BellVestibuleB0);
+        b0.phase = CorePrivateRoutePhaseV1::DungeonVestibule;
+        b0.readiness = CorePrivateRouteReadinessV1::canonical(b0.phase);
+        let bell_delivery = async {
+            let delivery = receiver.receive().await.expect("Bell control");
+            let bell = delivery.route_control().expect("route control");
+            assert_eq!(bell.delivery_sequence.get(), 2);
+            assert_eq!(bell.simulation_tick, Tick(1));
+            assert_eq!(
+                bell.authority.kind(),
+                crate::CorePrivateTerminalRouteControlKindV1::BellDungeonEntered
+            );
+            delivery
+                .acknowledge_continue()
+                .expect("Bell acknowledgement");
+        };
+        let bell_send = sender.deliver_route_control(
+            CorePrivateTerminalRouteControlAuthorityV1::BellDungeonEntered {
+                transition: transition.clone(),
+            },
+            b0.clone(),
+            Tick(1),
+        );
+        let (bell_result, ()) = tokio::join!(bell_send, bell_delivery);
+        assert_eq!(
+            bell_result.expect("Bell accepted"),
+            CorePrivateTerminalFrameDisposition::Continue
+        );
+
+        let advance = sim_content::CoreFixedDungeonAdvance {
+            from: sim_content::CoreFixedDungeonNode::BellVestibuleB0,
+            to: sim_content::CoreFixedDungeonNode::BellCrossB1,
+            rest_resolution: None,
+        };
+        let mut b1 = b0.clone();
+        b1.state_version = 3;
+        b1.room = Some(CorePrivateRouteRoomV1::BellCrossB1);
+        b1.phase = CorePrivateRoutePhaseV1::RoomDormant;
+        b1.readiness = CorePrivateRouteReadinessV1::canonical(b1.phase);
+        let advance_delivery = async {
+            let delivery = receiver.receive().await.expect("B0/B1 control");
+            let control = delivery.route_control().expect("route control");
+            assert_eq!(control.delivery_sequence.get(), 3);
+            assert_eq!(control.simulation_tick, Tick(1));
+            delivery
+                .acknowledge_continue()
+                .expect("B0/B1 acknowledgement");
+        };
+        let advance_send = sender.deliver_route_control(
+            CorePrivateTerminalRouteControlAuthorityV1::FixedDungeonAdvanced {
+                transition: advance,
+            },
+            b1.clone(),
+            Tick(1),
+        );
+        let (advance_result, ()) = tokio::join!(advance_send, advance_delivery);
+        assert_eq!(
+            advance_result.expect("advance accepted"),
+            CorePrivateTerminalFrameDisposition::Continue
+        );
+
+        let first_b1_delivery = async {
+            let delivery = receiver.receive().await.expect("first B1 frame");
+            let first_b1 = delivery.frame().expect("simulation frame");
+            assert_eq!(first_b1.delivery_sequence.get(), 4);
+            assert_eq!(first_b1.tick, Tick(2));
+            delivery
+                .acknowledge_continue()
+                .expect("first B1 acknowledgement");
+        };
+        let first_b1_send = sender.deliver(
+            CorePrivateTerminalSceneV1::FixedDungeon,
+            b1,
+            Tick(2),
+            final_microrealm.player_position,
+            Vec::new(),
+            false,
+        );
+        let (first_b1_result, ()) = tokio::join!(first_b1_send, first_b1_delivery);
+        assert_eq!(
+            first_b1_result.expect("first B1 accepted"),
+            CorePrivateTerminalFrameDisposition::Continue
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_feed_accepts_one_exact_equal_version_b3_commit() {
+        let (mut sender, mut receiver) = terminal_frame_channel();
+        let mut route = template_step(1).route;
+        route.scene = CorePrivateRouteSceneV1::BellSepulcher;
+        route.room = Some(CorePrivateRouteRoomV1::BellKnightB3);
+        route.phase = CorePrivateRoutePhaseV1::RoomCleared;
+        route.readiness = CorePrivateRouteReadinessV1::canonical(route.phase);
+        route.state_version = 20;
+
+        let frame_receiver = async {
+            let delivery = receiver.receive().await.expect("B3 frame");
+            delivery
+                .acknowledge_continue()
+                .expect("frame acknowledgement");
+        };
+        let frame_sender = sender.deliver(
+            CorePrivateTerminalSceneV1::FixedDungeon,
+            route.clone(),
+            Tick(1),
+            sim_core::TilePoint::new(10_000, 10_000),
+            Vec::new(),
+            false,
+        );
+        let (frame_result, ()) = tokio::join!(frame_sender, frame_receiver);
+        assert_eq!(
+            frame_result.expect("frame accepted"),
+            CorePrivateTerminalFrameDisposition::Continue
+        );
+
+        let durable = b3_reward_authority();
+        let commit = CorePrivateFixedDungeonB3RewardCommit {
+            route: route.clone(),
+            receipt: sim_content::CoreB3RewardReceipt::Committed,
+            disposition: durable.disposition(),
+            reward_event_id: durable.reward_event_id(),
+            reward_result_hash: durable.reward_result_hash(),
+            progression_payload_hash: durable.progression_payload_hash(),
+            bargain_offer_id: durable.bargain_offer_id(),
+            has_no_offer_resolution: durable.has_no_offer_resolution(),
+        };
+        let authority =
+            CorePrivateTerminalRouteControlAuthorityV1::B3RewardCommitted { durable, commit };
+        let control_receiver = async {
+            let delivery = receiver.receive().await.expect("B3 control");
+            let control = delivery.route_control().expect("route control");
+            assert_eq!(control.delivery_sequence.get(), 2);
+            assert_eq!(control.route.state_version, 20);
+            delivery
+                .acknowledge_continue()
+                .expect("control acknowledgement");
+        };
+        let control_sender =
+            sender.deliver_route_control(authority.clone(), route.clone(), Tick(1));
+        let (control_result, ()) = tokio::join!(control_sender, control_receiver);
+        assert_eq!(
+            control_result.expect("control accepted"),
+            CorePrivateTerminalFrameDisposition::Continue
+        );
+        assert_eq!(
+            sender
+                .deliver_route_control(authority, route, Tick(1))
+                .await,
+            Err(CorePrivateTerminalFeedError::DuplicateRouteControl)
         );
     }
 
