@@ -43,6 +43,7 @@ const CHARACTER_ID: [u8; 16] = [211; 16];
 const ITEM_UID: [u8; 16] = [212; 16];
 const CREATION_REQUEST_ID: [u8; 16] = [213; 16];
 const MUTATION_ID: [u8; 16] = [214; 16];
+const LIFECYCLE_REWARD_REQUEST_ID: [u8; 16] = [246; 16];
 
 fn content_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../content")
@@ -329,7 +330,7 @@ async fn stage_progression_reward_and_equipment(persistence: &PostgresPersistenc
     )
     .unwrap();
     let context = RewardGrantContext {
-        reward_request_id: [226; 16],
+        reward_request_id: LIFECYCLE_REWARD_REQUEST_ID,
         account_id: ACCOUNT_ID,
         character_id: CHARACTER_ID,
         source_instance_id: [227; 16],
