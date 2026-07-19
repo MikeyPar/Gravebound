@@ -55,6 +55,32 @@ trait CoreCaldusResolutionSink: Send + Sync {
     ) -> RuntimeFuture<'_, Result<CorePrivateCaldusRewardCommit, CorePrivateMicrorealmDriverError>>;
 }
 
+trait CoreCaldusRewardObservation: Send {
+    fn pending_handoff(&self) -> Option<Arc<CorePrivateCaldusDefeatHandoff>>;
+
+    fn changed(&mut self) -> RuntimeFuture<'_, Result<(), ()>>;
+}
+
+impl CoreCaldusRewardObservation for CorePrivateMicrorealmDriverObserver {
+    fn pending_handoff(&self) -> Option<Arc<CorePrivateCaldusDefeatHandoff>> {
+        match self.latest() {
+            CorePrivateMicrorealmDriverState::CaldusRewardPending { reward_handoff, .. } => {
+                Some(reward_handoff)
+            }
+            _ => None,
+        }
+    }
+
+    fn changed(&mut self) -> RuntimeFuture<'_, Result<(), ()>> {
+        Box::pin(async move {
+            CorePrivateMicrorealmDriverObserver::changed(self)
+                .await
+                .map(|_| ())
+                .map_err(|_| ())
+        })
+    }
+}
+
 /// Loads one post-reward, terminal-first custody projection. The client cannot select the danger
 /// root, content revision, versions, item destinations, or material balances.
 pub trait CoreCaldusPendingInventoryAuthority: Send + Sync {
@@ -356,12 +382,15 @@ impl CorePrivateCaldusRewardRuntime {
         Self::spawn_with_sink(config, Arc::new(driver), observer, initial_writer)
     }
 
-    fn spawn_with_sink(
+    fn spawn_with_sink<O>(
         config: CorePrivateCaldusRewardRuntimeConfig,
         sink: Arc<dyn CoreCaldusResolutionSink>,
-        observer: CorePrivateMicrorealmDriverObserver,
+        observer: O,
         initial_writer: Option<(CoreCaldusRewardWriterGeneration, Arc<CoreReliableWriter>)>,
-    ) -> Self {
+    ) -> Self
+    where
+        O: CoreCaldusRewardObservation + 'static,
+    {
         let initial_writer =
             initial_writer.map(|(generation, writer)| WriterBinding { generation, writer });
         let (writer_tx, writer_rx) = watch::channel(initial_writer);
@@ -474,14 +503,17 @@ impl CorePrivateCaldusRewardRuntime {
     clippy::too_many_lines,
     reason = "one select loop keeps durable resolution, snapshot, and generation-safe publication ordering auditable"
 )]
-async fn run_runtime(
+async fn run_runtime<O>(
     config: CorePrivateCaldusRewardRuntimeConfig,
     sink: Arc<dyn CoreCaldusResolutionSink>,
-    mut observer: CorePrivateMicrorealmDriverObserver,
+    mut observer: O,
     mut writer_rx: watch::Receiver<Option<WriterBinding>>,
     state_tx: watch::Sender<CorePrivateCaldusRewardRuntimeState>,
     mut shutdown_rx: watch::Receiver<bool>,
-) -> CorePrivateCaldusRewardRuntimeReport {
+) -> CorePrivateCaldusRewardRuntimeReport
+where
+    O: CoreCaldusRewardObservation,
+{
     let CorePrivateCaldusRewardRuntimeConfig {
         authenticated,
         progression_content_revision,
@@ -530,22 +562,29 @@ async fn run_runtime(
         {
             attempted_generation = Some(binding.generation);
             report.publication_attempts = report.publication_attempts.saturating_add(1);
-            if publish(&binding.writer, retained).await.is_ok() {
-                report.publication_generations = report.publication_generations.saturating_add(1);
-                state_tx.send_replace(CorePrivateCaldusRewardRuntimeState::Published {
-                    encounter_id: retained.encounter_id,
-                    generation: binding.generation,
-                });
+            match publish(&binding.writer, retained).await {
+                Ok(()) => {
+                    report.publication_generations =
+                        report.publication_generations.saturating_add(1);
+                    state_tx.send_replace(CorePrivateCaldusRewardRuntimeState::Published {
+                        encounter_id: retained.encounter_id,
+                        generation: binding.generation,
+                    });
+                }
+                Err(_) => {
+                    // Publication is transport work, not durable authority. Preserve the retained
+                    // result and make the failed generation observable while awaiting a newer
+                    // session writer.
+                    state_tx.send_replace(CorePrivateCaldusRewardRuntimeState::AwaitingWriter {
+                        encounter_id: retained.encounter_id,
+                    });
+                }
             }
             continue;
         }
-        let pending =
-            match observer.latest() {
-                CorePrivateMicrorealmDriverState::CaldusRewardPending {
-                    reward_handoff, ..
-                } if !acknowledged => Some(reward_handoff),
-                _ => None,
-            };
+        let pending = (!acknowledged)
+            .then(|| observer.pending_handoff())
+            .flatten();
         if let Some(handoff) = pending {
             let resolution = match resolve_with_backoff(
                 authenticated,
@@ -941,6 +980,7 @@ mod tests {
     };
 
     use content_schema::{CoreCaldusSafeArrival, MilliTilePoint};
+    use persistence::{StoredCaldusVictoryExit, StoredCaldusVictoryOwner};
     use protocol::{
         CORE_PENDING_INVENTORY_SCHEMA_VERSION, CorePendingInventoryStateV1,
         CorePrivateRouteContentRevisionV1, CorePrivateRoutePhaseV1, CorePrivateRouteRoomV1,
@@ -985,6 +1025,71 @@ mod tests {
                     message: Arc::from("injected authority failure"),
                 })
             })
+        }
+    }
+
+    #[derive(Debug)]
+    struct RetryThenResolveAuthority {
+        resolution: CoreDurableCaldusResolution,
+        calls: AtomicU32,
+        seen: StdMutex<Vec<CorePrivateCaldusDefeatHandoff>>,
+    }
+
+    impl CoreCaldusRewardAuthority for RetryThenResolveAuthority {
+        fn resolve(
+            &self,
+            _authenticated: AuthenticatedAccount,
+            _progression_content_revision: ManifestHash,
+            handoff: CorePrivateCaldusDefeatHandoff,
+        ) -> RuntimeFuture<'_, Result<CoreDurableCaldusResolution, CoreCaldusRewardAuthorityFailure>>
+        {
+            self.seen.lock().expect("seen handoffs").push(handoff);
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            let resolution = self.resolution.clone();
+            Box::pin(async move {
+                if call == 0 {
+                    Err(CoreCaldusRewardAuthorityFailure {
+                        kind: CoreCaldusRewardAuthorityFailureKind::Retryable,
+                        message: Arc::from("injected transient authority outage"),
+                    })
+                } else {
+                    Ok(resolution)
+                }
+            })
+        }
+    }
+
+    struct RouteCommitSink {
+        directory: CorePrivateRouteActorDirectory,
+        calls: AtomicU32,
+    }
+
+    impl CoreCaldusResolutionSink for RouteCommitSink {
+        fn acknowledge(
+            &self,
+            resolution: CoreDurableCaldusResolution,
+        ) -> RuntimeFuture<
+            '_,
+            Result<CorePrivateCaldusRewardCommit, CorePrivateMicrorealmDriverError>,
+        > {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(
+                async move { Ok(boss_exit_commit(&self.directory, resolution.handoff()).await) },
+            )
+        }
+    }
+
+    struct TestRewardObservation {
+        receiver: watch::Receiver<Option<Arc<CorePrivateCaldusDefeatHandoff>>>,
+    }
+
+    impl CoreCaldusRewardObservation for TestRewardObservation {
+        fn pending_handoff(&self) -> Option<Arc<CorePrivateCaldusDefeatHandoff>> {
+            self.receiver.borrow().clone()
+        }
+
+        fn changed(&mut self) -> RuntimeFuture<'_, Result<(), ()>> {
+            Box::pin(async move { self.receiver.changed().await.map_err(|_| ()) })
         }
     }
 
@@ -1120,6 +1225,56 @@ mod tests {
             },
             disposition: CorePrivateCaldusRewardCommitDisposition::Committed,
         }
+    }
+
+    fn durable_resolution(handoff: &CorePrivateCaldusDefeatHandoff) -> CoreDurableCaldusResolution {
+        let identities = sim_core::CoreCaldusVictoryIdentities::derive(
+            handoff.instance_lineage_id(),
+            handoff.lock(),
+        )
+        .expect("Caldus identities");
+        let participant = handoff.lock().participants[0];
+        CoreDurableCaldusResolution::from_stored_for_test(
+            handoff.clone(),
+            StoredCaldusVictoryExit {
+                replayed: false,
+                encounter_id: identities.encounter_id.bytes(),
+                instance_lineage_id: handoff.instance_lineage_id(),
+                attempt_ordinal: handoff.lock().attempt_ordinal,
+                exit_instance_id: identities.exit_instance_id.bytes(),
+                canonical_request_hash: [0x85; 32],
+                owners: vec![StoredCaldusVictoryOwner {
+                    party_slot: participant.party_slot,
+                    participant_entity_id: participant.entity_id.get(),
+                    account_id: handoff.route_lease().account_id(),
+                    character_id: handoff.character_id(),
+                    reward_request_id: identities
+                        .reward_for(participant)
+                        .expect("owner reward identity")
+                        .bytes(),
+                    reward_result_hash: [0x86; 32],
+                    progression_payload_hash: [0x87; 32],
+                }],
+            },
+        )
+        .expect("validated durable Caldus resolution")
+    }
+
+    async fn wait_for_runtime_state(
+        state: &mut watch::Receiver<CorePrivateCaldusRewardRuntimeState>,
+        predicate: impl Fn(&CorePrivateCaldusRewardRuntimeState) -> bool,
+    ) -> CorePrivateCaldusRewardRuntimeState {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let current = state.borrow().clone();
+                if predicate(&current) {
+                    return current;
+                }
+                state.changed().await.expect("runtime state remains live");
+            }
+        })
+        .await
+        .expect("runtime state timeout")
     }
 
     fn empty_report() -> CorePrivateCaldusRewardRuntimeReport {
@@ -1293,6 +1448,176 @@ mod tests {
             .take()
             .expect("activator retained exact reservation");
         reservation.abort().await.expect("test cleanup");
+        directory.begin_shutdown();
+        assert!(directory.finish_shutdown().await.unwrap().zero_residue);
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one lifecycle proof keeps durable retry, QUIC response loss, replay, and cleanup contiguous"
+    )]
+    async fn full_worker_retries_resolves_activates_and_republishes_after_response_loss() {
+        let (authenticated, handoff, directory) = fixture();
+        let resolution = durable_resolution(&handoff);
+        let authority = Arc::new(RetryThenResolveAuthority {
+            resolution,
+            calls: AtomicU32::new(0),
+            seen: StdMutex::new(Vec::new()),
+        });
+        let sink = Arc::new(RouteCommitSink {
+            directory: directory.clone(),
+            calls: AtomicU32::new(0),
+        });
+        let inventory: Arc<dyn CoreCaldusPendingInventoryAuthority> =
+            Arc::new(OrderedInventoryAuthority {
+                directory: directory.clone(),
+                handoff: handoff.clone(),
+                order: Arc::new(StdMutex::new(Vec::new())),
+            });
+        let retaining = Arc::new(RetainingActivator {
+            order: Arc::new(StdMutex::new(Vec::new())),
+            reservation: StdMutex::new(None),
+        });
+        let activator: Arc<dyn CoreCaldusExtractionActivator> = retaining.clone();
+        let revision = pending_inventory(&handoff).content_revision;
+        let config =
+            CorePrivateCaldusRewardRuntimeConfig::new(authenticated, hash('7'), authority.clone())
+                .with_pending_inventory(inventory, revision.clone())
+                .with_extraction_activation(directory.clone(), activator);
+        let (_driver_state_tx, driver_state_rx) = watch::channel(Some(Arc::new(handoff.clone())));
+        let observer = TestRewardObservation {
+            receiver: driver_state_rx,
+        };
+        let runtime =
+            CorePrivateCaldusRewardRuntime::spawn_with_sink(config, sink.clone(), observer, None);
+        let mut state = runtime.observe();
+        let awaiting = wait_for_runtime_state(&mut state, |current| {
+            matches!(
+                current,
+                CorePrivateCaldusRewardRuntimeState::AwaitingWriter { .. }
+            )
+        })
+        .await;
+        let CorePrivateCaldusRewardRuntimeState::AwaitingWriter { encounter_id } = awaiting else {
+            unreachable!("state predicate guarantees AwaitingWriter");
+        };
+
+        let (server_endpoint_1, client_endpoint_1, client_1, server_1) =
+            live_connection_pair().await;
+        let first_generation = CoreCaldusRewardWriterGeneration::new(1).unwrap();
+        runtime.attach_writer(
+            first_generation,
+            Arc::new(CoreReliableWriter::new(server_1)),
+        );
+        wait_for_runtime_state(&mut state, |current| {
+            matches!(
+                current,
+                CorePrivateCaldusRewardRuntimeState::Published {
+                    encounter_id: published_encounter_id,
+                    generation,
+                } if *generation == first_generation && *published_encounter_id == encounter_id
+            )
+        })
+        .await;
+        runtime.detach_writer(first_generation);
+        client_1.close(0_u32.into(), b"drop both unacknowledged responses");
+
+        let (server_endpoint_2, client_endpoint_2, client_2, server_2) =
+            live_connection_pair().await;
+        let second_generation = CoreCaldusRewardWriterGeneration::new(2).unwrap();
+        runtime.attach_writer(
+            second_generation,
+            Arc::new(CoreReliableWriter::new(server_2)),
+        );
+        wait_for_runtime_state(&mut state, |current| {
+            matches!(
+                current,
+                CorePrivateCaldusRewardRuntimeState::Published { generation, .. }
+                    if *generation == second_generation
+            )
+        })
+        .await;
+        let second_pending = receive_reliable_event(&client_2).await;
+        let second_route = receive_reliable_event(&client_2).await;
+        assert!(matches!(
+            second_pending.event,
+            ReliableEvent::CorePendingInventoryState(_)
+        ));
+        assert!(matches!(
+            second_route.event,
+            ReliableEvent::CorePrivateRouteState(_)
+        ));
+        assert_eq!(second_pending.server_tick, handoff.defeat_tick().0);
+        assert_eq!(second_route.server_tick, handoff.defeat_tick().0);
+
+        runtime.detach_writer(second_generation);
+        client_2.close(0_u32.into(), b"reconnect before acknowledgement");
+        let (server_endpoint_3, client_endpoint_3, client_3, server_3) =
+            live_connection_pair().await;
+        let third_generation = CoreCaldusRewardWriterGeneration::new(3).unwrap();
+        runtime.attach_writer(
+            third_generation,
+            Arc::new(CoreReliableWriter::new(server_3)),
+        );
+        wait_for_runtime_state(&mut state, |current| {
+            matches!(
+                current,
+                CorePrivateCaldusRewardRuntimeState::Published { generation, .. }
+                    if *generation == third_generation
+            )
+        })
+        .await;
+        let third_pending = receive_reliable_event(&client_3).await;
+        let third_route = receive_reliable_event(&client_3).await;
+        assert_eq!(third_pending.event, second_pending.event);
+        assert_eq!(third_route.event, second_route.event);
+
+        runtime.detach_writer(third_generation);
+        runtime.acknowledge_terminal_complete();
+        let report = runtime.shutdown().await.expect("clean terminal completion");
+        assert_eq!(authority.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            *authority.seen.lock().expect("seen handoffs"),
+            vec![handoff.clone(), handoff.clone()]
+        );
+        assert_eq!(sink.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(report.resolution_attempts, 2);
+        assert_eq!(report.acknowledgements, 1);
+        assert_eq!(report.snapshot_attempts, 1);
+        assert_eq!(report.extraction_reservations, 1);
+        assert_eq!(report.extraction_activations, 1);
+        assert_eq!(report.publication_attempts, 3);
+        assert_eq!(report.publication_generations, 3);
+
+        let reservation = retaining
+            .reservation
+            .lock()
+            .expect("reservation lock")
+            .take()
+            .expect("activated extraction reservation");
+        reservation
+            .abort()
+            .await
+            .expect("competing terminal cleanup");
+        assert_eq!(
+            directory.snapshot(handoff.route_lease()).unwrap().phase,
+            CorePrivateRoutePhaseV1::BossExitReady
+        );
+
+        client_3.close(0_u32.into(), b"test complete");
+        server_endpoint_1.close(0_u32.into(), b"test complete");
+        client_endpoint_1.close(0_u32.into(), b"test complete");
+        server_endpoint_2.close(0_u32.into(), b"test complete");
+        client_endpoint_2.close(0_u32.into(), b"test complete");
+        server_endpoint_3.close(0_u32.into(), b"test complete");
+        client_endpoint_3.close(0_u32.into(), b"test complete");
+        server_endpoint_1.wait_idle().await;
+        client_endpoint_1.wait_idle().await;
+        server_endpoint_2.wait_idle().await;
+        client_endpoint_2.wait_idle().await;
+        server_endpoint_3.wait_idle().await;
+        client_endpoint_3.wait_idle().await;
         directory.begin_shutdown();
         assert!(directory.finish_shutdown().await.unwrap().zero_residue);
     }
