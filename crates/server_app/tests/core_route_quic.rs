@@ -34,6 +34,7 @@ use persistence::{
 };
 use protocol::{
     AuthTicket, CharacterLocation, CharacterLocationSnapshot, ClientHello, Compression,
+    CorePrivateRouteContentRevisionV1, CorePrivateRoutePhaseV1, CorePrivateRouteSceneV1,
     DEATH_VIEW_SCHEMA_VERSION, DeathViewFrameV1, DeathViewRequestV1, DeathViewResultV1,
     ExtractionCommitFrameV1, ExtractionCommitPayloadV1, ExtractionCommitResultV1,
     HandshakeResponse, ManifestHash, Platform, ProtocolVersion, RESOLUTION_HOLD_SCHEMA_VERSION,
@@ -59,12 +60,13 @@ use server_app::{
     AuthenticationDecision, BoundCoreIdentityServer, CaldusVictoryOwnerCommand,
     CharacterIdGenerator, CoreBargainAuthority, CoreExtractionTerminalAuthority,
     CoreIdentityServerConfig, CoreIdentityServerReport, CoreNonTerminalAdmission,
-    CoreOathSelectionAuthority, CoreRecallActorDirectory, CoreRecallAuthoritativeTick,
-    CoreRecallTerminalAuthority, CoreRecallTerminalTickOutcome, CoreReliableWriter,
-    CoreResolutionHoldAuthority, CoreResolutionHoldIntentAuthority, CoreSafeInventoryAuthority,
-    CoreSuccessorAuthority, CoreSuccessorIntentAuthority, CoreTerminalCoordinator,
-    CoreTerminalEvaluation, CoreTerminalOtherEvaluationsV1, CoreTerminalProducer,
-    CoreTerminalTickSeal, DeathViewService, DisabledDeathViewRepository,
+    CoreOathSelectionAuthority, CorePrivateRouteActorDirectory, CorePrivateRouteActorLease,
+    CorePrivateRouteActorPosition, CorePrivateRouteActorSeed, CoreRecallActorDirectory,
+    CoreRecallAuthoritativeTick, CoreRecallTerminalAuthority, CoreRecallTerminalTickOutcome,
+    CoreReliableWriter, CoreResolutionHoldAuthority, CoreResolutionHoldIntentAuthority,
+    CoreSafeInventoryAuthority, CoreSuccessorAuthority, CoreSuccessorIntentAuthority,
+    CoreTerminalCoordinator, CoreTerminalEvaluation, CoreTerminalOtherEvaluationsV1,
+    CoreTerminalProducer, CoreTerminalTickSeal, DeathViewService, DisabledDeathViewRepository,
     DisabledProgressionQueryRepository, DisposableCoreJourneyWorldFlow, DurableDeathExecutionError,
     DurableDeathExecutionService, HandshakePolicy, IdentityClock, IdentityService,
     InMemoryAccountRepository, NoopIdentityEventSink, PostgresAccountRepository,
@@ -262,6 +264,39 @@ fn revision() -> WorldFlowContentRevisionV1 {
     }
 }
 
+fn recall_route_actor(
+    authenticated: AuthenticatedAccount,
+    character_id: [u8; 16],
+    actor_generation: u64,
+) -> (CorePrivateRouteActorDirectory, CorePrivateRouteActorLease) {
+    let world_revision = revision();
+    let route_revision = CorePrivateRouteContentRevisionV1 {
+        records_blake3: world_revision.records_blake3.clone(),
+        assets_blake3: world_revision.assets_blake3.clone(),
+        localization_blake3: world_revision.localization_blake3.clone(),
+    };
+    let routes = CorePrivateRouteActorDirectory::new();
+    let lease = routes
+        .register_actor(
+            authenticated,
+            CorePrivateRouteActorSeed {
+                character_id,
+                character_version: 1,
+                content_revision: route_revision,
+                world_flow_revision: world_revision,
+                position: CorePrivateRouteActorPosition {
+                    instance_lineage_id: Some(LINEAGE_ID),
+                    scene: CorePrivateRouteSceneV1::CoreMicrorealm,
+                    room: None,
+                    phase: CorePrivateRoutePhaseV1::MicrorealmDormant,
+                },
+            },
+            actor_generation,
+        )
+        .expect("register Recall route actor");
+    (routes, lease)
+}
+
 fn death_view_frame(sequence: u32, request: DeathViewRequestV1) -> DeathViewFrameV1 {
     DeathViewFrameV1 {
         schema_version: DEATH_VIEW_SCHEMA_VERSION,
@@ -354,8 +389,8 @@ impl RecallRuntimeTick {
 }
 
 impl CoreRecallAuthoritativeTick for RecallRuntimeTick {
-    fn current_tick(&self, _account_id: [u8; 16], _character_id: [u8; 16]) -> NonZeroU64 {
-        NonZeroU64::new(self.0.load(Ordering::SeqCst)).expect("test tick remains nonzero")
+    fn current_tick(&self, _route: CorePrivateRouteActorLease) -> Option<NonZeroU64> {
+        NonZeroU64::new(self.0.load(Ordering::SeqCst))
     }
 }
 
@@ -4399,8 +4434,10 @@ async fn run_postgres_quic_link_lost_recall_branch(
         .unwrap(),
     );
     let directory = Arc::new(CoreRecallActorDirectory::new(Arc::clone(&tick_source)));
+    let (route_directory, route_lease) =
+        recall_route_actor(authenticated, durable_death_fixture::CHARACTER_ID, 1);
     let registration = directory
-        .register_actor(authenticated, Arc::clone(&actor))
+        .register_actor(authenticated, route_lease, Arc::clone(&actor))
         .await
         .unwrap();
     let (server_endpoint, client_endpoint, address) = endpoints();
@@ -4532,6 +4569,14 @@ async fn run_postgres_quic_link_lost_recall_branch(
     assert_eq!(report.undelivered_completion_publications, 0);
     assert_eq!(report.abandoned_completion_publications, 0);
     assert!(report.zero_residue);
+    route_directory.begin_shutdown();
+    assert!(
+        route_directory
+            .finish_shutdown()
+            .await
+            .unwrap()
+            .zero_residue
+    );
     reconnected_client.close(0_u32.into(), b"LinkLost branch complete");
     server_endpoint.close(0_u32.into(), b"LinkLost branch complete");
     client_endpoint.wait_idle().await;
@@ -4566,8 +4611,10 @@ async fn run_postgres_quic_link_lost_lethal_branch(persistence: &PostgresPersist
         .unwrap(),
     );
     let directory = Arc::new(CoreRecallActorDirectory::new(Arc::clone(&tick_source)));
+    let (route_directory, route_lease) =
+        recall_route_actor(authenticated, durable_death_fixture::CHARACTER_ID, 1);
     let registration = directory
-        .register_actor(authenticated, Arc::clone(&actor))
+        .register_actor(authenticated, route_lease, Arc::clone(&actor))
         .await
         .unwrap();
     let (server_endpoint, client_endpoint, address) = endpoints();
@@ -4684,6 +4731,14 @@ async fn run_postgres_quic_link_lost_lethal_branch(persistence: &PostgresPersist
     assert_eq!(report.undelivered_completion_publications, 0);
     assert_eq!(report.abandoned_completion_publications, 0);
     assert!(report.zero_residue);
+    route_directory.begin_shutdown();
+    assert!(
+        route_directory
+            .finish_shutdown()
+            .await
+            .unwrap()
+            .zero_residue
+    );
     server_endpoint.close(0_u32.into(), b"lethal branch complete");
     client_endpoint.wait_idle().await;
     server_endpoint.wait_idle().await;

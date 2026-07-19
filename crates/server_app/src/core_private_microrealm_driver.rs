@@ -149,6 +149,7 @@ struct SharedIngress {
     reducer: Mutex<IngressReducer>,
     retained_tx: watch::Sender<RetainedFrameInput>,
     metrics: SharedMetrics,
+    authoritative_tick: AtomicU64,
     task_live: AtomicBool,
 }
 
@@ -191,6 +192,19 @@ pub struct CorePrivateMicrorealmDriverHandle {
 }
 
 impl CorePrivateMicrorealmDriverHandle {
+    /// Returns only the latest successfully committed frame tick. Scheduled deadlines and failed
+    /// simulation/route attempts never advance this value; zero means the first frame has not
+    /// committed yet.
+    #[must_use]
+    pub(crate) fn authoritative_tick(&self) -> Option<std::num::NonZeroU64> {
+        std::num::NonZeroU64::new(self.ingress.authoritative_tick.load(Ordering::Acquire))
+    }
+
+    #[must_use]
+    pub(crate) fn shares_driver_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.ingress, &other.ingress)
+    }
+
     /// Pauses this task between frames without transferring ownership to the caller. The returned
     /// decision token is independent of any transport generation, so reconnect cannot create a
     /// second simulation owner while durable Bell resolution is in flight.
@@ -894,6 +908,7 @@ where
         reducer: Mutex::new(IngressReducer::default()),
         retained_tx,
         metrics: SharedMetrics::default(),
+        authoritative_tick: AtomicU64::new(0),
         task_live: AtomicBool::new(true),
     });
     let (observation_tx, observation_rx) =
@@ -1033,6 +1048,9 @@ where
             Ok(step) => {
                 committed_frames = committed_frames.saturating_add(1);
                 final_tick = step.tick;
+                ingress
+                    .authoritative_tick
+                    .store(final_tick.0, Ordering::Release);
                 let step = Arc::new(step);
                 if step.player_died {
                     outcome = CorePrivateMicrorealmDriverOutcome::TerminalPending;
@@ -1424,6 +1442,9 @@ async fn run_fixed_dungeon(
                     Ok(frame) => {
                         committed_frames = committed_frames.saturating_add(1);
                         final_tick = frame.tick;
+                        ingress
+                            .authoritative_tick
+                            .store(final_tick.0, Ordering::Release);
                         let frame = Arc::new(frame);
                         if frame.player_died {
                             outcome =
@@ -1588,6 +1609,9 @@ async fn run_caldus(
                     Ok(frame) => {
                         committed_frames = committed_frames.saturating_add(1);
                         final_tick = frame.tick;
+                        ingress
+                            .authoritative_tick
+                            .store(final_tick.0, Ordering::Release);
                         let frame = Arc::new(frame);
                         if frame.player_died {
                             outcome = CorePrivateMicrorealmDriverOutcome::CaldusTerminalPending;
@@ -1976,6 +2000,7 @@ mod tests {
             reducer: Mutex::new(IngressReducer::default()),
             retained_tx,
             metrics: SharedMetrics::default(),
+            authoritative_tick: AtomicU64::new(0),
             task_live: AtomicBool::new(true),
         });
         let (observation_tx, observation_rx) =
@@ -2651,7 +2676,8 @@ mod tests {
         let mut faulting = ScriptedRuntime::ordinary(Arc::clone(&received));
         faulting.fault_at = Some(1);
         let fault_driver = spawn_driver(faulting);
-        let mut fault_observer = fault_driver.handle().observe();
+        let fault_handle = fault_driver.handle();
+        let mut fault_observer = fault_handle.observe();
         tokio::task::yield_now().await;
         advance_one_frame(&mut fault_observer).await;
         assert!(matches!(
@@ -2665,6 +2691,7 @@ mod tests {
                 }
             }
         ));
+        assert_eq!(fault_handle.authoritative_tick(), None);
         let fault_report = fault_driver.shutdown().await.expect("fault shutdown");
         assert_eq!(
             fault_report.outcome,
@@ -2677,6 +2704,7 @@ mod tests {
         blocked.entered = Some(Arc::clone(&entered));
         blocked.release = Some(Arc::clone(&release));
         let driver = spawn_driver(blocked);
+        let handle = driver.handle();
         tokio::task::yield_now().await;
         tokio::time::advance(DRIVER_TICK_DURATION).await;
         entered.notified().await;
@@ -2687,6 +2715,7 @@ mod tests {
         let report = shutdown.await.expect("shutdown task").expect("driver join");
         assert_eq!(report.committed_frames, 1);
         assert_eq!(report.final_tick, Tick(1));
+        assert_eq!(handle.authoritative_tick().unwrap().get(), 1);
         assert!(report.task_joined);
         assert!(!report.driver_task_live_after_join);
     }

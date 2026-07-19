@@ -790,6 +790,11 @@ impl<Planner, Clock> ProductionExtractionIntentActor<Planner, Clock> {
     }
 
     #[must_use]
+    pub(crate) const fn route_lease(&self) -> CorePrivateRouteActorLease {
+        self.route_lease
+    }
+
+    #[must_use]
     pub async fn prepared_intent(&self) -> Option<ProductionExtractionPreparedIntentV1> {
         self.intent.lock().await.clone()
     }
@@ -1423,9 +1428,8 @@ mod tests {
     use super::*;
     use crate::{
         AccountId, CaldusExitPresentationCommit, CoreExtractionActorDirectory,
-        CoreExtractionActorLease, CoreExtractionAuthoritativeTick,
-        CoreExtractionPublicationOutcome, CoreExtractionRuntimeError,
-        CoreExtractionTransportDetach, CorePrivateLifeSessionDirectory,
+        CoreExtractionAuthoritativeTick, CoreExtractionPublicationOutcome,
+        CoreExtractionRuntimeError, CoreExtractionTransportDetach, CorePrivateLifeSessionDirectory,
         CorePrivateLifeTransportDetach, CorePrivateRouteActorPosition, CorePrivateRouteActorSeed,
         CorePrivateRouteExtractionBinding, CorePrivateRouteExtractionExitBinding,
         CoreRecallActorDirectory, CoreRecallAuthoritativeTick, CoreReliableWriter,
@@ -1457,10 +1461,10 @@ mod tests {
     struct RecallTicks(AtomicU64);
 
     impl CoreRecallAuthoritativeTick for RecallTicks {
-        fn current_tick(&self, account_id: [u8; 16], character_id: [u8; 16]) -> NonZeroU64 {
-            assert_eq!(account_id, [1; 16]);
-            assert_eq!(character_id, [2; 16]);
-            NonZeroU64::new(self.0.load(Ordering::SeqCst)).expect("non-zero Recall tick")
+        fn current_tick(&self, route: CorePrivateRouteActorLease) -> Option<NonZeroU64> {
+            assert_eq!(route.account_id(), [1; 16]);
+            assert_eq!(route.character_id(), [2; 16]);
+            NonZeroU64::new(self.0.load(Ordering::SeqCst))
         }
     }
 
@@ -1594,10 +1598,10 @@ mod tests {
     }
 
     impl CoreExtractionAuthoritativeTick for ExtractionTicks {
-        fn current_tick(&self, lease: CoreExtractionActorLease) -> Option<NonZeroU64> {
-            assert_eq!(lease.account_id(), [1; 16]);
-            assert_eq!(lease.character_id(), [2; 16]);
-            assert_eq!(lease.route_generation(), 7);
+        fn current_tick(&self, route: CorePrivateRouteActorLease) -> Option<NonZeroU64> {
+            assert_eq!(route.account_id(), [1; 16]);
+            assert_eq!(route.character_id(), [2; 16]);
+            assert_eq!(route.actor_generation(), 7);
             self.calls.fetch_add(1, Ordering::SeqCst);
             NonZeroU64::new(self.tick.load(Ordering::SeqCst))
         }
@@ -2215,15 +2219,15 @@ mod tests {
         reason = "one bounded real-QUIC composition journey proves shared sequence authority, coordinated dual-runtime reconnect, detach, and shutdown"
     )]
     async fn private_life_session_coordinates_recall_and_extraction_writer_handoffs() {
+        let (exit_authority, route_directory, route_lease) = authority().await;
         let recall = Arc::new(CoreRecallActorDirectory::new(Arc::new(RecallTicks(
             AtomicU64::new(700),
         ))));
         recall
-            .register_actor(authenticated(), recall_actor())
+            .register_actor(authenticated(), route_lease, recall_actor())
             .await
             .expect("register Recall actor");
 
-        let (exit_authority, route_directory, route_lease) = authority().await;
         let extraction_actor = Arc::new(
             ProductionExtractionIntentActor::new(
                 exit_authority,

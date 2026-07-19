@@ -62,6 +62,21 @@ pub(crate) struct CorePrivateRouteReturnToCharacterSelectTransition {
 }
 
 impl CorePrivateRouteActorLease {
+    #[cfg(test)]
+    pub(crate) const fn for_test(
+        account_id: [u8; 16],
+        character_id: [u8; 16],
+        actor_generation: u64,
+    ) -> Self {
+        Self {
+            key: CorePrivateRouteActorKey {
+                account_id,
+                character_id,
+            },
+            actor_generation,
+        }
+    }
+
     #[must_use]
     pub const fn account_id(self) -> [u8; 16] {
         self.key.account_id

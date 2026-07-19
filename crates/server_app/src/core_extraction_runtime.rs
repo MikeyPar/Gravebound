@@ -26,19 +26,19 @@ use tokio::{
 use crate::{
     AuthenticatedAccount, AuthenticatedNamespace, CoreExtractionActorHandle,
     CoreExtractionActorInbox, CoreExtractionIntentAuthority, CoreExtractionIntentReply,
-    CorePrivateRouteRuntimeError, CoreReliableWriter, CoreTerminalCoordinator, IdentityClock,
-    ProductionExtractionIntentActor, ProductionExtractionPlanner,
-    ProductionExtractionPreparedIntentV1, ProductionExtractionPublicationProof,
-    TRANSPORT_REPLACED_CLOSE_CODE, TerminalKind, committed_extraction_terminal_receipt,
-    hall_snapshot_from_stored_extraction, production_extraction_actor_mailbox,
-    protocol_extraction_terminal_result,
+    CorePrivateRouteActorLease, CorePrivateRouteRuntimeError, CoreReliableWriter,
+    CoreTerminalCoordinator, IdentityClock, ProductionExtractionIntentActor,
+    ProductionExtractionPlanner, ProductionExtractionPreparedIntentV1,
+    ProductionExtractionPublicationProof, TRANSPORT_REPLACED_CLOSE_CODE, TerminalKind,
+    committed_extraction_terminal_receipt, hall_snapshot_from_stored_extraction,
+    production_extraction_actor_mailbox, protocol_extraction_terminal_result,
 };
 
 const EXTRACTION_TRANSPORT_DETACHED_CLOSE_CODE: u32 = 0x105;
 const EXTRACTION_TRANSPORT_DETACHED_REASON: &[u8] = b"extraction transport detached";
 
 pub trait CoreExtractionAuthoritativeTick: Send + Sync {
-    fn current_tick(&self, lease: CoreExtractionActorLease) -> Option<NonZeroU64>;
+    fn current_tick(&self, route: CorePrivateRouteActorLease) -> Option<NonZeroU64>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -341,6 +341,7 @@ impl CommittedExtractionPublication {
 struct ExtractionActorEntry<Planner, Clock> {
     authenticated: AuthenticatedAccount,
     lease: CoreExtractionActorLease,
+    route_lease: CorePrivateRouteActorLease,
     actor: Arc<ProductionExtractionIntentActor<Planner, Clock>>,
     handle: CoreExtractionActorHandle,
     shutdown: Option<oneshot::Sender<()>>,
@@ -462,10 +463,14 @@ where
         actor: Arc<ProductionExtractionIntentActor<Planner, Clock>>,
     ) -> Result<CoreExtractionActorRegistration, CoreExtractionRuntimeError> {
         let authority = actor.authority();
+        let route_lease = actor.route_lease();
         if authenticated.namespace != AuthenticatedNamespace::WipeableTest
             || authenticated.account_id.as_bytes() != authority.account_id()
             || authority.selected_character_id() == [0; 16]
             || authority.actor_generation() == 0
+            || route_lease.account_id() != authority.account_id()
+            || route_lease.character_id() != authority.selected_character_id()
+            || route_lease.actor_generation() != authority.actor_generation()
         {
             return Err(CoreExtractionRuntimeError::InvalidActorBinding);
         }
@@ -482,6 +487,7 @@ where
         if let Some(existing) = state.actors.get(&account_id) {
             if existing.authenticated == authenticated
                 && existing.lease == lease
+                && existing.route_lease == route_lease
                 && existing.actor.authority() == actor.authority()
             {
                 return Ok(CoreExtractionActorRegistration::Replayed(lease));
@@ -506,7 +512,7 @@ where
             inbox,
             Arc::clone(&actor),
             Arc::clone(&self.tick_source),
-            lease,
+            route_lease,
             shutdown_receive,
         ));
         state.actors.insert(
@@ -514,6 +520,7 @@ where
             ExtractionActorEntry {
                 authenticated,
                 lease,
+                route_lease,
                 actor,
                 handle,
                 shutdown: Some(shutdown_send),
@@ -1518,7 +1525,7 @@ async fn serve_extraction_actor<Planner, Clock, TickSource>(
     mut inbox: CoreExtractionActorInbox,
     actor: Arc<ProductionExtractionIntentActor<Planner, Clock>>,
     tick_source: Arc<TickSource>,
-    lease: CoreExtractionActorLease,
+    route_lease: CorePrivateRouteActorLease,
     mut shutdown: oneshot::Receiver<()>,
 ) -> ExtractionActorTaskReport
 where
@@ -1539,7 +1546,7 @@ where
                 };
             }
             handled = inbox.serve_next_with_tick(actor.as_ref(), || {
-                tick_source.current_tick(lease).map(NonZeroU64::get)
+                tick_source.current_tick(route_lease).map(NonZeroU64::get)
             }) => {
                 match handled {
                     Ok(true) => served = served.saturating_add(1),

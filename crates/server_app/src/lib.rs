@@ -25,6 +25,7 @@ mod core_private_fixed_dungeon_runtime;
 mod core_private_life_foundation;
 mod core_private_life_runtime_bootstrap;
 mod core_private_life_session;
+mod core_private_life_tick;
 mod core_private_microrealm_driver;
 mod core_private_microrealm_runtime;
 mod core_private_route_actor;
@@ -154,6 +155,10 @@ pub use core_private_life_session::{
     CorePrivateLifeTransportAttach, CorePrivateLifeTransportDetach,
     CorePrivateLifeTransportGeneration, CorePrivateLifeTransportLease,
     CorePrivateMicrorealmBinding, CorePrivateMicrorealmBindingLease,
+};
+pub use core_private_life_tick::{
+    CorePrivateLifeAuthoritativeTick, CorePrivateLifeTickDirectory,
+    CorePrivateLifeTickDirectoryReport, CorePrivateLifeTickError,
 };
 pub use core_private_microrealm_driver::{
     CorePrivateFixedDungeonConversion, CorePrivateFixedDungeonDriverReady,

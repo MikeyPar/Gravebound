@@ -55,6 +55,7 @@ pub struct CoreRecallActorInbox {
 struct CoreRecallActorCommand {
     authenticated: AuthenticatedAccount,
     frame: RecallFrameV1,
+    fallback_server_tick: u64,
     reply: oneshot::Sender<CoreRecallIntentReply>,
 }
 
@@ -101,6 +102,7 @@ impl CoreRecallIntentAuthority for CoreRecallActorHandle {
             let command = CoreRecallActorCommand {
                 authenticated,
                 frame: *frame,
+                fallback_server_tick,
                 reply,
             };
             if self.sender.send(command).await.is_err() {
@@ -796,7 +798,7 @@ impl CoreRecallActorInbox {
     where
         Clock: ProductionRecallClock,
     {
-        self.serve_next_with_tick(actor, || authoritative_tick)
+        self.serve_next_with_tick(actor, || Some(authoritative_tick))
             .await
     }
 
@@ -810,12 +812,23 @@ impl CoreRecallActorInbox {
     ) -> bool
     where
         Clock: ProductionRecallClock,
-        Tick: FnOnce() -> u64,
+        Tick: FnOnce() -> Option<u64>,
     {
         let Some(command) = self.receiver.recv().await else {
             return false;
         };
-        let authoritative_tick = authoritative_tick();
+        let Some(authoritative_tick) = authoritative_tick() else {
+            let _ = command.reply.send(CoreRecallIntentReply {
+                server_tick: command.fallback_server_tick,
+                result: RecallResultV1::Rejected {
+                    schema_version: TERMINAL_INVENTORY_SCHEMA_VERSION,
+                    request_sequence: command.frame.sequence,
+                    character_id: command.frame.character_id,
+                    code: TerminalInventoryRejectionCodeV1::SourceUnavailable,
+                },
+            });
+            return true;
+        };
         let result = actor
             .handle(command.authenticated, &command.frame, authoritative_tick)
             .await;

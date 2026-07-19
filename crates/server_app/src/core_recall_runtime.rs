@@ -23,17 +23,18 @@ use tokio::{
 };
 
 use crate::{
-    AuthenticatedAccount, AuthenticatedNamespace, CoreRecallActorHandle, CoreRecallActorInbox,
-    CoreRecallCompletionInbox, CoreRecallCompletionOutbox, CoreRecallIntentAuthority,
-    CoreRecallIntentReply, CoreRecallReliableWriter, ProductionRecallClock,
-    ProductionRecallDetachOutcome, ProductionRecallIntentActor, ProductionRecallPublishedV1,
-    ProductionRecallSessionError, ProductionRecallSessionLifecycle,
-    ProductionRecallTransportGeneration, TRANSPORT_REPLACED_CLOSE_CODE,
-    core_recall_completion_outbox, production_recall_actor_mailbox, send_recall_publication,
+    AuthenticatedAccount, AuthenticatedNamespace, CorePrivateRouteActorLease,
+    CoreRecallActorHandle, CoreRecallActorInbox, CoreRecallCompletionInbox,
+    CoreRecallCompletionOutbox, CoreRecallIntentAuthority, CoreRecallIntentReply,
+    CoreRecallReliableWriter, ProductionRecallClock, ProductionRecallDetachOutcome,
+    ProductionRecallIntentActor, ProductionRecallPublishedV1, ProductionRecallSessionError,
+    ProductionRecallSessionLifecycle, ProductionRecallTransportGeneration,
+    TRANSPORT_REPLACED_CLOSE_CODE, core_recall_completion_outbox, production_recall_actor_mailbox,
+    send_recall_publication,
 };
 
 pub trait CoreRecallAuthoritativeTick: Send + Sync {
-    fn current_tick(&self, account_id: [u8; 16], character_id: [u8; 16]) -> NonZeroU64;
+    fn current_tick(&self, route: CorePrivateRouteActorLease) -> Option<NonZeroU64>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,6 +126,8 @@ pub enum CoreRecallRuntimeError {
     ReliableWriterAlreadyAttached,
     #[error("Core Recall prepared reliable-writer handoff is stale or invalid")]
     PreparedWriterHandoffMismatch,
+    #[error("Core Recall authoritative simulation tick is unavailable")]
+    AuthoritativeTickUnavailable,
     #[error("Core Recall reliable-writer handoff generation overflowed")]
     WriterHandoffGenerationExhausted,
     #[error("Core Recall runtime shutdown has not started")]
@@ -138,6 +141,7 @@ pub enum CoreRecallRuntimeError {
 struct CoreRecallActorEntry<Clock> {
     authenticated: AuthenticatedAccount,
     character_id: [u8; 16],
+    route_lease: CorePrivateRouteActorLease,
     lifecycle: Arc<ProductionRecallSessionLifecycle<Clock>>,
     handle: CoreRecallActorHandle,
     shutdown: Option<oneshot::Sender<()>>,
@@ -212,10 +216,14 @@ where
     pub async fn register_actor(
         self: &Arc<Self>,
         authenticated: AuthenticatedAccount,
+        route_lease: CorePrivateRouteActorLease,
         actor: Arc<ProductionRecallIntentActor<Clock>>,
     ) -> Result<CoreRecallActorRegistration, CoreRecallRuntimeError> {
         if authenticated.namespace != AuthenticatedNamespace::WipeableTest
             || authenticated.account_id.as_bytes() != actor.account_id()
+            || route_lease.account_id() != actor.account_id()
+            || route_lease.character_id() != actor.character_id()
+            || route_lease.actor_generation() == 0
         {
             return Err(CoreRecallRuntimeError::InvalidActorBinding);
         }
@@ -238,8 +246,7 @@ where
             inbox,
             task_actor,
             tick_source,
-            account_id,
-            character_id,
+            route_lease,
             shutdown_receive,
         ));
         let completion_task = tokio::spawn(serve_completion_outbox(
@@ -253,6 +260,7 @@ where
             CoreRecallActorEntry {
                 authenticated,
                 character_id,
+                route_lease,
                 lifecycle: Arc::new(ProductionRecallSessionLifecycle::new(actor)),
                 handle,
                 shutdown: Some(shutdown_send),
@@ -418,7 +426,8 @@ where
         let writer = Arc::clone(&pending.writer);
         let tick = self
             .tick_source
-            .current_tick(account_id, entry.character_id)
+            .current_tick(entry.route_lease)
+            .ok_or(CoreRecallRuntimeError::AuthoritativeTickUnavailable)?
             .get();
         let transport_lease = entry.lifecycle.attach_transport(tick).await?;
         let lease = CoreRecallConnectionLease {
@@ -525,7 +534,8 @@ where
             .ok_or(CoreRecallRuntimeError::ActorUnavailable)?;
         let lost_tick = self
             .tick_source
-            .current_tick(lease.account_id, lease.character_id)
+            .current_tick(entry.route_lease)
+            .ok_or(CoreRecallRuntimeError::AuthoritativeTickUnavailable)?
             .get();
         let outcome = entry
             .lifecycle
@@ -817,8 +827,7 @@ async fn serve_actor_mailbox<Clock, TickSource>(
     mut inbox: CoreRecallActorInbox,
     actor: Arc<ProductionRecallIntentActor<Clock>>,
     tick_source: Arc<TickSource>,
-    account_id: [u8; 16],
-    character_id: [u8; 16],
+    route_lease: CorePrivateRouteActorLease,
     mut shutdown: oneshot::Receiver<()>,
 ) -> CoreRecallActorTaskReport
 where
@@ -837,7 +846,9 @@ where
                 };
             }
             handled = inbox.serve_next_with_tick(actor.as_ref(), || {
-                tick_source.current_tick(account_id, character_id).get()
+                tick_source
+                    .current_tick(route_lease)
+                    .map(NonZeroU64::get)
             }) => {
                 if !handled {
                     break;
@@ -921,10 +932,10 @@ mod tests {
     struct TickSource(AtomicU64);
 
     impl CoreRecallAuthoritativeTick for TickSource {
-        fn current_tick(&self, account_id: [u8; 16], character_id: [u8; 16]) -> NonZeroU64 {
-            assert_eq!(account_id, ACCOUNT_ID);
-            assert_eq!(character_id, CHARACTER_ID);
-            NonZeroU64::new(self.0.load(Ordering::SeqCst)).unwrap()
+        fn current_tick(&self, route: CorePrivateRouteActorLease) -> Option<NonZeroU64> {
+            assert_eq!(route.account_id(), ACCOUNT_ID);
+            assert_eq!(route.character_id(), CHARACTER_ID);
+            NonZeroU64::new(self.0.load(Ordering::SeqCst))
         }
     }
 
@@ -948,6 +959,10 @@ mod tests {
             )
             .unwrap(),
         )
+    }
+
+    fn route_lease() -> CorePrivateRouteActorLease {
+        CorePrivateRouteActorLease::for_test(ACCOUNT_ID, CHARACTER_ID, 1)
     }
 
     fn frame() -> RecallFrameV1 {
@@ -1048,7 +1063,7 @@ mod tests {
         let tick_source = Arc::new(TickSource(AtomicU64::new(100)));
         let directory = Arc::new(CoreRecallActorDirectory::new(tick_source));
         let registration = directory
-            .register_actor(authenticated(), actor())
+            .register_actor(authenticated(), route_lease(), actor())
             .await
             .unwrap();
         let (server_endpoint, client_endpoint, client, server) = live_connection_pair().await;
@@ -1128,7 +1143,7 @@ mod tests {
         let tick_source = Arc::new(TickSource(AtomicU64::new(100)));
         let directory = Arc::new(CoreRecallActorDirectory::new(tick_source));
         directory
-            .register_actor(authenticated(), actor())
+            .register_actor(authenticated(), route_lease(), actor())
             .await
             .unwrap();
         let (first_server_endpoint, first_client_endpoint, first_client, first_server) =
@@ -1194,7 +1209,7 @@ mod tests {
         let tick_source = Arc::new(TickSource(AtomicU64::new(100)));
         let directory = Arc::new(CoreRecallActorDirectory::new(Arc::clone(&tick_source)));
         directory
-            .register_actor(authenticated(), actor())
+            .register_actor(authenticated(), route_lease(), actor())
             .await
             .unwrap();
         let (first_server_endpoint, first_client_endpoint, first_connection) =
@@ -1261,6 +1276,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn missing_authoritative_tick_rejects_without_mutating_recall_state() {
+        let tick_source = Arc::new(TickSource(AtomicU64::new(100)));
+        let directory = Arc::new(CoreRecallActorDirectory::new(Arc::clone(&tick_source)));
+        directory
+            .register_actor(authenticated(), route_lease(), actor())
+            .await
+            .unwrap();
+        let (server_endpoint, client_endpoint, connection) = connection_pair().await;
+        let attached = directory
+            .attach_transport(authenticated(), connection)
+            .await
+            .unwrap();
+        let authority = directory.authority(attached.lease);
+
+        tick_source.0.store(0, Ordering::SeqCst);
+        let unavailable = authority
+            .handle_recall(authenticated(), &frame(), 999)
+            .await;
+        assert_eq!(unavailable.server_tick, 999);
+        assert!(matches!(
+            unavailable.result,
+            RecallResultV1::Rejected {
+                code: TerminalInventoryRejectionCodeV1::SourceUnavailable,
+                ..
+            }
+        ));
+
+        tick_source.0.store(101, Ordering::SeqCst);
+        let accepted = authority
+            .handle_recall(authenticated(), &frame(), 999)
+            .await;
+        assert_eq!(accepted.server_tick, 101);
+        assert!(matches!(
+            accepted.result,
+            RecallResultV1::Pending {
+                started_tick: 101,
+                ..
+            }
+        ));
+
+        for connection in directory.begin_shutdown().await {
+            connection.close(0_u32.into(), b"test shutdown");
+        }
+        assert!(directory.finish_shutdown().await.unwrap().zero_residue);
+        server_endpoint.wait_idle().await;
+        client_endpoint.wait_idle().await;
+    }
+
+    #[tokio::test]
     #[allow(
         clippy::too_many_lines,
         reason = "one real-QUIC test keeps the complete prepare, recover, supersede, abort, commit, retry, and shutdown contract contiguous"
@@ -1269,7 +1333,7 @@ mod tests {
         let tick_source = Arc::new(TickSource(AtomicU64::new(100)));
         let directory = Arc::new(CoreRecallActorDirectory::new(Arc::clone(&tick_source)));
         directory
-            .register_actor(authenticated(), actor())
+            .register_actor(authenticated(), route_lease(), actor())
             .await
             .unwrap();
         let (first_server_endpoint, first_client_endpoint, first_client, first_connection) =
@@ -1387,7 +1451,7 @@ mod tests {
         let tick_source = Arc::new(TickSource(AtomicU64::new(100)));
         let directory = Arc::new(CoreRecallActorDirectory::new(tick_source));
         directory
-            .register_actor(authenticated(), actor())
+            .register_actor(authenticated(), route_lease(), actor())
             .await
             .unwrap();
         let (server_endpoint, client_endpoint, connection) = connection_pair().await;

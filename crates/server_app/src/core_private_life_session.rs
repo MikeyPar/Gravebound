@@ -38,7 +38,8 @@ use crate::{
     CorePrivateCaldusRewardRuntimeConfig, CorePrivateCaldusRewardRuntimeError,
     CorePrivateFixedDungeonAdvance, CorePrivateFixedDungeonB3RewardCommit,
     CorePrivateFixedDungeonDriverReady, CorePrivateFixedDungeonRestCommit,
-    CorePrivateMicrorealmAbility, CorePrivateMicrorealmAbilityPress, CorePrivateMicrorealmDriver,
+    CorePrivateLifeTickDirectory, CorePrivateLifeTickError, CorePrivateMicrorealmAbility,
+    CorePrivateMicrorealmAbilityPress, CorePrivateMicrorealmDriver,
     CorePrivateMicrorealmDriverError, CorePrivateMicrorealmDriverHandle,
     CorePrivateMicrorealmDriverObserver, CorePrivateMicrorealmDriverReport,
     CorePrivateMicrorealmIngressError, CorePrivateMicrorealmPreparedHandoff,
@@ -87,6 +88,19 @@ pub struct CorePrivateMicrorealmBindingLease {
 }
 
 impl CorePrivateMicrorealmBindingLease {
+    pub(crate) const fn from_route(
+        route_lease: CorePrivateRouteActorLease,
+        binding_generation: u64,
+    ) -> Self {
+        Self {
+            account_id: route_lease.account_id(),
+            character_id: route_lease.character_id(),
+            actor_generation: route_lease.actor_generation(),
+            binding_generation,
+            route_lease,
+        }
+    }
+
     #[must_use]
     pub const fn account_id(self) -> [u8; 16] {
         self.account_id
@@ -261,6 +275,8 @@ pub enum CorePrivateLifeSessionError {
     MicrorealmIngress(#[from] CorePrivateMicrorealmIngressError),
     #[error("Core private-life microrealm driver failed: {0}")]
     MicrorealmDriver(#[from] CorePrivateMicrorealmDriverError),
+    #[error("Core private-life authoritative tick failed: {0}")]
+    AuthoritativeTick(#[from] CorePrivateLifeTickError),
     #[error("Core private-life automatic B3 reward runtime failed: {0}")]
     B3RewardRuntime(#[from] CorePrivateB3RewardRuntimeError),
     #[error("Core private-life automatic Caldus reward runtime failed: {0}")]
@@ -351,6 +367,7 @@ pub struct CorePrivateLifeSessionDirectory<Clock, TickSource> {
     caldus_extraction_registrar: Option<Arc<dyn PrivateLifeCaldusExtractionRegistrar>>,
     b3_rewards: Option<Arc<dyn CoreB3RewardAuthority>>,
     caldus_rewards: Option<CaldusRewardAuthorityBinding>,
+    authoritative_ticks: Option<Arc<CorePrivateLifeTickDirectory>>,
     state: Mutex<SessionState>,
 }
 
@@ -635,6 +652,7 @@ where
             caldus_extraction_registrar: None,
             b3_rewards: None,
             caldus_rewards: None,
+            authoritative_ticks: None,
             state: Mutex::new(SessionState {
                 accepting: true,
                 shutdown_started: false,
@@ -734,6 +752,18 @@ where
     #[must_use]
     pub fn with_b3_reward_authority(mut self, authority: Arc<dyn CoreB3RewardAuthority>) -> Self {
         self.b3_rewards = Some(authority);
+        self
+    }
+
+    /// Registers every session-owned danger driver with the common route-generation-bound tick
+    /// directory. The all-or-nothing private-life composition root supplies the same directory to
+    /// Recall and extraction; standalone regression constructors deliberately leave it absent.
+    #[must_use]
+    pub fn with_authoritative_tick_directory(
+        mut self,
+        ticks: Arc<CorePrivateLifeTickDirectory>,
+    ) -> Self {
+        self.authoritative_ticks = Some(ticks);
         self
     }
 
@@ -1211,16 +1241,18 @@ where
             return Err(CorePrivateLifeSessionError::MicrorealmBindingGenerationExhausted);
         };
         let route_lease = runtime.route_lease();
-        let binding_lease = CorePrivateMicrorealmBindingLease {
-            account_id: lease.account_id,
-            character_id: route_lease.character_id(),
-            actor_generation: route_lease.actor_generation(),
-            binding_generation,
-            route_lease,
-        };
+        let binding_lease =
+            CorePrivateMicrorealmBindingLease::from_route(route_lease, binding_generation);
         let route_directory = runtime.route_directory();
         let driver = CorePrivateMicrorealmDriver::spawn(runtime);
         let handle = driver.handle();
+        if let Some(ticks) = &self.authoritative_ticks
+            && let Err(error) = ticks.bind(binding_lease, handle.clone())
+        {
+            drop(state);
+            let _ = driver.shutdown().await;
+            return Err(error.into());
+        }
         let active = entry
             .active
             .as_ref()
@@ -1532,9 +1564,16 @@ where
             Ok(())
         };
         let driver_result = bound.driver.shutdown().await;
+        let tick_result = self
+            .authoritative_ticks
+            .as_ref()
+            .map(|ticks| ticks.unbind(bound.lease))
+            .transpose();
         b3_result?;
         caldus_result?;
-        driver_result.map_err(Into::into)
+        let report = driver_result?;
+        tick_result?;
+        Ok(report)
     }
 
     /// Binds the current Boss-exit extraction actor to the exact private-life writer. This is
@@ -1949,7 +1988,11 @@ where
                 false
             };
             let driver_failed = bound.driver.shutdown().await.is_err();
-            if b3_failed || caldus_failed || driver_failed {
+            let tick_failed = self
+                .authoritative_ticks
+                .as_ref()
+                .is_some_and(|ticks| ticks.unbind(bound.lease).is_err());
+            if b3_failed || caldus_failed || driver_failed || tick_failed {
                 microrealm_shutdown_failures = microrealm_shutdown_failures.saturating_add(1);
             }
         }
@@ -2062,6 +2105,7 @@ mod tests {
     use sim_core::{CoreBossParticipant, CoreBossParticipantLock, EntityId, Tick};
 
     use super::*;
+    use crate::CorePrivateLifeAuthoritativeTick;
     use crate::{
         AccountId, CoreBellPortalAuthority, CoreBellPortalBinding, CorePrivateCaldusDefeatHandoff,
         CorePrivateCaldusRewardCommit, CorePrivateCaldusRewardCommitDisposition,
@@ -2088,10 +2132,10 @@ mod tests {
     struct TickSource(AtomicU64);
 
     impl CoreRecallAuthoritativeTick for TickSource {
-        fn current_tick(&self, account_id: [u8; 16], character_id: [u8; 16]) -> NonZeroU64 {
-            assert_eq!(account_id, ACCOUNT_ID);
-            assert_eq!(character_id, CHARACTER_ID);
-            NonZeroU64::new(self.0.load(Ordering::SeqCst)).unwrap()
+        fn current_tick(&self, route: CorePrivateRouteActorLease) -> Option<NonZeroU64> {
+            assert_eq!(route.account_id(), ACCOUNT_ID);
+            assert_eq!(route.character_id(), CHARACTER_ID);
+            NonZeroU64::new(self.0.load(Ordering::SeqCst))
         }
     }
 
@@ -2108,10 +2152,10 @@ mod tests {
     struct ExtractionTicks;
 
     impl CoreExtractionAuthoritativeTick for ExtractionTicks {
-        fn current_tick(&self, lease: CoreExtractionActorLease) -> Option<NonZeroU64> {
-            assert_eq!(lease.account_id(), ACCOUNT_ID);
-            assert_eq!(lease.character_id(), CHARACTER_ID);
-            assert_eq!(lease.route_generation(), 7);
+        fn current_tick(&self, route: CorePrivateRouteActorLease) -> Option<NonZeroU64> {
+            assert_eq!(route.account_id(), ACCOUNT_ID);
+            assert_eq!(route.character_id(), CHARACTER_ID);
+            assert_eq!(route.actor_generation(), 7);
             NonZeroU64::new(700)
         }
     }
@@ -2427,7 +2471,11 @@ mod tests {
             1
         );
         recall
-            .register_actor(authenticated(), actor())
+            .register_actor(
+                authenticated(),
+                CorePrivateRouteActorLease::for_test(ACCOUNT_ID, CHARACTER_ID, 7),
+                actor(),
+            )
             .await
             .unwrap();
         let recall_lease = sessions.bind_recall(attached.lease).await.unwrap();
@@ -2471,6 +2519,108 @@ mod tests {
         let report = sessions.finish_shutdown().await.unwrap();
         assert_eq!(report.retired_account_count, 1);
         assert!(report.zero_residue);
+        client.close(0_u32.into(), b"test complete");
+        server_endpoint.wait_idle().await;
+        client_endpoint.wait_idle().await;
+    }
+
+    #[tokio::test]
+    async fn live_driver_tick_is_route_bound_and_gates_recall_until_first_commit() {
+        let ticks = Arc::new(CorePrivateLifeTickDirectory::new());
+        let recall = Arc::new(CoreRecallActorDirectory::<FixedClock, _>::new(Arc::clone(
+            &ticks,
+        )));
+        let sessions = Arc::new(
+            CorePrivateLifeSessionDirectory::new(Arc::clone(&recall))
+                .with_authoritative_tick_directory(Arc::clone(&ticks)),
+        );
+        let (routes, route_lease, runtime) = live_microrealm();
+        recall
+            .register_actor(authenticated(), route_lease, actor())
+            .await
+            .unwrap();
+        let (server_endpoint, client_endpoint, client, server) = live_connection_pair().await;
+        let attached = sessions
+            .attach_transport(authenticated(), server, 5_000)
+            .await
+            .unwrap();
+        let mut binding = sessions
+            .bind_microrealm(attached.lease, runtime)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            sessions.bind_recall(attached.lease).await,
+            Err(CorePrivateLifeSessionError::Recall(
+                CoreRecallRuntimeError::AuthoritativeTickUnavailable
+            ))
+        ));
+        let running = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let state = binding.observer.changed().await.unwrap();
+                if matches!(state, CorePrivateMicrorealmDriverState::Running { .. }) {
+                    break state;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        let committed_tick = running.latest_step().unwrap().tick.0;
+        let source_tick =
+            CorePrivateLifeAuthoritativeTick::current_tick(ticks.as_ref(), route_lease)
+                .unwrap()
+                .get();
+        assert!(source_tick >= committed_tick);
+        let recall_tick = CoreRecallAuthoritativeTick::current_tick(ticks.as_ref(), route_lease)
+            .unwrap()
+            .get();
+        let extraction_tick =
+            CoreExtractionAuthoritativeTick::current_tick(ticks.as_ref(), route_lease)
+                .unwrap()
+                .get();
+        assert!(recall_tick >= source_tick);
+        assert!(extraction_tick >= recall_tick);
+        assert_eq!(
+            CorePrivateLifeAuthoritativeTick::current_tick(
+                ticks.as_ref(),
+                CorePrivateRouteActorLease::for_test(ACCOUNT_ID, CHARACTER_ID, 8),
+            ),
+            Err(CorePrivateLifeTickError::RouteGenerationMismatch)
+        );
+        assert_eq!(
+            CorePrivateLifeAuthoritativeTick::current_tick(
+                ticks.as_ref(),
+                CorePrivateRouteActorLease::for_test([99; 16], CHARACTER_ID, 7),
+            ),
+            Err(CorePrivateLifeTickError::Unbound)
+        );
+        sessions.bind_recall(attached.lease).await.unwrap();
+        let result = sessions
+            .recall_authority(attached.lease)
+            .await
+            .unwrap()
+            .handle_recall(authenticated(), &recall_frame(1), 999)
+            .await;
+        assert!(result.server_tick >= source_tick);
+        assert!(matches!(
+            result.result,
+            RecallResultV1::Pending { started_tick, .. } if started_tick == result.server_tick
+        ));
+
+        sessions.unbind_recall(attached.lease).await.unwrap();
+        sessions.unbind_microrealm(binding.lease).await.unwrap();
+        assert_eq!(
+            CorePrivateLifeAuthoritativeTick::current_tick(ticks.as_ref(), route_lease),
+            Err(CorePrivateLifeTickError::Unbound)
+        );
+        for connection in sessions.begin_shutdown().await {
+            connection.close(0_u32.into(), b"test shutdown");
+        }
+        assert!(sessions.finish_shutdown().await.unwrap().zero_residue);
+        ticks.begin_shutdown();
+        assert!(ticks.finish_shutdown().unwrap().zero_residue);
+        routes.begin_shutdown();
+        assert!(routes.finish_shutdown().await.unwrap().zero_residue);
         client.close(0_u32.into(), b"test complete");
         server_endpoint.wait_idle().await;
         client_endpoint.wait_idle().await;
@@ -3150,7 +3300,11 @@ mod tests {
         let recall = Arc::new(CoreRecallActorDirectory::new(Arc::clone(&ticks)));
         let sessions = Arc::new(CorePrivateLifeSessionDirectory::new(Arc::clone(&recall)));
         recall
-            .register_actor(authenticated(), actor())
+            .register_actor(
+                authenticated(),
+                CorePrivateRouteActorLease::for_test(ACCOUNT_ID, CHARACTER_ID, 7),
+                actor(),
+            )
             .await
             .unwrap();
         let (first_server_endpoint, first_client_endpoint, first_client, first_server) =
@@ -3234,7 +3388,11 @@ mod tests {
         assert!(third.writer.is_available());
         assert_eq!(sessions.snapshot().await.recall_bound_count, 0);
         recall
-            .register_actor(authenticated(), actor())
+            .register_actor(
+                authenticated(),
+                CorePrivateRouteActorLease::for_test(ACCOUNT_ID, CHARACTER_ID, 7),
+                actor(),
+            )
             .await
             .unwrap();
         sessions.bind_recall(third.lease).await.unwrap();
