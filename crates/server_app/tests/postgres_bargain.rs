@@ -252,7 +252,7 @@ async fn lower_fixture_to_level_four(persistence: &PostgresPersistence, ids: Fix
     .await
     .unwrap();
     sqlx::query(
-        "UPDATE character_progression SET total_xp = 400, level = 4, current_health = 128 \
+        "UPDATE character_progression SET total_xp = 450, level = 4, current_health = 128 \
          WHERE namespace_id = $1 AND account_id = $2 AND character_id = $3",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
@@ -1115,7 +1115,9 @@ async fn postgres_b3_ineligible_terminal_grants_nothing_and_replays_without_stra
     begin_core_danger_entry(&persistence, &restores, B3_INELIGIBLE_FIXTURE).await;
     let coordinator = b3_coordinator(&persistence);
     let mut ineligible_handoff = b3_handoff(9);
-    ineligible_handoff.longest_inactivity_ticks = 120;
+    ineligible_handoff.active_ticks = 700;
+    ineligible_handoff.present_ticks = 700;
+    ineligible_handoff.longest_inactivity_ticks = 601;
     let ineligible = coordinator
         .commit(
             authenticated(B3_INELIGIBLE_FIXTURE),
