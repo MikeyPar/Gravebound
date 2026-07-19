@@ -34,8 +34,8 @@ Local Windows verification at exact source `78b7ff0`:
 
 ## Explicit boundary
 
-This slice freezes and acknowledges one exact durable Caldus result but does not call PostgreSQL itself. It does not yet construct the B6 owner in the persistent session task, publish pending inventory to the client, bind the production extraction actor, enable Character Select `Play` or Realm Gate admission, or claim hosted restart/adverse evidence.
+This historical slice freezes and acknowledges one exact durable Caldus result but does not call PostgreSQL itself. Later commits now construct the B6 owner, publish pending inventory, and bind production extraction through the persistent session; this file still does not claim complete automatic-worker or hosted restart/adverse evidence, and Character Select `Play` plus Realm Gate admission remain disabled.
 
 ## Current Next Step
 
-Commits `42a632b`, `be52c29`, and `f5c12b3` complete fail-closed custody validation, exact permit abort, ordered pending-inventory publication, reconnect replay, and transport-free `LinkLost` cleanup under [extraction-prerequisite evidence](GB-M03-03G-caldus-extraction-prerequisites-evidence.md). Next construct/register production extraction only from the committed `BossExitReady` exit and coherent storage versions, then bind it through the exact danger lease. Keep normal admission disabled.
+Commit `3f749dd` completes exact production extraction construction/registration and danger-lease binding with replay-safe ownership; see [activation evidence](GB-M03-03G-caldus-extraction-activation-evidence.md). Next prove the complete automatic-worker active/reconnect/transport-free-`LinkLost`/competing-terminal lifecycle and hosted adverse/restart matrix. Keep normal admission disabled.

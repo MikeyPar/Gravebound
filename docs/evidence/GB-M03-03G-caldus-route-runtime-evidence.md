@@ -42,4 +42,4 @@ This slice now uses the compiled arena shell/pillars plus the exact `0.70` Caldu
 
 ## Current Next Step
 
-Commits `42a632b`, `be52c29`, and `f5c12b3` now close custody hardening, exact permit rollback, ordered pending-inventory publication/replay, and `LinkLost` loser cleanup; see [extraction-prerequisite evidence](GB-M03-03G-caldus-extraction-prerequisites-evidence.md). Next construct/register the exact `BossExitReady` production extraction actor from the committed exit and coherent storage versions, then bind it through the exact danger lease. Keep normal admission disabled until that integration and hosted adverse proof pass.
+Commit `3f749dd` now constructs/registers the exact `BossExitReady` production extraction actor from the committed exit and coherent storage versions, binds it through the exact danger lease, and preserves winner authority under early/exact/altered replay; see [activation evidence](GB-M03-03G-caldus-extraction-activation-evidence.md). Next prove the complete automatic-worker active/reconnect/transport-free-`LinkLost`/competing-terminal lifecycle and hosted adverse/restart matrix. Keep normal admission disabled.

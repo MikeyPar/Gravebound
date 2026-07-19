@@ -17,17 +17,18 @@
 - Commit `42a632b` closes impossible custody shapes at every projection boundary. Equipment cannot share one pending slot, Red Tonic stacks are homogeneous and capped at six, run materials are capped at 99, staged lineages cannot project extraction authority, and Core rejects material families excluded by `CONT-REWARD-003`.
 - Commit `be52c29` adds exact extraction-permit abort. Only the current account/character/generation/permit may reopen `BossExitReady`; the route version advances monotonically and stale, changed, foreign, retired, or replacement permits cannot clear newer authority.
 - Commit `f5c12b3` completes ordered worker publication. After durable reward acknowledgement the worker loads the coherent storage snapshot, sends pending inventory before the matching `BossExitReady` route state at the same authoritative defeat tick, retains both events, and replays them only on newer writer generations. The private-life session installs the writer before reconnect visibility, removes the current writer on `LinkLost`, and can clear the exact registered extraction binding without a transport lease when another terminal wins.
-- Normal admission and ordinary feature advertisement remain disabled. Production extraction actor construction/registration from the committed exit and storage version vector is the next integration seam.
+- Commit `3f749dd` consumes these prerequisites in the exact production actor construction/registration and session-binding seam recorded separately in the [activation evidence](GB-M03-03G-caldus-extraction-activation-evidence.md).
+- Normal admission and ordinary feature advertisement remain disabled. Complete automatic-worker and hosted lifecycle proof is the next integration seam.
 
 ## Verification
 
 - Strict all-feature/all-target Clippy passed with warnings denied for `protocol`, `persistence`, and `server_app`.
 - Protocol: `88/88` tests passed.
 - Persistence: `246/246` tests passed.
-- Server library: `354/354` tests passed, including exact reservation abort, ordered real-QUIC publication/replay, coherent projection, and transport-free exact/foreign `LinkLost` cleanup coverage.
+- Server library: the prerequisite source passed `354/354`; cumulative activation source `3f749dd` plus replay/cleanup corrections passes `360/360`, including exact reservation abort, ordered real-QUIC publication/replay, coherent projection, actor/session activation, replay-owned rollback, bounded shutdown cleanup, and terminal-completion release.
 - `cargo check -p server_app --test postgres_caldus_victory` passed, so the hosted custody journey compiles.
 - `TEST_DATABASE_URL` was absent locally. Hosted PostgreSQL execution and real-QUIC restart/adverse evidence are therefore explicitly unclaimed.
 
 ## Current Next Step
 
-Construct and register the production extraction actor only from the exact committed `BossExitReady` exit plus coherent storage version vector, then call the transport-independent session binding. Every post-permit failure must use the exact abort contract so `TerminalPending` cannot strand. Prove active transport, response loss, reconnect, `LinkLost`, competing terminal, restart, and zero-residue behavior before bound normal-server construction or admission.
+Commit `3f749dd` completes the exact construction/registration/session-binding boundary with reservation-before-snapshot, coherent storage versions, fresh/replayed rollback ownership, bounded cleanup, and terminal-completion release; see [activation evidence](GB-M03-03G-caldus-extraction-activation-evidence.md). Next drive the complete automatic worker and prove active transport, response loss, reconnect, transport-free `LinkLost`, competing terminal, completion release, shutdown, and zero residue, then run hosted PostgreSQL/real-QUIC adverse and restart evidence before bound normal-server construction or admission.

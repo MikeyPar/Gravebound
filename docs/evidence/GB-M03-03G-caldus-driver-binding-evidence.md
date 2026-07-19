@@ -36,4 +36,4 @@ The PostgreSQL reward coordinator still performs personal item, progression, and
 
 ## Current Next Step
 
-Commits `42a632b`, `be52c29`, and `f5c12b3` now close custody hardening, exact permit abort, ordered pending-inventory publication, reconnect replay, and `LinkLost` loser cleanup under [extraction-prerequisite evidence](GB-M03-03G-caldus-extraction-prerequisites-evidence.md). Next construct/register production extraction only from the committed `BossExitReady` exit and coherent storage versions, then bind it through the exact danger lease. Keep normal admission disabled.
+Commit `3f749dd` now constructs/registers production extraction only from the committed `BossExitReady` exit and coherent storage versions, binds it through the exact danger lease, and closes replay-owned rollback and terminal-completion teardown hazards; see [activation evidence](GB-M03-03G-caldus-extraction-activation-evidence.md). Next prove the complete automatic-worker active/reconnect/transport-free-`LinkLost`/competing-terminal lifecycle, then execute hosted adverse/restart evidence. Keep normal admission disabled.
