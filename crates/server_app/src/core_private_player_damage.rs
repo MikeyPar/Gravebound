@@ -79,6 +79,7 @@ pub fn normal_wave_player_damage_facts(
             &mut facts,
             step.tick,
             *source_entity_id,
+            player,
             *source_position,
             pattern_id,
             damage,
@@ -114,6 +115,7 @@ pub fn fixed_room_player_damage_facts(
                         &mut facts,
                         contact.tick,
                         contact.application.damage.source,
+                        player,
                         contact.source_position,
                         "miniboss.sepulcher_knight.charge_lane",
                         &contact.application,
@@ -153,6 +155,7 @@ pub fn caldus_player_damage_facts(
                 &mut facts,
                 contact.tick,
                 contact.damage.damage.source,
+                player,
                 contact.source_position,
                 "boss.caldus.charge_lane",
                 &contact.damage,
@@ -192,6 +195,7 @@ fn push_hostile_contacts(
             facts,
             tick,
             *source_entity_id,
+            player,
             *source_position,
             pattern_id,
             damage,
@@ -204,6 +208,7 @@ fn push_applied(
     facts: &mut Vec<CorePrivatePlayerDamageFactV1>,
     tick: Tick,
     source: EntityId,
+    player: EntityId,
     source_position: SimulationVector,
     pattern_id: &'static str,
     applied: &AppliedHostileDamage,
@@ -216,6 +221,7 @@ fn push_applied(
         facts,
         tick,
         source,
+        player,
         source_position,
         pattern_id,
         &applied.damage,
@@ -226,11 +232,12 @@ fn push_damage(
     facts: &mut Vec<CorePrivatePlayerDamageFactV1>,
     tick: Tick,
     source: EntityId,
+    player: EntityId,
     source_position: SimulationVector,
     pattern_id: &'static str,
     damage: &DamageEvent,
 ) -> Result<(), CorePrivatePlayerDamageError> {
-    if damage.source != source || !source_position.is_finite() {
+    if damage.source != source || damage.target != player || !source_position.is_finite() {
         return Err(CorePrivatePlayerDamageError::InvalidDamage);
     }
     let event_ordinal =
@@ -291,6 +298,9 @@ fn finish_facts(
             .iter()
             .position(CorePrivatePlayerDamageFactV1::lethal)
             .is_some_and(|index| index + 1 != facts.len())
+        || facts
+            .windows(2)
+            .any(|pair| pair[0].post_health != pair[1].pre_health)
     {
         return Err(CorePrivatePlayerDamageError::LethalityMismatch);
     }
@@ -433,6 +443,7 @@ mod tests {
             &mut facts,
             tick,
             id(10),
+            id(20),
             SimulationVector::new(4.0, 6.0),
             "pattern.enemy.drowned_pilgrim.fan",
             &applied(tick, 100, 10),
@@ -442,6 +453,7 @@ mod tests {
             &mut facts,
             tick,
             id(10),
+            id(20),
             SimulationVector::new(7.0, 8.0),
             "pattern.enemy.drowned_pilgrim.fan",
             &applied(tick, 90, 100),
@@ -465,5 +477,68 @@ mod tests {
             finish_facts(reversed, tick, true),
             Err(CorePrivatePlayerDamageError::LethalityMismatch)
         );
+    }
+
+    #[test]
+    fn foreign_target_tick_discontinuity_and_debug_damage_fail_closed() {
+        let tick = Tick(41);
+        let position = SimulationVector::new(4.0, 6.0);
+        let pattern = "pattern.enemy.drowned_pilgrim.fan";
+        assert_eq!(
+            push_applied(
+                &mut Vec::new(),
+                tick,
+                id(10),
+                id(21),
+                position,
+                pattern,
+                &applied(tick, 100, 10),
+            ),
+            Err(CorePrivatePlayerDamageError::InvalidDamage)
+        );
+        assert_eq!(
+            push_applied(
+                &mut Vec::new(),
+                tick,
+                id(10),
+                id(20),
+                position,
+                pattern,
+                &applied(Tick(42), 100, 10),
+            ),
+            Err(CorePrivatePlayerDamageError::InvalidDamage)
+        );
+
+        let mut facts = Vec::new();
+        push_applied(
+            &mut facts,
+            tick,
+            id(10),
+            id(20),
+            position,
+            pattern,
+            &applied(tick, 100, 10),
+        )
+        .unwrap();
+        push_applied(
+            &mut facts,
+            tick,
+            id(10),
+            id(20),
+            position,
+            pattern,
+            &applied(tick, 80, 10),
+        )
+        .unwrap();
+        assert_eq!(
+            finish_facts(facts, tick, false),
+            Err(CorePrivatePlayerDamageError::LethalityMismatch)
+        );
+
+        let mut debug = applied(tick, 100, 10);
+        debug.debug_invulnerable = true;
+        let mut facts = Vec::new();
+        push_applied(&mut facts, tick, id(10), id(20), position, pattern, &debug).unwrap();
+        assert!(facts.is_empty());
     }
 }
