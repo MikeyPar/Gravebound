@@ -17,7 +17,7 @@ use crate::{
     EnemyHealthStep, EnemyHurtbox, EnemyLabPlayer, EnemyRuntimeError, EntityId, EntityIdAllocator,
     HostileDamagePolicy, HostileError, HostileEvent, HostileProjectile,
     HostileProjectileSimulation, HostileStep, LaneGeometry, NormalRewardDropEvent,
-    PilgrimTargetInput, SpawnInstanceId, Tick, resolve_lane_contact_with_policy,
+    PilgrimTargetInput, SimulationVector, SpawnInstanceId, Tick, resolve_lane_contact_with_policy,
 };
 
 pub const FIRST_PLAYABLE_SPAWN_TELEGRAPH_TICKS: u32 = 27;
@@ -124,7 +124,7 @@ pub struct NormalWaveTimelineEvent {
     pub event: EnemyEvent,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum NormalWaveLaneEvent {
     Activated {
         instance_id: SpawnInstanceId,
@@ -135,6 +135,7 @@ pub enum NormalWaveLaneEvent {
     Contact {
         instance_id: SpawnInstanceId,
         source_entity_id: EntityId,
+        source_position: SimulationVector,
         pattern_id: &'static str,
         cast_id: AttackCastId,
         player_entity_id: EntityId,
@@ -834,6 +835,7 @@ impl NormalWaveSimulation {
                 events.push(NormalWaveLaneEvent::Contact {
                     instance_id,
                     source_entity_id: lane.source_entity_id,
+                    source_position: self.actors[actor_index].actor.position(),
                     pattern_id: lane.attack.pattern_id,
                     cast_id: lane.cast_id,
                     player_entity_id: player_id,

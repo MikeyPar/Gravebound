@@ -2181,6 +2181,7 @@ mod tests {
             },
             combat: sim_core::CombatStep::default(),
             wave: None,
+            player_damage: Vec::new(),
             pack_clear: None,
             player_died: false,
             bell_portal_in_range: false,

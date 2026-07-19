@@ -29,7 +29,8 @@ use crate::{
     CorePrivateCaldusDefeatHandoff, CorePrivateCaldusRewardCommit,
     CorePrivateCaldusRewardCommitDisposition, CorePrivateCaldusRewardError,
     CorePrivateCaldusStagingHandoff, CorePrivateMicrorealmInput, CorePrivateMicrorealmRuntimeError,
-    CorePrivateRouteActorDirectory, CorePrivateRouteActorLease, CorePrivateRouteRuntimeError,
+    CorePrivatePlayerDamageError, CorePrivatePlayerDamageFactV1, CorePrivateRouteActorDirectory,
+    CorePrivateRouteActorLease, CorePrivateRouteRuntimeError, caldus_player_damage_facts,
     core_private_caldus_reward::CoreCaldusRewardTracker,
     core_private_combat_frame::{core_player_movement_config, step_live_player_combat_with_bodies},
 };
@@ -52,6 +53,7 @@ pub struct CorePrivateCaldusFrame {
     pub route: CorePrivateRouteStateV1,
     pub boss_entity_id: EntityId,
     pub boss_health: Option<(u32, u32)>,
+    pub player_damage: Vec<CorePrivatePlayerDamageFactV1>,
     pub player_died: bool,
 }
 
@@ -296,6 +298,17 @@ impl CorePrivateCaldusRuntime {
         let route_before = self.route_directory.snapshot(self.route_lease)?;
         self.validate_route_authority(&route_before)?;
         let staged = self.stage_frame(input, tick, friendly_inputs.as_deref())?;
+        let player = staged
+            .players
+            .get(&self.participant.entity_id)
+            .ok_or(CorePrivateCaldusRuntimeError::InvalidComposition)?;
+        let player_died = player.consumables.vitals().current_health() == 0;
+        let player_damage = caldus_player_damage_facts(
+            tick,
+            staged.encounter.as_ref(),
+            self.participant.entity_id,
+            player_died,
+        )?;
         let route = self
             .route_directory
             .apply_fixed_dungeon_authority(
@@ -305,12 +318,7 @@ impl CorePrivateCaldusRuntime {
                 staged.route_phase,
             )
             .await?;
-        let player = staged
-            .players
-            .get(&self.participant.entity_id)
-            .ok_or(CorePrivateCaldusRuntimeError::InvalidComposition)?;
         let player_position = simulation_to_tile_point(player.target.position)?;
-        let player_died = player.consumables.vitals().current_health() == 0;
         let boss_health = staged
             .encounter_simulation
             .as_ref()
@@ -366,6 +374,7 @@ impl CorePrivateCaldusRuntime {
             route,
             boss_entity_id: self.boss_entity_id,
             boss_health,
+            player_damage,
             player_died,
         })
     }
@@ -772,6 +781,8 @@ pub enum CorePrivateCaldusRuntimeError {
     Presentation(#[from] crate::CaldusInstancePresentationError),
     #[error(transparent)]
     Route(#[from] CorePrivateRouteRuntimeError),
+    #[error(transparent)]
+    PlayerDamage(#[from] CorePrivatePlayerDamageError),
 }
 
 #[cfg(test)]

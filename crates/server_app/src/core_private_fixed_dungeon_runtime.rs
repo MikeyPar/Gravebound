@@ -19,10 +19,11 @@ use thiserror::Error;
 use crate::{
     CoreBellPortalTransition, CoreCharacterCombatEnvelope, CoreDurableB3Resolution,
     CoreDurableBargainRestResolution, CorePrivateMicrorealmInput, CorePrivateMicrorealmRuntime,
-    CorePrivateMicrorealmRuntimeError, CorePrivateRouteActorDirectory, CorePrivateRouteActorLease,
-    CorePrivateRouteRuntimeError,
+    CorePrivateMicrorealmRuntimeError, CorePrivatePlayerDamageError, CorePrivatePlayerDamageFactV1,
+    CorePrivateRouteActorDirectory, CorePrivateRouteActorLease, CorePrivateRouteRuntimeError,
     core_private_combat_frame::{core_player_movement_config, step_live_player_combat},
     core_private_microrealm_runtime::CorePrivateMicrorealmDungeonHandoff,
+    fixed_room_player_damage_facts,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -69,6 +70,7 @@ pub struct CorePrivateFixedDungeonLiveRoomFrame {
     pub combat: sim_core::CombatStep,
     pub route: CorePrivateRouteStateV1,
     pub step: sim_content::CoreFixedDungeonRoomStep,
+    pub player_damage: Vec<CorePrivatePlayerDamageFactV1>,
     pub player_died: bool,
 }
 
@@ -440,6 +442,8 @@ impl CorePrivateFixedDungeonRuntime {
         let player = staged_combat.player()?;
         let player_position = simulation_to_tile_point(player.target.position)?;
         let player_died = player.consumables.vitals().current_health() == 0;
+        let player_damage =
+            fixed_room_player_damage_facts(&step, player.target.entity_id, player_died)?;
         let (room, phase) = route_position(staged_combat.node(), Some(step.phase_after()))?;
         let route = self
             .route_directory
@@ -462,6 +466,7 @@ impl CorePrivateFixedDungeonRuntime {
             combat: combat_step,
             route,
             step,
+            player_damage,
             player_died,
         })
     }
@@ -649,6 +654,8 @@ pub enum CorePrivateFixedDungeonRuntimeError {
     Dungeon(#[from] sim_content::CoreFixedDungeonError),
     #[error(transparent)]
     Route(#[from] CorePrivateRouteRuntimeError),
+    #[error(transparent)]
+    PlayerDamage(#[from] CorePrivatePlayerDamageError),
 }
 
 #[cfg(test)]

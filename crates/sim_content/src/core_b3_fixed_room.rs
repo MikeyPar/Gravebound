@@ -25,6 +25,7 @@ pub struct CoreB3ChargeContact {
     pub tick: Tick,
     pub cast_id: AttackCastId,
     pub target: EntityId,
+    pub source_position: sim_core::SimulationVector,
     pub application: AppliedHostileDamage,
 }
 
@@ -301,6 +302,8 @@ impl CoreB3CombatSimulation {
                                 tick: combat.tick,
                                 cast_id: *cast_id,
                                 target: *target,
+                                source_position:
+                                    super::core_fixed_room_encounter::core_position_vector(step.to),
                                 application,
                             });
                         }

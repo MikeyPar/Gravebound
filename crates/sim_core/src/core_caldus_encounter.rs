@@ -36,11 +36,12 @@ pub fn core_caldus_entity_id(run_ordinal: u32) -> Result<EntityId, CoreCaldusEnc
     EntityId::new(value).ok_or(CoreCaldusEncounterError::EntityIdOverflow)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CoreCaldusChargeDamageEvent {
     pub tick: Tick,
     pub cast_id: u64,
     pub participant: CoreBossParticipant,
+    pub source_position: SimulationVector,
     pub damage: AppliedHostileDamage,
 }
 
@@ -370,6 +371,7 @@ impl CoreCaldusEncounterSimulation {
                     tick: *tick,
                     cast_id: *cast_id,
                     participant: *participant,
+                    source_position: self.body.simulation_position(),
                     damage,
                 });
             }

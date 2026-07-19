@@ -696,6 +696,7 @@ mod tests {
                     reward_handoff: Some(reward_handoff.clone()),
                     reset_cleared_projectiles: Vec::new(),
                 }),
+                player_damage: Vec::new(),
                 player_died: false,
             }),
             reward_handoff: Arc::new(reward_handoff.clone()),

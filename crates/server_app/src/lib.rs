@@ -28,6 +28,7 @@ mod core_private_life_session;
 mod core_private_life_tick;
 mod core_private_microrealm_driver;
 mod core_private_microrealm_runtime;
+mod core_private_player_damage;
 mod core_private_route_actor;
 mod core_private_world_flow;
 mod core_recall_outbox;
@@ -174,6 +175,10 @@ pub use core_private_microrealm_driver::{
 pub use core_private_microrealm_runtime::{
     CoreMicrorealmPackClearProof, CorePrivateMicrorealmInput, CorePrivateMicrorealmRuntime,
     CorePrivateMicrorealmRuntimeError, CorePrivateMicrorealmStep,
+};
+pub use core_private_player_damage::{
+    CorePrivatePlayerDamageError, CorePrivatePlayerDamageFactV1, caldus_player_damage_facts,
+    fixed_room_player_damage_facts, normal_wave_player_damage_facts,
 };
 pub use core_private_route_actor::{
     CORE_PRIVATE_ROUTE_ACTOR_MAILBOX_CAPACITY, CorePrivateRouteActor, CorePrivateRouteActorAdvance,

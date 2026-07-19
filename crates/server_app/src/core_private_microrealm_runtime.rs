@@ -22,8 +22,9 @@ use thiserror::Error;
 use crate::core_private_combat_frame::{core_player_movement_config, step_live_player_combat};
 use crate::{
     CoreBellPortalTransition, CoreCharacterCombat, CoreCharacterCombatEnvelope,
-    CoreCombatFactoryError, CorePrivateRouteActorDirectory, CorePrivateRouteActorLease,
-    CorePrivateRouteRuntimeError,
+    CoreCombatFactoryError, CorePrivatePlayerDamageError, CorePrivatePlayerDamageFactV1,
+    CorePrivateRouteActorDirectory, CorePrivateRouteActorLease, CorePrivateRouteRuntimeError,
+    normal_wave_player_damage_facts,
 };
 
 #[derive(Debug)]
@@ -102,6 +103,7 @@ pub struct CorePrivateMicrorealmStep {
     pub movement: MovementStep,
     pub combat: CombatStep,
     pub wave: Option<sim_core::NormalWaveStep>,
+    pub player_damage: Vec<CorePrivatePlayerDamageFactV1>,
     pub pack_clear: Option<CoreMicrorealmPackClearProof>,
     pub player_died: bool,
     pub bell_portal_in_range: bool,
@@ -340,6 +342,15 @@ impl CorePrivateMicrorealmRuntime {
         // All fallible simulation work is staged before the shared route CAS. Local state swaps
         // only after the actor commits phase and Bell range under its one lock.
         let frame = self.stage_frame(&input, tick, &route_before)?;
+        let player_died = frame.living_participants == 0;
+        let player = frame.combat.player().target.entity_id;
+        let player_damage = match frame.wave_step.as_ref() {
+            Some(wave) => normal_wave_player_damage_facts(wave, player, player_died)?,
+            None if player_died => {
+                return Err(CorePrivatePlayerDamageError::LethalityMismatch.into());
+            }
+            None => Vec::new(),
+        };
         let bell_portal_in_range = frame.phase == CoreMicrorealmPhase::Cleared
             && point_in_circle(
                 frame.player_position,
@@ -371,8 +382,9 @@ impl CorePrivateMicrorealmRuntime {
             movement: frame.movement_step,
             combat: frame.combat_step,
             wave: frame.wave_step,
+            player_damage,
             pack_clear: frame.pack_clear,
-            player_died: frame.living_participants == 0,
+            player_died,
             bell_portal_in_range,
         })
     }
@@ -567,6 +579,8 @@ pub enum CorePrivateMicrorealmRuntimeError {
     Lifecycle(#[from] sim_core::CoreMicrorealmError),
     #[error(transparent)]
     Route(#[from] CorePrivateRouteRuntimeError),
+    #[error(transparent)]
+    PlayerDamage(#[from] CorePrivatePlayerDamageError),
 }
 
 #[cfg(test)]

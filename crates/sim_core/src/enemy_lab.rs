@@ -166,7 +166,7 @@ pub struct EnemyTimelineEvent {
     pub event: EnemyEvent,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum EnemyLaneEvent {
     Activated {
         source_entity_id: EntityId,
@@ -175,6 +175,7 @@ pub enum EnemyLaneEvent {
     },
     Contact {
         source_entity_id: EntityId,
+        source_position: SimulationVector,
         pattern_id: &'static str,
         cast_id: AttackCastId,
         player_entity_id: EntityId,
@@ -566,6 +567,7 @@ impl EnemyLab {
         }
         events.push(EnemyLaneEvent::Contact {
             source_entity_id: lane.source_entity_id,
+            source_position: self.actors.chain_sentry().position(),
             pattern_id: lane.attack.pattern_id,
             cast_id: lane.cast_id,
             player_entity_id: snapshot.entity_id,

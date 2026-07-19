@@ -64,6 +64,9 @@ pub struct HostileProjectile {
     cast_id: AttackCastId,
     source_kind: HostileProjectileSourceKind,
     pattern_id: &'static str,
+    /// Immutable authored attack origin retained for death-trace attribution. Projectile impact
+    /// position is a collision fact and must not be substituted for the source position.
+    source_position: SimulationVector,
     position: SimulationVector,
     direction: AimDirection,
     speed_tiles_per_second: f32,
@@ -104,6 +107,11 @@ impl HostileProjectile {
     #[must_use]
     pub const fn pattern_id(&self) -> &'static str {
         self.pattern_id
+    }
+
+    #[must_use]
+    pub const fn source_position(&self) -> SimulationVector {
+        self.source_position
     }
 
     #[must_use]
@@ -182,6 +190,7 @@ pub enum HostileEvent {
         source_entity_id: EntityId,
         pattern_id: &'static str,
         cast_id: AttackCastId,
+        source_position: SimulationVector,
         target: HostileCollisionTarget,
         position: SimulationVector,
         declared_damage_band: DamageBand,
@@ -648,6 +657,7 @@ impl HostileProjectileSimulation {
             cast_id,
             source_kind,
             pattern_id: attack.pattern_id,
+            source_position: position,
             position,
             direction,
             speed_tiles_per_second: milli_to_tiles(attack.speed_milli_tiles_per_second),
@@ -898,6 +908,7 @@ impl ProjectileTickTransaction<'_> {
             source_entity_id: projectile.source_entity_id,
             pattern_id: projectile.pattern_id,
             cast_id: projectile.cast_id,
+            source_position: projectile.source_position,
             target: HostileCollisionTarget::Player(player_entity_id),
             position,
             declared_damage_band: projectile.declared_damage_band,
@@ -923,6 +934,7 @@ impl ProjectileTickTransaction<'_> {
             source_entity_id: projectile.source_entity_id,
             pattern_id: projectile.pattern_id,
             cast_id: projectile.cast_id,
+            source_position: projectile.source_position,
             target: HostileCollisionTarget::Solid(solid),
             position,
             declared_damage_band: projectile.declared_damage_band,
@@ -2627,6 +2639,7 @@ mod tests {
             cast_id: AttackCastId::FIRST,
             source_kind: HostileProjectileSourceKind::AimedFan,
             pattern_id: "pattern.test.hostile_contact",
+            source_position: SimulationVector::new(4.0, 6.0),
             position: SimulationVector::new(5.0, 6.0),
             direction: AimDirection::east(),
             speed_tiles_per_second: 30.0,
@@ -2951,6 +2964,7 @@ mod tests {
             cast_id: AttackCastId::FIRST,
             source_kind: HostileProjectileSourceKind::AimedFan,
             pattern_id: "pattern.enemy.drowned_pilgrim.fan",
+            source_position: SimulationVector::new(4.0, 12.0),
             position: SimulationVector::new(4.45, 12.0),
             direction: AimDirection::east(),
             speed_tiles_per_second: 300.0,
@@ -2992,6 +3006,7 @@ mod tests {
             cast_id: AttackCastId::FIRST,
             source_kind: HostileProjectileSourceKind::AimedFan,
             pattern_id: "pattern.enemy.drowned_pilgrim.fan",
+            source_position: SimulationVector::new(8.0, 6.0),
             position: SimulationVector::new(9.0, 6.0),
             direction: AimDirection::east(),
             speed_tiles_per_second: 300.0,
