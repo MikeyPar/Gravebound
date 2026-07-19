@@ -2746,9 +2746,10 @@ mod tests {
             ),
         );
         let (dummy_routes, _dummy_lease, runtime) = live_microrealm();
-        let (server_endpoint, client_endpoint, client, server) = live_connection_pair().await;
+        let (first_server_endpoint, first_client_endpoint, first_client, first_server) =
+            live_connection_pair().await;
         let attached = sessions
-            .attach_transport(authenticated(), server, 5_000)
+            .attach_transport(authenticated(), first_server, 5_000)
             .await
             .expect("private-life transport");
         let dummy_binding = sessions
@@ -2945,12 +2946,52 @@ mod tests {
             Err(CorePrivateLifeSessionError::UnresolvedExtraction)
         ));
 
+        assert!(matches!(
+            sessions
+                .detach_transport(attached.lease, 5_100)
+                .await
+                .expect("first LinkLost detach"),
+            CorePrivateLifeTransportDetach::Detached { .. }
+        ));
+        assert_eq!(sessions.snapshot().await.extraction_bound_count, 1);
+        assert_eq!(
+            extraction
+                .registered_actor_lease(authenticated())
+                .await
+                .expect("actor survives LinkLost"),
+            actor_lease
+        );
+
+        let (second_server_endpoint, second_client_endpoint, second_client, second_server) =
+            live_connection_pair().await;
+        let second = sessions
+            .attach_transport(authenticated(), second_server, 5_200)
+            .await
+            .expect("reconnect");
+        assert_eq!(second.microrealm.as_ref().unwrap().lease, exact_binding);
+        let second_extraction = second.extraction_lease.expect("reconnected extraction");
+        assert_eq!(second_extraction.actor(), actor_lease);
+        assert!(Arc::ptr_eq(
+            &second.writer,
+            &extraction
+                .reliable_writer(second_extraction)
+                .await
+                .expect("reconnected shared writer")
+        ));
+        assert!(matches!(
+            sessions
+                .detach_transport(second.lease, 5_300)
+                .await
+                .expect("second LinkLost detach"),
+            CorePrivateLifeTransportDetach::Detached { .. }
+        ));
+
         assert_eq!(
             sessions
                 .unbind_registered_extraction(exact_binding)
                 .await
-                .expect("session cleanup"),
-            Some(CoreExtractionTransportDetach::Detached)
+                .expect("transport-free terminal cleanup"),
+            None
         );
         registrar
             .abort(actor_lease)
@@ -2959,6 +3000,19 @@ mod tests {
         let reopened = boss_routes.snapshot(boss_lease).expect("reopened route");
         assert_eq!(reopened.phase, CorePrivateRoutePhaseV1::BossExitReady);
         assert_eq!(sessions.snapshot().await.extraction_bound_count, 0);
+
+        let (third_server_endpoint, third_client_endpoint, third_client, third_server) =
+            live_connection_pair().await;
+        let third = sessions
+            .attach_transport(authenticated(), third_server, 5_400)
+            .await
+            .expect("post-terminal reconnect");
+        assert!(third.extraction_lease.is_none());
+        assert_eq!(third.microrealm.as_ref().unwrap().lease, exact_binding);
+        sessions
+            .detach_transport(third.lease, 5_500)
+            .await
+            .expect("final detach");
         assert!(
             sessions
                 .unbind_microrealm(exact_binding)
@@ -2975,9 +3029,15 @@ mod tests {
         assert!(dummy_routes.finish_shutdown().await.unwrap().zero_residue);
         boss_routes.begin_shutdown();
         assert!(boss_routes.finish_shutdown().await.unwrap().zero_residue);
-        client.close(0_u32.into(), b"test complete");
-        server_endpoint.wait_idle().await;
-        client_endpoint.wait_idle().await;
+        first_client.close(0_u32.into(), b"test complete");
+        second_client.close(0_u32.into(), b"test complete");
+        third_client.close(0_u32.into(), b"test complete");
+        first_server_endpoint.wait_idle().await;
+        first_client_endpoint.wait_idle().await;
+        second_server_endpoint.wait_idle().await;
+        second_client_endpoint.wait_idle().await;
+        third_server_endpoint.wait_idle().await;
+        third_client_endpoint.wait_idle().await;
     }
 
     #[tokio::test]
