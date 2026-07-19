@@ -23,6 +23,7 @@ pub struct CorePrivatePlayerDamageFactV1 {
     pub cause_kind: AuthoritativeDeathCauseKind,
     pub source_content_id: &'static str,
     pub source_entity_id: EntityId,
+    pub target_entity_id: EntityId,
     pub pattern_id: &'static str,
     pub attack_id: &'static str,
     pub raw_damage: u32,
@@ -248,6 +249,7 @@ fn push_damage(
         cause_kind: AuthoritativeDeathCauseKind::DirectHit,
         source_content_id: source_content_id(pattern_id)?,
         source_entity_id: source,
+        target_entity_id: player,
         pattern_id,
         attack_id: pattern_id,
         raw_damage: damage.raw_damage,
@@ -462,6 +464,7 @@ mod tests {
         let facts = finish_facts(facts, tick, true).unwrap();
         assert_eq!(facts.len(), 2);
         assert_eq!((facts[0].event_ordinal, facts[1].event_ordinal), (0, 1));
+        assert!(facts.iter().all(|fact| fact.target_entity_id == id(20)));
         assert_eq!(facts[0].source_position, SimulationVector::new(4.0, 6.0));
         assert_eq!(facts[1].source_position, SimulationVector::new(7.0, 8.0));
         assert!(!facts[0].lethal());
