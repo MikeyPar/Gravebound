@@ -10,6 +10,8 @@
 
 Commit `3f749dd` reserves the exact committed `BossExitReady` route before the final PostgreSQL custody read, preserves the original storage version vector beside its wire projection, constructs the production extraction authority only from the committed Caldus exit, registers it in the shared extraction directory, and binds it to the existing private-life writer through the exact danger lease.
 
+Commit `e7905ea` extracts the worker's complete post-acknowledgement path into one auditable boundary and proves that reservation reaches `TerminalPending` before the custody authority is called, then coherent snapshot projection, retained publication construction, and activation occur in canonical order.
+
 Fresh and replayed ownership is explicit at both the route-permit and extraction-actor layers. Only the fresh reservation owner may construct or roll back; exact replay can reuse only an already-registered identical actor. Altered version replay, early concurrent replay, stale binding, actor-construction failure, and session-binding failure cannot reopen the winning permit. Reservation abort retries while the owner remains live, reports a visible fault, and exits promptly when shutdown is already active.
 
 The retained pending-inventory/`BossExitReady` publisher blocks danger-owner teardown while extraction is unresolved. Exact Hall installation or an exact competing-terminal cleanup releases that publisher and permits later microrealm teardown. Reconnect and `LinkLost` continue to use the existing generation-safe session/extraction handoff rather than creating another writer.
@@ -18,14 +20,14 @@ The retained pending-inventory/`BossExitReady` publisher blocks danger-owner tea
 
 - `cargo fmt --all`: pass.
 - `cargo clippy -p server_app --all-targets --all-features -- -D warnings`: pass.
-- `cargo test -p server_app --lib`: `360/360` pass.
+- `cargo test -p server_app --lib`: `361/361` pass.
 - Focused real-QUIC/session activation proof passes exact registration, shared writer identity, early replay rejection, exact replay, altered inventory/character-version conflict, unresolved-terminal teardown rejection, exact loser cleanup, route reopening, and zero residue.
 - Focused shutdown regression proves a persistent abort failure cannot hang after shutdown is already active.
 - Focused terminal-completion regression proves retained publication changes from teardown-blocking to releasable only after the exact completion signal.
 - `git diff --check`: pass before commit.
 
-The focused composition test directly exercises the activation seam after setting an exact server-owned danger binding. It does not yet drive the complete automatic `CaldusRewardPending -> durable acknowledgement -> reserve -> hosted PostgreSQL snapshot -> retained publication -> activate` path. The timed all-server-target command exceeded the local execution window and is not claimed. Hosted PostgreSQL, complete automatic-worker real-QUIC response loss/reconnect/`LinkLost`, process restart, competing-terminal, and journey evidence remain open.
+The focused composition test directly exercises the activation seam after setting an exact server-owned danger binding, and the automatic-order test exercises the production post-acknowledgement function itself. A full live worker has not yet driven `CaldusRewardPending -> durable resolution -> acknowledgement` into that function over the session boundary. The timed all-server-target command exceeded the local execution window and is not claimed. Hosted PostgreSQL, complete automatic-worker real-QUIC response loss/reconnect/`LinkLost`, process restart, competing-terminal, and journey evidence remain open.
 
 ## Current Next Step
 
-Drive activation through the automatic Caldus reward worker with the exact production pipeline and prove active transport, response loss, reconnect, transport-free `LinkLost`, competing terminal, terminal-completion release, shutdown, and zero residue. Then execute the hosted PostgreSQL/real-QUIC restart and adverse matrix before bound normal-server construction or admission.
+Drive the full live worker from `CaldusRewardPending` through durable resolution/acknowledgement into the proven post-acknowledgement path, then prove active transport, response loss, reconnect, transport-free `LinkLost`, competing terminal, terminal-completion release, shutdown, and zero residue. Then execute the hosted PostgreSQL/real-QUIC restart and adverse matrix before bound normal-server construction or admission.
