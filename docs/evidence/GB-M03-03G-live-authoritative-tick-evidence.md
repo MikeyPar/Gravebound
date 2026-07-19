@@ -28,4 +28,4 @@ Hosted run [`29668693282`](https://github.com/MikeyPar/Gravebound/actions/runs/2
 
 ## Current Next Step
 
-The next scene dependency is now implemented in [`GB-M03-03G-live-player-damage-evidence.md`](GB-M03-03G-live-player-damage-evidence.md). Add its bounded, lossless, acknowledged driver-to-terminal feed, then bind tick, trace, clocks, deeds, custody, and all five terminal producers inside the all-or-nothing private-life authority builder. Normal capability advertisement remains disabled until the complete owner graph and shutdown order pass together.
+The damage dependency and its [bounded, lossless terminal-frame feed](GB-M03-03G-terminal-frame-feed-evidence.md) are implemented locally. Next total-order the Bell/room/reward/exit control events that occur between simulation frames, bind the exact danger-entry restore authority, and replace the disabled terminal-ownerless session path with tick, trace, clocks, deeds, custody, and all five terminal producers inside the all-or-nothing private-life authority builder. Normal capability advertisement remains disabled until the complete owner graph and shutdown order pass together.
