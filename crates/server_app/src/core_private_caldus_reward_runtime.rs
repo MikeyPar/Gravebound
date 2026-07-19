@@ -209,6 +209,12 @@ struct RetainedPublication {
     route: ReliableEvent,
 }
 
+enum PostAcknowledgementOutcome {
+    Shutdown,
+    AcknowledgedOnly,
+    Publication(Box<RetainedPublication>),
+}
+
 pub(crate) struct CorePrivateCaldusRewardRuntimeConfig {
     authenticated: AuthenticatedAccount,
     progression_content_revision: ManifestHash,
@@ -568,151 +574,45 @@ async fn run_runtime(
                 Ok(commit) if commit.route.phase == CorePrivateRoutePhaseV1::BossExitReady => {
                     report.acknowledgements = report.acknowledgements.saturating_add(1);
                     acknowledged = true;
-                    if let (Some(inventory), Some(world_flow_revision)) =
-                        (&pending_inventory, &world_flow_revision)
+                    match prepare_post_acknowledgement(
+                        authenticated,
+                        encounter_id,
+                        &handoff,
+                        &commit,
+                        pending_inventory.as_ref(),
+                        world_flow_revision.as_ref(),
+                        extraction_route.as_ref(),
+                        extraction_activator.as_ref(),
+                        &state_tx,
+                        &mut shutdown_rx,
+                        &mut report,
+                    )
+                    .await
                     {
-                        let mut reservation = match (&extraction_route, &extraction_activator) {
-                            (Some(route_directory), Some(_)) => {
-                                state_tx.send_replace(
-                                    CorePrivateCaldusRewardRuntimeState::ReservingExtraction,
-                                );
-                                match ProductionExtractionCaldusReservationV1::reserve(
-                                    authenticated,
-                                    route_directory.clone(),
-                                    &handoff,
-                                    &commit,
-                                    world_flow_revision.clone(),
-                                )
-                                .await
-                                {
-                                    Ok(reservation) => {
-                                        report.extraction_reservations =
-                                            report.extraction_reservations.saturating_add(1);
-                                        Some(reservation)
-                                    }
-                                    Err(error) => {
-                                        state_tx.send_replace(
-                                            CorePrivateCaldusRewardRuntimeState::Faulted {
-                                                message: Arc::from(error.to_string()),
-                                            },
-                                        );
-                                        break;
-                                    }
-                                }
-                            }
-                            (None, None) => None,
-                            _ => {
-                                state_tx.send_replace(
-                                    CorePrivateCaldusRewardRuntimeState::Faulted {
-                                        message: Arc::from(
-                                            "Caldus extraction activation is only partially configured",
-                                        ),
-                                    },
-                                );
-                                break;
-                            }
-                        };
-                        let snapshot = match load_snapshot_with_backoff(
-                            authenticated,
-                            handoff.clone(),
-                            world_flow_revision.clone(),
-                            inventory.as_ref(),
-                            &state_tx,
-                            &mut shutdown_rx,
-                            &mut report,
-                        )
-                        .await
-                        {
-                            Ok(Some(snapshot)) => snapshot,
-                            Ok(None) => {
-                                if let Err(message) = abort_reservation(
-                                    reservation.as_ref(),
-                                    &mut report,
-                                    &mut shutdown_rx,
-                                )
-                                .await
-                                {
-                                    state_tx.send_replace(
-                                        CorePrivateCaldusRewardRuntimeState::Faulted { message },
-                                    );
-                                }
-                                break;
-                            }
-                            Err(failure) => {
-                                let message = abort_reservation(
-                                    reservation.as_ref(),
-                                    &mut report,
-                                    &mut shutdown_rx,
-                                )
-                                .await
-                                .err()
-                                .unwrap_or(failure.message);
-                                state_tx.send_replace(
-                                    CorePrivateCaldusRewardRuntimeState::Faulted { message },
-                                );
-                                break;
-                            }
-                        };
-                        let route = reservation.as_ref().map_or_else(
-                            || commit.route.clone(),
-                            |reservation| reservation.accepted_route().clone(),
-                        );
-                        let (projected, expected_versions) = snapshot.into_parts();
-                        let retained =
-                            match retained_publication(encounter_id, &handoff, &route, projected) {
-                                Ok(retained) => retained,
-                                Err(message) => {
-                                    let message = abort_reservation(
-                                        reservation.as_ref(),
-                                        &mut report,
-                                        &mut shutdown_rx,
-                                    )
-                                    .await
-                                    .err()
-                                    .unwrap_or(message);
-                                    state_tx.send_replace(
-                                        CorePrivateCaldusRewardRuntimeState::Faulted { message },
-                                    );
-                                    break;
-                                }
-                            };
-                        if let Some(reservation) = reservation.take() {
+                        Ok(PostAcknowledgementOutcome::Publication(retained)) => {
+                            publication = Some(*retained);
+                            attempted_generation = None;
                             state_tx.send_replace(
-                                CorePrivateCaldusRewardRuntimeState::ActivatingExtraction,
+                                CorePrivateCaldusRewardRuntimeState::AwaitingWriter {
+                                    encounter_id,
+                                },
                             );
-                            report.extraction_activations =
-                                report.extraction_activations.saturating_add(1);
-                            let activator = extraction_activator
-                                .as_ref()
-                                .expect("reservation requires configured activator");
-                            if let Err(failure) =
-                                activator.activate(reservation, expected_versions).await
-                            {
-                                state_tx.send_replace(
-                                    CorePrivateCaldusRewardRuntimeState::Faulted {
-                                        message: failure.message,
-                                    },
-                                );
-                                break;
-                            }
                         }
-                        publication = Some(retained);
-                        attempted_generation = None;
-                        state_tx.send_replace(
-                            CorePrivateCaldusRewardRuntimeState::AwaitingWriter { encounter_id },
-                        );
-                    } else if pending_inventory.is_none() && world_flow_revision.is_none() {
-                        state_tx.send_replace(CorePrivateCaldusRewardRuntimeState::Acknowledged {
-                            encounter_id,
-                            exit_instance_id,
-                        });
-                    } else {
-                        state_tx.send_replace(CorePrivateCaldusRewardRuntimeState::Faulted {
-                            message: Arc::from(
-                                "Caldus pending-inventory authority is only partially configured",
-                            ),
-                        });
-                        break;
+                        Ok(PostAcknowledgementOutcome::AcknowledgedOnly) => {
+                            state_tx.send_replace(
+                                CorePrivateCaldusRewardRuntimeState::Acknowledged {
+                                    encounter_id,
+                                    exit_instance_id,
+                                },
+                            );
+                        }
+                        Ok(PostAcknowledgementOutcome::Shutdown) => break,
+                        Err(message) => {
+                            state_tx.send_replace(CorePrivateCaldusRewardRuntimeState::Faulted {
+                                message,
+                            });
+                            break;
+                        }
                     }
                     continue;
                 }
@@ -757,6 +657,104 @@ async fn run_runtime(
         state_tx.send_replace(CorePrivateCaldusRewardRuntimeState::Shutdown);
     }
     report
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the post-acknowledgement boundary keeps every server-owned authority explicit"
+)]
+async fn prepare_post_acknowledgement(
+    authenticated: AuthenticatedAccount,
+    encounter_id: [u8; 16],
+    handoff: &CorePrivateCaldusDefeatHandoff,
+    commit: &CorePrivateCaldusRewardCommit,
+    pending_inventory: Option<&Arc<dyn CoreCaldusPendingInventoryAuthority>>,
+    world_flow_revision: Option<&WorldFlowContentRevisionV1>,
+    extraction_route: Option<&CorePrivateRouteActorDirectory>,
+    extraction_activator: Option<&Arc<dyn CoreCaldusExtractionActivator>>,
+    state_tx: &watch::Sender<CorePrivateCaldusRewardRuntimeState>,
+    shutdown_rx: &mut watch::Receiver<bool>,
+    report: &mut CorePrivateCaldusRewardRuntimeReport,
+) -> Result<PostAcknowledgementOutcome, Arc<str>> {
+    let (Some(inventory), Some(world_flow_revision)) = (pending_inventory, world_flow_revision)
+    else {
+        return if pending_inventory.is_none() && world_flow_revision.is_none() {
+            Ok(PostAcknowledgementOutcome::AcknowledgedOnly)
+        } else {
+            Err(Arc::from(
+                "Caldus pending-inventory authority is only partially configured",
+            ))
+        };
+    };
+    let mut reservation = match (extraction_route, extraction_activator) {
+        (Some(route_directory), Some(_)) => {
+            state_tx.send_replace(CorePrivateCaldusRewardRuntimeState::ReservingExtraction);
+            let reservation = ProductionExtractionCaldusReservationV1::reserve(
+                authenticated,
+                route_directory.clone(),
+                handoff,
+                commit,
+                world_flow_revision.clone(),
+            )
+            .await
+            .map_err(|error| Arc::from(error.to_string()))?;
+            report.extraction_reservations = report.extraction_reservations.saturating_add(1);
+            Some(reservation)
+        }
+        (None, None) => None,
+        _ => {
+            return Err(Arc::from(
+                "Caldus extraction activation is only partially configured",
+            ));
+        }
+    };
+    let snapshot = match load_snapshot_with_backoff(
+        authenticated,
+        handoff.clone(),
+        world_flow_revision.clone(),
+        inventory.as_ref(),
+        state_tx,
+        shutdown_rx,
+        report,
+    )
+    .await
+    {
+        Ok(Some(snapshot)) => snapshot,
+        Ok(None) => {
+            abort_reservation(reservation.as_ref(), report, shutdown_rx).await?;
+            return Ok(PostAcknowledgementOutcome::Shutdown);
+        }
+        Err(failure) => {
+            return Err(abort_reservation(reservation.as_ref(), report, shutdown_rx)
+                .await
+                .err()
+                .unwrap_or(failure.message));
+        }
+    };
+    let route = reservation.as_ref().map_or_else(
+        || commit.route.clone(),
+        |reservation| reservation.accepted_route().clone(),
+    );
+    let (projected, expected_versions) = snapshot.into_parts();
+    let retained = match retained_publication(encounter_id, handoff, &route, projected) {
+        Ok(retained) => retained,
+        Err(message) => {
+            return Err(abort_reservation(reservation.as_ref(), report, shutdown_rx)
+                .await
+                .err()
+                .unwrap_or(message));
+        }
+    };
+    if let Some(reservation) = reservation.take() {
+        state_tx.send_replace(CorePrivateCaldusRewardRuntimeState::ActivatingExtraction);
+        report.extraction_activations = report.extraction_activations.saturating_add(1);
+        extraction_activator
+            .expect("reservation requires configured activator")
+            .activate(reservation, expected_versions)
+            .await
+            .map_err(|failure| failure.message)?;
+    }
+    Ok(PostAcknowledgementOutcome::Publication(Box::new(retained)))
 }
 
 async fn abort_reservation(
@@ -1090,6 +1088,123 @@ mod tests {
         }
     }
 
+    async fn boss_exit_commit(
+        directory: &CorePrivateRouteActorDirectory,
+        handoff: &CorePrivateCaldusDefeatHandoff,
+    ) -> CorePrivateCaldusRewardCommit {
+        let route = directory
+            .advance(
+                handoff.route_lease(),
+                CorePrivateRouteActorAdvance::BossExitReady,
+            )
+            .await
+            .expect("BossExitReady");
+        let identities = sim_core::CoreCaldusVictoryIdentities::derive(
+            handoff.instance_lineage_id(),
+            handoff.lock(),
+        )
+        .expect("Caldus identities");
+        CorePrivateCaldusRewardCommit {
+            route,
+            exit: CaldusExitPresentation {
+                exit_instance_id: identities.exit_instance_id.bytes(),
+                content_id: "portal.exit.dungeon.bell_sepulcher".to_owned(),
+                asset_id: "asset.portal.exit.bell".to_owned(),
+                display_name: "Return to Lantern Halls".to_owned(),
+                description: "Secure pending custody before Hall return.".to_owned(),
+                tags: vec!["portal".to_owned()],
+                point: MilliTilePoint { x: 2_500, y: 9_000 },
+                destination_content_id: "hub.lantern_halls_01".to_owned(),
+                arrival: CoreCaldusSafeArrival::HallDefault,
+                requires_committed_extraction_receipt: true,
+            },
+            disposition: CorePrivateCaldusRewardCommitDisposition::Committed,
+        }
+    }
+
+    fn empty_report() -> CorePrivateCaldusRewardRuntimeReport {
+        CorePrivateCaldusRewardRuntimeReport {
+            resolution_attempts: 0,
+            acknowledgements: 0,
+            snapshot_attempts: 0,
+            extraction_reservations: 0,
+            extraction_activations: 0,
+            extraction_abort_failures: 0,
+            publication_attempts: 0,
+            publication_generations: 0,
+            faulted: false,
+            task_joined: true,
+        }
+    }
+
+    struct OrderedInventoryAuthority {
+        directory: CorePrivateRouteActorDirectory,
+        handoff: CorePrivateCaldusDefeatHandoff,
+        order: Arc<StdMutex<Vec<&'static str>>>,
+    }
+
+    impl CoreCaldusPendingInventoryAuthority for OrderedInventoryAuthority {
+        fn load(
+            &self,
+            _authenticated: AuthenticatedAccount,
+            _handoff: CorePrivateCaldusDefeatHandoff,
+            _world_flow_revision: WorldFlowContentRevisionV1,
+        ) -> RuntimeFuture<
+            '_,
+            Result<CoreCaldusPendingInventorySnapshot, CoreCaldusRewardAuthorityFailure>,
+        > {
+            Box::pin(async move {
+                assert_eq!(
+                    self.directory
+                        .snapshot(self.handoff.route_lease())
+                        .expect("reserved route")
+                        .phase,
+                    CorePrivateRoutePhaseV1::TerminalPending
+                );
+                self.order.lock().unwrap().push("snapshot");
+                CoreCaldusPendingInventorySnapshot::new(
+                    pending_inventory(&self.handoff),
+                    ProductionExtractionExpectedVersionsV1 {
+                        account: 1,
+                        character: 1,
+                        world: 1,
+                        inventory: 2,
+                        life_metrics: 1,
+                    },
+                )
+            })
+        }
+    }
+
+    struct RetainingActivator {
+        order: Arc<StdMutex<Vec<&'static str>>>,
+        reservation: StdMutex<Option<ProductionExtractionCaldusReservationV1>>,
+    }
+
+    impl CoreCaldusExtractionActivator for RetainingActivator {
+        fn activate(
+            &self,
+            reservation: ProductionExtractionCaldusReservationV1,
+            expected_versions: ProductionExtractionExpectedVersionsV1,
+        ) -> RuntimeFuture<'_, Result<(), CoreCaldusRewardAuthorityFailure>> {
+            Box::pin(async move {
+                assert_eq!(
+                    expected_versions,
+                    ProductionExtractionExpectedVersionsV1 {
+                        account: 1,
+                        character: 1,
+                        world: 1,
+                        inventory: 2,
+                        life_metrics: 1,
+                    }
+                );
+                self.order.lock().unwrap().push("activate");
+                *self.reservation.lock().unwrap() = Some(reservation);
+                Ok(())
+            })
+        }
+    }
+
     #[tokio::test]
     async fn pending_snapshot_keeps_storage_versions_separate_and_exact() {
         let (_authenticated, handoff, directory) = fixture();
@@ -1116,36 +1231,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn automatic_post_acknowledgement_reserves_before_snapshot_then_activates() {
+        let (authenticated, handoff, directory) = fixture();
+        let commit = boss_exit_commit(&directory, &handoff).await;
+        let order = Arc::new(StdMutex::new(Vec::new()));
+        let inventory: Arc<dyn CoreCaldusPendingInventoryAuthority> =
+            Arc::new(OrderedInventoryAuthority {
+                directory: directory.clone(),
+                handoff: handoff.clone(),
+                order: Arc::clone(&order),
+            });
+        let retaining = Arc::new(RetainingActivator {
+            order: Arc::clone(&order),
+            reservation: StdMutex::new(None),
+        });
+        let activator: Arc<dyn CoreCaldusExtractionActivator> = retaining.clone();
+        let (state_tx, _state_rx) = watch::channel(CorePrivateCaldusRewardRuntimeState::Watching);
+        let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
+        let mut report = empty_report();
+        let revision = pending_inventory(&handoff).content_revision;
+
+        let outcome = prepare_post_acknowledgement(
+            authenticated,
+            sim_core::CoreCaldusVictoryIdentities::derive(
+                handoff.instance_lineage_id(),
+                handoff.lock(),
+            )
+            .unwrap()
+            .encounter_id
+            .bytes(),
+            &handoff,
+            &commit,
+            Some(&inventory),
+            Some(&revision),
+            Some(&directory),
+            Some(&activator),
+            &state_tx,
+            &mut shutdown_rx,
+            &mut report,
+        )
+        .await
+        .expect("automatic post-acknowledgement path");
+
+        assert!(matches!(
+            outcome,
+            PostAcknowledgementOutcome::Publication(_)
+        ));
+        assert_eq!(*order.lock().unwrap(), vec!["snapshot", "activate"]);
+        assert_eq!(report.snapshot_attempts, 1);
+        assert_eq!(report.extraction_reservations, 1);
+        assert_eq!(report.extraction_activations, 1);
+        assert_eq!(
+            directory.snapshot(handoff.route_lease()).unwrap().phase,
+            CorePrivateRoutePhaseV1::TerminalPending
+        );
+
+        let reservation = retaining
+            .reservation
+            .lock()
+            .unwrap()
+            .take()
+            .expect("activator retained exact reservation");
+        reservation.abort().await.expect("test cleanup");
+        directory.begin_shutdown();
+        assert!(directory.finish_shutdown().await.unwrap().zero_residue);
+    }
+
+    #[tokio::test]
     async fn shutdown_during_failed_reservation_abort_is_bounded_and_faulted() {
         let (authenticated, handoff, directory) = fixture();
-        let route = directory
-            .advance(
-                handoff.route_lease(),
-                CorePrivateRouteActorAdvance::BossExitReady,
-            )
-            .await
-            .expect("BossExitReady");
-        let identities = sim_core::CoreCaldusVictoryIdentities::derive(
-            handoff.instance_lineage_id(),
-            handoff.lock(),
-        )
-        .expect("Caldus identities");
-        let commit = CorePrivateCaldusRewardCommit {
-            route,
-            exit: CaldusExitPresentation {
-                exit_instance_id: identities.exit_instance_id.bytes(),
-                content_id: "portal.exit.dungeon.bell_sepulcher".to_owned(),
-                asset_id: "asset.portal.exit.bell".to_owned(),
-                display_name: "Return to Lantern Halls".to_owned(),
-                description: "Secure pending custody before Hall return.".to_owned(),
-                tags: vec!["portal".to_owned()],
-                point: MilliTilePoint { x: 2_500, y: 9_000 },
-                destination_content_id: "hub.lantern_halls_01".to_owned(),
-                arrival: CoreCaldusSafeArrival::HallDefault,
-                requires_committed_extraction_receipt: true,
-            },
-            disposition: CorePrivateCaldusRewardCommitDisposition::Committed,
-        };
+        let commit = boss_exit_commit(&directory, &handoff).await;
         let reservation = ProductionExtractionCaldusReservationV1::reserve(
             authenticated,
             directory.clone(),
@@ -1157,18 +1312,8 @@ mod tests {
         .expect("fresh reservation");
         directory.begin_shutdown();
         let (_shutdown_tx, mut shutdown_rx) = watch::channel(true);
-        let mut report = CorePrivateCaldusRewardRuntimeReport {
-            resolution_attempts: 0,
-            acknowledgements: 0,
-            snapshot_attempts: 0,
-            extraction_reservations: 1,
-            extraction_activations: 0,
-            extraction_abort_failures: 0,
-            publication_attempts: 0,
-            publication_generations: 0,
-            faulted: false,
-            task_joined: true,
-        };
+        let mut report = empty_report();
+        report.extraction_reservations = 1;
 
         let failure = tokio::time::timeout(
             Duration::from_millis(100),
