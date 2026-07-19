@@ -377,7 +377,7 @@ async fn stage_danger_binding(
         "INSERT INTO character_instance_lineages (namespace_id,account_id,character_id,
          lineage_id,content_id,layout_id,lineage_state,records_blake3,assets_blake3,
          localization_blake3) VALUES ($1,$2,$3,$4,'world.core_microrealm_01',
-         'layout.core_private_life_01',0,$5,$6,$7)",
+         'layout.core_private_life_01',1,$5,$6,$7)",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(account_id.as_slice())
@@ -739,13 +739,13 @@ async fn current_danger_snapshot_reads_exact_core_pending_ground_custody() {
 #[ignore = "requires explicitly authorized disposable PostgreSQL"]
 async fn caldus_victory_fresh_replay_and_payload_conflict_are_durable() {
     let persistence = disposable_database().await;
-    let account_id = [141; 16];
-    let character_id = [142; 16];
-    let lineage_id = [143; 16];
-    let lock = lock(144, 1);
+    let account_id = [231; 16];
+    let character_id = [232; 16];
+    let lineage_id = [233; 16];
+    let lock = lock(235, 1);
     reset_fixture(&persistence, account_id, character_id, lineage_id, &lock).await;
     let (_, _, coordinator) = services(&persistence);
-    let owner = owner(account_id, character_id, 144);
+    let owner = owner(account_id, character_id, 235);
 
     let fresh = coordinator
         .commit(
