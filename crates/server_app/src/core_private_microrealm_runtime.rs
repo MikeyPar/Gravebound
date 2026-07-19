@@ -1017,7 +1017,7 @@ mod tests {
             .register_actor(authenticated(), seed(), 12)
             .expect("actor");
         let runtime = bell_ready_runtime(&directory, lease);
-        let driver = CorePrivateMicrorealmDriver::spawn(runtime);
+        let driver = CorePrivateMicrorealmDriver::spawn_without_terminal_owner(runtime);
         let handle = driver.handle();
         let state_reader = handle.observe();
         tokio::task::yield_now().await;

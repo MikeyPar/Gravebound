@@ -34,7 +34,9 @@ use crate::{
     CorePrivateFixedDungeonB3RewardCommit, CorePrivateFixedDungeonLiveRoomFrame,
     CorePrivateFixedDungeonRestCommit, CorePrivateFixedDungeonRuntime,
     CorePrivateFixedDungeonRuntimeError, CorePrivateMicrorealmInput, CorePrivateMicrorealmRuntime,
-    CorePrivateMicrorealmRuntimeError, CorePrivateMicrorealmStep,
+    CorePrivateMicrorealmRuntimeError, CorePrivateMicrorealmStep, CorePrivatePlayerDamageFactV1,
+    CorePrivateTerminalFeedError, CorePrivateTerminalFrameDisposition,
+    CorePrivateTerminalFrameSender, CorePrivateTerminalSceneV1,
 };
 
 const NANOS_PER_SECOND: u64 = 1_000_000_000;
@@ -495,6 +497,7 @@ pub enum CorePrivateMicrorealmFaultKind {
     RouteAuthority,
     TickExhausted,
     Simulation,
+    TerminalAuthority,
 }
 
 /// Stable fault projection; the underlying non-cloneable runtime error never crosses owners.
@@ -756,9 +759,22 @@ pub struct CorePrivateMicrorealmDriver {
 }
 
 impl CorePrivateMicrorealmDriver {
+    /// Component-test/bootstrap path used only while normal admission remains disabled. It skips
+    /// empty-frame terminal delivery and faults on the first damage-bearing or lethal frame.
     #[must_use]
-    pub fn spawn(runtime: CorePrivateMicrorealmRuntime) -> Self {
+    pub(crate) fn spawn_without_terminal_owner(runtime: CorePrivateMicrorealmRuntime) -> Self {
         spawn_driver(runtime)
+    }
+
+    /// Installs the lossless terminal-history consumer before the first danger frame. The
+    /// ordinary `spawn` path remains fail closed for damage-bearing frames until the complete
+    /// private-life authority builder supplies this binding.
+    #[must_use]
+    pub fn spawn_with_terminal_feed(
+        runtime: CorePrivateMicrorealmRuntime,
+        terminal_feed: CorePrivateTerminalFrameSender,
+    ) -> Self {
+        spawn_driver_with_terminal_feed(runtime, terminal_feed)
     }
 
     #[must_use]
@@ -903,6 +919,16 @@ fn spawn_driver<R>(runtime: R) -> CorePrivateMicrorealmDriver
 where
     R: MicrorealmFrameRuntime,
 {
+    spawn_driver_with_terminal_feed(runtime, CorePrivateTerminalFrameSender::unbound())
+}
+
+fn spawn_driver_with_terminal_feed<R>(
+    runtime: R,
+    terminal_feed: CorePrivateTerminalFrameSender,
+) -> CorePrivateMicrorealmDriver
+where
+    R: MicrorealmFrameRuntime,
+{
     let (retained_tx, retained_rx) = watch::channel(RetainedFrameInput::default());
     let ingress = Arc::new(SharedIngress {
         reducer: Mutex::new(IngressReducer::default()),
@@ -924,6 +950,7 @@ where
         };
         run_driver(
             runtime,
+            terminal_feed,
             task_ingress,
             retained_rx,
             observation_tx,
@@ -957,11 +984,13 @@ impl Drop for ActiveDriverTaskGuard {
 }
 
 #[allow(
+    clippy::too_many_arguments,
     clippy::too_many_lines,
     reason = "one select loop owns the full frame-boundary handoff and fail-closed shutdown order"
 )]
 async fn run_driver<R>(
     mut runtime: R,
+    mut terminal_feed: CorePrivateTerminalFrameSender,
     ingress: Arc<SharedIngress>,
     mut retained_rx: watch::Receiver<RetainedFrameInput>,
     observation_tx: watch::Sender<CorePrivateMicrorealmDriverState>,
@@ -1006,6 +1035,7 @@ where
                         return convert_runtime_and_wait(
                             runtime,
                             request,
+                            &mut terminal_feed,
                             &ingress,
                             &observation_tx,
                             committed_frames,
@@ -1046,13 +1076,53 @@ where
         let retained = *retained_rx.borrow_and_update();
         match runtime.step_frame(retained.runtime_input()).await {
             Ok(step) => {
+                if step.player_died {
+                    ingress.stop_accepting();
+                }
+                let terminal_disposition = acknowledge_terminal_frame(
+                    &mut terminal_feed,
+                    CorePrivateTerminalFrameView {
+                        scene: CorePrivateTerminalSceneV1::Microrealm,
+                        route: &step.route,
+                        tick: step.tick,
+                        player_position: step.player_position,
+                        player_died: step.player_died,
+                        facts: &step.player_damage,
+                    },
+                    &mut shutdown_rx,
+                )
+                .await;
+                let terminal_disposition = match terminal_disposition {
+                    Ok(disposition) => disposition,
+                    Err(error) => {
+                        committed_frames = committed_frames.saturating_add(1);
+                        final_tick = step.tick;
+                        outcome = CorePrivateMicrorealmDriverOutcome::Faulted;
+                        ingress.stop_accepting();
+                        observation_tx.send_replace(CorePrivateMicrorealmDriverState::Faulted {
+                            committed_frames,
+                            fault: terminal_feed_fault(&error, final_tick),
+                        });
+                        wait_for_shutdown(
+                            &mut shutdown_rx,
+                            &mut handoff_rx,
+                            &mut fixed_advance_rx,
+                            "private terminal ingestion failed after a microrealm frame commit",
+                        )
+                        .await;
+                        break;
+                    }
+                };
                 committed_frames = committed_frames.saturating_add(1);
                 final_tick = step.tick;
                 ingress
                     .authoritative_tick
                     .store(final_tick.0, Ordering::Release);
                 let step = Arc::new(step);
-                if step.player_died {
+                if matches!(
+                    terminal_disposition,
+                    CorePrivateTerminalFrameDisposition::TerminalOwned { .. }
+                ) {
                     outcome = CorePrivateMicrorealmDriverOutcome::TerminalPending;
                     ingress.stop_accepting();
                     observation_tx.send_replace(
@@ -1114,6 +1184,7 @@ async fn fixed_driver_interval() -> tokio::time::Interval {
 async fn convert_runtime_and_wait<R>(
     runtime: R,
     request: Box<CorePrivateFixedDungeonConversionRequest>,
+    terminal_feed: &mut CorePrivateTerminalFrameSender,
     ingress: &Arc<SharedIngress>,
     observation_tx: &watch::Sender<CorePrivateMicrorealmDriverState>,
     committed_frames: u64,
@@ -1164,6 +1235,7 @@ where
                 fixed_dungeon,
                 caldus_content,
                 ready,
+                terminal_feed,
                 ingress,
                 observation_tx,
                 committed_frames,
@@ -1215,6 +1287,7 @@ async fn run_fixed_dungeon(
     mut runtime: CorePrivateFixedDungeonRuntime,
     caldus_content: Arc<sim_content::CoreDevelopmentCaldus>,
     mut ready: CorePrivateFixedDungeonDriverReady,
+    terminal_feed: &mut CorePrivateTerminalFrameSender,
     ingress: &Arc<SharedIngress>,
     observation_tx: &watch::Sender<CorePrivateMicrorealmDriverState>,
     mut committed_frames: u64,
@@ -1277,6 +1350,7 @@ async fn run_fixed_dungeon(
                                 run_caldus(
                                     caldus,
                                     caldus_content,
+                                    terminal_feed,
                                     ingress,
                                     observation_tx,
                                     committed_frames,
@@ -1440,13 +1514,55 @@ async fn run_fixed_dungeon(
                 let retained = *retained_rx.borrow_and_update();
                 match runtime.step_live_room(retained.runtime_input()).await {
                     Ok(frame) => {
+                        if frame.player_died {
+                            ingress.stop_accepting();
+                        }
+                        let terminal_disposition = acknowledge_terminal_frame(
+                            terminal_feed,
+                            CorePrivateTerminalFrameView {
+                                scene: CorePrivateTerminalSceneV1::FixedDungeon,
+                                route: &frame.route,
+                                tick: frame.tick,
+                                player_position: frame.player_position,
+                                player_died: frame.player_died,
+                                facts: &frame.player_damage,
+                            },
+                            shutdown_rx,
+                        )
+                        .await;
+                        let terminal_disposition = match terminal_disposition {
+                            Ok(disposition) => disposition,
+                            Err(error) => {
+                                committed_frames = committed_frames.saturating_add(1);
+                                final_tick = frame.tick;
+                                outcome = CorePrivateMicrorealmDriverOutcome::Faulted;
+                                ingress.stop_accepting();
+                                observation_tx.send_replace(
+                                    CorePrivateMicrorealmDriverState::Faulted {
+                                        committed_frames,
+                                        fault: terminal_feed_fault(&error, final_tick),
+                                    },
+                                );
+                                wait_for_shutdown(
+                                    shutdown_rx,
+                                    handoff_rx,
+                                    fixed_advance_rx,
+                                    "private terminal ingestion failed after a fixed-room frame commit",
+                                )
+                                .await;
+                                break;
+                            }
+                        };
                         committed_frames = committed_frames.saturating_add(1);
                         final_tick = frame.tick;
                         ingress
                             .authoritative_tick
                             .store(final_tick.0, Ordering::Release);
                         let frame = Arc::new(frame);
-                        if frame.player_died {
+                        if matches!(
+                            terminal_disposition,
+                            CorePrivateTerminalFrameDisposition::TerminalOwned { .. }
+                        ) {
                             outcome =
                                 CorePrivateMicrorealmDriverOutcome::FixedDungeonTerminalPending;
                             ingress.stop_accepting();
@@ -1522,6 +1638,7 @@ async fn run_fixed_dungeon(
 async fn run_caldus(
     mut runtime: CorePrivateCaldusRuntime,
     content: Arc<sim_content::CoreDevelopmentCaldus>,
+    terminal_feed: &mut CorePrivateTerminalFrameSender,
     ingress: &Arc<SharedIngress>,
     observation_tx: &watch::Sender<CorePrivateMicrorealmDriverState>,
     mut committed_frames: u64,
@@ -1607,13 +1724,55 @@ async fn run_caldus(
                 let retained = *retained_rx.borrow_and_update();
                 match runtime.step(caldus_runtime_input(retained)).await {
                     Ok(frame) => {
+                        if frame.player_died {
+                            ingress.stop_accepting();
+                        }
+                        let terminal_disposition = acknowledge_terminal_frame(
+                            terminal_feed,
+                            CorePrivateTerminalFrameView {
+                                scene: CorePrivateTerminalSceneV1::Caldus,
+                                route: &frame.route,
+                                tick: frame.tick,
+                                player_position: frame.player_position,
+                                player_died: frame.player_died,
+                                facts: &frame.player_damage,
+                            },
+                            shutdown_rx,
+                        )
+                        .await;
+                        let terminal_disposition = match terminal_disposition {
+                            Ok(disposition) => disposition,
+                            Err(error) => {
+                                committed_frames = committed_frames.saturating_add(1);
+                                final_tick = frame.tick;
+                                outcome = CorePrivateMicrorealmDriverOutcome::Faulted;
+                                ingress.stop_accepting();
+                                observation_tx.send_replace(
+                                    CorePrivateMicrorealmDriverState::Faulted {
+                                        committed_frames,
+                                        fault: terminal_feed_fault(&error, final_tick),
+                                    },
+                                );
+                                wait_for_shutdown(
+                                    shutdown_rx,
+                                    handoff_rx,
+                                    fixed_advance_rx,
+                                    "private terminal ingestion failed after a Caldus frame commit",
+                                )
+                                .await;
+                                break;
+                            }
+                        };
                         committed_frames = committed_frames.saturating_add(1);
                         final_tick = frame.tick;
                         ingress
                             .authoritative_tick
                             .store(final_tick.0, Ordering::Release);
                         let frame = Arc::new(frame);
-                        if frame.player_died {
+                        if matches!(
+                            terminal_disposition,
+                            CorePrivateTerminalFrameDisposition::TerminalOwned { .. }
+                        ) {
                             outcome = CorePrivateMicrorealmDriverOutcome::CaldusTerminalPending;
                             ingress.stop_accepting();
                             observation_tx.send_replace(
@@ -1865,6 +2024,50 @@ fn reject_fixed_advance(request: CorePrivateFixedDungeonControlRequest, message:
     }
 }
 
+struct CorePrivateTerminalFrameView<'a> {
+    scene: CorePrivateTerminalSceneV1,
+    route: &'a protocol::CorePrivateRouteStateV1,
+    tick: Tick,
+    player_position: sim_core::TilePoint,
+    player_died: bool,
+    facts: &'a [CorePrivatePlayerDamageFactV1],
+}
+
+async fn acknowledge_terminal_frame(
+    feed: &mut CorePrivateTerminalFrameSender,
+    frame: CorePrivateTerminalFrameView<'_>,
+    shutdown_rx: &mut watch::Receiver<bool>,
+) -> Result<CorePrivateTerminalFrameDisposition, CorePrivateTerminalFeedError> {
+    let delivery = feed.deliver(
+        frame.scene,
+        frame.route.clone(),
+        frame.tick,
+        frame.player_position,
+        frame.facts.to_vec(),
+        frame.player_died,
+    );
+    tokio::pin!(delivery);
+    tokio::select! {
+        biased;
+        result = &mut delivery => result,
+        changed = shutdown_rx.changed() => {
+            let _ = changed;
+            Err(CorePrivateTerminalFeedError::ShutdownWithUnresolvedFrame)
+        }
+    }
+}
+
+fn terminal_feed_fault(
+    error: &CorePrivateTerminalFeedError,
+    final_tick: Tick,
+) -> CorePrivateMicrorealmDriverFault {
+    CorePrivateMicrorealmDriverFault {
+        kind: CorePrivateMicrorealmFaultKind::TerminalAuthority,
+        message: Arc::from(error.to_string()),
+        last_committed_tick: final_tick,
+    }
+}
+
 fn runtime_fault(
     error: &CorePrivateMicrorealmRuntimeError,
     last_committed_tick: Tick,
@@ -1978,6 +2181,7 @@ fn caldus_reward_error_is_fatal(error: &CorePrivateCaldusRuntimeError) -> bool {
 mod tests {
     use std::{collections::VecDeque, sync::Mutex as StdMutex};
 
+    use crate::{CorePrivateTerminalFrameReceiver, TerminalBinding, TerminalKind};
     use protocol::{
         CORE_PRIVATE_ROUTE_SCHEMA_VERSION, CorePrivateRouteContentRevisionV1,
         CorePrivateRoutePhaseV1, CorePrivateRouteReadinessV1, CorePrivateRouteSceneV1,
@@ -2015,9 +2219,11 @@ mod tests {
             let _task_guard = ActiveDriverTaskGuard {
                 ingress: Arc::clone(&task_ingress),
             };
+            let mut terminal_feed = CorePrivateTerminalFrameSender::unbound();
             run_caldus(
                 runtime,
                 content,
+                &mut terminal_feed,
                 &task_ingress,
                 &observation_tx,
                 0,
@@ -2188,6 +2394,64 @@ mod tests {
         }
     }
 
+    fn lethal_damage_fact(tick: Tick) -> CorePrivatePlayerDamageFactV1 {
+        CorePrivatePlayerDamageFactV1 {
+            tick,
+            event_ordinal: 0,
+            cause_kind: sim_core::AuthoritativeDeathCauseKind::DirectHit,
+            source_content_id: "enemy.drowned_pilgrim",
+            source_entity_id: sim_core::EntityId::new(10).unwrap(),
+            target_entity_id: sim_core::EntityId::new(20).unwrap(),
+            pattern_id: "pattern.enemy.drowned_pilgrim.fan",
+            attack_id: "pattern.enemy.drowned_pilgrim.fan",
+            raw_damage: 10,
+            final_damage: 10,
+            damage_type: sim_core::DamageType::Physical,
+            pre_health: 10,
+            post_health: 0,
+            source_position: sim_core::SimulationVector::new(4.0, 6.0),
+        }
+    }
+
+    fn terminal_frame_channel() -> (
+        CorePrivateTerminalFrameSender,
+        CorePrivateTerminalFrameReceiver,
+    ) {
+        let binding = TerminalBinding::new([0x11; 16], [0x22; 16], [0x33; 16], [0x44; 16])
+            .expect("terminal binding");
+        let route_lease = crate::CorePrivateRouteActorLease::for_test([0x11; 16], [0x22; 16], 1);
+        let content_revision = template_step(1).route.content_revision;
+        let binding = crate::CorePrivateTerminalFeedBinding::new(
+            binding,
+            route_lease,
+            content_revision,
+            [0x44; 16],
+        )
+        .expect("valid feed binding");
+        CorePrivateTerminalFrameReceiver::channel(binding)
+    }
+
+    fn lethal_terminal_receipt(tick: Tick) -> crate::StoredTerminalReceipt {
+        crate::StoredTerminalReceipt::from_storage(&crate::StoredTerminalReceiptV1 {
+            schema_version: crate::STORED_TERMINAL_RECEIPT_SCHEMA_V1,
+            account_id: [0x11; 16],
+            character_id: [0x22; 16],
+            lineage_id: [0x33; 16],
+            restore_point_id: [0x44; 16],
+            terminal_id: [0x51; 16],
+            mutation_id: [0x52; 16],
+            payload_hash: [0x53; 32],
+            server_plan_hash: [0x54; 32],
+            result_hash: [0x55; 32],
+            expected_state_version: 1,
+            post_state_version: 2,
+            observed_tick: tick.0,
+            committed_tick: tick.0,
+            terminal_kind_code: TerminalKind::LethalDeath.stable_code(),
+        })
+        .expect("valid lethal receipt")
+    }
+
     struct ScriptedRuntime {
         tick: u64,
         received: Arc<StdMutex<Vec<CorePrivateMicrorealmInput>>>,
@@ -2237,6 +2501,9 @@ mod tests {
             step.tick = Tick(self.tick);
             step.input_sequence = input.input_sequence;
             step.player_died = self.terminal_at == Some(self.tick);
+            if step.player_died {
+                step.player_damage = vec![lethal_damage_fact(step.tick)];
+            }
             Ok(step)
         }
 
@@ -2640,7 +2907,22 @@ mod tests {
         let received = Arc::new(StdMutex::new(Vec::new()));
         let mut runtime = ScriptedRuntime::ordinary(received);
         runtime.terminal_at = Some(2);
-        let driver = spawn_driver(runtime);
+        let (terminal_sender, mut terminal_receiver) = terminal_frame_channel();
+        let terminal_owner = tokio::spawn(async move {
+            let first = terminal_receiver.receive().await.expect("first frame");
+            assert_eq!(first.frame().tick, Tick(1));
+            assert!(first.frame().damage.is_empty());
+            first.acknowledge_continue().expect("first acknowledgement");
+            let lethal = terminal_receiver.receive().await.expect("lethal frame");
+            assert_eq!(lethal.frame().delivery_sequence.get(), 2);
+            assert_eq!(lethal.frame().tick, Tick(2));
+            assert_eq!(lethal.frame().damage.len(), 1);
+            let receipt = lethal_terminal_receipt(Tick(2));
+            lethal
+                .acknowledge_terminal_owned(&receipt)
+                .expect("lethal ownership");
+        });
+        let driver = spawn_driver_with_terminal_feed(runtime, terminal_sender);
         let handle = driver.handle();
         let mut observer = handle.observe();
         tokio::task::yield_now().await;
@@ -2668,6 +2950,160 @@ mod tests {
         assert_eq!(
             report.outcome,
             CorePrivateMicrorealmDriverOutcome::TerminalPending
+        );
+        terminal_owner.await.expect("terminal owner");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn terminal_ack_precedes_tick_and_presentation_publication() {
+        let received = Arc::new(StdMutex::new(Vec::new()));
+        let (terminal_sender, mut terminal_receiver) = terminal_frame_channel();
+        let driver =
+            spawn_driver_with_terminal_feed(ScriptedRuntime::ordinary(received), terminal_sender);
+        let handle = driver.handle();
+        let mut observer = handle.observe();
+
+        tokio::time::advance(DRIVER_TICK_DURATION).await;
+        let delivery = terminal_receiver.receive().await.expect("terminal frame");
+        assert_eq!(delivery.frame().delivery_sequence.get(), 1);
+        assert_eq!(delivery.frame().tick, Tick(1));
+        assert!(matches!(
+            observer.latest(),
+            CorePrivateMicrorealmDriverState::Starting
+        ));
+        assert_eq!(handle.authoritative_tick(), None);
+
+        delivery
+            .acknowledge_continue()
+            .expect("terminal acknowledgement");
+        let state = observer.changed().await.expect("published frame");
+        assert!(matches!(
+            state,
+            CorePrivateMicrorealmDriverState::Running {
+                committed_frames: 1,
+                ref step,
+            } if step.tick == Tick(1)
+        ));
+        assert_eq!(handle.authoritative_tick().unwrap().get(), 1);
+        let report = driver.shutdown().await.expect("shutdown");
+        assert_eq!(report.committed_frames, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn terminal_feed_loss_faults_without_publishing_the_committed_tick() {
+        let received = Arc::new(StdMutex::new(Vec::new()));
+        let (terminal_sender, terminal_receiver) = terminal_frame_channel();
+        drop(terminal_receiver);
+        let driver =
+            spawn_driver_with_terminal_feed(ScriptedRuntime::ordinary(received), terminal_sender);
+        let handle = driver.handle();
+        let mut observer = handle.observe();
+        tokio::task::yield_now().await;
+        advance_one_frame(&mut observer).await;
+        assert!(matches!(
+            observer.latest(),
+            CorePrivateMicrorealmDriverState::Faulted {
+                committed_frames: 1,
+                fault: CorePrivateMicrorealmDriverFault {
+                    kind: CorePrivateMicrorealmFaultKind::TerminalAuthority,
+                    last_committed_tick: Tick(1),
+                    ..
+                }
+            }
+        ));
+        assert_eq!(handle.authoritative_tick(), None);
+        let report = driver.shutdown().await.expect("shutdown");
+        assert_eq!(report.committed_frames, 1);
+        assert_eq!(report.final_tick, Tick(1));
+        assert_eq!(report.outcome, CorePrivateMicrorealmDriverOutcome::Faulted);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_cancels_an_undrained_terminal_delivery_as_ambiguous() {
+        let received = Arc::new(StdMutex::new(Vec::new()));
+        let (terminal_sender, mut terminal_receiver) = terminal_frame_channel();
+        let driver =
+            spawn_driver_with_terminal_feed(ScriptedRuntime::ordinary(received), terminal_sender);
+        let handle = driver.handle();
+        tokio::task::yield_now().await;
+        for _ in 0..4 {
+            if terminal_receiver.pending_deliveries() > 0 {
+                break;
+            }
+            tokio::time::advance(DRIVER_TICK_DURATION).await;
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(terminal_receiver.pending_deliveries(), 1);
+        let report = driver.shutdown().await.expect("bounded shutdown");
+        assert_eq!(report.committed_frames, 1);
+        assert_eq!(report.final_tick, Tick(1));
+        assert_eq!(report.outcome, CorePrivateMicrorealmDriverOutcome::Faulted);
+        assert_eq!(handle.authoritative_tick(), None);
+        let delivery = terminal_receiver
+            .receive()
+            .await
+            .expect("ambiguous committed delivery retained");
+        assert_eq!(delivery.frame().tick, Tick(1));
+        assert_eq!(
+            delivery.acknowledge_continue(),
+            Err(crate::CorePrivateTerminalAcknowledgementError::DriverGone)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_cancels_a_received_unacknowledged_terminal_delivery() {
+        let received = Arc::new(StdMutex::new(Vec::new()));
+        let (terminal_sender, mut terminal_receiver) = terminal_frame_channel();
+        let driver =
+            spawn_driver_with_terminal_feed(ScriptedRuntime::ordinary(received), terminal_sender);
+        let handle = driver.handle();
+        tokio::task::yield_now().await;
+        for _ in 0..4 {
+            if terminal_receiver.pending_deliveries() > 0 {
+                break;
+            }
+            tokio::time::advance(DRIVER_TICK_DURATION).await;
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(terminal_receiver.pending_deliveries(), 1);
+        let delivery = terminal_receiver.receive().await.expect("received frame");
+        let report = driver.shutdown().await.expect("bounded shutdown");
+        assert_eq!(report.committed_frames, 1);
+        assert_eq!(report.final_tick, Tick(1));
+        assert_eq!(report.outcome, CorePrivateMicrorealmDriverOutcome::Faulted);
+        assert_eq!(handle.authoritative_tick(), None);
+        assert_eq!(
+            delivery.acknowledge_continue(),
+            Err(crate::CorePrivateTerminalAcknowledgementError::DriverGone)
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_feed_rejects_foreign_route_generation_before_delivery() {
+        let binding = TerminalBinding::new([0x11; 16], [0x22; 16], [0x33; 16], [0x44; 16])
+            .expect("terminal binding");
+        let foreign_lease = crate::CorePrivateRouteActorLease::for_test([0x11; 16], [0x22; 16], 2);
+        let step = template_step(1);
+        let feed_binding = crate::CorePrivateTerminalFeedBinding::new(
+            binding,
+            foreign_lease,
+            step.route.content_revision.clone(),
+            [0x44; 16],
+        )
+        .expect("structurally valid foreign generation binding");
+        let (mut sender, _receiver) = CorePrivateTerminalFrameReceiver::channel(feed_binding);
+        assert_eq!(
+            sender
+                .deliver(
+                    CorePrivateTerminalSceneV1::Microrealm,
+                    step.route,
+                    step.tick,
+                    step.player_position,
+                    step.player_damage,
+                    step.player_died,
+                )
+                .await,
+            Err(CorePrivateTerminalFeedError::ForeignBinding)
         );
     }
 

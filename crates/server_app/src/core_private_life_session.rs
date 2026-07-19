@@ -1244,7 +1244,7 @@ where
         let binding_lease =
             CorePrivateMicrorealmBindingLease::from_route(route_lease, binding_generation);
         let route_directory = runtime.route_directory();
-        let driver = CorePrivateMicrorealmDriver::spawn(runtime);
+        let driver = CorePrivateMicrorealmDriver::spawn_without_terminal_owner(runtime);
         let handle = driver.handle();
         if let Some(ticks) = &self.authoritative_ticks
             && let Err(error) = ticks.bind(binding_lease, handle.clone())

@@ -30,6 +30,7 @@ mod core_private_microrealm_driver;
 mod core_private_microrealm_runtime;
 mod core_private_player_damage;
 mod core_private_route_actor;
+mod core_private_terminal_feed;
 mod core_private_world_flow;
 mod core_recall_outbox;
 mod core_recall_runtime;
@@ -186,6 +187,12 @@ pub use core_private_route_actor::{
     CorePrivateRouteActorPosition, CorePrivateRouteActorSeed, CorePrivateRouteBellPermitLease,
     CorePrivateRouteExtractionBinding, CorePrivateRouteExtractionExitBinding,
     CorePrivateRouteExtractionPermit, CorePrivateRouteRuntimeError, CorePrivateRouteRuntimeReport,
+};
+pub use core_private_terminal_feed::{
+    CorePrivateTerminalAcknowledgementError, CorePrivateTerminalFeedBinding,
+    CorePrivateTerminalFeedError, CorePrivateTerminalFrameDelivery,
+    CorePrivateTerminalFrameDisposition, CorePrivateTerminalFrameReceiver,
+    CorePrivateTerminalFrameSender, CorePrivateTerminalFrameV1, CorePrivateTerminalSceneV1,
 };
 pub use core_private_world_flow::{
     CoreBellPortalAbortReason, CoreBellPortalAuthority, CoreBellPortalBinding,
