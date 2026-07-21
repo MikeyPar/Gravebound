@@ -25,7 +25,8 @@ use crate::world_flow::decode_location;
 use crate::{
     DangerCrashRestoreCode, DangerCrashRestoreReceipt, DangerCrashRestoreRequest,
     DangerCrashRestoreTransaction, DangerCrashRestoreVersions, PersistenceError,
-    PostgresPersistence, ProductionExtractionExpectedVersionsV1, StoredActiveDangerAuthorityV1,
+    PostgresPersistence, ProductionExtractionExpectedVersionsV1,
+    ProductionRecallExpectedVersionsV1, StoredActiveDangerAuthorityV1,
     StoredCommittedDeathTerminalV1, StoredCommittedExtractionTerminalV1,
     StoredCommittedRecallTerminalV1, StoredResolutionHoldSnapshotV1, StoredSafeArrival,
     StoredWorldFlowRevisionV1, StoredWorldLocation, WIPEABLE_CORE_NAMESPACE,
@@ -39,6 +40,7 @@ pub const PRIVATE_LIFE_CLASS_ID_V1: &str = "class.grave_arbalist";
 pub const PRIVATE_LIFE_CHARACTER_SELECT_RETURN_SPAWN_ID_V1: &str =
     "spawn.hub.character_select_return";
 pub const CURRENT_DANGER_EXTRACTION_SNAPSHOT_SCHEMA_VERSION_V1: u16 = 1;
+pub const CURRENT_DANGER_TERMINAL_SNAPSHOT_SCHEMA_VERSION_V1: u16 = 1;
 pub const MAX_CURRENT_DANGER_PENDING_ITEMS_V1: usize = 64;
 pub const MAX_CURRENT_DANGER_PENDING_MATERIALS_V1: usize = 4;
 
@@ -457,6 +459,50 @@ impl StoredCurrentDangerExtractionSnapshotV1 {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StoredCurrentDangerTerminalClockV1 {
+    pub lifetime_ticks: u64,
+    pub permadeath_combat_ticks: u64,
+    pub life_metrics_version: u64,
+    pub authoritative_tick: u64,
+}
+
+/// One serializable current-danger view for the shared terminal coordinator. It joins the exact
+/// extraction custody projection with all eight Recall versions and the latest acknowledged clock
+/// boundary, preventing independent reads from constructing a mixed terminal tick.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredCurrentDangerTerminalSnapshotV1 {
+    pub schema_version: u16,
+    pub extraction: StoredCurrentDangerExtractionSnapshotV1,
+    pub recall_expected_versions: ProductionRecallExpectedVersionsV1,
+    pub clock: StoredCurrentDangerTerminalClockV1,
+    pub pending_item_count: u16,
+    pub pending_material_stack_count: u16,
+}
+
+impl StoredCurrentDangerTerminalSnapshotV1 {
+    pub fn validate(&self) -> Result<(), PersistenceError> {
+        self.extraction.validate()?;
+        self.recall_expected_versions.validate()?;
+        let versions = self.extraction.expected_versions;
+        if self.schema_version != CURRENT_DANGER_TERMINAL_SNAPSHOT_SCHEMA_VERSION_V1
+            || self.clock.authoritative_tick == 0
+            || self.clock.life_metrics_version != versions.life_metrics
+            || self.recall_expected_versions.account != versions.account
+            || self.recall_expected_versions.character != versions.character
+            || self.recall_expected_versions.world != versions.world
+            || self.recall_expected_versions.inventory != versions.inventory
+            || self.recall_expected_versions.life_metrics != versions.life_metrics
+            || usize::from(self.pending_item_count) != self.extraction.pending_items.len()
+            || usize::from(self.pending_material_stack_count)
+                != self.extraction.pending_materials.len()
+        {
+            return Err(corrupt_current_danger_snapshot());
+        }
+        Ok(())
+    }
+}
+
 impl StoredPrivateLifeBootstrapV1 {
     pub fn validate(&self) -> Result<(), PersistenceError> {
         if self.schema_version != PRIVATE_LIFE_BOOTSTRAP_SCHEMA_VERSION_V1
@@ -588,11 +634,9 @@ impl PostgresPersistence {
         }
         for attempt in 1..=MAX_TRANSACTION_ATTEMPTS {
             match self
-                .load_current_danger_extraction_snapshot_once_v1(
-                    authority,
-                    expected_content_revision,
-                )
+                .load_current_danger_terminal_snapshot_once_v1(authority, expected_content_revision)
                 .await
+                .map(|snapshot| snapshot.extraction)
             {
                 Err(error)
                     if attempt < MAX_TRANSACTION_ATTEMPTS
@@ -603,11 +647,36 @@ impl PostgresPersistence {
         unreachable!("bounded current-danger snapshot loop always returns")
     }
 
-    async fn load_current_danger_extraction_snapshot_once_v1(
+    /// Loads every version, pending count, custody row, and clock needed to evaluate one shared
+    /// terminal tick under the same serializable snapshot.
+    pub async fn load_current_danger_terminal_snapshot_v1(
         &self,
         authority: StoredActiveDangerAuthorityV1,
         expected_content_revision: &StoredWorldFlowRevisionV1,
-    ) -> Result<StoredCurrentDangerExtractionSnapshotV1, PersistenceError> {
+    ) -> Result<StoredCurrentDangerTerminalSnapshotV1, PersistenceError> {
+        authority.validate()?;
+        if !valid_revision(expected_content_revision) {
+            return Err(PersistenceError::CurrentDangerExtractionSnapshotContentMismatch);
+        }
+        for attempt in 1..=MAX_TRANSACTION_ATTEMPTS {
+            match self
+                .load_current_danger_terminal_snapshot_once_v1(authority, expected_content_revision)
+                .await
+            {
+                Err(error)
+                    if attempt < MAX_TRANSACTION_ATTEMPTS
+                        && is_retryable_transaction_failure(&error) => {}
+                result => return result,
+            }
+        }
+        unreachable!("bounded current-danger terminal snapshot loop always returns")
+    }
+
+    async fn load_current_danger_terminal_snapshot_once_v1(
+        &self,
+        authority: StoredActiveDangerAuthorityV1,
+        expected_content_revision: &StoredWorldFlowRevisionV1,
+    ) -> Result<StoredCurrentDangerTerminalSnapshotV1, PersistenceError> {
         let mut transaction = self.begin_transaction().await?;
         let bootstrap =
             load_private_life_bootstrap_v1_on(transaction.connection(), authority.account_id)
@@ -649,7 +718,7 @@ impl PostgresPersistence {
             return Err(PersistenceError::CurrentDangerExtractionSnapshotContentMismatch);
         }
         let versions = character.versions;
-        let snapshot = StoredCurrentDangerExtractionSnapshotV1 {
+        let extraction = StoredCurrentDangerExtractionSnapshotV1 {
             schema_version: CURRENT_DANGER_EXTRACTION_SNAPSHOT_SCHEMA_VERSION_V1,
             authority,
             location_content_id: danger.location_content_id,
@@ -664,9 +733,31 @@ impl PostgresPersistence {
             pending_items,
             pending_materials,
         };
-        snapshot.validate()?;
+        extraction.validate()?;
+        let clock =
+            load_current_danger_terminal_clock_v1(transaction.connection(), authority).await?;
+        let terminal = StoredCurrentDangerTerminalSnapshotV1 {
+            schema_version: CURRENT_DANGER_TERMINAL_SNAPSHOT_SCHEMA_VERSION_V1,
+            recall_expected_versions: ProductionRecallExpectedVersionsV1 {
+                account: versions.account,
+                character: versions.character,
+                world: versions.world,
+                inventory: versions.inventory,
+                life_metrics: versions.life_metrics,
+                progression: versions.progression,
+                oath_bargain: versions.oath_bargain,
+                ash_wallet: versions.ash_wallet,
+            },
+            clock,
+            pending_item_count: u16::try_from(extraction.pending_items.len())
+                .map_err(|_| corrupt_current_danger_snapshot())?,
+            pending_material_stack_count: u16::try_from(extraction.pending_materials.len())
+                .map_err(|_| corrupt_current_danger_snapshot())?,
+            extraction,
+        };
+        terminal.validate()?;
         transaction.rollback().await?;
-        Ok(snapshot)
+        Ok(terminal)
     }
 
     /// Process-restart-only resolver. Within-process reconnect must reattach the retained actor
@@ -738,6 +829,48 @@ pub fn derive_private_life_crash_mutation_id_v1(
         return Err(corrupt());
     }
     Ok(mutation_id)
+}
+
+async fn load_current_danger_terminal_clock_v1(
+    connection: &mut PgConnection,
+    authority: StoredActiveDangerAuthorityV1,
+) -> Result<StoredCurrentDangerTerminalClockV1, PersistenceError> {
+    let row = sqlx::query(
+        "SELECT metrics.lifetime_ticks,metrics.permadeath_combat_ticks, \
+                metrics.life_metrics_version,receipt.authoritative_tick, \
+                receipt.clock_state,receipt.lineage_id,receipt.restore_point_id \
+         FROM character_life_metrics AS metrics \
+         JOIN LATERAL ( \
+             SELECT authoritative_tick,clock_state,lineage_id,restore_point_id \
+             FROM character_life_clock_checkpoint_receipts_v1 \
+             WHERE namespace_id=metrics.namespace_id AND account_id=metrics.account_id \
+               AND character_id=metrics.character_id \
+             ORDER BY authoritative_tick DESC LIMIT 1 \
+         ) AS receipt ON TRUE \
+         WHERE metrics.namespace_id=$1 AND metrics.account_id=$2 AND metrics.character_id=$3",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(authority.account_id.as_slice())
+    .bind(authority.character_id.as_slice())
+    .fetch_optional(connection)
+    .await?
+    .ok_or_else(corrupt_current_danger_snapshot)?;
+    let lineage =
+        optional_id(row.try_get("lineage_id")?)?.ok_or_else(corrupt_current_danger_snapshot)?;
+    let restore = optional_id(row.try_get("restore_point_id")?)?
+        .ok_or_else(corrupt_current_danger_snapshot)?;
+    if lineage != authority.instance_lineage_id
+        || restore != authority.entry_restore_point_id
+        || !matches!(row.try_get::<i16, _>("clock_state")?, 6 | 7)
+    {
+        return Err(corrupt_current_danger_snapshot());
+    }
+    Ok(StoredCurrentDangerTerminalClockV1 {
+        lifetime_ticks: nonnegative_u64(row.try_get("lifetime_ticks")?)?,
+        permadeath_combat_ticks: nonnegative_u64(row.try_get("permadeath_combat_ticks")?)?,
+        life_metrics_version: positive_u64(row.try_get("life_metrics_version")?)?,
+        authoritative_tick: positive_u64(row.try_get("authoritative_tick")?)?,
+    })
 }
 
 async fn load_private_life_bootstrap_v1_on(
@@ -1343,6 +1476,10 @@ fn current_snapshot_positive_u64(value: i64) -> Result<u64, PersistenceError> {
         .ok_or_else(corrupt_current_danger_snapshot)
 }
 
+fn nonnegative_u64(value: i64) -> Result<u64, PersistenceError> {
+    u64::try_from(value).map_err(|_| corrupt_current_danger_snapshot())
+}
+
 fn current_snapshot_exact_id(value: Vec<u8>) -> Result<[u8; 16], PersistenceError> {
     let value: [u8; 16] = value
         .try_into()
@@ -1560,6 +1697,58 @@ mod tests {
         let mut over_cap_material = current_danger_snapshot();
         over_cap_material.pending_materials[0].quantity = 100;
         assert!(over_cap_material.validate().is_err());
+    }
+
+    #[test]
+    fn terminal_snapshot_rejects_any_mixed_tick_or_aggregate_view() {
+        let terminal = current_danger_terminal_snapshot();
+        terminal.validate().unwrap();
+
+        let mut mixed_recall = terminal.clone();
+        mixed_recall.recall_expected_versions.account += 1;
+        assert!(mixed_recall.validate().is_err());
+
+        let mut invalid_recall = terminal.clone();
+        invalid_recall.recall_expected_versions.progression = 0;
+        assert!(invalid_recall.validate().is_err());
+
+        let mut mixed_life_clock = terminal.clone();
+        mixed_life_clock.clock.life_metrics_version += 1;
+        assert!(mixed_life_clock.validate().is_err());
+
+        let mut mixed_pending_count = terminal.clone();
+        mixed_pending_count.pending_item_count += 1;
+        assert!(mixed_pending_count.validate().is_err());
+
+        let mut unacknowledged_tick = terminal;
+        unacknowledged_tick.clock.authoritative_tick = 0;
+        assert!(unacknowledged_tick.validate().is_err());
+    }
+
+    fn current_danger_terminal_snapshot() -> StoredCurrentDangerTerminalSnapshotV1 {
+        let extraction = current_danger_snapshot();
+        StoredCurrentDangerTerminalSnapshotV1 {
+            schema_version: CURRENT_DANGER_TERMINAL_SNAPSHOT_SCHEMA_VERSION_V1,
+            recall_expected_versions: ProductionRecallExpectedVersionsV1 {
+                account: extraction.expected_versions.account,
+                character: extraction.expected_versions.character,
+                world: extraction.expected_versions.world,
+                inventory: extraction.expected_versions.inventory,
+                life_metrics: extraction.expected_versions.life_metrics,
+                progression: 6,
+                oath_bargain: 7,
+                ash_wallet: 8,
+            },
+            clock: StoredCurrentDangerTerminalClockV1 {
+                lifetime_ticks: 900,
+                permadeath_combat_ticks: 450,
+                life_metrics_version: extraction.expected_versions.life_metrics,
+                authoritative_tick: 120,
+            },
+            pending_item_count: extraction.pending_items.len() as u16,
+            pending_material_stack_count: extraction.pending_materials.len() as u16,
+            extraction,
+        }
     }
 
     fn current_danger_snapshot() -> StoredCurrentDangerExtractionSnapshotV1 {

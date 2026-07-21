@@ -221,13 +221,15 @@ pub use private_death_context_repository::{
     StoredPrivateDeathRunMaterialV1,
 };
 pub use private_life_bootstrap::{
-    CURRENT_DANGER_EXTRACTION_SNAPSHOT_SCHEMA_VERSION_V1, MAX_CURRENT_DANGER_PENDING_ITEMS_V1,
+    CURRENT_DANGER_EXTRACTION_SNAPSHOT_SCHEMA_VERSION_V1,
+    CURRENT_DANGER_TERMINAL_SNAPSHOT_SCHEMA_VERSION_V1, MAX_CURRENT_DANGER_PENDING_ITEMS_V1,
     MAX_CURRENT_DANGER_PENDING_MATERIALS_V1, PRIVATE_LIFE_BOOTSTRAP_SCHEMA_VERSION_V1,
     PRIVATE_LIFE_CHARACTER_SELECT_RETURN_SPAWN_ID_V1, PRIVATE_LIFE_CLASS_ID_V1,
     PRIVATE_LIFE_HALL_ID_V1, PRIVATE_LIFE_LAYOUT_ID_V1, ResolvedPrivateLifeProcessRestartV1,
     StoredCurrentDangerExtractionSnapshotV1, StoredCurrentDangerPendingItemKindV1,
     StoredCurrentDangerPendingItemLocationV1, StoredCurrentDangerPendingItemV1,
-    StoredCurrentDangerPendingMaterialV1, StoredPrivateLifeBootstrapStateV1,
+    StoredCurrentDangerPendingMaterialV1, StoredCurrentDangerTerminalClockV1,
+    StoredCurrentDangerTerminalSnapshotV1, StoredPrivateLifeBootstrapStateV1,
     StoredPrivateLifeBootstrapV1, StoredPrivateLifeDangerRootV1, StoredPrivateLifeHallV1,
     StoredPrivateLifeLifeStateV1, StoredPrivateLifeSecurityStateV1,
     StoredPrivateLifeSelectedCharacterV1, StoredPrivateLifeVersionsV1,

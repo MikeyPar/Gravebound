@@ -69,7 +69,7 @@ pub struct ProductionRecallExpectedVersionsV1 {
 }
 
 impl ProductionRecallExpectedVersionsV1 {
-    fn validate(self) -> Result<(), PersistenceError> {
+    pub(crate) fn validate(self) -> Result<(), PersistenceError> {
         if [
             self.account,
             self.character,
