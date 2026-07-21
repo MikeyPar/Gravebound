@@ -146,7 +146,9 @@ async fn run_connection_loop(
         tokio::select! {
             observation = next_driver_observation(driver) => {
                 let observation = observation?;
-                publish_route(process, writer, route, observation_tick(&observation)).await?;
+                if observation_allows_route_publication(&observation) {
+                    publish_route(process, writer, route, observation_tick(&observation)).await?;
+                }
             }
             datagram = connection.read_datagram() => {
                 let Ok(bytes) = datagram else { break };
@@ -476,6 +478,15 @@ fn observation_tick(observation: &CorePrivateMicrorealmDriverState) -> u64 {
         CorePrivateMicrorealmDriverState::Starting
         | CorePrivateMicrorealmDriverState::CaldusExitReady { .. } => 0,
     }
+}
+
+fn observation_allows_route_publication(observation: &CorePrivateMicrorealmDriverState) -> bool {
+    !matches!(
+        observation,
+        CorePrivateMicrorealmDriverState::FixedDungeonRewardPending { .. }
+            | CorePrivateMicrorealmDriverState::CaldusRewardPending { .. }
+            | CorePrivateMicrorealmDriverState::CaldusExitReady { .. }
+    )
 }
 
 fn unix_millis() -> Result<u64, CorePrivateLifeServerError> {
