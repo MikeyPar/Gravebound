@@ -319,6 +319,14 @@ impl<Repository> LiveDamageTraceService<Repository> {
         &self.identities
     }
 
+    /// Current repository-authenticated danger authority. Terminal owners use this exact value
+    /// when sealing the next trace mutation; callers cannot reconstruct checkpoint authority from
+    /// the simulation frame or transport state.
+    #[must_use]
+    pub const fn danger_authority(&self) -> &LiveDamageTraceDangerAuthorityV1 {
+        &self.binding.danger
+    }
+
     /// Monotonically extends the simulation-to-journal identity authority. Historical mappings
     /// are retained for the complete trace window and cannot be remapped or reused.
     pub fn register_entity_identities(

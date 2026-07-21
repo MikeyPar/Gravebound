@@ -28,16 +28,16 @@ use crate::{
     CorePrivateRouteRuntimeError, CorePrivateRouteRuntimeReport, CorePrivateWorldFlowRouter,
     CoreResolutionHoldAuthority, CoreSafeInventoryAuthority, CoreSuccessorAuthority,
     DeathViewService, IdentityClock, IdentityService, NoopIdentityEventSink,
-    PostgresAccountRepository, PostgresBargainService, PostgresDangerEntryAshWalletProviderV3,
-    PostgresDangerEntryInventoryProviderV3, PostgresDangerEntryLifeMetricsProviderV3,
-    PostgresDangerEntryOathBargainProviderV3, PostgresDeathViewRepository,
-    PostgresDurableDeathExecutionService, PostgresOathSelectionService,
-    PostgresPrivateDeathContextPlanner, PostgresProductionExtractionExecutionService,
-    PostgresProductionRecallExecutionService, PostgresProgressionQueryRepository,
-    PostgresProgressionRestoreProvider, PostgresSafeInventoryService,
-    PostgresWorldFlowLocationRepository, ProgressionQueryService, ResolutionHoldService,
-    SuccessorService, SystemDurableDeathIdentitySource, WorldFlowGateService,
-    world_flow_coordinator::PostgresCorePrivateWorldFlowCoordinator,
+    PostgresAccountRepository, PostgresBargainService, PostgresCorePrivateTerminalOwnerFactory,
+    PostgresDangerEntryAshWalletProviderV3, PostgresDangerEntryInventoryProviderV3,
+    PostgresDangerEntryLifeMetricsProviderV3, PostgresDangerEntryOathBargainProviderV3,
+    PostgresDeathViewRepository, PostgresDurableDeathExecutionService,
+    PostgresOathSelectionService, PostgresPrivateDeathContextPlanner,
+    PostgresProductionExtractionExecutionService, PostgresProductionRecallExecutionService,
+    PostgresProgressionQueryRepository, PostgresProgressionRestoreProvider,
+    PostgresSafeInventoryService, PostgresWorldFlowLocationRepository, ProgressionQueryService,
+    ResolutionHoldService, SuccessorService, SystemDurableDeathIdentitySource,
+    WorldFlowGateService, world_flow_coordinator::PostgresCorePrivateWorldFlowCoordinator,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -109,6 +109,7 @@ pub(crate) struct CorePrivateLifePersistentFoundation {
     death_views: Arc<DeathViewService<PostgresDeathViewRepository>>,
     death_execution: Arc<PostgresDurableDeathExecutionService>,
     death_planner: Arc<PersistentDeathPlanner>,
+    terminal_owner_factory: Arc<PostgresCorePrivateTerminalOwnerFactory>,
     oath: Arc<CoreOathSelectionAuthority<SystemIdentityClock>>,
     bargain: Arc<CoreBargainAuthority<SystemIdentityClock>>,
     safe_inventory: Arc<CoreSafeInventoryAuthority>,
@@ -165,10 +166,19 @@ impl CorePrivateLifePersistentFoundation {
         let death_planner = Arc::new(PostgresPrivateDeathContextPlanner::new(
             persistence.clone(),
             SystemDurableDeathIdentitySource,
-            death_view,
+            Arc::clone(&death_view),
             items,
             Arc::clone(&content),
         )?);
+        let death_execution = Arc::new(PostgresDurableDeathExecutionService::new(
+            persistence.clone(),
+        ));
+        let terminal_owner_factory = Arc::new(PostgresCorePrivateTerminalOwnerFactory::new(
+            persistence.clone(),
+            Arc::clone(&death_planner),
+            Arc::clone(&death_execution),
+            death_view,
+        ));
         let world_flow_revision = world_flow_revision(content.world_flow())?;
         let route_revision = route_revision(content.revision())?;
 
@@ -231,10 +241,9 @@ impl CorePrivateLifePersistentFoundation {
                 PostgresDeathViewRepository::new(persistence.clone()),
                 death_view_revision,
             )),
-            death_execution: Arc::new(PostgresDurableDeathExecutionService::new(
-                persistence.clone(),
-            )),
+            death_execution,
             death_planner,
+            terminal_owner_factory,
             oath: Arc::new(CoreOathSelectionAuthority::persistent(oath)),
             bargain: Arc::new(CoreBargainAuthority::persistent(bargain)),
             safe_inventory: Arc::new(CoreSafeInventoryAuthority::persistent(
@@ -288,13 +297,12 @@ impl CorePrivateLifePersistentFoundation {
         // Construction must finish before any process-wide owner can escape into a session.
         // These counts make that all-or-nothing boundary explicit and keep partial composition
         // from becoming externally observable.
-        let owner_counts = [
+        let single_owner_counts = [
             Arc::strong_count(&self.identity),
             Arc::strong_count(&self.world_flow),
             Arc::strong_count(&self.progression),
             Arc::strong_count(&self.death_views),
-            Arc::strong_count(&self.death_execution),
-            Arc::strong_count(&self.death_planner),
+            Arc::strong_count(&self.terminal_owner_factory),
             Arc::strong_count(&self.oath),
             Arc::strong_count(&self.bargain),
             Arc::strong_count(&self.safe_inventory),
@@ -303,7 +311,9 @@ impl CorePrivateLifePersistentFoundation {
             Arc::strong_count(&self.extraction_execution),
             Arc::strong_count(&self.recall_execution),
         ];
-        if owner_counts.into_iter().any(|count| count != 1)
+        if single_owner_counts.into_iter().any(|count| count != 1)
+            || Arc::strong_count(&self.death_execution) != 2
+            || Arc::strong_count(&self.death_planner) != 2
             || Arc::strong_count(&self.runtime_bootstrap) != 2
         {
             return Err(CorePrivateLifeFoundationError::InvalidComposition);
