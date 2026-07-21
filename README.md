@@ -156,7 +156,7 @@ Concept images establish mood, hierarchy, and visual language. They are not fina
 
 ## Current Next Step
 
-Commits `03b0cdb` and `aeb2033` compose the persistent tick, Recall, extraction, reward, terminal, combat, and session owners as one process graph, then add server-owned Lantern Halls collision, generation-bound 4.5-tile/second movement, noncombat enforcement, and exact 1.5-tile Realm Gate reservation. Construction still does not publish a capability. The Current Next Step is the dedicated bound normal server: terminal-first session attach, authenticated reliable/datagram dispatch, Hall-permit consumption around the durable Gate transaction, and post-commit danger actor binding. Then add the native route state and run the user-deferred cumulative audit. Normal admission remains fail closed until the server and client composition are both production-ready.
+Commits through `646ca3f` compose the persistent process graph, enforce server-owned Lantern Halls movement and the exact 1.5-tile Realm Gate range, consume an opaque Hall reservation around the durable transfer, retain exact response-loss replay, and convert an accepted receipt into the real combat, Recall, tick, terminal, reward, and microrealm driver graph. Partial post-commit binds retire their Recall authority and fail closed. Construction still does not publish a capability. The Current Next Step is terminal-first connection attach plus authenticated reliable/datagram dispatch and shared-writer route publication in `BoundCorePrivateLifeServer`. Then add the native route state and run the user-deferred cumulative audit. Normal admission remains fail closed until the server and client composition are both production-ready.
 
 ### Historical cumulative record
 
