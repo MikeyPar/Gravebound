@@ -55,6 +55,12 @@ impl IdentityClock for SystemIdentityClock {
     }
 }
 
+impl crate::ProductionRecallClock for SystemIdentityClock {
+    fn unix_millis(&self) -> u64 {
+        IdentityClock::unix_millis(self)
+    }
+}
+
 type PersistentIdentity = IdentityService<
     PostgresAccountRepository,
     SystemIdentityClock,
@@ -270,6 +276,10 @@ impl CorePrivateLifePersistentFoundation {
 
     pub(crate) const fn normal_route_enabled(&self) -> bool {
         self.admission.normal_route_enabled()
+    }
+
+    pub(crate) fn terminal_owner_factory(&self) -> Arc<PostgresCorePrivateTerminalOwnerFactory> {
+        Arc::clone(&self.terminal_owner_factory)
     }
 
     pub(crate) fn begin_shutdown(&self) {

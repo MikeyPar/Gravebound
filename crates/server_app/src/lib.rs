@@ -23,6 +23,11 @@ mod core_private_caldus_runtime;
 mod core_private_combat_frame;
 mod core_private_fixed_dungeon_runtime;
 mod core_private_life_foundation;
+#[allow(
+    dead_code,
+    reason = "the dormant owner graph is consumed by the next normal-server composition slice"
+)]
+mod core_private_life_process;
 mod core_private_life_runtime_bootstrap;
 mod core_private_life_session;
 mod core_private_life_tick;
