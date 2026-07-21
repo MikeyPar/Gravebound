@@ -32,10 +32,11 @@ use crate::{
     PostgresDangerEntryInventoryProviderV3, PostgresDangerEntryLifeMetricsProviderV3,
     PostgresDangerEntryOathBargainProviderV3, PostgresDeathViewRepository,
     PostgresDurableDeathExecutionService, PostgresOathSelectionService,
-    PostgresProductionExtractionExecutionService, PostgresProductionRecallExecutionService,
-    PostgresProgressionQueryRepository, PostgresProgressionRestoreProvider,
-    PostgresSafeInventoryService, PostgresWorldFlowLocationRepository, ProgressionQueryService,
-    ResolutionHoldService, SuccessorService, WorldFlowGateService,
+    PostgresPrivateDeathContextPlanner, PostgresProductionExtractionExecutionService,
+    PostgresProductionRecallExecutionService, PostgresProgressionQueryRepository,
+    PostgresProgressionRestoreProvider, PostgresSafeInventoryService,
+    PostgresWorldFlowLocationRepository, ProgressionQueryService, ResolutionHoldService,
+    SuccessorService, SystemDurableDeathIdentitySource, WorldFlowGateService,
     world_flow_coordinator::PostgresCorePrivateWorldFlowCoordinator,
 };
 
@@ -77,6 +78,8 @@ type PersistentWorldFlow = CorePrivateWorldFlowRouter<
 >;
 
 type PersistentRuntimeBootstrap = CorePrivateLifeRuntimeBootstrapAdapter<PostgresPersistence>;
+type PersistentDeathPlanner =
+    PostgresPrivateDeathContextPlanner<PostgresPersistence, SystemDurableDeathIdentitySource>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct DormantNormalAdmission {
@@ -105,6 +108,7 @@ pub(crate) struct CorePrivateLifePersistentFoundation {
     progression: Arc<ProgressionQueryService<PostgresProgressionQueryRepository>>,
     death_views: Arc<DeathViewService<PostgresDeathViewRepository>>,
     death_execution: Arc<PostgresDurableDeathExecutionService>,
+    death_planner: Arc<PersistentDeathPlanner>,
     oath: Arc<CoreOathSelectionAuthority<SystemIdentityClock>>,
     bargain: Arc<CoreBargainAuthority<SystemIdentityClock>>,
     safe_inventory: Arc<CoreSafeInventoryAuthority>,
@@ -128,6 +132,10 @@ impl fmt::Debug for CorePrivateLifePersistentFoundation {
 }
 
 impl CorePrivateLifePersistentFoundation {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "all process-wide owners are constructed contiguously before dormant admission can exist"
+    )]
     pub(crate) fn new(
         content_root: &Path,
         persistence: PostgresPersistence,
@@ -145,7 +153,22 @@ impl CorePrivateLifePersistentFoundation {
             .map_err(content_error("progression"))?;
         let oath_content = sim_content::load_core_development_oaths_bargains(content_root)
             .map_err(content_error("Oath/Bargain"))?;
-        let death_view_revision = load_death_view_revision(content_root)?;
+        let death_view = Arc::new(
+            sim_content::load_core_development_death_view(content_root)
+                .map_err(content_error("death presentation"))?,
+        );
+        let death_view_revision = death_view_revision(&death_view)?;
+        let items = Arc::new(
+            sim_content::load_core_development_items(content_root)
+                .map_err(content_error("death item authority"))?,
+        );
+        let death_planner = Arc::new(PostgresPrivateDeathContextPlanner::new(
+            persistence.clone(),
+            SystemDurableDeathIdentitySource,
+            death_view,
+            items,
+            Arc::clone(&content),
+        )?);
         let world_flow_revision = world_flow_revision(content.world_flow())?;
         let route_revision = route_revision(content.revision())?;
 
@@ -211,6 +234,7 @@ impl CorePrivateLifePersistentFoundation {
             death_execution: Arc::new(PostgresDurableDeathExecutionService::new(
                 persistence.clone(),
             )),
+            death_planner,
             oath: Arc::new(CoreOathSelectionAuthority::persistent(oath)),
             bargain: Arc::new(CoreBargainAuthority::persistent(bargain)),
             safe_inventory: Arc::new(CoreSafeInventoryAuthority::persistent(
@@ -270,6 +294,7 @@ impl CorePrivateLifePersistentFoundation {
             Arc::strong_count(&self.progression),
             Arc::strong_count(&self.death_views),
             Arc::strong_count(&self.death_execution),
+            Arc::strong_count(&self.death_planner),
             Arc::strong_count(&self.oath),
             Arc::strong_count(&self.bargain),
             Arc::strong_count(&self.safe_inventory),
@@ -297,6 +322,8 @@ pub(crate) enum CorePrivateLifeFoundationError {
     RouteRuntime(#[source] CorePrivateRouteRuntimeError),
     #[error("private-life runtime bootstrap failed: {0}")]
     RuntimeBootstrap(#[from] crate::CorePrivateLifeBootstrapError),
+    #[error("private-life death planner failed: {0}")]
+    DeathPlanner(#[from] crate::PrivateDeathPlanningError),
     #[error(transparent)]
     Bounded(#[from] protocol::BoundedValueError),
 }
@@ -306,6 +333,12 @@ pub(crate) fn load_death_view_revision(
 ) -> Result<DeathViewContentRevisionV1, CorePrivateLifeFoundationError> {
     let content = sim_content::load_core_development_death_view(content_root)
         .map_err(content_error("death presentation"))?;
+    death_view_revision(&content)
+}
+
+fn death_view_revision(
+    content: &sim_content::CoreDevelopmentDeathView,
+) -> Result<DeathViewContentRevisionV1, CorePrivateLifeFoundationError> {
     let hashes = content.hashes();
     let persistence_authority = DurableDeathPresentationAuthorityV1::core();
     if hashes.records_blake3 != persistence_authority.records_blake3

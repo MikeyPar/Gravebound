@@ -48,6 +48,7 @@ mod instance;
 mod lifecycle;
 mod live_damage_trace_service;
 mod oath_selection;
+mod private_death_context_planner;
 mod production_extraction;
 mod production_extraction_intent;
 mod production_recall;
@@ -280,6 +281,7 @@ pub use live_damage_trace_service::{
     PreparedTerminalLiveDamageTrace,
 };
 pub use oath_selection::{CoreOathSelectionAuthority, PostgresOathSelectionService};
+pub use private_death_context_planner::*;
 pub use production_extraction::{
     CoreExtractionIntentAuthority, CoreExtractionIntentReply, CoreExtractionTerminalAuthority,
     PostgresProductionExtractionExecutionService, ProductionExtractionCoordinatedOutcome,
