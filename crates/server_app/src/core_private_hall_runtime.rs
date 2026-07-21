@@ -94,6 +94,7 @@ struct HallState {
     accepting: bool,
     next_generation: BTreeMap<[u8; 16], u64>,
     actors: BTreeMap<[u8; 16], HallActor>,
+    committed_gates: BTreeMap<([u8; 16], [u8; 16]), CorePrivateHallRealmGatePermit>,
 }
 
 /// Capacity-one-per-account safe-scene authority. The immutable scene comes from the compiled
@@ -122,6 +123,7 @@ impl CorePrivateHallDirectory {
                 accepting: true,
                 next_generation: BTreeMap::new(),
                 actors: BTreeMap::new(),
+                committed_gates: BTreeMap::new(),
             }),
         })
     }
@@ -299,11 +301,36 @@ impl CorePrivateHallDirectory {
             return Err(CorePrivateHallError::StaleActor);
         }
         state.actors.remove(&permit.actor.account_id);
+        state
+            .committed_gates
+            .insert((permit.actor.account_id, permit.mutation_id), permit);
         Ok(())
     }
 
+    /// Returns true only for the exact already-committed Gate identity retained by this process.
+    /// This permits response-loss replay after the Hall actor has been retired without opening a
+    /// second range-free mutation path.
+    pub(crate) fn is_committed_realm_gate(
+        &self,
+        authenticated: AuthenticatedAccount,
+        character_id: [u8; 16],
+        character_version: u64,
+        mutation_id: [u8; 16],
+    ) -> bool {
+        if authenticated.namespace != AuthenticatedNamespace::WipeableTest {
+            return false;
+        }
+        lock(&self.state)
+            .committed_gates
+            .get(&(authenticated.account_id.as_bytes(), mutation_id))
+            .is_some_and(|permit| {
+                permit.actor.character_id == character_id
+                    && permit.character_version == character_version
+            })
+    }
+
     #[cfg(test)]
-    fn install_at(
+    pub(crate) fn install_at(
         &self,
         authenticated: AuthenticatedAccount,
         character_id: [u8; 16],

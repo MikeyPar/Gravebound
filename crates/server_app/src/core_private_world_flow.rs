@@ -5,11 +5,17 @@
 //! durable projection authority, mutations retain the transactional coordinator, and the Bell
 //! portal can be authorized only by a matching live private-life actor.
 
-use std::future::Future;
+use std::{future::Future, sync::Arc};
 
-use protocol::{WorldFlowContentRevisionV1, WorldFlowFrame, WorldFlowRequest, WorldFlowResult};
+use protocol::{
+    WorldFlowContentRevisionV1, WorldFlowFrame, WorldFlowRequest, WorldFlowResult,
+    WorldTransferCommand, WorldTransferResultCode,
+};
 
-use crate::{AuthenticatedAccount, CoreWorldFlowAuthority};
+use crate::core_private_hall_runtime::{
+    CorePrivateHallActorLease, CorePrivateHallDirectory, CorePrivateHallError,
+};
+use crate::{AuthenticatedAccount, CorePrivateLifeTransportLease, CoreWorldFlowAuthority};
 
 /// Immutable server-side binding presented to the live actor before the fixed Bell dungeon may
 /// replace the microrealm as the character's current dangerous scene.
@@ -218,8 +224,140 @@ where
     }
 }
 
+/// Per-connection world-flow authority that makes an authenticated Hall reservation mandatory
+/// before the process-wide router can see a fresh Realm Gate mutation. Other route commands keep
+/// their own domain authority and pass through unchanged.
+#[derive(Debug, Clone)]
+#[allow(
+    dead_code,
+    reason = "the Hall-gated authority is consumed by the next bound normal-server dispatch slice"
+)]
+pub(crate) struct CorePrivateHallWorldFlow<Inner> {
+    inner: Arc<Inner>,
+    hall: Arc<CorePrivateHallDirectory>,
+    actor: CorePrivateHallActorLease,
+    transport: CorePrivateLifeTransportLease,
+}
+
+#[allow(
+    dead_code,
+    reason = "the Hall-gated authority is consumed by the next bound normal-server dispatch slice"
+)]
+impl<Inner> CorePrivateHallWorldFlow<Inner> {
+    #[must_use]
+    pub(crate) fn new(
+        inner: Arc<Inner>,
+        hall: Arc<CorePrivateHallDirectory>,
+        actor: CorePrivateHallActorLease,
+        transport: CorePrivateLifeTransportLease,
+    ) -> Self {
+        Self {
+            inner,
+            hall,
+            actor,
+            transport,
+        }
+    }
+}
+
+impl<Inner> CoreWorldFlowAuthority for CorePrivateHallWorldFlow<Inner>
+where
+    Inner: CoreWorldFlowAuthority,
+{
+    async fn handle_world_flow(
+        &self,
+        authenticated: AuthenticatedAccount,
+        frame: &WorldFlowFrame,
+    ) -> WorldFlowResult {
+        let WorldFlowRequest::Transfer(mutation) = &frame.request else {
+            return self.inner.handle_world_flow(authenticated, frame).await;
+        };
+        let WorldTransferCommand::UsePortal { portal_id } = &mutation.payload.command else {
+            return self.inner.handle_world_flow(authenticated, frame).await;
+        };
+        if portal_id.as_str() != "station.realm_gate" {
+            return self.inner.handle_world_flow(authenticated, frame).await;
+        }
+        if self.hall.is_committed_realm_gate(
+            authenticated,
+            mutation.character_id,
+            mutation.expected_character_version,
+            mutation.mutation_id,
+        ) {
+            return self.inner.handle_world_flow(authenticated, frame).await;
+        }
+        let permit = match self.hall.prepare_realm_gate(
+            authenticated,
+            self.actor,
+            self.transport,
+            mutation.mutation_id,
+            mutation.expected_character_version,
+        ) {
+            Ok(permit) => permit,
+            Err(error) => return hall_rejection(frame.sequence, mutation, error),
+        };
+        let result = self.inner.handle_world_flow(authenticated, frame).await;
+        if matches!(
+            &result,
+            WorldFlowResult::Transfer {
+                accepted: true,
+                code: WorldTransferResultCode::Accepted,
+                mutation_id,
+                ..
+            } if *mutation_id == mutation.mutation_id
+        ) {
+            // A durable accepted result remains authoritative even if local retirement detects a
+            // fault. The connection bootstrap must reconcile before publishing player control.
+            let _ = self.hall.commit_realm_gate(permit);
+        } else {
+            let _ = self.hall.abort_realm_gate(permit);
+        }
+        result
+    }
+}
+
+#[allow(
+    dead_code,
+    reason = "the Hall-gated authority is consumed by the next bound normal-server dispatch slice"
+)]
+fn hall_rejection(
+    request_sequence: u32,
+    mutation: &protocol::WorldTransferMutation,
+    error: CorePrivateHallError,
+) -> WorldFlowResult {
+    let code = match error {
+        CorePrivateHallError::OutOfRange => WorldTransferResultCode::OutOfRange,
+        CorePrivateHallError::VersionMismatch => WorldTransferResultCode::StateVersionMismatch,
+        CorePrivateHallError::TransferInProgress => WorldTransferResultCode::TransferInProgress,
+        CorePrivateHallError::Retired | CorePrivateHallError::ActorUnavailable => {
+            WorldTransferResultCode::InstanceUnavailable
+        }
+        CorePrivateHallError::InvalidMutation | CorePrivateHallError::InvalidInput => {
+            WorldTransferResultCode::InvalidSource
+        }
+        CorePrivateHallError::Content => WorldTransferResultCode::ContentDisabled,
+        CorePrivateHallError::GenerationExhausted
+        | CorePrivateHallError::InvalidSnapshot
+        | CorePrivateHallError::ForeignAuthority
+        | CorePrivateHallError::StaleActor
+        | CorePrivateHallError::StaleTransport
+        | CorePrivateHallError::StaleInput
+        | CorePrivateHallError::UnsafeAction => WorldTransferResultCode::InvalidSource,
+    };
+    WorldFlowResult::Transfer {
+        request_sequence,
+        mutation_id: mutation.mutation_id,
+        accepted: false,
+        code,
+        snapshot: None,
+        transfer_id: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use protocol::{
         CharacterLocation, CharacterLocationSnapshot, ManifestHash, SafeArrival, WireText,
         WorldFlowContentRevisionV1, WorldTransferCommand, WorldTransferMutation,
@@ -227,7 +365,9 @@ mod tests {
     };
 
     use super::*;
-    use crate::{AccountId, AuthenticatedNamespace};
+    use sim_core::TilePoint;
+
+    use crate::{AccountId, AuthenticatedNamespace, CorePrivateLifeTransportLease};
 
     #[derive(Debug, Clone, Copy)]
     struct LocationAuthority;
@@ -290,6 +430,40 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Default)]
+    struct AcceptingRealmGate {
+        calls: AtomicUsize,
+    }
+
+    impl CoreWorldFlowAuthority for AcceptingRealmGate {
+        async fn handle_world_flow(
+            &self,
+            _authenticated: AuthenticatedAccount,
+            frame: &WorldFlowFrame,
+        ) -> WorldFlowResult {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            let WorldFlowRequest::Transfer(mutation) = &frame.request else {
+                panic!("Gate authority requires transfer")
+            };
+            WorldFlowResult::Transfer {
+                request_sequence: frame.sequence,
+                mutation_id: mutation.mutation_id,
+                accepted: true,
+                code: WorldTransferResultCode::Accepted,
+                snapshot: Some(CharacterLocationSnapshot {
+                    character_id: mutation.character_id,
+                    character_version: mutation.expected_character_version + 1,
+                    location: CharacterLocation::Danger {
+                        location_id: WireText::new("world.core_microrealm_01").unwrap(),
+                        instance_lineage_id: [4; 16],
+                        entry_restore_point_id: [5; 16],
+                    },
+                }),
+                transfer_id: Some([6; 16]),
+            }
+        }
+    }
+
     fn authenticated() -> AuthenticatedAccount {
         AuthenticatedAccount {
             account_id: AccountId::new([1; 16]).unwrap(),
@@ -302,6 +476,33 @@ mod tests {
             records_blake3: ManifestHash::new("a".repeat(64)).unwrap(),
             assets_blake3: ManifestHash::new("b".repeat(64)).unwrap(),
             localization_blake3: ManifestHash::new("c".repeat(64)).unwrap(),
+        }
+    }
+
+    fn content_root() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("content")
+    }
+
+    fn realm_gate_frame() -> WorldFlowFrame {
+        let payload = WorldTransferPayload {
+            content_revision: revision(),
+            command: WorldTransferCommand::UsePortal {
+                portal_id: WireText::new("station.realm_gate").unwrap(),
+            },
+        };
+        WorldFlowFrame {
+            sequence: 9,
+            request: WorldFlowRequest::Transfer(WorldTransferMutation {
+                mutation_id: [3; 16],
+                character_id: [2; 16],
+                expected_character_version: 4,
+                issued_at_unix_millis: 9_000,
+                payload_hash: payload.canonical_hash(),
+                payload,
+            }),
         }
     }
 
@@ -381,5 +582,59 @@ mod tests {
                 .await,
             Err(CoreBellPortalRejection::NotCleared)
         ));
+    }
+
+    #[tokio::test]
+    async fn hall_gate_blocks_out_of_range_before_durable_authority() {
+        let hall = Arc::new(CorePrivateHallDirectory::load(&content_root()).unwrap());
+        let transport = CorePrivateLifeTransportLease::test_only([1; 16], 3);
+        let actor = hall.install_at(
+            authenticated(),
+            [2; 16],
+            4,
+            TilePoint::new(32_000, 42_000),
+            transport.generation(),
+        );
+        let inner = Arc::new(AcceptingRealmGate::default());
+        let authority = CorePrivateHallWorldFlow::new(Arc::clone(&inner), hall, actor, transport);
+        assert!(matches!(
+            authority
+                .handle_world_flow(authenticated(), &realm_gate_frame())
+                .await,
+            WorldFlowResult::Transfer {
+                accepted: false,
+                code: WorldTransferResultCode::OutOfRange,
+                ..
+            }
+        ));
+        assert_eq!(inner.calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn hall_gate_commits_once_and_allows_exact_response_loss_replay() {
+        let hall = Arc::new(CorePrivateHallDirectory::load(&content_root()).unwrap());
+        let transport = CorePrivateLifeTransportLease::test_only([1; 16], 3);
+        let actor = hall.install_at(
+            authenticated(),
+            [2; 16],
+            4,
+            TilePoint::new(32_000, 4_500),
+            transport.generation(),
+        );
+        let inner = Arc::new(AcceptingRealmGate::default());
+        let authority =
+            CorePrivateHallWorldFlow::new(Arc::clone(&inner), Arc::clone(&hall), actor, transport);
+        let frame = realm_gate_frame();
+        for expected_calls in 1..=2 {
+            assert!(matches!(
+                authority.handle_world_flow(authenticated(), &frame).await,
+                WorldFlowResult::Transfer {
+                    accepted: true,
+                    code: WorldTransferResultCode::Accepted,
+                    ..
+                }
+            ));
+            assert_eq!(inner.calls.load(Ordering::Relaxed), expected_calls);
+        }
     }
 }
