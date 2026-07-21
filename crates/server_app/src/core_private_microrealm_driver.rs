@@ -760,8 +760,9 @@ pub struct CorePrivateMicrorealmDriver {
 }
 
 impl CorePrivateMicrorealmDriver {
-    /// Component-test/bootstrap path used only while normal admission remains disabled. It skips
-    /// empty-frame terminal delivery and faults on the first damage-bearing or lethal frame.
+    /// Unit-test-only path for driver mechanics that do not exercise terminal delivery. No
+    /// production or persistent-session build can construct an ownerless danger driver.
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn spawn_without_terminal_owner(runtime: CorePrivateMicrorealmRuntime) -> Self {
         spawn_driver(runtime)
@@ -916,6 +917,7 @@ struct CorePrivateMicrorealmDriverTaskExit {
     report: CorePrivateMicrorealmDriverReport,
 }
 
+#[cfg(test)]
 fn spawn_driver<R>(runtime: R) -> CorePrivateMicrorealmDriver
 where
     R: MicrorealmFrameRuntime,

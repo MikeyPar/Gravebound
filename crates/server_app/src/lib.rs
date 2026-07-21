@@ -156,7 +156,8 @@ pub use core_private_life_session::{
     CorePrivateLifeSessionError, CorePrivateLifeSessionReport, CorePrivateLifeSessionSnapshot,
     CorePrivateLifeTransportAttach, CorePrivateLifeTransportDetach,
     CorePrivateLifeTransportGeneration, CorePrivateLifeTransportLease,
-    CorePrivateMicrorealmBinding, CorePrivateMicrorealmBindingLease,
+    CorePrivateMicrorealmBinding, CorePrivateMicrorealmBindingLease, CorePrivateTerminalOwner,
+    CorePrivateTerminalOwnerError, CorePrivateTerminalOwnerFactory,
 };
 pub use core_private_life_tick::{
     CorePrivateLifeAuthoritativeTick, CorePrivateLifeTickDirectory,

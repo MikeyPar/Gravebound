@@ -36,21 +36,22 @@ use crate::{
     CoreExtractionRuntimeReport, CoreExtractionTransportAttach, CoreExtractionTransportDetach,
     CorePrivateB3RewardRuntime, CorePrivateB3RewardRuntimeError, CorePrivateCaldusRewardRuntime,
     CorePrivateCaldusRewardRuntimeConfig, CorePrivateCaldusRewardRuntimeError,
-    CorePrivateFixedDungeonAdvance, CorePrivateFixedDungeonB3RewardCommit,
-    CorePrivateFixedDungeonDriverReady, CorePrivateFixedDungeonRestCommit,
-    CorePrivateLifeTickDirectory, CorePrivateLifeTickError, CorePrivateMicrorealmAbility,
-    CorePrivateMicrorealmAbilityPress, CorePrivateMicrorealmDriver,
+    CorePrivateDangerEntryAuthority, CorePrivateFixedDungeonAdvance,
+    CorePrivateFixedDungeonB3RewardCommit, CorePrivateFixedDungeonDriverReady,
+    CorePrivateFixedDungeonRestCommit, CorePrivateLifeTickDirectory, CorePrivateLifeTickError,
+    CorePrivateMicrorealmAbility, CorePrivateMicrorealmAbilityPress, CorePrivateMicrorealmDriver,
     CorePrivateMicrorealmDriverError, CorePrivateMicrorealmDriverHandle,
     CorePrivateMicrorealmDriverObserver, CorePrivateMicrorealmDriverReport,
     CorePrivateMicrorealmIngressError, CorePrivateMicrorealmPreparedHandoff,
     CorePrivateMicrorealmRetainedInput, CorePrivateMicrorealmRuntime, CorePrivateRouteActorLease,
-    CoreRecallActorDirectory, CoreRecallActorRetirementReport, CoreRecallAuthoritativeTick,
-    CoreRecallConnectionAuthority, CoreRecallConnectionLease, CoreRecallRuntimeError,
-    CoreRecallRuntimeReport, CoreRecallTransportAttach, CoreReliableWriter, IdentityClock,
-    PostgresCaldusVictoryCoordinator, PostgresCoreB3RewardCoordinator,
-    ProductionExtractionBossExitAuthorityV1, ProductionExtractionCaldusReservationV1,
-    ProductionExtractionIntentActor, ProductionExtractionPlanner, ProductionRecallClock,
-    ProductionRecallDetachOutcome, SecretRewardEpoch, TRANSPORT_REPLACED_CLOSE_CODE,
+    CorePrivateTerminalFeedBinding, CorePrivateTerminalFrameReceiver, CoreRecallActorDirectory,
+    CoreRecallActorRetirementReport, CoreRecallAuthoritativeTick, CoreRecallConnectionAuthority,
+    CoreRecallConnectionLease, CoreRecallRuntimeError, CoreRecallRuntimeReport,
+    CoreRecallTransportAttach, CoreReliableWriter, IdentityClock, PostgresCaldusVictoryCoordinator,
+    PostgresCoreB3RewardCoordinator, ProductionExtractionBossExitAuthorityV1,
+    ProductionExtractionCaldusReservationV1, ProductionExtractionIntentActor,
+    ProductionExtractionPlanner, ProductionRecallClock, ProductionRecallDetachOutcome,
+    SecretRewardEpoch, TRANSPORT_REPLACED_CLOSE_CODE,
 };
 use crate::{
     core_extraction_runtime::CoreExtractionPreparedWriterHandoff,
@@ -257,6 +258,8 @@ pub enum CorePrivateLifeSessionError {
     MicrorealmAlreadyBound,
     #[error("Core private-life microrealm authority is not bound")]
     MicrorealmUnavailable,
+    #[error("Core private-life terminal owner is not configured")]
+    TerminalOwnerUnavailable,
     #[error("Core private-life microrealm binding generation overflowed")]
     MicrorealmBindingGenerationExhausted,
     #[error("Core private-life microrealm input is invalid")]
@@ -281,6 +284,35 @@ pub enum CorePrivateLifeSessionError {
     B3RewardRuntime(#[from] CorePrivateB3RewardRuntimeError),
     #[error("Core private-life automatic Caldus reward runtime failed: {0}")]
     CaldusRewardRuntime(#[from] CorePrivateCaldusRewardRuntimeError),
+    #[error("Core private-life terminal owner failed: {0}")]
+    TerminalOwner(#[from] CorePrivateTerminalOwnerError),
+}
+
+#[derive(Debug, Error)]
+pub enum CorePrivateTerminalOwnerError {
+    #[error("terminal owner could not start")]
+    StartFailed,
+    #[error("terminal owner stopped before orderly driver retirement")]
+    RuntimeFailed,
+}
+
+/// One process-owned consumer of the lossless private-route event stream. Implementations own
+/// their task and must not finish successfully until the driver has closed its sender.
+pub trait CorePrivateTerminalOwner: Send + std::fmt::Debug {
+    fn finish(
+        self: Box<Self>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), CorePrivateTerminalOwnerError>> + Send>>;
+}
+
+/// Production composition seam for the real trace/clock/terminal owner. No default implementation
+/// exists: a missing owner must fail before the simulation driver or authoritative tick starts.
+pub trait CorePrivateTerminalOwnerFactory: Send + Sync {
+    fn start(
+        &self,
+        authenticated: AuthenticatedAccount,
+        authority: CorePrivateDangerEntryAuthority,
+        receiver: CorePrivateTerminalFrameReceiver,
+    ) -> Result<Box<dyn CorePrivateTerminalOwner>, CorePrivateTerminalOwnerError>;
 }
 
 #[derive(Debug)]
@@ -306,6 +338,7 @@ struct SessionEntry {
 struct BoundMicrorealmDriver {
     lease: CorePrivateMicrorealmBindingLease,
     driver: CorePrivateMicrorealmDriver,
+    terminal_owner: Box<dyn CorePrivateTerminalOwner>,
     b3_rewards: Option<CorePrivateB3RewardRuntime>,
     caldus_rewards: Option<CorePrivateCaldusRewardRuntime>,
 }
@@ -368,6 +401,7 @@ pub struct CorePrivateLifeSessionDirectory<Clock, TickSource> {
     b3_rewards: Option<Arc<dyn CoreB3RewardAuthority>>,
     caldus_rewards: Option<CaldusRewardAuthorityBinding>,
     authoritative_ticks: Option<Arc<CorePrivateLifeTickDirectory>>,
+    terminal_owner_factory: Option<Arc<dyn CorePrivateTerminalOwnerFactory>>,
     state: Mutex<SessionState>,
 }
 
@@ -653,6 +687,7 @@ where
             b3_rewards: None,
             caldus_rewards: None,
             authoritative_ticks: None,
+            terminal_owner_factory: None,
             state: Mutex::new(SessionState {
                 accepting: true,
                 shutdown_started: false,
@@ -764,6 +799,18 @@ where
         ticks: Arc<CorePrivateLifeTickDirectory>,
     ) -> Self {
         self.authoritative_ticks = Some(ticks);
+        self
+    }
+
+    /// Installs the process-owned terminal consumer before any danger runtime can bind. This is
+    /// intentionally independent from transport generations so `LinkLost` and reconnect retain
+    /// the same trace, clocks, and terminal arbiter.
+    #[must_use]
+    pub fn with_terminal_owner_factory(
+        mut self,
+        factory: Arc<dyn CorePrivateTerminalOwnerFactory>,
+    ) -> Self {
+        self.terminal_owner_factory = Some(factory);
         self
     }
 
@@ -1244,13 +1291,29 @@ where
         let binding_lease =
             CorePrivateMicrorealmBindingLease::from_route(route_lease, binding_generation);
         let route_directory = runtime.route_directory();
-        let driver = CorePrivateMicrorealmDriver::spawn_without_terminal_owner(runtime);
+        let terminal_owner_factory = self
+            .terminal_owner_factory
+            .as_ref()
+            .ok_or(CorePrivateLifeSessionError::TerminalOwnerUnavailable)?;
+        let danger_entry_authority = runtime.danger_entry_authority().clone();
+        let terminal_feed =
+            CorePrivateTerminalFeedBinding::from_danger_entry(&danger_entry_authority);
+        let (terminal_sender, terminal_receiver) =
+            CorePrivateTerminalFrameReceiver::channel(terminal_feed);
+        let terminal_owner = terminal_owner_factory.start(
+            entry.authenticated,
+            danger_entry_authority,
+            terminal_receiver,
+        )?;
+        let driver =
+            CorePrivateMicrorealmDriver::spawn_with_terminal_feed(runtime, terminal_sender);
         let handle = driver.handle();
         if let Some(ticks) = &self.authoritative_ticks
             && let Err(error) = ticks.bind(binding_lease, handle.clone())
         {
             drop(state);
             let _ = driver.shutdown().await;
+            let _ = terminal_owner.finish().await;
             return Err(error.into());
         }
         let active = entry
@@ -1287,6 +1350,7 @@ where
         entry.microrealm = Some(BoundMicrorealmDriver {
             lease: binding_lease,
             driver,
+            terminal_owner,
             b3_rewards,
             caldus_rewards,
         });
@@ -1564,6 +1628,7 @@ where
             Ok(())
         };
         let driver_result = bound.driver.shutdown().await;
+        let terminal_owner_result = bound.terminal_owner.finish().await;
         let tick_result = self
             .authoritative_ticks
             .as_ref()
@@ -1572,6 +1637,7 @@ where
         b3_result?;
         caldus_result?;
         let report = driver_result?;
+        terminal_owner_result?;
         tick_result?;
         Ok(report)
     }
@@ -1988,11 +2054,12 @@ where
                 false
             };
             let driver_failed = bound.driver.shutdown().await.is_err();
+            let terminal_owner_failed = bound.terminal_owner.finish().await.is_err();
             let tick_failed = self
                 .authoritative_ticks
                 .as_ref()
                 .is_some_and(|ticks| ticks.unbind(bound.lease).is_err());
-            if b3_failed || caldus_failed || driver_failed || tick_failed {
+            if b3_failed || caldus_failed || driver_failed || terminal_owner_failed || tick_failed {
                 microrealm_shutdown_failures = microrealm_shutdown_failures.saturating_add(1);
             }
         }
@@ -2118,6 +2185,51 @@ mod tests {
     const ACCOUNT_ID: [u8; 16] = [71; 16];
     const CHARACTER_ID: [u8; 16] = [72; 16];
     const LINEAGE_ID: [u8; 16] = [73; 16];
+
+    #[derive(Debug)]
+    struct TestTerminalOwner {
+        task: tokio::task::JoinHandle<Result<(), CorePrivateTerminalOwnerError>>,
+    }
+
+    impl CorePrivateTerminalOwner for TestTerminalOwner {
+        fn finish(
+            self: Box<Self>,
+        ) -> Pin<Box<dyn Future<Output = Result<(), CorePrivateTerminalOwnerError>> + Send>>
+        {
+            Box::pin(async move {
+                self.task
+                    .await
+                    .map_err(|_| CorePrivateTerminalOwnerError::RuntimeFailed)?
+            })
+        }
+    }
+
+    #[derive(Debug)]
+    struct TestTerminalOwnerFactory;
+
+    impl CorePrivateTerminalOwnerFactory for TestTerminalOwnerFactory {
+        fn start(
+            &self,
+            authenticated: AuthenticatedAccount,
+            authority: CorePrivateDangerEntryAuthority,
+            mut receiver: CorePrivateTerminalFrameReceiver,
+        ) -> Result<Box<dyn CorePrivateTerminalOwner>, CorePrivateTerminalOwnerError> {
+            if authenticated.account_id.as_bytes() != *authority.terminal().account_id()
+                || receiver.binding() != authority.terminal()
+            {
+                return Err(CorePrivateTerminalOwnerError::StartFailed);
+            }
+            let task = tokio::spawn(async move {
+                while let Some(delivery) = receiver.receive().await {
+                    delivery
+                        .acknowledge_continue()
+                        .map_err(|_| CorePrivateTerminalOwnerError::RuntimeFailed)?;
+                }
+                Ok(())
+            });
+            Ok(Box::new(TestTerminalOwner { task }))
+        }
+    }
 
     #[derive(Debug, Clone, Copy)]
     struct FixedClock;
@@ -2534,6 +2646,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn missing_terminal_owner_fails_before_microrealm_driver_spawn() {
+        let ticks = Arc::new(TickSource(AtomicU64::new(100)));
+        let recall = Arc::new(CoreRecallActorDirectory::<FixedClock, _>::new(ticks));
+        let sessions = Arc::new(CorePrivateLifeSessionDirectory::new(recall));
+        let (routes, _route_lease, runtime) = live_microrealm().await;
+        let (server_endpoint, client_endpoint, client, server) = live_connection_pair().await;
+        let attached = sessions
+            .attach_transport(authenticated(), server, 5_000)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            sessions.bind_microrealm(attached.lease, runtime).await,
+            Err(CorePrivateLifeSessionError::TerminalOwnerUnavailable)
+        ));
+        assert_eq!(sessions.snapshot().await.microrealm_bound_count, 0);
+        assert_eq!(crate::active_core_microrealm_driver_tasks(), 0);
+
+        for connection in sessions.begin_shutdown().await {
+            connection.close(0_u32.into(), b"test shutdown");
+        }
+        assert!(sessions.finish_shutdown().await.unwrap().zero_residue);
+        routes.begin_shutdown();
+        assert!(routes.finish_shutdown().await.unwrap().zero_residue);
+        client.close(0_u32.into(), b"test complete");
+        server_endpoint.wait_idle().await;
+        client_endpoint.wait_idle().await;
+    }
+
+    #[tokio::test]
     async fn live_driver_tick_is_route_bound_and_gates_recall_until_first_commit() {
         let ticks = Arc::new(CorePrivateLifeTickDirectory::new());
         let recall = Arc::new(CoreRecallActorDirectory::<FixedClock, _>::new(Arc::clone(
@@ -2541,7 +2683,8 @@ mod tests {
         )));
         let sessions = Arc::new(
             CorePrivateLifeSessionDirectory::new(Arc::clone(&recall))
-                .with_authoritative_tick_directory(Arc::clone(&ticks)),
+                .with_authoritative_tick_directory(Arc::clone(&ticks))
+                .with_terminal_owner_factory(Arc::new(TestTerminalOwnerFactory)),
         );
         let (routes, route_lease, runtime) = live_microrealm().await;
         recall
@@ -2643,7 +2786,10 @@ mod tests {
     async fn live_microrealm_survives_handoff_and_link_lost_until_exact_unbind() {
         let ticks = Arc::new(TickSource(AtomicU64::new(100)));
         let recall = Arc::new(CoreRecallActorDirectory::<FixedClock, _>::new(ticks));
-        let sessions = Arc::new(CorePrivateLifeSessionDirectory::new(recall));
+        let sessions = Arc::new(
+            CorePrivateLifeSessionDirectory::new(recall)
+                .with_terminal_owner_factory(Arc::new(TestTerminalOwnerFactory)),
+        );
         let (routes, route_lease, runtime) = live_microrealm().await;
 
         let (first_server_endpoint, first_client_endpoint, first_client, first_server) =
@@ -2807,7 +2953,10 @@ mod tests {
     async fn exact_danger_lease_clears_registered_extraction_during_link_lost() {
         let ticks = Arc::new(TickSource(AtomicU64::new(100)));
         let recall = Arc::new(CoreRecallActorDirectory::<FixedClock, _>::new(ticks));
-        let sessions = Arc::new(CorePrivateLifeSessionDirectory::new(recall));
+        let sessions = Arc::new(
+            CorePrivateLifeSessionDirectory::new(recall)
+                .with_terminal_owner_factory(Arc::new(TestTerminalOwnerFactory)),
+        );
         let (routes, _route_lease, runtime) = live_microrealm().await;
         let (first_server_endpoint, first_client_endpoint, first_client, first_server) =
             live_connection_pair().await;
@@ -2902,7 +3051,8 @@ mod tests {
                 Arc::clone(&extraction),
                 UnusedExtractionPlanner,
                 ExtractionClock,
-            ),
+            )
+            .with_terminal_owner_factory(Arc::new(TestTerminalOwnerFactory)),
         );
         let (dummy_routes, _dummy_lease, runtime) = live_microrealm().await;
         let (first_server_endpoint, first_client_endpoint, first_client, first_server) =
@@ -3203,7 +3353,10 @@ mod tests {
     async fn bell_conversion_keeps_one_session_task_and_observer_across_reconnect() {
         let ticks = Arc::new(TickSource(AtomicU64::new(100)));
         let recall = Arc::new(CoreRecallActorDirectory::<FixedClock, _>::new(ticks));
-        let sessions = Arc::new(CorePrivateLifeSessionDirectory::new(recall));
+        let sessions = Arc::new(
+            CorePrivateLifeSessionDirectory::new(recall)
+                .with_terminal_owner_factory(Arc::new(TestTerminalOwnerFactory)),
+        );
         let (routes, route_lease, runtime) = live_microrealm().await;
         let runtime =
             crate::core_private_microrealm_runtime::core_bell_ready_runtime_test_fixture(runtime);
