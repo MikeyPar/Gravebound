@@ -40,6 +40,7 @@ use crate::{
 
 const WINDOW_TITLE: &str = "Gravebound - Core Private Life";
 const REALM_GATE_ID: &str = "station.realm_gate";
+const BELL_DUNGEON_PORTAL_ID: &str = "portal.dungeon.bell_sepulcher";
 const RUN_ENTITY_ID_STRIDE: u64 = 100_000;
 const PLAYER_ENTITY_ID_OFFSET: u64 = 10_000;
 const MAX_BUFFERED_PRIVATE_SNAPSHOT_CHUNKS: usize = 128;
@@ -413,6 +414,18 @@ impl CorePrivateLifeClient {
                         .route
                         .as_ref()
                         .is_some_and(CorePrivateRouteClientModel::can_accept_gameplay_input)
+            }
+            (
+                CharacterLocation::Danger { location_id, .. },
+                WorldTransferCommand::UsePortal { portal_id },
+            ) => {
+                location_id.as_str() == CorePrivateRouteSceneV1::CoreMicrorealm.location_id()
+                    && portal_id.as_str() == BELL_DUNGEON_PORTAL_ID
+                    && self.route.as_ref().is_some_and(|route| {
+                        route.route_state().is_some_and(|state| {
+                            state.readiness.bell_portal_available.is_available()
+                        })
+                    })
             }
             _ => false,
         };
@@ -996,17 +1009,30 @@ fn handle_interact_keyboard(
     snapshots: Res<CorePrivateSnapshotClient>,
     mut client: ResMut<CorePrivateLifeClient>,
 ) {
-    if !keyboard.just_pressed(KeyCode::KeyE)
-        || client.phase != CorePrivateLifePhase::PrivateRoute
-        || !client
-            .route
-            .as_ref()
-            .and_then(CorePrivateRouteClientModel::route_state)
-            .is_some_and(|route| {
-                route.scene == CorePrivateRouteSceneV1::BellSepulcher
-                    && route.readiness.room_exit_available.is_available()
-                    && !route.readiness.extraction_available.is_available()
-            })
+    if !keyboard.just_pressed(KeyCode::KeyE) || client.phase != CorePrivateLifePhase::PrivateRoute {
+        return;
+    }
+    let Some(route) = client
+        .route
+        .as_ref()
+        .and_then(CorePrivateRouteClientModel::route_state)
+    else {
+        return;
+    };
+    if route.readiness.bell_portal_available.is_available() {
+        queue_transfer(
+            WorldTransferCommand::UsePortal {
+                portal_id: WireText::new(BELL_DUNGEON_PORTAL_ID)
+                    .expect("canonical Bell portal ID fits"),
+            },
+            &bridge,
+            &mut client,
+        );
+        return;
+    }
+    if route.scene != CorePrivateRouteSceneV1::BellSepulcher
+        || !route.readiness.room_exit_available.is_available()
+        || route.readiness.extraction_available.is_available()
     {
         return;
     }

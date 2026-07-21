@@ -374,6 +374,25 @@ impl CorePrivateLifeProcess {
         }
     }
 
+    /// Installs one already committed Bell transfer into the same danger task that was frozen
+    /// before persistence began. The immutable process content is supplied here so transport code
+    /// cannot select a layout, encounter pack, route revision, or boss definition.
+    pub(crate) async fn commit_bell_handoff(
+        &self,
+        prepared: crate::CorePrivateLifePreparedBellHandoff,
+        transition: crate::CoreBellPortalTransition,
+    ) -> Result<crate::CorePrivateFixedDungeonDriverReady, CorePrivateLifeProcessError> {
+        let content = self.foundation.content();
+        Ok(prepared
+            .commit_into_fixed_dungeon(
+                transition,
+                route_revision(content.revision())?,
+                content.encounter_rooms().clone(),
+                Arc::new(content.caldus().clone()),
+            )
+            .await?)
+    }
+
     /// Refreshes durable Character Select/Hall/terminal state after an acknowledged identity or
     /// non-danger transition. A danger transition must use `enter_committed_microrealm` instead.
     pub(crate) async fn refresh_transport(

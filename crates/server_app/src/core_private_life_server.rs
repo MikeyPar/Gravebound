@@ -22,14 +22,18 @@ use crate::core_private_life_process::{
     CorePrivateLifeProcess, CorePrivateLifeProcessDisposition, CorePrivateLifeProcessError,
 };
 use crate::{
-    AuthenticatedAccount, AuthenticatedNamespace, CoreExtractionIntentAuthority,
-    CoreExtractionTerminalAuthority, CorePrivateHallActorLease, CorePrivateLifeTransportLease,
+    AuthenticatedAccount, AuthenticatedNamespace, CoreBellPortalBinding, CoreBellPortalTransition,
+    CoreExtractionIntentAuthority, CoreExtractionTerminalAuthority, CorePrivateHallActorLease,
+    CorePrivateLifePreparedBellHandoff, CorePrivateLifeTransportLease,
     CorePrivateMicrorealmBinding, CorePrivateMicrorealmBindingLease,
     CorePrivateMicrorealmDriverObserver, CorePrivateMicrorealmDriverState,
     CorePrivateRouteActorLease, CoreRecallIntentAuthority, CoreRecallTerminalAuthority,
     CoreReliableWriter, CoreReliableWriterError, CoreWorldFlowAuthority, HandshakePolicy,
     dispatch_core_reliable_message, send_gameplay_snapshots,
 };
+
+const BELL_DUNGEON_PORTAL_ID: &str = "portal.dungeon.bell_sepulcher";
+const BELL_DUNGEON_CONTENT_ID: &str = "dungeon.bell_sepulcher";
 
 #[derive(Debug)]
 enum ConnectionRoute {
@@ -332,6 +336,7 @@ async fn dispatch_reliable(
             }
         }
         WireMessage::WorldFlowFrame(frame) => {
+            let bell_handoff = prepare_bell_handoff(process, transport, route, &frame).await?;
             let transition = transition_kind(&frame);
             let result = match route {
                 ConnectionRoute::Hall { actor, .. } => {
@@ -347,6 +352,8 @@ async fn dispatch_reliable(
                         .await
                 }
             };
+            reconcile_bell_handoff(process, authenticated, route, &frame, &result, bell_handoff)
+                .await?;
             if accepted_transfer(&result) {
                 reconcile_transition(process, authenticated, transport, writer, route, transition)
                     .await?;
@@ -402,6 +409,135 @@ async fn dispatch_reliable(
         }
     }
     Ok(())
+}
+
+async fn prepare_bell_handoff(
+    process: &CorePrivateLifeProcess,
+    transport: CorePrivateLifeTransportLease,
+    route: &ConnectionRoute,
+    frame: &protocol::WorldFlowFrame,
+) -> Result<Option<CorePrivateLifePreparedBellHandoff>, CorePrivateLifeServerError> {
+    if !is_bell_transfer(frame) {
+        return Ok(None);
+    }
+    let Some(route_lease) = route.route_lease() else {
+        return Ok(None);
+    };
+    let state = process.route_snapshot(route_lease)?;
+    if !state.readiness.bell_portal_available.is_available() {
+        return Ok(None);
+    }
+    Ok(Some(
+        process.sessions().prepare_bell_handoff(transport).await?,
+    ))
+}
+
+async fn reconcile_bell_handoff(
+    process: &CorePrivateLifeProcess,
+    authenticated: AuthenticatedAccount,
+    route: &ConnectionRoute,
+    frame: &protocol::WorldFlowFrame,
+    result: &WorldFlowResult,
+    prepared: Option<CorePrivateLifePreparedBellHandoff>,
+) -> Result<(), CorePrivateLifeServerError> {
+    if !is_bell_transfer(frame) {
+        return Ok(());
+    }
+    if !accepted_transfer(result) {
+        if let Some(prepared) = prepared {
+            prepared.abort().await?;
+        }
+        return Ok(());
+    }
+    if let Some(prepared) = prepared {
+        let transition = bell_transition(authenticated, frame, result)
+            .ok_or(CorePrivateLifeServerError::ControlUnavailable)?;
+        process.commit_bell_handoff(prepared, transition).await?;
+        return Ok(());
+    }
+    if danger_runtime_has_fixed_dungeon(route) {
+        return Ok(());
+    }
+    Err(CorePrivateLifeServerError::ControlUnavailable)
+}
+
+fn is_bell_transfer(frame: &protocol::WorldFlowFrame) -> bool {
+    matches!(
+        &frame.request,
+        WorldFlowRequest::Transfer(protocol::WorldTransferMutation {
+            payload: protocol::WorldTransferPayload {
+                command: WorldTransferCommand::UsePortal { portal_id },
+                ..
+            },
+            ..
+        }) if portal_id.as_str() == BELL_DUNGEON_PORTAL_ID
+    )
+}
+
+fn bell_transition(
+    authenticated: AuthenticatedAccount,
+    frame: &protocol::WorldFlowFrame,
+    result: &WorldFlowResult,
+) -> Option<CoreBellPortalTransition> {
+    let WorldFlowRequest::Transfer(mutation) = &frame.request else {
+        return None;
+    };
+    let WorldFlowResult::Transfer {
+        accepted: true,
+        code: WorldTransferResultCode::Accepted,
+        snapshot:
+            Some(protocol::CharacterLocationSnapshot {
+                character_id,
+                character_version,
+                location:
+                    protocol::CharacterLocation::Danger {
+                        location_id,
+                        instance_lineage_id,
+                        entry_restore_point_id,
+                    },
+            }),
+        transfer_id: Some(transfer_id),
+        ..
+    } = result
+    else {
+        return None;
+    };
+    (*character_id == mutation.character_id
+        && location_id.as_str() == BELL_DUNGEON_CONTENT_ID
+        && *character_version == mutation.expected_character_version.checked_add(1)?)
+    .then(|| {
+        let binding = CoreBellPortalBinding {
+            account_id: authenticated.account_id.as_bytes(),
+            character_id: mutation.character_id,
+            mutation_id: mutation.mutation_id,
+            instance_lineage_id: *instance_lineage_id,
+            entry_restore_point_id: *entry_restore_point_id,
+            character_version: mutation.expected_character_version,
+            content_revision: mutation.payload.content_revision.clone(),
+        };
+        CoreBellPortalTransition {
+            binding,
+            transfer_id: *transfer_id,
+            destination_character_version: *character_version,
+        }
+    })
+}
+
+fn danger_runtime_has_fixed_dungeon(route: &ConnectionRoute) -> bool {
+    let ConnectionRoute::Danger(binding) = route else {
+        return false;
+    };
+    matches!(
+        binding.observer.latest(),
+        CorePrivateMicrorealmDriverState::FixedDungeonReady { .. }
+            | CorePrivateMicrorealmDriverState::FixedDungeonRunning { .. }
+            | CorePrivateMicrorealmDriverState::FixedDungeonRewardPending { .. }
+            | CorePrivateMicrorealmDriverState::FixedDungeonTerminalPending { .. }
+            | CorePrivateMicrorealmDriverState::CaldusRunning { .. }
+            | CorePrivateMicrorealmDriverState::CaldusRewardPending { .. }
+            | CorePrivateMicrorealmDriverState::CaldusTerminalPending { .. }
+            | CorePrivateMicrorealmDriverState::CaldusExitReady { .. }
+    )
 }
 
 async fn dispatch_private_action(
@@ -684,6 +820,69 @@ pub(crate) enum CorePrivateLifeServerError {
 mod tests {
     use super::*;
     use crate::core_private_gameplay_observation::core_private_gameplay_observation_test_fixture;
+
+    fn bell_frame() -> protocol::WorldFlowFrame {
+        let payload = protocol::WorldTransferPayload {
+            content_revision: protocol::WorldFlowContentRevisionV1 {
+                records_blake3: protocol::ManifestHash::new("1".repeat(64)).unwrap(),
+                assets_blake3: protocol::ManifestHash::new("2".repeat(64)).unwrap(),
+                localization_blake3: protocol::ManifestHash::new("3".repeat(64)).unwrap(),
+            },
+            command: WorldTransferCommand::UsePortal {
+                portal_id: WireText::new(BELL_DUNGEON_PORTAL_ID).unwrap(),
+            },
+        };
+        protocol::WorldFlowFrame {
+            sequence: 7,
+            request: WorldFlowRequest::Transfer(protocol::WorldTransferMutation {
+                mutation_id: [4; 16],
+                character_id: [5; 16],
+                expected_character_version: 9,
+                issued_at_unix_millis: 10,
+                payload_hash: payload.canonical_hash(),
+                payload,
+            }),
+        }
+    }
+
+    fn accepted_bell_result(character_version: u64) -> WorldFlowResult {
+        WorldFlowResult::Transfer {
+            request_sequence: 7,
+            mutation_id: [4; 16],
+            accepted: true,
+            code: WorldTransferResultCode::Accepted,
+            snapshot: Some(protocol::CharacterLocationSnapshot {
+                character_id: [5; 16],
+                character_version,
+                location: protocol::CharacterLocation::Danger {
+                    location_id: WireText::new(BELL_DUNGEON_CONTENT_ID).unwrap(),
+                    instance_lineage_id: [6; 16],
+                    entry_restore_point_id: [7; 16],
+                },
+            }),
+            transfer_id: Some([8; 16]),
+        }
+    }
+
+    #[test]
+    fn bell_transition_is_exactly_request_and_durable_result_bound() {
+        let authenticated = AuthenticatedAccount {
+            account_id: crate::AccountId::new([9; 16]).unwrap(),
+            namespace: AuthenticatedNamespace::WipeableTest,
+        };
+        let frame = bell_frame();
+        assert!(is_bell_transfer(&frame));
+        let transition = bell_transition(authenticated, &frame, &accepted_bell_result(10))
+            .expect("exact accepted result binds a transition");
+        assert_eq!(transition.binding.account_id, [9; 16]);
+        assert_eq!(transition.binding.mutation_id, [4; 16]);
+        assert_eq!(transition.binding.instance_lineage_id, [6; 16]);
+        assert_eq!(transition.binding.entry_restore_point_id, [7; 16]);
+        assert_eq!(transition.transfer_id, [8; 16]);
+        assert_eq!(transition.destination_character_version, 10);
+
+        assert!(bell_transition(authenticated, &frame, &accepted_bell_result(11)).is_none());
+    }
 
     #[test]
     fn snapshot_publisher_is_15_hz_generation_bound_and_terminal_complete() {
