@@ -1,5 +1,5 @@
 [package]
-name = "persistence"
+name = "telemetry"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,12 +8,8 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-blake3.workspace = true
-postcard.workspace = true
 serde.workspace = true
-sim_core = { path = "../sim_core" }
-sqlx.workspace = true
-telemetry = { path = "../telemetry" }
+serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

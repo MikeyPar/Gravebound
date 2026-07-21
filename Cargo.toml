@@ -10,6 +10,7 @@ members = [
     "crates/sim_content",
     "crates/sim_core",
     "crates/support_lookup",
+    "crates/telemetry",
     "crates/tools_content",
 ]
 resolver = "3"

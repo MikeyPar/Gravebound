@@ -4577,6 +4577,7 @@ dependencies = [
  "serde",
  "sim_core",
  "sqlx",
+ "telemetry",
  "thiserror 2.0.18",
  "tokio",
 ]
@@ -5868,6 +5869,16 @@ dependencies = [
  "grid",
  "serde",
  "slotmap",
+]
+
+[[package]]
+name = "telemetry"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]

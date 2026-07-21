@@ -58,6 +58,7 @@ mod reward;
 mod safe_inventory;
 mod successor;
 mod successor_repository;
+mod telemetry_outbox;
 mod world_flow;
 
 pub use active_danger_authority::StoredActiveDangerAuthorityV1;
@@ -304,6 +305,10 @@ pub use successor::{
     StoredSuccessorAppearanceV1, StoredSuccessorResultV1, StoredSuccessorStarterItemsV1,
     StoredSuccessorVersionsV1, SuccessorCreateRequestV1, SuccessorCreateTransactionV1,
     derive_successor_character_id_v1, derive_successor_receipt_id_v1,
+};
+pub use telemetry_outbox::{
+    M03TelemetryOutboxError, M03TelemetryProjectionContextV1, MAX_M03_TELEMETRY_POLL,
+    PostgresM03TelemetryOutboxAdapter, TelemetryPseudonymizationKeyV1,
 };
 pub use world_flow::{
     StoredDangerEntryRootV3, StoredSafeArrival, StoredWorldFlowCharacter,
