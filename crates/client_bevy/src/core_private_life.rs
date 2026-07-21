@@ -15,7 +15,12 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use bevy::{app::AppExit, camera::ScalingMode, prelude::*, window::WindowResolution};
+use bevy::{
+    app::AppExit,
+    camera::ScalingMode,
+    prelude::*,
+    window::{PrimaryWindow, WindowResolution},
+};
 use protocol::{
     AccountBootstrapFrame, AccountBootstrapRequest, AccountBootstrapResult, AccountSnapshot,
     AuthTicket, CORE_WORLD_FLOW_FEATURE_FLAG, CharacterLocation, CharacterLocationSnapshot,
@@ -982,6 +987,7 @@ struct InputSequencer {
     input_sequence: u32,
     primary_sequence: u32,
     primary_held: bool,
+    last_aim: (i16, i16),
 }
 
 impl Default for InputSequencer {
@@ -990,6 +996,7 @@ impl Default for InputSequencer {
             input_sequence: 1,
             primary_sequence: 0,
             primary_held: false,
+            last_aim: (1_000, 0),
         }
     }
 }
@@ -1120,6 +1127,7 @@ pub fn run_core_private_life(config: CorePrivateLifeConfig) -> Result<()> {
                 handle_recall_keyboard,
                 handle_bargain_keyboard,
                 handle_interact_keyboard,
+                send_reliable_combat_edges,
                 handle_buttons,
                 present_private_gameplay,
                 update_ui,
@@ -1854,7 +1862,7 @@ fn handle_interact_keyboard(
     mut bargain: ResMut<CorePrivateBargainState>,
     mut client: ResMut<CorePrivateLifeClient>,
 ) {
-    if !keyboard.just_pressed(KeyCode::KeyE) || client.phase != CorePrivateLifePhase::PrivateRoute {
+    if !keyboard.just_pressed(KeyCode::KeyF) || client.phase != CorePrivateLifePhase::PrivateRoute {
         return;
     }
     let Some(route) = client
@@ -2108,12 +2116,20 @@ fn unix_millis() -> Option<u64> {
         .and_then(|duration| u64::try_from(duration.as_millis()).ok())
 }
 
-#[allow(clippy::needless_pass_by_value)] // Bevy system parameters are wrapper values.
+#[allow(
+    clippy::needless_pass_by_value,
+    clippy::too_many_arguments,
+    reason = "the fixed input projector consumes independent Bevy resources without local authority"
+)]
 fn send_gameplay_input(
     keyboard: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
+    window: Single<&Window, With<PrimaryWindow>>,
+    camera: Single<(&Camera, &GlobalTransform), With<PrivateGameplayCamera>>,
     bridge: Res<CorePrivateLifeBridge>,
     client: Res<CorePrivateLifeClient>,
+    snapshots: Res<CorePrivateSnapshotClient>,
+    content: Res<CorePrivatePresentationContent>,
     bargain: Res<CorePrivateBargainState>,
     mut sequencer: ResMut<InputSequencer>,
 ) {
@@ -2138,14 +2154,29 @@ fn send_gameplay_input(
         sequencer.primary_sequence = next;
     }
     sequencer.primary_held = held_primary;
+    let aim = client
+        .route
+        .as_ref()
+        .and_then(CorePrivateRouteClientModel::route_state)
+        .and_then(|route| {
+            cursor_private_aim(
+                &window,
+                *camera,
+                &content.0,
+                route,
+                snapshots.latest.as_ref(),
+            )
+        })
+        .unwrap_or(sequencer.last_aim);
+    sequencer.last_aim = aim;
     let sequence = sequencer.input_sequence;
     bridge.0.replace_input(protocol::InputFrame {
         sequence,
         client_tick: u64::from(sequence),
         movement_x_milli: horizontal_milli,
         movement_y_milli: vertical_milli,
-        aim_x_milli: 0,
-        aim_y_milli: -1_000,
+        aim_x_milli: aim.0,
+        aim_y_milli: aim.1,
         held_primary,
         primary_sequence: sequencer.primary_sequence,
         ability_1_sequence: 0,
@@ -2154,6 +2185,90 @@ fn send_gameplay_input(
     if let Some(next) = sequence.checked_add(1) {
         sequencer.input_sequence = next;
     }
+}
+
+#[allow(clippy::needless_pass_by_value)] // Bevy system parameters are wrapper values.
+fn send_reliable_combat_edges(
+    mouse: Res<ButtonInput<MouseButton>>,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    bridge: Res<CorePrivateLifeBridge>,
+    snapshots: Res<CorePrivateSnapshotClient>,
+    bargain: Res<CorePrivateBargainState>,
+    mut client: ResMut<CorePrivateLifeClient>,
+) {
+    if bargain.captures_input()
+        || client.phase != CorePrivateLifePhase::PrivateRoute
+        || !client
+            .route
+            .as_ref()
+            .is_some_and(CorePrivateRouteClientModel::can_accept_gameplay_input)
+    {
+        return;
+    }
+    let Some(client_tick) = snapshots
+        .latest
+        .as_ref()
+        .map(|snapshot| snapshot.server_tick)
+    else {
+        return;
+    };
+    for action in [
+        mouse
+            .just_pressed(MouseButton::Right)
+            .then_some(protocol::ActionKind::Ability1Press),
+        keyboard
+            .just_pressed(KeyCode::Space)
+            .then_some(protocol::ActionKind::Ability2Press),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let Ok(sequence) = client.take_request_sequence() else {
+            client.phase = CorePrivateLifePhase::Error;
+            return;
+        };
+        let frame = protocol::ActionFrame {
+            sequence,
+            client_tick,
+            action,
+        };
+        if bridge
+            .0
+            .queue_reliable(WireMessage::ActionFrame(frame))
+            .is_err()
+        {
+            client.phase = CorePrivateLifePhase::Error;
+            return;
+        }
+    }
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+fn cursor_private_aim(
+    window: &Window,
+    (camera, camera_transform): (&Camera, &GlobalTransform),
+    content: &sim_content::CorePrivateLifeContent,
+    route: &protocol::CorePrivateRouteStateV1,
+    snapshot: Option<&CompleteSnapshot>,
+) -> Option<(i16, i16)> {
+    let cursor = window.cursor_position()?;
+    let cursor_world = camera.viewport_to_world_2d(camera_transform, cursor).ok()?;
+    let (width, height) = private_scene_dimensions(content, route)?;
+    let player = snapshot?
+        .entities
+        .iter()
+        .find(|entity| entity.kind == protocol::EntityKind::Player)?;
+    let player_world = private_snapshot_position(player, width, height);
+    let delta_x = cursor_world.x - player_world.x;
+    let delta_y = player_world.y - cursor_world.y;
+    let length = delta_x.hypot(delta_y);
+    if !length.is_finite() || length <= f32::EPSILON {
+        return None;
+    }
+    Some((
+        (delta_x / length * 1_000.0).round() as i16,
+        (delta_y / length * 1_000.0).round() as i16,
+    ))
 }
 
 fn normalized_input(x: i8, y: i8) -> (i16, i16) {
