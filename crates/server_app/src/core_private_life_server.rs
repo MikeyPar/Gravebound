@@ -315,17 +315,7 @@ async fn dispatch_reliable(
 ) -> Result<(), CorePrivateLifeServerError> {
     match message {
         WireMessage::ActionFrame(frame) => {
-            let code = if matches!(route, ConnectionRoute::Danger(_))
-                && process
-                    .sessions()
-                    .submit_microrealm_action(transport, &frame)
-                    .await
-                    .is_ok()
-            {
-                ActionResultCode::Accepted
-            } else {
-                ActionResultCode::InvalidState
-            };
+            let code = dispatch_private_action(process, transport, route, &frame).await;
             writer
                 .send_response(
                     send,
@@ -336,6 +326,10 @@ async fn dispatch_reliable(
                     },
                 )
                 .await?;
+            if code == ActionResultCode::Accepted && frame.action == protocol::ActionKind::Interact
+            {
+                publish_route(process, writer, route, 0).await?;
+            }
         }
         WireMessage::WorldFlowFrame(frame) => {
             let transition = transition_kind(&frame);
@@ -408,6 +402,35 @@ async fn dispatch_reliable(
         }
     }
     Ok(())
+}
+
+async fn dispatch_private_action(
+    process: &CorePrivateLifeProcess,
+    transport: CorePrivateLifeTransportLease,
+    route: &ConnectionRoute,
+    frame: &protocol::ActionFrame,
+) -> ActionResultCode {
+    if !matches!(route, ConnectionRoute::Danger(_)) {
+        return ActionResultCode::InvalidState;
+    }
+    let accepted = match frame.action {
+        protocol::ActionKind::Interact => process
+            .sessions()
+            .advance_fixed_dungeon(transport)
+            .await
+            .is_ok(),
+        protocol::ActionKind::Ability1Press | protocol::ActionKind::Ability2Press => process
+            .sessions()
+            .submit_microrealm_action(transport, frame)
+            .await
+            .is_ok(),
+        protocol::ActionKind::RecallStart | protocol::ActionKind::RecallCancel => false,
+    };
+    if accepted {
+        ActionResultCode::Accepted
+    } else {
+        ActionResultCode::InvalidState
+    }
 }
 
 async fn dispatch_extraction(

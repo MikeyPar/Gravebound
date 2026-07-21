@@ -808,6 +808,7 @@ pub fn run_core_private_life(config: CorePrivateLifeConfig) -> Result<()> {
                 request_location,
                 handle_keyboard,
                 handle_recall_keyboard,
+                handle_interact_keyboard,
                 handle_buttons,
                 present_private_gameplay,
                 update_ui,
@@ -983,6 +984,52 @@ fn handle_recall_keyboard(
             .0
             .queue_reliable(WireMessage::RecallFrame(frame))
             .is_err()
+    {
+        client.phase = CorePrivateLifePhase::Error;
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)] // Bevy system parameters are wrapper values.
+fn handle_interact_keyboard(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    bridge: Res<CorePrivateLifeBridge>,
+    snapshots: Res<CorePrivateSnapshotClient>,
+    mut client: ResMut<CorePrivateLifeClient>,
+) {
+    if !keyboard.just_pressed(KeyCode::KeyE)
+        || client.phase != CorePrivateLifePhase::PrivateRoute
+        || !client
+            .route
+            .as_ref()
+            .and_then(CorePrivateRouteClientModel::route_state)
+            .is_some_and(|route| {
+                route.scene == CorePrivateRouteSceneV1::BellSepulcher
+                    && route.readiness.room_exit_available.is_available()
+                    && !route.readiness.extraction_available.is_available()
+            })
+    {
+        return;
+    }
+    let Some(client_tick) = snapshots
+        .latest
+        .as_ref()
+        .map(|snapshot| snapshot.server_tick)
+    else {
+        return;
+    };
+    let Ok(sequence) = client.take_request_sequence() else {
+        client.phase = CorePrivateLifePhase::Error;
+        return;
+    };
+    let frame = protocol::ActionFrame {
+        sequence,
+        client_tick,
+        action: protocol::ActionKind::Interact,
+    };
+    if bridge
+        .0
+        .queue_reliable(WireMessage::ActionFrame(frame))
+        .is_err()
     {
         client.phase = CorePrivateLifePhase::Error;
     }
