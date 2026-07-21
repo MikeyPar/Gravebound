@@ -422,6 +422,36 @@ impl CorePrivateLifeProcess {
         }
     }
 
+    /// Installs Hall only after the retained stored extraction result reached this transport.
+    /// Extraction replay authority is consumed after the exact Hall snapshot is live, then normal
+    /// bootstrap recreates the read-only Hall route actor from durable state.
+    pub(crate) async fn install_delivered_extraction_hall(
+        &self,
+        authenticated: crate::AuthenticatedAccount,
+        transport: CorePrivateLifeTransportLease,
+        writer: &Arc<CoreReliableWriter>,
+    ) -> Result<Option<CorePrivateLifeProcessDisposition>, CorePrivateLifeProcessError> {
+        let Some(projection) = self.sessions.delivered_extraction_hall(transport).await? else {
+            return Ok(None);
+        };
+        let actor = self.hall.install(authenticated, projection.snapshot())?;
+        if let Err(error) = self.hall.attach_transport(authenticated, actor, transport) {
+            let _ = self.hall.retire(actor);
+            return Err(error.into());
+        }
+        if let Err(error) = self
+            .sessions
+            .acknowledge_extraction_hall_installed(transport, projection)
+            .await
+        {
+            let _ = self.hall.retire(actor);
+            return Err(error.into());
+        }
+        self.refresh_transport(authenticated, transport, writer)
+            .await
+            .map(Some)
+    }
+
     pub(crate) async fn detach_transport(
         &self,
         transport: CorePrivateLifeTransportLease,

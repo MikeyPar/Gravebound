@@ -449,6 +449,10 @@ trait PrivateLifeExtractionRuntime: Send + Sync {
         &self,
         projection: CoreExtractionHallProjection,
     ) -> RuntimeFuture<'_, Result<(), CoreExtractionRuntimeError>>;
+    fn prepare_delivered_hall_projection(
+        &self,
+        lease: CoreExtractionConnectionLease,
+    ) -> RuntimeFuture<'_, Result<CoreExtractionHallProjection, CoreExtractionRuntimeError>>;
     fn begin_shutdown(&self) -> RuntimeFuture<'_, Vec<quinn::Connection>>;
     fn finish_shutdown(
         &self,
@@ -683,6 +687,15 @@ where
     ) -> RuntimeFuture<'_, Result<(), CoreExtractionRuntimeError>> {
         Box::pin(async move {
             CoreExtractionActorDirectory::acknowledge_hall_installed(self, projection).await
+        })
+    }
+
+    fn prepare_delivered_hall_projection(
+        &self,
+        lease: CoreExtractionConnectionLease,
+    ) -> RuntimeFuture<'_, Result<CoreExtractionHallProjection, CoreExtractionRuntimeError>> {
+        Box::pin(async move {
+            CoreExtractionActorDirectory::prepare_delivered_hall_projection(self, lease).await
         })
     }
 
@@ -1889,6 +1902,38 @@ where
             microrealm.acknowledge_terminal_complete();
         }
         Ok(())
+    }
+
+    /// Returns Hall installation material only after this transport's shared reliable writer has
+    /// successfully delivered the retained stored extraction result.
+    pub async fn delivered_extraction_hall(
+        &self,
+        lease: CorePrivateLifeTransportLease,
+    ) -> Result<Option<CoreExtractionHallProjection>, CorePrivateLifeSessionError> {
+        let extraction_lease = {
+            let state = self.state.lock().await;
+            let Some(entry) = state.sessions.get(&lease.account_id) else {
+                return Ok(None);
+            };
+            if entry.active.as_ref().map(|active| active.lease) != Some(lease) {
+                return Err(CorePrivateLifeSessionError::StaleTransport);
+            }
+            let Some(extraction_lease) = entry.extraction_lease else {
+                return Ok(None);
+            };
+            extraction_lease
+        };
+        let Some(extraction) = &self.extraction else {
+            return Ok(None);
+        };
+        match extraction
+            .prepare_delivered_hall_projection(extraction_lease)
+            .await
+        {
+            Ok(projection) => Ok(Some(projection)),
+            Err(CoreExtractionRuntimeError::CommittedResultUndelivered) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// Clears extraction's dynamic transport binding after another terminal producer wins. The

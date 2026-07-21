@@ -1187,6 +1187,40 @@ where
         })
     }
 
+    /// Server-internal completion probe for the exact transport generation whose reliable writer
+    /// already delivered the stored result. Unlike the public correlation seam, this reads the
+    /// retained terminal identity directly and never accepts client-authored IDs.
+    pub(crate) async fn prepare_delivered_hall_projection(
+        &self,
+        lease: CoreExtractionConnectionLease,
+    ) -> Result<CoreExtractionHallProjection, CoreExtractionRuntimeError> {
+        let state = self.state.lock().await;
+        let account_id = lease.actor.account_id;
+        let committed = state
+            .committed
+            .get(&account_id)
+            .ok_or(CoreExtractionRuntimeError::CommittedResultUndelivered)?;
+        let active = state
+            .transports
+            .get(&account_id)
+            .ok_or(CoreExtractionRuntimeError::CommittedResultUndelivered)?;
+        if active.lease != lease
+            || state.delivery.get(&account_id)
+                != Some(&(
+                    lease.transport_generation,
+                    ExtractionDeliveryState::Succeeded,
+                ))
+        {
+            return Err(CoreExtractionRuntimeError::CommittedResultUndelivered);
+        }
+        Ok(CoreExtractionHallProjection {
+            lease,
+            terminal_id: committed.stored.terminal_id,
+            result_hash: committed.stored.result_hash,
+            hall: committed.hall.clone(),
+        })
+    }
+
     /// Consumes the exact projection only after Hall installation succeeds. Replay authority and
     /// the extraction binding are removed atomically; the shared session writer is not retired.
     pub async fn acknowledge_hall_installed(

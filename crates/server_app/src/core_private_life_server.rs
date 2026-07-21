@@ -6,7 +6,11 @@
 //! `Gravebound_Development_Roadmap_v1.md` (`GB-M03-03`, `GB-M03-08`, and the M03
 //! exit gate). Durable transition reconciliation always precedes response publication.
 
-use std::{future::pending, sync::Arc, time::SystemTime};
+use std::{
+    future::pending,
+    sync::Arc,
+    time::{Duration, SystemTime},
+};
 
 use protocol::{
     ActionResultCode, HandshakeResponse, RELIABLE_FRAME_LIMIT, ReliableEvent, WireMessage,
@@ -205,8 +209,20 @@ async fn run_connection_loop(
     driver: &mut Option<DriverObservation>,
     snapshot_publisher: &mut SnapshotPublisher,
 ) -> Result<(), CorePrivateLifeServerError> {
+    let mut terminal_refresh = tokio::time::interval(Duration::from_millis(50));
+    terminal_refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
+            _ = terminal_refresh.tick(), if matches!(route, ConnectionRoute::Danger(_)) => {
+                if let Some(disposition) = process
+                    .install_delivered_extraction_hall(authenticated, transport, writer)
+                    .await?
+                {
+                    *route = ConnectionRoute::from_disposition(disposition);
+                    sync_driver_observation(route, driver);
+                    publish_route(process, writer, route, 0).await?;
+                }
+            }
             observation = next_driver_observation(driver) => {
                 let observation = observation?;
                 if observation_allows_route_publication(&observation) {
