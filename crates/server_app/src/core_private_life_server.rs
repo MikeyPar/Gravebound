@@ -410,7 +410,11 @@ async fn dispatch_reliable(
                 0,
             )
             .await?;
-            if refresh_after && matches!(route, ConnectionRoute::Bootstrap) {
+            let stored_successor = is_stored_successor(&dispatch.event);
+            if stored_successor {
+                reconcile_stored_successor(process, authenticated, transport, writer, route)
+                    .await?;
+            } else if refresh_after && matches!(route, ConnectionRoute::Bootstrap) {
                 *route = ConnectionRoute::from_disposition(
                     process
                         .refresh_transport(authenticated, transport, writer)
@@ -422,6 +426,42 @@ async fn dispatch_reliable(
                 .await?;
             publish_route(process, writer, route, 0).await?;
         }
+    }
+    Ok(())
+}
+
+fn is_stored_successor(event: &ReliableEvent) -> bool {
+    matches!(
+        event,
+        ReliableEvent::SuccessorCreateResult(result)
+            if matches!(
+                result.as_ref(),
+                protocol::SuccessorCreateResultV1::Stored { .. }
+            )
+    )
+}
+
+/// Retires the exact terminal danger task after successor persistence succeeds, then rebuilds the
+/// continuing transport from durable authority before the stored response can expose a Play
+/// action. A dropped response is harmless: retry returns the same stored successor and this
+/// reconciliation is already complete.
+async fn reconcile_stored_successor(
+    process: &CorePrivateLifeProcess,
+    authenticated: AuthenticatedAccount,
+    transport: CorePrivateLifeTransportLease,
+    writer: &Arc<CoreReliableWriter>,
+    route: &mut ConnectionRoute,
+) -> Result<(), CorePrivateLifeServerError> {
+    if let ConnectionRoute::Danger(binding) = route {
+        process.sessions().unbind_microrealm(binding.lease).await?;
+        *route = ConnectionRoute::Bootstrap;
+    }
+    if matches!(route, ConnectionRoute::Bootstrap) {
+        *route = ConnectionRoute::from_disposition(
+            process
+                .refresh_transport(authenticated, transport, writer)
+                .await?,
+        );
     }
     Ok(())
 }
