@@ -18,7 +18,7 @@ use std::{
     time::Duration,
 };
 
-use sim_core::{AimDirection, MovementAction, Tick};
+use sim_core::{AimDirection, DeathTraceNetworkState, DeathTraceRecallState, MovementAction, Tick};
 use thiserror::Error;
 use tokio::{
     sync::{mpsc, oneshot, watch},
@@ -37,7 +37,7 @@ use crate::{
     CorePrivateMicrorealmRuntimeError, CorePrivateMicrorealmStep, CorePrivatePlayerDamageFactV1,
     CorePrivateTerminalFeedError, CorePrivateTerminalFrameDisposition,
     CorePrivateTerminalFrameSender, CorePrivateTerminalRouteControlAuthorityV1,
-    CorePrivateTerminalSceneV1,
+    CorePrivateTerminalSceneV1, CorePrivateTerminalTickContextV1,
 };
 
 const NANOS_PER_SECOND: u64 = 1_000_000_000;
@@ -91,6 +91,8 @@ struct RetainedFrameInput {
     reward_session_active: bool,
     reward_trust_valid: bool,
     reward_activity_sequence: u64,
+    network_state: DeathTraceNetworkState,
+    recall_state: DeathTraceRecallState,
 }
 
 impl RetainedFrameInput {
@@ -119,6 +121,8 @@ impl Default for RetainedFrameInput {
             reward_session_active: true,
             reward_trust_valid: true,
             reward_activity_sequence: 1,
+            network_state: DeathTraceNetworkState::Connected,
+            recall_state: DeathTraceRecallState::Inactive,
         }
     }
 }
@@ -182,6 +186,18 @@ impl SharedIngress {
 
     fn publish_locked(&self, reducer: &IngressReducer) {
         self.retained_tx.send_replace(reducer.retained);
+    }
+
+    fn acknowledge_terminal_context(&self, context: &CorePrivateTerminalTickContextV1) {
+        if context.network_state != DeathTraceNetworkState::Reattached {
+            return;
+        }
+        if let Ok(mut reducer) = self.reducer.lock()
+            && reducer.retained.network_state == DeathTraceNetworkState::Reattached
+        {
+            reducer.retained.network_state = DeathTraceNetworkState::Connected;
+            self.publish_locked(&reducer);
+        }
     }
 }
 
@@ -412,6 +428,7 @@ impl CorePrivateMicrorealmDriverHandle {
         reducer.retained.continuous.primary_held = false;
         reducer.retained.reward_session_active = false;
         reducer.retained.reward_trust_valid = false;
+        reducer.retained.network_state = DeathTraceNetworkState::LinkLost;
         self.ingress.publish_locked(&reducer);
         self.ingress
             .metrics
@@ -434,6 +451,7 @@ impl CorePrivateMicrorealmDriverHandle {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         reducer.retained.reward_session_active = true;
         reducer.retained.reward_trust_valid = true;
+        reducer.retained.network_state = DeathTraceNetworkState::Reattached;
         reducer.retained.reward_activity_sequence =
             reducer.retained.reward_activity_sequence.saturating_add(1);
         self.ingress.publish_locked(&reducer);
@@ -1089,9 +1107,11 @@ where
                         route: &step.route,
                         tick: step.tick,
                         player_position: step.player_position,
+                        context: terminal_tick_context(retained),
                         player_died: step.player_died,
                         facts: &step.player_damage,
                     },
+                    &ingress,
                     &mut shutdown_rx,
                 )
                 .await;
@@ -1703,9 +1723,11 @@ async fn run_fixed_dungeon(
                                 route: &frame.route,
                                 tick: frame.tick,
                                 player_position: frame.player_position,
+                                context: terminal_tick_context(retained),
                                 player_died: frame.player_died,
                                 facts: &frame.player_damage,
                             },
+                            ingress,
                             shutdown_rx,
                         )
                         .await;
@@ -1952,9 +1974,11 @@ async fn run_caldus(
                                 route: &frame.route,
                                 tick: frame.tick,
                                 player_position: frame.player_position,
+                                context: terminal_tick_context(retained),
                                 player_died: frame.player_died,
                                 facts: &frame.player_damage,
                             },
+                            ingress,
                             shutdown_rx,
                         )
                         .await;
@@ -2247,6 +2271,7 @@ struct CorePrivateTerminalFrameView<'a> {
     route: &'a protocol::CorePrivateRouteStateV1,
     tick: Tick,
     player_position: sim_core::TilePoint,
+    context: CorePrivateTerminalTickContextV1,
     player_died: bool,
     facts: &'a [CorePrivatePlayerDamageFactV1],
 }
@@ -2254,24 +2279,39 @@ struct CorePrivateTerminalFrameView<'a> {
 async fn acknowledge_terminal_frame(
     feed: &mut CorePrivateTerminalFrameSender,
     frame: CorePrivateTerminalFrameView<'_>,
+    ingress: &SharedIngress,
     shutdown_rx: &mut watch::Receiver<bool>,
 ) -> Result<CorePrivateTerminalFrameDisposition, CorePrivateTerminalFeedError> {
-    let delivery = feed.deliver(
+    let context = frame.context.clone();
+    let delivery = feed.deliver_with_context(
         frame.scene,
         frame.route.clone(),
         frame.tick,
         frame.player_position,
+        frame.context,
         frame.facts.to_vec(),
         frame.player_died,
     );
     tokio::pin!(delivery);
     tokio::select! {
         biased;
-        result = &mut delivery => result,
+        result = &mut delivery => {
+            let disposition = result?;
+            ingress.acknowledge_terminal_context(&context);
+            Ok(disposition)
+        },
         changed = shutdown_rx.changed() => {
             let _ = changed;
             Err(CorePrivateTerminalFeedError::ShutdownWithUnresolvedFrame)
         }
+    }
+}
+
+fn terminal_tick_context(retained: RetainedFrameInput) -> CorePrivateTerminalTickContextV1 {
+    CorePrivateTerminalTickContextV1 {
+        network_state: retained.network_state,
+        recall_state: retained.recall_state,
+        statuses: Arc::from([]),
     }
 }
 
@@ -3232,6 +3272,46 @@ mod tests {
         assert_eq!(handle.authoritative_tick().unwrap().get(), 1);
         let report = driver.shutdown().await.expect("shutdown");
         assert_eq!(report.committed_frames, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn terminal_context_records_link_loss_and_one_committed_reattach_frame() {
+        let received = Arc::new(StdMutex::new(Vec::new()));
+        let (terminal_sender, mut terminal_receiver) = terminal_frame_channel();
+        let driver =
+            spawn_driver_with_terminal_feed(ScriptedRuntime::ordinary(received), terminal_sender);
+        let handle = driver.handle();
+        let mut observer = handle.observe();
+        tokio::task::yield_now().await;
+
+        for expected in [
+            DeathTraceNetworkState::Connected,
+            DeathTraceNetworkState::LinkLost,
+            DeathTraceNetworkState::Reattached,
+            DeathTraceNetworkState::Connected,
+        ] {
+            match expected {
+                DeathTraceNetworkState::LinkLost => handle
+                    .neutralize_for_link_lost()
+                    .expect("LinkLost transition"),
+                DeathTraceNetworkState::Reattached => handle.mark_reward_session_active(),
+                _ => {}
+            }
+            tokio::time::advance(DRIVER_TICK_DURATION).await;
+            let delivery = terminal_receiver.receive().await.expect("terminal frame");
+            let frame = delivery.frame().expect("frame delivery");
+            assert_eq!(frame.context.network_state, expected);
+            assert_eq!(frame.context.recall_state, DeathTraceRecallState::Inactive);
+            assert!(frame.context.statuses.is_empty());
+            delivery
+                .acknowledge_continue()
+                .expect("terminal acknowledgement");
+            observer.changed().await.expect("published frame");
+        }
+
+        let report = driver.shutdown().await.expect("shutdown");
+        assert_eq!(report.committed_frames, 4);
+        assert_eq!(report.link_lost_neutralizations, 1);
     }
 
     #[tokio::test(start_paused = true)]

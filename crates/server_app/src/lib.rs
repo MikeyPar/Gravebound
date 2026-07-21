@@ -198,6 +198,7 @@ pub use core_private_terminal_feed::{
     CorePrivateTerminalFrameSender, CorePrivateTerminalFrameV1,
     CorePrivateTerminalRouteControlAuthorityV1, CorePrivateTerminalRouteControlKindV1,
     CorePrivateTerminalRouteControlV1, CorePrivateTerminalSceneV1,
+    CorePrivateTerminalTickContextV1,
 };
 pub use core_private_world_flow::{
     CoreBellPortalAbortReason, CoreBellPortalAuthority, CoreBellPortalBinding,

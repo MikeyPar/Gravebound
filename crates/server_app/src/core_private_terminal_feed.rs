@@ -16,7 +16,10 @@ use protocol::{
     CorePrivateRouteContentRevisionV1, CorePrivateRoutePhaseV1, CorePrivateRouteRoomV1,
     CorePrivateRouteSceneV1, CorePrivateRouteStateV1,
 };
-use sim_core::{Tick, TilePoint};
+use sim_core::{
+    DeathTraceNetworkState, DeathTraceRecallState, DeathTraceStatus, MAX_DEATH_TRACE_STATUS_TICKS,
+    MAX_DEATH_TRACE_STATUSES, Tick, TilePoint,
+};
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 
@@ -43,8 +46,31 @@ pub struct CorePrivateTerminalFrameV1 {
     pub tick: Tick,
     pub route: CorePrivateRouteStateV1,
     pub player_position: TilePoint,
+    pub context: CorePrivateTerminalTickContextV1,
     pub damage: Arc<[CorePrivatePlayerDamageFactV1]>,
     pub player_died: bool,
+}
+
+/// Terminal context sampled at the same pre-simulation boundary as retained player input.
+///
+/// Core currently has no authoritative player-status system. The status collection therefore
+/// remains empty in production until that authority exists, while the bounded field preserves the
+/// exact append-only death-trace contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CorePrivateTerminalTickContextV1 {
+    pub network_state: DeathTraceNetworkState,
+    pub recall_state: DeathTraceRecallState,
+    pub statuses: Arc<[DeathTraceStatus]>,
+}
+
+impl Default for CorePrivateTerminalTickContextV1 {
+    fn default() -> Self {
+        Self {
+            network_state: DeathTraceNetworkState::Connected,
+            recall_state: DeathTraceRecallState::Inactive,
+            statuses: Arc::from([]),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,7 +152,7 @@ pub struct CorePrivateTerminalRouteControlV1 {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum CorePrivateTerminalDeliveryV1 {
-    Frame(CorePrivateTerminalFrameV1),
+    Frame(Box<CorePrivateTerminalFrameV1>),
     RouteControl(Box<CorePrivateTerminalRouteControlV1>),
 }
 
@@ -245,6 +271,7 @@ impl CorePrivateTerminalFrameSender {
         }
     }
 
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub async fn deliver(
         &mut self,
@@ -252,6 +279,29 @@ impl CorePrivateTerminalFrameSender {
         route: CorePrivateRouteStateV1,
         tick: Tick,
         player_position: TilePoint,
+        damage: Vec<CorePrivatePlayerDamageFactV1>,
+        player_died: bool,
+    ) -> Result<CorePrivateTerminalFrameDisposition, CorePrivateTerminalFeedError> {
+        self.deliver_with_context(
+            scene,
+            route,
+            tick,
+            player_position,
+            CorePrivateTerminalTickContextV1::default(),
+            damage,
+            player_died,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn deliver_with_context(
+        &mut self,
+        scene: CorePrivateTerminalSceneV1,
+        route: CorePrivateRouteStateV1,
+        tick: Tick,
+        player_position: TilePoint,
+        context: CorePrivateTerminalTickContextV1,
         damage: Vec<CorePrivatePlayerDamageFactV1>,
         player_died: bool,
     ) -> Result<CorePrivateTerminalFrameDisposition, CorePrivateTerminalFeedError> {
@@ -267,6 +317,7 @@ impl CorePrivateTerminalFrameSender {
             scene,
             &route,
             tick,
+            &context,
             &damage,
             player_died,
             &self.cursor,
@@ -278,10 +329,11 @@ impl CorePrivateTerminalFrameSender {
             tick,
             route,
             player_position,
+            context,
             damage: damage.into(),
             player_died,
         };
-        self.deliver_validated(CorePrivateTerminalDeliveryV1::Frame(frame))
+        self.deliver_validated(CorePrivateTerminalDeliveryV1::Frame(Box::new(frame)))
             .await
     }
 
@@ -535,16 +587,22 @@ fn validate_bound_route(
     Ok(())
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "all values form one indivisible frame authority validated before allocation or handoff"
+)]
 fn validate_frame(
     binding: &CorePrivateTerminalFeedBinding,
     scene: CorePrivateTerminalSceneV1,
     route: &CorePrivateRouteStateV1,
     tick: Tick,
+    context: &CorePrivateTerminalTickContextV1,
     damage: &[CorePrivatePlayerDamageFactV1],
     player_died: bool,
     cursor: &CorePrivateTerminalFeedCursor,
 ) -> Result<(), CorePrivateTerminalFeedError> {
     validate_bound_route(binding, route)?;
+    validate_tick_context(context)?;
     if tick.0 == 0 || tick.0 != cursor.tick.0.saturating_add(1) {
         return Err(CorePrivateTerminalFeedError::NonSequentialTick);
     }
@@ -578,6 +636,37 @@ fn validate_frame(
         return Err(CorePrivateTerminalFeedError::LethalityMismatch);
     }
     Ok(())
+}
+
+fn validate_tick_context(
+    context: &CorePrivateTerminalTickContextV1,
+) -> Result<(), CorePrivateTerminalFeedError> {
+    if context.statuses.len() > MAX_DEATH_TRACE_STATUSES {
+        return Err(CorePrivateTerminalFeedError::CapacityExceeded);
+    }
+    for (index, status) in context.statuses.iter().enumerate() {
+        if !is_stable_trace_id(&status.status_id)
+            || status.remaining_ticks > MAX_DEATH_TRACE_STATUS_TICKS
+            || !(1..=255).contains(&status.stack_count)
+            || (index > 0 && context.statuses[index - 1].status_id >= status.status_id)
+        {
+            return Err(CorePrivateTerminalFeedError::InvalidTickContext);
+        }
+    }
+    Ok(())
+}
+
+fn is_stable_trace_id(value: &str) -> bool {
+    (3..=96).contains(&value.len())
+        && value.split('.').all(|segment| {
+            !segment.is_empty()
+                && segment.bytes().all(|byte| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || byte == b'_'
+                        || byte == b'-'
+                })
+        })
 }
 
 fn validate_scene(
@@ -774,6 +863,8 @@ pub enum CorePrivateTerminalFeedError {
     DuplicateRouteControl,
     #[error("private terminal-frame damage is incoherent")]
     IncoherentDamage,
+    #[error("private terminal-frame tick context is invalid")]
+    InvalidTickContext,
     #[error("private terminal-frame lethality is incoherent")]
     LethalityMismatch,
     #[error("private terminal-frame capacity was exceeded")]
