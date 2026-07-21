@@ -958,7 +958,6 @@ pub async fn prepare_death_for_with_custody(
             bargain_ids: vec![],
             memorial_presentation_key: "memorial.presentation.core_default".into(),
         },
-        entity_identities: identities,
         terminal_trace: terminal_trace.as_ref().clone(),
         echo: build_echo_projection(scenario, server_computed_echo_power_band),
     };
