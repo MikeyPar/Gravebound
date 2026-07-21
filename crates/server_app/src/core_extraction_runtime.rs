@@ -10,6 +10,7 @@
 
 use std::{collections::BTreeMap, future::Future, num::NonZeroU64, sync::Arc};
 
+use persistence::PersistenceError;
 use protocol::{
     ExtractionCommitFrameV1, ExtractionCommitResultV1, ReliableEvent,
     StoredExtractionTerminalResultV1, TERMINAL_INVENTORY_SCHEMA_VERSION,
@@ -242,6 +243,14 @@ pub enum CoreExtractionRuntimeError {
     RouteRetirement(#[from] CorePrivateRouteRuntimeError),
 }
 
+#[derive(Debug, Error)]
+pub(crate) enum CoreExtractionTerminalSourceError {
+    #[error("Core extraction terminal source failed")]
+    Runtime(#[from] CoreExtractionRuntimeError),
+    #[error("Core extraction terminal planning failed")]
+    Persistence(#[from] PersistenceError),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CommittedExtractionPublication {
     actor_lease: CoreExtractionActorLease,
@@ -406,6 +415,41 @@ where
     Clock: IdentityClock + 'static,
     TickSource: CoreExtractionAuthoritativeTick + 'static,
 {
+    pub(crate) async fn terminal_intent_for_route(
+        &self,
+        authenticated: AuthenticatedAccount,
+        route_lease: CorePrivateRouteActorLease,
+    ) -> Result<
+        Option<(
+            CoreExtractionActorLease,
+            ProductionExtractionPreparedIntentV1,
+        )>,
+        CoreExtractionTerminalSourceError,
+    > {
+        let (lease, actor) = {
+            let state = self.state.lock().await;
+            if !state.accepting {
+                return Err(CoreExtractionRuntimeError::Retired.into());
+            }
+            let Some(entry) = state.actors.get(&authenticated.account_id.as_bytes()) else {
+                return Ok(None);
+            };
+            if authenticated.namespace != AuthenticatedNamespace::WipeableTest
+                || entry.lease.account_id != authenticated.account_id.as_bytes()
+                || entry.lease.character_id != route_lease.character_id()
+                || entry.actor.route_lease() != route_lease
+            {
+                return Err(CoreExtractionRuntimeError::InvalidActorBinding.into());
+            }
+            (entry.lease, Arc::clone(&entry.actor))
+        };
+        Ok(actor
+            .prepare_for_terminal_owner()
+            .await
+            .map_err(CoreExtractionTerminalSourceError::Persistence)?
+            .map(|intent| (lease, intent)))
+    }
+
     #[must_use]
     pub fn new(tick_source: Arc<TickSource>) -> Self {
         Self {

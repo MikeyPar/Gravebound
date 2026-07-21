@@ -30,22 +30,27 @@ use thiserror::Error;
 use tokio::task::JoinHandle;
 
 use crate::{
-    AuthenticatedAccount, CorePrivateDangerEntryAuthority, CorePrivatePlayerDamageFactV1,
+    AuthenticatedAccount, CoreExtractionActorDirectory, CoreExtractionActorLease,
+    CoreExtractionAuthoritativeTick, CoreExtractionRuntimeError, CorePrivateDangerEntryAuthority,
+    CorePrivatePlayerDamageFactV1, CorePrivateRouteActorLease,
     CorePrivateTerminalAcknowledgementError, CorePrivateTerminalDeliveryV1,
     CorePrivateTerminalFrameDelivery, CorePrivateTerminalFrameReceiver, CorePrivateTerminalFrameV1,
     CorePrivateTerminalOwner, CorePrivateTerminalOwnerError, CorePrivateTerminalOwnerFactory,
     CorePrivateTerminalRouteControlAuthorityV1, CorePrivateTerminalRouteControlV1,
     CoreRecallTerminalDriverError, CoreRecallTerminalTickOutcome, CoreTerminalCoordinator,
     CoreTerminalCoordinatorError, CoreTerminalEvaluation, CoreTerminalOtherEvaluationsV1,
-    CoreTerminalProducer, DeathEntityIdentityAuthority, DurableDeathExecutionError,
+    CoreTerminalProducer, DeathEntityIdentityAuthority, DurableDeathExecutionError, IdentityClock,
     LiveDamageTraceIngestOutcome, LiveDamageTraceMutationAuthority, LiveDamageTraceService,
     LiveDamageTraceServiceError, PostgresDurableDeathExecutionService,
-    PostgresPrivateDeathContextPlanner, PostgresProductionRecallExecutionService,
-    PreparedDurableDeathCommit, PrivateDeathPlanningAuthority, PrivateDeathPlanningError,
-    ProductionRecallClock, ProductionRecallCompletionAuthorityV1, ProductionRecallIntentActor,
+    PostgresPrivateDeathContextPlanner, PostgresProductionExtractionExecutionService,
+    PostgresProductionRecallExecutionService, PreparedDurableDeathCommit,
+    PrivateDeathPlanningAuthority, PrivateDeathPlanningError, ProductionExtractionExecutionError,
+    ProductionExtractionPlanner, ProductionExtractionPreparedIntentV1,
+    ProductionExtractionPublicationProof, ProductionRecallClock,
+    ProductionRecallCompletionAuthorityV1, ProductionRecallIntentActor,
     ProductionRecallPendingAuthorityV1, StoredTerminalReceipt, SystemDurableDeathIdentitySource,
     drive_recall_terminal_tick, durable_death_terminal_candidate,
-    private_route_damage_entity_identities,
+    private_route_damage_entity_identities, production_extraction_terminal_candidate,
 };
 
 type PersistentDeathPlanner =
@@ -58,6 +63,7 @@ pub struct PostgresCorePrivateTerminalOwnerFactory {
     persistence: PostgresPersistence,
     planner: Arc<PersistentDeathPlanner>,
     death_execution: Arc<PostgresDurableDeathExecutionService>,
+    extraction_execution: Arc<PostgresProductionExtractionExecutionService>,
     recall_execution: Arc<PostgresProductionRecallExecutionService>,
     death_view: Arc<sim_content::CoreDevelopmentDeathView>,
 }
@@ -79,6 +85,9 @@ impl PostgresCorePrivateTerminalOwnerFactory {
         death_view: Arc<sim_content::CoreDevelopmentDeathView>,
     ) -> Self {
         Self {
+            extraction_execution: Arc::new(PostgresProductionExtractionExecutionService::new(
+                persistence.clone(),
+            )),
             recall_execution: Arc::new(PostgresProductionRecallExecutionService::new(
                 persistence.clone(),
             )),
@@ -96,6 +105,7 @@ impl CorePrivateTerminalOwnerFactory for PostgresCorePrivateTerminalOwnerFactory
         authenticated: AuthenticatedAccount,
         authority: CorePrivateDangerEntryAuthority,
         recall: CorePrivateRecallTerminalHandle,
+        extraction: Option<CorePrivateExtractionTerminalHandle>,
         receiver: CorePrivateTerminalFrameReceiver,
     ) -> Result<Box<dyn CorePrivateTerminalOwner>, CorePrivateTerminalOwnerError> {
         if authenticated.account_id.as_bytes() != *authority.terminal().account_id()
@@ -107,17 +117,215 @@ impl CorePrivateTerminalOwnerFactory for PostgresCorePrivateTerminalOwnerFactory
             persistence: self.persistence.clone(),
             planner: Arc::clone(&self.planner),
             death_execution: Arc::clone(&self.death_execution),
+            extraction_execution: Arc::clone(&self.extraction_execution),
             recall_execution: Arc::clone(&self.recall_execution),
             death_view: Arc::clone(&self.death_view),
             authenticated,
             authority,
             recall,
+            extraction,
             receiver,
         };
         Ok(Box::new(PostgresCorePrivateTerminalOwner {
             task: tokio::spawn(runtime.run()),
         }))
     }
+}
+
+#[derive(Debug, Clone)]
+struct PreparedPrivateExtractionTerminal {
+    actor_lease: CoreExtractionActorLease,
+    intent: ProductionExtractionPreparedIntentV1,
+}
+
+#[derive(Clone)]
+pub struct CorePrivateExtractionTerminalHandle {
+    source: Arc<dyn ErasedPrivateExtractionTerminalSource>,
+}
+
+impl fmt::Debug for CorePrivateExtractionTerminalHandle {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CorePrivateExtractionTerminalHandle")
+            .finish_non_exhaustive()
+    }
+}
+
+impl CorePrivateExtractionTerminalHandle {
+    pub(crate) fn new<Planner, Clock, TickSource>(
+        directory: Arc<CoreExtractionActorDirectory<Planner, Clock, TickSource>>,
+        authenticated: AuthenticatedAccount,
+        route_lease: CorePrivateRouteActorLease,
+    ) -> Self
+    where
+        Planner: ProductionExtractionPlanner + 'static,
+        Clock: IdentityClock + 'static,
+        TickSource: CoreExtractionAuthoritativeTick + 'static,
+    {
+        Self {
+            source: Arc::new(BoundPrivateExtractionTerminalSource {
+                directory,
+                authenticated,
+                route_lease,
+            }),
+        }
+    }
+
+    async fn prepare(
+        &self,
+    ) -> Result<Option<PreparedPrivateExtractionTerminal>, CorePrivateExtractionTerminalError> {
+        self.source.prepare().await
+    }
+
+    async fn publish(
+        &self,
+        terminal: &PreparedPrivateExtractionTerminal,
+        proof: &ProductionExtractionPublicationProof,
+    ) -> Result<(), CorePrivateExtractionTerminalError> {
+        self.source.publish(terminal, proof).await
+    }
+
+    async fn retire_after_commit(
+        &self,
+        actor_lease: CoreExtractionActorLease,
+    ) -> Result<(), CorePrivateExtractionTerminalError> {
+        self.source.retire_after_commit(actor_lease).await
+    }
+
+    async fn retire_after_other(
+        &self,
+        coordinator: &CoreTerminalCoordinator,
+    ) -> Result<(), CorePrivateExtractionTerminalError> {
+        self.source.retire_after_other(coordinator).await
+    }
+}
+
+trait ErasedPrivateExtractionTerminalSource: Send + Sync {
+    fn prepare(
+        &self,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        Option<PreparedPrivateExtractionTerminal>,
+                        CorePrivateExtractionTerminalError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    >;
+
+    fn publish<'a>(
+        &'a self,
+        terminal: &'a PreparedPrivateExtractionTerminal,
+        proof: &'a ProductionExtractionPublicationProof,
+    ) -> Pin<Box<dyn Future<Output = Result<(), CorePrivateExtractionTerminalError>> + Send + 'a>>;
+
+    fn retire_after_commit(
+        &self,
+        actor_lease: CoreExtractionActorLease,
+    ) -> Pin<Box<dyn Future<Output = Result<(), CorePrivateExtractionTerminalError>> + Send + '_>>;
+
+    fn retire_after_other<'a>(
+        &'a self,
+        coordinator: &'a CoreTerminalCoordinator,
+    ) -> Pin<Box<dyn Future<Output = Result<(), CorePrivateExtractionTerminalError>> + Send + 'a>>;
+}
+
+struct BoundPrivateExtractionTerminalSource<Planner, Clock, TickSource> {
+    directory: Arc<CoreExtractionActorDirectory<Planner, Clock, TickSource>>,
+    authenticated: AuthenticatedAccount,
+    route_lease: CorePrivateRouteActorLease,
+}
+
+impl<Planner, Clock, TickSource> ErasedPrivateExtractionTerminalSource
+    for BoundPrivateExtractionTerminalSource<Planner, Clock, TickSource>
+where
+    Planner: ProductionExtractionPlanner + 'static,
+    Clock: IdentityClock + 'static,
+    TickSource: CoreExtractionAuthoritativeTick + 'static,
+{
+    fn prepare(
+        &self,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        Option<PreparedPrivateExtractionTerminal>,
+                        CorePrivateExtractionTerminalError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            Ok(self
+                .directory
+                .terminal_intent_for_route(self.authenticated, self.route_lease)
+                .await?
+                .map(|(actor_lease, intent)| PreparedPrivateExtractionTerminal {
+                    actor_lease,
+                    intent,
+                }))
+        })
+    }
+
+    fn publish<'a>(
+        &'a self,
+        terminal: &'a PreparedPrivateExtractionTerminal,
+        proof: &'a ProductionExtractionPublicationProof,
+    ) -> Pin<Box<dyn Future<Output = Result<(), CorePrivateExtractionTerminalError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            self.directory
+                .publish_coordinated(terminal.actor_lease, &terminal.intent, proof)
+                .await?;
+            Ok(())
+        })
+    }
+
+    fn retire_after_commit(
+        &self,
+        actor_lease: CoreExtractionActorLease,
+    ) -> Pin<Box<dyn Future<Output = Result<(), CorePrivateExtractionTerminalError>> + Send + '_>>
+    {
+        Box::pin(async move {
+            self.directory
+                .retire_actor_after_commit(actor_lease)
+                .await?;
+            Ok(())
+        })
+    }
+
+    fn retire_after_other<'a>(
+        &'a self,
+        coordinator: &'a CoreTerminalCoordinator,
+    ) -> Pin<Box<dyn Future<Output = Result<(), CorePrivateExtractionTerminalError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let actor_lease = match self
+                .directory
+                .registered_actor_lease(self.authenticated)
+                .await
+            {
+                Ok(lease) => lease,
+                Err(CoreExtractionRuntimeError::ActorUnavailable) => return Ok(()),
+                Err(error) => return Err(error.into()),
+            };
+            self.directory
+                .retire_actor_after_other_terminal(actor_lease, coordinator)
+                .await?;
+            Ok(())
+        })
+    }
+}
+
+#[derive(Debug, Error)]
+enum CorePrivateExtractionTerminalError {
+    #[error("private extraction terminal source failed")]
+    Source(#[from] crate::core_extraction_runtime::CoreExtractionTerminalSourceError),
+    #[error("private extraction runtime failed")]
+    Runtime(#[from] CoreExtractionRuntimeError),
 }
 
 #[derive(Clone)]
@@ -246,6 +454,10 @@ enum ProductionTerminalOwnerError {
     Planning(#[from] PrivateDeathPlanningError),
     #[error("terminal owner death execution failed")]
     DeathExecution(#[from] DurableDeathExecutionError),
+    #[error("terminal owner extraction source failed")]
+    ExtractionSource(#[from] CorePrivateExtractionTerminalError),
+    #[error("terminal owner extraction execution failed")]
+    ExtractionExecution(#[from] ProductionExtractionExecutionError),
     #[error("terminal owner coordination failed")]
     Coordinator(#[from] CoreTerminalCoordinatorError),
     #[error("terminal owner Recall/disconnect coordination failed")]
@@ -262,11 +474,13 @@ struct ProductionTerminalOwnerRuntime {
     persistence: PostgresPersistence,
     planner: Arc<PersistentDeathPlanner>,
     death_execution: Arc<PostgresDurableDeathExecutionService>,
+    extraction_execution: Arc<PostgresProductionExtractionExecutionService>,
     recall_execution: Arc<PostgresProductionRecallExecutionService>,
     death_view: Arc<sim_content::CoreDevelopmentDeathView>,
     authenticated: AuthenticatedAccount,
     authority: CorePrivateDangerEntryAuthority,
     recall: CorePrivateRecallTerminalHandle,
+    extraction: Option<CorePrivateExtractionTerminalHandle>,
     receiver: CorePrivateTerminalFrameReceiver,
 }
 
@@ -392,6 +606,34 @@ impl ProductionTerminalOwnerRuntime {
         };
         let pending_material_stack_count = u8::try_from(snapshot.pending_material_stack_count)
             .map_err(|_| ProductionTerminalOwnerError::InvalidAuthority)?;
+        let extraction = match &self.extraction {
+            Some(source) => source.prepare().await?,
+            None => None,
+        };
+        let extraction_evaluation = match extraction.as_ref() {
+            Some(extraction) if extraction.intent.server_tick() < tick => {
+                return Err(ProductionTerminalOwnerError::InvalidAuthority);
+            }
+            Some(extraction) if extraction.intent.server_tick() == tick => {
+                let prepared = extraction
+                    .intent
+                    .prepared()
+                    .ok_or(ProductionTerminalOwnerError::InvalidAuthority)?;
+                CoreTerminalEvaluation::candidate(
+                    CoreTerminalProducer::SuccessfulExtraction,
+                    terminal,
+                    tick,
+                    version,
+                    production_extraction_terminal_candidate(prepared)?,
+                )
+            }
+            Some(_) | None => CoreTerminalEvaluation::absent(
+                CoreTerminalProducer::SuccessfulExtraction,
+                terminal,
+                tick,
+                version,
+            ),
+        };
         let outcome = self
             .recall
             .drive_tick(
@@ -405,12 +647,7 @@ impl ProductionTerminalOwnerRuntime {
                 },
                 CoreTerminalOtherEvaluationsV1 {
                     lethal,
-                    extraction: CoreTerminalEvaluation::absent(
-                        CoreTerminalProducer::SuccessfulExtraction,
-                        terminal,
-                        tick,
-                        version,
-                    ),
+                    extraction: extraction_evaluation,
                     fault_restore: CoreTerminalEvaluation::absent(
                         CoreTerminalProducer::VerifiedFaultRestoration,
                         terminal,
@@ -420,13 +657,26 @@ impl ProductionTerminalOwnerRuntime {
                 },
             )
             .await?;
-        match (outcome, death) {
-            (CoreRecallTerminalTickOutcome::NoTerminal, None) => {
+        match (outcome, death, extraction) {
+            (CoreRecallTerminalTickOutcome::NoTerminal, None, _) => {
                 delivery.acknowledge_continue()?;
             }
-            (CoreRecallTerminalTickOutcome::OtherTerminalPrepared(prepared), Some(death)) => {
+            (CoreRecallTerminalTickOutcome::OtherTerminalPrepared(prepared), Some(death), _) => {
                 let receipt = self
                     .execute_death_exact(coordinator, &prepared, &death)
+                    .await?;
+                if let Some(extraction) = &self.extraction {
+                    extraction.retire_after_other(coordinator).await?;
+                }
+                delivery.acknowledge_terminal_owned(&receipt)?;
+            }
+            (
+                CoreRecallTerminalTickOutcome::OtherTerminalPrepared(prepared),
+                None,
+                Some(extraction),
+            ) if extraction.intent.server_tick() == tick => {
+                let receipt = self
+                    .execute_extraction_exact(coordinator, &prepared, &extraction)
                     .await?;
                 delivery.acknowledge_terminal_owned(&receipt)?;
             }
@@ -434,7 +684,11 @@ impl ProductionTerminalOwnerRuntime {
                 CoreRecallTerminalTickOutcome::RecallStored(_)
                 | CoreRecallTerminalTickOutcome::RecallReplayed(_),
                 None,
+                _,
             ) => {
+                if let Some(extraction) = &self.extraction {
+                    extraction.retire_after_other(coordinator).await?;
+                }
                 let receipt = coordinator
                     .committed_receipt()
                     .ok_or(ProductionTerminalOwnerError::InvalidAuthority)?;
@@ -672,6 +926,46 @@ impl ProductionTerminalOwnerRuntime {
                         .ok_or(ProductionTerminalOwnerError::InvalidAuthority);
                 }
                 Err(DurableDeathExecutionError::Persistence(error))
+                    if error.may_have_ambiguous_commit_outcome() =>
+                {
+                    tokio::time::sleep(RETRY_DELAY).await;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+
+    async fn execute_extraction_exact(
+        &self,
+        coordinator: &mut CoreTerminalCoordinator,
+        prepared_terminal: &crate::PreparedTerminal,
+        terminal: &PreparedPrivateExtractionTerminal,
+    ) -> Result<StoredTerminalReceipt, ProductionTerminalOwnerError> {
+        let prepared = terminal
+            .intent
+            .prepared()
+            .ok_or(ProductionTerminalOwnerError::InvalidAuthority)?;
+        loop {
+            match self
+                .extraction_execution
+                .execute_coordinated(coordinator, prepared_terminal, prepared)
+                .await
+            {
+                Ok(outcome) => {
+                    let source = self
+                        .extraction
+                        .as_ref()
+                        .ok_or(ProductionTerminalOwnerError::InvalidAuthority)?;
+                    source
+                        .publish(terminal, outcome.publication_proof())
+                        .await?;
+                    source.retire_after_commit(terminal.actor_lease).await?;
+                    return coordinator
+                        .committed_receipt()
+                        .cloned()
+                        .ok_or(ProductionTerminalOwnerError::InvalidAuthority);
+                }
+                Err(ProductionExtractionExecutionError::Persistence(error))
                     if error.may_have_ambiguous_commit_outcome() =>
                 {
                     tokio::time::sleep(RETRY_DELAY).await;

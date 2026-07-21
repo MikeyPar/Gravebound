@@ -36,10 +36,11 @@ use crate::{
     CoreExtractionRuntimeReport, CoreExtractionTransportAttach, CoreExtractionTransportDetach,
     CorePrivateB3RewardRuntime, CorePrivateB3RewardRuntimeError, CorePrivateCaldusRewardRuntime,
     CorePrivateCaldusRewardRuntimeConfig, CorePrivateCaldusRewardRuntimeError,
-    CorePrivateDangerEntryAuthority, CorePrivateFixedDungeonAdvance,
-    CorePrivateFixedDungeonB3RewardCommit, CorePrivateFixedDungeonDriverReady,
-    CorePrivateFixedDungeonRestCommit, CorePrivateLifeTickDirectory, CorePrivateLifeTickError,
-    CorePrivateMicrorealmAbility, CorePrivateMicrorealmAbilityPress, CorePrivateMicrorealmDriver,
+    CorePrivateDangerEntryAuthority, CorePrivateExtractionTerminalHandle,
+    CorePrivateFixedDungeonAdvance, CorePrivateFixedDungeonB3RewardCommit,
+    CorePrivateFixedDungeonDriverReady, CorePrivateFixedDungeonRestCommit,
+    CorePrivateLifeTickDirectory, CorePrivateLifeTickError, CorePrivateMicrorealmAbility,
+    CorePrivateMicrorealmAbilityPress, CorePrivateMicrorealmDriver,
     CorePrivateMicrorealmDriverError, CorePrivateMicrorealmDriverHandle,
     CorePrivateMicrorealmDriverObserver, CorePrivateMicrorealmDriverReport,
     CorePrivateMicrorealmIngressError, CorePrivateMicrorealmPreparedHandoff,
@@ -312,6 +313,7 @@ pub trait CorePrivateTerminalOwnerFactory: Send + Sync {
         authenticated: AuthenticatedAccount,
         authority: CorePrivateDangerEntryAuthority,
         recall: CorePrivateRecallTerminalHandle,
+        extraction: Option<CorePrivateExtractionTerminalHandle>,
         receiver: CorePrivateTerminalFrameReceiver,
     ) -> Result<Box<dyn CorePrivateTerminalOwner>, CorePrivateTerminalOwnerError>;
 }
@@ -409,6 +411,11 @@ pub struct CorePrivateLifeSessionDirectory<Clock, TickSource> {
 type RuntimeFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 trait PrivateLifeExtractionRuntime: Send + Sync {
+    fn terminal_handle(
+        &self,
+        authenticated: AuthenticatedAccount,
+        route_lease: CorePrivateRouteActorLease,
+    ) -> CorePrivateExtractionTerminalHandle;
     fn prepare(
         &self,
         authenticated: AuthenticatedAccount,
@@ -611,6 +618,14 @@ where
     ExtractionClock: IdentityClock + 'static,
     ExtractionTicks: CoreExtractionAuthoritativeTick + 'static,
 {
+    fn terminal_handle(
+        &self,
+        authenticated: AuthenticatedAccount,
+        route_lease: CorePrivateRouteActorLease,
+    ) -> CorePrivateExtractionTerminalHandle {
+        CorePrivateExtractionTerminalHandle::new(Arc::clone(self), authenticated, route_lease)
+    }
+
     fn registered_actor_lease(
         &self,
         authenticated: AuthenticatedAccount,
@@ -1309,10 +1324,15 @@ where
             .recall
             .terminal_authorities(entry.authenticated, route_lease)
             .await?;
+        let extraction_terminal = self
+            .extraction
+            .as_ref()
+            .map(|runtime| runtime.terminal_handle(entry.authenticated, route_lease));
         let terminal_owner = terminal_owner_factory.start(
             entry.authenticated,
             danger_entry_authority,
             recall_terminal,
+            extraction_terminal,
             terminal_receiver,
         )?;
         let driver = CorePrivateMicrorealmDriver::spawn_with_terminal_authorities(
@@ -2226,6 +2246,7 @@ mod tests {
             authenticated: AuthenticatedAccount,
             authority: CorePrivateDangerEntryAuthority,
             _recall: CorePrivateRecallTerminalHandle,
+            _extraction: Option<CorePrivateExtractionTerminalHandle>,
             mut receiver: CorePrivateTerminalFrameReceiver,
         ) -> Result<Box<dyn CorePrivateTerminalOwner>, CorePrivateTerminalOwnerError> {
             if authenticated.account_id.as_bytes() != *authority.terminal().account_id()

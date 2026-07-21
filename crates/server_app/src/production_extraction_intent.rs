@@ -799,6 +799,37 @@ impl<Planner, Clock> ProductionExtractionIntentActor<Planner, Clock> {
         self.intent.lock().await.clone()
     }
 
+    /// Completes repository planning for an already accepted intent without requiring the client
+    /// to resend after a transient response or database failure. The accepted frame and observed
+    /// tick never change; the terminal owner may therefore hold that exact tick until planning
+    /// succeeds or a typed authority conflict is proven.
+    pub(crate) async fn prepare_for_terminal_owner(
+        &self,
+    ) -> Result<Option<ProductionExtractionPreparedIntentV1>, PersistenceError>
+    where
+        Planner: ProductionExtractionPlanner,
+        Clock: IdentityClock,
+    {
+        let mut intent = self.intent.lock().await;
+        let Some(pinned) = intent.as_mut() else {
+            return Ok(None);
+        };
+        if pinned.prepared.is_none() {
+            self.revalidate_route_permit()
+                .await
+                .map_err(|_| PersistenceError::ProductionExtractionTerminalSuperseded)?;
+            let prepared = self.planner.prepare(&pinned.input).await?;
+            if prepared.validate().is_err() || prepared.request() != pinned.input.commit_request() {
+                return Err(PersistenceError::CorruptStoredProductionExtractionIntent);
+            }
+            self.revalidate_route_permit()
+                .await
+                .map_err(|_| PersistenceError::ProductionExtractionTerminalSuperseded)?;
+            pinned.prepared = Some(prepared);
+        }
+        Ok(Some(pinned.clone()))
+    }
+
     /// Retires the route generation only after the extraction runtime has retained a committed
     /// terminal result. Durable bootstrap owns recovery if the process ends before this cleanup.
     pub async fn retire_route_after_terminal(&self) -> Result<(), CorePrivateRouteRuntimeError> {
@@ -2892,6 +2923,51 @@ mod tests {
         }
         assert_eq!(planner.calls.load(Ordering::SeqCst), 1);
         assert_eq!(planner.accept_calls.load(Ordering::SeqCst), 5);
+        directory.begin_shutdown();
+        assert!(directory.finish_shutdown().await.unwrap().zero_residue);
+    }
+
+    #[tokio::test]
+    async fn terminal_owner_retries_the_exact_accepted_tick_without_client_replanning() {
+        let planner = FakePlanner::fail_first();
+        let (authority, directory, lease) = authority().await;
+        let actor = ProductionExtractionIntentActor::new(
+            authority,
+            directory.clone(),
+            lease,
+            planner.clone(),
+            FixedClock(10_000),
+        )
+        .expect("intent actor");
+        let frame = frame(1);
+        let first = actor.handle(authenticated(), &frame, 700).await;
+        assert!(matches!(
+            first.result,
+            ExtractionCommitResultV1::Rejected {
+                code: TerminalInventoryRejectionCodeV1::TerminalLost,
+                ..
+            }
+        ));
+        assert!(
+            actor
+                .prepared_intent()
+                .await
+                .expect("accepted intent remains pinned")
+                .prepared()
+                .is_none()
+        );
+
+        let recovered = actor
+            .prepare_for_terminal_owner()
+            .await
+            .expect("server-owned exact retry")
+            .expect("accepted intent");
+        assert_eq!(recovered.server_tick(), 700);
+        assert_eq!(recovered.input().commit_request().observed_tick, 700);
+        assert!(recovered.prepared().is_some());
+        assert_eq!(planner.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(planner.accept_calls.load(Ordering::SeqCst), 1);
+
         directory.begin_shutdown();
         assert!(directory.finish_shutdown().await.unwrap().zero_residue);
     }

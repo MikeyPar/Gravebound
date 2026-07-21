@@ -161,7 +161,9 @@ impl CoreRecallAuthoritativeTick for CorePrivateLifeTickDirectory {
 impl CoreExtractionAuthoritativeTick for CorePrivateLifeTickDirectory {
     fn current_tick(&self, route: CorePrivateRouteActorLease) -> Option<NonZeroU64> {
         let acknowledged = CorePrivateLifeAuthoritativeTick::current_tick(self, route).ok()?;
-        NonZeroU64::new(acknowledged.get().checked_add(1)?)
+        // One frame may already be awaiting terminal-owner acknowledgement. Reserve the following
+        // tick so an accepted extraction can never race an absence already in that barrier.
+        NonZeroU64::new(acknowledged.get().checked_add(2)?)
     }
 }
 
