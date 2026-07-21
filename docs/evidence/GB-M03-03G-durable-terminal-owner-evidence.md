@@ -22,6 +22,10 @@ Commit `fa44c81` keeps a neutral 30 Hz terminal heartbeat alive after Caldus rew
 
 Commit `8c4c907` injects the dynamic, route-bound extraction directory into the owner before the later Caldus actor exists. Once an authenticated intent is accepted, repository planning is retried server-side against the same durable frame and target tick. The owner submits its sealed candidate beside death and Recall, executes only a prepared extraction winner, publishes only the executor's opaque proof, and retires the actor/route after commit. A death or Recall winner retires any registered extraction actor as a loser.
 
+Commit `5d5fad6` corrects terminal-feed acknowledgement so a matching nonlethal extraction, Recall, disconnect, or verified-fault receipt can close a nonlethal frame, while route controls and lethal frames retain their stricter disposition contracts.
+
+Commit `b252a3b` adds the fifth live producer. A pure microrealm, fixed-room, Caldus, or exit-heartbeat runtime fault emits a typed next-unsealed-boundary delivery; planned shutdown, terminal-feed failure, and indeterminate durable-control failure do not. The owner persists that boundary, loads the coherent danger snapshot, evaluates extraction and both Recall producers alongside the fault candidate, then executes the stable per-root TECH-023 transaction only if fault restoration wins. Fresh and exact-replay receipts must report `Restored`; superseding terminal or conflicting results fail closed. Before acknowledging, the runtime bootstrap retires the exact danger lease, verifies durable Hall state, and installs a fresh Hall actor.
+
 ## Production-blocking verification
 
 Per the owner's reduced-test instruction, full workspace, hosted PostgreSQL/QUIC, journey, performance, and visual suites remain deferred until implementation completion. The changed production blockers passed:
@@ -36,8 +40,11 @@ Per the owner's reduced-test instruction, full workspace, hosted PostgreSQL/QUIC
 - `cargo test -p server_app --lib defeat_freezes_evidence_and_only_exact_durable_result_unlocks_exit`;
 - `cargo test -p server_app --lib terminal_owner_retries_the_exact_accepted_tick_without_client_replanning`;
 - `cargo test -p server_app --lib dynamic_runtime_reuses_session_writer_replays_commit_and_retires_route`;
+- `cargo test -p server_app --lib nonlethal_frame_accepts_matching_durable_terminal_owner`;
+- `cargo test -p server_app --lib preparation_is_deterministic_and_binds_fault_boundary`;
+- `cargo test -p server_app --lib staged_runtime_fault_reaches_next_terminal_boundary_and_requires_durable_owner`;
 - formatting and whitespace validation.
 
 ## Current Next Step
 
-Add the typed verified-fault restoration producer and exact crash-restore terminal receipt. Keep normal admission disabled until all five producers share this coordinator and focused restart, response-loss, and shutdown cases pass.
+Compose the completed five-producer owner into ordinary authenticated dispatch and capability admission for the full private loop. Keep normal admission disabled until that composition is production-ready; run the deferred hosted PostgreSQL/QUIC, restart, response-loss, shutdown, journey, performance, and visual audit after implementation completion.
