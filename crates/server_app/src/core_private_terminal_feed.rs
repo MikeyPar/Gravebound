@@ -411,7 +411,17 @@ impl CorePrivateTerminalFrameSender {
             return Err(CorePrivateTerminalFeedError::AcknowledgementMismatch);
         }
         match (player_died, acknowledgement.disposition) {
-            (false, CorePrivateTerminalFrameDisposition::Continue)
+            (
+                false,
+                CorePrivateTerminalFrameDisposition::Continue
+                | CorePrivateTerminalFrameDisposition::TerminalOwned {
+                    kind:
+                        TerminalKind::SuccessfulExtraction
+                        | TerminalKind::EmergencyRecall
+                        | TerminalKind::DisconnectRecovery
+                        | TerminalKind::VerifiedServerFaultRestoration,
+                },
+            )
             | (
                 true,
                 CorePrivateTerminalFrameDisposition::TerminalOwned {
@@ -797,15 +807,26 @@ impl CorePrivateTerminalFrameDelivery {
         receipt
             .validate()
             .map_err(|_| CorePrivateTerminalAcknowledgementError::InvalidReceipt)?;
-        if !self.delivery.player_died()
-            || receipt.kind() != TerminalKind::LethalDeath
+        let valid_kind = if self.delivery.player_died() {
+            receipt.kind() == TerminalKind::LethalDeath
+        } else {
+            matches!(
+                receipt.kind(),
+                TerminalKind::SuccessfulExtraction
+                    | TerminalKind::EmergencyRecall
+                    | TerminalKind::DisconnectRecovery
+                    | TerminalKind::VerifiedServerFaultRestoration
+            )
+        };
+        if !valid_kind
             || receipt.binding() != self.binding
             || receipt.observed_tick() != self.delivery.tick().0
+            || receipt.expected_state_version() != self.delivery.route().character_version
         {
             return Err(CorePrivateTerminalAcknowledgementError::InvalidDisposition);
         }
         self.send_acknowledgement(CorePrivateTerminalFrameDisposition::TerminalOwned {
-            kind: TerminalKind::LethalDeath,
+            kind: receipt.kind(),
         })
     }
 

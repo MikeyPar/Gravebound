@@ -2876,7 +2876,7 @@ mod tests {
         CorePrivateTerminalFrameReceiver::channel(binding)
     }
 
-    fn lethal_terminal_receipt(tick: Tick) -> crate::StoredTerminalReceipt {
+    fn terminal_receipt(tick: Tick, kind: TerminalKind) -> crate::StoredTerminalReceipt {
         crate::StoredTerminalReceipt::from_storage(&crate::StoredTerminalReceiptV1 {
             schema_version: crate::STORED_TERMINAL_RECEIPT_SCHEMA_V1,
             account_id: [0x11; 16],
@@ -2892,9 +2892,13 @@ mod tests {
             post_state_version: 2,
             observed_tick: tick.0,
             committed_tick: tick.0,
-            terminal_kind_code: TerminalKind::LethalDeath.stable_code(),
+            terminal_kind_code: kind.stable_code(),
         })
-        .expect("valid lethal receipt")
+        .expect("valid terminal receipt")
+    }
+
+    fn lethal_terminal_receipt(tick: Tick) -> crate::StoredTerminalReceipt {
+        terminal_receipt(tick, TerminalKind::LethalDeath)
     }
 
     struct ScriptedRuntime {
@@ -3399,6 +3403,35 @@ mod tests {
             CorePrivateMicrorealmDriverOutcome::TerminalPending
         );
         terminal_owner.await.expect("terminal owner");
+    }
+
+    #[tokio::test]
+    async fn nonlethal_frame_accepts_matching_durable_terminal_owner() {
+        let (mut sender, mut receiver) = terminal_frame_channel();
+        let step = template_step(1);
+        let receive = async {
+            let delivery = receiver.receive().await.expect("terminal frame");
+            let receipt = terminal_receipt(Tick(1), TerminalKind::SuccessfulExtraction);
+            delivery
+                .acknowledge_terminal_owned(&receipt)
+                .expect("matching nonlethal terminal ownership");
+        };
+        let send = sender.deliver(
+            CorePrivateTerminalSceneV1::Microrealm,
+            step.route,
+            step.tick,
+            step.player_position,
+            step.player_damage,
+            false,
+        );
+
+        let (disposition, ()) = tokio::join!(send, receive);
+        assert_eq!(
+            disposition.expect("terminal frame accepted"),
+            CorePrivateTerminalFrameDisposition::TerminalOwned {
+                kind: TerminalKind::SuccessfulExtraction,
+            }
+        );
     }
 
     #[tokio::test(start_paused = true)]
