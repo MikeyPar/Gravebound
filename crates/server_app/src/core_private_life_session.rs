@@ -187,6 +187,14 @@ impl CorePrivateLifeTransportLease {
     pub const fn generation(self) -> CorePrivateLifeTransportGeneration {
         self.generation
     }
+
+    #[cfg(test)]
+    pub(crate) const fn test_only(account_id: [u8; 16], generation: u64) -> Self {
+        Self {
+            account_id,
+            generation: CorePrivateLifeTransportGeneration(generation),
+        }
+    }
 }
 
 #[derive(Debug)]

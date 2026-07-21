@@ -22,6 +22,11 @@ mod core_private_caldus_reward_runtime;
 mod core_private_caldus_runtime;
 mod core_private_combat_frame;
 mod core_private_fixed_dungeon_runtime;
+#[allow(
+    dead_code,
+    reason = "the authoritative Hall owner is consumed by the next normal-server dispatch slice"
+)]
+mod core_private_hall_runtime;
 mod core_private_life_foundation;
 #[allow(
     dead_code,

@@ -6,15 +6,16 @@
 //! `Gravebound_Development_Roadmap_v1.md` (`GB-M03-03`, `GB-M03-08`, and the M03
 //! exit gate). ADR-037 requires this all-or-nothing owner graph before a normal socket may exist.
 //!
-//! Construction intentionally does not imply admission. The authoritative Hall movement and
-//! interaction-range owner is not part of this graph yet, so capability publication remains
-//! fail-closed even though every danger-route process owner is available.
+//! Construction intentionally does not imply admission. The authoritative Hall owner is present,
+//! but normal transport dispatch and the native route client are not yet composed, so capability
+//! publication remains fail-closed.
 
 use std::{path::Path, sync::Arc};
 
 use persistence::PostgresPersistence;
 use thiserror::Error;
 
+use crate::core_private_hall_runtime::{CorePrivateHallDirectory, CorePrivateHallError};
 use crate::core_private_life_foundation::{
     CorePrivateLifeFoundationError, CorePrivateLifePersistentFoundation, SystemIdentityClock,
 };
@@ -43,8 +44,8 @@ struct CorePrivateLifeAdmission {
 }
 
 impl CorePrivateLifeAdmission {
-    const DORMANT: Self = Self {
-        authoritative_hall: false,
+    const HALL_COMPOSED: Self = Self {
+        authoritative_hall: true,
         transport_dispatch: false,
         native_client: false,
     };
@@ -60,6 +61,7 @@ pub(crate) struct CorePrivateLifeProcess {
     foundation: Arc<CorePrivateLifePersistentFoundation>,
     sessions: Arc<PersistentSessionDirectory>,
     ticks: Arc<CorePrivateLifeTickDirectory>,
+    hall: Arc<CorePrivateHallDirectory>,
     combat: Arc<CoreCharacterCombatFactory>,
     admission: CorePrivateLifeAdmission,
 }
@@ -107,8 +109,9 @@ impl CorePrivateLifeProcess {
             foundation,
             sessions: Arc::new(sessions),
             ticks,
+            hall: Arc::new(CorePrivateHallDirectory::load(content_root)?),
             combat: Arc::new(CoreCharacterCombatFactory::load(persistence, content_root)?),
-            admission: CorePrivateLifeAdmission::DORMANT,
+            admission: CorePrivateLifeAdmission::HALL_COMPOSED,
         };
         process.validate_dormant_composition()?;
         Ok(process)
@@ -127,6 +130,11 @@ impl CorePrivateLifeProcess {
     #[must_use]
     pub(crate) fn combat(&self) -> &Arc<CoreCharacterCombatFactory> {
         &self.combat
+    }
+
+    #[must_use]
+    pub(crate) fn hall(&self) -> &Arc<CorePrivateHallDirectory> {
+        &self.hall
     }
 
     fn validate_dormant_composition(&self) -> Result<(), CorePrivateLifeProcessError> {
@@ -182,6 +190,8 @@ pub(crate) enum CorePrivateLifeProcessError {
     Caldus(#[from] CaldusVictoryCompositionError),
     #[error("private-life combat composition failed: {0}")]
     Combat(#[from] CoreCombatFactoryError),
+    #[error("private-life Hall composition failed: {0}")]
+    Hall(#[from] CorePrivateHallError),
     #[error("private-life session runtime failed: {0}")]
     Session(#[from] crate::CorePrivateLifeSessionError),
     #[error("private-life tick runtime failed: {0}")]
@@ -196,6 +206,6 @@ mod tests {
 
     #[test]
     fn danger_owner_graph_does_not_imply_normal_admission() {
-        assert!(!CorePrivateLifeAdmission::DORMANT.ready());
+        assert!(!CorePrivateLifeAdmission::HALL_COMPOSED.ready());
     }
 }
