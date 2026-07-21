@@ -2239,7 +2239,7 @@ mod tests {
         }
     }
 
-    fn live_microrealm() -> (
+    async fn live_microrealm() -> (
         CorePrivateRouteActorDirectory,
         CorePrivateRouteActorLease,
         CorePrivateMicrorealmRuntime,
@@ -2250,18 +2250,27 @@ mod tests {
                 authenticated(),
                 CorePrivateRouteActorSeed {
                     character_id: CHARACTER_ID,
-                    character_version: 2,
+                    character_version: 1,
                     content_revision: route_revision(),
                     world_flow_revision: world_revision(),
-                    position: CorePrivateRouteActorPosition {
-                        instance_lineage_id: Some(LINEAGE_ID),
-                        scene: CorePrivateRouteSceneV1::CoreMicrorealm,
-                        room: None,
-                        phase: CorePrivateRoutePhaseV1::MicrorealmDormant,
-                    },
+                    position: CorePrivateRouteActorPosition::hall(),
                 },
                 7,
             )
+            .unwrap();
+        routes
+            .reconcile_enter_microrealm(
+                lease,
+                crate::core_private_route_actor::CorePrivateRouteEnterMicrorealmTransition {
+                    transfer_id: [0x44; 16],
+                    source_character_version: 1,
+                    destination_character_version: 2,
+                    instance_lineage_id: LINEAGE_ID,
+                    entry_restore_point_id: [0x55; 16],
+                    content_revision: world_revision(),
+                },
+            )
+            .await
             .unwrap();
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content");
         let world = sim_content::load_core_development_world_flow(&root).unwrap();
@@ -2534,7 +2543,7 @@ mod tests {
             CorePrivateLifeSessionDirectory::new(Arc::clone(&recall))
                 .with_authoritative_tick_directory(Arc::clone(&ticks)),
         );
-        let (routes, route_lease, runtime) = live_microrealm();
+        let (routes, route_lease, runtime) = live_microrealm().await;
         recall
             .register_actor(authenticated(), route_lease, actor())
             .await
@@ -2635,7 +2644,7 @@ mod tests {
         let ticks = Arc::new(TickSource(AtomicU64::new(100)));
         let recall = Arc::new(CoreRecallActorDirectory::<FixedClock, _>::new(ticks));
         let sessions = Arc::new(CorePrivateLifeSessionDirectory::new(recall));
-        let (routes, route_lease, runtime) = live_microrealm();
+        let (routes, route_lease, runtime) = live_microrealm().await;
 
         let (first_server_endpoint, first_client_endpoint, first_client, first_server) =
             live_connection_pair().await;
@@ -2799,7 +2808,7 @@ mod tests {
         let ticks = Arc::new(TickSource(AtomicU64::new(100)));
         let recall = Arc::new(CoreRecallActorDirectory::<FixedClock, _>::new(ticks));
         let sessions = Arc::new(CorePrivateLifeSessionDirectory::new(recall));
-        let (routes, _route_lease, runtime) = live_microrealm();
+        let (routes, _route_lease, runtime) = live_microrealm().await;
         let (first_server_endpoint, first_client_endpoint, first_client, first_server) =
             live_connection_pair().await;
         let first = sessions
@@ -2895,7 +2904,7 @@ mod tests {
                 ExtractionClock,
             ),
         );
-        let (dummy_routes, _dummy_lease, runtime) = live_microrealm();
+        let (dummy_routes, _dummy_lease, runtime) = live_microrealm().await;
         let (first_server_endpoint, first_client_endpoint, first_client, first_server) =
             live_connection_pair().await;
         let attached = sessions
@@ -3195,7 +3204,7 @@ mod tests {
         let ticks = Arc::new(TickSource(AtomicU64::new(100)));
         let recall = Arc::new(CoreRecallActorDirectory::<FixedClock, _>::new(ticks));
         let sessions = Arc::new(CorePrivateLifeSessionDirectory::new(recall));
-        let (routes, route_lease, runtime) = live_microrealm();
+        let (routes, route_lease, runtime) = live_microrealm().await;
         let runtime =
             crate::core_private_microrealm_runtime::core_bell_ready_runtime_test_fixture(runtime);
         let (first_server_endpoint, first_client_endpoint, first_client, first_server) =

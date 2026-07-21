@@ -113,6 +113,7 @@ pub struct CorePrivateMicrorealmStep {
 pub struct CorePrivateMicrorealmRuntime {
     route_directory: CorePrivateRouteActorDirectory,
     route_lease: CorePrivateRouteActorLease,
+    danger_entry_authority: crate::CorePrivateDangerEntryAuthority,
     movement: PlayerMovementState,
     player_position: TilePoint,
     lifecycle: CoreMicrorealmSimulation,
@@ -148,7 +149,10 @@ impl CorePrivateMicrorealmRuntime {
         character_combat: CoreCharacterCombat,
     ) -> Result<Self, CorePrivateMicrorealmRuntimeError> {
         let route = route_directory.snapshot(route_lease)?;
+        let danger_entry_authority = route_directory.danger_entry_authority(route_lease)?;
         if route.content_revision != *expected_content_revision
+            || danger_entry_authority.route_content_revision() != expected_content_revision
+            || danger_entry_authority.route_lease() != route_lease
             || route.character_id != route_lease.character_id()
             || route.actor_generation != route_lease.actor_generation()
             || route.scene != CorePrivateRouteSceneV1::CoreMicrorealm
@@ -214,6 +218,7 @@ impl CorePrivateMicrorealmRuntime {
         Ok(Self {
             route_directory,
             route_lease,
+            danger_entry_authority,
             movement,
             player_position: scene.player_spawn,
             lifecycle,
@@ -228,6 +233,11 @@ impl CorePrivateMicrorealmRuntime {
     #[must_use]
     pub const fn route_lease(&self) -> CorePrivateRouteActorLease {
         self.route_lease
+    }
+
+    #[must_use]
+    pub const fn danger_entry_authority(&self) -> &crate::CorePrivateDangerEntryAuthority {
+        &self.danger_entry_authority
     }
 
     #[must_use]
@@ -664,6 +674,7 @@ mod tests {
     const ACCOUNT_ID: [u8; 16] = [0x11; 16];
     const CHARACTER_ID: [u8; 16] = [0x22; 16];
     const LINEAGE_ID: [u8; 16] = [0x33; 16];
+    const RESTORE_POINT_ID: [u8; 16] = [0x55; 16];
 
     fn hash(byte: char) -> ManifestHash {
         ManifestHash::new(byte.to_string().repeat(64)).expect("valid hash")
@@ -708,15 +719,10 @@ mod tests {
     fn seed() -> CorePrivateRouteActorSeed {
         CorePrivateRouteActorSeed {
             character_id: CHARACTER_ID,
-            character_version: 2,
+            character_version: 1,
             content_revision: route_revision(),
             world_flow_revision: world_revision(),
-            position: CorePrivateRouteActorPosition {
-                instance_lineage_id: Some(LINEAGE_ID),
-                scene: CorePrivateRouteSceneV1::CoreMicrorealm,
-                room: None,
-                phase: CorePrivateRoutePhaseV1::MicrorealmDormant,
-            },
+            position: CorePrivateRouteActorPosition::hall(),
         }
     }
 
@@ -735,10 +741,24 @@ mod tests {
         }
     }
 
-    fn runtime(
+    async fn runtime(
         directory: &CorePrivateRouteActorDirectory,
         lease: CorePrivateRouteActorLease,
     ) -> CorePrivateMicrorealmRuntime {
+        directory
+            .reconcile_enter_microrealm(
+                lease,
+                crate::core_private_route_actor::CorePrivateRouteEnterMicrorealmTransition {
+                    transfer_id: [0x44; 16],
+                    source_character_version: 1,
+                    destination_character_version: 2,
+                    instance_lineage_id: LINEAGE_ID,
+                    entry_restore_point_id: RESTORE_POINT_ID,
+                    content_revision: world_revision(),
+                },
+            )
+            .await
+            .expect("committed danger entry");
         let (scene, encounters, world) = content();
         CorePrivateMicrorealmRuntime::new(
             directory.clone(),
@@ -752,11 +772,11 @@ mod tests {
         .expect("live runtime")
     }
 
-    fn bell_ready_runtime(
+    async fn bell_ready_runtime(
         directory: &CorePrivateRouteActorDirectory,
         lease: CorePrivateRouteActorLease,
     ) -> CorePrivateMicrorealmRuntime {
-        core_bell_ready_runtime_test_fixture(runtime(directory, lease))
+        core_bell_ready_runtime_test_fixture(runtime(directory, lease).await)
     }
 
     async fn commit_bell_transition(
@@ -808,7 +828,7 @@ mod tests {
         let lease = directory
             .register_actor(authenticated(), seed(), 7)
             .expect("actor");
-        let mut runtime = runtime(&directory, lease);
+        let mut runtime = runtime(&directory, lease).await;
 
         let mut release = input(1);
         release.primary_held = true;
@@ -859,7 +879,7 @@ mod tests {
         let lease = directory
             .register_actor(authenticated(), seed(), 9)
             .expect("actor");
-        let mut runtime = runtime(&directory, lease);
+        let mut runtime = runtime(&directory, lease).await;
         let start = runtime.player_position();
         let mut movement = input(1);
         movement.movement = MovementAction::new(1, 0);
@@ -913,7 +933,7 @@ mod tests {
         let lease = directory
             .register_actor(authenticated(), seed(), 8)
             .expect("actor");
-        let mut runtime = runtime(&directory, lease);
+        let mut runtime = runtime(&directory, lease).await;
         let arena = runtime.combat.arena().expect("arena");
         let start = sim_core::SimulationVector::new(1.4, 20.0);
         runtime.movement =
@@ -972,7 +992,7 @@ mod tests {
         let lease = directory
             .register_actor(authenticated(), seed(), 11)
             .expect("actor");
-        let mut runtime = runtime(&directory, lease);
+        let mut runtime = runtime(&directory, lease).await;
         let start = runtime.player_position();
         directory
             .advance(
@@ -999,6 +1019,7 @@ mod tests {
             .register_actor(authenticated(), seed(), 6)
             .expect("actor");
         let combat = runtime(&directory, lease)
+            .await
             .into_character_combat()
             .expect("quiet handoff");
         assert_eq!(combat.character_id, CHARACTER_ID);
@@ -1016,7 +1037,7 @@ mod tests {
         let lease = directory
             .register_actor(authenticated(), seed(), 12)
             .expect("actor");
-        let runtime = bell_ready_runtime(&directory, lease);
+        let runtime = bell_ready_runtime(&directory, lease).await;
         let driver = CorePrivateMicrorealmDriver::spawn_without_terminal_owner(runtime);
         let handle = driver.handle();
         let state_reader = handle.observe();
@@ -1150,7 +1171,7 @@ mod tests {
         let lease = directory
             .register_actor(authenticated(), seed(), 13)
             .expect("actor");
-        let mut runtime = runtime(&directory, lease);
+        let mut runtime = runtime(&directory, lease).await;
         let spawn = runtime.player_position;
         let ordinary = CoreMicrorealmInput {
             entrant_position: spawn,

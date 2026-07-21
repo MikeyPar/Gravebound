@@ -182,11 +182,12 @@ pub use core_private_player_damage::{
     fixed_room_player_damage_facts, normal_wave_player_damage_facts,
 };
 pub use core_private_route_actor::{
-    CORE_PRIVATE_ROUTE_ACTOR_MAILBOX_CAPACITY, CorePrivateRouteActor, CorePrivateRouteActorAdvance,
-    CorePrivateRouteActorDirectory, CorePrivateRouteActorError, CorePrivateRouteActorLease,
-    CorePrivateRouteActorPosition, CorePrivateRouteActorSeed, CorePrivateRouteBellPermitLease,
-    CorePrivateRouteExtractionBinding, CorePrivateRouteExtractionExitBinding,
-    CorePrivateRouteExtractionPermit, CorePrivateRouteRuntimeError, CorePrivateRouteRuntimeReport,
+    CORE_PRIVATE_ROUTE_ACTOR_MAILBOX_CAPACITY, CorePrivateDangerEntryAuthority,
+    CorePrivateRouteActor, CorePrivateRouteActorAdvance, CorePrivateRouteActorDirectory,
+    CorePrivateRouteActorError, CorePrivateRouteActorLease, CorePrivateRouteActorPosition,
+    CorePrivateRouteActorSeed, CorePrivateRouteBellPermitLease, CorePrivateRouteExtractionBinding,
+    CorePrivateRouteExtractionExitBinding, CorePrivateRouteExtractionPermit,
+    CorePrivateRouteRuntimeError, CorePrivateRouteRuntimeReport,
 };
 pub use core_private_terminal_feed::{
     CorePrivateTerminalAcknowledgementError, CorePrivateTerminalDeliveryV1,

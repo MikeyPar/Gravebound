@@ -22,7 +22,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::{
     CoreBellPortalTransition, CoreDurableB3Resolution, CoreDurableBargainRestResolution,
-    CoreDurableCaldusResolution, CorePrivateCaldusRewardCommit,
+    CoreDurableCaldusResolution, CorePrivateCaldusRewardCommit, CorePrivateDangerEntryAuthority,
     CorePrivateFixedDungeonB3RewardCommit, CorePrivateFixedDungeonRestCommit,
     CorePrivatePlayerDamageFactV1, CorePrivateRouteActorLease, StoredTerminalReceipt,
     TerminalBinding, TerminalKind,
@@ -179,6 +179,16 @@ pub struct CorePrivateTerminalFeedBinding {
 }
 
 impl CorePrivateTerminalFeedBinding {
+    #[must_use]
+    pub fn from_danger_entry(authority: &CorePrivateDangerEntryAuthority) -> Self {
+        Self {
+            terminal: authority.terminal(),
+            route_lease: authority.route_lease(),
+            content_revision: authority.route_content_revision().clone(),
+        }
+    }
+
+    #[cfg(test)]
     pub fn new(
         terminal: TerminalBinding,
         route_lease: CorePrivateRouteActorLease,

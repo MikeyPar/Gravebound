@@ -18,7 +18,7 @@ use super::{CorePrivateRouteActor, CorePrivateRouteActorAdvance, CorePrivateRout
 use crate::{
     AuthenticatedAccount, AuthenticatedNamespace, CoreBellPortalAbortReason,
     CoreBellPortalAuthority, CoreBellPortalBinding, CoreBellPortalPermit,
-    CoreBellPortalPermitLease, CoreBellPortalRejection, CoreBellPortalTransition,
+    CoreBellPortalPermitLease, CoreBellPortalRejection, CoreBellPortalTransition, TerminalBinding,
 };
 
 pub const CORE_PRIVATE_ROUTE_ACTOR_MAILBOX_CAPACITY: usize = 64;
@@ -47,7 +47,53 @@ pub(crate) struct CorePrivateRouteEnterMicrorealmTransition {
     pub source_character_version: u64,
     pub destination_character_version: u64,
     pub instance_lineage_id: [u8; 16],
+    pub entry_restore_point_id: [u8; 16],
     pub content_revision: WorldFlowContentRevisionV1,
+}
+
+/// Opaque proof that one authenticated actor generation reconciled the exact committed Realm
+/// Gate receipt. Terminal systems consume this value instead of assembling account, character,
+/// lineage, restore-point, generation, and content authority independently.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CorePrivateDangerEntryAuthority {
+    terminal: TerminalBinding,
+    route_lease: CorePrivateRouteActorLease,
+    route_content_revision: CorePrivateRouteContentRevisionV1,
+    world_flow_revision: WorldFlowContentRevisionV1,
+    transfer_id: [u8; 16],
+    entry_character_version: u64,
+}
+
+impl CorePrivateDangerEntryAuthority {
+    #[must_use]
+    pub const fn terminal(&self) -> TerminalBinding {
+        self.terminal
+    }
+
+    #[must_use]
+    pub const fn route_lease(&self) -> CorePrivateRouteActorLease {
+        self.route_lease
+    }
+
+    #[must_use]
+    pub const fn route_content_revision(&self) -> &CorePrivateRouteContentRevisionV1 {
+        &self.route_content_revision
+    }
+
+    #[must_use]
+    pub const fn world_flow_revision(&self) -> &WorldFlowContentRevisionV1 {
+        &self.world_flow_revision
+    }
+
+    #[must_use]
+    pub const fn transfer_id(&self) -> [u8; 16] {
+        self.transfer_id
+    }
+
+    #[must_use]
+    pub const fn entry_character_version(&self) -> u64 {
+        self.entry_character_version
+    }
 }
 
 /// Durable Hall-to-Character-Select transition material. Character Select has no route actor, so
@@ -728,6 +774,51 @@ impl CorePrivateRouteActorDirectory {
         self.actor_handle(lease)?
             .reconcile_enter_microrealm(transition)
             .await
+    }
+
+    /// Returns the immutable terminal binding only after the exact committed entry has been
+    /// reconciled into this live actor generation. Hall, stale-generation, foreign, retired, and
+    /// partially reconciled routes fail closed.
+    pub fn danger_entry_authority(
+        &self,
+        lease: CorePrivateRouteActorLease,
+    ) -> Result<CorePrivateDangerEntryAuthority, CorePrivateRouteRuntimeError> {
+        let control = self.actor_control(lease)?;
+        let control = lock(&control);
+        if control.retired {
+            return Err(CorePrivateRouteRuntimeError::Retired);
+        }
+        let transition = control
+            .enter_microrealm_reconciliation
+            .as_ref()
+            .ok_or(CorePrivateRouteRuntimeError::StaleRouteState)?;
+        let projection = control.actor.projection();
+        if projection.actor_generation != lease.actor_generation
+            || projection.character_id != lease.character_id()
+            || projection.character_version != transition.destination_character_version
+            || projection.scene != CorePrivateRouteSceneV1::CoreMicrorealm
+            || projection.room.is_some()
+            || projection.instance_lineage_id != Some(transition.instance_lineage_id)
+            || projection.content_revision.validate().is_err()
+            || control.actor.world_flow_revision() != &transition.content_revision
+        {
+            return Err(CorePrivateRouteRuntimeError::StaleRouteState);
+        }
+        let terminal = TerminalBinding::new(
+            lease.account_id(),
+            lease.character_id(),
+            transition.instance_lineage_id,
+            transition.entry_restore_point_id,
+        )
+        .map_err(|_| CorePrivateRouteRuntimeError::InvalidActorBinding)?;
+        Ok(CorePrivateDangerEntryAuthority {
+            terminal,
+            route_lease: lease,
+            route_content_revision: projection.content_revision.clone(),
+            world_flow_revision: transition.content_revision.clone(),
+            transfer_id: transition.transfer_id,
+            entry_character_version: transition.destination_character_version,
+        })
     }
 
     /// Retires the exact Hall actor after a committed return to Character Select. The transition
@@ -2133,6 +2224,7 @@ fn validate_enter_microrealm_transition(
 ) -> Result<(), CorePrivateRouteRuntimeError> {
     if transition.transfer_id == [0; 16]
         || transition.instance_lineage_id == [0; 16]
+        || transition.entry_restore_point_id == [0; 16]
         || transition.source_character_version == 0
         || transition.source_character_version.checked_add(1)
             != Some(transition.destination_character_version)

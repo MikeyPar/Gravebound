@@ -400,7 +400,7 @@ where
                 let CharacterLocation::Danger {
                     location_id,
                     instance_lineage_id,
-                    ..
+                    entry_restore_point_id,
                 } = &snapshot.location
                 else {
                     return Err(CorePrivateLifeBootstrapError::RetainedActorMismatch);
@@ -419,10 +419,12 @@ where
                             source_character_version: mutation.expected_character_version,
                             destination_character_version: snapshot.character_version,
                             instance_lineage_id: *instance_lineage_id,
+                            entry_restore_point_id: *entry_restore_point_id,
                             content_revision: mutation.payload.content_revision.clone(),
                         },
                     )
                     .await?;
+                self.route_directory.danger_entry_authority(lease)?;
                 Ok(())
             }
             WorldTransferCommand::UsePortal { .. }
@@ -907,10 +909,36 @@ mod tests {
             .reconcile_committed_world_transition(authenticated(), &mutation, &result)
             .await
             .unwrap();
+        let lease = adapter
+            .retained_route(authenticated().account_id.as_bytes())
+            .expect("committed entry retains exact route generation");
+        let authority = directory
+            .danger_entry_authority(lease)
+            .expect("committed entry publishes terminal danger authority");
+        assert_eq!(authority.terminal().lineage_id(), &[8; 16]);
+        assert_eq!(authority.terminal().restore_point_id(), &[9; 16]);
+        assert_eq!(authority.transfer_id(), [10; 16]);
         adapter
             .reconcile_committed_world_transition(authenticated(), &mutation, &result)
             .await
             .unwrap();
+
+        let changed_restore = accepted_result(
+            CharacterLocation::Danger {
+                location_id: WireText::new("world.core_microrealm_01").unwrap(),
+                instance_lineage_id: [8; 16],
+                entry_restore_point_id: [12; 16],
+            },
+            [10; 16],
+        );
+        assert!(matches!(
+            adapter
+                .reconcile_committed_world_transition(authenticated(), &mutation, &changed_restore)
+                .await,
+            Err(CorePrivateLifeBootstrapError::Route(
+                CorePrivateRouteRuntimeError::StaleRouteState
+            ))
+        ));
 
         let changed = accepted_result(
             CharacterLocation::Danger {

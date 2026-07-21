@@ -14,10 +14,10 @@ mod state;
 mod tests;
 
 pub use directory::{
-    CORE_PRIVATE_ROUTE_ACTOR_MAILBOX_CAPACITY, CorePrivateRouteActorDirectory,
-    CorePrivateRouteActorLease, CorePrivateRouteBellPermitLease, CorePrivateRouteExtractionBinding,
-    CorePrivateRouteExtractionExitBinding, CorePrivateRouteExtractionPermit,
-    CorePrivateRouteRuntimeError, CorePrivateRouteRuntimeReport,
+    CORE_PRIVATE_ROUTE_ACTOR_MAILBOX_CAPACITY, CorePrivateDangerEntryAuthority,
+    CorePrivateRouteActorDirectory, CorePrivateRouteActorLease, CorePrivateRouteBellPermitLease,
+    CorePrivateRouteExtractionBinding, CorePrivateRouteExtractionExitBinding,
+    CorePrivateRouteExtractionPermit, CorePrivateRouteRuntimeError, CorePrivateRouteRuntimeReport,
 };
 pub(crate) use directory::{
     CorePrivateRouteEnterMicrorealmTransition, CorePrivateRouteReturnToCharacterSelectTransition,

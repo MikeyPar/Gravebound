@@ -520,6 +520,7 @@ async fn committed_microrealm_entry_reconciles_once_and_exact_replay_never_rewin
         source_character_version: 4,
         destination_character_version: 5,
         instance_lineage_id: LINEAGE_ID,
+        entry_restore_point_id: [73; 16],
         content_revision: world_revision(),
     };
 
@@ -531,6 +532,15 @@ async fn committed_microrealm_entry_reconciles_once_and_exact_replay_never_rewin
     assert_eq!(entered.instance_lineage_id, Some(LINEAGE_ID));
     assert_eq!(entered.scene, CorePrivateRouteSceneV1::CoreMicrorealm);
     assert_eq!(entered.phase, CorePrivateRoutePhaseV1::MicrorealmDormant);
+    let authority = directory
+        .danger_entry_authority(lease)
+        .expect("committed entry publishes opaque danger authority");
+    assert_eq!(authority.terminal().account_id(), &ACCOUNT_ID);
+    assert_eq!(authority.terminal().character_id(), &CHARACTER_ID);
+    assert_eq!(authority.terminal().lineage_id(), &LINEAGE_ID);
+    assert_eq!(authority.terminal().restore_point_id(), &[73; 16]);
+    assert_eq!(authority.route_lease(), lease);
+    assert_eq!(authority.entry_character_version(), 5);
 
     directory
         .advance(lease, CorePrivateRouteActorAdvance::MicrorealmWaiting)
@@ -557,6 +567,14 @@ async fn committed_microrealm_entry_reconciles_once_and_exact_replay_never_rewin
     assert!(matches!(
         directory
             .reconcile_enter_microrealm(lease, changed_lineage)
+            .await,
+        Err(CorePrivateRouteRuntimeError::StaleRouteState)
+    ));
+    let mut changed_restore = transition.clone();
+    changed_restore.entry_restore_point_id = [74; 16];
+    assert!(matches!(
+        directory
+            .reconcile_enter_microrealm(lease, changed_restore)
             .await,
         Err(CorePrivateRouteRuntimeError::StaleRouteState)
     ));
