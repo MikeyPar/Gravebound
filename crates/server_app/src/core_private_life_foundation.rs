@@ -61,7 +61,7 @@ impl crate::ProductionRecallClock for SystemIdentityClock {
     }
 }
 
-type PersistentIdentity = IdentityService<
+pub(crate) type PersistentIdentity = IdentityService<
     PostgresAccountRepository,
     SystemIdentityClock,
     Blake3CharacterIds,
@@ -284,6 +284,40 @@ impl CorePrivateLifePersistentFoundation {
 
     pub(crate) fn world_flow(&self) -> Arc<PersistentWorldFlow> {
         Arc::clone(&self.world_flow)
+    }
+
+    pub(crate) fn identity(&self) -> Arc<PersistentIdentity> {
+        Arc::clone(&self.identity)
+    }
+
+    pub(crate) fn progression(
+        &self,
+    ) -> Arc<ProgressionQueryService<PostgresProgressionQueryRepository>> {
+        Arc::clone(&self.progression)
+    }
+
+    pub(crate) fn death_views(&self) -> Arc<DeathViewService<PostgresDeathViewRepository>> {
+        Arc::clone(&self.death_views)
+    }
+
+    pub(crate) fn oath(&self) -> Arc<CoreOathSelectionAuthority<SystemIdentityClock>> {
+        Arc::clone(&self.oath)
+    }
+
+    pub(crate) fn bargain(&self) -> Arc<CoreBargainAuthority<SystemIdentityClock>> {
+        Arc::clone(&self.bargain)
+    }
+
+    pub(crate) fn safe_inventory(&self) -> Arc<CoreSafeInventoryAuthority> {
+        Arc::clone(&self.safe_inventory)
+    }
+
+    pub(crate) fn resolution_hold(&self) -> Arc<CoreResolutionHoldAuthority> {
+        Arc::clone(&self.resolution_hold)
+    }
+
+    pub(crate) fn successor(&self) -> Arc<CoreSuccessorAuthority> {
+        Arc::clone(&self.successor)
     }
 
     pub(crate) fn content(&self) -> Arc<sim_content::CorePrivateLifeContent> {

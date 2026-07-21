@@ -67,6 +67,7 @@ pub(crate) struct CorePrivateLifeProcess {
     foundation: Arc<CorePrivateLifePersistentFoundation>,
     sessions: Arc<PersistentSessionDirectory>,
     recall: Arc<PersistentRecallDirectory>,
+    extraction: Arc<PersistentExtractionDirectory>,
     ticks: Arc<CorePrivateLifeTickDirectory>,
     hall: Arc<CorePrivateHallDirectory>,
     combat: Arc<CoreCharacterCombatFactory>,
@@ -96,7 +97,7 @@ impl CorePrivateLifeProcess {
         let extraction = Arc::new(PersistentExtractionDirectory::new(Arc::clone(&ticks)));
         let sessions = CorePrivateLifeSessionDirectory::with_caldus_extraction_runtime(
             Arc::clone(&recall),
-            extraction,
+            Arc::clone(&extraction),
             persistence.clone(),
             SystemIdentityClock,
         )
@@ -116,6 +117,7 @@ impl CorePrivateLifeProcess {
             foundation,
             sessions: Arc::new(sessions),
             recall,
+            extraction,
             ticks,
             hall: Arc::new(CorePrivateHallDirectory::load(content_root)?),
             combat: Arc::new(CoreCharacterCombatFactory::load(persistence, content_root)?),
@@ -133,6 +135,60 @@ impl CorePrivateLifeProcess {
     #[must_use]
     pub(crate) fn sessions(&self) -> &Arc<PersistentSessionDirectory> {
         &self.sessions
+    }
+
+    #[must_use]
+    pub(crate) fn identity(&self) -> Arc<crate::core_private_life_foundation::PersistentIdentity> {
+        self.foundation.identity()
+    }
+
+    #[must_use]
+    pub(crate) fn progression(
+        &self,
+    ) -> Arc<crate::ProgressionQueryService<crate::PostgresProgressionQueryRepository>> {
+        self.foundation.progression()
+    }
+
+    #[must_use]
+    pub(crate) fn death_views(
+        &self,
+    ) -> Arc<crate::DeathViewService<crate::PostgresDeathViewRepository>> {
+        self.foundation.death_views()
+    }
+
+    #[must_use]
+    pub(crate) fn oath(&self) -> Arc<crate::CoreOathSelectionAuthority<SystemIdentityClock>> {
+        self.foundation.oath()
+    }
+
+    #[must_use]
+    pub(crate) fn bargain(&self) -> Arc<crate::CoreBargainAuthority<SystemIdentityClock>> {
+        self.foundation.bargain()
+    }
+
+    #[must_use]
+    pub(crate) fn safe_inventory(&self) -> Arc<crate::CoreSafeInventoryAuthority> {
+        self.foundation.safe_inventory()
+    }
+
+    #[must_use]
+    pub(crate) fn resolution_hold(&self) -> Arc<crate::CoreResolutionHoldAuthority> {
+        self.foundation.resolution_hold()
+    }
+
+    #[must_use]
+    pub(crate) fn successor(&self) -> Arc<crate::CoreSuccessorAuthority> {
+        self.foundation.successor()
+    }
+
+    #[must_use]
+    pub(crate) fn recall(&self) -> &Arc<PersistentRecallDirectory> {
+        &self.recall
+    }
+
+    #[must_use]
+    pub(crate) fn extraction(&self) -> &Arc<PersistentExtractionDirectory> {
+        &self.extraction
     }
 
     #[must_use]
@@ -303,6 +359,35 @@ impl CorePrivateLifeProcess {
                 let _ = self.sessions.unbind_recall(transport).await;
                 Err(error.into())
             }
+        }
+    }
+
+    /// Refreshes durable Character Select/Hall/terminal state after an acknowledged identity or
+    /// non-danger transition. A danger transition must use `enter_committed_microrealm` instead.
+    pub(crate) async fn refresh_transport(
+        &self,
+        authenticated: crate::AuthenticatedAccount,
+        transport: CorePrivateLifeTransportLease,
+        expected_writer: &Arc<CoreReliableWriter>,
+    ) -> Result<CorePrivateLifeProcessDisposition, CorePrivateLifeProcessError> {
+        let bootstrap = self
+            .foundation
+            .runtime_bootstrap()
+            .refresh_after_identity_or_transition(authenticated, transport, self.sessions.as_ref())
+            .await?;
+        if !Arc::ptr_eq(&bootstrap.writer, expected_writer) {
+            return Err(CorePrivateLifeProcessError::SplitReliableWriter);
+        }
+        match bootstrap.disposition {
+            crate::CorePrivateLifeBootstrapDisposition::HallReady { hall, route } => {
+                let actor = self.hall.install_stored(authenticated, &hall)?;
+                if let Err(error) = self.hall.attach_transport(authenticated, actor, transport) {
+                    let _ = self.hall.retire(actor);
+                    return Err(error.into());
+                }
+                Ok(CorePrivateLifeProcessDisposition::Hall { hall, route, actor })
+            }
+            disposition => Ok(CorePrivateLifeProcessDisposition::Bootstrap(disposition)),
         }
     }
 
