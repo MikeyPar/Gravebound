@@ -752,8 +752,8 @@ fn build_echo_projection(
     };
     Some(EligibleEchoProjection {
         echo_id: identity.echo_id,
-        appearance_snapshot_id: "appearance.default.grave_arbalist".into(),
-        appearance_theme_id: "theme.echo.arbalist_ash".into(),
+        appearance_snapshot_id: persistence::CORE_ECHO_BASE_SILHOUETTE_ID.into(),
+        appearance_theme_id: persistence::CORE_ECHO_PRESENTATION_PLACEHOLDER_ID.into(),
         weapon_signature_tag: None,
         relic_signature_tag: None,
         deed_tags: vec![DEED_ID.into()],

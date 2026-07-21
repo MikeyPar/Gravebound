@@ -1378,8 +1378,8 @@ pub(crate) mod tests {
             terminal_trace,
             echo: Some(EligibleEchoProjection {
                 echo_id: uuid_v7(11),
-                appearance_snapshot_id: "appearance.default.grave_arbalist".into(),
-                appearance_theme_id: "theme.echo.arbalist_ash".into(),
+                appearance_snapshot_id: persistence::CORE_ECHO_BASE_SILHOUETTE_ID.into(),
+                appearance_theme_id: persistence::CORE_ECHO_PRESENTATION_PLACEHOLDER_ID.into(),
                 weapon_signature_tag: Some("signature.weapon.bow".into()),
                 relic_signature_tag: None,
                 deed_tags: vec!["deed.core.sir_caldus_defeated".into()],

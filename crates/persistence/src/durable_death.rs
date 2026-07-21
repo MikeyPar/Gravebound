@@ -29,6 +29,13 @@ pub const CORE_DEATH_VIEW_ASSETS_BLAKE3: &str =
 pub const CORE_DEATH_VIEW_LOCALIZATION_BLAKE3: &str =
     "c10bcc96887aac7db8c855f19d991e6185f46d1df39f7a37d3a31cb4b9ca1b92";
 
+/// Core has no stage-legal production appearance or Echo-theme record. Under the approved
+/// `SPEC-CONFLICT-004` resolution both legacy Echo compatibility fields therefore snapshot the
+/// one locked, non-entitlement base silhouette. The wipeable Core record is never migrated into a
+/// later production appearance entitlement.
+pub const CORE_ECHO_BASE_SILHOUETTE_ID: &str = "sprite.class.grave_arbalist";
+pub const CORE_ECHO_PRESENTATION_PLACEHOLDER_ID: &str = CORE_ECHO_BASE_SILHOUETTE_ID;
+
 const PLAN_HASH_CONTEXT: &str = "gravebound.durable-death.plan.v1";
 const REQUEST_HASH_CONTEXT: &str = "gravebound.durable-death.request.v1";
 const TRACE_HASH_CONTEXT: &str = "gravebound.durable-death.trace.v1";
@@ -1365,8 +1372,8 @@ fn validate_echo(plan: &AuthoritativeDeathPlanV1) -> Result<(), PersistenceError
         || echo.oath_id != plan.summary.oath_id
         || echo.level != 10
         || echo.class_id != "class.grave_arbalist"
-        || echo.appearance_snapshot_id != "appearance.default.grave_arbalist"
-        || echo.appearance_theme_id != "theme.echo.arbalist_ash"
+        || echo.appearance_snapshot_id != CORE_ECHO_BASE_SILHOUETTE_ID
+        || echo.appearance_theme_id != CORE_ECHO_PRESENTATION_PLACEHOLDER_ID
         || !valid_optional_id(echo.weapon_signature_tag.as_deref())
         || !valid_optional_id(echo.relic_signature_tag.as_deref())
         || echo.bargains != plan.summary.bargains
@@ -1952,8 +1959,8 @@ pub(crate) mod tests {
             class_id: request.plan.summary.class_id.clone(),
             oath_id: request.plan.summary.oath_id.clone(),
             level: 10,
-            appearance_snapshot_id: "appearance.default.grave_arbalist".into(),
-            appearance_theme_id: "theme.echo.arbalist_ash".into(),
+            appearance_snapshot_id: CORE_ECHO_BASE_SILHOUETTE_ID.into(),
+            appearance_theme_id: CORE_ECHO_PRESENTATION_PLACEHOLDER_ID.into(),
             weapon_signature_tag: Some("signature.weapon.bow".into()),
             relic_signature_tag: Some("signature.relic.bell".into()),
             bargains: request.plan.summary.bargains.clone(),
@@ -2078,6 +2085,24 @@ pub(crate) mod tests {
             .unwrap()
             .ordinal = 0;
         assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn core_echo_snapshots_use_only_the_approved_non_entitlement_silhouette() {
+        let mut request = valid_request();
+        enable_new_echo_promotion(&mut request);
+        request.validate().unwrap();
+        let echo = &request.plan.echo.as_ref().unwrap().created;
+        assert_eq!(echo.appearance_snapshot_id, CORE_ECHO_BASE_SILHOUETTE_ID);
+        assert_eq!(
+            echo.appearance_theme_id,
+            CORE_ECHO_PRESENTATION_PLACEHOLDER_ID
+        );
+
+        let echo = &mut request.plan.echo.as_mut().unwrap().created;
+        echo.appearance_snapshot_id = "appearance.default.grave_arbalist".into();
+        echo.snapshot_digest = echo.expected_snapshot_digest().unwrap();
+        assert!(request.plan.validate().is_err());
     }
 
     #[test]

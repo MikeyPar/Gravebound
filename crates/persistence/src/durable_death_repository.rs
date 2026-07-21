@@ -3539,6 +3539,16 @@ mod tests {
     fn echo_power_is_recomputed_from_locked_equipment_at_exact_band_boundaries() {
         assert_eq!(expected_echo_power_band(10, &BTreeMap::new()).unwrap(), 1);
         assert_eq!(
+            expected_echo_power_band(10, &equipped_power_items(7, 0)).unwrap(),
+            1,
+            "level-seven Worn equipment remains below the first boundary"
+        );
+        assert_eq!(
+            expected_echo_power_band(10, &equipped_power_items(7, 5)).unwrap(),
+            2,
+            "BlackUnique receives the exact CONT-ECHO-001 +30 tenths"
+        );
+        assert_eq!(
             expected_echo_power_band(10, &equipped_power_items(8, 0)).unwrap(),
             2
         );

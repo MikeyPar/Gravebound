@@ -38,8 +38,8 @@ const CORE_HERO_LABEL_KEY: &str = "hero.core.grave_arbalist";
 const CORE_MEMORIAL_PRESENTATION_KEY: &str = "memorial.presentation.core_default";
 const CORE_DANGER_CONTENT_ID: &str = "world.core_microrealm_01";
 const CORE_PRIVATE_LAYOUT_ID: &str = "layout.core_private_life_01";
-const CORE_ECHO_APPEARANCE_ID: &str = "appearance.default.grave_arbalist";
-const CORE_ECHO_THEME_ID: &str = "theme.echo.arbalist_ash";
+const CORE_ECHO_APPEARANCE_ID: &str = persistence::CORE_ECHO_BASE_SILHOUETTE_ID;
+const CORE_ECHO_THEME_ID: &str = persistence::CORE_ECHO_PRESENTATION_PLACEHOLDER_ID;
 
 /// Exact process-owned authority presented by the private-route terminal owner.
 #[derive(Debug, Clone, PartialEq, Eq)]

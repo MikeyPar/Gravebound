@@ -979,8 +979,8 @@ fn request(ids: RequestIds) -> DurableDeathCommitRequestV1 {
         class_id: summary.class_id.clone(),
         oath_id: None,
         level: 10,
-        appearance_snapshot_id: "appearance.default.grave_arbalist".into(),
-        appearance_theme_id: "theme.echo.arbalist_ash".into(),
+        appearance_snapshot_id: persistence::CORE_ECHO_BASE_SILHOUETTE_ID.into(),
+        appearance_theme_id: persistence::CORE_ECHO_PRESENTATION_PLACEHOLDER_ID.into(),
         weapon_signature_tag: None,
         relic_signature_tag: None,
         bargains: vec![],
@@ -3359,6 +3359,59 @@ async fn safe_equipped_item_in_danger_fails_closed_without_terminal_writes() {
     assert_eq!(restored, 1);
     transaction.commit().await.unwrap();
     assert_rollback_pristine(&persistence).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires explicitly authorized disposable PostgreSQL"]
+async fn black_unique_equipment_uses_the_repaired_atomic_echo_power_band() {
+    // Authorities: GDD ECH-002/TECH-022, Content Spec CONT-ECHO-001, and roadmap
+    // GB-M03-06/13 require the locked pre-destruction item state and deferred SQL graph to agree.
+    let persistence = disposable_database().await;
+    let content = content_authority();
+    reset_fixture(&persistence).await;
+
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let changed = sqlx::query(
+        "UPDATE item_instances SET item_level=20,rarity=5 WHERE namespace_id=$1 AND account_id=$2 \
+         AND character_id=$3 AND item_uid=$4 AND location_kind=0 AND security_state=1",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(CHARACTER_ID.as_slice())
+    .bind(ITEM_UID.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap()
+    .rows_affected();
+    assert_eq!(changed, 1);
+    transaction.commit().await.unwrap();
+
+    let mut plan = request(RequestIds::primary()).plan;
+    let echo = plan.echo.as_mut().expect("qualifying death has an Echo");
+    echo.created.power_band = 2;
+    echo.created.snapshot_digest = echo.created.expected_snapshot_digest().unwrap();
+    let death = DurableDeathCommitRequestV1::seal(plan, ISSUED_AT_UNIX_MS).unwrap();
+    let evidence = seed_hosted_death_trace(&persistence, &death).await;
+    let promotion = evidence.promotion_for(&death);
+
+    assert!(matches!(
+        persistence
+            .transact_durable_death(&death, &content, &promotion)
+            .await
+            .unwrap(),
+        DurableDeathTransactionV1::Fresh(_)
+    ));
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let stored_band: i16 = sqlx::query_scalar(
+        "SELECT power_band FROM echo_records WHERE namespace_id=$1 AND echo_id=$2",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(RequestIds::primary().echo_id.as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    transaction.rollback().await.unwrap();
+    assert_eq!(stored_band, 2);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
