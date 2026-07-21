@@ -47,4 +47,4 @@ Per the owner's reduced-test instruction, full workspace, hosted PostgreSQL/QUIC
 
 ## Current Next Step
 
-Compose the completed five-producer owner into ordinary authenticated dispatch and capability admission for the full private loop. Keep normal admission disabled until that composition is production-ready; run the deferred hosted PostgreSQL/QUIC, restart, response-loss, shutdown, journey, performance, and visual audit after implementation completion.
+Commits `03b0cdb` and `aeb2033` now place this owner inside the dormant all-or-nothing private-life process and close the server-owned Hall movement/Realm Gate range prerequisite. Next implement the dedicated bound normal server, terminal-first session attach, Hall-permit-wrapped durable Gate dispatch, post-commit danger binding, and shared-writer route publication. Keep normal admission disabled until the matching native client state is production-ready; run the deferred hosted PostgreSQL/QUIC, restart, response-loss, shutdown, journey, performance, and visual audit after implementation completion.
