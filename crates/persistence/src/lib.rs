@@ -43,6 +43,7 @@ mod life_deed_repository;
 mod lifecycle_signature;
 mod live_damage_trace_repository;
 mod oath;
+mod private_death_context_repository;
 mod private_life_bootstrap;
 mod private_route_generation;
 mod production_extraction_intent;
@@ -212,6 +213,12 @@ pub use live_damage_trace_repository::{
 pub use oath::{
     OathSelectionTransaction, OathSelectionTransactionState, StoredCharacterLifeEvent,
     StoredOathCharacter, StoredOathInventory, StoredOathMutationResult,
+};
+pub use private_death_context_repository::{
+    PrivateDeathPlanningRequestV1, StoredPrivateDeathClockV1, StoredPrivateDeathCustodyItemV1,
+    StoredPrivateDeathDeedKindV1, StoredPrivateDeathDeedV1, StoredPrivateDeathDeedsV1,
+    StoredPrivateDeathEchoQueueV1, StoredPrivateDeathPlanningSnapshotV1,
+    StoredPrivateDeathRunMaterialV1,
 };
 pub use private_life_bootstrap::{
     CURRENT_DANGER_EXTRACTION_SNAPSHOT_SCHEMA_VERSION_V1, MAX_CURRENT_DANGER_PENDING_ITEMS_V1,
