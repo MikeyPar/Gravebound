@@ -101,7 +101,17 @@ impl DormantNormalAdmission {
         recall: false,
     };
 
+    const ENABLED: Self = Self {
+        world_flow: true,
+        extraction: true,
+        recall: true,
+    };
+
     const fn normal_route_enabled(self) -> bool {
+        self.world_flow && self.extraction && self.recall
+    }
+
+    const fn any_enabled(self) -> bool {
         self.world_flow || self.extraction || self.recall
     }
 }
@@ -278,6 +288,11 @@ impl CorePrivateLifePersistentFoundation {
         self.admission.normal_route_enabled()
     }
 
+    pub(crate) fn activate_normal_route(mut self) -> Self {
+        self.admission = DormantNormalAdmission::ENABLED;
+        self
+    }
+
     pub(crate) fn terminal_owner_factory(&self) -> Arc<PostgresCorePrivateTerminalOwnerFactory> {
         Arc::clone(&self.terminal_owner_factory)
     }
@@ -348,7 +363,7 @@ impl CorePrivateLifePersistentFoundation {
 
     fn validate_dormant(&self) -> Result<(), CorePrivateLifeFoundationError> {
         let revision = self.content.revision();
-        if self.normal_route_enabled()
+        if self.admission.any_enabled()
             || !valid_hash(&revision.records_blake3)
             || !valid_hash(&revision.assets_blake3)
             || !valid_hash(&revision.localization_blake3)

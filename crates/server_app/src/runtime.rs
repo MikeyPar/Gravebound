@@ -46,6 +46,8 @@ use crate::{
         CorePrivateLifeFoundationError, CorePrivateLifePersistentFoundation, SystemIdentityClock,
         load_death_view_revision,
     },
+    core_private_life_process::{CorePrivateLifeProcess, CorePrivateLifeProcessError},
+    core_private_life_server::{CorePrivateLifeServerError, serve_core_private_life_connection},
     serve_core_reliable,
 };
 
@@ -475,6 +477,169 @@ pub struct CoreIdentityServerReport {
     pub remaining_open_connections: usize,
     pub zero_residue: bool,
     pub persistence_enabled: bool,
+}
+
+/// Persistent normal-route endpoint. Construction owns the entire private-life process graph and
+/// publishes capabilities only after transport and native-client admission are both composed.
+pub struct BoundCorePrivateLifeServer {
+    endpoint: quinn::Endpoint,
+    certificate: CertificateDer<'static>,
+    local_address: SocketAddr,
+    policy: HandshakePolicy,
+    process: Arc<CorePrivateLifeProcess>,
+}
+
+impl fmt::Debug for BoundCorePrivateLifeServer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BoundCorePrivateLifeServer")
+            .field("local_address", &self.local_address)
+            .field("policy", &self.policy)
+            .field("admission_ready", &self.process.admission_ready())
+            .finish_non_exhaustive()
+    }
+}
+
+impl BoundCorePrivateLifeServer {
+    pub fn bind_persistent(
+        config: &CoreIdentityServerConfig,
+        persistence: persistence::PostgresPersistence,
+        reward_epoch: crate::SecretRewardEpoch,
+    ) -> Result<Self, LocalServerRuntimeError> {
+        let (_, source_report) = sim_content::load_and_validate(&config.content_root)
+            .map_err(|error| LocalServerRuntimeError::Content(error.to_string()))?;
+        let required_manifest_hash = ManifestHash::new(source_report.package_hash_blake3)?;
+        let foundation = Arc::new(
+            CorePrivateLifePersistentFoundation::new(&config.content_root, persistence.clone())?
+                .activate_normal_route(),
+        );
+        let process = Arc::new(CorePrivateLifeProcess::compose_normal_route(
+            foundation,
+            persistence,
+            &config.content_root,
+            reward_epoch,
+        )?);
+        let CertifiedKey { cert, signing_key } =
+            generate_simple_self_signed(vec![LOCAL_SERVER_NAME.to_owned()])?;
+        let certificate = cert.der().clone();
+        let private_key = PrivatePkcs8KeyDer::from(signing_key.serialize_der());
+        let server_config =
+            quinn::ServerConfig::with_single_cert(vec![certificate.clone()], private_key.into())?;
+        let endpoint = quinn::Endpoint::server(server_config, config.bind_address)?;
+        let local_address = endpoint.local_addr()?;
+        let policy = HandshakePolicy {
+            required_protocol: ProtocolVersion::current(),
+            required_client_build: WireText::new(CORE_IDENTITY_BUILD_ID)?,
+            required_manifest_hash,
+            content_bundle_version: WireText::new(CORE_IDENTITY_CONTENT_TARGET)?,
+            region_id: WireText::new(LOCAL_REGION_ID)?,
+            feature_flags: vec![
+                WireText::new(CORE_TEST_IDENTITY_FEATURE_FLAG)?,
+                WireText::new(protocol::CORE_WORLD_FLOW_FEATURE_FLAG)?,
+                WireText::new(protocol::CORE_SAFE_INVENTORY_FEATURE_FLAG)?,
+                WireText::new(protocol::CORE_DEATH_VIEW_FEATURE_FLAG)?,
+                WireText::new(protocol::CORE_EXTRACTION_TERMINAL_FEATURE_FLAG)?,
+                WireText::new(protocol::CORE_RECALL_TERMINAL_FEATURE_FLAG)?,
+                WireText::new(protocol::CORE_RESOLUTION_HOLD_FEATURE_FLAG)?,
+                WireText::new(protocol::CORE_SUCCESSOR_FEATURE_FLAG)?,
+            ],
+            admission: AdmissionState::Available,
+        };
+        Ok(Self {
+            endpoint,
+            certificate,
+            local_address,
+            policy,
+            process,
+        })
+    }
+
+    #[must_use]
+    pub const fn local_address(&self) -> SocketAddr {
+        self.local_address
+    }
+
+    #[must_use]
+    pub fn certificate_der(&self) -> &[u8] {
+        self.certificate.as_ref()
+    }
+
+    pub async fn serve_until<F>(
+        self,
+        shutdown: F,
+    ) -> Result<CoreIdentityServerReport, LocalServerRuntimeError>
+    where
+        F: Future<Output = ()>,
+    {
+        let accepted = Arc::new(AtomicU64::new(0));
+        let rejected = Arc::new(AtomicU64::new(0));
+        let failed = Arc::new(AtomicU64::new(0));
+        let mut completed_connection_tasks = 0_u64;
+        let mut workers = JoinSet::new();
+        tokio::pin!(shutdown);
+        loop {
+            tokio::select! {
+                biased;
+                () = &mut shutdown => break,
+                incoming = self.endpoint.accept() => {
+                    let Some(incoming) = incoming else { break };
+                    let policy = self.policy.clone();
+                    let process = Arc::clone(&self.process);
+                    let accepted = Arc::clone(&accepted);
+                    let rejected = Arc::clone(&rejected);
+                    let failed = Arc::clone(&failed);
+                    workers.spawn(async move {
+                        match serve_core_private_life_connection(incoming, policy, process).await {
+                            Ok(true) => { accepted.fetch_add(1, Ordering::Relaxed); }
+                            Ok(false) => { rejected.fetch_add(1, Ordering::Relaxed); }
+                            Err(error) => {
+                                failed.fetch_add(1, Ordering::Relaxed);
+                                warn!(%error, "Core private-life connection ended");
+                            }
+                        }
+                    });
+                }
+                completed = workers.join_next(), if !workers.is_empty() => {
+                    if let Some(completed) = completed {
+                        completed_connection_tasks = completed_connection_tasks.saturating_add(1);
+                        if let Err(error) = completed {
+                            failed.fetch_add(1, Ordering::Relaxed);
+                            warn!(%error, "Core private-life task panicked or was cancelled");
+                        }
+                    }
+                }
+            }
+        }
+        self.process.begin_shutdown().await;
+        self.endpoint.close(
+            SERVER_SHUTDOWN_CLOSE_CODE.into(),
+            b"Core private-life server shutdown",
+        );
+        while let Some(completed) = workers.join_next().await {
+            completed_connection_tasks = completed_connection_tasks.saturating_add(1);
+            if let Err(error) = completed {
+                failed.fetch_add(1, Ordering::Relaxed);
+                warn!(%error, "Core private-life task panicked or was cancelled");
+            }
+        }
+        let remaining_connection_tasks = workers.len();
+        self.endpoint.wait_idle().await;
+        let remaining_open_connections = self.endpoint.open_connections();
+        let process_report = self.process.finish_shutdown().await?;
+        Ok(CoreIdentityServerReport {
+            accepted_connections: accepted.load(Ordering::Relaxed),
+            rejected_connections: rejected.load(Ordering::Relaxed),
+            combat_sessions_admitted: 0,
+            completed_connection_tasks,
+            failed_connection_tasks: failed.load(Ordering::Relaxed),
+            remaining_connection_tasks,
+            remaining_open_connections,
+            zero_residue: process_report.zero_residue
+                && remaining_connection_tasks == 0
+                && remaining_open_connections == 0,
+            persistence_enabled: true,
+        })
+    }
 }
 
 /// Derives the wipeable Core account identity from the authenticated ticket without persisting or
@@ -1061,6 +1226,10 @@ pub enum LocalServerRuntimeError {
     Bounded(#[from] protocol::BoundedValueError),
     #[error("private-life foundation failed: {0}")]
     PrivateLifeFoundation(String),
+    #[error("private-life process failed: {0}")]
+    PrivateLifeProcess(String),
+    #[error("private-life server failed: {0}")]
+    PrivateLifeServer(String),
     #[error(transparent)]
     Codec(#[from] protocol::WireCodecError),
     #[error(transparent)]
@@ -1086,6 +1255,18 @@ impl From<quinn::ConnectError> for LocalServerRuntimeError {
 impl From<CorePrivateLifeFoundationError> for LocalServerRuntimeError {
     fn from(error: CorePrivateLifeFoundationError) -> Self {
         Self::PrivateLifeFoundation(error.to_string())
+    }
+}
+
+impl From<CorePrivateLifeProcessError> for LocalServerRuntimeError {
+    fn from(error: CorePrivateLifeProcessError) -> Self {
+        Self::PrivateLifeProcess(error.to_string())
+    }
+}
+
+impl From<CorePrivateLifeServerError> for LocalServerRuntimeError {
+    fn from(error: CorePrivateLifeServerError) -> Self {
+        Self::PrivateLifeServer(error.to_string())
     }
 }
 

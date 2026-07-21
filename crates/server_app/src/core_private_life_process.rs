@@ -1,4 +1,4 @@
-//! Dormant process owner graph for the ordinary Core private-life route.
+//! Process owner graph for the ordinary Core private-life route.
 //!
 //! Authority: `Gravebound_Production_GDD_v1_Canonical.md` (`LOOP-001`-`003`,
 //! `TECH-015`, and `TECH-021`-`023`), `Gravebound_Content_Production_Spec_v1.md`
@@ -6,9 +6,9 @@
 //! `Gravebound_Development_Roadmap_v1.md` (`GB-M03-03`, `GB-M03-08`, and the M03
 //! exit gate). ADR-037 requires this all-or-nothing owner graph before a normal socket may exist.
 //!
-//! Construction intentionally does not imply admission. The authoritative Hall owner is present,
-//! but normal transport dispatch and the native route client are not yet composed, so capability
-//! publication remains fail-closed.
+//! Normal-route composition is all-or-nothing: persistent authorities, Hall ownership, terminal-
+//! first transport dispatch, and the native route client must all be present before capability
+//! publication.
 
 use std::{path::Path, sync::Arc};
 
@@ -50,10 +50,10 @@ struct CorePrivateLifeAdmission {
 }
 
 impl CorePrivateLifeAdmission {
-    const HALL_COMPOSED: Self = Self {
+    const NORMAL_ROUTE_COMPOSED: Self = Self {
         authoritative_hall: true,
-        transport_dispatch: false,
-        native_client: false,
+        transport_dispatch: true,
+        native_client: true,
     };
 
     const fn ready(self) -> bool {
@@ -86,7 +86,7 @@ impl std::fmt::Debug for CorePrivateLifeProcess {
 impl CorePrivateLifeProcess {
     /// Builds the complete danger-route process graph from one persistence pool and one redacted
     /// reward epoch. Callers must retain this value as a unit; no partial owner escapes on error.
-    pub(crate) fn compose_dormant(
+    pub(crate) fn compose_normal_route(
         foundation: Arc<CorePrivateLifePersistentFoundation>,
         persistence: PostgresPersistence,
         content_root: &Path,
@@ -121,9 +121,9 @@ impl CorePrivateLifeProcess {
             ticks,
             hall: Arc::new(CorePrivateHallDirectory::load(content_root)?),
             combat: Arc::new(CoreCharacterCombatFactory::load(persistence, content_root)?),
-            admission: CorePrivateLifeAdmission::HALL_COMPOSED,
+            admission: CorePrivateLifeAdmission::NORMAL_ROUTE_COMPOSED,
         };
-        process.validate_dormant_composition()?;
+        process.validate_normal_composition()?;
         Ok(process)
     }
 
@@ -213,6 +213,18 @@ impl CorePrivateLifeProcess {
             actor,
             transport,
         )
+    }
+
+    #[must_use]
+    pub(crate) fn world_flow(&self) -> Arc<PersistentWorldFlow> {
+        self.foundation.world_flow()
+    }
+
+    pub(crate) fn route_snapshot(
+        &self,
+        lease: crate::CorePrivateRouteActorLease,
+    ) -> Result<protocol::CorePrivateRouteStateV1, CorePrivateLifeProcessError> {
+        Ok(self.foundation.route_directory().snapshot(lease)?)
     }
 
     /// Attaches the winning authenticated transport and resolves terminal/restart state before
@@ -402,9 +414,9 @@ impl CorePrivateLifeProcess {
             .await?)
     }
 
-    fn validate_dormant_composition(&self) -> Result<(), CorePrivateLifeProcessError> {
-        if self.admission_ready() || self.foundation.normal_route_enabled() {
-            return Err(CorePrivateLifeProcessError::AdmissionEscaped);
+    fn validate_normal_composition(&self) -> Result<(), CorePrivateLifeProcessError> {
+        if !self.admission_ready() || !self.foundation.normal_route_enabled() {
+            return Err(CorePrivateLifeProcessError::IncompleteAdmission);
         }
         Ok(())
     }
@@ -465,8 +477,8 @@ pub(crate) enum CorePrivateLifeProcessDisposition {
 
 #[derive(Debug, Error)]
 pub(crate) enum CorePrivateLifeProcessError {
-    #[error("private-life process admission escaped before the normal composition was complete")]
-    AdmissionEscaped,
+    #[error("private-life process admission is incomplete")]
+    IncompleteAdmission,
     #[error("private-life session composition failed: {0}")]
     B3(#[from] CoreB3RewardCompositionError),
     #[error("private-life Caldus composition failed: {0}")]
@@ -477,6 +489,8 @@ pub(crate) enum CorePrivateLifeProcessError {
     Hall(#[from] CorePrivateHallError),
     #[error("private-life route binding is invalid")]
     InvalidRouteBinding,
+    #[error("private-life route runtime failed: {0}")]
+    Route(#[from] crate::CorePrivateRouteRuntimeError),
     #[error("private-life microrealm composition failed: {0}")]
     Microrealm(#[from] crate::CorePrivateMicrorealmRuntimeError),
     #[error("private-life Recall composition failed: {0}")]
@@ -500,7 +514,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn danger_owner_graph_does_not_imply_normal_admission() {
-        assert!(!CorePrivateLifeAdmission::HALL_COMPOSED.ready());
+    fn complete_owner_graph_is_required_for_normal_admission() {
+        assert!(CorePrivateLifeAdmission::NORMAL_ROUTE_COMPOSED.ready());
     }
 }

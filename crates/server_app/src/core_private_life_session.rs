@@ -930,11 +930,12 @@ where
 
     async fn prepare_dynamic_writer_handoffs(
         &self,
-        entry: &SessionEntry,
+        recall_bound: bool,
+        extraction_bound: bool,
         authenticated: AuthenticatedAccount,
         writer: &Arc<CoreReliableWriter>,
     ) -> Result<PreparedDynamicWriterHandoffs, CorePrivateLifeSessionError> {
-        let recall = if entry.recall_bound {
+        let recall = if recall_bound {
             match self
                 .recall
                 .prepare_reliable_writer_handoff(authenticated, Arc::clone(writer))
@@ -952,7 +953,7 @@ where
         } else {
             None
         };
-        let extraction = if entry.extraction_bound {
+        let extraction = if extraction_bound {
             let Some(extraction) = self.extraction.as_ref() else {
                 if let Some(prepared) = recall {
                     let _ = self
@@ -1124,6 +1125,10 @@ where
     /// Accepts a transport after authentication. No route or danger owner is required yet.
     /// When Recall is already bound, its writer handoff commits first so no new session can be
     /// advertised with a split reliable sequence.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the generation-safe writer handoff must keep prepare, commit, rollback, and publication ordering contiguous"
+    )]
     pub async fn attach_transport(
         &self,
         authenticated: AuthenticatedAccount,
@@ -1171,7 +1176,12 @@ where
         };
 
         let prepared = self
-            .prepare_dynamic_writer_handoffs(entry, authenticated, &writer)
+            .prepare_dynamic_writer_handoffs(
+                entry.recall_bound,
+                entry.extraction_bound,
+                authenticated,
+                &writer,
+            )
             .await?;
         let committed = self
             .commit_dynamic_writer_handoffs(

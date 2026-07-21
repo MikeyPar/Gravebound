@@ -40,6 +40,18 @@ enum Command {
         #[arg(long)]
         readiness_out: Option<PathBuf>,
     },
+    /// Run the terminal-first persistent GB-M03 private-life server.
+    ServeCorePrivateLife {
+        #[arg(long, default_value = "127.0.0.1:50001")]
+        bind: SocketAddr,
+        #[arg(long, default_value = "content")]
+        content_root: PathBuf,
+        #[arg(long, default_value = "target/gravebound-core-dev/server-cert.der")]
+        certificate_out: PathBuf,
+        /// Atomically published bound address for the native launcher.
+        #[arg(long)]
+        readiness_out: Option<PathBuf>,
+    },
     /// Run the previous process-local Core identity endpoint for explicit regression testing.
     ServeCoreIdentityEphemeral {
         #[arg(long, default_value = "127.0.0.1:50002")]
@@ -93,6 +105,14 @@ async fn run_command(command: Command) -> Result<()> {
             serve_core_identity_persistent(bind, content_root, certificate_out, readiness_out)
                 .await?;
         }
+        Command::ServeCorePrivateLife {
+            bind,
+            content_root,
+            certificate_out,
+            readiness_out,
+        } => {
+            serve_core_private_life(bind, content_root, certificate_out, readiness_out).await?;
+        }
         Command::ServeCoreIdentityEphemeral {
             bind,
             content_root,
@@ -101,6 +121,62 @@ async fn run_command(command: Command) -> Result<()> {
             serve_core_identity_ephemeral(bind, content_root, certificate_out).await?;
         }
     }
+    Ok(())
+}
+
+async fn serve_core_private_life(
+    bind: SocketAddr,
+    content_root: PathBuf,
+    certificate_out: PathBuf,
+    readiness_out: Option<PathBuf>,
+) -> Result<()> {
+    let persistence = persistence::PostgresPersistence::connect(
+        &persistence::PersistenceConfig::from_runtime_environment()?,
+    )
+    .await?;
+    persistence.migrate().await?;
+    let readiness = persistence.readiness().await?;
+    let reward_epoch = server_app::SecretRewardEpoch::from_environment()?;
+    let server = server_app::BoundCorePrivateLifeServer::bind_persistent(
+        &server_app::CoreIdentityServerConfig {
+            bind_address: bind,
+            content_root,
+        },
+        persistence.clone(),
+        reward_epoch,
+    )?;
+    write_certificate(
+        &certificate_out,
+        server.certificate_der(),
+        "Core private life",
+    )?;
+    if let Some(path) = readiness_out.as_ref() {
+        publish_readiness(path, server.local_address())?;
+    }
+    info!(
+        address = %server.local_address(),
+        certificate = %certificate_out.display(),
+        build_id = server_app::CORE_IDENTITY_BUILD_ID,
+        content_target = server_app::CORE_IDENTITY_CONTENT_TARGET,
+        schema_version = readiness.schema_version,
+        namespace = readiness.namespace,
+        wipeable = readiness.wipeable,
+        "GB-M03 terminal-first private-life server is ready"
+    );
+    let report = server.serve_until(shutdown_signal()).await;
+    if let Some(path) = readiness_out.as_ref() {
+        let _ = std::fs::remove_file(path);
+    }
+    let report = report?;
+    info!(
+        accepted_connections = report.accepted_connections,
+        rejected_connections = report.rejected_connections,
+        completed_connection_tasks = report.completed_connection_tasks,
+        failed_connection_tasks = report.failed_connection_tasks,
+        zero_residue = report.zero_residue,
+        "GB-M03 terminal-first private-life server stopped cleanly"
+    );
+    persistence.close().await;
     Ok(())
 }
 

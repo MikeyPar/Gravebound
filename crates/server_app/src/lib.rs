@@ -34,6 +34,7 @@ mod core_private_life_foundation;
 )]
 mod core_private_life_process;
 mod core_private_life_runtime_bootstrap;
+mod core_private_life_server;
 mod core_private_life_session;
 mod core_private_life_tick;
 mod core_private_microrealm_driver;
@@ -384,7 +385,7 @@ pub use reward_service::{
     RewardGrantTransaction, RewardGrantedItem, RewardPlacement, replay_result,
 };
 pub use runtime::{
-    BoundCoreIdentityServer, BoundLocalServer, CORE_IDENTITY_BUILD_ID,
+    BoundCoreIdentityServer, BoundCorePrivateLifeServer, BoundLocalServer, CORE_IDENTITY_BUILD_ID,
     CORE_IDENTITY_CONTENT_TARGET, CoreIdentityServerConfig, CoreIdentityServerReport,
     LOCAL_BUILD_ID, LOCAL_REGION_ID, LOCAL_SERVER_NAME, LocalServerConfig, LocalServerReport,
     LocalServerRuntimeError, core_account_id_from_auth_ticket,
