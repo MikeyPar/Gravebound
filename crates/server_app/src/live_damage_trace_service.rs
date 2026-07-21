@@ -134,6 +134,7 @@ pub struct PreparedTerminalLiveDamageTrace {
     aggregate: DamageTraceAggregate,
     terminal_snapshot: sim_core::DeathTraceTerminalSnapshot,
     full_window: Vec<StoredLiveDamageTraceSnapshotEntryV1>,
+    entity_identities: DeathEntityIdentityAuthority,
 }
 
 impl PreparedTerminalLiveDamageTrace {
@@ -157,11 +158,19 @@ impl PreparedTerminalLiveDamageTrace {
         &self.full_window
     }
 
+    /// Immutable simulation-to-journal mapping accumulated by the same trace owner that staged
+    /// the lethal tick. Death planning cannot substitute a separately authored identity map.
+    #[must_use]
+    pub const fn entity_identities(&self) -> &DeathEntityIdentityAuthority {
+        &self.entity_identities
+    }
+
     #[cfg(test)]
     pub(crate) fn from_test_authority(
         request: LiveDamageTraceTickRequestV1,
         aggregate: DamageTraceAggregate,
         full_window: Vec<StoredLiveDamageTraceSnapshotEntryV1>,
+        entity_identities: DeathEntityIdentityAuthority,
     ) -> Result<Self, LiveDamageTraceServiceError> {
         let terminal_snapshot = aggregate
             .terminal_snapshot()
@@ -171,6 +180,7 @@ impl PreparedTerminalLiveDamageTrace {
             aggregate,
             terminal_snapshot,
             full_window,
+            entity_identities,
         })
     }
 }
@@ -487,6 +497,7 @@ where
                 aggregate: staged.aggregate,
                 terminal_snapshot,
                 full_window,
+                entity_identities: self.identities.clone(),
             };
             self.terminal = Some(prepared.clone());
             return Ok(LiveDamageTraceIngestOutcome::TerminalPrepared(Box::new(
@@ -1611,6 +1622,7 @@ mod tests {
                 .iter()
                 .all(|entry| entry.entry.source_entity_id == Some([77; 16]))
         );
+        assert_eq!(prepared.entity_identities(), service.identities());
     }
 
     #[tokio::test]

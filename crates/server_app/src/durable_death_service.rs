@@ -172,7 +172,6 @@ pub struct ServerAuthoredDeathContext {
     /// ordinals, post-versions, or item-ledger identities.
     pub custody: DeathCustodySnapshot,
     pub hero: DeathHeroSnapshot,
-    pub entity_identities: DeathEntityIdentityAuthority,
     /// Lethal evidence prepared only by the server-owned live trace service. Its private fields
     /// prevent a client or external crate from constructing an alternate terminal window.
     pub terminal_trace: PreparedTerminalLiveDamageTrace,
@@ -357,7 +356,7 @@ pub fn build_durable_death_commit(
     )?;
     validate_presentation_content(inputs, context, &destruction, presentation)?;
 
-    let trace = map_trace(inputs, &context.entity_identities)?;
+    let trace = map_trace(inputs, context.terminal_trace.entity_identities())?;
     let trace_digest = canonical_digest(DURABLE_TRACE_DIGEST_CONTEXT, &trace)?;
     let destruction_digest = canonical_digest(DURABLE_DESTRUCTION_DIGEST_CONTEXT, &destruction)?;
     let lethal = trace
@@ -1307,8 +1306,15 @@ pub(crate) mod tests {
             entries: inputs.trace.clone(),
         })
         .unwrap();
-        PreparedTerminalLiveDamageTrace::from_test_authority(request, aggregate, full_window)
-            .unwrap()
+        PreparedTerminalLiveDamageTrace::from_test_authority(
+            request,
+            aggregate,
+            full_window,
+            DeathEntityIdentityAuthority {
+                by_sim_entity: BTreeMap::from([(EntityId::new(41).unwrap(), [10; 16])]),
+            },
+        )
+        .unwrap()
     }
 
     fn context() -> ServerAuthoredDeathContext {
@@ -1368,9 +1374,6 @@ pub(crate) mod tests {
                 oath_id: Some("oath.arbalist.long_vigil".into()),
                 bargain_ids: vec!["bargain.cinder_hunger".into()],
                 memorial_presentation_key: "memorial.presentation.core_default".into(),
-            },
-            entity_identities: DeathEntityIdentityAuthority {
-                by_sim_entity: BTreeMap::from([(EntityId::new(41).unwrap(), [10; 16])]),
             },
             terminal_trace,
             echo: Some(EligibleEchoProjection {
@@ -1727,7 +1730,13 @@ pub(crate) mod tests {
         ));
 
         let mut missing_entity = context();
-        missing_entity.entity_identities.by_sim_entity.clear();
+        missing_entity.terminal_trace = PreparedTerminalLiveDamageTrace::from_test_authority(
+            missing_entity.terminal_trace.request().clone(),
+            missing_entity.terminal_trace.aggregate().clone(),
+            missing_entity.terminal_trace.full_window().to_vec(),
+            DeathEntityIdentityAuthority::default(),
+        )
+        .unwrap();
         assert!(matches!(
             build_test_commit(&inputs(), &missing_entity),
             Err(DurableDeathBuildError::MissingEntityIdentity(41))
