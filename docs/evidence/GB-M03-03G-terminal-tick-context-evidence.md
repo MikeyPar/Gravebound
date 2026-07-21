@@ -26,4 +26,4 @@ Per the owner's instruction, broad workspace/audit suites remain deferred until 
 
 ## Current Next Step
 
-The planner, durable owner, and exact Recall projection are installed. Next compose the actor's explicit/LinkLost terminal evaluations, extraction, and verified-fault restoration through the same coordinator using one coherent current-terminal snapshot. Keep normal admission disabled until exit-ready heartbeats and focused restart/shutdown proof pass.
+The planner, durable owner, exact Recall projection, coherent terminal snapshot, and actor-owned explicit/LinkLost plus disconnect evaluations are installed. Next compose prepared extraction and verified-fault restoration through the same coordinator, and keep the exact terminal heartbeat running in exit-ready state. Keep normal admission disabled until focused restart/shutdown proof passes.
