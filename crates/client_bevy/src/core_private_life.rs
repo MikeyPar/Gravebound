@@ -15,7 +15,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use bevy::{app::AppExit, prelude::*, window::WindowResolution};
+use bevy::{app::AppExit, camera::ScalingMode, prelude::*, window::WindowResolution};
 use protocol::{
     AccountBootstrapResult, AccountSnapshot, AuthTicket, CORE_WORLD_FLOW_FEATURE_FLAG,
     CharacterLocation, CharacterLocationSnapshot, CharacterMutationFrame, CharacterMutationPayload,
@@ -78,6 +78,9 @@ enum PrivateLifeAction {
 
 #[derive(Debug, Resource)]
 struct CorePrivateLifeBridge(NetworkWorkerHandle);
+
+#[derive(Debug, Resource)]
+struct CorePrivatePresentationContent(sim_content::CorePrivateLifeContent);
 
 #[derive(Debug, Resource, Default)]
 struct CorePrivateSnapshotClient {
@@ -676,6 +679,18 @@ struct RosterText;
 struct RouteText;
 #[derive(Component)]
 struct ActionButton(PrivateLifeAction);
+#[derive(Component)]
+struct PrivateGameplayCamera;
+#[derive(Component)]
+struct PrivateGameplayEntity {
+    entity_id: u64,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Component)]
+struct PrivateGameplayFloor {
+    actor_generation: u64,
+    scene: CorePrivateRouteSceneV1,
+    room: Option<protocol::CorePrivateRouteRoomV1>,
+}
 
 /// Opens the real negotiated private-life route without enabling any local gameplay authority.
 pub fn run_core_private_life(config: CorePrivateLifeConfig) -> Result<()> {
@@ -729,6 +744,7 @@ pub fn run_core_private_life(config: CorePrivateLifeConfig) -> Result<()> {
     app.insert_resource(ClearColor(Color::srgb_u8(5, 8, 11)))
         .insert_resource(AccessibilitySettings::default())
         .insert_resource(CorePrivateLifeBridge(worker))
+        .insert_resource(CorePrivatePresentationContent(content))
         .insert_resource(CorePrivateLifeClient::new(world_revision, route_revision))
         .insert_resource(CorePrivateSnapshotClient::default())
         .insert_resource(InputSequencer::default())
@@ -755,6 +771,7 @@ pub fn run_core_private_life(config: CorePrivateLifeConfig) -> Result<()> {
                 request_location,
                 handle_keyboard,
                 handle_buttons,
+                present_private_gameplay,
                 update_ui,
             )
                 .chain(),
@@ -1068,19 +1085,200 @@ fn normalized_input(x: i8, y: i8) -> (i16, i16) {
     }
 }
 
+#[allow(
+    clippy::needless_pass_by_value,
+    clippy::too_many_arguments,
+    reason = "Bevy presentation owns disjoint entity, floor, and camera queries"
+)]
+fn present_private_gameplay(
+    mut commands: Commands,
+    client: Res<CorePrivateLifeClient>,
+    snapshots: Res<CorePrivateSnapshotClient>,
+    content: Res<CorePrivatePresentationContent>,
+    mut camera: Single<&mut Transform, With<PrivateGameplayCamera>>,
+    mut entities: Query<(Entity, &PrivateGameplayEntity, &mut Transform, &mut Sprite)>,
+    floors: Query<(Entity, &PrivateGameplayFloor)>,
+) {
+    let Some(route) = client
+        .route
+        .as_ref()
+        .and_then(CorePrivateRouteClientModel::route_state)
+        .filter(|state| {
+            matches!(
+                state.scene,
+                CorePrivateRouteSceneV1::CoreMicrorealm | CorePrivateRouteSceneV1::BellSepulcher
+            )
+        })
+    else {
+        despawn_private_gameplay(&mut commands, &entities, &floors);
+        return;
+    };
+    let Some(snapshot) = snapshots.latest.as_ref() else {
+        despawn_private_gameplay(&mut commands, &entities, &floors);
+        return;
+    };
+    let Some((width, height)) = private_scene_dimensions(&content.0, route) else {
+        despawn_private_gameplay(&mut commands, &entities, &floors);
+        return;
+    };
+    let floor_binding = PrivateGameplayFloor {
+        actor_generation: route.actor_generation,
+        scene: route.scene,
+        room: route.room,
+    };
+    let floor_matches = floors.iter().any(|(_, floor)| *floor == floor_binding);
+    if !floor_matches {
+        for (entity, _) in &floors {
+            commands.entity(entity).despawn();
+        }
+        commands.spawn((
+            Name::new("Authoritative private arena"),
+            floor_binding,
+            Sprite::from_color(Color::srgb_u8(12, 20, 24), Vec2::new(width, height)),
+            Transform::from_xyz(0.0, 0.0, -1.0),
+        ));
+    }
+
+    let desired = snapshot
+        .entities
+        .iter()
+        .map(|entity| (entity.entity_id, entity))
+        .collect::<BTreeMap<_, _>>();
+    for (entity, visual, mut transform, mut sprite) in &mut entities {
+        let Some(snapshot) = desired.get(&visual.entity_id) else {
+            commands.entity(entity).despawn();
+            continue;
+        };
+        let render = private_snapshot_position(snapshot, width, height);
+        transform.translation.x = render.x;
+        transform.translation.y = render.y;
+        let (color, size, z) = private_entity_style(snapshot.kind);
+        sprite.color = color;
+        sprite.custom_size = Some(Vec2::splat(size));
+        transform.translation.z = z;
+    }
+    let existing = entities
+        .iter()
+        .map(|(_, visual, _, _)| visual.entity_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    for snapshot in snapshot
+        .entities
+        .iter()
+        .filter(|snapshot| !existing.contains(&snapshot.entity_id))
+    {
+        let (color, size, z) = private_entity_style(snapshot.kind);
+        let render = private_snapshot_position(snapshot, width, height);
+        commands.spawn((
+            Name::new(format!(
+                "Private {:?} {}",
+                snapshot.kind, snapshot.entity_id
+            )),
+            PrivateGameplayEntity {
+                entity_id: snapshot.entity_id,
+            },
+            Sprite::from_color(color, Vec2::splat(size)),
+            Transform::from_xyz(render.x, render.y, z),
+        ));
+    }
+    if let Some(player) = snapshot
+        .entities
+        .iter()
+        .find(|entity| entity.kind == protocol::EntityKind::Player)
+    {
+        let render = private_snapshot_position(player, width, height);
+        camera.translation.x = render.x;
+        camera.translation.y = render.y;
+    }
+}
+
+fn despawn_private_gameplay(
+    commands: &mut Commands,
+    entities: &Query<(Entity, &PrivateGameplayEntity, &mut Transform, &mut Sprite)>,
+    floors: &Query<(Entity, &PrivateGameplayFloor)>,
+) {
+    for (entity, _, _, _) in entities {
+        commands.entity(entity).despawn();
+    }
+    for (entity, _) in floors {
+        commands.entity(entity).despawn();
+    }
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn private_scene_dimensions(
+    content: &sim_content::CorePrivateLifeContent,
+    route: &protocol::CorePrivateRouteStateV1,
+) -> Option<(f32, f32)> {
+    match route.scene {
+        CorePrivateRouteSceneV1::CoreMicrorealm => Some((
+            content.microrealm_scene().width_milli_tiles as f32 / 1_000.0,
+            content.microrealm_scene().height_milli_tiles as f32 / 1_000.0,
+        )),
+        CorePrivateRouteSceneV1::BellSepulcher => {
+            let node_id = route.room?.node_id();
+            content
+                .fixed_layout()
+                .rooms
+                .iter()
+                .find(|room| room.node_id == node_id)
+                .map(|room| {
+                    (
+                        room.room.width_milli_tiles as f32 / 1_000.0,
+                        room.room.height_milli_tiles as f32 / 1_000.0,
+                    )
+                })
+        }
+        CorePrivateRouteSceneV1::LanternHalls => None,
+    }
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn private_snapshot_position(snapshot: &protocol::EntitySnapshot, width: f32, height: f32) -> Vec2 {
+    Vec2::new(
+        snapshot.x_milli_tiles as f32 / 1_000.0 - width * 0.5,
+        height * 0.5 - snapshot.y_milli_tiles as f32 / 1_000.0,
+    )
+}
+
+fn private_entity_style(kind: protocol::EntityKind) -> (Color, f32, f32) {
+    match kind {
+        protocol::EntityKind::Player => (Color::srgb_u8(99, 225, 197), 0.64, 8.0),
+        protocol::EntityKind::Enemy => (Color::srgb_u8(191, 69, 80), 0.72, 5.5),
+        protocol::EntityKind::Boss => (Color::srgb_u8(226, 78, 70), 1.15, 5.5),
+        protocol::EntityKind::FriendlyProjectile => (Color::srgb_u8(109, 234, 203), 0.20, 7.0),
+        protocol::EntityKind::HostileProjectile => (Color::srgb_u8(246, 126, 77), 0.24, 7.0),
+        protocol::EntityKind::PersonalPickup | protocol::EntityKind::Loot => {
+            (Color::srgb_u8(240, 213, 139), 0.34, 4.5)
+        }
+        protocol::EntityKind::Objective => (Color::srgb_u8(191, 139, 241), 0.46, 4.0),
+    }
+}
+
 fn spawn_ui(mut commands: Commands) {
-    commands.spawn(Camera2d);
+    commands.spawn((
+        Camera2d,
+        Projection::Orthographic(OrthographicProjection {
+            scaling_mode: ScalingMode::FixedVertical {
+                viewport_height: 13.5,
+            },
+            ..OrthographicProjection::default_2d()
+        }),
+        PrivateGameplayCamera,
+    ));
     commands
         .spawn((
             Node {
-                width: percent(100),
-                height: percent(100),
-                padding: UiRect::all(px(28)),
+                position_type: PositionType::Absolute,
+                left: px(18),
+                top: px(18),
+                width: px(420),
+                max_height: percent(94),
+                padding: UiRect::all(px(20)),
                 flex_direction: FlexDirection::Column,
-                row_gap: px(16),
+                row_gap: px(12),
                 ..default()
             },
-            BackgroundColor(Color::srgb_u8(5, 8, 11)),
+            BackgroundColor(Color::srgba_u8(5, 8, 11, 238)),
         ))
         .with_children(|root| {
             root.spawn((
@@ -1172,6 +1370,7 @@ fn spawn_button(parent: &mut ChildSpawnerCommands, action: PrivateLifeAction, la
 )]
 fn update_ui(
     client: Res<CorePrivateLifeClient>,
+    snapshots: Res<CorePrivateSnapshotClient>,
     mut status: Single<&mut Text, With<StatusText>>,
     mut roster: Single<&mut Text, (With<RosterText>, Without<StatusText>)>,
     mut route: Single<&mut Text, (With<RouteText>, Without<StatusText>, Without<RosterText>)>,
@@ -1179,7 +1378,7 @@ fn update_ui(
 ) {
     **status = Text::new(phase_label(client.phase));
     **roster = Text::new(render_roster(&client));
-    **route = Text::new(render_route(&client));
+    **route = Text::new(render_route(&client, &snapshots));
     for (action, mut background, mut border) in &mut actions {
         let available = action_available(action.0, &client);
         *background = BackgroundColor(if available {
@@ -1258,7 +1457,7 @@ fn render_roster(client: &CorePrivateLifeClient) -> String {
     rows.join("\n")
 }
 
-fn render_route(client: &CorePrivateLifeClient) -> String {
+fn render_route(client: &CorePrivateLifeClient, snapshots: &CorePrivateSnapshotClient) -> String {
     if client.phase == CorePrivateLifePhase::Disabled {
         return "Available in a later test.\nNormal route capability was not negotiated."
             .to_owned();
@@ -1292,8 +1491,35 @@ fn render_route(client: &CorePrivateLifeClient) -> String {
         .filter(|code| *code != WorldTransferResultCode::Accepted)
         .map(|code| format!("\nLast transfer: {code:?}"))
         .unwrap_or_default();
+    let gameplay = snapshots.latest.as_ref().map_or_else(
+        || "\nSnapshot: awaiting authoritative frame".to_owned(),
+        |snapshot| {
+            let enemies = snapshot
+                .entities
+                .iter()
+                .filter(|entity| {
+                    matches!(
+                        entity.kind,
+                        protocol::EntityKind::Enemy | protocol::EntityKind::Boss
+                    ) && entity.state_flags & protocol::ENTITY_STATE_ALIVE != 0
+                })
+                .count();
+            let health = snapshot
+                .entities
+                .iter()
+                .find(|entity| entity.kind == protocol::EntityKind::Player)
+                .map_or_else(
+                    || "unavailable".to_owned(),
+                    |player| format!("{} / {}", player.current_health, player.maximum_health),
+                );
+            format!(
+                "\nSnapshot: tick {}    HP {health}    Hostiles {enemies}",
+                snapshot.server_tick
+            )
+        },
+    );
     format!(
-        "{scene}{room}\nPhase: {:?}\nActor generation: {}    State version: {}\nControl: {}{transfer}",
+        "{scene}{room}\nPhase: {:?}\nActor generation: {}    State version: {}\nControl: {}{gameplay}{transfer}",
         state.phase,
         state.actor_generation,
         state.state_version,
