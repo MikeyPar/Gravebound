@@ -37,7 +37,7 @@ use crate::{
     CorePrivateMicrorealmRuntimeError, CorePrivateMicrorealmStep, CorePrivatePlayerDamageFactV1,
     CorePrivateTerminalFeedError, CorePrivateTerminalFrameDisposition,
     CorePrivateTerminalFrameSender, CorePrivateTerminalRouteControlAuthorityV1,
-    CorePrivateTerminalSceneV1, CorePrivateTerminalTickContextV1,
+    CorePrivateTerminalSceneV1, CorePrivateTerminalTickContextV1, ProductionRecallLiveProjectionV1,
 };
 
 const NANOS_PER_SECOND: u64 = 1_000_000_000;
@@ -93,18 +93,33 @@ struct RetainedFrameInput {
     reward_activity_sequence: u64,
     network_state: DeathTraceNetworkState,
     recall_state: DeathTraceRecallState,
+    recall_movement_basis_points: u16,
+    recall_blocks_actions: bool,
 }
 
 impl RetainedFrameInput {
     fn runtime_input(self) -> CorePrivateMicrorealmInput {
+        let movement = self
+            .continuous
+            .movement
+            .scaled_basis_points(self.recall_movement_basis_points)
+            .expect("Recall projections contain a validated movement basis");
         CorePrivateMicrorealmInput {
             input_sequence: self.continuous.input_sequence,
-            movement: self.continuous.movement,
+            movement,
             aim: self.continuous.aim,
-            primary_held: self.continuous.primary_held,
+            primary_held: self.continuous.primary_held && !self.recall_blocks_actions,
             primary_sequence: self.continuous.primary_sequence,
-            ability_1_sequence: self.ability_1_sequence,
-            ability_2_sequence: self.ability_2_sequence,
+            ability_1_sequence: if self.recall_blocks_actions {
+                0
+            } else {
+                self.ability_1_sequence
+            },
+            ability_2_sequence: if self.recall_blocks_actions {
+                0
+            } else {
+                self.ability_2_sequence
+            },
             reward_session_active: self.reward_session_active,
             reward_trust_valid: self.reward_trust_valid,
             reward_activity_sequence: self.reward_activity_sequence,
@@ -123,6 +138,8 @@ impl Default for RetainedFrameInput {
             reward_activity_sequence: 1,
             network_state: DeathTraceNetworkState::Connected,
             recall_state: DeathTraceRecallState::Inactive,
+            recall_movement_basis_points: 10_000,
+            recall_blocks_actions: false,
         }
     }
 }
@@ -196,6 +213,16 @@ impl SharedIngress {
             && reducer.retained.network_state == DeathTraceNetworkState::Reattached
         {
             reducer.retained.network_state = DeathTraceNetworkState::Connected;
+            self.publish_locked(&reducer);
+        }
+    }
+
+    fn apply_recall_projection(&self, projection: ProductionRecallLiveProjectionV1) {
+        if let Ok(mut reducer) = self.reducer.lock() {
+            reducer.retained.recall_state = projection.trace_state;
+            reducer.retained.recall_movement_basis_points = projection.movement_basis_points;
+            reducer.retained.recall_blocks_actions =
+                projection.blocks_combat_interaction_and_consumables;
             self.publish_locked(&reducer);
         }
     }
@@ -775,6 +802,7 @@ pub struct CorePrivateMicrorealmDriver {
     handle: CorePrivateMicrorealmDriverHandle,
     shutdown_tx: watch::Sender<bool>,
     join: Option<JoinHandle<CorePrivateMicrorealmDriverTaskExit>>,
+    recall_bridge: Option<JoinHandle<()>>,
 }
 
 impl CorePrivateMicrorealmDriver {
@@ -794,7 +822,19 @@ impl CorePrivateMicrorealmDriver {
         runtime: CorePrivateMicrorealmRuntime,
         terminal_feed: CorePrivateTerminalFrameSender,
     ) -> Self {
-        spawn_driver_with_terminal_feed(runtime, terminal_feed)
+        spawn_driver_with_terminal_feed(runtime, terminal_feed, None)
+    }
+
+    /// Installs the lossless terminal feed and the exact actor-owned Recall projection before the
+    /// first danger frame. The projection is sampled through the retained-input boundary used by
+    /// simulation and death tracing.
+    #[must_use]
+    pub(crate) fn spawn_with_terminal_authorities(
+        runtime: CorePrivateMicrorealmRuntime,
+        terminal_feed: CorePrivateTerminalFrameSender,
+        recall: watch::Receiver<ProductionRecallLiveProjectionV1>,
+    ) -> Self {
+        spawn_driver_with_terminal_feed(runtime, terminal_feed, Some(recall))
     }
 
     #[must_use]
@@ -820,6 +860,11 @@ impl CorePrivateMicrorealmDriver {
             .take()
             .ok_or(CorePrivateMicrorealmDriverError::AlreadyJoined)?;
         let mut exit = join.await.map_err(CorePrivateMicrorealmDriverError::Task)?;
+        if let Some(bridge) = self.recall_bridge.take() {
+            bridge
+                .await
+                .map_err(CorePrivateMicrorealmDriverError::Task)?;
+        }
         let report = &mut exit.report;
         report.task_joined = true;
         report.driver_task_live_after_join = self.handle.ingress.task_live.load(Ordering::Acquire);
@@ -940,12 +985,13 @@ fn spawn_driver<R>(runtime: R) -> CorePrivateMicrorealmDriver
 where
     R: MicrorealmFrameRuntime,
 {
-    spawn_driver_with_terminal_feed(runtime, CorePrivateTerminalFrameSender::unbound())
+    spawn_driver_with_terminal_feed(runtime, CorePrivateTerminalFrameSender::unbound(), None)
 }
 
 fn spawn_driver_with_terminal_feed<R>(
     runtime: R,
     terminal_feed: CorePrivateTerminalFrameSender,
+    recall: Option<watch::Receiver<ProductionRecallLiveProjectionV1>>,
 ) -> CorePrivateMicrorealmDriver
 where
     R: MicrorealmFrameRuntime,
@@ -961,6 +1007,28 @@ where
     let (observation_tx, observation_rx) =
         watch::channel(CorePrivateMicrorealmDriverState::Starting);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let recall_bridge = recall.map(|mut recall| {
+        ingress.apply_recall_projection(*recall.borrow_and_update());
+        let ingress = Arc::clone(&ingress);
+        let mut shutdown = shutdown_rx.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    changed = shutdown.changed() => {
+                        if changed.is_err() || *shutdown.borrow() {
+                            break;
+                        }
+                    }
+                    changed = recall.changed() => {
+                        if changed.is_err() {
+                            break;
+                        }
+                        ingress.apply_recall_projection(*recall.borrow_and_update());
+                    }
+                }
+            }
+        })
+    });
     let (handoff_tx, handoff_rx) = mpsc::channel(1);
     let (fixed_advance_tx, fixed_advance_rx) = mpsc::channel(1);
     ACTIVE_CORE_MICROREALM_DRIVER_TASKS.fetch_add(1, Ordering::AcqRel);
@@ -990,6 +1058,7 @@ where
         },
         shutdown_tx,
         join: Some(join),
+        recall_bridge,
     }
 }
 
@@ -2526,6 +2595,7 @@ mod tests {
             },
             shutdown_tx,
             join: Some(join),
+            recall_bridge: None,
         }
     }
 
@@ -3206,7 +3276,7 @@ mod tests {
                 .acknowledge_terminal_owned(&receipt)
                 .expect("lethal ownership");
         });
-        let driver = spawn_driver_with_terminal_feed(runtime, terminal_sender);
+        let driver = spawn_driver_with_terminal_feed(runtime, terminal_sender, None);
         let handle = driver.handle();
         let mut observer = handle.observe();
         tokio::task::yield_now().await;
@@ -3242,8 +3312,11 @@ mod tests {
     async fn terminal_ack_precedes_tick_and_presentation_publication() {
         let received = Arc::new(StdMutex::new(Vec::new()));
         let (terminal_sender, mut terminal_receiver) = terminal_frame_channel();
-        let driver =
-            spawn_driver_with_terminal_feed(ScriptedRuntime::ordinary(received), terminal_sender);
+        let driver = spawn_driver_with_terminal_feed(
+            ScriptedRuntime::ordinary(received),
+            terminal_sender,
+            None,
+        );
         let handle = driver.handle();
         let mut observer = handle.observe();
 
@@ -3275,11 +3348,64 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn recall_projection_constrains_the_same_frame_and_trace_context() {
+        let received = Arc::new(StdMutex::new(Vec::new()));
+        let (terminal_sender, mut terminal_receiver) = terminal_frame_channel();
+        let (_, recall) = watch::channel(ProductionRecallLiveProjectionV1 {
+            trace_state: DeathTraceRecallState::Channeling,
+            movement_basis_points: 7_500,
+            blocks_combat_interaction_and_consumables: true,
+        });
+        let driver = spawn_driver_with_terminal_feed(
+            ScriptedRuntime::ordinary(Arc::clone(&received)),
+            terminal_sender,
+            Some(recall),
+        );
+        let handle = driver.handle();
+        handle
+            .submit_latest_input(CorePrivateMicrorealmRetainedInput {
+                input_sequence: 1,
+                movement: MovementAction::new(1, 0),
+                aim: AimDirection::east(),
+                primary_held: true,
+                primary_sequence: 1,
+            })
+            .expect("input");
+        handle
+            .submit_ability_press(CorePrivateMicrorealmAbilityPress {
+                action_sequence: 1,
+                ability: CorePrivateMicrorealmAbility::Ability1,
+            })
+            .expect("ability");
+
+        tokio::time::advance(DRIVER_TICK_DURATION).await;
+        let delivery = terminal_receiver.receive().await.expect("terminal frame");
+        assert_eq!(
+            delivery.frame().expect("frame").context.recall_state,
+            DeathTraceRecallState::Channeling
+        );
+        delivery.acknowledge_continue().expect("acknowledgement");
+        let mut observer = handle.observe();
+        observer.changed().await.expect("published frame");
+
+        let inputs = received.lock().expect("received inputs");
+        let input = inputs.first().expect("first input");
+        assert!((input.movement.normalized_vector().x - 0.75).abs() < f32::EPSILON);
+        assert!(!input.primary_held);
+        assert_eq!(input.ability_1_sequence, 0);
+        drop(inputs);
+        driver.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn terminal_context_records_link_loss_and_one_committed_reattach_frame() {
         let received = Arc::new(StdMutex::new(Vec::new()));
         let (terminal_sender, mut terminal_receiver) = terminal_frame_channel();
-        let driver =
-            spawn_driver_with_terminal_feed(ScriptedRuntime::ordinary(received), terminal_sender);
+        let driver = spawn_driver_with_terminal_feed(
+            ScriptedRuntime::ordinary(received),
+            terminal_sender,
+            None,
+        );
         let handle = driver.handle();
         let mut observer = handle.observe();
         tokio::task::yield_now().await;
@@ -3319,8 +3445,11 @@ mod tests {
         let received = Arc::new(StdMutex::new(Vec::new()));
         let (terminal_sender, terminal_receiver) = terminal_frame_channel();
         drop(terminal_receiver);
-        let driver =
-            spawn_driver_with_terminal_feed(ScriptedRuntime::ordinary(received), terminal_sender);
+        let driver = spawn_driver_with_terminal_feed(
+            ScriptedRuntime::ordinary(received),
+            terminal_sender,
+            None,
+        );
         let handle = driver.handle();
         let mut observer = handle.observe();
         tokio::task::yield_now().await;
@@ -3347,8 +3476,11 @@ mod tests {
     async fn shutdown_cancels_an_undrained_terminal_delivery_as_ambiguous() {
         let received = Arc::new(StdMutex::new(Vec::new()));
         let (terminal_sender, mut terminal_receiver) = terminal_frame_channel();
-        let driver =
-            spawn_driver_with_terminal_feed(ScriptedRuntime::ordinary(received), terminal_sender);
+        let driver = spawn_driver_with_terminal_feed(
+            ScriptedRuntime::ordinary(received),
+            terminal_sender,
+            None,
+        );
         let handle = driver.handle();
         tokio::task::yield_now().await;
         for _ in 0..4 {
@@ -3379,8 +3511,11 @@ mod tests {
     async fn shutdown_cancels_a_received_unacknowledged_terminal_delivery() {
         let received = Arc::new(StdMutex::new(Vec::new()));
         let (terminal_sender, mut terminal_receiver) = terminal_frame_channel();
-        let driver =
-            spawn_driver_with_terminal_feed(ScriptedRuntime::ordinary(received), terminal_sender);
+        let driver = spawn_driver_with_terminal_feed(
+            ScriptedRuntime::ordinary(received),
+            terminal_sender,
+            None,
+        );
         let handle = driver.handle();
         tokio::task::yield_now().await;
         for _ in 0..4 {

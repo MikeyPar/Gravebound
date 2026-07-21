@@ -1305,8 +1305,15 @@ where
             danger_entry_authority,
             terminal_receiver,
         )?;
-        let driver =
-            CorePrivateMicrorealmDriver::spawn_with_terminal_feed(runtime, terminal_sender);
+        let recall_projection = self
+            .recall
+            .live_projection(entry.authenticated, route_lease)
+            .await?;
+        let driver = CorePrivateMicrorealmDriver::spawn_with_terminal_authorities(
+            runtime,
+            terminal_sender,
+            recall_projection,
+        );
         let handle = driver.handle();
         if let Some(ticks) = &self.authoritative_ticks
             && let Err(error) = ticks.bind(binding_lease, handle.clone())

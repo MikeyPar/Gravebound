@@ -24,7 +24,7 @@ use protocol::{
     TERMINAL_PENDING_ITEM_CAPACITY, TerminalInventoryRejectionCodeV1,
 };
 use thiserror::Error;
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::sync::{Mutex, mpsc, oneshot, watch};
 
 use crate::{
     AuthenticatedAccount, AuthenticatedNamespace, CoreRecallIntentAuthority, CoreRecallIntentReply,
@@ -40,6 +40,24 @@ pub const CORE_RECALL_ACTOR_MAILBOX_CAPACITY: usize = 8;
 const MUTATION_ID_CONTEXT: &str = "gravebound.production-recall-channel-mutation.v1";
 const TERMINAL_ID_CONTEXT: &str = "gravebound.production-recall-channel-terminal.v1";
 const MAX_DURABLE_CLIENT_TICK: u64 = 9_223_372_036_854_775_807;
+
+/// Same-boundary gameplay projection published by the Recall actor. The private-route driver
+/// consumes this watch value before simulation so movement, action blocking, and death-trace
+/// context all describe the same authoritative channel state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProductionRecallLiveProjectionV1 {
+    pub trace_state: sim_core::DeathTraceRecallState,
+    pub movement_basis_points: u16,
+    pub blocks_combat_interaction_and_consumables: bool,
+}
+
+impl ProductionRecallLiveProjectionV1 {
+    pub const INACTIVE: Self = Self {
+        trace_state: sim_core::DeathTraceRecallState::Inactive,
+        movement_basis_points: 10_000,
+        blocks_combat_interaction_and_consumables: false,
+    };
+}
 
 #[derive(Debug, Clone)]
 pub struct CoreRecallActorHandle {
@@ -370,6 +388,7 @@ pub struct ProductionRecallIntentActor<Clock> {
     account_id: [u8; 16],
     character_id: [u8; 16],
     state: Mutex<ProductionRecallIntentActorState<Clock>>,
+    live_projection: watch::Sender<ProductionRecallLiveProjectionV1>,
 }
 
 impl<Clock> ProductionRecallIntentActor<Clock> {
@@ -383,6 +402,7 @@ impl<Clock> ProductionRecallIntentActor<Clock> {
             return Err(ProductionRecallChannelError::InvalidServerAuthority);
         }
         pending.validate()?;
+        let (live_projection, _) = watch::channel(ProductionRecallLiveProjectionV1::INACTIVE);
         Ok(Self {
             account_id,
             character_id,
@@ -394,6 +414,7 @@ impl<Clock> ProductionRecallIntentActor<Clock> {
                 pinned_terminal: None,
                 published: None,
             }),
+            live_projection,
         })
     }
 
@@ -405,6 +426,11 @@ impl<Clock> ProductionRecallIntentActor<Clock> {
     #[must_use]
     pub const fn character_id(&self) -> [u8; 16] {
         self.character_id
+    }
+
+    #[must_use]
+    pub fn subscribe_live_projection(&self) -> watch::Receiver<ProductionRecallLiveProjectionV1> {
+        self.live_projection.subscribe()
     }
 
     /// Refreshes only server-observed pending counts for a future Start result. An active channel
@@ -483,7 +509,9 @@ impl<Clock> ProductionRecallIntentActor<Clock> {
             pending_item_count: state.pending.pending_item_count,
             pending_material_stack_count: state.pending.pending_material_stack_count,
         };
-        state.channel.handle(authenticated, authority, frame)
+        let result = state.channel.handle(authenticated, authority, frame);
+        self.publish_live_projection(&state);
+        result
     }
 
     /// Captures transport loss inside the serialized actor turn. An exact duplicate is harmless;
@@ -585,6 +613,7 @@ impl<Clock> ProductionRecallIntentActor<Clock> {
         validate_published_hall(&recovered.published, self.character_id, post_world_version)?;
         pin_published_terminal_tick(&mut state.pinned_terminal, completion_tick)?;
         state.published = Some(recovered.published.clone());
+        self.publish_live_projection(&state);
         Ok(())
     }
 
@@ -599,14 +628,16 @@ impl<Clock> ProductionRecallIntentActor<Clock> {
         validate_published_hall(&published, self.character_id, post_world_version)?;
         let mut state = self.state.lock().await;
         pin_published_terminal_tick(&mut state.pinned_terminal, completion_tick)?;
-        match state.published.as_ref() {
+        let result = match state.published.as_ref() {
             None => {
                 state.published = Some(published);
                 Ok(())
             }
             Some(existing) if existing == &published => Ok(()),
             Some(_) => Err(ProductionRecallChannelError::InvalidPublishedAuthority),
-        }
+        };
+        self.publish_live_projection(&state);
+        result
     }
 
     /// Pins a non-Recall terminal candidate to the same immutable actor tick before the shared
@@ -620,7 +651,9 @@ impl<Clock> ProductionRecallIntentActor<Clock> {
             return Err(ProductionRecallChannelError::InvalidServerAuthority);
         }
         let mut state = self.state.lock().await;
-        pin_terminal_snapshot(&mut state.pinned_terminal, server_tick, snapshot_hash)
+        let result = pin_terminal_snapshot(&mut state.pinned_terminal, server_tick, snapshot_hash);
+        self.publish_live_projection(&state);
+        result
     }
 
     /// Builds both Recall producer evaluations from one actor-owned completion snapshot. A due
@@ -675,6 +708,7 @@ impl<Clock> ProductionRecallIntentActor<Clock> {
                 authority.server_tick,
                 snapshot_hash,
             )?;
+            self.publish_live_projection(&state);
         }
 
         let explicit = state
@@ -771,6 +805,31 @@ impl<Clock> ProductionRecallIntentActor<Clock> {
     pub async fn blocks_combat_interaction_and_consumables(&self) -> bool {
         let state = self.state.lock().await;
         state.pinned_terminal.is_some() || state.channel.blocks_combat_interaction_and_consumables()
+    }
+
+    fn publish_live_projection(&self, state: &ProductionRecallIntentActorState<Clock>) {
+        self.live_projection
+            .send_replace(live_projection_from_state(state));
+    }
+}
+
+fn live_projection_from_state<Clock>(
+    state: &ProductionRecallIntentActorState<Clock>,
+) -> ProductionRecallLiveProjectionV1 {
+    if state.pinned_terminal.is_some() {
+        ProductionRecallLiveProjectionV1 {
+            trace_state: sim_core::DeathTraceRecallState::CompletionPending,
+            movement_basis_points: 0,
+            blocks_combat_interaction_and_consumables: true,
+        }
+    } else if state.channel.is_channeling() {
+        ProductionRecallLiveProjectionV1 {
+            trace_state: sim_core::DeathTraceRecallState::Channeling,
+            movement_basis_points: PRODUCTION_RECALL_MOVEMENT_BASIS_POINTS,
+            blocks_combat_interaction_and_consumables: true,
+        }
+    } else {
+        ProductionRecallLiveProjectionV1::INACTIVE
     }
 }
 
@@ -1738,6 +1797,11 @@ mod tests {
             },
         )
         .unwrap();
+        let projection = actor.subscribe_live_projection();
+        assert_eq!(
+            *projection.borrow(),
+            ProductionRecallLiveProjectionV1::INACTIVE
+        );
         let pending = actor
             .handle(
                 authenticated(),
@@ -1758,6 +1822,14 @@ mod tests {
         assert!(actor.is_channeling().await);
         assert_eq!(actor.movement_basis_points().await, 7_500);
         assert!(actor.blocks_combat_interaction_and_consumables().await);
+        assert_eq!(
+            *projection.borrow(),
+            ProductionRecallLiveProjectionV1 {
+                trace_state: sim_core::DeathTraceRecallState::Channeling,
+                movement_basis_points: 7_500,
+                blocks_combat_interaction_and_consumables: true,
+            }
+        );
 
         actor
             .refresh_pending_authority(ProductionRecallPendingAuthorityV1 {

@@ -318,7 +318,7 @@ pub use production_recall_channel::{
     PRODUCTION_RECALL_MOVEMENT_BASIS_POINTS, ProductionLinkLostRecallAuthorityV1,
     ProductionLinkLostSeedV1, ProductionRecallChannel, ProductionRecallChannelError,
     ProductionRecallClock, ProductionRecallCompletionAuthorityV1, ProductionRecallIntentActor,
-    ProductionRecallPendingAuthorityV1, ProductionRecallPlanner,
+    ProductionRecallLiveProjectionV1, ProductionRecallPendingAuthorityV1, ProductionRecallPlanner,
     ProductionRecallProducerEvaluation, ProductionRecallStartAuthorityV1,
     ProductionRecallTickBundle, ProductionRecallTickPreparation, evaluate_link_lost_tick,
     production_recall_actor_mailbox,
