@@ -208,6 +208,7 @@ pub struct CorePrivateLifeClient {
     pending_location_character: Option<[u8; protocol::CHARACTER_ID_BYTES]>,
     pending_transfer: Option<[u8; protocol::MUTATION_ID_BYTES]>,
     last_transfer_code: Option<WorldTransferResultCode>,
+    recall_result: Option<protocol::RecallResultV1>,
     error: Option<CorePrivateLifeClientFailure>,
     next_request_sequence: u32,
     next_mutation: u128,
@@ -229,6 +230,7 @@ impl CorePrivateLifeClient {
             pending_location_character: None,
             pending_transfer: None,
             last_transfer_code: None,
+            recall_result: None,
             error: None,
             next_request_sequence: 1,
             next_mutation: 1,
@@ -542,6 +544,40 @@ impl CorePrivateLifeClient {
         Ok(())
     }
 
+    fn apply_recall(
+        &mut self,
+        result: protocol::RecallResultV1,
+    ) -> Result<(), CorePrivateLifeClientError> {
+        result
+            .validate()
+            .map_err(|_| CorePrivateLifeClientError::InvalidSnapshotAuthority)?;
+        match &result {
+            protocol::RecallResultV1::Pending { character_id, .. }
+            | protocol::RecallResultV1::Cancelled { character_id, .. }
+            | protocol::RecallResultV1::Rejected { character_id, .. }
+                if Some(*character_id) != self.selected_character_id() =>
+            {
+                return Err(CorePrivateLifeClientError::InvalidSnapshotAuthority);
+            }
+            protocol::RecallResultV1::Stored { result, .. }
+                if Some(result.character_id) != self.selected_character_id() =>
+            {
+                return Err(CorePrivateLifeClientError::InvalidSnapshotAuthority);
+            }
+            _ => {}
+        }
+        if matches!(result, protocol::RecallResultV1::Stored { .. }) {
+            self.location = None;
+            self.pending_location_character = None;
+            if let Some(route) = self.route.as_mut() {
+                route.begin_committed_transfer_refresh()?;
+            }
+            self.phase = CorePrivateLifePhase::LoadingAuthority;
+        }
+        self.recall_result = Some(result);
+        Ok(())
+    }
+
     fn apply_compiled_readiness(&mut self) -> Result<(), CorePrivateLifeClientError> {
         let Some(route) = self.route.as_mut() else {
             return Ok(());
@@ -577,6 +613,7 @@ impl CorePrivateLifeClient {
         self.location = None;
         self.pending_location_character = None;
         self.pending_transfer = None;
+        self.recall_result = None;
         self.phase = CorePrivateLifePhase::Disconnected;
     }
 
@@ -770,6 +807,7 @@ pub fn run_core_private_life(config: CorePrivateLifeConfig) -> Result<()> {
                 poll_transport,
                 request_location,
                 handle_keyboard,
+                handle_recall_keyboard,
                 handle_buttons,
                 present_private_gameplay,
                 update_ui,
@@ -808,6 +846,7 @@ fn poll_transport(
                 }
                 ReliableEvent::WorldFlowResult(result) => client.apply_world_flow(result.clone()),
                 ReliableEvent::CorePrivateRouteState(_) => client.apply_route(&frame),
+                ReliableEvent::RecallResult(result) => client.apply_recall((**result).clone()),
                 _ => Ok(()),
             },
             TransportEvent::LinkLost
@@ -887,6 +926,65 @@ fn handle_keyboard(
     };
     if let Some(action) = action {
         submit_action(action, &bridge, &mut client);
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)] // Bevy system parameters are wrapper values.
+fn handle_recall_keyboard(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    bridge: Res<CorePrivateLifeBridge>,
+    snapshots: Res<CorePrivateSnapshotClient>,
+    mut client: ResMut<CorePrivateLifeClient>,
+) {
+    let pending = matches!(
+        client.recall_result,
+        Some(protocol::RecallResultV1::Pending { .. })
+    );
+    let intent = if keyboard.just_pressed(KeyCode::KeyR) && !pending {
+        Some(protocol::RecallIntentV1::Start)
+    } else if keyboard.just_released(KeyCode::KeyR) && pending {
+        Some(protocol::RecallIntentV1::Cancel)
+    } else {
+        None
+    };
+    let Some(intent) = intent else {
+        return;
+    };
+    if client.phase != CorePrivateLifePhase::PrivateRoute
+        || !client.server_hello.as_ref().is_some_and(|hello| {
+            protocol::TerminalInventoryCapabilityV1::EmergencyRecall.is_advertised_by(hello)
+        })
+    {
+        return;
+    }
+    let Some(character_id) = client.selected_character_id() else {
+        return;
+    };
+    let Some(client_tick) = snapshots
+        .latest
+        .as_ref()
+        .map(|snapshot| snapshot.server_tick)
+    else {
+        return;
+    };
+    let Ok(sequence) = client.take_request_sequence() else {
+        client.phase = CorePrivateLifePhase::Error;
+        return;
+    };
+    let frame = protocol::RecallFrameV1 {
+        schema_version: protocol::TERMINAL_INVENTORY_SCHEMA_VERSION,
+        sequence,
+        character_id,
+        client_tick,
+        intent,
+    };
+    if frame.validate().is_err()
+        || bridge
+            .0
+            .queue_reliable(WireMessage::RecallFrame(frame))
+            .is_err()
+    {
+        client.phase = CorePrivateLifePhase::Error;
     }
 }
 
@@ -1336,7 +1434,7 @@ fn spawn_ui(mut commands: Commands) {
                     spawn_button(row, PrivateLifeAction::Retry, "Retry [R]");
                 });
             root.spawn((
-                Text::new("MOVE  WASD    FIRE  LEFT MOUSE    HALL REALM GATE  G"),
+                Text::new("MOVE  WASD    FIRE  LEFT MOUSE    RECALL  HOLD R    HALL GATE  G"),
                 TextFont::from_font_size(13.0),
                 TextColor(Color::srgb_u8(130, 144, 145)),
             ));
@@ -1518,8 +1616,23 @@ fn render_route(client: &CorePrivateLifeClient, snapshots: &CorePrivateSnapshotC
             )
         },
     );
+    let recall = match client.recall_result.as_ref() {
+        Some(protocol::RecallResultV1::Pending {
+            completion_tick, ..
+        }) => format!("\nEmergency Recall: channeling to tick {completion_tick}"),
+        Some(protocol::RecallResultV1::Cancelled { .. }) => {
+            "\nEmergency Recall: cancelled".to_owned()
+        }
+        Some(protocol::RecallResultV1::Stored { .. }) => {
+            "\nEmergency Recall: committed — returning to Hall".to_owned()
+        }
+        Some(protocol::RecallResultV1::Rejected { code, .. }) => {
+            format!("\nEmergency Recall: {code:?}")
+        }
+        None => String::new(),
+    };
     format!(
-        "{scene}{room}\nPhase: {:?}\nActor generation: {}    State version: {}\nControl: {}{gameplay}{transfer}",
+        "{scene}{room}\nPhase: {:?}\nActor generation: {}    State version: {}\nControl: {}{gameplay}{recall}{transfer}",
         state.phase,
         state.actor_generation,
         state.state_version,
@@ -1786,5 +1899,37 @@ mod tests {
             client.ingest(snapshot(1, 7, 10_000)),
             Err(CorePrivateLifeClientError::InvalidSnapshotAuthority)
         ));
+    }
+
+    #[test]
+    fn recall_result_is_selected_character_bound_before_presentation() {
+        let mut client = CorePrivateLifeClient::new(world_revision(), route_revision());
+        client.accept_server_hello(&hello(true)).unwrap();
+        client.set_account(account()).unwrap();
+        let pending = protocol::RecallResultV1::Pending {
+            schema_version: protocol::TERMINAL_INVENTORY_SCHEMA_VERSION,
+            request_sequence: 1,
+            character_id: [7; 16],
+            started_tick: 10,
+            completion_tick: 10 + protocol::RECALL_CHANNEL_TICKS,
+            pending_item_count: 0,
+            pending_material_stack_count: 0,
+        };
+        client.apply_recall(pending.clone()).unwrap();
+        assert_eq!(client.recall_result, Some(pending));
+
+        assert!(
+            client
+                .apply_recall(protocol::RecallResultV1::Pending {
+                    schema_version: protocol::TERMINAL_INVENTORY_SCHEMA_VERSION,
+                    request_sequence: 2,
+                    character_id: [8; 16],
+                    started_tick: 11,
+                    completion_tick: 11 + protocol::RECALL_CHANNEL_TICKS,
+                    pending_item_count: 0,
+                    pending_material_stack_count: 0,
+                })
+                .is_err()
+        );
     }
 }
