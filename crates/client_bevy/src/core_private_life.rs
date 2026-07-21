@@ -35,11 +35,11 @@ use thiserror::Error;
 use crate::{
     CorePrivateRouteClientError, CorePrivateRouteClientModel, CorePrivateRouteClientPhase,
     CorePrivateSceneReadiness, CoreSceneReadiness, DeathSummaryAction, DeathUiAction,
-    DeathUiCommand, DeathUiConfig, DeathUiSnapshot, DeathViewClientModel, NativeDeathView,
-    NativeDeathViewPlugin, NativeSuccessorRecoveryPlugin, NativeSuccessorRecoveryView,
-    SuccessorRecoveryClientModel, SuccessorRecoveryPhase, SuccessorRecoveryUiAction,
-    SuccessorRecoveryUiCommand, SuccessorRecoveryUiConfig, SuccessorRecoveryUiSnapshot,
-    TerminalDeathPhase,
+    DeathUiCommand, DeathUiConfig, DeathUiSnapshot, DeathViewClientModel, MemorialDetailPhase,
+    MemorialListPhase, NativeDeathView, NativeDeathViewPlugin, NativeSuccessorRecoveryPlugin,
+    NativeSuccessorRecoveryView, SuccessorRecoveryClientModel, SuccessorRecoveryPhase,
+    SuccessorRecoveryUiAction, SuccessorRecoveryUiCommand, SuccessorRecoveryUiConfig,
+    SuccessorRecoveryUiSnapshot, TerminalDeathPhase,
     accessibility::AccessibilitySettings,
     bargain_ui::BargainUiAction,
     network_prediction::{CompleteSnapshot, SnapshotAssembler},
@@ -84,6 +84,7 @@ enum PrivateLifeAction {
     Select(u8),
     Play,
     RealmGate,
+    Memorial,
     Retry,
 }
 
@@ -164,6 +165,15 @@ impl CorePrivateTerminalUi {
 
     fn death_surface_open(&self) -> bool {
         !self.terminal_complete && self.death.terminal().phase() != TerminalDeathPhase::Inactive
+    }
+
+    fn memorial_surface_open(&self) -> bool {
+        self.death.memorial().list_phase() != MemorialListPhase::Closed
+            || self.death.memorial().detail_phase() != MemorialDetailPhase::Closed
+    }
+
+    fn surface_open(&self) -> bool {
+        self.death_surface_open() || self.memorial_surface_open()
     }
 }
 
@@ -1441,20 +1451,47 @@ fn handle_terminal_death_commands(
                 }
                 None
             }
-            DeathUiAction::LoadMoreLosses => terminal
+            DeathUiAction::Summary(DeathSummaryAction::Memorial) => terminal
                 .death
-                .load_more_losses()
+                .open_memorial_wall()
                 .ok()
                 .map(WireMessage::DeathViewFrame),
-            DeathUiAction::Retry | DeathUiAction::Summary(DeathSummaryAction::Retry) => {
-                terminal.death.retry().ok().map(WireMessage::DeathViewFrame)
+            DeathUiAction::LoadMoreLosses => {
+                if terminal.death.memorial().detail_phase() == MemorialDetailPhase::Closed {
+                    terminal.death.load_more_losses().ok()
+                } else {
+                    terminal.death.load_more_memorial_losses().ok()
+                }
+                .map(WireMessage::DeathViewFrame)
             }
-            DeathUiAction::Summary(
-                DeathSummaryAction::Memorial | DeathSummaryAction::CharacterSelect,
-            )
-            | DeathUiAction::MemorialEntry(_)
-            | DeathUiAction::LoadOlderMemorials
-            | DeathUiAction::Back => None,
+            DeathUiAction::Retry | DeathUiAction::Summary(DeathSummaryAction::Retry) => {
+                if terminal.memorial_surface_open() {
+                    terminal.death.retry_memorial().ok()
+                } else {
+                    terminal.death.retry().ok()
+                }
+                .map(WireMessage::DeathViewFrame)
+            }
+            DeathUiAction::MemorialEntry(cursor) => terminal
+                .death
+                .select_memorial(cursor)
+                .ok()
+                .map(WireMessage::DeathViewFrame),
+            DeathUiAction::LoadOlderMemorials => terminal
+                .death
+                .load_older_memorials()
+                .ok()
+                .map(WireMessage::DeathViewFrame),
+            DeathUiAction::Back => {
+                if terminal.death.memorial().detail_phase() == MemorialDetailPhase::Closed {
+                    let _ = terminal.death.close_memorial_wall();
+                } else {
+                    let _ = terminal.death.close_memorial_detail();
+                }
+                terminal.view_signature = None;
+                None
+            }
+            DeathUiAction::Summary(DeathSummaryAction::CharacterSelect) => None,
         };
         if let Some(frame) = frame {
             if bridge.0.queue_reliable(frame).is_err() {
@@ -1531,7 +1568,7 @@ fn sync_terminal_views(
     death_view: Option<ResMut<NativeDeathView>>,
     successor_view: Option<ResMut<NativeSuccessorRecoveryView>>,
 ) {
-    let open = terminal.death_surface_open();
+    let open = terminal.surface_open();
     let visibility = if open {
         Visibility::Hidden
     } else {
@@ -1547,6 +1584,31 @@ fn sync_terminal_views(
         commands.remove_resource::<NativeDeathView>();
         commands.remove_resource::<NativeSuccessorRecoveryView>();
         terminal.view_signature = None;
+        return;
+    }
+
+    if terminal.memorial_surface_open() {
+        let snapshot = if terminal.death.memorial().detail_phase() == MemorialDetailPhase::Closed {
+            DeathUiSnapshot::memorial_list(&terminal.death)
+        } else {
+            DeathUiSnapshot::memorial_detail(&terminal.death)
+        };
+        let Ok(snapshot) = snapshot else {
+            return;
+        };
+        let signature = format!("memorial:{}", snapshot.semantic_signature());
+        if terminal.view_signature.as_ref() == Some(&signature) {
+            return;
+        }
+        if let Some(mut view) = death_view {
+            if view.replace_snapshot(snapshot).is_err() {
+                return;
+            }
+        } else if let Ok(view) = NativeDeathView::new(snapshot, terminal.death_config) {
+            commands.remove_resource::<NativeSuccessorRecoveryView>();
+            commands.insert_resource(view);
+        }
+        terminal.view_signature = Some(signature);
         return;
     }
 
@@ -1628,6 +1690,7 @@ fn handle_keyboard(
     bridge: Res<CorePrivateLifeBridge>,
     bargain: Res<CorePrivateBargainState>,
     mut client: ResMut<CorePrivateLifeClient>,
+    mut terminal: ResMut<CorePrivateTerminalUi>,
 ) {
     if bargain.captures_input() {
         return;
@@ -1642,13 +1705,15 @@ fn handle_keyboard(
         Some(PrivateLifeAction::Play)
     } else if keyboard.just_pressed(KeyCode::KeyG) {
         Some(PrivateLifeAction::RealmGate)
+    } else if keyboard.just_pressed(KeyCode::KeyM) {
+        Some(PrivateLifeAction::Memorial)
     } else if keyboard.just_pressed(KeyCode::KeyR) {
         Some(PrivateLifeAction::Retry)
     } else {
         None
     };
     if let Some(action) = action {
-        submit_action(action, &bridge, &mut client);
+        submit_action(action, &bridge, &mut client, &mut terminal);
     }
 }
 
@@ -1893,10 +1958,11 @@ fn handle_buttons(
     interactions: Query<(&Interaction, &ActionButton), Changed<Interaction>>,
     bridge: Res<CorePrivateLifeBridge>,
     mut client: ResMut<CorePrivateLifeClient>,
+    mut terminal: ResMut<CorePrivateTerminalUi>,
 ) {
     for (interaction, action) in &interactions {
         if *interaction == Interaction::Pressed {
-            submit_action(action.0, &bridge, &mut client);
+            submit_action(action.0, &bridge, &mut client, &mut terminal);
         }
     }
 }
@@ -1905,6 +1971,7 @@ fn submit_action(
     action: PrivateLifeAction,
     bridge: &CorePrivateLifeBridge,
     client: &mut CorePrivateLifeClient,
+    terminal: &mut CorePrivateTerminalUi,
 ) {
     if !action_available(action, client) {
         return;
@@ -1951,6 +2018,19 @@ fn submit_action(
             bridge,
             client,
         ),
+        PrivateLifeAction::Memorial => {
+            let Ok(frame) = terminal.death.open_memorial_wall() else {
+                return;
+            };
+            if bridge
+                .0
+                .queue_reliable(WireMessage::DeathViewFrame(frame))
+                .is_err()
+            {
+                client.phase = CorePrivateLifePhase::Error;
+            }
+            terminal.view_signature = None;
+        }
         PrivateLifeAction::Retry => {
             client.location = None;
             client.pending_location_character = None;
@@ -2333,10 +2413,13 @@ fn spawn_ui(mut commands: Commands) {
                     spawn_button(row, PrivateLifeAction::Select(2), "Select 2 [2]");
                     spawn_button(row, PrivateLifeAction::Play, "Play [Enter]");
                     spawn_button(row, PrivateLifeAction::RealmGate, "Realm Gate — Enter [G]");
+                    spawn_button(row, PrivateLifeAction::Memorial, "Memorial Wall [M]");
                     spawn_button(row, PrivateLifeAction::Retry, "Retry [R]");
                 });
             root.spawn((
-                Text::new("MOVE  WASD    FIRE  LEFT MOUSE    RECALL  HOLD R    HALL GATE  G"),
+                Text::new(
+                    "MOVE  WASD    FIRE  LEFT MOUSE    RECALL  HOLD R    HALL GATE  G    MEMORIAL  M",
+                ),
                 TextFont::from_font_size(13.0),
                 TextColor(Color::srgb_u8(130, 144, 145)),
             ));
@@ -2429,7 +2512,7 @@ fn action_available(action: PrivateLifeAction, client: &CorePrivateLifeClient) -
                 Some(CharacterLocation::CharacterSelect { .. })
             ) && client.phase == CorePrivateLifePhase::CharacterSelect
         }
-        PrivateLifeAction::RealmGate => {
+        PrivateLifeAction::RealmGate | PrivateLifeAction::Memorial => {
             client.phase == CorePrivateLifePhase::Hall
                 && client
                     .route
