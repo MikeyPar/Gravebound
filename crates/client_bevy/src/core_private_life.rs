@@ -1021,6 +1021,8 @@ struct PrivateGameplayFloor {
     scene: CorePrivateRouteSceneV1,
     room: Option<protocol::CorePrivateRouteRoomV1>,
 }
+#[derive(Component)]
+struct PrivateGameplayGeometry;
 
 type NormalPrivateUiVisibility<'w, 's> = Query<
     'w,
@@ -1037,7 +1039,11 @@ type PrivateGameplayVisibility<'w, 's> = Query<
     'w,
     's,
     &'static mut Visibility,
-    Or<(With<PrivateGameplayFloor>, With<PrivateGameplayEntity>)>,
+    Or<(
+        With<PrivateGameplayFloor>,
+        With<PrivateGameplayEntity>,
+        With<PrivateGameplayGeometry>,
+    )>,
 >;
 
 /// Opens the real negotiated private-life route without enabling any local gameplay authority.
@@ -2293,6 +2299,7 @@ fn present_private_gameplay(
     mut camera: Single<&mut Transform, With<PrivateGameplayCamera>>,
     mut entities: Query<(Entity, &PrivateGameplayEntity, &mut Transform, &mut Sprite)>,
     floors: Query<(Entity, &PrivateGameplayFloor)>,
+    geometry: Query<Entity, With<PrivateGameplayGeometry>>,
 ) {
     let Some(route) = client
         .route
@@ -2301,19 +2308,21 @@ fn present_private_gameplay(
         .filter(|state| {
             matches!(
                 state.scene,
-                CorePrivateRouteSceneV1::CoreMicrorealm | CorePrivateRouteSceneV1::BellSepulcher
+                CorePrivateRouteSceneV1::LanternHalls
+                    | CorePrivateRouteSceneV1::CoreMicrorealm
+                    | CorePrivateRouteSceneV1::BellSepulcher
             )
         })
     else {
-        despawn_private_gameplay(&mut commands, &entities, &floors);
+        despawn_private_gameplay(&mut commands, &entities, &floors, &geometry);
         return;
     };
     let Some(snapshot) = snapshots.latest.as_ref() else {
-        despawn_private_gameplay(&mut commands, &entities, &floors);
+        despawn_private_gameplay(&mut commands, &entities, &floors, &geometry);
         return;
     };
     let Some((width, height)) = private_scene_dimensions(&content.0, route) else {
-        despawn_private_gameplay(&mut commands, &entities, &floors);
+        despawn_private_gameplay(&mut commands, &entities, &floors, &geometry);
         return;
     };
     let floor_binding = PrivateGameplayFloor {
@@ -2326,12 +2335,16 @@ fn present_private_gameplay(
         for (entity, _) in &floors {
             commands.entity(entity).despawn();
         }
+        for entity in &geometry {
+            commands.entity(entity).despawn();
+        }
         commands.spawn((
             Name::new("Authoritative private arena"),
             floor_binding,
             Sprite::from_color(Color::srgb_u8(12, 20, 24), Vec2::new(width, height)),
             Transform::from_xyz(0.0, 0.0, -1.0),
         ));
+        spawn_private_geometry(&mut commands, &content.0, route, width, height);
     }
 
     let desired = snapshot
@@ -2390,6 +2403,7 @@ fn despawn_private_gameplay(
     commands: &mut Commands,
     entities: &Query<(Entity, &PrivateGameplayEntity, &mut Transform, &mut Sprite)>,
     floors: &Query<(Entity, &PrivateGameplayFloor)>,
+    geometry: &Query<Entity, With<PrivateGameplayGeometry>>,
 ) {
     for (entity, _, _, _) in entities {
         commands.entity(entity).despawn();
@@ -2397,6 +2411,210 @@ fn despawn_private_gameplay(
     for (entity, _) in floors {
         commands.entity(entity).despawn();
     }
+    for entity in geometry {
+        commands.entity(entity).despawn();
+    }
+}
+
+fn spawn_private_geometry(
+    commands: &mut Commands,
+    content: &sim_content::CorePrivateLifeContent,
+    route: &protocol::CorePrivateRouteStateV1,
+    width: f32,
+    height: f32,
+) {
+    match route.scene {
+        CorePrivateRouteSceneV1::LanternHalls | CorePrivateRouteSceneV1::CoreMicrorealm => {
+            let scene = if route.scene == CorePrivateRouteSceneV1::LanternHalls {
+                content.hall_scene()
+            } else {
+                content.microrealm_scene()
+            };
+            let shell = scene.shell_thickness_milli_tiles;
+            for rectangle in [
+                sim_core::TileRectangle::new(0, 0, scene.width_milli_tiles, shell),
+                sim_core::TileRectangle::new(
+                    0,
+                    scene.height_milli_tiles - shell,
+                    scene.width_milli_tiles,
+                    shell,
+                ),
+                sim_core::TileRectangle::new(0, shell, shell, scene.height_milli_tiles - shell * 2),
+                sim_core::TileRectangle::new(
+                    scene.width_milli_tiles - shell,
+                    shell,
+                    shell,
+                    scene.height_milli_tiles - shell * 2,
+                ),
+            ]
+            .into_iter()
+            .chain(scene.solid_rectangles.iter().copied())
+            {
+                spawn_private_rectangle(
+                    commands,
+                    rectangle,
+                    width,
+                    height,
+                    Color::srgb_u8(42, 48, 49),
+                    0.0,
+                );
+            }
+            for object in &scene.objects {
+                let (center, size) = match object.geometry {
+                    sim_core::SceneObjectGeometry::Point(point)
+                    | sim_core::SceneObjectGeometry::PointInteractable { point, .. } => (
+                        authored_private_point(point, width, height),
+                        Vec2::splat(if object.id == REALM_GATE_ID {
+                            1.25
+                        } else {
+                            0.72
+                        }),
+                    ),
+                    sim_core::SceneObjectGeometry::Circle {
+                        center,
+                        radius_milli_tiles,
+                    } => (
+                        authored_private_point(center, width, height),
+                        Vec2::splat(radius_milli_tiles as f32 / 500.0),
+                    ),
+                    sim_core::SceneObjectGeometry::Rectangle(rectangle) => {
+                        let (center, size) = authored_private_rectangle(rectangle, width, height);
+                        (center, size)
+                    }
+                };
+                let enabled_core_station = matches!(
+                    object.id.as_str(),
+                    "station.realm_gate"
+                        | "station.vault"
+                        | "station.overflow"
+                        | "station.memorial_wall"
+                        | "station.oath_shrine"
+                );
+                let color = if object.id.starts_with("station.") && !enabled_core_station {
+                    Color::srgb_u8(72, 74, 73)
+                } else if object.id == "station.memorial_wall" {
+                    Color::srgb_u8(172, 151, 111)
+                } else if object.id == "station.oath_shrine" {
+                    Color::srgb_u8(126, 101, 156)
+                } else if object.id.starts_with("station.") {
+                    Color::srgb_u8(114, 151, 143)
+                } else {
+                    Color::srgb_u8(103, 119, 115)
+                };
+                commands.spawn((
+                    Name::new(format!("Authoritative {}", object.id)),
+                    PrivateGameplayGeometry,
+                    Sprite::from_color(color, size.max(Vec2::splat(0.24))),
+                    Transform::from_xyz(center.x, center.y, 1.0),
+                ));
+            }
+        }
+        CorePrivateRouteSceneV1::BellSepulcher => {
+            let Some(room) = route.room.and_then(|room| {
+                content
+                    .fixed_layout()
+                    .rooms
+                    .iter()
+                    .find(|candidate| candidate.node_id == room.node_id())
+            }) else {
+                return;
+            };
+            let border = 500;
+            let room_width = i32::try_from(room.room.width_milli_tiles).unwrap_or(i32::MAX);
+            let room_height = i32::try_from(room.room.height_milli_tiles).unwrap_or(i32::MAX);
+            for rectangle in [
+                sim_core::TileRectangle::new(0, 0, room_width, border),
+                sim_core::TileRectangle::new(0, room_height - border, room_width, border),
+                sim_core::TileRectangle::new(0, border, border, room_height - border * 2),
+                sim_core::TileRectangle::new(
+                    room_width - border,
+                    border,
+                    border,
+                    room_height - border * 2,
+                ),
+            ] {
+                spawn_private_rectangle(
+                    commands,
+                    rectangle,
+                    width,
+                    height,
+                    Color::srgb_u8(50, 45, 44),
+                    0.0,
+                );
+            }
+            for volume in room
+                .room
+                .volumes
+                .iter()
+                .filter(|volume| volume.kind == sim_core::DungeonRoomVolumeKind::Solid)
+            {
+                if let sim_core::DungeonRoomVolumeGeometry::Rectangle {
+                    x,
+                    y,
+                    width: rectangle_width,
+                    height: rectangle_height,
+                } = volume.geometry
+                {
+                    let Ok(rectangle_width) = i32::try_from(rectangle_width) else {
+                        continue;
+                    };
+                    let Ok(rectangle_height) = i32::try_from(rectangle_height) else {
+                        continue;
+                    };
+                    spawn_private_rectangle(
+                        commands,
+                        sim_core::TileRectangle::new(x, y, rectangle_width, rectangle_height),
+                        width,
+                        height,
+                        Color::srgb_u8(55, 49, 47),
+                        0.1,
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn spawn_private_rectangle(
+    commands: &mut Commands,
+    rectangle: sim_core::TileRectangle,
+    width: f32,
+    height: f32,
+    color: Color,
+    z: f32,
+) {
+    let (center, size) = authored_private_rectangle(rectangle, width, height);
+    commands.spawn((
+        Name::new("Authoritative collision"),
+        PrivateGameplayGeometry,
+        Sprite::from_color(color, size),
+        Transform::from_xyz(center.x, center.y, z),
+    ));
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn authored_private_point(point: sim_core::TilePoint, width: f32, height: f32) -> Vec2 {
+    Vec2::new(
+        point.x_milli_tiles as f32 / 1_000.0 - width * 0.5,
+        height * 0.5 - point.y_milli_tiles as f32 / 1_000.0,
+    )
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn authored_private_rectangle(
+    rectangle: sim_core::TileRectangle,
+    width: f32,
+    height: f32,
+) -> (Vec2, Vec2) {
+    let rectangle_width = rectangle.width_milli_tiles as f32 / 1_000.0;
+    let rectangle_height = rectangle.height_milli_tiles as f32 / 1_000.0;
+    (
+        Vec2::new(
+            rectangle.x_milli_tiles as f32 / 1_000.0 + rectangle_width * 0.5 - width * 0.5,
+            height * 0.5 - (rectangle.y_milli_tiles as f32 / 1_000.0 + rectangle_height * 0.5),
+        ),
+        Vec2::new(rectangle_width, rectangle_height),
+    )
 }
 
 #[allow(clippy::cast_precision_loss)]
@@ -2423,7 +2641,10 @@ fn private_scene_dimensions(
                     )
                 })
         }
-        CorePrivateRouteSceneV1::LanternHalls => None,
+        CorePrivateRouteSceneV1::LanternHalls => Some((
+            content.hall_scene().width_milli_tiles as f32 / 1_000.0,
+            content.hall_scene().height_milli_tiles as f32 / 1_000.0,
+        )),
     }
 }
 
