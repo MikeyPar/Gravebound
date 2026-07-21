@@ -12,7 +12,7 @@ Commit `e869f01` extends every lossless micro-realm, fixed-dungeon, and Caldus f
 
 `LinkLost` is recorded before subsequent danger simulation. A winning authenticated reattach produces exactly one acknowledged `Reattached` frame, then returns to `Connected` only if no newer `LinkLost` transition won while acknowledgement was pending. The transition therefore cannot disappear behind coalescing or race a replacement transport.
 
-Status entries use the death-authority stable-ID, count, duration, capacity, ordering, and uniqueness bounds before delivery. The promoted Core runtime currently has no player-status authority, so production frames deliberately carry an empty status set. Recall remains `Inactive` until the existing Recall actor is connected through a server-only terminal-owner proxy; no transport-facing setter or guessed phase was added.
+Status entries use the death-authority stable-ID, count, duration, capacity, ordering, and uniqueness bounds before delivery. The promoted Core runtime currently has no player-status authority, so production frames deliberately carry an empty status set. Commit `50d858a` connects the exact route-bound Recall actor through a read-only watch projection: `Channeling` applies the canonical 7,500 movement basis points and blocks combat actions, while terminal pinning publishes `CompletionPending`. No transport-facing setter or guessed phase exists.
 
 The frame variant is boxed after adding context so the mixed frame/control delivery enum remains compact. The old context-free delivery helper is test-only; production callers must provide the exact tick context.
 
@@ -26,4 +26,4 @@ Per the owner's instruction, broad workspace/audit suites remain deferred until 
 
 ## Current Next Step
 
-Build `PostgresPrivateDeathContextPlanner` and its server adapter. Under one account/character authority, load the exact life-clock head, destructive custody, immutable character/deed/Oath/Bargain/content facts, Echo availability, and current trace into one server-authored durable-death context. Then connect the Recall actor's ordered phase through the terminal owner, feed nonlethal ticks into trace and clock persistence, and acknowledge a lethal frame only with the exact stored death receipt. Keep normal admission disabled.
+The planner, durable owner, and exact Recall projection are installed. Next compose the actor's explicit/LinkLost terminal evaluations, extraction, and verified-fault restoration through the same coordinator using one coherent current-terminal snapshot. Keep normal admission disabled until exit-ready heartbeats and focused restart/shutdown proof pass.

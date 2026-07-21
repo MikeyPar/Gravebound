@@ -31,4 +31,4 @@ No hosted PostgreSQL, real-QUIC, 25-journey, or full workspace result is claimed
 
 ## Current Next Step
 
-Install the sealed planner in the mandatory terminal-owner factory. The owner must persist exact clock/deed checkpoints, feed the current server-only Recall phase and network state into trace ingestion, submit lethal death through the shared coordinator, and acknowledge the lethal frame only after the stored durable result is known. Compose extraction, explicit/LinkLost Recall, disconnect recovery, and verified server-fault restoration beside death; keep normal admission disabled until three-scene restart, exact replay, cancellation, and zero-residue shutdown proof pass.
+The sealed planner is installed in the mandatory production owner by commit `8cd626e`; commit `50d858a` supplies the same-boundary Recall projection. Next add the coherent current-terminal snapshot and route extraction, explicit/LinkLost Recall, disconnect recovery, and verified server-fault restoration beside death through the same coordinator. Keep normal admission disabled until exit-ready heartbeats, three-scene restart, exact replay, cancellation, and zero-residue shutdown proof pass.
