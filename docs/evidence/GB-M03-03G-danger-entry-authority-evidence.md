@@ -14,7 +14,7 @@ Commit `2e02b94` closes the missing provenance seam between the committed Realm 
 
 `CorePrivateMicrorealmRuntime::new` requires and retains that proof before simulation construction. `CorePrivateTerminalFeedBinding::from_danger_entry` consumes it directly, so later terminal owners no longer need to assemble account, character, lineage, restore-point, lease, and content tuples independently. The raw feed constructor is restricted to crate tests.
 
-Normal admission remains disabled. The persistent session still uses its explicitly named component-only terminal-ownerless spawn until a real owner is installed; this commit does not auto-acknowledge or discard terminal history.
+Normal admission remains disabled. Follow-up commit `0991cd6` removes the terminal-ownerless path from production through the [mandatory owner lifecycle](GB-M03-03G-terminal-owner-lifecycle-evidence.md); it does not add a production auto-acknowledgement or discard owner.
 
 ## Production-blocking verification
 
@@ -28,4 +28,4 @@ Per the owner's instruction, broad audit and workspace suites are deferred until
 
 ## Current Next Step
 
-Replace `CorePrivateLifeSessionDirectory::bind_microrealm`'s component-only ownerless spawn with a mandatory process-owned terminal-owner factory. Start the receiver before the driver, retain and join it across `LinkLost`, reconnect, unbind, and shutdown, and fail before the first tick when no owner exists. The first production implementation must consume the opaque danger authority and join the live damage trace, independent lifetime/permadeath clocks, deeds, custody, per-tick network/Recall/status providers, immutable simulation-to-journal entity identities, and all five terminal producers. Keep normal admission disabled until that owner graph is complete.
+Commit `0991cd6` now requires and owns the process terminal consumer before driver/tick start and across `LinkLost`, reconnect, unbind, and shutdown. Next implement the production factory over the opaque danger authority and join the live damage trace, independent lifetime/permadeath clocks, deeds, custody, per-tick network/Recall/status providers, immutable simulation-to-journal entity identities, and all five terminal producers. Keep normal admission disabled until that owner graph is complete.

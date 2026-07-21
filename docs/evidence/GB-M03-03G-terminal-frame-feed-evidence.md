@@ -18,7 +18,7 @@ The feed is constructed from one opaque terminal/route/content/restore-point bin
 
 Lethal ingress closes immediately after the committed lethal frame and before terminal resolution. Feed loss, altered acknowledgement, or owner loss faults terminal authority without publishing the committed tick. The task report still identifies that committed-but-unacknowledged frame so restart logic can distinguish it from a frame that never committed. Shutdown while a delivery is queued or received but unacknowledged returns an explicit unresolved-frame fault and cannot deadlock.
 
-This evidence closes the reusable frame-feed contract only. The persistent life session still uses the explicitly named terminal-ownerless component path while normal admission is disabled. That path permits empty nonlethal frames and fails closed on the first damage-bearing or lethal frame. No production-route or durable-death integration claim is made until the real terminal owner and the total-ordered control-event stream are installed.
+This evidence closes the reusable frame-feed contract only. Commit `0991cd6` later removes the terminal-ownerless path from production and installs the [mandatory owner lifecycle](GB-M03-03G-terminal-owner-lifecycle-evidence.md). No production-route or durable-death integration claim is made until the real trace/clock/five-producer factory implements that seam.
 
 ## Verification
 
@@ -32,4 +32,4 @@ Hosted proof for commits `e9a7e16`, `68830ad`, and `c9f8705` remains pending and
 
 ## Current Next Step
 
-Commit `2e02b94` now constructs the event stream binding from the exact [opaque danger-entry authority](GB-M03-03G-danger-entry-authority-evidence.md). Next replace the persistent session's terminal-ownerless spawn with a mandatory real owner. That owner must join the live damage trace, independent lifetime/permadeath clocks, deeds, custody, per-tick network/Recall/status providers, immutable simulation-to-journal entity identities, and all five terminal producers. Keep normal admission disabled until three-scene/restart/adverse coverage proves that complete owner graph and zero-residue shutdown.
+Commit `2e02b94` constructs the event stream from the exact [opaque danger-entry authority](GB-M03-03G-danger-entry-authority-evidence.md), and commit `0991cd6` removes the production ownerless path through the [mandatory owner lifecycle](GB-M03-03G-terminal-owner-lifecycle-evidence.md). Next implement that factory with the live damage trace, independent lifetime/permadeath clocks, deeds, custody, per-tick network/Recall/status providers, immutable simulation-to-journal entity identities, and all five terminal producers. Keep normal admission disabled until three-scene/restart/adverse coverage proves that complete owner graph and zero-residue shutdown.
