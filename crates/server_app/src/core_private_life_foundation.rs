@@ -68,7 +68,7 @@ type PersistentIdentity = IdentityService<
     NoopIdentityEventSink,
 >;
 
-type PersistentWorldFlowCoordinator = PostgresCorePrivateWorldFlowCoordinator<
+pub(crate) type PersistentWorldFlowCoordinator = PostgresCorePrivateWorldFlowCoordinator<
     Blake3WorldFlowIds,
     SystemIdentityClock,
     PostgresDangerEntryInventoryProviderV3,
@@ -78,7 +78,7 @@ type PersistentWorldFlowCoordinator = PostgresCorePrivateWorldFlowCoordinator<
     CorePrivateRouteActorDirectory,
 >;
 
-type PersistentWorldFlow = CorePrivateWorldFlowRouter<
+pub(crate) type PersistentWorldFlow = CorePrivateWorldFlowRouter<
     WorldFlowGateService<PostgresWorldFlowLocationRepository, SystemIdentityClock>,
     PersistentWorldFlowCoordinator,
 >;
@@ -280,6 +280,10 @@ impl CorePrivateLifePersistentFoundation {
 
     pub(crate) fn terminal_owner_factory(&self) -> Arc<PostgresCorePrivateTerminalOwnerFactory> {
         Arc::clone(&self.terminal_owner_factory)
+    }
+
+    pub(crate) fn world_flow(&self) -> Arc<PersistentWorldFlow> {
+        Arc::clone(&self.world_flow)
     }
 
     pub(crate) fn begin_shutdown(&self) {

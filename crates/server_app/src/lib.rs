@@ -160,6 +160,7 @@ pub use core_private_fixed_dungeon_runtime::{
     CorePrivateFixedDungeonRestCommit, CorePrivateFixedDungeonRoomFrame,
     CorePrivateFixedDungeonRuntime, CorePrivateFixedDungeonRuntimeError,
 };
+pub(crate) use core_private_hall_runtime::CorePrivateHallActorLease;
 pub use core_private_life_runtime_bootstrap::{
     CorePrivateLifeBootstrapDisposition, CorePrivateLifeBootstrapError,
     CorePrivateLifeBootstrapOutcome, CorePrivateLifeBootstrapRepository,

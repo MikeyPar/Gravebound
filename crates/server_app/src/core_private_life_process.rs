@@ -17,12 +17,15 @@ use thiserror::Error;
 
 use crate::core_private_hall_runtime::{CorePrivateHallDirectory, CorePrivateHallError};
 use crate::core_private_life_foundation::{
-    CorePrivateLifeFoundationError, CorePrivateLifePersistentFoundation, SystemIdentityClock,
+    CorePrivateLifeFoundationError, CorePrivateLifePersistentFoundation, PersistentWorldFlow,
+    SystemIdentityClock,
 };
+use crate::core_private_world_flow::CorePrivateHallWorldFlow;
 use crate::{
     CaldusVictoryCompositionError, CoreB3RewardCompositionError, CoreCharacterCombatFactory,
-    CoreCombatFactoryError, CoreExtractionActorDirectory, CorePrivateLifeSessionDirectory,
-    CorePrivateLifeSessionReport, CorePrivateLifeTickDirectory, CorePrivateLifeTickDirectoryReport,
+    CoreCombatFactoryError, CoreExtractionActorDirectory, CorePrivateHallActorLease,
+    CorePrivateLifeSessionDirectory, CorePrivateLifeSessionReport, CorePrivateLifeTickDirectory,
+    CorePrivateLifeTickDirectoryReport, CorePrivateLifeTransportLease,
     CorePrivateRouteRuntimeReport, CoreRecallActorDirectory, SecretRewardEpoch,
 };
 
@@ -35,6 +38,7 @@ type PersistentExtractionDirectory = CoreExtractionActorDirectory<
 >;
 type PersistentSessionDirectory =
     CorePrivateLifeSessionDirectory<SystemIdentityClock, CorePrivateLifeTickDirectory>;
+type PersistentHallWorldFlow = CorePrivateHallWorldFlow<PersistentWorldFlow>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct CorePrivateLifeAdmission {
@@ -135,6 +139,20 @@ impl CorePrivateLifeProcess {
     #[must_use]
     pub(crate) fn hall(&self) -> &Arc<CorePrivateHallDirectory> {
         &self.hall
+    }
+
+    #[must_use]
+    pub(crate) fn hall_world_flow(
+        &self,
+        actor: CorePrivateHallActorLease,
+        transport: CorePrivateLifeTransportLease,
+    ) -> PersistentHallWorldFlow {
+        CorePrivateHallWorldFlow::new(
+            self.foundation.world_flow(),
+            Arc::clone(&self.hall),
+            actor,
+            transport,
+        )
     }
 
     fn validate_dormant_composition(&self) -> Result<(), CorePrivateLifeProcessError> {
