@@ -275,12 +275,15 @@ where
     /// Returns the exact route-bound Recall projection consumed by the simulation driver. This
     /// is read-only actor authority: transport code cannot publish channel state or substitute a
     /// different character generation.
-    pub(crate) async fn live_projection(
+    pub(crate) async fn terminal_authorities(
         &self,
         authenticated: AuthenticatedAccount,
         route_lease: CorePrivateRouteActorLease,
     ) -> Result<
-        tokio::sync::watch::Receiver<crate::ProductionRecallLiveProjectionV1>,
+        (
+            crate::CorePrivateRecallTerminalHandle,
+            tokio::sync::watch::Receiver<crate::ProductionRecallLiveProjectionV1>,
+        ),
         CoreRecallRuntimeError,
     > {
         let state = self.state.lock().await;
@@ -297,7 +300,10 @@ where
         {
             return Err(CoreRecallRuntimeError::InvalidActorBinding);
         }
-        Ok(entry.lifecycle.actor().subscribe_live_projection())
+        Ok((
+            crate::CorePrivateRecallTerminalHandle::new(Arc::clone(entry.lifecycle.actor())),
+            entry.lifecycle.actor().subscribe_live_projection(),
+        ))
     }
 
     /// Installs the new generation before returning the connection that it superseded. The caller

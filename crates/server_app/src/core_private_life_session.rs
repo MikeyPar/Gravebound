@@ -43,15 +43,15 @@ use crate::{
     CorePrivateMicrorealmDriverError, CorePrivateMicrorealmDriverHandle,
     CorePrivateMicrorealmDriverObserver, CorePrivateMicrorealmDriverReport,
     CorePrivateMicrorealmIngressError, CorePrivateMicrorealmPreparedHandoff,
-    CorePrivateMicrorealmRetainedInput, CorePrivateMicrorealmRuntime, CorePrivateRouteActorLease,
-    CorePrivateTerminalFeedBinding, CorePrivateTerminalFrameReceiver, CoreRecallActorDirectory,
-    CoreRecallActorRetirementReport, CoreRecallAuthoritativeTick, CoreRecallConnectionAuthority,
-    CoreRecallConnectionLease, CoreRecallRuntimeError, CoreRecallRuntimeReport,
-    CoreRecallTransportAttach, CoreReliableWriter, IdentityClock, PostgresCaldusVictoryCoordinator,
-    PostgresCoreB3RewardCoordinator, ProductionExtractionBossExitAuthorityV1,
-    ProductionExtractionCaldusReservationV1, ProductionExtractionIntentActor,
-    ProductionExtractionPlanner, ProductionRecallClock, ProductionRecallDetachOutcome,
-    SecretRewardEpoch, TRANSPORT_REPLACED_CLOSE_CODE,
+    CorePrivateMicrorealmRetainedInput, CorePrivateMicrorealmRuntime,
+    CorePrivateRecallTerminalHandle, CorePrivateRouteActorLease, CorePrivateTerminalFeedBinding,
+    CorePrivateTerminalFrameReceiver, CoreRecallActorDirectory, CoreRecallActorRetirementReport,
+    CoreRecallAuthoritativeTick, CoreRecallConnectionAuthority, CoreRecallConnectionLease,
+    CoreRecallRuntimeError, CoreRecallRuntimeReport, CoreRecallTransportAttach, CoreReliableWriter,
+    IdentityClock, PostgresCaldusVictoryCoordinator, PostgresCoreB3RewardCoordinator,
+    ProductionExtractionBossExitAuthorityV1, ProductionExtractionCaldusReservationV1,
+    ProductionExtractionIntentActor, ProductionExtractionPlanner, ProductionRecallClock,
+    ProductionRecallDetachOutcome, SecretRewardEpoch, TRANSPORT_REPLACED_CLOSE_CODE,
 };
 use crate::{
     core_extraction_runtime::CoreExtractionPreparedWriterHandoff,
@@ -311,6 +311,7 @@ pub trait CorePrivateTerminalOwnerFactory: Send + Sync {
         &self,
         authenticated: AuthenticatedAccount,
         authority: CorePrivateDangerEntryAuthority,
+        recall: CorePrivateRecallTerminalHandle,
         receiver: CorePrivateTerminalFrameReceiver,
     ) -> Result<Box<dyn CorePrivateTerminalOwner>, CorePrivateTerminalOwnerError>;
 }
@@ -1259,6 +1260,10 @@ where
     /// Binds one generation-pinned live microrealm owner to the retained account session. The
     /// owner is transport-independent: disconnect keeps it alive for `LinkLost` vulnerability, and
     /// reconnect returns the same allocation to the winning transport generation.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "microrealm binding atomically composes the route, terminal, Recall, tick, reward, and transport owners"
+    )]
     pub async fn bind_microrealm(
         self: &Arc<Self>,
         lease: CorePrivateLifeTransportLease,
@@ -1300,15 +1305,16 @@ where
             CorePrivateTerminalFeedBinding::from_danger_entry(&danger_entry_authority);
         let (terminal_sender, terminal_receiver) =
             CorePrivateTerminalFrameReceiver::channel(terminal_feed);
+        let (recall_terminal, recall_projection) = self
+            .recall
+            .terminal_authorities(entry.authenticated, route_lease)
+            .await?;
         let terminal_owner = terminal_owner_factory.start(
             entry.authenticated,
             danger_entry_authority,
+            recall_terminal,
             terminal_receiver,
         )?;
-        let recall_projection = self
-            .recall
-            .live_projection(entry.authenticated, route_lease)
-            .await?;
         let driver = CorePrivateMicrorealmDriver::spawn_with_terminal_authorities(
             runtime,
             terminal_sender,
@@ -2219,6 +2225,7 @@ mod tests {
             &self,
             authenticated: AuthenticatedAccount,
             authority: CorePrivateDangerEntryAuthority,
+            _recall: CorePrivateRecallTerminalHandle,
             mut receiver: CorePrivateTerminalFrameReceiver,
         ) -> Result<Box<dyn CorePrivateTerminalOwner>, CorePrivateTerminalOwnerError> {
             if authenticated.account_id.as_bytes() != *authority.terminal().account_id()

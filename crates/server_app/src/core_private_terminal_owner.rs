@@ -13,6 +13,7 @@
 
 use std::{
     fmt,
+    future::Future,
     pin::Pin,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -21,7 +22,8 @@ use std::{
 use persistence::{
     LifeClockCheckpointCommandV1, LifeClockCheckpointRequestV1, LifeClockContentAuthorityV1,
     LifeClockStateV1, LifeDeedCompletionCommandV2, LifeDeedCompletionRequestV2,
-    LifeDeedContentAuthorityV2, PersistenceError, PostgresPersistence, StoredLifeClockHeadV1,
+    LifeDeedContentAuthorityV2, PersistenceError, PostgresPersistence,
+    StoredActiveDangerAuthorityV1, StoredLifeClockHeadV1, StoredWorldFlowRevisionV1,
 };
 use sim_core::{DamageTraceObservation, DeathTraceNetworkState};
 use thiserror::Error;
@@ -33,13 +35,17 @@ use crate::{
     CorePrivateTerminalFrameDelivery, CorePrivateTerminalFrameReceiver, CorePrivateTerminalFrameV1,
     CorePrivateTerminalOwner, CorePrivateTerminalOwnerError, CorePrivateTerminalOwnerFactory,
     CorePrivateTerminalRouteControlAuthorityV1, CorePrivateTerminalRouteControlV1,
-    CoreTerminalCoordinator, CoreTerminalCoordinatorError, CoreTerminalEvaluation,
-    CoreTerminalProducer, CoreTerminalTickSeal, DeathEntityIdentityAuthority,
-    DurableDeathExecutionError, LiveDamageTraceIngestOutcome, LiveDamageTraceMutationAuthority,
-    LiveDamageTraceService, LiveDamageTraceServiceError, PostgresDurableDeathExecutionService,
-    PostgresPrivateDeathContextPlanner, PreparedDurableDeathCommit, PrivateDeathPlanningAuthority,
-    PrivateDeathPlanningError, StoredTerminalReceipt, SystemDurableDeathIdentitySource,
-    durable_death_terminal_candidate, private_route_damage_entity_identities,
+    CoreRecallTerminalDriverError, CoreRecallTerminalTickOutcome, CoreTerminalCoordinator,
+    CoreTerminalCoordinatorError, CoreTerminalEvaluation, CoreTerminalOtherEvaluationsV1,
+    CoreTerminalProducer, DeathEntityIdentityAuthority, DurableDeathExecutionError,
+    LiveDamageTraceIngestOutcome, LiveDamageTraceMutationAuthority, LiveDamageTraceService,
+    LiveDamageTraceServiceError, PostgresDurableDeathExecutionService,
+    PostgresPrivateDeathContextPlanner, PostgresProductionRecallExecutionService,
+    PreparedDurableDeathCommit, PrivateDeathPlanningAuthority, PrivateDeathPlanningError,
+    ProductionRecallClock, ProductionRecallCompletionAuthorityV1, ProductionRecallIntentActor,
+    ProductionRecallPendingAuthorityV1, StoredTerminalReceipt, SystemDurableDeathIdentitySource,
+    drive_recall_terminal_tick, durable_death_terminal_candidate,
+    private_route_damage_entity_identities,
 };
 
 type PersistentDeathPlanner =
@@ -52,6 +58,7 @@ pub struct PostgresCorePrivateTerminalOwnerFactory {
     persistence: PostgresPersistence,
     planner: Arc<PersistentDeathPlanner>,
     death_execution: Arc<PostgresDurableDeathExecutionService>,
+    recall_execution: Arc<PostgresProductionRecallExecutionService>,
     death_view: Arc<sim_content::CoreDevelopmentDeathView>,
 }
 
@@ -72,6 +79,9 @@ impl PostgresCorePrivateTerminalOwnerFactory {
         death_view: Arc<sim_content::CoreDevelopmentDeathView>,
     ) -> Self {
         Self {
+            recall_execution: Arc::new(PostgresProductionRecallExecutionService::new(
+                persistence.clone(),
+            )),
             persistence,
             planner,
             death_execution,
@@ -85,6 +95,7 @@ impl CorePrivateTerminalOwnerFactory for PostgresCorePrivateTerminalOwnerFactory
         &self,
         authenticated: AuthenticatedAccount,
         authority: CorePrivateDangerEntryAuthority,
+        recall: CorePrivateRecallTerminalHandle,
         receiver: CorePrivateTerminalFrameReceiver,
     ) -> Result<Box<dyn CorePrivateTerminalOwner>, CorePrivateTerminalOwnerError> {
         if authenticated.account_id.as_bytes() != *authority.terminal().account_id()
@@ -96,14 +107,111 @@ impl CorePrivateTerminalOwnerFactory for PostgresCorePrivateTerminalOwnerFactory
             persistence: self.persistence.clone(),
             planner: Arc::clone(&self.planner),
             death_execution: Arc::clone(&self.death_execution),
+            recall_execution: Arc::clone(&self.recall_execution),
             death_view: Arc::clone(&self.death_view),
             authenticated,
             authority,
+            recall,
             receiver,
         };
         Ok(Box::new(PostgresCorePrivateTerminalOwner {
             task: tokio::spawn(runtime.run()),
         }))
+    }
+}
+
+#[derive(Clone)]
+pub struct CorePrivateRecallTerminalHandle {
+    actor: Arc<dyn ErasedPrivateRecallTerminalActor>,
+}
+
+impl fmt::Debug for CorePrivateRecallTerminalHandle {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CorePrivateRecallTerminalHandle")
+            .finish_non_exhaustive()
+    }
+}
+
+impl CorePrivateRecallTerminalHandle {
+    pub(crate) fn new<Clock>(actor: Arc<ProductionRecallIntentActor<Clock>>) -> Self
+    where
+        Clock: ProductionRecallClock + 'static,
+    {
+        Self { actor }
+    }
+
+    async fn drive_tick(
+        &self,
+        coordinator: &mut CoreTerminalCoordinator,
+        persistence: &PostgresPersistence,
+        executor: &PostgresProductionRecallExecutionService,
+        completion: &ProductionRecallCompletionAuthorityV1,
+        pending: ProductionRecallPendingAuthorityV1,
+        others: CoreTerminalOtherEvaluationsV1,
+    ) -> Result<CoreRecallTerminalTickOutcome, CoreRecallTerminalDriverError> {
+        self.actor
+            .drive_tick(
+                coordinator,
+                persistence,
+                executor,
+                completion,
+                pending,
+                others,
+            )
+            .await
+    }
+}
+
+trait ErasedPrivateRecallTerminalActor: Send + Sync {
+    fn drive_tick<'a>(
+        &'a self,
+        coordinator: &'a mut CoreTerminalCoordinator,
+        persistence: &'a PostgresPersistence,
+        executor: &'a PostgresProductionRecallExecutionService,
+        completion: &'a ProductionRecallCompletionAuthorityV1,
+        pending: ProductionRecallPendingAuthorityV1,
+        others: CoreTerminalOtherEvaluationsV1,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<CoreRecallTerminalTickOutcome, CoreRecallTerminalDriverError>,
+                > + Send
+                + 'a,
+        >,
+    >;
+}
+
+impl<Clock> ErasedPrivateRecallTerminalActor for ProductionRecallIntentActor<Clock>
+where
+    Clock: ProductionRecallClock + 'static,
+{
+    fn drive_tick<'a>(
+        &'a self,
+        coordinator: &'a mut CoreTerminalCoordinator,
+        persistence: &'a PostgresPersistence,
+        executor: &'a PostgresProductionRecallExecutionService,
+        completion: &'a ProductionRecallCompletionAuthorityV1,
+        pending: ProductionRecallPendingAuthorityV1,
+        others: CoreTerminalOtherEvaluationsV1,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<CoreRecallTerminalTickOutcome, CoreRecallTerminalDriverError>,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            match self.refresh_pending_authority(pending).await {
+                Ok(()) => {}
+                Err(crate::ProductionRecallChannelError::TerminalTickPinned { pinned_tick })
+                    if pinned_tick == completion.server_tick => {}
+                Err(error) => return Err(CoreRecallTerminalDriverError::Channel(error)),
+            }
+            drive_recall_terminal_tick(self, coordinator, persistence, executor, completion, others)
+                .await
+        })
     }
 }
 
@@ -140,6 +248,8 @@ enum ProductionTerminalOwnerError {
     DeathExecution(#[from] DurableDeathExecutionError),
     #[error("terminal owner coordination failed")]
     Coordinator(#[from] CoreTerminalCoordinatorError),
+    #[error("terminal owner Recall/disconnect coordination failed")]
+    Recall(#[from] CoreRecallTerminalDriverError),
     #[error("terminal owner acknowledgement failed")]
     Acknowledgement(#[from] CorePrivateTerminalAcknowledgementError),
     #[error("terminal owner received incoherent authority")]
@@ -152,9 +262,11 @@ struct ProductionTerminalOwnerRuntime {
     persistence: PostgresPersistence,
     planner: Arc<PersistentDeathPlanner>,
     death_execution: Arc<PostgresDurableDeathExecutionService>,
+    recall_execution: Arc<PostgresProductionRecallExecutionService>,
     death_view: Arc<sim_content::CoreDevelopmentDeathView>,
     authenticated: AuthenticatedAccount,
     authority: CorePrivateDangerEntryAuthority,
+    recall: CorePrivateRecallTerminalHandle,
     receiver: CorePrivateTerminalFrameReceiver,
 }
 
@@ -197,6 +309,10 @@ impl ProductionTerminalOwnerRuntime {
         Ok(())
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one lossless frame must persist clocks/trace, build all terminal producers, commit the winner, and acknowledge exactly once"
+    )]
     async fn process_frame(
         &self,
         delivery: CorePrivateTerminalFrameDelivery,
@@ -210,6 +326,19 @@ impl ProductionTerminalOwnerRuntime {
         self.persist_clock(frame.tick.0, frame.context.network_state, clock)
             .await?;
         let terminal_trace = self.persist_trace(&frame, trace).await?;
+        let snapshot = self
+            .persistence
+            .load_current_danger_terminal_snapshot_v1(
+                stored_danger_authority(&self.authority),
+                &stored_world_revision(self.authority.world_flow_revision()),
+            )
+            .await?;
+        if snapshot.clock.authoritative_tick != frame.tick.0
+            || snapshot.extraction.expected_versions.character != frame.route.character_version
+            || snapshot.clock.life_metrics_version != clock.life_metrics_version
+        {
+            return Err(ProductionTerminalOwnerError::InvalidAuthority);
+        }
 
         let death = if frame.player_died {
             let terminal_trace =
@@ -232,37 +361,84 @@ impl ProductionTerminalOwnerRuntime {
             None
         };
 
-        let terminal = self.authority.terminal();
         let tick = frame.tick.0;
         let version = frame.route.character_version;
-        for producer in CoreTerminalProducer::ALL {
-            let evaluation = if producer == CoreTerminalProducer::LethalHealth {
-                match death.as_ref() {
-                    Some(death) => CoreTerminalEvaluation::candidate(
-                        producer,
+        let terminal = self.authority.terminal();
+        let lethal = match death.as_ref() {
+            Some(death) => CoreTerminalEvaluation::candidate(
+                CoreTerminalProducer::LethalHealth,
+                terminal,
+                tick,
+                version,
+                durable_death_terminal_candidate(death)?,
+            ),
+            None => CoreTerminalEvaluation::absent(
+                CoreTerminalProducer::LethalHealth,
+                terminal,
+                tick,
+                version,
+            ),
+        };
+        let completion = ProductionRecallCompletionAuthorityV1 {
+            account_id: *terminal.account_id(),
+            character_id: *terminal.character_id(),
+            instance_lineage_id: *terminal.lineage_id(),
+            entry_restore_point_id: *terminal.restore_point_id(),
+            expected_versions: snapshot.recall_expected_versions,
+            content_revision: snapshot.extraction.content_revision.clone(),
+            server_tick: tick,
+            final_lifetime_ticks: snapshot.clock.lifetime_ticks,
+            final_permadeath_combat_ticks: snapshot.clock.permadeath_combat_ticks,
+        };
+        let pending_material_stack_count = u8::try_from(snapshot.pending_material_stack_count)
+            .map_err(|_| ProductionTerminalOwnerError::InvalidAuthority)?;
+        let outcome = self
+            .recall
+            .drive_tick(
+                coordinator,
+                &self.persistence,
+                &self.recall_execution,
+                &completion,
+                ProductionRecallPendingAuthorityV1 {
+                    pending_item_count: snapshot.pending_item_count,
+                    pending_material_stack_count,
+                },
+                CoreTerminalOtherEvaluationsV1 {
+                    lethal,
+                    extraction: CoreTerminalEvaluation::absent(
+                        CoreTerminalProducer::SuccessfulExtraction,
                         terminal,
                         tick,
                         version,
-                        durable_death_terminal_candidate(death)?,
                     ),
-                    None => CoreTerminalEvaluation::absent(producer, terminal, tick, version),
-                }
-            } else {
-                // Recall, extraction, disconnect recovery, and verified-fault candidates are
-                // admitted through their process-owned actors. Until their shared mailbox is
-                // composed, an ordinary simulation frame supplies an explicit absence only.
-                CoreTerminalEvaluation::absent(producer, terminal, tick, version)
-            };
-            coordinator.evaluate(evaluation)?;
-        }
-        let seal = coordinator.seal_authoritative_tick(tick, version)?;
-        match (seal, death) {
-            (CoreTerminalTickSeal::NoTerminal { .. }, None) => delivery.acknowledge_continue()?,
-            (CoreTerminalTickSeal::Prepared(prepared), Some(death)) => {
+                    fault_restore: CoreTerminalEvaluation::absent(
+                        CoreTerminalProducer::VerifiedFaultRestoration,
+                        terminal,
+                        tick,
+                        version,
+                    ),
+                },
+            )
+            .await?;
+        match (outcome, death) {
+            (CoreRecallTerminalTickOutcome::NoTerminal, None) => {
+                delivery.acknowledge_continue()?;
+            }
+            (CoreRecallTerminalTickOutcome::OtherTerminalPrepared(prepared), Some(death)) => {
                 let receipt = self
                     .execute_death_exact(coordinator, &prepared, &death)
                     .await?;
                 delivery.acknowledge_terminal_owned(&receipt)?;
+            }
+            (
+                CoreRecallTerminalTickOutcome::RecallStored(_)
+                | CoreRecallTerminalTickOutcome::RecallReplayed(_),
+                None,
+            ) => {
+                let receipt = coordinator
+                    .committed_receipt()
+                    .ok_or(ProductionTerminalOwnerError::InvalidAuthority)?;
+                delivery.acknowledge_terminal_owned(receipt)?;
             }
             _ => return Err(ProductionTerminalOwnerError::InvalidAuthority),
         }
@@ -503,6 +679,28 @@ impl ProductionTerminalOwnerRuntime {
                 Err(error) => return Err(error.into()),
             }
         }
+    }
+}
+
+fn stored_danger_authority(
+    authority: &CorePrivateDangerEntryAuthority,
+) -> StoredActiveDangerAuthorityV1 {
+    let terminal = authority.terminal();
+    StoredActiveDangerAuthorityV1 {
+        account_id: *terminal.account_id(),
+        character_id: *terminal.character_id(),
+        instance_lineage_id: *terminal.lineage_id(),
+        entry_restore_point_id: *terminal.restore_point_id(),
+    }
+}
+
+fn stored_world_revision(
+    revision: &protocol::WorldFlowContentRevisionV1,
+) -> StoredWorldFlowRevisionV1 {
+    StoredWorldFlowRevisionV1 {
+        records_blake3: revision.records_blake3.as_str().to_owned(),
+        assets_blake3: revision.assets_blake3.as_str().to_owned(),
+        localization_blake3: revision.localization_blake3.as_str().to_owned(),
     }
 }
 

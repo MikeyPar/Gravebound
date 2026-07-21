@@ -202,6 +202,7 @@ pub use core_private_terminal_feed::{
     CorePrivateTerminalRouteControlV1, CorePrivateTerminalSceneV1,
     CorePrivateTerminalTickContextV1,
 };
+pub use core_private_terminal_owner::CorePrivateRecallTerminalHandle;
 pub use core_private_terminal_owner::PostgresCorePrivateTerminalOwnerFactory;
 pub use core_private_world_flow::{
     CoreBellPortalAbortReason, CoreBellPortalAuthority, CoreBellPortalBinding,
