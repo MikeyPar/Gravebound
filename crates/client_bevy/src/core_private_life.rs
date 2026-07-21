@@ -32,6 +32,7 @@ use crate::{
     CorePrivateRouteClientError, CorePrivateRouteClientModel, CorePrivateRouteClientPhase,
     CorePrivateSceneReadiness, CoreSceneReadiness,
     accessibility::AccessibilitySettings,
+    bargain_ui::BargainUiAction,
     network_prediction::{CompleteSnapshot, SnapshotAssembler},
     network_transport::{
         NetworkStartup, NetworkTransportConfig, NetworkWorkerHandle, TransportEvent,
@@ -82,6 +83,27 @@ struct CorePrivateLifeBridge(NetworkWorkerHandle);
 
 #[derive(Debug, Resource)]
 struct CorePrivatePresentationContent(sim_content::CorePrivateLifeContent);
+
+#[derive(Debug, Resource)]
+struct CorePrivateBargainCopy(crate::bargain_ui::BargainUiCopy);
+
+#[derive(Debug, Resource, Default)]
+struct CorePrivateBargainState {
+    model: crate::bargain_ui::BargainUiModel,
+    open: bool,
+    loaded: bool,
+    may_advance_rest: bool,
+}
+
+impl CorePrivateBargainState {
+    fn captures_input(&self) -> bool {
+        self.open && self.model.captures_input()
+    }
+
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
 
 #[derive(Debug, Resource, Default)]
 struct CorePrivateSnapshotClient {
@@ -755,6 +777,10 @@ pub fn run_core_private_life(config: CorePrivateLifeConfig) -> Result<()> {
     })?;
     let content = load_core_private_life_content(&config.content_root)
         .context("normal Core private-life content failed validation")?;
+    let bargain_catalog = sim_content::load_core_development_oaths_bargains(&config.content_root)
+        .context("normal Core Bargain content failed validation")?;
+    let bargain_copy = crate::bargain_ui::BargainUiCopy::from_catalog(&bargain_catalog)
+        .context("normal Core Bargain presentation failed validation")?;
     let (_, source_report) =
         load_and_validate(&config.content_root).context("Core source package failed validation")?;
     let manifest_hash = ManifestHash::new(source_report.package_hash_blake3)?;
@@ -795,6 +821,8 @@ pub fn run_core_private_life(config: CorePrivateLifeConfig) -> Result<()> {
         .insert_resource(AccessibilitySettings::default())
         .insert_resource(CorePrivateLifeBridge(worker))
         .insert_resource(CorePrivatePresentationContent(content))
+        .insert_resource(CorePrivateBargainCopy(bargain_copy))
+        .insert_resource(CorePrivateBargainState::default())
         .insert_resource(CorePrivateLifeClient::new(world_revision, route_revision))
         .insert_resource(CorePrivateSnapshotClient::default())
         .insert_resource(InputSequencer::default())
@@ -821,6 +849,7 @@ pub fn run_core_private_life(config: CorePrivateLifeConfig) -> Result<()> {
                 request_location,
                 handle_keyboard,
                 handle_recall_keyboard,
+                handle_bargain_keyboard,
                 handle_interact_keyboard,
                 handle_buttons,
                 present_private_gameplay,
@@ -839,6 +868,7 @@ fn poll_transport(
     bridge: Res<CorePrivateLifeBridge>,
     mut client: ResMut<CorePrivateLifeClient>,
     mut snapshots: ResMut<CorePrivateSnapshotClient>,
+    mut bargain: ResMut<CorePrivateBargainState>,
 ) {
     let mut discard_snapshot_queue = false;
     for event in bridge.0.drain_events() {
@@ -861,18 +891,43 @@ fn poll_transport(
                 ReliableEvent::WorldFlowResult(result) => client.apply_world_flow(result.clone()),
                 ReliableEvent::CorePrivateRouteState(_) => client.apply_route(&frame),
                 ReliableEvent::RecallResult(result) => client.apply_recall((**result).clone()),
+                ReliableEvent::BargainViewResult(result) => {
+                    let result = result.clone();
+                    bargain.loaded = matches!(
+                        result.code,
+                        protocol::BargainResultCode::Available
+                            | protocol::BargainResultCode::NoOffer
+                    );
+                    bargain.may_advance_rest = result.code == protocol::BargainResultCode::NoOffer;
+                    bargain.open = result.code == protocol::BargainResultCode::Available;
+                    bargain.model.apply_view(result);
+                    Ok(())
+                }
+                ReliableEvent::BargainDecisionResult(result) => {
+                    let result = result.clone();
+                    bargain.may_advance_rest = matches!(
+                        result.code,
+                        protocol::BargainResultCode::Accepted
+                            | protocol::BargainResultCode::Refused
+                    );
+                    bargain.open = !bargain.may_advance_rest;
+                    bargain.model.apply_decision(result);
+                    Ok(())
+                }
                 _ => Ok(()),
             },
             TransportEvent::LinkLost
             | TransportEvent::Reconnecting { .. }
             | TransportEvent::TransportClosed => {
                 snapshots.reset_transport();
+                bargain.reset();
                 discard_snapshot_queue = true;
                 client.transport_lost();
                 Ok(())
             }
             TransportEvent::Fatal(_) => {
                 snapshots.reset_transport();
+                bargain.reset();
                 discard_snapshot_queue = true;
                 client.error = Some(CorePrivateLifeClientFailure::Transport);
                 client.phase = CorePrivateLifePhase::Error;
@@ -900,6 +955,17 @@ fn poll_transport(
         client.error = Some(CorePrivateLifeClientFailure::InvalidServerAuthority);
         client.phase = CorePrivateLifePhase::Error;
     }
+    let at_b4 = client
+        .route
+        .as_ref()
+        .and_then(CorePrivateRouteClientModel::route_state)
+        .is_some_and(|route| {
+            route.room == Some(protocol::CorePrivateRouteRoomV1::BellRestB4)
+                && route.phase == protocol::CorePrivateRoutePhaseV1::Rest
+        });
+    if !at_b4 {
+        bargain.reset();
+    }
 }
 
 #[allow(clippy::needless_pass_by_value)] // Bevy system parameters are wrapper values.
@@ -921,8 +987,12 @@ fn request_location(bridge: Res<CorePrivateLifeBridge>, mut client: ResMut<CoreP
 fn handle_keyboard(
     keyboard: Res<ButtonInput<KeyCode>>,
     bridge: Res<CorePrivateLifeBridge>,
+    bargain: Res<CorePrivateBargainState>,
     mut client: ResMut<CorePrivateLifeClient>,
 ) {
+    if bargain.captures_input() {
+        return;
+    }
     let action = if keyboard.just_pressed(KeyCode::Digit1) {
         Some(PrivateLifeAction::Select(1))
     } else if keyboard.just_pressed(KeyCode::Digit2) {
@@ -948,8 +1018,12 @@ fn handle_recall_keyboard(
     keyboard: Res<ButtonInput<KeyCode>>,
     bridge: Res<CorePrivateLifeBridge>,
     snapshots: Res<CorePrivateSnapshotClient>,
+    bargain: Res<CorePrivateBargainState>,
     mut client: ResMut<CorePrivateLifeClient>,
 ) {
+    if bargain.captures_input() {
+        return;
+    }
     let pending = matches!(
         client.recall_result,
         Some(protocol::RecallResultV1::Pending { .. })
@@ -1003,10 +1077,77 @@ fn handle_recall_keyboard(
 }
 
 #[allow(clippy::needless_pass_by_value)] // Bevy system parameters are wrapper values.
+fn handle_bargain_keyboard(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    bridge: Res<CorePrivateLifeBridge>,
+    copy: Res<CorePrivateBargainCopy>,
+    mut bargain: ResMut<CorePrivateBargainState>,
+    mut client: ResMut<CorePrivateLifeClient>,
+) {
+    if !bargain.open {
+        return;
+    }
+    let action = if keyboard.just_pressed(KeyCode::Digit1) {
+        Some(BargainUiAction::Cell(0))
+    } else if keyboard.just_pressed(KeyCode::Digit2) {
+        Some(BargainUiAction::Cell(1))
+    } else if keyboard.just_pressed(KeyCode::Digit3) {
+        Some(BargainUiAction::Cell(2))
+    } else if keyboard.just_pressed(KeyCode::KeyF) {
+        Some(BargainUiAction::Refuse)
+    } else if keyboard.just_pressed(KeyCode::Enter) {
+        Some(BargainUiAction::Confirm)
+    } else if keyboard.just_pressed(KeyCode::Escape) {
+        Some(BargainUiAction::Cancel)
+    } else {
+        None
+    };
+    let Some(action) = action else {
+        return;
+    };
+    match action {
+        BargainUiAction::Cell(_) | BargainUiAction::Refuse => bargain.model.choose(action),
+        BargainUiAction::Cancel => {
+            if bargain.model.action_available(BargainUiAction::Cancel) {
+                bargain.model.cancel();
+            } else {
+                bargain.open = false;
+            }
+        }
+        BargainUiAction::Confirm => {
+            let Ok(mutation_id) = client.take_mutation_id() else {
+                bargain.model.mutation_failed();
+                return;
+            };
+            let Some(issued_at) = unix_millis() else {
+                bargain.model.mutation_failed();
+                return;
+            };
+            let Some(frame) =
+                bargain
+                    .model
+                    .confirm(mutation_id, issued_at, copy.0.revision.clone())
+            else {
+                return;
+            };
+            if bridge
+                .0
+                .queue_reliable(WireMessage::BargainDecisionFrame(frame))
+                .is_err()
+            {
+                bargain.model.mutation_failed();
+            }
+        }
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)] // Bevy system parameters are wrapper values.
 fn handle_interact_keyboard(
     keyboard: Res<ButtonInput<KeyCode>>,
     bridge: Res<CorePrivateLifeBridge>,
     snapshots: Res<CorePrivateSnapshotClient>,
+    copy: Res<CorePrivateBargainCopy>,
+    mut bargain: ResMut<CorePrivateBargainState>,
     mut client: ResMut<CorePrivateLifeClient>,
 ) {
     if !keyboard.just_pressed(KeyCode::KeyE) || client.phase != CorePrivateLifePhase::PrivateRoute {
@@ -1029,6 +1170,36 @@ fn handle_interact_keyboard(
             &mut client,
         );
         return;
+    }
+    if route.room == Some(protocol::CorePrivateRouteRoomV1::BellRestB4)
+        && route.phase == protocol::CorePrivateRoutePhaseV1::Rest
+    {
+        if bargain.open {
+            return;
+        }
+        if bargain.may_advance_rest {
+            bargain.reset();
+        } else if bargain.loaded {
+            bargain.open = true;
+            return;
+        } else {
+            let Some(frame) = bargain
+                .model
+                .request_for_selected(client.selected_character_id(), copy.0.revision.clone())
+            else {
+                return;
+            };
+            if bridge
+                .0
+                .queue_reliable(WireMessage::BargainViewFrame(frame))
+                .is_err()
+            {
+                bargain.model.request_failed();
+                return;
+            }
+            bargain.open = true;
+            return;
+        }
     }
     if route.scene != CorePrivateRouteSceneV1::BellSepulcher
         || !route.readiness.room_exit_available.is_available()
@@ -1207,12 +1378,14 @@ fn send_gameplay_input(
     mouse: Res<ButtonInput<MouseButton>>,
     bridge: Res<CorePrivateLifeBridge>,
     client: Res<CorePrivateLifeClient>,
+    bargain: Res<CorePrivateBargainState>,
     mut sequencer: ResMut<InputSequencer>,
 ) {
-    if !client
-        .route
-        .as_ref()
-        .is_some_and(CorePrivateRouteClientModel::can_accept_gameplay_input)
+    if bargain.captures_input()
+        || !client
+            .route
+            .as_ref()
+            .is_some_and(CorePrivateRouteClientModel::can_accept_gameplay_input)
     {
         return;
     }
@@ -1536,12 +1709,15 @@ fn spawn_button(parent: &mut ChildSpawnerCommands, action: PrivateLifeAction, la
 
 #[allow(
     clippy::needless_pass_by_value,
+    clippy::too_many_arguments,
     clippy::type_complexity,
     reason = "Bevy system parameters own disjoint query filters"
 )]
 fn update_ui(
     client: Res<CorePrivateLifeClient>,
     snapshots: Res<CorePrivateSnapshotClient>,
+    bargain: Res<CorePrivateBargainState>,
+    bargain_copy: Res<CorePrivateBargainCopy>,
     mut status: Single<&mut Text, With<StatusText>>,
     mut roster: Single<&mut Text, (With<RosterText>, Without<StatusText>)>,
     mut route: Single<&mut Text, (With<RouteText>, Without<StatusText>, Without<RosterText>)>,
@@ -1549,7 +1725,20 @@ fn update_ui(
 ) {
     **status = Text::new(phase_label(client.phase));
     **roster = Text::new(render_roster(&client));
-    **route = Text::new(render_route(&client, &snapshots));
+    **route = Text::new(if bargain.open {
+        format!(
+            "{}\n\n{}",
+            render_route(&client, &snapshots),
+            bargain.model.render(&bargain_copy.0)
+        )
+    } else if bargain.may_advance_rest {
+        format!(
+            "{}\n\nBargain resolved. Press E to continue.",
+            render_route(&client, &snapshots)
+        )
+    } else {
+        render_route(&client, &snapshots)
+    });
     for (action, mut background, mut border) in &mut actions {
         let available = action_available(action.0, &client);
         *background = BackgroundColor(if available {

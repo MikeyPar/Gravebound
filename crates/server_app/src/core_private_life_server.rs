@@ -336,32 +336,31 @@ async fn dispatch_reliable(
             }
         }
         WireMessage::WorldFlowFrame(frame) => {
-            let bell_handoff = prepare_bell_handoff(process, transport, route, &frame).await?;
-            let transition = transition_kind(&frame);
-            let result = match route {
-                ConnectionRoute::Hall { actor, .. } => {
-                    process
-                        .hall_world_flow(*actor, transport)
-                        .handle_world_flow(authenticated, &frame)
-                        .await
-                }
-                ConnectionRoute::Bootstrap | ConnectionRoute::Danger(_) => {
-                    process
-                        .world_flow()
-                        .handle_world_flow(authenticated, &frame)
-                        .await
-                }
-            };
-            reconcile_bell_handoff(process, authenticated, route, &frame, &result, bell_handoff)
-                .await?;
-            if accepted_transfer(&result) {
-                reconcile_transition(process, authenticated, transport, writer, route, transition)
-                    .await?;
-            }
-            writer
-                .send_response(send, 0, ReliableEvent::WorldFlowResult(result))
-                .await?;
-            publish_route(process, writer, route, 0).await?;
+            dispatch_world_flow(
+                send,
+                &frame,
+                process,
+                authenticated,
+                transport,
+                writer,
+                route,
+            )
+            .await?;
+        }
+        WireMessage::BargainViewFrame(frame) => {
+            dispatch_bargain_view(send, &frame, process, authenticated, writer, route).await?;
+        }
+        WireMessage::BargainDecisionFrame(frame) => {
+            dispatch_bargain_decision(
+                send,
+                &frame,
+                process,
+                authenticated,
+                transport,
+                writer,
+                route,
+            )
+            .await?;
         }
         WireMessage::ExtractionCommitFrame(frame) => {
             dispatch_extraction(send, &frame, process, authenticated, transport, writer).await?;
@@ -408,6 +407,114 @@ async fn dispatch_reliable(
             publish_route(process, writer, route, 0).await?;
         }
     }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_world_flow(
+    send: quinn::SendStream,
+    frame: &protocol::WorldFlowFrame,
+    process: &Arc<CorePrivateLifeProcess>,
+    authenticated: AuthenticatedAccount,
+    transport: CorePrivateLifeTransportLease,
+    writer: &Arc<CoreReliableWriter>,
+    route: &mut ConnectionRoute,
+) -> Result<(), CorePrivateLifeServerError> {
+    let bell_handoff = prepare_bell_handoff(process, transport, route, frame).await?;
+    let transition = transition_kind(frame);
+    let result = match route {
+        ConnectionRoute::Hall { actor, .. } => {
+            process
+                .hall_world_flow(*actor, transport)
+                .handle_world_flow(authenticated, frame)
+                .await
+        }
+        ConnectionRoute::Bootstrap | ConnectionRoute::Danger(_) => {
+            process
+                .world_flow()
+                .handle_world_flow(authenticated, frame)
+                .await
+        }
+    };
+    reconcile_bell_handoff(process, authenticated, route, frame, &result, bell_handoff).await?;
+    if accepted_transfer(&result) {
+        reconcile_transition(process, authenticated, transport, writer, route, transition).await?;
+    }
+    writer
+        .send_response(send, 0, ReliableEvent::WorldFlowResult(result))
+        .await?;
+    publish_route(process, writer, route, 0).await?;
+    Ok(())
+}
+
+async fn dispatch_bargain_view(
+    send: quinn::SendStream,
+    frame: &protocol::BargainViewFrame,
+    process: &CorePrivateLifeProcess,
+    authenticated: AuthenticatedAccount,
+    writer: &CoreReliableWriter,
+    route: &ConnectionRoute,
+) -> Result<(), CorePrivateLifeServerError> {
+    let result = if route_is_b4_rest(process, route)? {
+        process.bargain().view(authenticated, frame).await
+    } else {
+        protocol::BargainViewResult {
+            sequence: frame.sequence,
+            code: protocol::BargainResultCode::LocationRequired,
+            projection: None,
+        }
+    };
+    writer
+        .send_response(send, 0, ReliableEvent::BargainViewResult(result))
+        .await?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_bargain_decision(
+    send: quinn::SendStream,
+    frame: &protocol::BargainDecisionFrame,
+    process: &CorePrivateLifeProcess,
+    authenticated: AuthenticatedAccount,
+    transport: CorePrivateLifeTransportLease,
+    writer: &CoreReliableWriter,
+    route: &ConnectionRoute,
+) -> Result<(), CorePrivateLifeServerError> {
+    let authority = if route_is_b4_rest(process, route)? {
+        process
+            .bargain()
+            .decide_with_rest_resolution(authenticated, frame)
+            .await
+    } else {
+        crate::CoreBargainDecisionAuthorityResult {
+            response: protocol::BargainDecisionResult {
+                mutation_id: frame.mutation_id,
+                code: protocol::BargainResultCode::LocationRequired,
+                projection: None,
+            },
+            rest_resolution: None,
+        }
+    };
+    if matches!(
+        authority.response.code,
+        protocol::BargainResultCode::Accepted | protocol::BargainResultCode::Refused
+    ) {
+        let durable = authority
+            .rest_resolution
+            .ok_or(CorePrivateLifeServerError::ControlUnavailable)?;
+        process
+            .sessions()
+            .resolve_fixed_dungeon_rest(transport, durable)
+            .await?;
+    }
+    writer
+        .send_response(
+            send,
+            0,
+            ReliableEvent::BargainDecisionResult(authority.response),
+        )
+        .await?;
+    publish_route(process, writer, route, 0).await?;
     Ok(())
 }
 
@@ -537,6 +644,21 @@ fn danger_runtime_has_fixed_dungeon(route: &ConnectionRoute) -> bool {
             | CorePrivateMicrorealmDriverState::CaldusRewardPending { .. }
             | CorePrivateMicrorealmDriverState::CaldusTerminalPending { .. }
             | CorePrivateMicrorealmDriverState::CaldusExitReady { .. }
+    )
+}
+
+fn route_is_b4_rest(
+    process: &CorePrivateLifeProcess,
+    route: &ConnectionRoute,
+) -> Result<bool, CorePrivateLifeServerError> {
+    let Some(lease) = route.route_lease() else {
+        return Ok(false);
+    };
+    let state = process.route_snapshot(lease)?;
+    Ok(
+        state.scene == protocol::CorePrivateRouteSceneV1::BellSepulcher
+            && state.room == Some(protocol::CorePrivateRouteRoomV1::BellRestB4)
+            && state.phase == protocol::CorePrivateRoutePhaseV1::Rest,
     )
 }
 
