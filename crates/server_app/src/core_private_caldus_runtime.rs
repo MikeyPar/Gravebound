@@ -57,6 +57,15 @@ pub struct CorePrivateCaldusFrame {
     pub player_died: bool,
 }
 
+/// Neutral post-reward frame authority. Combat remains frozen, while Recall, extraction, and
+/// terminal precedence continue to receive monotonically increasing authoritative ticks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CorePrivateCaldusTerminalHeartbeat {
+    pub tick: Tick,
+    pub player_position: TilePoint,
+    pub route: CorePrivateRouteStateV1,
+}
+
 #[derive(Debug)]
 pub struct CorePrivateCaldusRuntime {
     route_directory: CorePrivateRouteActorDirectory,
@@ -268,6 +277,32 @@ impl CorePrivateCaldusRuntime {
             route,
             exit,
             disposition: CorePrivateCaldusRewardCommitDisposition::Committed,
+        })
+    }
+
+    pub(crate) fn terminal_heartbeat(
+        &mut self,
+    ) -> Result<CorePrivateCaldusTerminalHeartbeat, CorePrivateCaldusRuntimeError> {
+        if self.reward_resolution.is_none()
+            || self.route_phase != CorePrivateRoutePhaseV1::BossExitReady
+        {
+            return Err(CorePrivateCaldusRuntimeError::RewardResolutionUnavailable);
+        }
+        let route = self.route_directory.snapshot(self.route_lease)?;
+        self.validate_route_authority(&route)?;
+        if route.phase != CorePrivateRoutePhaseV1::BossExitReady {
+            return Err(CorePrivateCaldusRuntimeError::RouteAuthorityMismatch);
+        }
+        let tick = self
+            .tick
+            .checked_next()
+            .ok_or(CorePrivateCaldusRuntimeError::TickExhausted)?;
+        let player_position = simulation_to_tile_point(self.player().target.position)?;
+        self.tick = tick;
+        Ok(CorePrivateCaldusTerminalHeartbeat {
+            tick,
+            player_position,
+            route,
         })
     }
 
@@ -1324,6 +1359,20 @@ mod tests {
             runtime.step(input(951)).await,
             Err(CorePrivateCaldusRuntimeError::ExitReady)
         ));
+        let first_heartbeat = runtime
+            .terminal_heartbeat()
+            .expect("first exit-ready heartbeat");
+        let second_heartbeat = runtime
+            .terminal_heartbeat()
+            .expect("second exit-ready heartbeat");
+        assert_eq!(first_heartbeat.tick, Tick(951));
+        assert_eq!(second_heartbeat.tick, Tick(952));
+        assert_eq!(first_heartbeat.route, committed.route);
+        assert_eq!(second_heartbeat.route, committed.route);
+        assert_eq!(
+            first_heartbeat.player_position,
+            second_heartbeat.player_position
+        );
 
         drop(runtime);
         directory.begin_shutdown();

@@ -160,7 +160,8 @@ impl CoreRecallAuthoritativeTick for CorePrivateLifeTickDirectory {
 
 impl CoreExtractionAuthoritativeTick for CorePrivateLifeTickDirectory {
     fn current_tick(&self, route: CorePrivateRouteActorLease) -> Option<NonZeroU64> {
-        CorePrivateLifeAuthoritativeTick::current_tick(self, route).ok()
+        let acknowledged = CorePrivateLifeAuthoritativeTick::current_tick(self, route).ok()?;
+        NonZeroU64::new(acknowledged.get().checked_add(1)?)
     }
 }
 

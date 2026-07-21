@@ -1923,6 +1923,7 @@ async fn run_caldus(
     let mut outcome = CorePrivateMicrorealmDriverOutcome::Shutdown;
     let mut reward_pending = false;
     let mut exit_ready = false;
+    let mut exit_commit: Option<Arc<CorePrivateCaldusRewardCommit>> = None;
 
     loop {
         let event = tokio::select! {
@@ -1933,7 +1934,7 @@ async fn run_caldus(
             }
             request = handoff_rx.recv() => FixedDungeonDriverEvent::Handoff(request),
             request = fixed_advance_rx.recv() => FixedDungeonDriverEvent::Control(request),
-            deadline = interval.tick(), if !reward_pending && !exit_ready => {
+            deadline = interval.tick(), if !reward_pending => {
                 FixedDungeonDriverEvent::Frame(deadline)
             }
         };
@@ -1994,6 +1995,7 @@ async fn run_caldus(
                     outcome = CorePrivateMicrorealmDriverOutcome::CaldusExitReady;
                     ingress.stop_accepting();
                     let commit = Arc::new(commit);
+                    exit_commit = Some(Arc::clone(&commit));
                     observation_tx.send_replace(
                         CorePrivateMicrorealmDriverState::CaldusExitReady {
                             committed_frames,
@@ -2031,6 +2033,97 @@ async fn run_caldus(
                 skipped_deadlines =
                     skipped_deadlines.saturating_add(u64::try_from(missed).unwrap_or(u64::MAX));
                 let retained = *retained_rx.borrow_and_update();
+                if exit_ready {
+                    let heartbeat = match runtime.terminal_heartbeat() {
+                        Ok(heartbeat) => heartbeat,
+                        Err(error) => {
+                            outcome = CorePrivateMicrorealmDriverOutcome::Faulted;
+                            ingress.stop_accepting();
+                            observation_tx.send_replace(
+                                CorePrivateMicrorealmDriverState::Faulted {
+                                    committed_frames,
+                                    fault: caldus_runtime_fault(&error, final_tick),
+                                },
+                            );
+                            wait_for_shutdown(
+                                shutdown_rx,
+                                handoff_rx,
+                                fixed_advance_rx,
+                                "Caldus exit-ready heartbeat failed",
+                            )
+                            .await;
+                            break;
+                        }
+                    };
+                    let terminal_disposition = acknowledge_terminal_frame(
+                        terminal_feed,
+                        CorePrivateTerminalFrameView {
+                            scene: CorePrivateTerminalSceneV1::Caldus,
+                            route: &heartbeat.route,
+                            tick: heartbeat.tick,
+                            player_position: heartbeat.player_position,
+                            context: terminal_tick_context(retained),
+                            player_died: false,
+                            facts: &[],
+                        },
+                        ingress,
+                        shutdown_rx,
+                    )
+                    .await;
+                    let terminal_disposition = match terminal_disposition {
+                        Ok(disposition) => disposition,
+                        Err(error) => {
+                            committed_frames = committed_frames.saturating_add(1);
+                            final_tick = heartbeat.tick;
+                            outcome = CorePrivateMicrorealmDriverOutcome::Faulted;
+                            ingress.stop_accepting();
+                            observation_tx.send_replace(
+                                CorePrivateMicrorealmDriverState::Faulted {
+                                    committed_frames,
+                                    fault: terminal_feed_fault(&error, final_tick),
+                                },
+                            );
+                            wait_for_shutdown(
+                                shutdown_rx,
+                                handoff_rx,
+                                fixed_advance_rx,
+                                "private terminal ingestion failed during Caldus exit-ready",
+                            )
+                            .await;
+                            break;
+                        }
+                    };
+                    committed_frames = committed_frames.saturating_add(1);
+                    final_tick = heartbeat.tick;
+                    ingress
+                        .authoritative_tick
+                        .store(final_tick.0, Ordering::Release);
+                    if matches!(
+                        terminal_disposition,
+                        CorePrivateTerminalFrameDisposition::TerminalOwned { .. }
+                    ) {
+                        outcome = CorePrivateMicrorealmDriverOutcome::CaldusTerminalPending;
+                        ingress.stop_accepting();
+                        wait_for_shutdown(
+                            shutdown_rx,
+                            handoff_rx,
+                            fixed_advance_rx,
+                            "Caldus exit-ready terminal is durably owned",
+                        )
+                        .await;
+                        break;
+                    }
+                    let commit = exit_commit
+                        .as_ref()
+                        .expect("exit-ready state retains its committed reward");
+                    observation_tx.send_replace(
+                        CorePrivateMicrorealmDriverState::CaldusExitReady {
+                            committed_frames,
+                            commit: Arc::clone(commit),
+                        },
+                    );
+                    continue;
+                }
                 match runtime.step(caldus_runtime_input(retained)).await {
                     Ok(frame) => {
                         if frame.player_died {
