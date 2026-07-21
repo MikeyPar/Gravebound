@@ -316,7 +316,6 @@ DESIGN AUTHORITIES
 
     Get-ChildItem -LiteralPath $DistRoot -Force |
         Where-Object {
-            $_.Name -like "$PackagePrefix-*" -and
             $_.Name -ne $PackageName -and
             $_.Name -ne "$PackageName.zip"
         } |
