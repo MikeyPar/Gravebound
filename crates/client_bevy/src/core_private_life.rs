@@ -232,6 +232,10 @@ pub struct CorePrivateLifeClient {
     pending_transfer: Option<[u8; protocol::MUTATION_ID_BYTES]>,
     last_transfer_code: Option<WorldTransferResultCode>,
     recall_result: Option<protocol::RecallResultV1>,
+    pending_inventory: Option<protocol::CorePendingInventoryStateV1>,
+    extraction_ready: Option<protocol::CoreExtractionReadyStateV1>,
+    extraction_frame: Option<protocol::ExtractionCommitFrameV1>,
+    extraction_result: Option<protocol::ExtractionCommitResultV1>,
     error: Option<CorePrivateLifeClientFailure>,
     next_request_sequence: u32,
     next_mutation: u128,
@@ -254,6 +258,10 @@ impl CorePrivateLifeClient {
             pending_transfer: None,
             last_transfer_code: None,
             recall_result: None,
+            pending_inventory: None,
+            extraction_ready: None,
+            extraction_frame: None,
+            extraction_result: None,
             error: None,
             next_request_sequence: 1,
             next_mutation: 1,
@@ -574,6 +582,18 @@ impl CorePrivateLifeClient {
             .as_mut()
             .ok_or(CorePrivateLifeClientError::FeatureNotNegotiated)?;
         route.apply_reliable(frame)?;
+        let reset_extraction = route.route_state().is_some_and(|state| {
+            matches!(
+                state.scene,
+                CorePrivateRouteSceneV1::LanternHalls | CorePrivateRouteSceneV1::CoreMicrorealm
+            )
+        });
+        if reset_extraction {
+            self.pending_inventory = None;
+            self.extraction_ready = None;
+            self.extraction_frame = None;
+            self.extraction_result = None;
+        }
         self.apply_compiled_readiness()?;
         self.sync_phase();
         Ok(())
@@ -610,6 +630,155 @@ impl CorePrivateLifeClient {
             self.phase = CorePrivateLifePhase::LoadingAuthority;
         }
         self.recall_result = Some(result);
+        Ok(())
+    }
+
+    fn apply_pending_inventory(
+        &mut self,
+        state: protocol::CorePendingInventoryStateV1,
+    ) -> Result<(), CorePrivateLifeClientError> {
+        state
+            .validate()
+            .map_err(|_| CorePrivateLifeClientError::InvalidSnapshotAuthority)?;
+        let route = self
+            .route
+            .as_ref()
+            .and_then(CorePrivateRouteClientModel::route_state)
+            .ok_or(CorePrivateLifeClientError::InvalidSnapshotAuthority)?;
+        if Some(state.character_id) != self.selected_character_id()
+            || route.character_id != state.character_id
+            || route.instance_lineage_id != Some(state.instance_lineage_id)
+            || route.character_version != state.expected_extraction_versions.character
+        {
+            return Err(CorePrivateLifeClientError::InvalidSnapshotAuthority);
+        }
+        self.pending_inventory = Some(state);
+        Ok(())
+    }
+
+    fn apply_extraction_ready(
+        &mut self,
+        state: protocol::CoreExtractionReadyStateV1,
+    ) -> Result<(), CorePrivateLifeClientError> {
+        state
+            .validate()
+            .map_err(|_| CorePrivateLifeClientError::InvalidSnapshotAuthority)?;
+        if Some(state.character_id) != self.selected_character_id() {
+            return Err(CorePrivateLifeClientError::InvalidSnapshotAuthority);
+        }
+        self.extraction_ready = Some(state);
+        Ok(())
+    }
+
+    fn begin_extraction(
+        &mut self,
+        issued_at_unix_millis: u64,
+    ) -> Result<protocol::ExtractionCommitFrameV1, CorePrivateLifeClientError> {
+        if let Some(frame) = self.extraction_frame.clone() {
+            return Ok(frame);
+        }
+        let pending = self
+            .pending_inventory
+            .clone()
+            .ok_or(CorePrivateLifeClientError::ActionUnavailable)?;
+        let ready = self
+            .extraction_ready
+            .clone()
+            .ok_or(CorePrivateLifeClientError::ActionUnavailable)?;
+        let route = self
+            .route
+            .as_ref()
+            .and_then(CorePrivateRouteClientModel::route_state)
+            .ok_or(CorePrivateLifeClientError::ActionUnavailable)?;
+        if !route.readiness.extraction_available.is_available()
+            || pending.character_id != ready.character_id
+            || pending.instance_lineage_id != ready.instance_lineage_id
+            || pending.entry_restore_point_id != ready.entry_restore_point_id
+            || pending.content_revision != ready.content_revision
+            || pending.expected_extraction_versions != ready.expected_versions
+            || !self.server_hello.as_ref().is_some_and(|hello| {
+                protocol::TerminalInventoryCapabilityV1::ExtractionCommit.is_advertised_by(hello)
+            })
+        {
+            return Err(CorePrivateLifeClientError::ActionUnavailable);
+        }
+        let sequence = self.take_request_sequence()?;
+        let mutation_id = self.take_mutation_id()?;
+        let payload = protocol::ExtractionCommitPayloadV1 {
+            extraction_request_id: ready.extraction_request_id,
+            expected_versions: ready.expected_versions,
+            content_revision: ready.content_revision.clone(),
+        };
+        let frame = protocol::ExtractionCommitFrameV1 {
+            schema_version: protocol::TERMINAL_INVENTORY_SCHEMA_VERSION,
+            sequence,
+            mutation_id,
+            character_id: ready.character_id,
+            issued_at_unix_millis,
+            payload_hash: payload.canonical_hash(),
+            payload,
+        };
+        frame
+            .validate()
+            .map_err(|_| CorePrivateLifeClientError::InvalidSnapshotAuthority)?;
+        self.extraction_frame = Some(frame.clone());
+        Ok(frame)
+    }
+
+    fn apply_extraction(
+        &mut self,
+        result: protocol::ExtractionCommitResultV1,
+    ) -> Result<(), CorePrivateLifeClientError> {
+        result
+            .validate()
+            .map_err(|_| CorePrivateLifeClientError::InvalidSnapshotAuthority)?;
+        let frame = self
+            .extraction_frame
+            .as_ref()
+            .ok_or(CorePrivateLifeClientError::InvalidSnapshotAuthority)?;
+        let exact = match &result {
+            protocol::ExtractionCommitResultV1::Pending {
+                request_sequence,
+                mutation_id,
+                character_id,
+                extraction_request_id,
+                ..
+            }
+            | protocol::ExtractionCommitResultV1::Rejected {
+                request_sequence,
+                mutation_id,
+                character_id,
+                extraction_request_id,
+                ..
+            } => {
+                *request_sequence == frame.sequence
+                    && *mutation_id == frame.mutation_id
+                    && *character_id == frame.character_id
+                    && *extraction_request_id == frame.payload.extraction_request_id
+            }
+            protocol::ExtractionCommitResultV1::Stored {
+                request_sequence,
+                result,
+                ..
+            } => {
+                *request_sequence == frame.sequence
+                    && result.mutation_id == frame.mutation_id
+                    && result.character_id == frame.character_id
+                    && result.extraction_request_id == frame.payload.extraction_request_id
+            }
+        };
+        if !exact {
+            return Err(CorePrivateLifeClientError::InvalidSnapshotAuthority);
+        }
+        if matches!(result, protocol::ExtractionCommitResultV1::Stored { .. }) {
+            self.location = None;
+            self.pending_location_character = None;
+            if let Some(route) = self.route.as_mut() {
+                route.begin_committed_transfer_refresh()?;
+            }
+            self.phase = CorePrivateLifePhase::LoadingAuthority;
+        }
+        self.extraction_result = Some(result);
         Ok(())
     }
 
@@ -881,41 +1050,9 @@ fn poll_transport(
                 snapshots.reset_transport();
                 client.accept_server_hello(&hello)
             }
-            TransportEvent::Reliable(frame) => match &frame.event {
-                ReliableEvent::AccountBootstrapResult(result) => {
-                    client.apply_bootstrap(result.clone())
-                }
-                ReliableEvent::CharacterMutationResult(result) => {
-                    client.apply_character_mutation(result.clone())
-                }
-                ReliableEvent::WorldFlowResult(result) => client.apply_world_flow(result.clone()),
-                ReliableEvent::CorePrivateRouteState(_) => client.apply_route(&frame),
-                ReliableEvent::RecallResult(result) => client.apply_recall((**result).clone()),
-                ReliableEvent::BargainViewResult(result) => {
-                    let result = result.clone();
-                    bargain.loaded = matches!(
-                        result.code,
-                        protocol::BargainResultCode::Available
-                            | protocol::BargainResultCode::NoOffer
-                    );
-                    bargain.may_advance_rest = result.code == protocol::BargainResultCode::NoOffer;
-                    bargain.open = result.code == protocol::BargainResultCode::Available;
-                    bargain.model.apply_view(result);
-                    Ok(())
-                }
-                ReliableEvent::BargainDecisionResult(result) => {
-                    let result = result.clone();
-                    bargain.may_advance_rest = matches!(
-                        result.code,
-                        protocol::BargainResultCode::Accepted
-                            | protocol::BargainResultCode::Refused
-                    );
-                    bargain.open = !bargain.may_advance_rest;
-                    bargain.model.apply_decision(result);
-                    Ok(())
-                }
-                _ => Ok(()),
-            },
+            TransportEvent::Reliable(frame) => {
+                apply_private_reliable(&frame, &mut client, &mut bargain)
+            }
             TransportEvent::LinkLost
             | TransportEvent::Reconnecting { .. }
             | TransportEvent::TransportClosed => {
@@ -965,6 +1102,53 @@ fn poll_transport(
         });
     if !at_b4 {
         bargain.reset();
+    }
+}
+
+fn apply_private_reliable(
+    frame: &ReliableEventFrame,
+    client: &mut CorePrivateLifeClient,
+    bargain: &mut CorePrivateBargainState,
+) -> Result<(), CorePrivateLifeClientError> {
+    match &frame.event {
+        ReliableEvent::AccountBootstrapResult(result) => client.apply_bootstrap(result.clone()),
+        ReliableEvent::CharacterMutationResult(result) => {
+            client.apply_character_mutation(result.clone())
+        }
+        ReliableEvent::WorldFlowResult(result) => client.apply_world_flow(result.clone()),
+        ReliableEvent::CorePrivateRouteState(_) => client.apply_route(frame),
+        ReliableEvent::RecallResult(result) => client.apply_recall((**result).clone()),
+        ReliableEvent::BargainViewResult(result) => {
+            let result = result.clone();
+            bargain.loaded = matches!(
+                result.code,
+                protocol::BargainResultCode::Available | protocol::BargainResultCode::NoOffer
+            );
+            bargain.may_advance_rest = result.code == protocol::BargainResultCode::NoOffer;
+            bargain.open = result.code == protocol::BargainResultCode::Available;
+            bargain.model.apply_view(result);
+            Ok(())
+        }
+        ReliableEvent::BargainDecisionResult(result) => {
+            let result = result.clone();
+            bargain.may_advance_rest = matches!(
+                result.code,
+                protocol::BargainResultCode::Accepted | protocol::BargainResultCode::Refused
+            );
+            bargain.open = !bargain.may_advance_rest;
+            bargain.model.apply_decision(result);
+            Ok(())
+        }
+        ReliableEvent::CorePendingInventoryState(state) => {
+            client.apply_pending_inventory((**state).clone())
+        }
+        ReliableEvent::CoreExtractionReadyState(state) => {
+            client.apply_extraction_ready((**state).clone())
+        }
+        ReliableEvent::ExtractionCommitResult(result) => {
+            client.apply_extraction((**result).clone())
+        }
+        _ => Ok(()),
     }
 }
 
@@ -1160,6 +1344,23 @@ fn handle_interact_keyboard(
     else {
         return;
     };
+    if route.readiness.extraction_available.is_available() {
+        let Some(issued_at) = unix_millis() else {
+            client.phase = CorePrivateLifePhase::Error;
+            return;
+        };
+        let Ok(frame) = client.begin_extraction(issued_at) else {
+            return;
+        };
+        if bridge
+            .0
+            .queue_reliable(WireMessage::ExtractionCommitFrame(frame))
+            .is_err()
+        {
+            client.phase = CorePrivateLifePhase::Error;
+        }
+        return;
+    }
     if route.readiness.bell_portal_available.is_available() {
         queue_transfer(
             WorldTransferCommand::UsePortal {
@@ -1878,23 +2079,10 @@ fn render_route(client: &CorePrivateLifeClient, snapshots: &CorePrivateSnapshotC
             )
         },
     );
-    let recall = match client.recall_result.as_ref() {
-        Some(protocol::RecallResultV1::Pending {
-            completion_tick, ..
-        }) => format!("\nEmergency Recall: channeling to tick {completion_tick}"),
-        Some(protocol::RecallResultV1::Cancelled { .. }) => {
-            "\nEmergency Recall: cancelled".to_owned()
-        }
-        Some(protocol::RecallResultV1::Stored { .. }) => {
-            "\nEmergency Recall: committed — returning to Hall".to_owned()
-        }
-        Some(protocol::RecallResultV1::Rejected { code, .. }) => {
-            format!("\nEmergency Recall: {code:?}")
-        }
-        None => String::new(),
-    };
+    let recall = render_recall_status(client.recall_result.as_ref());
+    let extraction = render_extraction_status(client.extraction_result.as_ref());
     format!(
-        "{scene}{room}\nPhase: {:?}\nActor generation: {}    State version: {}\nControl: {}{gameplay}{recall}{transfer}",
+        "{scene}{room}\nPhase: {:?}\nActor generation: {}    State version: {}\nControl: {}{gameplay}{recall}{extraction}{transfer}",
         state.phase,
         state.actor_generation,
         state.state_version,
@@ -1908,6 +2096,45 @@ fn render_route(client: &CorePrivateLifeClient, snapshots: &CorePrivateSnapshotC
             "WITHHELD"
         }
     )
+}
+
+fn render_recall_status(result: Option<&protocol::RecallResultV1>) -> String {
+    match result {
+        Some(protocol::RecallResultV1::Pending {
+            completion_tick, ..
+        }) => format!("\nEmergency Recall: channeling to tick {completion_tick}"),
+        Some(protocol::RecallResultV1::Cancelled { .. }) => {
+            "\nEmergency Recall: cancelled".to_owned()
+        }
+        Some(protocol::RecallResultV1::Stored { .. }) => {
+            "\nEmergency Recall: committed — returning to Hall".to_owned()
+        }
+        Some(protocol::RecallResultV1::Rejected { code, .. }) => {
+            format!("\nEmergency Recall: {code:?}")
+        }
+        None => String::new(),
+    }
+}
+
+fn render_extraction_status(result: Option<&protocol::ExtractionCommitResultV1>) -> String {
+    match result {
+        Some(protocol::ExtractionCommitResultV1::Pending { .. }) => {
+            "\nExtraction: committing secured inventory".to_owned()
+        }
+        Some(protocol::ExtractionCommitResultV1::Stored { result, .. }) => format!(
+            "\nExtraction: committed — {} item placements{}",
+            result.placements.len(),
+            if result.storage_resolution_required {
+                " — storage resolution required"
+            } else {
+                ""
+            }
+        ),
+        Some(protocol::ExtractionCommitResultV1::Rejected { code, .. }) => {
+            format!("\nExtraction: {code:?} — press E to retry")
+        }
+        None => String::new(),
+    }
 }
 
 const fn phase_label(phase: CorePrivateLifePhase) -> &'static str {
@@ -2193,5 +2420,87 @@ mod tests {
                 })
                 .is_err()
         );
+    }
+
+    #[test]
+    fn extraction_reuses_exact_server_bound_request() {
+        let mut client = CorePrivateLifeClient::new(world_revision(), route_revision());
+        let mut server_hello = hello(true);
+        server_hello
+            .feature_flags
+            .push(WireText::new(protocol::CORE_EXTRACTION_TERMINAL_FEATURE_FLAG).unwrap());
+        client.accept_server_hello(&server_hello).unwrap();
+        client.set_account(account()).unwrap();
+        client
+            .accept_location(CharacterLocationSnapshot {
+                character_id: [7; 16],
+                character_version: 2,
+                location: CharacterLocation::Danger {
+                    location_id: WireText::new("dungeon.bell_sepulcher").unwrap(),
+                    instance_lineage_id: [9; 16],
+                    entry_restore_point_id: [3; 16],
+                },
+            })
+            .unwrap();
+        client
+            .apply_route(&ReliableEventFrame {
+                sequence: 1,
+                server_tick: 30,
+                event: ReliableEvent::CorePrivateRouteState(Box::new(CorePrivateRouteStateV1 {
+                    schema_version: protocol::CORE_PRIVATE_ROUTE_SCHEMA_VERSION,
+                    character_id: [7; 16],
+                    character_version: 2,
+                    content_revision: route_revision(),
+                    actor_generation: 1,
+                    state_version: 7,
+                    instance_lineage_id: Some([9; 16]),
+                    scene: CorePrivateRouteSceneV1::BellSepulcher,
+                    room: Some(protocol::CorePrivateRouteRoomV1::CaldusArenaB6),
+                    phase: CorePrivateRoutePhaseV1::BossExitReady,
+                    readiness: CorePrivateRouteReadinessV1::canonical(
+                        CorePrivateRoutePhaseV1::BossExitReady,
+                    ),
+                })),
+            })
+            .unwrap();
+        let expected_versions = protocol::TerminalExpectedVersionsV1 {
+            account: 1,
+            character: 2,
+            world: 2,
+            inventory: 3,
+            life_clock: 4,
+        };
+        client
+            .apply_pending_inventory(protocol::CorePendingInventoryStateV1 {
+                schema_version: protocol::CORE_PENDING_INVENTORY_SCHEMA_VERSION,
+                character_id: [7; 16],
+                instance_lineage_id: [9; 16],
+                entry_restore_point_id: [3; 16],
+                location_content_id: WireText::new("dungeon.bell_sepulcher").unwrap(),
+                content_revision: world_revision(),
+                expected_extraction_versions: expected_versions,
+                items: Vec::new(),
+                materials: Vec::new(),
+            })
+            .unwrap();
+        client
+            .apply_extraction_ready(protocol::CoreExtractionReadyStateV1 {
+                schema_version: protocol::CORE_PENDING_INVENTORY_SCHEMA_VERSION,
+                character_id: [7; 16],
+                instance_lineage_id: [9; 16],
+                entry_restore_point_id: [3; 16],
+                extraction_request_id: [4; 16],
+                content_revision: world_revision(),
+                expected_versions,
+            })
+            .unwrap();
+
+        let first = client.begin_extraction(1_000).unwrap();
+        let retry = client.begin_extraction(9_999).unwrap();
+        assert_eq!(retry, first);
+        assert_eq!(first.character_id, [7; 16]);
+        assert_eq!(first.payload.extraction_request_id, [4; 16]);
+        assert_eq!(first.payload.expected_versions, expected_versions);
+        assert_eq!(first.payload.content_revision, world_revision());
     }
 }
