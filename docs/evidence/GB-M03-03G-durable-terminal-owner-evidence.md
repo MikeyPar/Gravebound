@@ -18,6 +18,10 @@ Commit `5d9dc33` adds one serializable current-danger terminal snapshot. The sam
 
 Commit `1ec0285` injects the exact route-generation-bound Recall actor into the terminal owner. Every acknowledged frame refreshes the actor's future pending projection from the coherent snapshot, then evaluates lethal health, explicit Recall, and LinkLost disconnect recovery in canonical producer order. A stored Recall publishes only after the Recall transaction commits; a same-tick death remains the prepared winner and continues through the atomic death/Memorial/Echo transaction. Extraction and verified-fault restoration remain explicit absences until their process-owned sources are composed.
 
+Commit `fa44c81` keeps a neutral 30 Hz terminal heartbeat alive after Caldus reward commitment. Combat stays frozen, but authoritative ticks, Recall state, terminal precedence, and shutdown ownership continue. Extraction reserves the first tick that cannot already be awaiting acknowledgement, eliminating the previously possible stale sealed-tick race.
+
+Commit `8c4c907` injects the dynamic, route-bound extraction directory into the owner before the later Caldus actor exists. Once an authenticated intent is accepted, repository planning is retried server-side against the same durable frame and target tick. The owner submits its sealed candidate beside death and Recall, executes only a prepared extraction winner, publishes only the executor's opaque proof, and retires the actor/route after commit. A death or Recall winner retires any registered extraction actor as a loser.
+
 ## Production-blocking verification
 
 Per the owner's reduced-test instruction, full workspace, hosted PostgreSQL/QUIC, journey, performance, and visual suites remain deferred until implementation completion. The changed production blockers passed:
@@ -29,8 +33,11 @@ Per the owner's reduced-test instruction, full workspace, hosted PostgreSQL/QUIC
 - `cargo test -p server_app --lib lethal_death_wins_same_tick_without_touching_recall_writer`;
 - `cargo test -p server_app --lib link_lost_tick_ninety_commits_after_tick_eighty_nine_absence`;
 - `cargo test -p server_app --lib missing_terminal_owner_fails_before_microrealm_driver_spawn`;
+- `cargo test -p server_app --lib defeat_freezes_evidence_and_only_exact_durable_result_unlocks_exit`;
+- `cargo test -p server_app --lib terminal_owner_retries_the_exact_accepted_tick_without_client_replanning`;
+- `cargo test -p server_app --lib dynamic_runtime_reuses_session_writer_replays_commit_and_retires_route`;
 - formatting and whitespace validation.
 
 ## Current Next Step
 
-Route the prepared Caldus extraction actor into this owner, keep a 30 Hz terminal heartbeat alive after Caldus reaches exit-ready, and add a typed verified-fault restoration producer. Keep normal admission disabled until all five producers share this coordinator and focused restart, response-loss, and shutdown cases pass.
+Add the typed verified-fault restoration producer and exact crash-restore terminal receipt. Keep normal admission disabled until all five producers share this coordinator and focused restart, response-loss, and shutdown cases pass.
