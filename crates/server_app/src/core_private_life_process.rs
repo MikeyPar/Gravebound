@@ -27,8 +27,8 @@ use crate::{
     CorePrivateLifeSessionDirectory, CorePrivateLifeSessionReport, CorePrivateLifeTickDirectory,
     CorePrivateLifeTickDirectoryReport, CorePrivateLifeTransportLease,
     CorePrivateMicrorealmBinding, CorePrivateMicrorealmRuntime, CorePrivateRouteRuntimeReport,
-    CoreRecallActorDirectory, ProductionRecallIntentActor, ProductionRecallPendingAuthorityV1,
-    SecretRewardEpoch,
+    CoreRecallActorDirectory, CoreReliableWriter, ProductionRecallIntentActor,
+    ProductionRecallPendingAuthorityV1, SecretRewardEpoch,
 };
 
 type PersistentRecallDirectory =
@@ -159,6 +159,88 @@ impl CorePrivateLifeProcess {
         )
     }
 
+    /// Attaches the winning authenticated transport and resolves terminal/restart state before
+    /// any Hall or danger control can be published by the connection root.
+    pub(crate) async fn attach_transport(
+        self: &Arc<Self>,
+        authenticated: crate::AuthenticatedAccount,
+        connection: quinn::Connection,
+        issued_at_unix_ms: u64,
+    ) -> Result<CorePrivateLifeProcessAttach, CorePrivateLifeProcessError> {
+        let attached = self
+            .sessions
+            .attach_transport(authenticated, connection, issued_at_unix_ms)
+            .await?;
+        if let Some(previous) = attached.invalidated_connection.as_ref() {
+            crate::close_transport(
+                previous,
+                crate::TRANSPORT_REPLACED_CLOSE_CODE,
+                b"authoritative private-life transport replaced",
+            );
+        }
+        if let Some(microrealm) = attached.microrealm {
+            return Ok(CorePrivateLifeProcessAttach {
+                transport: attached.lease,
+                writer: attached.writer,
+                disposition: CorePrivateLifeProcessDisposition::Danger(microrealm),
+            });
+        }
+        let bootstrap = match self
+            .foundation
+            .runtime_bootstrap()
+            .bootstrap_process_restart(authenticated, attached.lease, self.sessions.as_ref())
+            .await
+        {
+            Ok(bootstrap) => bootstrap,
+            Err(error) => {
+                let _ = self
+                    .sessions
+                    .detach_transport(attached.lease, issued_at_unix_ms)
+                    .await;
+                return Err(error.into());
+            }
+        };
+        if !Arc::ptr_eq(&bootstrap.writer, &attached.writer) {
+            let _ = self
+                .sessions
+                .detach_transport(attached.lease, issued_at_unix_ms)
+                .await;
+            return Err(CorePrivateLifeProcessError::SplitReliableWriter);
+        }
+        let disposition = match bootstrap.disposition {
+            crate::CorePrivateLifeBootstrapDisposition::HallReady { hall, route } => {
+                let actor = match self.hall.install_stored(authenticated, &hall) {
+                    Ok(actor) => actor,
+                    Err(error) => {
+                        let _ = self
+                            .sessions
+                            .detach_transport(attached.lease, issued_at_unix_ms)
+                            .await;
+                        return Err(error.into());
+                    }
+                };
+                if let Err(error) = self
+                    .hall
+                    .attach_transport(authenticated, actor, attached.lease)
+                {
+                    let _ = self.hall.retire(actor);
+                    let _ = self
+                        .sessions
+                        .detach_transport(attached.lease, issued_at_unix_ms)
+                        .await;
+                    return Err(error.into());
+                }
+                CorePrivateLifeProcessDisposition::Hall { hall, route, actor }
+            }
+            disposition => CorePrivateLifeProcessDisposition::Bootstrap(disposition),
+        };
+        Ok(CorePrivateLifeProcessAttach {
+            transport: attached.lease,
+            writer: attached.writer,
+            disposition,
+        })
+    }
+
     /// Converts one already committed Hall -> microrealm receipt into the exact live danger
     /// graph. Exact replay returns the retained binding; every partial fresh bind is retired before
     /// the error escapes.
@@ -224,6 +306,17 @@ impl CorePrivateLifeProcess {
         }
     }
 
+    pub(crate) async fn detach_transport(
+        &self,
+        transport: CorePrivateLifeTransportLease,
+        issued_at_unix_ms: u64,
+    ) -> Result<crate::CorePrivateLifeTransportDetach, CorePrivateLifeProcessError> {
+        Ok(self
+            .sessions
+            .detach_transport(transport, issued_at_unix_ms)
+            .await?)
+    }
+
     fn validate_dormant_composition(&self) -> Result<(), CorePrivateLifeProcessError> {
         if self.admission_ready() || self.foundation.normal_route_enabled() {
             return Err(CorePrivateLifeProcessError::AdmissionEscaped);
@@ -267,6 +360,24 @@ pub(crate) struct CorePrivateLifeProcessReport {
     pub zero_residue: bool,
 }
 
+#[derive(Debug)]
+pub(crate) struct CorePrivateLifeProcessAttach {
+    pub transport: CorePrivateLifeTransportLease,
+    pub writer: Arc<CoreReliableWriter>,
+    pub disposition: CorePrivateLifeProcessDisposition,
+}
+
+#[derive(Debug)]
+pub(crate) enum CorePrivateLifeProcessDisposition {
+    Bootstrap(crate::CorePrivateLifeBootstrapDisposition),
+    Hall {
+        hall: persistence::StoredPrivateLifeHallV1,
+        route: crate::CorePrivateRouteActorLease,
+        actor: CorePrivateHallActorLease,
+    },
+    Danger(CorePrivateMicrorealmBinding),
+}
+
 #[derive(Debug, Error)]
 pub(crate) enum CorePrivateLifeProcessError {
     #[error("private-life process admission escaped before the normal composition was complete")]
@@ -289,6 +400,8 @@ pub(crate) enum CorePrivateLifeProcessError {
     RecallActor(#[from] crate::ProductionRecallChannelError),
     #[error("private-life runtime bootstrap failed: {0}")]
     Bootstrap(#[from] crate::CorePrivateLifeBootstrapError),
+    #[error("private-life connection resolved more than one reliable writer")]
+    SplitReliableWriter,
     #[error("private-life session runtime failed: {0}")]
     Session(#[from] crate::CorePrivateLifeSessionError),
     #[error("private-life tick runtime failed: {0}")]

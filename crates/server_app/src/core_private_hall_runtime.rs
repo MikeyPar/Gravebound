@@ -177,6 +177,32 @@ impl CorePrivateHallDirectory {
         Ok(lease)
     }
 
+    pub(crate) fn install_stored(
+        &self,
+        authenticated: AuthenticatedAccount,
+        hall: &persistence::StoredPrivateLifeHallV1,
+    ) -> Result<CorePrivateHallActorLease, CorePrivateHallError> {
+        let arrival = match &hall.arrival {
+            persistence::StoredSafeArrival::HallDefault => SafeArrival::HallDefault,
+            persistence::StoredSafeArrival::SpawnAnchor(spawn_id) => SafeArrival::SpawnAnchor {
+                spawn_id: protocol::WireText::new(spawn_id.clone())
+                    .map_err(|_| CorePrivateHallError::InvalidSnapshot)?,
+            },
+        };
+        self.install(
+            authenticated,
+            &CharacterLocationSnapshot {
+                character_id: hall.character.character_id,
+                character_version: hall.character.versions.world,
+                location: CharacterLocation::Safe {
+                    location_id: protocol::WireText::new(HALL_ID)
+                        .map_err(|_| CorePrivateHallError::Content)?,
+                    arrival,
+                },
+            },
+        )
+    }
+
     /// Pins Hall input and interaction authority to the session directory's winning transport.
     pub(crate) fn attach_transport(
         &self,
@@ -190,6 +216,22 @@ impl CorePrivateHallDirectory {
             return Err(CorePrivateHallError::ForeignAuthority);
         }
         live.transport_generation = Some(transport.generation());
+        Ok(())
+    }
+
+    pub(crate) fn retire(
+        &self,
+        actor: CorePrivateHallActorLease,
+    ) -> Result<(), CorePrivateHallError> {
+        let mut state = lock(&self.state);
+        let live = state
+            .actors
+            .get(&actor.account_id)
+            .ok_or(CorePrivateHallError::ActorUnavailable)?;
+        if live.lease != actor {
+            return Err(CorePrivateHallError::StaleActor);
+        }
+        state.actors.remove(&actor.account_id);
         Ok(())
     }
 
