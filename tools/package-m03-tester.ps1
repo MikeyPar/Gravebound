@@ -16,9 +16,14 @@ $PackageInputs = @(
     'content',
     'crates\client_bevy',
     'crates\content_schema',
+    'crates\persistence',
     'crates\protocol',
+    'crates\server_app',
     'crates\sim_content',
-    'crates\sim_core'
+    'crates\sim_core',
+    'migrations',
+    'tools\m03-tester-postgres.yml',
+    'tools\run-m03-tester.ps1'
 )
 
 function Assert-ChildPath {
@@ -61,6 +66,21 @@ function Write-Launcher {
 setlocal
 pushd "%~dp0"
 "%~dp0Gravebound.exe" $Arguments
+set "exit_code=%ERRORLEVEL%"
+popd
+if not "%exit_code%"=="0" pause
+exit /b %exit_code%
+"@ | Set-Content -LiteralPath $Path -Encoding ascii
+}
+
+function Write-PrivateLifeLauncher {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    @"
+@echo off
+setlocal
+pushd "%~dp0"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0run-m03-tester.ps1"
 set "exit_code=%ERRORLEVEL%"
 popd
 if not "%exit_code%"=="0" pause
@@ -124,12 +144,15 @@ try {
     Assert-ChildPath -Parent $RepoRoot -Child $DistRoot
     Assert-ChildPath -Parent (Join-Path $RepoRoot 'tmp') -Child $StageRoot
 
-    $DirtyPackageInputs = & git status --porcelain -- @PackageInputs
-    if ($LASTEXITCODE -ne 0) {
+    & git diff --quiet -- @PackageInputs
+    $TrackedWorktreeStatus = $LASTEXITCODE
+    & git diff --cached --quiet -- @PackageInputs
+    $TrackedIndexStatus = $LASTEXITCODE
+    if ($TrackedWorktreeStatus -gt 1 -or $TrackedIndexStatus -gt 1) {
         throw 'Unable to inspect tester-package source state.'
     }
-    if ($DirtyPackageInputs) {
-        throw "Commit or revert tester-package input changes before packaging:`n$($DirtyPackageInputs -join "`n")"
+    if ($TrackedWorktreeStatus -eq 1 -or $TrackedIndexStatus -eq 1) {
+        throw 'Commit or revert tracked tester-package input changes before packaging.'
     }
 
     $Revision = (& git rev-parse HEAD).Trim()
@@ -157,6 +180,7 @@ try {
     $StagePackage = Join-Path $StageRoot $PackageName
     $StageZip = Join-Path $StageRoot "$PackageName.zip"
     $SourceArchive = Join-Path $StageRoot 'source.zip'
+    $PayloadArchive = Join-Path $StageRoot 'payload.zip'
     $SmokeLogs = Join-Path $StageRoot 'smoke'
 
     if (Test-Path -LiteralPath $StageRoot) {
@@ -164,14 +188,18 @@ try {
     }
     New-Item -ItemType Directory -Force -Path $StagePackage, $SmokeLogs | Out-Null
 
-    Invoke-Checked -Command cargo -Arguments @('build', '--locked', '--release', '-p', 'client_bevy')
+    Invoke-Checked -Command cargo -Arguments @('build', '--locked', '--release', '-p', 'client_bevy', '-p', 'server_app')
     Invoke-Checked -Command cargo -Arguments @('run', '--locked', '-p', 'tools_content', '--', 'validate')
 
     Copy-Item -LiteralPath 'target\release\client_bevy.exe' -Destination (Join-Path $StagePackage 'Gravebound.exe')
-    Copy-Item -LiteralPath 'assets' -Destination $StagePackage -Recurse
-    Copy-Item -LiteralPath 'content' -Destination $StagePackage -Recurse
+    Copy-Item -LiteralPath 'target\release\server_app.exe' -Destination (Join-Path $StagePackage 'GraveboundServer.exe')
+    Invoke-Checked -Command git -Arguments @('archive', '--format=zip', "--output=$PayloadArchive", 'HEAD', 'assets', 'content')
+    Expand-Archive -LiteralPath $PayloadArchive -DestinationPath $StagePackage
+    Copy-Item -LiteralPath 'tools\m03-tester-postgres.yml' -Destination $StagePackage
+    Copy-Item -LiteralPath 'tools\run-m03-tester.ps1' -Destination $StagePackage
 
-    Write-Launcher -Path (Join-Path $StagePackage 'PLAY GAME.cmd') -Arguments 'local-lab'
+    Write-PrivateLifeLauncher -Path (Join-Path $StagePackage 'PLAY GAME.cmd')
+    Write-Launcher -Path (Join-Path $StagePackage 'PLAY LOCAL LAB.cmd') -Arguments 'local-lab'
     Write-Launcher -Path (Join-Path $StagePackage 'M03 HALL PREVIEW.cmd') -Arguments 'core-world-showcase --scene hall --content-root content'
     Write-Launcher -Path (Join-Path $StagePackage 'M03 DUNGEON PREVIEW.cmd') -Arguments 'core-encounter-showcase --content-root content'
     Write-Launcher -Path (Join-Path $StagePackage 'M03 BOSS PREVIEW.cmd') -Arguments 'core-caldus-showcase --content-root content --state phase-one'
@@ -182,7 +210,9 @@ try {
     Invoke-Checked -Command git -Arguments @('archive', '--format=zip', "--output=$SourceArchive", 'HEAD')
     $SourceArchiveHash = (Get-FileHash -LiteralPath $SourceArchive -Algorithm SHA256).Hash
     $Executable = Join-Path $StagePackage 'Gravebound.exe'
+    $ServerExecutable = Join-Path $StagePackage 'GraveboundServer.exe'
     $ExecutableHash = (Get-FileHash -LiteralPath $Executable -Algorithm SHA256).Hash
+    $ServerExecutableHash = (Get-FileHash -LiteralPath $ServerExecutable -Algorithm SHA256).Hash
 
     @"
 GRAVEBOUND - GB-M03 TESTER BUILD
@@ -191,10 +221,16 @@ Repository source revision: $Revision
 Source archive SHA-256: $SourceArchiveHash
 Build profile: optimized Windows release
 Executable SHA-256: $ExecutableHash
+Server executable SHA-256: $ServerExecutableHash
 
 START HERE
-Double-click PLAY GAME.cmd. Opening Gravebound.exe directly also launches the playable
-Local Lab.
+Double-click PLAY GAME.cmd for the current persistent Character Select -> Lantern Hall ->
+private danger -> Bell Sepulcher -> extraction/death -> Hall/successor route. This requires
+Docker Desktop for the package's private local PostgreSQL service. The wipeable tester data
+survives between launches in a local Docker volume. No Steam runtime is required.
+
+PLAY LOCAL LAB.cmd remains a dependency-free combat sandbox. Opening Gravebound.exe
+directly also launches that Local Lab.
 
 LOCAL LAB CONTROLS
 - Move: WASD
@@ -205,32 +241,32 @@ LOCAL LAB CONTROLS
 - Inventory: I
 - Accessibility panel: F6
 
-M03 PREVIEWS
+CURRENT M03 ROUTE AND PREVIEWS
+PLAY GAME.cmd runs the normal authenticated QUIC route implemented so far, including
+durable identity, Hall/danger traversal, fixed Bell rooms and Sir Caldus, extraction,
+Emergency Recall, lethal death, Memorial, and successor recovery.
+
 The other launchers expose implemented M03 surfaces for direct review: Lantern Halls,
 the Core dungeon encounters, Sir Caldus, item/Vault state, durable death/Memorial, and
-the two-confirmation successor recovery handoff. These are isolated previews of
-implemented work. The production Character Select -> Hall -> dungeon -> terminal
-outcome route remains gated until the parent GB-M03-03 integration and audit pass.
-GB-M03-07 successor recovery and GB-M03-08 extraction/Emergency Recall are implemented
-and closed under hosted evidence, but remain behind that integrated-route gate.
+the two-confirmation successor recovery handoff. Those launchers are isolated previews.
 
 PACKAGE RULE
-Keep Gravebound.exe, content, and assets together. Moving only the EXE will make strict
-content or asset validation fail at startup.
+Keep both executables, the PowerShell runner, Compose file, content, and assets together.
+Moving only the EXE will make strict content or asset validation fail at startup.
 
 USEFUL TEST NOTES
 - Please record which launcher you used when reporting a problem.
 - Include a screenshot and the exact action immediately before the issue when possible.
-- The successor preview is ready for visual/input testing. Its hosted 25-journey timing,
-  unique identity/grant, danger-return, and zero-residue acceptance gates are closed.
-- Extraction and Emergency Recall are implemented, but their production player route
-  remains gated on parent GB-M03-03 integration.
+- PLAY GAME uses the opaque local identity `local-m03-tester`. Delete the package-local
+  .runtime folder only if its generated local secrets become corrupt.
+- The external private-cohort, Steamworks, hosting rehearsal, and user-deferred full audit
+  are not represented as complete by this tester build.
 
 BUILD VERIFICATION
-- Optimized Windows release compilation: PASS
-- Executable CLI smoke check: PASS
+- Optimized Windows client/server release compilation: PASS
+- Client/server executable CLI smoke check: PASS
 - Local Lab twelve-second launch/responding check: PASS
-- All seven packaged launch modes remained alive and responsive: PASS
+- All seven standalone packaged launch modes remained alive and responsive: PASS
 - Strict compiled content validation: PASS
 - Startup stderr for all seven launch modes: EMPTY
 
@@ -243,6 +279,10 @@ DESIGN AUTHORITIES
     & $Executable --help *> $null
     if ($LASTEXITCODE -ne 0) {
         throw "Packaged executable CLI smoke check failed with exit code $LASTEXITCODE"
+    }
+    & $ServerExecutable --help *> $null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Packaged server executable CLI smoke check failed with exit code $LASTEXITCODE"
     }
 
     $LaunchModes = @(
