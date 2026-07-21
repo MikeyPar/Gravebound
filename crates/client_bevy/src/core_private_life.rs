@@ -8,6 +8,7 @@
 //! projections agree with the exact locally compiled Core content.
 
 use std::{
+    collections::BTreeMap,
     net::SocketAddr,
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
@@ -31,6 +32,7 @@ use crate::{
     CorePrivateRouteClientError, CorePrivateRouteClientModel, CorePrivateRouteClientPhase,
     CorePrivateSceneReadiness, CoreSceneReadiness,
     accessibility::AccessibilitySettings,
+    network_prediction::{CompleteSnapshot, SnapshotAssembler},
     network_transport::{
         NetworkStartup, NetworkTransportConfig, NetworkWorkerHandle, TransportEvent,
     },
@@ -38,6 +40,9 @@ use crate::{
 
 const WINDOW_TITLE: &str = "Gravebound - Core Private Life";
 const REALM_GATE_ID: &str = "station.realm_gate";
+const RUN_ENTITY_ID_STRIDE: u64 = 100_000;
+const PLAYER_ENTITY_ID_OFFSET: u64 = 10_000;
+const MAX_BUFFERED_PRIVATE_SNAPSHOT_CHUNKS: usize = 128;
 
 #[derive(Debug, Clone)]
 pub struct CorePrivateLifeConfig {
@@ -73,6 +78,120 @@ enum PrivateLifeAction {
 
 #[derive(Debug, Resource)]
 struct CorePrivateLifeBridge(NetworkWorkerHandle);
+
+#[derive(Debug, Resource, Default)]
+struct CorePrivateSnapshotClient {
+    actor_generation: Option<u64>,
+    route_state_version: Option<u64>,
+    local_entity_id: Option<u64>,
+    assembler: SnapshotAssembler,
+    buffered: BTreeMap<(u64, u32, u16), protocol::SnapshotChunk>,
+    latest: Option<CompleteSnapshot>,
+}
+
+impl CorePrivateSnapshotClient {
+    fn reset_transport(&mut self) {
+        *self = Self::default();
+    }
+
+    fn bind_route(
+        &mut self,
+        route: Option<&protocol::CorePrivateRouteStateV1>,
+    ) -> Result<(), CorePrivateLifeClientError> {
+        let Some(route) = route.filter(|state| {
+            matches!(
+                state.scene,
+                CorePrivateRouteSceneV1::CoreMicrorealm | CorePrivateRouteSceneV1::BellSepulcher
+            )
+        }) else {
+            self.actor_generation = None;
+            self.route_state_version = None;
+            self.local_entity_id = None;
+            self.assembler = SnapshotAssembler::default();
+            self.buffered.clear();
+            self.latest = None;
+            return Ok(());
+        };
+        let generation_changed = self.actor_generation != Some(route.actor_generation);
+        if generation_changed {
+            self.actor_generation = Some(route.actor_generation);
+            self.local_entity_id = Some(private_player_entity_id(route.actor_generation)?);
+            self.assembler = SnapshotAssembler::default();
+            self.latest = None;
+        }
+        self.route_state_version = Some(route.state_version);
+        self.buffered
+            .retain(|(version, _, _), _| *version >= route.state_version);
+        let ready = self
+            .buffered
+            .extract_if(.., |(version, _, _), _| *version == route.state_version)
+            .map(|(_, chunk)| chunk)
+            .collect::<Vec<_>>();
+        for chunk in ready {
+            self.apply_bound_chunk(chunk)?;
+        }
+        Ok(())
+    }
+
+    fn ingest(&mut self, chunk: protocol::SnapshotChunk) -> Result<(), CorePrivateLifeClientError> {
+        chunk
+            .validate()
+            .map_err(|_| CorePrivateLifeClientError::InvalidSnapshotAuthority)?;
+        match self.route_state_version {
+            Some(version) if chunk.state_version < version => Ok(()),
+            Some(version) if chunk.state_version == version => self.apply_bound_chunk(chunk),
+            _ => {
+                if self.buffered.len() == MAX_BUFFERED_PRIVATE_SNAPSHOT_CHUNKS {
+                    self.buffered.pop_first();
+                }
+                self.buffered.insert(
+                    (chunk.state_version, chunk.sequence, chunk.chunk_index),
+                    chunk,
+                );
+                Ok(())
+            }
+        }
+    }
+
+    fn apply_bound_chunk(
+        &mut self,
+        chunk: protocol::SnapshotChunk,
+    ) -> Result<(), CorePrivateLifeClientError> {
+        if Some(chunk.state_version) != self.route_state_version {
+            return Err(CorePrivateLifeClientError::InvalidSnapshotAuthority);
+        }
+        let Some(snapshot) = self
+            .assembler
+            .push(chunk)
+            .map_err(|_| CorePrivateLifeClientError::InvalidSnapshotAuthority)?
+        else {
+            return Ok(());
+        };
+        let expected = self
+            .local_entity_id
+            .ok_or(CorePrivateLifeClientError::InvalidSnapshotAuthority)?;
+        let mut players = snapshot
+            .entities
+            .iter()
+            .filter(|entity| entity.kind == protocol::EntityKind::Player);
+        if players.next().map(|player| player.entity_id) != Some(expected)
+            || players.next().is_some()
+        {
+            return Err(CorePrivateLifeClientError::InvalidSnapshotAuthority);
+        }
+        self.latest = Some(snapshot);
+        Ok(())
+    }
+}
+
+fn private_player_entity_id(actor_generation: u64) -> Result<u64, CorePrivateLifeClientError> {
+    actor_generation
+        .checked_sub(1)
+        .and_then(|zero_based| zero_based.checked_mul(RUN_ENTITY_ID_STRIDE))
+        .and_then(|base| base.checked_add(PLAYER_ENTITY_ID_OFFSET))
+        .filter(|entity_id| *entity_id != 0)
+        .ok_or(CorePrivateLifeClientError::InvalidSnapshotAuthority)
+}
 
 #[derive(Debug, Resource)]
 pub struct CorePrivateLifeClient {
@@ -526,6 +645,8 @@ pub enum CorePrivateLifeClientError {
     InvalidWorldAuthority,
     #[error("normal Core client sequence exhausted")]
     SequenceExhausted,
+    #[error("normal Core gameplay snapshot authority is malformed or contradictory")]
+    InvalidSnapshotAuthority,
     #[error(transparent)]
     Route(#[from] CorePrivateRouteClientError),
 }
@@ -609,6 +730,7 @@ pub fn run_core_private_life(config: CorePrivateLifeConfig) -> Result<()> {
         .insert_resource(AccessibilitySettings::default())
         .insert_resource(CorePrivateLifeBridge(worker))
         .insert_resource(CorePrivateLifeClient::new(world_revision, route_revision))
+        .insert_resource(CorePrivateSnapshotClient::default())
         .insert_resource(InputSequencer::default())
         .insert_resource(Time::<Fixed>::from_hz(f64::from(
             sim_core::TICKS_PER_SECOND,
@@ -644,14 +766,22 @@ pub fn run_core_private_life(config: CorePrivateLifeConfig) -> Result<()> {
 }
 
 #[allow(clippy::needless_pass_by_value)] // Bevy system parameters are wrapper values.
-fn poll_transport(bridge: Res<CorePrivateLifeBridge>, mut client: ResMut<CorePrivateLifeClient>) {
+fn poll_transport(
+    bridge: Res<CorePrivateLifeBridge>,
+    mut client: ResMut<CorePrivateLifeClient>,
+    mut snapshots: ResMut<CorePrivateSnapshotClient>,
+) {
+    let mut discard_snapshot_queue = false;
     for event in bridge.0.drain_events() {
         let result = match event {
             TransportEvent::Connecting => {
                 client.phase = CorePrivateLifePhase::Connecting;
                 Ok(())
             }
-            TransportEvent::HandshakeAccepted(hello) => client.accept_server_hello(&hello),
+            TransportEvent::HandshakeAccepted(hello) => {
+                snapshots.reset_transport();
+                client.accept_server_hello(&hello)
+            }
             TransportEvent::Reliable(frame) => match &frame.event {
                 ReliableEvent::AccountBootstrapResult(result) => {
                     client.apply_bootstrap(result.clone())
@@ -666,10 +796,14 @@ fn poll_transport(bridge: Res<CorePrivateLifeBridge>, mut client: ResMut<CorePri
             TransportEvent::LinkLost
             | TransportEvent::Reconnecting { .. }
             | TransportEvent::TransportClosed => {
+                snapshots.reset_transport();
+                discard_snapshot_queue = true;
                 client.transport_lost();
                 Ok(())
             }
             TransportEvent::Fatal(_) => {
+                snapshots.reset_transport();
+                discard_snapshot_queue = true;
                 client.error = Some(CorePrivateLifeClientFailure::Transport);
                 client.phase = CorePrivateLifePhase::Error;
                 Ok(())
@@ -678,6 +812,23 @@ fn poll_transport(bridge: Res<CorePrivateLifeBridge>, mut client: ResMut<CorePri
         if result.is_err() {
             client.phase = CorePrivateLifePhase::Error;
         }
+    }
+    let queued = bridge.0.drain_snapshots();
+    if discard_snapshot_queue {
+        return;
+    }
+    let route = client
+        .route
+        .as_ref()
+        .and_then(CorePrivateRouteClientModel::route_state);
+    let result = snapshots.bind_route(route).and_then(|()| {
+        queued
+            .into_iter()
+            .try_for_each(|chunk| snapshots.ingest(chunk))
+    });
+    if result.is_err() {
+        client.error = Some(CorePrivateLifeClientFailure::InvalidServerAuthority);
+        client.phase = CorePrivateLifePhase::Error;
     }
 }
 
@@ -1344,5 +1495,70 @@ mod tests {
         assert_eq!(normalized_input(1, 1), (707, 707));
         assert_eq!(normalized_input(-1, 0), (-1_000, 0));
         assert_eq!(normalized_input(0, -1), (0, -1_000));
+    }
+
+    fn danger_route(actor_generation: u64, state_version: u64) -> CorePrivateRouteStateV1 {
+        CorePrivateRouteStateV1 {
+            schema_version: protocol::CORE_PRIVATE_ROUTE_SCHEMA_VERSION,
+            character_id: [7; 16],
+            character_version: 2,
+            content_revision: route_revision(),
+            actor_generation,
+            state_version,
+            instance_lineage_id: Some([9; 16]),
+            scene: CorePrivateRouteSceneV1::CoreMicrorealm,
+            room: None,
+            phase: CorePrivateRoutePhaseV1::MicrorealmActive,
+            readiness: CorePrivateRouteReadinessV1::canonical(
+                CorePrivateRoutePhaseV1::MicrorealmActive,
+            ),
+        }
+    }
+
+    fn snapshot(
+        sequence: u32,
+        state_version: u64,
+        player_entity_id: u64,
+    ) -> protocol::SnapshotChunk {
+        protocol::SnapshotChunk {
+            sequence,
+            server_tick: u64::from(sequence),
+            state_version,
+            acknowledged_input_sequence: sequence,
+            chunk_index: 0,
+            chunk_count: 1,
+            entities: vec![protocol::EntitySnapshot {
+                entity_id: player_entity_id,
+                kind: protocol::EntityKind::Player,
+                x_milli_tiles: 24_000,
+                y_milli_tiles: 24_000,
+                velocity_x_milli_tiles_per_second: 0,
+                velocity_y_milli_tiles_per_second: 0,
+                source_entity_id: 0,
+                source_input_sequence: 0,
+                source_projectile_ordinal: 0,
+                current_health: 100,
+                maximum_health: 100,
+                state_flags: protocol::ENTITY_STATE_ALIVE,
+            }],
+        }
+    }
+
+    #[test]
+    fn snapshots_wait_for_matching_route_and_validate_generation_player_identity() {
+        let mut client = CorePrivateSnapshotClient::default();
+        client.bind_route(Some(&danger_route(1, 5))).unwrap();
+        client.ingest(snapshot(1, 6, 10_000)).unwrap();
+        assert!(client.latest.is_none());
+
+        client.bind_route(Some(&danger_route(1, 6))).unwrap();
+        assert_eq!(client.latest.as_ref().unwrap().state_version, 6);
+
+        client.reset_transport();
+        client.bind_route(Some(&danger_route(2, 7))).unwrap();
+        assert!(matches!(
+            client.ingest(snapshot(1, 7, 10_000)),
+            Err(CorePrivateLifeClientError::InvalidSnapshotAuthority)
+        ));
     }
 }
