@@ -133,6 +133,11 @@ impl CorePrivateRouteClientModel {
     }
 
     #[must_use]
+    pub const fn character_id(&self) -> [u8; CHARACTER_ID_BYTES] {
+        self.character_id
+    }
+
+    #[must_use]
     pub const fn failure(&self) -> Option<CorePrivateRouteClientFailure> {
         self.failure
     }

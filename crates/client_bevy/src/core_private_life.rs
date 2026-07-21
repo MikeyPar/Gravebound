@@ -1,0 +1,1348 @@
+//! Ordinary native client route for the wipeable M03 private character life.
+//!
+//! The three design authorities are `Gravebound_Production_GDD_v1_Canonical.md`,
+//! `Gravebound_Content_Production_Spec_v1.md`, and
+//! `Gravebound_Development_Roadmap_v1.md`. This client never infers admission, destinations,
+//! collision, combat results, or terminal outcomes. Character Select, Hall, and dangerous-scene
+//! control are exposed only after the negotiated server capability and matching durable route
+//! projections agree with the exact locally compiled Core content.
+
+use std::{
+    net::SocketAddr,
+    path::PathBuf,
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+use anyhow::{Context, Result, bail};
+use bevy::{app::AppExit, prelude::*, window::WindowResolution};
+use protocol::{
+    AccountBootstrapResult, AccountSnapshot, AuthTicket, CORE_WORLD_FLOW_FEATURE_FLAG,
+    CharacterLocation, CharacterLocationSnapshot, CharacterMutationFrame, CharacterMutationPayload,
+    CharacterMutationResult, ClientHello, Compression, CorePrivateRouteContentRevisionV1,
+    CorePrivateRouteSceneV1, M02_LOCAL_SERVER_NAME, M03_CORE_DEV_BUILD_ID, ManifestHash, Platform,
+    ProtocolVersion, ReliableEvent, ReliableEventFrame, ServerHello, WireMessage, WireText,
+    WorldFlowContentRevisionV1, WorldFlowFrame, WorldFlowRequest, WorldFlowResult,
+    WorldTransferCommand, WorldTransferMutation, WorldTransferPayload, WorldTransferResultCode,
+};
+use sim_content::{load_and_validate, load_core_private_life_content};
+use thiserror::Error;
+
+use crate::{
+    CorePrivateRouteClientError, CorePrivateRouteClientModel, CorePrivateRouteClientPhase,
+    CorePrivateSceneReadiness, CoreSceneReadiness,
+    accessibility::AccessibilitySettings,
+    network_transport::{
+        NetworkStartup, NetworkTransportConfig, NetworkWorkerHandle, TransportEvent,
+    },
+};
+
+const WINDOW_TITLE: &str = "Gravebound - Core Private Life";
+const REALM_GATE_ID: &str = "station.realm_gate";
+
+#[derive(Debug, Clone)]
+pub struct CorePrivateLifeConfig {
+    pub server_address: SocketAddr,
+    pub certificate_path: PathBuf,
+    pub test_token: String,
+    pub content_root: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CorePrivateLifePhase {
+    Connecting,
+    CharacterSelect,
+    Selecting,
+    EnteringHall,
+    LoadingAuthority,
+    Hall,
+    PrivateRoute,
+    TerminalPending,
+    Disconnected,
+    Disabled,
+    Error,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrivateLifeAction {
+    Create,
+    Select(u8),
+    Play,
+    RealmGate,
+    Retry,
+}
+
+#[derive(Debug, Resource)]
+struct CorePrivateLifeBridge(NetworkWorkerHandle);
+
+#[derive(Debug, Resource)]
+pub struct CorePrivateLifeClient {
+    phase: CorePrivateLifePhase,
+    account: Option<AccountSnapshot>,
+    server_hello: Option<ServerHello>,
+    world_revision: WorldFlowContentRevisionV1,
+    route_revision: CorePrivateRouteContentRevisionV1,
+    route: Option<CorePrivateRouteClientModel>,
+    location: Option<CharacterLocationSnapshot>,
+    pending_location_character: Option<[u8; protocol::CHARACTER_ID_BYTES]>,
+    pending_transfer: Option<[u8; protocol::MUTATION_ID_BYTES]>,
+    last_transfer_code: Option<WorldTransferResultCode>,
+    error: Option<CorePrivateLifeClientFailure>,
+    next_request_sequence: u32,
+    next_mutation: u128,
+}
+
+impl CorePrivateLifeClient {
+    fn new(
+        world_revision: WorldFlowContentRevisionV1,
+        route_revision: CorePrivateRouteContentRevisionV1,
+    ) -> Self {
+        Self {
+            phase: CorePrivateLifePhase::Connecting,
+            account: None,
+            server_hello: None,
+            world_revision,
+            route_revision,
+            route: None,
+            location: None,
+            pending_location_character: None,
+            pending_transfer: None,
+            last_transfer_code: None,
+            error: None,
+            next_request_sequence: 1,
+            next_mutation: 1,
+        }
+    }
+
+    #[must_use]
+    pub const fn phase(&self) -> CorePrivateLifePhase {
+        self.phase
+    }
+
+    #[must_use]
+    pub const fn account(&self) -> Option<&AccountSnapshot> {
+        self.account.as_ref()
+    }
+
+    #[must_use]
+    pub const fn route(&self) -> Option<&CorePrivateRouteClientModel> {
+        self.route.as_ref()
+    }
+
+    #[must_use]
+    pub fn selected_character_id(&self) -> Option<[u8; protocol::CHARACTER_ID_BYTES]> {
+        self.account
+            .as_ref()
+            .and_then(|account| account.selected_character_id)
+    }
+
+    fn accept_server_hello(
+        &mut self,
+        hello: &ServerHello,
+    ) -> Result<(), CorePrivateLifeClientError> {
+        if hello.validate().is_err() {
+            return self.fail(CorePrivateLifeClientFailure::InvalidServerAuthority);
+        }
+        self.server_hello = Some(hello.clone());
+        self.error = None;
+        if !hello
+            .feature_flags
+            .iter()
+            .any(|flag| flag.as_str() == CORE_WORLD_FLOW_FEATURE_FLAG)
+        {
+            self.route = None;
+            self.phase = CorePrivateLifePhase::Disabled;
+            return Ok(());
+        }
+        self.phase = CorePrivateLifePhase::LoadingAuthority;
+        self.rebind_selected_route()?;
+        Ok(())
+    }
+
+    fn apply_bootstrap(
+        &mut self,
+        result: AccountBootstrapResult,
+    ) -> Result<(), CorePrivateLifeClientError> {
+        match result {
+            AccountBootstrapResult::Snapshot(snapshot) => self.set_account(snapshot),
+            AccountBootstrapResult::Error(_) => self.fail(CorePrivateLifeClientFailure::Identity),
+        }
+    }
+
+    fn apply_character_mutation(
+        &mut self,
+        result: CharacterMutationResult,
+    ) -> Result<(), CorePrivateLifeClientError> {
+        if !result.accepted {
+            if let Some(snapshot) = result.snapshot {
+                self.set_account(snapshot)?;
+            }
+            return self.fail(CorePrivateLifeClientFailure::Identity);
+        }
+        let snapshot = result
+            .snapshot
+            .ok_or(CorePrivateLifeClientError::InvalidAccountAuthority)?;
+        self.set_account(snapshot)
+    }
+
+    fn set_account(&mut self, snapshot: AccountSnapshot) -> Result<(), CorePrivateLifeClientError> {
+        if snapshot.validate().is_err() {
+            return self.fail(CorePrivateLifeClientFailure::Identity);
+        }
+        let previous = self.selected_character_id();
+        self.account = Some(snapshot);
+        if previous != self.selected_character_id() {
+            self.location = None;
+            self.pending_location_character = None;
+            self.pending_transfer = None;
+            self.rebind_selected_route()?;
+        }
+        if self.phase != CorePrivateLifePhase::Disabled {
+            self.phase = CorePrivateLifePhase::CharacterSelect;
+        }
+        Ok(())
+    }
+
+    fn rebind_selected_route(&mut self) -> Result<(), CorePrivateLifeClientError> {
+        let Some(hello) = self.server_hello.as_ref() else {
+            return Ok(());
+        };
+        if !hello
+            .feature_flags
+            .iter()
+            .any(|flag| flag.as_str() == CORE_WORLD_FLOW_FEATURE_FLAG)
+        {
+            self.route = None;
+            return Ok(());
+        }
+        let Some(character_id) = self.selected_character_id() else {
+            self.route = None;
+            return Ok(());
+        };
+        if let Some(route) = self.route.as_mut()
+            && route.character_id() == character_id
+        {
+            route.accept_server_hello(hello)?;
+            return Ok(());
+        }
+        let mut route = CorePrivateRouteClientModel::new(
+            character_id,
+            self.world_revision.clone(),
+            self.route_revision.clone(),
+        )?;
+        route.accept_server_hello(hello)?;
+        self.route = Some(route);
+        Ok(())
+    }
+
+    fn begin_location_query(
+        &mut self,
+    ) -> Result<Option<WorldFlowFrame>, CorePrivateLifeClientError> {
+        if self.phase == CorePrivateLifePhase::Disabled || self.pending_location_character.is_some()
+        {
+            return Ok(None);
+        }
+        let Some(character_id) = self.selected_character_id() else {
+            return Ok(None);
+        };
+        if self
+            .location
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.character_id == character_id)
+        {
+            return Ok(None);
+        }
+        let sequence = self.take_request_sequence()?;
+        self.pending_location_character = Some(character_id);
+        Ok(Some(WorldFlowFrame {
+            sequence,
+            request: WorldFlowRequest::Location {
+                character_id,
+                content_revision: self.world_revision.clone(),
+            },
+        }))
+    }
+
+    fn begin_transfer(
+        &mut self,
+        command: WorldTransferCommand,
+        issued_at_unix_millis: u64,
+    ) -> Result<WorldFlowFrame, CorePrivateLifeClientError> {
+        if self.phase == CorePrivateLifePhase::Disabled || self.pending_transfer.is_some() {
+            return Err(CorePrivateLifeClientError::ActionUnavailable);
+        }
+        let snapshot = self
+            .location
+            .clone()
+            .ok_or(CorePrivateLifeClientError::ActionUnavailable)?;
+        let allowed = match (&snapshot.location, &command) {
+            (
+                CharacterLocation::CharacterSelect { .. },
+                WorldTransferCommand::EnterHallFromCharacterSelect,
+            ) => true,
+            (
+                CharacterLocation::Safe { location_id, .. },
+                WorldTransferCommand::UsePortal { portal_id },
+            ) => {
+                location_id.as_str() == CorePrivateRouteSceneV1::LanternHalls.location_id()
+                    && portal_id.as_str() == REALM_GATE_ID
+                    && self
+                        .route
+                        .as_ref()
+                        .is_some_and(CorePrivateRouteClientModel::can_accept_gameplay_input)
+            }
+            _ => false,
+        };
+        if !allowed || issued_at_unix_millis == 0 {
+            return Err(CorePrivateLifeClientError::ActionUnavailable);
+        }
+        let mutation_id = self.take_mutation_id()?;
+        let payload = WorldTransferPayload {
+            content_revision: self.world_revision.clone(),
+            command,
+        };
+        let mutation = WorldTransferMutation {
+            mutation_id,
+            character_id: snapshot.character_id,
+            expected_character_version: snapshot.character_version,
+            issued_at_unix_millis,
+            payload_hash: payload.canonical_hash(),
+            payload,
+        };
+        let sequence = self.take_request_sequence()?;
+        self.pending_transfer = Some(mutation_id);
+        self.last_transfer_code = None;
+        if let Some(route) = self.route.as_mut() {
+            route.begin_committed_transfer_refresh()?;
+        }
+        self.phase = match mutation.payload.command {
+            WorldTransferCommand::EnterHallFromCharacterSelect => {
+                CorePrivateLifePhase::EnteringHall
+            }
+            _ => CorePrivateLifePhase::LoadingAuthority,
+        };
+        Ok(WorldFlowFrame {
+            sequence,
+            request: WorldFlowRequest::Transfer(mutation),
+        })
+    }
+
+    fn apply_world_flow(
+        &mut self,
+        result: WorldFlowResult,
+    ) -> Result<(), CorePrivateLifeClientError> {
+        result
+            .validate()
+            .map_err(|_| CorePrivateLifeClientError::InvalidWorldAuthority)?;
+        match result {
+            WorldFlowResult::Location { snapshot, .. } => {
+                if self.pending_location_character != Some(snapshot.character_id) {
+                    return self.fail(CorePrivateLifeClientFailure::InvalidServerAuthority);
+                }
+                self.pending_location_character = None;
+                self.accept_location(snapshot)
+            }
+            WorldFlowResult::Transfer {
+                mutation_id,
+                accepted,
+                code,
+                snapshot,
+                ..
+            } => {
+                if self.pending_transfer != Some(mutation_id) {
+                    return self.fail(CorePrivateLifeClientFailure::InvalidServerAuthority);
+                }
+                self.pending_transfer = None;
+                self.last_transfer_code = Some(code);
+                let Some(snapshot) = snapshot else {
+                    if accepted {
+                        return self.fail(CorePrivateLifeClientFailure::InvalidServerAuthority);
+                    }
+                    self.phase = CorePrivateLifePhase::Error;
+                    return Ok(());
+                };
+                self.accept_location(snapshot)?;
+                if !accepted {
+                    self.phase = CorePrivateLifePhase::Error;
+                }
+                Ok(())
+            }
+            WorldFlowResult::Error { code, snapshot, .. } => {
+                self.pending_transfer = None;
+                self.last_transfer_code = Some(code);
+                if let Some(snapshot) = snapshot {
+                    self.accept_location(snapshot)?;
+                }
+                self.phase = CorePrivateLifePhase::Error;
+                Ok(())
+            }
+        }
+    }
+
+    fn accept_location(
+        &mut self,
+        snapshot: CharacterLocationSnapshot,
+    ) -> Result<(), CorePrivateLifeClientError> {
+        if snapshot.validate().is_err()
+            || Some(snapshot.character_id) != self.selected_character_id()
+        {
+            return self.fail(CorePrivateLifeClientFailure::InvalidServerAuthority);
+        }
+        self.location = Some(snapshot.clone());
+        match snapshot.location {
+            CharacterLocation::CharacterSelect { .. } => {
+                self.phase = CorePrivateLifePhase::CharacterSelect;
+                Ok(())
+            }
+            CharacterLocation::Safe { .. } | CharacterLocation::Danger { .. } => {
+                let route = self
+                    .route
+                    .as_mut()
+                    .ok_or(CorePrivateLifeClientError::FeatureNotNegotiated)?;
+                route.apply_location(snapshot)?;
+                self.apply_compiled_readiness()?;
+                self.sync_phase();
+                Ok(())
+            }
+        }
+    }
+
+    fn apply_route(
+        &mut self,
+        frame: &ReliableEventFrame,
+    ) -> Result<(), CorePrivateLifeClientError> {
+        let route = self
+            .route
+            .as_mut()
+            .ok_or(CorePrivateLifeClientError::FeatureNotNegotiated)?;
+        route.apply_reliable(frame)?;
+        self.apply_compiled_readiness()?;
+        self.sync_phase();
+        Ok(())
+    }
+
+    fn apply_compiled_readiness(&mut self) -> Result<(), CorePrivateLifeClientError> {
+        let Some(route) = self.route.as_mut() else {
+            return Ok(());
+        };
+        let Some(state) = route.route_state().cloned() else {
+            return Ok(());
+        };
+        let Some(location) = self.location.as_ref() else {
+            return Ok(());
+        };
+        if location.character_version != state.character_version {
+            return Ok(());
+        }
+        Ok(route.apply_scene_readiness(CorePrivateSceneReadiness {
+            base: CoreSceneReadiness {
+                location_id: WireText::new(state.scene.location_id())
+                    .map_err(|_| CorePrivateLifeClientError::InvalidWorldAuthority)?,
+                character_version: state.character_version,
+                content_revision: self.world_revision.clone(),
+            },
+            scene: state.scene,
+            room: state.room,
+            instance_lineage_id: state.instance_lineage_id,
+            actor_generation: state.actor_generation,
+            route_state_version: state.state_version,
+        })?)
+    }
+
+    fn transport_lost(&mut self) {
+        if let Some(route) = self.route.as_mut() {
+            route.transport_lost();
+        }
+        self.location = None;
+        self.pending_location_character = None;
+        self.pending_transfer = None;
+        self.phase = CorePrivateLifePhase::Disconnected;
+    }
+
+    fn sync_phase(&mut self) {
+        let Some(route) = self.route.as_ref() else {
+            return;
+        };
+        self.phase = match route.phase() {
+            CorePrivateRouteClientPhase::Disabled => CorePrivateLifePhase::Disabled,
+            CorePrivateRouteClientPhase::AwaitingAuthority
+            | CorePrivateRouteClientPhase::LoadingScene => CorePrivateLifePhase::LoadingAuthority,
+            CorePrivateRouteClientPhase::TerminalPending => CorePrivateLifePhase::TerminalPending,
+            CorePrivateRouteClientPhase::FatalAuthorityError => CorePrivateLifePhase::Error,
+            CorePrivateRouteClientPhase::Controllable => {
+                match route.route_state().map(|state| state.scene) {
+                    Some(CorePrivateRouteSceneV1::LanternHalls) => CorePrivateLifePhase::Hall,
+                    Some(
+                        CorePrivateRouteSceneV1::CoreMicrorealm
+                        | CorePrivateRouteSceneV1::BellSepulcher,
+                    ) => CorePrivateLifePhase::PrivateRoute,
+                    None => CorePrivateLifePhase::LoadingAuthority,
+                }
+            }
+        };
+    }
+
+    fn take_request_sequence(&mut self) -> Result<u32, CorePrivateLifeClientError> {
+        let sequence = self.next_request_sequence;
+        self.next_request_sequence = sequence
+            .checked_add(1)
+            .ok_or(CorePrivateLifeClientError::SequenceExhausted)?;
+        Ok(sequence)
+    }
+
+    fn take_mutation_id(&mut self) -> Result<[u8; 16], CorePrivateLifeClientError> {
+        let mutation = self.next_mutation;
+        self.next_mutation = mutation
+            .checked_add(1)
+            .ok_or(CorePrivateLifeClientError::SequenceExhausted)?;
+        Ok(mutation.to_le_bytes())
+    }
+
+    fn fail<T>(
+        &mut self,
+        failure: CorePrivateLifeClientFailure,
+    ) -> Result<T, CorePrivateLifeClientError> {
+        self.error = Some(failure);
+        self.phase = CorePrivateLifePhase::Error;
+        Err(CorePrivateLifeClientError::InvalidAccountAuthority)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CorePrivateLifeClientFailure {
+    Identity,
+    InvalidServerAuthority,
+    Transport,
+}
+
+#[derive(Debug, Error)]
+pub enum CorePrivateLifeClientError {
+    #[error("normal Core route was not negotiated")]
+    FeatureNotNegotiated,
+    #[error("normal Core route action is not currently authoritative")]
+    ActionUnavailable,
+    #[error("normal Core account authority is malformed or contradictory")]
+    InvalidAccountAuthority,
+    #[error("normal Core world authority is malformed or contradictory")]
+    InvalidWorldAuthority,
+    #[error("normal Core client sequence exhausted")]
+    SequenceExhausted,
+    #[error(transparent)]
+    Route(#[from] CorePrivateRouteClientError),
+}
+
+#[derive(Debug, Resource)]
+struct InputSequencer {
+    input_sequence: u32,
+    primary_sequence: u32,
+    primary_held: bool,
+}
+
+impl Default for InputSequencer {
+    fn default() -> Self {
+        Self {
+            input_sequence: 1,
+            primary_sequence: 0,
+            primary_held: false,
+        }
+    }
+}
+
+#[derive(Component)]
+struct StatusText;
+#[derive(Component)]
+struct RosterText;
+#[derive(Component)]
+struct RouteText;
+#[derive(Component)]
+struct ActionButton(PrivateLifeAction);
+
+/// Opens the real negotiated private-life route without enabling any local gameplay authority.
+pub fn run_core_private_life(config: CorePrivateLifeConfig) -> Result<()> {
+    if config.test_token.trim().is_empty() {
+        bail!("--identity must contain a nonempty wipeable test token");
+    }
+    let certificate_der = std::fs::read(&config.certificate_path).with_context(|| {
+        format!(
+            "failed to read Core private-life server certificate {}",
+            config.certificate_path.display()
+        )
+    })?;
+    let content = load_core_private_life_content(&config.content_root)
+        .context("normal Core private-life content failed validation")?;
+    let (_, source_report) =
+        load_and_validate(&config.content_root).context("Core source package failed validation")?;
+    let manifest_hash = ManifestHash::new(source_report.package_hash_blake3)?;
+    let world_revision = WorldFlowContentRevisionV1 {
+        records_blake3: ManifestHash::new(content.world_flow().hashes().records_blake3.clone())?,
+        assets_blake3: ManifestHash::new(content.world_flow().hashes().assets_blake3.clone())?,
+        localization_blake3: ManifestHash::new(
+            content.world_flow().hashes().localization_blake3.clone(),
+        )?,
+    };
+    let route_revision = CorePrivateRouteContentRevisionV1 {
+        records_blake3: ManifestHash::new(content.revision().records_blake3.clone())?,
+        assets_blake3: ManifestHash::new(content.revision().assets_blake3.clone())?,
+        localization_blake3: ManifestHash::new(content.revision().localization_blake3.clone())?,
+    };
+    let hello = ClientHello {
+        protocol_major: ProtocolVersion::current().major,
+        protocol_minor: ProtocolVersion::current().minor,
+        client_build_id: WireText::new(M03_CORE_DEV_BUILD_ID)?,
+        platform: Platform::WindowsNative,
+        supported_compression: vec![Compression::None],
+        content_manifest_hash: manifest_hash.clone(),
+        auth_ticket: AuthTicket::new(config.test_token.into_bytes())?,
+        locale: WireText::new("en-US")?,
+    };
+    let worker = NetworkWorkerHandle::spawn(NetworkTransportConfig {
+        server_address: config.server_address,
+        server_name: M02_LOCAL_SERVER_NAME.to_owned(),
+        certificate_der,
+        hello,
+        startup: NetworkStartup::CoreIdentity {
+            content_manifest_hash: manifest_hash,
+        },
+    })?;
+    let (width, height) = crate::configured_window_size()?;
+    let mut app = App::new();
+    app.insert_resource(ClearColor(Color::srgb_u8(5, 8, 11)))
+        .insert_resource(AccessibilitySettings::default())
+        .insert_resource(CorePrivateLifeBridge(worker))
+        .insert_resource(CorePrivateLifeClient::new(world_revision, route_revision))
+        .insert_resource(InputSequencer::default())
+        .insert_resource(Time::<Fixed>::from_hz(f64::from(
+            sim_core::TICKS_PER_SECOND,
+        )))
+        .add_plugins(
+            crate::gravebound_default_plugins()
+                .set(ImagePlugin::default_nearest())
+                .set(WindowPlugin {
+                    primary_window: Some(Window {
+                        title: WINDOW_TITLE.to_owned(),
+                        resolution: WindowResolution::new(width, height),
+                        ..default()
+                    }),
+                    ..default()
+                }),
+        )
+        .add_systems(Startup, spawn_ui)
+        .add_systems(
+            Update,
+            (
+                poll_transport,
+                request_location,
+                handle_keyboard,
+                handle_buttons,
+                update_ui,
+            )
+                .chain(),
+        )
+        .add_systems(FixedUpdate, send_gameplay_input)
+        .add_systems(Last, shutdown_transport);
+    app.run();
+    Ok(())
+}
+
+#[allow(clippy::needless_pass_by_value)] // Bevy system parameters are wrapper values.
+fn poll_transport(bridge: Res<CorePrivateLifeBridge>, mut client: ResMut<CorePrivateLifeClient>) {
+    for event in bridge.0.drain_events() {
+        let result = match event {
+            TransportEvent::Connecting => {
+                client.phase = CorePrivateLifePhase::Connecting;
+                Ok(())
+            }
+            TransportEvent::HandshakeAccepted(hello) => client.accept_server_hello(&hello),
+            TransportEvent::Reliable(frame) => match &frame.event {
+                ReliableEvent::AccountBootstrapResult(result) => {
+                    client.apply_bootstrap(result.clone())
+                }
+                ReliableEvent::CharacterMutationResult(result) => {
+                    client.apply_character_mutation(result.clone())
+                }
+                ReliableEvent::WorldFlowResult(result) => client.apply_world_flow(result.clone()),
+                ReliableEvent::CorePrivateRouteState(_) => client.apply_route(&frame),
+                _ => Ok(()),
+            },
+            TransportEvent::LinkLost
+            | TransportEvent::Reconnecting { .. }
+            | TransportEvent::TransportClosed => {
+                client.transport_lost();
+                Ok(())
+            }
+            TransportEvent::Fatal(_) => {
+                client.error = Some(CorePrivateLifeClientFailure::Transport);
+                client.phase = CorePrivateLifePhase::Error;
+                Ok(())
+            }
+        };
+        if result.is_err() {
+            client.phase = CorePrivateLifePhase::Error;
+        }
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)] // Bevy system parameters are wrapper values.
+fn request_location(bridge: Res<CorePrivateLifeBridge>, mut client: ResMut<CorePrivateLifeClient>) {
+    let Ok(Some(frame)) = client.begin_location_query() else {
+        return;
+    };
+    if bridge
+        .0
+        .queue_reliable(WireMessage::WorldFlowFrame(frame))
+        .is_err()
+    {
+        client.pending_location_character = None;
+        client.phase = CorePrivateLifePhase::Error;
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)] // Bevy system parameters are wrapper values.
+fn handle_keyboard(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    bridge: Res<CorePrivateLifeBridge>,
+    mut client: ResMut<CorePrivateLifeClient>,
+) {
+    let action = if keyboard.just_pressed(KeyCode::Digit1) {
+        Some(PrivateLifeAction::Select(1))
+    } else if keyboard.just_pressed(KeyCode::Digit2) {
+        Some(PrivateLifeAction::Select(2))
+    } else if keyboard.just_pressed(KeyCode::KeyN) {
+        Some(PrivateLifeAction::Create)
+    } else if keyboard.just_pressed(KeyCode::Enter) {
+        Some(PrivateLifeAction::Play)
+    } else if keyboard.just_pressed(KeyCode::KeyG) {
+        Some(PrivateLifeAction::RealmGate)
+    } else if keyboard.just_pressed(KeyCode::KeyR) {
+        Some(PrivateLifeAction::Retry)
+    } else {
+        None
+    };
+    if let Some(action) = action {
+        submit_action(action, &bridge, &mut client);
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)] // Bevy system parameters are wrapper values.
+fn handle_buttons(
+    interactions: Query<(&Interaction, &ActionButton), Changed<Interaction>>,
+    bridge: Res<CorePrivateLifeBridge>,
+    mut client: ResMut<CorePrivateLifeClient>,
+) {
+    for (interaction, action) in &interactions {
+        if *interaction == Interaction::Pressed {
+            submit_action(action.0, &bridge, &mut client);
+        }
+    }
+}
+
+fn submit_action(
+    action: PrivateLifeAction,
+    bridge: &CorePrivateLifeBridge,
+    client: &mut CorePrivateLifeClient,
+) {
+    if !action_available(action, client) {
+        return;
+    }
+    match action {
+        PrivateLifeAction::Create => {
+            let Some(account) = client.account.as_ref() else {
+                return;
+            };
+            if account.characters.len() >= usize::from(account.slot_capacity) {
+                return;
+            }
+            let payload = CharacterMutationPayload::Create {
+                class_id: WireText::new(protocol::GRAVE_ARBALIST_CLASS_ID)
+                    .expect("canonical class ID fits"),
+            };
+            queue_identity_mutation(payload, bridge, client);
+        }
+        PrivateLifeAction::Select(ordinal) => {
+            let character_id = client.account.as_ref().and_then(|account| {
+                account
+                    .characters
+                    .iter()
+                    .find(|character| character.roster_ordinal == ordinal)
+                    .map(|character| character.character_id)
+            });
+            if let Some(character_id) = character_id {
+                queue_identity_mutation(
+                    CharacterMutationPayload::Select { character_id },
+                    bridge,
+                    client,
+                );
+            }
+        }
+        PrivateLifeAction::Play => queue_transfer(
+            WorldTransferCommand::EnterHallFromCharacterSelect,
+            bridge,
+            client,
+        ),
+        PrivateLifeAction::RealmGate => queue_transfer(
+            WorldTransferCommand::UsePortal {
+                portal_id: WireText::new(REALM_GATE_ID).expect("canonical gate ID fits"),
+            },
+            bridge,
+            client,
+        ),
+        PrivateLifeAction::Retry => {
+            client.location = None;
+            client.pending_location_character = None;
+            client.pending_transfer = None;
+            client.error = None;
+            client.phase = CorePrivateLifePhase::LoadingAuthority;
+        }
+    }
+}
+
+fn queue_identity_mutation(
+    payload: CharacterMutationPayload,
+    bridge: &CorePrivateLifeBridge,
+    client: &mut CorePrivateLifeClient,
+) {
+    let Some(expected_account_version) = client
+        .account
+        .as_ref()
+        .map(|account| account.account_version)
+    else {
+        return;
+    };
+    let Ok(mutation_id) = client.take_mutation_id() else {
+        client.phase = CorePrivateLifePhase::Error;
+        return;
+    };
+    let Some(issued_at_unix_millis) = unix_millis() else {
+        client.phase = CorePrivateLifePhase::Error;
+        return;
+    };
+    let frame = CharacterMutationFrame {
+        mutation_id,
+        expected_account_version,
+        payload_hash: payload.canonical_hash(),
+        issued_at_unix_millis,
+        payload,
+    };
+    if bridge
+        .0
+        .queue_reliable(WireMessage::CharacterMutationFrame(frame))
+        .is_ok()
+    {
+        client.phase = CorePrivateLifePhase::Selecting;
+    } else {
+        client.phase = CorePrivateLifePhase::Error;
+    }
+}
+
+fn queue_transfer(
+    command: WorldTransferCommand,
+    bridge: &CorePrivateLifeBridge,
+    client: &mut CorePrivateLifeClient,
+) {
+    let Some(issued_at_unix_millis) = unix_millis() else {
+        client.phase = CorePrivateLifePhase::Error;
+        return;
+    };
+    let Ok(frame) = client.begin_transfer(command, issued_at_unix_millis) else {
+        return;
+    };
+    if bridge
+        .0
+        .queue_reliable(WireMessage::WorldFlowFrame(frame))
+        .is_err()
+    {
+        client.pending_transfer = None;
+        client.phase = CorePrivateLifePhase::Error;
+    }
+}
+
+fn unix_millis() -> Option<u64> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+}
+
+#[allow(clippy::needless_pass_by_value)] // Bevy system parameters are wrapper values.
+fn send_gameplay_input(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    bridge: Res<CorePrivateLifeBridge>,
+    client: Res<CorePrivateLifeClient>,
+    mut sequencer: ResMut<InputSequencer>,
+) {
+    if !client
+        .route
+        .as_ref()
+        .is_some_and(CorePrivateRouteClientModel::can_accept_gameplay_input)
+    {
+        return;
+    }
+    let horizontal =
+        i8::from(keyboard.pressed(KeyCode::KeyD)) - i8::from(keyboard.pressed(KeyCode::KeyA));
+    let vertical =
+        i8::from(keyboard.pressed(KeyCode::KeyS)) - i8::from(keyboard.pressed(KeyCode::KeyW));
+    let (horizontal_milli, vertical_milli) = normalized_input(horizontal, vertical);
+    let held_primary = mouse.pressed(MouseButton::Left);
+    if held_primary && !sequencer.primary_held {
+        let Some(next) = sequencer.primary_sequence.checked_add(1) else {
+            return;
+        };
+        sequencer.primary_sequence = next;
+    }
+    sequencer.primary_held = held_primary;
+    let sequence = sequencer.input_sequence;
+    bridge.0.replace_input(protocol::InputFrame {
+        sequence,
+        client_tick: u64::from(sequence),
+        movement_x_milli: horizontal_milli,
+        movement_y_milli: vertical_milli,
+        aim_x_milli: 0,
+        aim_y_milli: -1_000,
+        held_primary,
+        primary_sequence: sequencer.primary_sequence,
+        ability_1_sequence: 0,
+        ability_2_sequence: 0,
+    });
+    if let Some(next) = sequence.checked_add(1) {
+        sequencer.input_sequence = next;
+    }
+}
+
+fn normalized_input(x: i8, y: i8) -> (i16, i16) {
+    match (x, y) {
+        (0, 0) => (0, 0),
+        (0, y) => (0, i16::from(y) * 1_000),
+        (x, 0) => (i16::from(x) * 1_000, 0),
+        (x, y) => (i16::from(x) * 707, i16::from(y) * 707),
+    }
+}
+
+fn spawn_ui(mut commands: Commands) {
+    commands.spawn(Camera2d);
+    commands
+        .spawn((
+            Node {
+                width: percent(100),
+                height: percent(100),
+                padding: UiRect::all(px(28)),
+                flex_direction: FlexDirection::Column,
+                row_gap: px(16),
+                ..default()
+            },
+            BackgroundColor(Color::srgb_u8(5, 8, 11)),
+        ))
+        .with_children(|root| {
+            root.spawn((
+                Text::new("GRAVEBOUND\nCORE PRIVATE LIFE"),
+                TextFont::from_font_size(28.0),
+                TextColor(Color::srgb_u8(235, 216, 166)),
+            ));
+            root.spawn((
+                Text::new("Connecting"),
+                TextFont::from_font_size(16.0),
+                TextColor(Color::srgb_u8(140, 203, 195)),
+                StatusText,
+            ));
+            root.spawn((
+                Text::new("Character Select"),
+                TextFont::from_font_size(18.0),
+                TextColor(Color::srgb_u8(225, 225, 216)),
+                Node {
+                    min_height: px(150),
+                    padding: UiRect::all(px(16)),
+                    border: UiRect::all(px(2)),
+                    ..default()
+                },
+                BorderColor::all(Color::srgb_u8(83, 113, 116)),
+                BackgroundColor(Color::srgb_u8(15, 21, 27)),
+                RosterText,
+            ));
+            root.spawn((
+                Text::new("Awaiting authoritative route."),
+                TextFont::from_font_size(17.0),
+                TextColor(Color::srgb_u8(192, 200, 190)),
+                Node {
+                    min_height: px(160),
+                    padding: UiRect::all(px(16)),
+                    border: UiRect::all(px(2)),
+                    ..default()
+                },
+                BorderColor::all(Color::srgb_u8(80, 87, 91)),
+                BackgroundColor(Color::srgb_u8(12, 17, 22)),
+                RouteText,
+            ));
+            root.spawn((Node {
+                flex_direction: FlexDirection::Row,
+                flex_wrap: FlexWrap::Wrap,
+                column_gap: px(10),
+                row_gap: px(10),
+                ..default()
+            },))
+                .with_children(|row| {
+                    spawn_button(row, PrivateLifeAction::Create, "New Grave Arbalist [N]");
+                    spawn_button(row, PrivateLifeAction::Select(1), "Select 1 [1]");
+                    spawn_button(row, PrivateLifeAction::Select(2), "Select 2 [2]");
+                    spawn_button(row, PrivateLifeAction::Play, "Play [Enter]");
+                    spawn_button(row, PrivateLifeAction::RealmGate, "Realm Gate — Enter [G]");
+                    spawn_button(row, PrivateLifeAction::Retry, "Retry [R]");
+                });
+            root.spawn((
+                Text::new("MOVE  WASD    FIRE  LEFT MOUSE    HALL REALM GATE  G"),
+                TextFont::from_font_size(13.0),
+                TextColor(Color::srgb_u8(130, 144, 145)),
+            ));
+        });
+}
+
+fn spawn_button(parent: &mut ChildSpawnerCommands, action: PrivateLifeAction, label: &str) {
+    parent
+        .spawn((
+            Button,
+            Node {
+                padding: UiRect::axes(px(15), px(10)),
+                border: UiRect::all(px(2)),
+                ..default()
+            },
+            BackgroundColor(Color::srgb_u8(23, 35, 38)),
+            BorderColor::all(Color::srgb_u8(105, 151, 145)),
+            ActionButton(action),
+        ))
+        .with_child((
+            Text::new(label),
+            TextFont::from_font_size(14.0),
+            TextColor(Color::srgb_u8(222, 224, 211)),
+        ));
+}
+
+#[allow(
+    clippy::needless_pass_by_value,
+    clippy::type_complexity,
+    reason = "Bevy system parameters own disjoint query filters"
+)]
+fn update_ui(
+    client: Res<CorePrivateLifeClient>,
+    mut status: Single<&mut Text, With<StatusText>>,
+    mut roster: Single<&mut Text, (With<RosterText>, Without<StatusText>)>,
+    mut route: Single<&mut Text, (With<RouteText>, Without<StatusText>, Without<RosterText>)>,
+    mut actions: Query<(&ActionButton, &mut BackgroundColor, &mut BorderColor)>,
+) {
+    **status = Text::new(phase_label(client.phase));
+    **roster = Text::new(render_roster(&client));
+    **route = Text::new(render_route(&client));
+    for (action, mut background, mut border) in &mut actions {
+        let available = action_available(action.0, &client);
+        *background = BackgroundColor(if available {
+            Color::srgb_u8(23, 45, 43)
+        } else {
+            Color::srgb_u8(23, 27, 30)
+        });
+        *border = BorderColor::all(if available {
+            Color::srgb_u8(119, 177, 163)
+        } else {
+            Color::srgb_u8(66, 74, 76)
+        });
+    }
+}
+
+fn action_available(action: PrivateLifeAction, client: &CorePrivateLifeClient) -> bool {
+    match action {
+        PrivateLifeAction::Create => client.account.as_ref().is_some_and(|account| {
+            client.phase == CorePrivateLifePhase::CharacterSelect
+                && account.characters.len() < usize::from(account.slot_capacity)
+        }),
+        PrivateLifeAction::Select(ordinal) => client.account.as_ref().is_some_and(|account| {
+            client.phase == CorePrivateLifePhase::CharacterSelect
+                && account
+                    .characters
+                    .iter()
+                    .any(|character| character.roster_ordinal == ordinal)
+        }),
+        PrivateLifeAction::Play => {
+            matches!(
+                client.location.as_ref().map(|snapshot| &snapshot.location),
+                Some(CharacterLocation::CharacterSelect { .. })
+            ) && client.phase == CorePrivateLifePhase::CharacterSelect
+        }
+        PrivateLifeAction::RealmGate => {
+            client.phase == CorePrivateLifePhase::Hall
+                && client
+                    .route
+                    .as_ref()
+                    .is_some_and(CorePrivateRouteClientModel::can_accept_gameplay_input)
+        }
+        PrivateLifeAction::Retry => matches!(
+            client.phase,
+            CorePrivateLifePhase::Disconnected | CorePrivateLifePhase::Error
+        ),
+    }
+}
+
+fn render_roster(client: &CorePrivateLifeClient) -> String {
+    let Some(account) = client.account.as_ref() else {
+        return "Character Select\nLoading roster.".to_owned();
+    };
+    let mut rows = vec!["Character Select".to_owned()];
+    for ordinal in 1..=account.slot_capacity {
+        let row = account
+            .characters
+            .iter()
+            .find(|character| character.roster_ordinal == ordinal)
+            .map_or_else(
+                || format!("Slot {ordinal} — Empty"),
+                |character| {
+                    let selected = if account.selected_character_id == Some(character.character_id)
+                    {
+                        " — SELECTED"
+                    } else {
+                        ""
+                    };
+                    format!(
+                        "Hero {ordinal} — Grave Arbalist — Level {}{selected}",
+                        character.level
+                    )
+                },
+            );
+        rows.push(row);
+    }
+    rows.join("\n")
+}
+
+fn render_route(client: &CorePrivateLifeClient) -> String {
+    if client.phase == CorePrivateLifePhase::Disabled {
+        return "Available in a later test.\nNormal route capability was not negotiated."
+            .to_owned();
+    }
+    let Some(state) = client
+        .route
+        .as_ref()
+        .and_then(CorePrivateRouteClientModel::route_state)
+    else {
+        let location = match client.location.as_ref().map(|snapshot| &snapshot.location) {
+            Some(CharacterLocation::CharacterSelect { .. }) => "Character Select",
+            Some(
+                CharacterLocation::Safe { location_id, .. }
+                | CharacterLocation::Danger { location_id, .. },
+            ) => location_id.as_str(),
+            None => "Awaiting authoritative location",
+        };
+        return format!("{location}\nAwaiting authoritative route.");
+    };
+    let scene = match state.scene {
+        CorePrivateRouteSceneV1::LanternHalls => "Lantern Halls",
+        CorePrivateRouteSceneV1::CoreMicrorealm => "Core Micro-realm",
+        CorePrivateRouteSceneV1::BellSepulcher => "Bell Sepulcher",
+    };
+    let room = state
+        .room
+        .map(|room| format!(" — {}", room.node_id()))
+        .unwrap_or_default();
+    let transfer = client
+        .last_transfer_code
+        .filter(|code| *code != WorldTransferResultCode::Accepted)
+        .map(|code| format!("\nLast transfer: {code:?}"))
+        .unwrap_or_default();
+    format!(
+        "{scene}{room}\nPhase: {:?}\nActor generation: {}    State version: {}\nControl: {}{transfer}",
+        state.phase,
+        state.actor_generation,
+        state.state_version,
+        if client
+            .route
+            .as_ref()
+            .is_some_and(CorePrivateRouteClientModel::can_accept_gameplay_input)
+        {
+            "READY"
+        } else {
+            "WITHHELD"
+        }
+    )
+}
+
+const fn phase_label(phase: CorePrivateLifePhase) -> &'static str {
+    match phase {
+        CorePrivateLifePhase::Connecting => "Connecting",
+        CorePrivateLifePhase::CharacterSelect => "Character Select",
+        CorePrivateLifePhase::Selecting => "Selecting character",
+        CorePrivateLifePhase::EnteringHall => "Entering Lantern Halls",
+        CorePrivateLifePhase::LoadingAuthority => "Loading authoritative route",
+        CorePrivateLifePhase::Hall => "Lantern Halls — Ready",
+        CorePrivateLifePhase::PrivateRoute => "Private route — Ready",
+        CorePrivateLifePhase::TerminalPending => "Terminal result pending",
+        CorePrivateLifePhase::Disconnected => "Disconnected",
+        CorePrivateLifePhase::Disabled => "Available in a later test.",
+        CorePrivateLifePhase::Error => "Service unavailable. Try again.",
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)] // Bevy system parameters are wrapper values.
+fn shutdown_transport(bridge: Res<CorePrivateLifeBridge>, exits: MessageReader<AppExit>) {
+    if !exits.is_empty() {
+        bridge.0.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use protocol::{
+        AccountNamespace, CORE_CHARACTER_SLOT_CAPACITY, CharacterLifeState, CharacterSecurityState,
+        CharacterSnapshot, CorePrivateRoutePhaseV1, CorePrivateRouteReadinessV1,
+        CorePrivateRouteStateV1, M03_CORE_DEV_BUILD_ID, SIMULATION_HZ, SNAPSHOT_HZ, SafeArrival,
+    };
+
+    use super::*;
+
+    fn revision(value: char) -> ManifestHash {
+        ManifestHash::new(value.to_string().repeat(64)).unwrap()
+    }
+
+    fn world_revision() -> WorldFlowContentRevisionV1 {
+        WorldFlowContentRevisionV1 {
+            records_blake3: revision('1'),
+            assets_blake3: revision('2'),
+            localization_blake3: revision('3'),
+        }
+    }
+
+    fn route_revision() -> CorePrivateRouteContentRevisionV1 {
+        CorePrivateRouteContentRevisionV1 {
+            records_blake3: revision('4'),
+            assets_blake3: revision('5'),
+            localization_blake3: revision('6'),
+        }
+    }
+
+    fn hello(enabled: bool) -> ServerHello {
+        ServerHello {
+            session_id: WireText::new("core-private-life").unwrap(),
+            protocol_major: ProtocolVersion::current().major,
+            protocol_minor: ProtocolVersion::current().minor,
+            required_client_build: WireText::new(M03_CORE_DEV_BUILD_ID).unwrap(),
+            content_bundle_version: WireText::new("core-test").unwrap(),
+            server_tick_rate: SIMULATION_HZ,
+            snapshot_rate: SNAPSHOT_HZ,
+            region_id: WireText::new("local").unwrap(),
+            feature_flags: enabled
+                .then(|| WireText::new(CORE_WORLD_FLOW_FEATURE_FLAG).unwrap())
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    fn account() -> AccountSnapshot {
+        AccountSnapshot {
+            namespace: AccountNamespace::WipeableTest,
+            account_version: 1,
+            slot_capacity: CORE_CHARACTER_SLOT_CAPACITY,
+            characters: vec![CharacterSnapshot {
+                character_id: [7; 16],
+                roster_ordinal: 1,
+                class_id: WireText::new(protocol::GRAVE_ARBALIST_CLASS_ID).unwrap(),
+                level: 1,
+                oath_id: None,
+                life_state: CharacterLifeState::Living,
+                security_state: CharacterSecurityState::SafeCharacterSelect,
+            }],
+            selected_character_id: Some([7; 16]),
+        }
+    }
+
+    fn character_select() -> CharacterLocationSnapshot {
+        CharacterLocationSnapshot {
+            character_id: [7; 16],
+            character_version: 1,
+            location: CharacterLocation::CharacterSelect {
+                next_hall_arrival: SafeArrival::HallDefault,
+            },
+        }
+    }
+
+    #[test]
+    fn missing_capability_keeps_play_fail_closed() {
+        let mut client = CorePrivateLifeClient::new(world_revision(), route_revision());
+        client.accept_server_hello(&hello(false)).unwrap();
+        client.set_account(account()).unwrap();
+        assert_eq!(client.phase(), CorePrivateLifePhase::Disabled);
+        assert!(client.begin_location_query().unwrap().is_none());
+        assert!(matches!(
+            client.begin_transfer(WorldTransferCommand::EnterHallFromCharacterSelect, 1),
+            Err(CorePrivateLifeClientError::ActionUnavailable)
+        ));
+    }
+
+    #[test]
+    fn selected_character_requires_location_before_play_and_route_before_hall_control() {
+        let mut client = CorePrivateLifeClient::new(world_revision(), route_revision());
+        client.accept_server_hello(&hello(true)).unwrap();
+        client.set_account(account()).unwrap();
+        assert!(
+            client
+                .begin_transfer(WorldTransferCommand::EnterHallFromCharacterSelect, 1)
+                .is_err()
+        );
+        let query = client.begin_location_query().unwrap().unwrap();
+        let WorldFlowRequest::Location { .. } = query.request else {
+            panic!("expected location query");
+        };
+        client
+            .apply_world_flow(WorldFlowResult::Location {
+                request_sequence: query.sequence,
+                snapshot: character_select(),
+            })
+            .unwrap();
+        let transfer = client
+            .begin_transfer(WorldTransferCommand::EnterHallFromCharacterSelect, 1)
+            .unwrap();
+        let WorldFlowRequest::Transfer(mutation) = transfer.request else {
+            panic!("expected transfer");
+        };
+        let hall = CharacterLocationSnapshot {
+            character_id: [7; 16],
+            character_version: 2,
+            location: CharacterLocation::Safe {
+                location_id: WireText::new("hub.lantern_halls_01").unwrap(),
+                arrival: SafeArrival::HallDefault,
+            },
+        };
+        client
+            .apply_world_flow(WorldFlowResult::Transfer {
+                request_sequence: transfer.sequence,
+                mutation_id: mutation.mutation_id,
+                accepted: true,
+                code: WorldTransferResultCode::Accepted,
+                snapshot: Some(hall),
+                transfer_id: Some([8; 16]),
+            })
+            .unwrap();
+        assert_eq!(client.phase(), CorePrivateLifePhase::LoadingAuthority);
+
+        let state = CorePrivateRouteStateV1 {
+            schema_version: protocol::CORE_PRIVATE_ROUTE_SCHEMA_VERSION,
+            character_id: [7; 16],
+            character_version: 2,
+            content_revision: route_revision(),
+            actor_generation: 1,
+            state_version: 1,
+            instance_lineage_id: None,
+            scene: CorePrivateRouteSceneV1::LanternHalls,
+            room: None,
+            phase: CorePrivateRoutePhaseV1::Hall,
+            readiness: CorePrivateRouteReadinessV1::canonical(CorePrivateRoutePhaseV1::Hall),
+        };
+        client
+            .apply_route(&ReliableEventFrame {
+                sequence: 3,
+                server_tick: 3,
+                event: ReliableEvent::CorePrivateRouteState(Box::new(state)),
+            })
+            .unwrap();
+        assert_eq!(client.phase(), CorePrivateLifePhase::Hall);
+        assert!(client.route().unwrap().can_accept_gameplay_input());
+    }
+
+    #[test]
+    fn normalized_diagonal_never_exceeds_protocol_vector_bound() {
+        assert_eq!(normalized_input(1, 1), (707, 707));
+        assert_eq!(normalized_input(-1, 0), (-1_000, 0));
+        assert_eq!(normalized_input(0, -1), (0, -1_000));
+    }
+}

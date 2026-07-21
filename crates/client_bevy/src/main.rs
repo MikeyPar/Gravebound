@@ -186,6 +186,18 @@ enum Command {
         #[arg(long, default_value = "content")]
         content_root: PathBuf,
     },
+    /// Open the negotiated GB-M03 Character Select -> private-life route.
+    CorePrivateLife {
+        #[arg(long, default_value = "127.0.0.1:50001")]
+        server: SocketAddr,
+        #[arg(long, default_value = "target/gravebound-core-dev/server-cert.der")]
+        certificate: PathBuf,
+        /// Opaque wipeable test credential. It is never displayed or logged.
+        #[arg(long)]
+        identity: String,
+        #[arg(long, default_value = "content")]
+        content_root: PathBuf,
+    },
     /// Open the disposable GB-M03 Core Hall or private-microrealm graybox showcase.
     CoreWorldShowcase {
         #[arg(long, value_enum, default_value_t = CoreWorldSceneArg::Hall)]
@@ -331,6 +343,17 @@ fn run() -> anyhow::Result<()> {
             identity,
             content_root,
         } => run_core_identity(server, certificate, identity, content_root),
+        Command::CorePrivateLife {
+            server,
+            certificate,
+            identity,
+            content_root,
+        } => client_bevy::run_core_private_life(client_bevy::CorePrivateLifeConfig {
+            server_address: server,
+            certificate_path: certificate,
+            test_token: identity,
+            content_root,
+        }),
         Command::CoreWorldShowcase {
             scene,
             content_root,
