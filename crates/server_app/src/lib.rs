@@ -787,9 +787,21 @@ pub(crate) async fn write_reliable_response(
 /// Serves one authenticated Core request and dispatches it to the owning domain authority.
 /// World-flow messages share the reliable transport but cannot mutate identity state, and the
 /// normal world-flow authority remains fail-closed until its downstream packages are complete.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CoreReliableDispatch {
+    pub(crate) server_tick: u64,
+    pub(crate) event: protocol::ReliableEvent,
+}
+
+/// Dispatches one already-decoded Core message without owning a QUIC stream.
+///
+/// Keeping domain dispatch separate from response publication lets the production private-life
+/// server reconcile any accepted durable transition before acknowledging it to the client. The
+/// legacy transport wrapper below remains intentionally thin and preserves its existing wire
+/// behavior.
 #[allow(clippy::too_many_arguments)]
-pub async fn serve_core_reliable<R, C, G, E, W, P, D, OC, BC, HA, SA, EA, RA>(
-    connection: &quinn::Connection,
+pub(crate) async fn dispatch_core_reliable_message<R, C, G, E, W, P, D, OC, BC, HA, SA, EA, RA>(
+    message: WireMessage,
     identity: &IdentityService<R, C, G, E>,
     world_flow: &W,
     progression: &ProgressionQueryService<P>,
@@ -802,9 +814,8 @@ pub async fn serve_core_reliable<R, C, G, E, W, P, D, OC, BC, HA, SA, EA, RA>(
     extraction: &EA,
     recall: &RA,
     authenticated: AuthenticatedAccount,
-    response_writer: &CoreReliableWriter,
     server_tick: u64,
-) -> Result<protocol::ReliableEventFrame, ServerTransportError>
+) -> Result<CoreReliableDispatch, ServerTransportError>
 where
     R: AccountRepository,
     C: IdentityClock,
@@ -820,16 +831,8 @@ where
     EA: CoreExtractionIntentAuthority,
     RA: CoreRecallIntentAuthority,
 {
-    let (send, mut receive) = connection
-        .accept_bi()
-        .await
-        .map_err(|error| ServerTransportError::Quic(error.to_string()))?;
-    let request = receive
-        .read_to_end(RELIABLE_FRAME_LIMIT)
-        .await
-        .map_err(|error| ServerTransportError::Quic(error.to_string()))?;
     let mut response_server_tick = server_tick;
-    let event = match decode_frame(&request)? {
+    let event = match message {
         WireMessage::AccountBootstrapFrame(frame) => {
             protocol::ReliableEvent::AccountBootstrapResult(
                 identity.bootstrap(Some(authenticated), &frame).await,
@@ -905,8 +908,72 @@ where
         }
         _ => return Err(ServerTransportError::UnexpectedMessage),
     };
+    Ok(CoreReliableDispatch {
+        server_tick: response_server_tick,
+        event,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn serve_core_reliable<R, C, G, E, W, P, D, OC, BC, HA, SA, EA, RA>(
+    connection: &quinn::Connection,
+    identity: &IdentityService<R, C, G, E>,
+    world_flow: &W,
+    progression: &ProgressionQueryService<P>,
+    death_views: &DeathViewService<D>,
+    oath: &CoreOathSelectionAuthority<OC>,
+    bargain: &CoreBargainAuthority<BC>,
+    safe_inventory: &CoreSafeInventoryAuthority,
+    resolution_hold: &HA,
+    successor: &SA,
+    extraction: &EA,
+    recall: &RA,
+    authenticated: AuthenticatedAccount,
+    response_writer: &CoreReliableWriter,
+    server_tick: u64,
+) -> Result<protocol::ReliableEventFrame, ServerTransportError>
+where
+    R: AccountRepository,
+    C: IdentityClock,
+    G: CharacterIdGenerator,
+    E: IdentityEventSink,
+    W: CoreWorldFlowAuthority,
+    P: ProgressionQueryRepository,
+    D: DeathViewRepository,
+    OC: IdentityClock,
+    BC: IdentityClock,
+    HA: CoreResolutionHoldIntentAuthority,
+    SA: CoreSuccessorIntentAuthority,
+    EA: CoreExtractionIntentAuthority,
+    RA: CoreRecallIntentAuthority,
+{
+    let (send, mut receive) = connection
+        .accept_bi()
+        .await
+        .map_err(|error| ServerTransportError::Quic(error.to_string()))?;
+    let request = receive
+        .read_to_end(RELIABLE_FRAME_LIMIT)
+        .await
+        .map_err(|error| ServerTransportError::Quic(error.to_string()))?;
+    let dispatch = dispatch_core_reliable_message(
+        decode_frame(&request)?,
+        identity,
+        world_flow,
+        progression,
+        death_views,
+        oath,
+        bargain,
+        safe_inventory,
+        resolution_hold,
+        successor,
+        extraction,
+        recall,
+        authenticated,
+        server_tick,
+    )
+    .await?;
     response_writer
-        .send_response(send, response_server_tick, event)
+        .send_response(send, dispatch.server_tick, dispatch.event)
         .await
         .map_err(ServerTransportError::from)
 }
