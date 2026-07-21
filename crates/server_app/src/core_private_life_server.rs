@@ -6,7 +6,7 @@
 //! `Gravebound_Development_Roadmap_v1.md` (`GB-M03-03`, `GB-M03-08`, and the M03
 //! exit gate). Durable transition reconciliation always precedes response publication.
 
-use std::{sync::Arc, time::SystemTime};
+use std::{future::pending, sync::Arc, time::SystemTime};
 
 use protocol::{
     ActionResultCode, HandshakeResponse, RELIABLE_FRAME_LIMIT, ReliableEvent, WireMessage,
@@ -21,9 +21,11 @@ use crate::core_private_life_process::{
 use crate::{
     AuthenticatedAccount, AuthenticatedNamespace, CoreExtractionIntentAuthority,
     CoreExtractionTerminalAuthority, CorePrivateHallActorLease, CorePrivateLifeTransportLease,
-    CorePrivateMicrorealmBinding, CorePrivateRouteActorLease, CoreRecallIntentAuthority,
-    CoreRecallTerminalAuthority, CoreReliableWriter, CoreReliableWriterError,
-    CoreWorldFlowAuthority, HandshakePolicy, dispatch_core_reliable_message,
+    CorePrivateMicrorealmBinding, CorePrivateMicrorealmBindingLease,
+    CorePrivateMicrorealmDriverObserver, CorePrivateMicrorealmDriverState,
+    CorePrivateRouteActorLease, CoreRecallIntentAuthority, CoreRecallTerminalAuthority,
+    CoreReliableWriter, CoreReliableWriterError, CoreWorldFlowAuthority, HandshakePolicy,
+    dispatch_core_reliable_message,
 };
 
 #[derive(Debug)]
@@ -54,6 +56,22 @@ impl ConnectionRoute {
             Self::Bootstrap => None,
         }
     }
+
+    fn driver_observation(&self) -> Option<DriverObservation> {
+        match self {
+            Self::Danger(binding) => Some(DriverObservation {
+                binding: binding.lease,
+                observer: binding.observer.clone(),
+            }),
+            Self::Bootstrap | Self::Hall { .. } => None,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct DriverObservation {
+    binding: CorePrivateMicrorealmBindingLease,
+    observer: CorePrivateMicrorealmDriverObserver,
 }
 
 pub(crate) async fn serve_core_private_life_connection(
@@ -94,7 +112,8 @@ pub(crate) async fn serve_core_private_life_connection(
     let transport = attached.transport;
     let writer = attached.writer;
     let mut route = ConnectionRoute::from_disposition(attached.disposition);
-    publish_route(&process, &writer, &route).await?;
+    let mut driver = route.driver_observation();
+    publish_route(&process, &writer, &route, 0).await?;
 
     let result = run_connection_loop(
         &connection,
@@ -103,6 +122,7 @@ pub(crate) async fn serve_core_private_life_connection(
         transport,
         &writer,
         &mut route,
+        &mut driver,
     )
     .await;
     let detached = process.detach_transport(transport, unix_millis()?).await;
@@ -120,9 +140,14 @@ async fn run_connection_loop(
     transport: CorePrivateLifeTransportLease,
     writer: &Arc<CoreReliableWriter>,
     route: &mut ConnectionRoute,
+    driver: &mut Option<DriverObservation>,
 ) -> Result<(), CorePrivateLifeServerError> {
     loop {
         tokio::select! {
+            observation = next_driver_observation(driver) => {
+                let observation = observation?;
+                publish_route(process, writer, route, observation_tick(&observation)).await?;
+            }
             datagram = connection.read_datagram() => {
                 let Ok(bytes) = datagram else { break };
                 let WireMessage::InputFrame(frame) = decode_frame(&bytes)? else {
@@ -153,6 +178,7 @@ async fn run_connection_loop(
                     writer,
                     route,
                 ).await?;
+                sync_driver_observation(route, driver);
             }
         }
     }
@@ -216,7 +242,7 @@ async fn dispatch_reliable(
             writer
                 .send_response(send, 0, ReliableEvent::WorldFlowResult(result))
                 .await?;
-            publish_route(process, writer, route).await?;
+            publish_route(process, writer, route, 0).await?;
         }
         WireMessage::ExtractionCommitFrame(frame) => {
             dispatch_extraction(send, &frame, process, authenticated, transport, writer).await?;
@@ -260,7 +286,7 @@ async fn dispatch_reliable(
             writer
                 .send_response(send, dispatch.server_tick, dispatch.event)
                 .await?;
-            publish_route(process, writer, route).await?;
+            publish_route(process, writer, route, 0).await?;
         }
     }
     Ok(())
@@ -393,15 +419,63 @@ async fn publish_route(
     process: &CorePrivateLifeProcess,
     writer: &CoreReliableWriter,
     route: &ConnectionRoute,
+    server_tick: u64,
 ) -> Result<(), CorePrivateLifeServerError> {
     let Some(lease) = route.route_lease() else {
         return Ok(());
     };
     let snapshot = process.route_snapshot(lease)?;
     writer
-        .send_route_event(0, ReliableEvent::CorePrivateRouteState(Box::new(snapshot)))
+        .send_route_event(
+            server_tick,
+            ReliableEvent::CorePrivateRouteState(Box::new(snapshot)),
+        )
         .await?;
     Ok(())
+}
+
+async fn next_driver_observation(
+    driver: &mut Option<DriverObservation>,
+) -> Result<CorePrivateMicrorealmDriverState, CorePrivateLifeServerError> {
+    match driver {
+        Some(driver) => Ok(driver.observer.changed().await?),
+        None => pending().await,
+    }
+}
+
+fn sync_driver_observation(route: &ConnectionRoute, driver: &mut Option<DriverObservation>) {
+    let expected = match route {
+        ConnectionRoute::Danger(binding) => Some(binding.lease),
+        ConnectionRoute::Bootstrap | ConnectionRoute::Hall { .. } => None,
+    };
+    if driver.as_ref().map(|current| current.binding) == expected {
+        return;
+    }
+    *driver = route.driver_observation();
+}
+
+fn observation_tick(observation: &CorePrivateMicrorealmDriverState) -> u64 {
+    match observation {
+        CorePrivateMicrorealmDriverState::Running { step, .. } => step.tick.0,
+        CorePrivateMicrorealmDriverState::TerminalPending { lethal_step, .. } => lethal_step.tick.0,
+        CorePrivateMicrorealmDriverState::BellResolutionPending { final_tick, .. } => final_tick.0,
+        CorePrivateMicrorealmDriverState::FixedDungeonReady { ready } => {
+            ready.final_microrealm_tick.0
+        }
+        CorePrivateMicrorealmDriverState::FixedDungeonRunning { frame, .. }
+        | CorePrivateMicrorealmDriverState::FixedDungeonRewardPending { frame, .. } => frame.tick.0,
+        CorePrivateMicrorealmDriverState::FixedDungeonTerminalPending { lethal_frame, .. } => {
+            lethal_frame.tick.0
+        }
+        CorePrivateMicrorealmDriverState::CaldusRunning { frame, .. }
+        | CorePrivateMicrorealmDriverState::CaldusRewardPending { frame, .. } => frame.tick.0,
+        CorePrivateMicrorealmDriverState::CaldusTerminalPending { lethal_frame, .. } => {
+            lethal_frame.tick.0
+        }
+        CorePrivateMicrorealmDriverState::Faulted { fault, .. } => fault.last_committed_tick.0,
+        CorePrivateMicrorealmDriverState::Starting
+        | CorePrivateMicrorealmDriverState::CaldusExitReady { .. } => 0,
+    }
 }
 
 fn unix_millis() -> Result<u64, CorePrivateLifeServerError> {
@@ -432,6 +506,8 @@ pub(crate) enum CorePrivateLifeServerError {
     Session(#[from] crate::CorePrivateLifeSessionError),
     #[error(transparent)]
     Reliable(#[from] CoreReliableWriterError),
+    #[error(transparent)]
+    Observation(#[from] crate::CorePrivateMicrorealmObservationError),
     #[error(transparent)]
     Transport(#[from] crate::ServerTransportError),
     #[error(transparent)]
