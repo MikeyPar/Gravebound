@@ -6,13 +6,14 @@ use thiserror::Error;
 use crate::{
     AccountBootstrapFrame, AccountBootstrapResult, BargainDecisionFrame, BargainDecisionResult,
     BargainViewFrame, BargainViewResult, CharacterMutationFrame, CharacterMutationResult,
-    ClientHello, CorePendingInventoryStateV1, CorePrivateRouteStateV1, DeathViewFrameV1,
-    DeathViewResultV1, ExtractionCommitFrameV1, ExtractionCommitResultV1, HandshakeResponse,
-    InitialOathSelectionFrame, InitialOathSelectionResult, NetworkChannel, OathViewFrame,
-    OathViewResult, ProgressionQueryFrame, ProgressionResult, RecallFrameV1, RecallResultV1,
-    ResolutionHoldMutationFrameV1, ResolutionHoldMutationResultV1, ResolutionHoldQueryFrameV1,
-    ResolutionHoldQueryResultV1, SafeInventoryTransferFrameV1, SafeInventoryTransferResultV1,
-    SuccessorCreateFrameV1, SuccessorCreateResultV1, WireText, WorldFlowFrame, WorldFlowResult,
+    ClientHello, CoreExtractionReadyStateV1, CorePendingInventoryStateV1, CorePrivateRouteStateV1,
+    DeathViewFrameV1, DeathViewResultV1, ExtractionCommitFrameV1, ExtractionCommitResultV1,
+    HandshakeResponse, InitialOathSelectionFrame, InitialOathSelectionResult, NetworkChannel,
+    OathViewFrame, OathViewResult, ProgressionQueryFrame, ProgressionResult, RecallFrameV1,
+    RecallResultV1, ResolutionHoldMutationFrameV1, ResolutionHoldMutationResultV1,
+    ResolutionHoldQueryFrameV1, ResolutionHoldQueryResultV1, SafeInventoryTransferFrameV1,
+    SafeInventoryTransferResultV1, SuccessorCreateFrameV1, SuccessorCreateResultV1, WireText,
+    WorldFlowFrame, WorldFlowResult,
 };
 
 pub const FIXED_VECTOR_SCALE: i16 = 1_000;
@@ -463,6 +464,7 @@ pub enum ReliableEvent {
     SuccessorCreateResult(Box<SuccessorCreateResultV1>),
     CorePrivateRouteState(Box<CorePrivateRouteStateV1>),
     CorePendingInventoryState(Box<CorePendingInventoryStateV1>),
+    CoreExtractionReadyState(Box<CoreExtractionReadyStateV1>),
 }
 
 impl ReliableEvent {
@@ -488,7 +490,8 @@ impl ReliableEvent {
             | Self::DeathViewResult(_)
             | Self::ResolutionHoldQueryResult(_)
             | Self::CorePrivateRouteState(_)
-            | Self::CorePendingInventoryState(_) => NetworkChannel::Control,
+            | Self::CorePendingInventoryState(_)
+            | Self::CoreExtractionReadyState(_) => NetworkChannel::Control,
             Self::SocialPing { .. } => NetworkChannel::Social,
         }
     }
@@ -552,6 +555,9 @@ impl ReliableEvent {
                 .validate()
                 .map_err(|_| MessageValidationError::CorePrivateRoute),
             Self::CorePendingInventoryState(state) => state
+                .validate()
+                .map_err(|_| MessageValidationError::CorePendingInventory),
+            Self::CoreExtractionReadyState(state) => state
                 .validate()
                 .map_err(|_| MessageValidationError::CorePendingInventory),
             _ => Ok(()),

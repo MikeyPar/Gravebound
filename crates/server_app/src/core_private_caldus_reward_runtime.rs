@@ -24,8 +24,8 @@ use persistence::{
     StoredActiveDangerAuthorityV1, StoredWorldFlowRevisionV1,
 };
 use protocol::{
-    CorePendingInventoryStateV1, CorePrivateRoutePhaseV1, ManifestHash, ReliableEvent,
-    WorldFlowContentRevisionV1,
+    CORE_PENDING_INVENTORY_SCHEMA_VERSION, CoreExtractionReadyStateV1, CorePendingInventoryStateV1,
+    CorePrivateRoutePhaseV1, ManifestHash, ReliableEvent, WorldFlowContentRevisionV1,
 };
 use thiserror::Error;
 use tokio::{
@@ -231,6 +231,7 @@ struct WriterBinding {
 struct RetainedPublication {
     encounter_id: [u8; 16],
     server_tick: u64,
+    extraction_ready: Option<ReliableEvent>,
     pending_inventory: ReliableEvent,
     route: ReliableEvent,
 }
@@ -774,8 +775,21 @@ async fn prepare_post_acknowledgement(
         || commit.route.clone(),
         |reservation| reservation.accepted_route().clone(),
     );
+    let extraction_request_id = reservation.as_ref().map(|reservation| {
+        reservation
+            .permit()
+            .binding()
+            .exit()
+            .extraction_request_id()
+    });
     let (projected, expected_versions) = snapshot.into_parts();
-    let retained = match retained_publication(encounter_id, handoff, &route, projected) {
+    let retained = match retained_publication(
+        encounter_id,
+        handoff,
+        &route,
+        projected,
+        extraction_request_id,
+    ) {
         Ok(retained) => retained,
         Err(message) => {
             return Err(abort_reservation(reservation.as_ref(), report, shutdown_rx)
@@ -872,6 +886,7 @@ fn retained_publication(
     handoff: &CorePrivateCaldusDefeatHandoff,
     route: &protocol::CorePrivateRouteStateV1,
     pending_inventory: CorePendingInventoryStateV1,
+    extraction_request_id: Option<[u8; 16]>,
 ) -> Result<RetainedPublication, Arc<str>> {
     pending_inventory
         .validate()
@@ -892,9 +907,21 @@ fn retained_publication(
             "Caldus pending inventory does not match acknowledged BossExitReady authority",
         ));
     }
+    let extraction_ready = extraction_request_id.map(|extraction_request_id| {
+        ReliableEvent::CoreExtractionReadyState(Box::new(CoreExtractionReadyStateV1 {
+            schema_version: CORE_PENDING_INVENTORY_SCHEMA_VERSION,
+            character_id: pending_inventory.character_id,
+            instance_lineage_id: pending_inventory.instance_lineage_id,
+            entry_restore_point_id: pending_inventory.entry_restore_point_id,
+            extraction_request_id,
+            content_revision: pending_inventory.content_revision.clone(),
+            expected_versions: pending_inventory.expected_extraction_versions,
+        }))
+    });
     Ok(RetainedPublication {
         encounter_id,
         server_tick: handoff.defeat_tick().0,
+        extraction_ready,
         pending_inventory: ReliableEvent::CorePendingInventoryState(Box::new(pending_inventory)),
         route: ReliableEvent::CorePrivateRouteState(Box::new(route.clone())),
     })
@@ -904,6 +931,11 @@ async fn publish(
     writer: &CoreReliableWriter,
     retained: &RetainedPublication,
 ) -> Result<(), CoreReliableWriterError> {
+    if let Some(extraction_ready) = &retained.extraction_ready {
+        writer
+            .send_event(retained.server_tick, extraction_ready.clone())
+            .await?;
+    }
     writer
         .send_event(retained.server_tick, retained.pending_inventory.clone())
         .await?;
@@ -1755,6 +1787,7 @@ mod tests {
             &handoff,
             &commit.route,
             pending_inventory(&handoff),
+            None,
         )
         .expect("retained publication");
 

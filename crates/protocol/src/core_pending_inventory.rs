@@ -27,6 +27,47 @@ const CORE_RED_TONIC_ID: &str = "consumable.red_tonic";
 const CORE_RED_TONIC_STACK_CAP: usize = 6;
 const RUN_MATERIAL_STACK_CAP: u16 = 99;
 
+/// Server-issued terminal identity paired with the coherent pending-inventory projection. This is
+/// a separate append-only event so protocol 1.19's existing inventory shape remains immutable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CoreExtractionReadyStateV1 {
+    pub schema_version: u16,
+    pub character_id: [u8; CHARACTER_ID_BYTES],
+    pub instance_lineage_id: [u8; INSTANCE_LINEAGE_ID_BYTES],
+    pub entry_restore_point_id: [u8; TERMINAL_INVENTORY_ID_BYTES],
+    pub extraction_request_id: [u8; TERMINAL_INVENTORY_ID_BYTES],
+    pub content_revision: WorldFlowContentRevisionV1,
+    pub expected_versions: TerminalExpectedVersionsV1,
+}
+
+impl CoreExtractionReadyStateV1 {
+    pub fn validate(&self) -> Result<(), CorePendingInventoryValidationError> {
+        if self.schema_version != CORE_PENDING_INVENTORY_SCHEMA_VERSION {
+            return Err(CorePendingInventoryValidationError::SchemaVersion);
+        }
+        if [
+            self.character_id,
+            self.instance_lineage_id,
+            self.entry_restore_point_id,
+            self.extraction_request_id,
+        ]
+        .contains(&[0; 16])
+        {
+            return Err(CorePendingInventoryValidationError::ZeroIdentity);
+        }
+        if zero_revision(&self.content_revision) {
+            return Err(CorePendingInventoryValidationError::InvalidContentRevision);
+        }
+        self.expected_versions
+            .validate()
+            .map_err(|_| CorePendingInventoryValidationError::InvalidVersions)?;
+        if self.expected_versions.character != self.expected_versions.world {
+            return Err(CorePendingInventoryValidationError::InvalidVersions);
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CorePendingItemKindV1 {
@@ -278,6 +319,36 @@ mod tests {
             ],
             materials: Vec::new(),
         }
+    }
+
+    #[test]
+    fn extraction_ready_authority_requires_complete_correlated_identity() {
+        let state = CoreExtractionReadyStateV1 {
+            schema_version: CORE_PENDING_INVENTORY_SCHEMA_VERSION,
+            character_id: [1; 16],
+            instance_lineage_id: [2; 16],
+            entry_restore_point_id: [3; 16],
+            extraction_request_id: [4; 16],
+            content_revision: WorldFlowContentRevisionV1 {
+                records_blake3: hash('1'),
+                assets_blake3: hash('2'),
+                localization_blake3: hash('3'),
+            },
+            expected_versions: TerminalExpectedVersionsV1 {
+                account: 1,
+                character: 2,
+                world: 2,
+                inventory: 3,
+                life_clock: 4,
+            },
+        };
+        assert!(state.validate().is_ok());
+        let mut invalid = state;
+        invalid.extraction_request_id = [0; 16];
+        assert_eq!(
+            invalid.validate(),
+            Err(CorePendingInventoryValidationError::ZeroIdentity)
+        );
     }
 
     #[test]

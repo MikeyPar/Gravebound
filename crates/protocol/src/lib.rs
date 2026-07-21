@@ -50,7 +50,7 @@ pub use codec::{
 pub use core_pending_inventory::{
     CORE_PENDING_BACKPACK_CAPACITY, CORE_PENDING_INVENTORY_FEATURE_FLAG,
     CORE_PENDING_INVENTORY_SCHEMA_VERSION, CORE_PENDING_ITEM_CAPACITY,
-    CORE_PENDING_MATERIAL_CAPACITY, CorePendingInventoryStateV1,
+    CORE_PENDING_MATERIAL_CAPACITY, CoreExtractionReadyStateV1, CorePendingInventoryStateV1,
     CorePendingInventoryValidationError, CorePendingItemKindV1, CorePendingItemLocationV1,
     CorePendingItemV1, CorePendingMaterialV1,
 };
