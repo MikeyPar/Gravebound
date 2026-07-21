@@ -686,6 +686,12 @@ mod tests {
                     tick,
                     ..CombatStep::default()
                 },
+                observation: crate::core_private_gameplay_observation::core_private_gameplay_observation_test_fixture(
+                    tick.0,
+                    1,
+                    9,
+                    7,
+                ),
                 route: route(),
                 step: sim_content::CoreFixedDungeonRoomStep::B3(sim_content::CoreB3FixedRoomStep {
                     tick,

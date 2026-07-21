@@ -848,6 +848,15 @@ impl CoreB2FixedRoomSimulation {
             .map_or_else(Vec::new, |combat| combat.authored_health.snapshots())
     }
 
+    /// Current hostile projectiles from the shared B2 projectile owner. The immutable wave owns
+    /// both authored and immutable hostile shots so presentation cannot observe two allocators.
+    #[must_use]
+    pub fn hostile_projectiles(&self) -> Vec<sim_core::HostileProjectile> {
+        self.combat.as_ref().map_or_else(Vec::new, |combat| {
+            combat.immutable_wave.hostile_projectiles().to_vec()
+        })
+    }
+
     pub fn set_damage_policy(&mut self, policy: HostileDamagePolicy) {
         self.damage_policy = policy;
         if let Some(combat) = &mut self.combat {

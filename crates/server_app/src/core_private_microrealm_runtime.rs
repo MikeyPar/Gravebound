@@ -20,6 +20,10 @@ use sim_core::{
 use thiserror::Error;
 
 use crate::core_private_combat_frame::{core_player_movement_config, step_live_player_combat};
+use crate::core_private_gameplay_observation::{
+    CorePrivateGameplayObservation, CorePrivateGameplayObservationError,
+    CorePrivateProjectileProvenance, enemy_snapshot, hostile_projectile_snapshot, player_snapshot,
+};
 use crate::{
     CoreBellPortalTransition, CoreCharacterCombat, CoreCharacterCombatEnvelope,
     CoreCombatFactoryError, CorePrivatePlayerDamageError, CorePrivatePlayerDamageFactV1,
@@ -36,6 +40,7 @@ pub(crate) struct CorePrivateMicrorealmDungeonHandoff {
     pub participant: sim_core::NormalWaveHandoff,
     pub next_hostile_spawn_ordinal: u16,
     pub final_tick: Tick,
+    pub projectile_provenance: CorePrivateProjectileProvenance,
 }
 
 const CORE_MICROREALM_SCENE_ID: &str = "world.core_microrealm_01";
@@ -102,6 +107,7 @@ pub struct CorePrivateMicrorealmStep {
     pub events: Vec<CoreMicrorealmEvent>,
     pub movement: MovementStep,
     pub combat: CombatStep,
+    pub(crate) observation: CorePrivateGameplayObservation,
     pub wave: Option<sim_core::NormalWaveStep>,
     pub player_damage: Vec<CorePrivatePlayerDamageFactV1>,
     pub pack_clear: Option<CoreMicrorealmPackClearProof>,
@@ -119,6 +125,7 @@ pub struct CorePrivateMicrorealmRuntime {
     lifecycle: CoreMicrorealmSimulation,
     combat: sim_content::CoreMicrorealmPackCombat,
     combat_envelope: CoreCharacterCombatEnvelope,
+    projectile_provenance: CorePrivateProjectileProvenance,
     bell_portal_center: TilePoint,
     bell_portal_radius_milli_tiles: i32,
     tick: Tick,
@@ -136,6 +143,7 @@ struct StagedMicrorealmFrame {
     wave_step: Option<sim_core::NormalWaveStep>,
     pack_clear: Option<CoreMicrorealmPackClearProof>,
     living_participants: u16,
+    projectile_provenance: CorePrivateProjectileProvenance,
 }
 
 impl CorePrivateMicrorealmRuntime {
@@ -224,6 +232,7 @@ impl CorePrivateMicrorealmRuntime {
             lifecycle,
             combat,
             combat_envelope,
+            projectile_provenance: CorePrivateProjectileProvenance::default(),
             bell_portal_center,
             bell_portal_radius_milli_tiles,
             tick: Tick(0),
@@ -332,6 +341,7 @@ impl CorePrivateMicrorealmRuntime {
             participant,
             next_hostile_spawn_ordinal,
             final_tick: self.tick,
+            projectile_provenance: self.projectile_provenance,
         })
     }
 
@@ -367,6 +377,11 @@ impl CorePrivateMicrorealmRuntime {
                 self.bell_portal_center,
                 self.bell_portal_radius_milli_tiles,
             );
+        // Validate the complete presentation projection before the shared route CAS. The route
+        // version is replaced with the committed projection below; all other observation material
+        // is now known-good and cannot turn a committed simulation frame into a partial local swap.
+        let mut observation =
+            project_microrealm_observation(tick, &route_before, input.input_sequence, &frame)?;
         let route = self
             .route_directory
             .apply_microrealm_authority(
@@ -376,11 +391,13 @@ impl CorePrivateMicrorealmRuntime {
                 bell_portal_in_range,
             )
             .await?;
+        observation.route_state_version = route.state_version;
 
         self.movement = frame.movement;
         self.player_position = frame.player_position;
         self.lifecycle = frame.lifecycle;
         self.combat = frame.combat;
+        self.projectile_provenance = frame.projectile_provenance;
         self.tick = tick;
         Ok(CorePrivateMicrorealmStep {
             input_sequence: input.input_sequence,
@@ -391,6 +408,7 @@ impl CorePrivateMicrorealmRuntime {
             events: frame.events,
             movement: frame.movement_step,
             combat: frame.combat_step,
+            observation,
             wave: frame.wave_step,
             player_damage,
             pack_clear: frame.pack_clear,
@@ -407,6 +425,7 @@ impl CorePrivateMicrorealmRuntime {
     ) -> Result<StagedMicrorealmFrame, CorePrivateMicrorealmRuntimeError> {
         let mut movement = self.movement;
         let mut combat = self.combat.clone();
+        let mut projectile_provenance = self.projectile_provenance.clone();
         let arena = combat.arena()?;
         let collision_world = ProjectileCollisionWorld::new(&arena, combat.alive_hurtboxes()?)?;
         let (combat_step, movement_step) =
@@ -446,6 +465,8 @@ impl CorePrivateMicrorealmRuntime {
         }
         let phase = lifecycle.phase();
         let pack_clear = Self::pack_clear_proof(&events, tick, route_before)?;
+        projectile_provenance
+            .apply_committed_combat(&combat_step, combat.player().combat.projectiles())?;
         Ok(StagedMicrorealmFrame {
             movement,
             lifecycle,
@@ -458,6 +479,7 @@ impl CorePrivateMicrorealmRuntime {
             wave_step,
             pack_clear,
             living_participants,
+            projectile_provenance,
         })
     }
 
@@ -514,6 +536,53 @@ impl CorePrivateMicrorealmRuntime {
         }
         Ok(())
     }
+}
+
+fn project_microrealm_observation(
+    tick: Tick,
+    route: &CorePrivateRouteStateV1,
+    input_sequence: u64,
+    frame: &StagedMicrorealmFrame,
+) -> Result<CorePrivateGameplayObservation, CorePrivateMicrorealmRuntimeError> {
+    let player = frame.combat.player();
+    let player_id = player.target.entity_id;
+    let mut entities = vec![player_snapshot(
+        player,
+        frame.movement_step.position,
+        frame.movement_step.velocity,
+    )?];
+    for projectile in player.combat.projectiles() {
+        entities.push(
+            frame
+                .projectile_provenance
+                .friendly_snapshot(player_id, projectile)?,
+        );
+    }
+    if let Some(wave) = frame.combat.wave() {
+        for enemy in wave.snapshots() {
+            entities.push(enemy_snapshot(
+                enemy.entity_id,
+                tile_point_to_simulation(TilePoint {
+                    x_milli_tiles: enemy.position_milli_tiles.0,
+                    y_milli_tiles: enemy.position_milli_tiles.1,
+                }),
+                enemy.health.current_health,
+                enemy.health.max_health,
+                enemy.health.alive,
+            )?);
+        }
+        for projectile in wave.hostile_projectiles() {
+            entities.push(hostile_projectile_snapshot(projectile)?);
+        }
+    }
+    CorePrivateGameplayObservation::new(
+        tick.0,
+        route.actor_generation,
+        route.state_version,
+        input_sequence,
+        entities,
+    )
+    .map_err(Into::into)
 }
 
 fn run_player_entity_id(
@@ -591,6 +660,8 @@ pub enum CorePrivateMicrorealmRuntimeError {
     Route(#[from] CorePrivateRouteRuntimeError),
     #[error(transparent)]
     PlayerDamage(#[from] CorePrivatePlayerDamageError),
+    #[error(transparent)]
+    GameplayObservation(#[from] CorePrivateGameplayObservationError),
 }
 
 #[cfg(test)]

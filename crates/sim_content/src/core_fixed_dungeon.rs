@@ -1,5 +1,7 @@
 //! One-owner traversal for the exact M03 Bell Sepulcher B0-B6 chain.
 
+use std::collections::BTreeMap;
+
 use sim_core::{
     ArenaGeometry, CoreBargainKind, EnemyLabPlayer, EntityId, EntityIdAllocator, FixedRoomPhase,
     NormalWaveHandoff, Tick, TilePoint, tile_point_to_simulation,
@@ -66,6 +68,22 @@ pub enum CoreFixedDungeonRoomStep {
     B2(CoreB2FixedRoomStep),
     B3(CoreB3FixedRoomStep),
     B5(CoreImmutableFixedRoomStep),
+}
+
+/// Renderer-neutral state from the current fixed-room combat owner.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CoreFixedDungeonEnemyPresentation {
+    pub entity_id: EntityId,
+    pub position: sim_core::SimulationVector,
+    pub current_health: u32,
+    pub maximum_health: u32,
+}
+
+/// Complete hostile presentation state for one committed fixed-dungeon frame.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CoreFixedDungeonPresentation {
+    pub enemies: Vec<CoreFixedDungeonEnemyPresentation>,
+    pub hostile_projectiles: Vec<sim_core::HostileProjectile>,
 }
 
 impl CoreFixedDungeonRoomStep {
@@ -291,6 +309,83 @@ impl CoreFixedDungeonCombat {
             | CoreFixedDungeonState::Rest { .. }
             | CoreFixedDungeonState::BossStaging(_) => Ok(Vec::new()),
         }
+    }
+
+    /// Projects presentation state from the same room owner used for collision and damage.
+    /// Only living hurtboxes are emitted, which avoids reconstructing unauthoritative corpse
+    /// positions for authored B2/B3 enemies whose health snapshots intentionally omit position.
+    pub fn presentation(&self) -> Result<CoreFixedDungeonPresentation, CoreFixedDungeonError> {
+        let health = match &self.state {
+            CoreFixedDungeonState::B1(room) | CoreFixedDungeonState::B5(room) => room
+                .wave()
+                .map_or_else(Vec::new, sim_core::NormalWaveSimulation::snapshots)
+                .into_iter()
+                .map(|snapshot| {
+                    (
+                        snapshot.entity_id,
+                        (snapshot.health.current_health, snapshot.health.max_health),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>(),
+            CoreFixedDungeonState::B2(room) => room
+                .immutable_snapshots()
+                .into_iter()
+                .map(|snapshot| {
+                    (
+                        snapshot.entity_id,
+                        (snapshot.health.current_health, snapshot.health.max_health),
+                    )
+                })
+                .chain(room.authored_snapshots().into_iter().map(|snapshot| {
+                    (
+                        snapshot.actor_id,
+                        (snapshot.current_health, snapshot.max_health),
+                    )
+                }))
+                .collect(),
+            CoreFixedDungeonState::B3(room) => room
+                .snapshot()
+                .map(|snapshot| {
+                    BTreeMap::from([(
+                        snapshot.actor_id,
+                        (snapshot.current_health, snapshot.max_health),
+                    )])
+                })
+                .unwrap_or_default(),
+            CoreFixedDungeonState::Vestibule(_)
+            | CoreFixedDungeonState::Rest { .. }
+            | CoreFixedDungeonState::BossStaging(_) => BTreeMap::new(),
+        };
+        let enemies = self
+            .alive_hurtboxes()?
+            .into_iter()
+            .map(|hurtbox| {
+                let (current_health, maximum_health) = health
+                    .get(&hurtbox.id())
+                    .copied()
+                    .ok_or(CoreFixedDungeonError::DefinitionDrift)?;
+                Ok(CoreFixedDungeonEnemyPresentation {
+                    entity_id: hurtbox.id(),
+                    position: hurtbox.center(),
+                    current_health,
+                    maximum_health,
+                })
+            })
+            .collect::<Result<Vec<_>, CoreFixedDungeonError>>()?;
+        let hostile_projectiles = match &self.state {
+            CoreFixedDungeonState::B1(room) | CoreFixedDungeonState::B5(room) => room
+                .wave()
+                .map_or_else(Vec::new, |wave| wave.hostile_projectiles().to_vec()),
+            CoreFixedDungeonState::B2(room) => room.hostile_projectiles(),
+            CoreFixedDungeonState::B3(room) => room.hostile_projectiles(),
+            CoreFixedDungeonState::Vestibule(_)
+            | CoreFixedDungeonState::Rest { .. }
+            | CoreFixedDungeonState::BossStaging(_) => Vec::new(),
+        };
+        Ok(CoreFixedDungeonPresentation {
+            enemies,
+            hostile_projectiles,
+        })
     }
 
     #[must_use]

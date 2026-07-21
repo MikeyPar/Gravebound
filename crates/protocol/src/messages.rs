@@ -150,7 +150,11 @@ pub struct EntitySnapshot {
 }
 
 impl EntitySnapshot {
-    const fn validate(&self) -> Result<(), MessageValidationError> {
+    /// Validates one entity independently of snapshot chunking.
+    ///
+    /// Authoritative runtime projectors use this before transport batching so invalid
+    /// presentation state fails closed at its source rather than at wire encoding.
+    pub const fn validate(&self) -> Result<(), MessageValidationError> {
         if self.entity_id == 0 {
             return Err(MessageValidationError::ZeroEntityId);
         }

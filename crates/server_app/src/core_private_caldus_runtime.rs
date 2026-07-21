@@ -33,6 +33,11 @@ use crate::{
     CorePrivateRouteActorLease, CorePrivateRouteRuntimeError, caldus_player_damage_facts,
     core_private_caldus_reward::CoreCaldusRewardTracker,
     core_private_combat_frame::{core_player_movement_config, step_live_player_combat_with_bodies},
+    core_private_gameplay_observation::{
+        CorePrivateGameplayObservation, CorePrivateGameplayObservationError,
+        CorePrivateProjectileProvenance, boss_snapshot, hostile_projectile_snapshot,
+        player_snapshot,
+    },
 };
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -48,6 +53,7 @@ pub struct CorePrivateCaldusFrame {
     pub player_position: TilePoint,
     pub movement: sim_core::MovementStep,
     pub combat: sim_core::CombatStep,
+    pub(crate) observation: CorePrivateGameplayObservation,
     pub lock: CoreBossLockStep,
     pub encounter: Option<CoreCaldusEncounterStep>,
     pub route: CorePrivateRouteStateV1,
@@ -86,6 +92,7 @@ pub struct CorePrivateCaldusRuntime {
     defeat_handoff: Option<CorePrivateCaldusDefeatHandoff>,
     reward_resolution: Option<CoreDurableCaldusResolution>,
     presentation: Option<CaldusInstancePresentation>,
+    projectile_provenance: CorePrivateProjectileProvenance,
 }
 
 struct StagedCaldusFrame {
@@ -100,6 +107,7 @@ struct StagedCaldusFrame {
     lock: CoreBossLockStep,
     encounter: Option<CoreCaldusEncounterStep>,
     reward_tracker: CoreCaldusRewardTracker,
+    projectile_provenance: CorePrivateProjectileProvenance,
 }
 
 impl CorePrivateCaldusRuntime {
@@ -159,6 +167,7 @@ impl CorePrivateCaldusRuntime {
             defeat_handoff: None,
             reward_resolution: None,
             presentation: None,
+            projectile_provenance: handoff.projectile_provenance,
         })
     }
 
@@ -344,6 +353,14 @@ impl CorePrivateCaldusRuntime {
             self.participant.entity_id,
             player_died,
         )?;
+        let mut observation = project_caldus_observation(
+            tick,
+            &route_before,
+            input.action.input_sequence,
+            self.participant.entity_id,
+            self.boss_entity_id,
+            &staged,
+        )?;
         let route = self
             .route_directory
             .apply_fixed_dungeon_authority(
@@ -353,6 +370,7 @@ impl CorePrivateCaldusRuntime {
                 staged.route_phase,
             )
             .await?;
+        observation.route_state_version = route.state_version;
         let player_position = simulation_to_tile_point(player.target.position)?;
         let boss_health = staged
             .encounter_simulation
@@ -397,6 +415,7 @@ impl CorePrivateCaldusRuntime {
         self.route_phase = staged.route_phase;
         self.tick = tick;
         self.reward_tracker = staged.reward_tracker;
+        self.projectile_provenance = staged.projectile_provenance;
         self.defeat_handoff = defeat_handoff;
         Ok(CorePrivateCaldusFrame {
             input_sequence: input.action.input_sequence,
@@ -404,6 +423,7 @@ impl CorePrivateCaldusRuntime {
             player_position,
             movement: staged.movement,
             combat: staged.combat,
+            observation,
             lock: staged.lock,
             encounter: staged.encounter,
             route,
@@ -426,6 +446,7 @@ impl CorePrivateCaldusRuntime {
         let mut encounter_simulation = self.encounter.clone();
         let mut projectile_ids = self.projectile_ids.clone();
         let mut reward_tracker = self.reward_tracker.clone();
+        let mut projectile_provenance = self.projectile_provenance.clone();
         let life = participant_life(&players, self.participant.entity_id)?;
         let lock = lock_simulation.step(&CoreBossLockInput {
             tick,
@@ -504,6 +525,10 @@ impl CorePrivateCaldusRuntime {
             &mut projectile_ids,
             &mut reward_tracker,
         );
+        let player = players
+            .get(&self.participant.entity_id)
+            .ok_or(CorePrivateCaldusRuntimeError::InvalidComposition)?;
+        projectile_provenance.apply_committed_combat(&combat, player.combat.projectiles())?;
         let route_phase =
             projected_route_phase(&lock.phase, encounter_simulation.as_ref(), self.route_phase)?;
         Ok(StagedCaldusFrame {
@@ -518,6 +543,7 @@ impl CorePrivateCaldusRuntime {
             lock,
             encounter,
             reward_tracker,
+            projectile_provenance,
         })
     }
 
@@ -536,6 +562,52 @@ impl CorePrivateCaldusRuntime {
         }
         Ok(())
     }
+}
+
+fn project_caldus_observation(
+    tick: Tick,
+    route: &CorePrivateRouteStateV1,
+    input_sequence: u64,
+    player_id: EntityId,
+    boss_entity_id: EntityId,
+    staged: &StagedCaldusFrame,
+) -> Result<CorePrivateGameplayObservation, CorePrivateCaldusRuntimeError> {
+    let player = staged
+        .players
+        .get(&player_id)
+        .ok_or(CorePrivateCaldusRuntimeError::InvalidComposition)?;
+    let mut entities = vec![player_snapshot(
+        player,
+        staged.movement.position,
+        staged.movement.velocity,
+    )?];
+    for projectile in player.combat.projectiles() {
+        entities.push(
+            staged
+                .projectile_provenance
+                .friendly_snapshot(player_id, projectile)?,
+        );
+    }
+    if let Some(encounter) = &staged.encounter_simulation {
+        entities.push(boss_snapshot(
+            boss_entity_id,
+            encounter.body().simulation_position(),
+            encounter.current_health(),
+            encounter.maximum_health(),
+            encounter.current_health() != 0,
+        )?);
+        for projectile in encounter.hostile_projectiles() {
+            entities.push(hostile_projectile_snapshot(projectile)?);
+        }
+    }
+    CorePrivateGameplayObservation::new(
+        tick.0,
+        route.actor_generation,
+        route.state_version,
+        input_sequence,
+        entities,
+    )
+    .map_err(Into::into)
 }
 
 fn participant_life(
@@ -775,6 +847,7 @@ pub(crate) fn core_private_caldus_runtime_test_fixture()
         arena: encounters.compile_caldus_arena().expect("B6 arena"),
         tick: Tick(0),
         last_reward_activity_sequence: 1,
+        projectile_provenance: CorePrivateProjectileProvenance::default(),
     };
     let runtime = CorePrivateCaldusRuntime::from_staging_handoff(handoff).expect("Caldus runtime");
     (directory, runtime)
@@ -818,6 +891,8 @@ pub enum CorePrivateCaldusRuntimeError {
     Route(#[from] CorePrivateRouteRuntimeError),
     #[error(transparent)]
     PlayerDamage(#[from] CorePrivatePlayerDamageError),
+    #[error(transparent)]
+    GameplayObservation(#[from] CorePrivateGameplayObservationError),
 }
 
 #[cfg(test)]
@@ -913,6 +988,7 @@ mod tests {
             arena: encounters.compile_caldus_arena().expect("B6 arena"),
             tick: Tick(0),
             last_reward_activity_sequence: 0,
+            projectile_provenance: CorePrivateProjectileProvenance::default(),
         };
         let runtime =
             CorePrivateCaldusRuntime::from_staging_handoff(handoff).expect("Caldus runtime");

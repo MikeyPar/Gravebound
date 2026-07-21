@@ -466,6 +466,14 @@ impl CoreB3FixedRoomSimulation {
             .and_then(|combat| combat.snapshot().ok())
     }
 
+    /// Current hostile projectiles from the sole B3 combat owner.
+    #[must_use]
+    pub fn hostile_projectiles(&self) -> Vec<sim_core::HostileProjectile> {
+        self.combat
+            .as_ref()
+            .map_or_else(Vec::new, |combat| combat.hostile.projectiles().to_vec())
+    }
+
     pub fn player(&self) -> Result<&EnemyLabPlayer, CoreFixedRoomEncounterError> {
         if let Some(combat) = &self.combat {
             return Ok(combat.player());

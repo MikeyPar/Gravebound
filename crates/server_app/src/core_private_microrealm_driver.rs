@@ -2851,6 +2851,12 @@ mod tests {
                 collided: false,
             },
             combat: sim_core::CombatStep::default(),
+            observation: crate::core_private_gameplay_observation::core_private_gameplay_observation_test_fixture(
+                tick,
+                1,
+                1,
+                0,
+            ),
             wave: None,
             player_damage: Vec::new(),
             pack_clear: None,

@@ -22,6 +22,11 @@ use crate::{
     CorePrivateMicrorealmRuntimeError, CorePrivatePlayerDamageError, CorePrivatePlayerDamageFactV1,
     CorePrivateRouteActorDirectory, CorePrivateRouteActorLease, CorePrivateRouteRuntimeError,
     core_private_combat_frame::{core_player_movement_config, step_live_player_combat},
+    core_private_gameplay_observation::{
+        CorePrivateGameplayObservation, CorePrivateGameplayObservationError,
+        CorePrivateProjectileProvenance, enemy_snapshot, hostile_projectile_snapshot,
+        player_snapshot,
+    },
     core_private_microrealm_runtime::CorePrivateMicrorealmDungeonHandoff,
     fixed_room_player_damage_facts,
 };
@@ -68,6 +73,7 @@ pub struct CorePrivateFixedDungeonLiveRoomFrame {
     pub player_position: TilePoint,
     pub movement: sim_core::MovementStep,
     pub combat: sim_core::CombatStep,
+    pub(crate) observation: CorePrivateGameplayObservation,
     pub route: CorePrivateRouteStateV1,
     pub step: sim_content::CoreFixedDungeonRoomStep,
     pub player_damage: Vec<CorePrivatePlayerDamageFactV1>,
@@ -88,6 +94,7 @@ pub struct CorePrivateCaldusStagingHandoff {
     pub(crate) arena: sim_core::ArenaGeometry,
     pub(crate) tick: Tick,
     pub(crate) last_reward_activity_sequence: u64,
+    pub(crate) projectile_provenance: CorePrivateProjectileProvenance,
 }
 
 impl CorePrivateCaldusStagingHandoff {
@@ -142,6 +149,7 @@ pub struct CorePrivateFixedDungeonRuntime {
     movement: Option<PlayerMovementState>,
     tick: Tick,
     last_reward_activity_sequence: u64,
+    projectile_provenance: CorePrivateProjectileProvenance,
 }
 
 impl CorePrivateFixedDungeonRuntime {
@@ -190,6 +198,7 @@ impl CorePrivateFixedDungeonRuntime {
             movement: None,
             tick: handoff.final_tick,
             last_reward_activity_sequence: 0,
+            projectile_provenance: handoff.projectile_provenance,
         })
     }
 
@@ -263,6 +272,7 @@ impl CorePrivateFixedDungeonRuntime {
             arena,
             tick: self.tick,
             last_reward_activity_sequence: self.last_reward_activity_sequence,
+            projectile_provenance: self.projectile_provenance,
         })
     }
 
@@ -398,6 +408,7 @@ impl CorePrivateFixedDungeonRuntime {
         let route_before = self.route_directory.snapshot(self.route_lease)?;
         self.validate_route_authority(&route_before)?;
         let mut staged_combat = self.combat.clone();
+        let mut staged_projectile_provenance = self.projectile_provenance.clone();
         let mut staged_movement = self
             .movement
             .ok_or(CorePrivateFixedDungeonRuntimeError::RoomMovementUnavailable)?;
@@ -447,12 +458,22 @@ impl CorePrivateFixedDungeonRuntime {
             combat_step: Some(combat_step.clone()),
         };
         let step = staged_combat.step_room(tick, &room_input)?;
+        staged_projectile_provenance
+            .apply_committed_combat(&combat_step, staged_combat.player()?.combat.projectiles())?;
         let player = staged_combat.player()?;
         let player_position = simulation_to_tile_point(player.target.position)?;
         let player_died = player.consumables.vitals().current_health() == 0;
         let player_damage =
             fixed_room_player_damage_facts(&step, player.target.entity_id, player_died)?;
         let (room, phase) = route_position(staged_combat.node(), Some(step.phase_after()))?;
+        let mut observation = project_fixed_observation(
+            tick,
+            &route_before,
+            input.input_sequence,
+            &staged_combat,
+            movement_step,
+            &staged_projectile_provenance,
+        )?;
         let route = self
             .route_directory
             .apply_fixed_dungeon_authority(
@@ -462,7 +483,9 @@ impl CorePrivateFixedDungeonRuntime {
                 phase,
             )
             .await?;
+        observation.route_state_version = route.state_version;
         self.combat = staged_combat;
+        self.projectile_provenance = staged_projectile_provenance;
         self.movement = Some(staged_movement);
         self.tick = tick;
         self.last_reward_activity_sequence = input.reward_activity_sequence;
@@ -472,6 +495,7 @@ impl CorePrivateFixedDungeonRuntime {
             player_position,
             movement: movement_step,
             combat: combat_step,
+            observation,
             route,
             step,
             player_damage,
@@ -531,6 +555,47 @@ impl CorePrivateFixedDungeonRuntime {
         }
         Ok(())
     }
+}
+
+fn project_fixed_observation(
+    tick: Tick,
+    route: &CorePrivateRouteStateV1,
+    input_sequence: u64,
+    combat: &sim_content::CoreFixedDungeonCombat,
+    movement: sim_core::MovementStep,
+    projectile_provenance: &CorePrivateProjectileProvenance,
+) -> Result<CorePrivateGameplayObservation, CorePrivateFixedDungeonRuntimeError> {
+    let player = combat.player()?;
+    let player_id = player.target.entity_id;
+    let mut entities = vec![player_snapshot(
+        player,
+        movement.position,
+        movement.velocity,
+    )?];
+    for projectile in player.combat.projectiles() {
+        entities.push(projectile_provenance.friendly_snapshot(player_id, projectile)?);
+    }
+    let presentation = combat.presentation()?;
+    for enemy in presentation.enemies {
+        entities.push(enemy_snapshot(
+            enemy.entity_id,
+            enemy.position,
+            enemy.current_health,
+            enemy.maximum_health,
+            true,
+        )?);
+    }
+    for projectile in &presentation.hostile_projectiles {
+        entities.push(hostile_projectile_snapshot(projectile)?);
+    }
+    CorePrivateGameplayObservation::new(
+        tick.0,
+        route.actor_generation,
+        route.state_version,
+        input_sequence,
+        entities,
+    )
+    .map_err(Into::into)
 }
 
 fn movement_for_combat(
@@ -664,6 +729,8 @@ pub enum CorePrivateFixedDungeonRuntimeError {
     Route(#[from] CorePrivateRouteRuntimeError),
     #[error(transparent)]
     PlayerDamage(#[from] CorePrivatePlayerDamageError),
+    #[error(transparent)]
+    GameplayObservation(#[from] CorePrivateGameplayObservationError),
 }
 
 #[cfg(test)]
@@ -768,6 +835,7 @@ mod tests {
             },
             next_hostile_spawn_ordinal: 9,
             final_tick,
+            projectile_provenance: CorePrivateProjectileProvenance::default(),
         };
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content");
         let encounters =
