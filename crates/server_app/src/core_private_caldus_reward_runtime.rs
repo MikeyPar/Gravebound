@@ -908,7 +908,7 @@ async fn publish(
         .send_event(retained.server_tick, retained.pending_inventory.clone())
         .await?;
     writer
-        .send_event(retained.server_tick, retained.route.clone())
+        .send_route_event(retained.server_tick, retained.route.clone())
         .await?;
     Ok(())
 }

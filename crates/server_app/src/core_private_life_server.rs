@@ -94,8 +94,7 @@ pub(crate) async fn serve_core_private_life_connection(
     let transport = attached.transport;
     let writer = attached.writer;
     let mut route = ConnectionRoute::from_disposition(attached.disposition);
-    let mut last_published_route_version = 0;
-    publish_route(&process, &writer, &route, &mut last_published_route_version).await?;
+    publish_route(&process, &writer, &route).await?;
 
     let result = run_connection_loop(
         &connection,
@@ -104,7 +103,6 @@ pub(crate) async fn serve_core_private_life_connection(
         transport,
         &writer,
         &mut route,
-        &mut last_published_route_version,
     )
     .await;
     let detached = process.detach_transport(transport, unix_millis()?).await;
@@ -122,7 +120,6 @@ async fn run_connection_loop(
     transport: CorePrivateLifeTransportLease,
     writer: &Arc<CoreReliableWriter>,
     route: &mut ConnectionRoute,
-    last_published_route_version: &mut u64,
 ) -> Result<(), CorePrivateLifeServerError> {
     loop {
         tokio::select! {
@@ -155,7 +152,6 @@ async fn run_connection_loop(
                     transport,
                     writer,
                     route,
-                    last_published_route_version,
                 ).await?;
             }
         }
@@ -172,7 +168,6 @@ async fn dispatch_reliable(
     transport: CorePrivateLifeTransportLease,
     writer: &Arc<CoreReliableWriter>,
     route: &mut ConnectionRoute,
-    last_published_route_version: &mut u64,
 ) -> Result<(), CorePrivateLifeServerError> {
     match message {
         WireMessage::ActionFrame(frame) => {
@@ -221,7 +216,7 @@ async fn dispatch_reliable(
             writer
                 .send_response(send, 0, ReliableEvent::WorldFlowResult(result))
                 .await?;
-            publish_route(process, writer, route, last_published_route_version).await?;
+            publish_route(process, writer, route).await?;
         }
         WireMessage::ExtractionCommitFrame(frame) => {
             dispatch_extraction(send, &frame, process, authenticated, transport, writer).await?;
@@ -265,7 +260,7 @@ async fn dispatch_reliable(
             writer
                 .send_response(send, dispatch.server_tick, dispatch.event)
                 .await?;
-            publish_route(process, writer, route, last_published_route_version).await?;
+            publish_route(process, writer, route).await?;
         }
     }
     Ok(())
@@ -398,18 +393,13 @@ async fn publish_route(
     process: &CorePrivateLifeProcess,
     writer: &CoreReliableWriter,
     route: &ConnectionRoute,
-    last_published_route_version: &mut u64,
 ) -> Result<(), CorePrivateLifeServerError> {
     let Some(lease) = route.route_lease() else {
         return Ok(());
     };
     let snapshot = process.route_snapshot(lease)?;
-    if snapshot.state_version <= *last_published_route_version {
-        return Ok(());
-    }
-    *last_published_route_version = snapshot.state_version;
     writer
-        .send_event(0, ReliableEvent::CorePrivateRouteState(Box::new(snapshot)))
+        .send_route_event(0, ReliableEvent::CorePrivateRouteState(Box::new(snapshot)))
         .await?;
     Ok(())
 }

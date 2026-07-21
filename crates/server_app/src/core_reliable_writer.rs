@@ -28,6 +28,7 @@ struct CoreReliableSequence {
 pub struct CoreReliableWriter {
     connection: quinn::Connection,
     sequence: Mutex<CoreReliableSequence>,
+    route_state_version: Mutex<Option<(u64, u64)>>,
     available: AtomicBool,
 }
 
@@ -109,6 +110,7 @@ impl CoreReliableWriter {
         Self {
             connection,
             sequence: Mutex::new(CoreReliableSequence::default()),
+            route_state_version: Mutex::new(None),
             available: AtomicBool::new(true),
         }
     }
@@ -184,6 +186,32 @@ impl CoreReliableWriter {
             .map_err(CoreReliableWriterError::Transport)?;
         permit.commit()?;
         Ok(frame)
+    }
+
+    /// Publishes one route projection per monotonically increasing actor generation/state version
+    /// across every producer sharing this transport. Reward, driver, and connection publishers
+    /// cannot duplicate or rewind route control even when they observe the same committed frame.
+    pub(crate) async fn send_route_event(
+        &self,
+        server_tick: u64,
+        event: ReliableEvent,
+    ) -> Result<Option<ReliableEventFrame>, CoreReliableWriterError> {
+        let ReliableEvent::CorePrivateRouteState(state) = &event else {
+            return Err(CoreReliableWriterError::InvalidEvent);
+        };
+        state
+            .validate()
+            .map_err(|_| CoreReliableWriterError::InvalidEvent)?;
+        let candidate = (state.actor_generation, state.state_version);
+        let mut published = self.route_state_version.lock().await;
+        if published.is_some_and(|current| {
+            candidate.0 < current.0 || (candidate.0 == current.0 && candidate.1 <= current.1)
+        }) {
+            return Ok(None);
+        }
+        let frame = self.send_event(server_tick, event).await?;
+        *published = Some(candidate);
+        Ok(Some(frame))
     }
 
     #[must_use]
