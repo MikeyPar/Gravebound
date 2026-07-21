@@ -286,6 +286,18 @@ impl CorePrivateLifePersistentFoundation {
         Arc::clone(&self.world_flow)
     }
 
+    pub(crate) fn content(&self) -> Arc<sim_content::CorePrivateLifeContent> {
+        Arc::clone(&self.content)
+    }
+
+    pub(crate) fn runtime_bootstrap(&self) -> Arc<PersistentRuntimeBootstrap> {
+        Arc::clone(&self.runtime_bootstrap)
+    }
+
+    pub(crate) fn route_directory(&self) -> CorePrivateRouteActorDirectory {
+        self.route_directory.clone()
+    }
+
     pub(crate) fn begin_shutdown(&self) {
         self.runtime_bootstrap.begin_shutdown();
         self.route_directory.begin_shutdown();
@@ -393,7 +405,7 @@ fn world_flow_revision(
     })
 }
 
-fn route_revision(
+pub(crate) fn route_revision(
     content: &sim_content::CorePrivateLifeContentRevision,
 ) -> Result<protocol::CorePrivateRouteContentRevisionV1, CorePrivateLifeFoundationError> {
     Ok(protocol::CorePrivateRouteContentRevisionV1 {

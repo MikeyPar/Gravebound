@@ -18,7 +18,7 @@ use thiserror::Error;
 use crate::core_private_hall_runtime::{CorePrivateHallDirectory, CorePrivateHallError};
 use crate::core_private_life_foundation::{
     CorePrivateLifeFoundationError, CorePrivateLifePersistentFoundation, PersistentWorldFlow,
-    SystemIdentityClock,
+    SystemIdentityClock, route_revision,
 };
 use crate::core_private_world_flow::CorePrivateHallWorldFlow;
 use crate::{
@@ -26,7 +26,9 @@ use crate::{
     CoreCombatFactoryError, CoreExtractionActorDirectory, CorePrivateHallActorLease,
     CorePrivateLifeSessionDirectory, CorePrivateLifeSessionReport, CorePrivateLifeTickDirectory,
     CorePrivateLifeTickDirectoryReport, CorePrivateLifeTransportLease,
-    CorePrivateRouteRuntimeReport, CoreRecallActorDirectory, SecretRewardEpoch,
+    CorePrivateMicrorealmBinding, CorePrivateMicrorealmRuntime, CorePrivateRouteRuntimeReport,
+    CoreRecallActorDirectory, ProductionRecallIntentActor, ProductionRecallPendingAuthorityV1,
+    SecretRewardEpoch,
 };
 
 type PersistentRecallDirectory =
@@ -64,6 +66,7 @@ impl CorePrivateLifeAdmission {
 pub(crate) struct CorePrivateLifeProcess {
     foundation: Arc<CorePrivateLifePersistentFoundation>,
     sessions: Arc<PersistentSessionDirectory>,
+    recall: Arc<PersistentRecallDirectory>,
     ticks: Arc<CorePrivateLifeTickDirectory>,
     hall: Arc<CorePrivateHallDirectory>,
     combat: Arc<CoreCharacterCombatFactory>,
@@ -92,7 +95,7 @@ impl CorePrivateLifeProcess {
         let recall = Arc::new(PersistentRecallDirectory::new(Arc::clone(&ticks)));
         let extraction = Arc::new(PersistentExtractionDirectory::new(Arc::clone(&ticks)));
         let sessions = CorePrivateLifeSessionDirectory::with_caldus_extraction_runtime(
-            recall,
+            Arc::clone(&recall),
             extraction,
             persistence.clone(),
             SystemIdentityClock,
@@ -112,6 +115,7 @@ impl CorePrivateLifeProcess {
         let process = Self {
             foundation,
             sessions: Arc::new(sessions),
+            recall,
             ticks,
             hall: Arc::new(CorePrivateHallDirectory::load(content_root)?),
             combat: Arc::new(CoreCharacterCombatFactory::load(persistence, content_root)?),
@@ -153,6 +157,71 @@ impl CorePrivateLifeProcess {
             actor,
             transport,
         )
+    }
+
+    /// Converts one already committed Hall -> microrealm receipt into the exact live danger
+    /// graph. Exact replay returns the retained binding; every partial fresh bind is retired before
+    /// the error escapes.
+    pub(crate) async fn enter_committed_microrealm(
+        self: &Arc<Self>,
+        authenticated: crate::AuthenticatedAccount,
+        transport: CorePrivateLifeTransportLease,
+        character_id: [u8; 16],
+    ) -> Result<CorePrivateMicrorealmBinding, CorePrivateLifeProcessError> {
+        if let Ok(binding) = self.sessions.microrealm_authority(transport).await {
+            if binding.lease.character_id() == character_id {
+                return Ok(binding);
+            }
+            return Err(CorePrivateLifeProcessError::InvalidRouteBinding);
+        }
+        let reattached = self
+            .foundation
+            .runtime_bootstrap()
+            .reattach_within_process(authenticated, transport, self.sessions.as_ref())
+            .await?;
+        let route_lease = reattached
+            .route
+            .ok_or(CorePrivateLifeProcessError::InvalidRouteBinding)?;
+        if route_lease.character_id() != character_id {
+            return Err(CorePrivateLifeProcessError::InvalidRouteBinding);
+        }
+        let combat = self
+            .combat
+            .build(authenticated.account_id.as_bytes(), character_id)
+            .await?;
+        let content = self.foundation.content();
+        let runtime = CorePrivateMicrorealmRuntime::new(
+            self.foundation.route_directory(),
+            route_lease,
+            &route_revision(content.revision())?,
+            content.microrealm_scene(),
+            content.encounter_rooms().clone(),
+            content.world_flow().clone(),
+            combat,
+        )?;
+        let recall_actor = Arc::new(ProductionRecallIntentActor::new(
+            SystemIdentityClock,
+            authenticated.account_id.as_bytes(),
+            character_id,
+            ProductionRecallPendingAuthorityV1 {
+                pending_item_count: 0,
+                pending_material_stack_count: 0,
+            },
+        )?);
+        self.recall
+            .register_actor(authenticated, route_lease, recall_actor)
+            .await?;
+        if let Err(error) = self.sessions.bind_recall(transport).await {
+            let _ = self.recall.retire_actor(authenticated).await;
+            return Err(error.into());
+        }
+        match self.sessions.bind_microrealm(transport, runtime).await {
+            Ok(binding) => Ok(binding),
+            Err(error) => {
+                let _ = self.sessions.unbind_recall(transport).await;
+                Err(error.into())
+            }
+        }
     }
 
     fn validate_dormant_composition(&self) -> Result<(), CorePrivateLifeProcessError> {
@@ -210,6 +279,16 @@ pub(crate) enum CorePrivateLifeProcessError {
     Combat(#[from] CoreCombatFactoryError),
     #[error("private-life Hall composition failed: {0}")]
     Hall(#[from] CorePrivateHallError),
+    #[error("private-life route binding is invalid")]
+    InvalidRouteBinding,
+    #[error("private-life microrealm composition failed: {0}")]
+    Microrealm(#[from] crate::CorePrivateMicrorealmRuntimeError),
+    #[error("private-life Recall composition failed: {0}")]
+    Recall(#[from] crate::CoreRecallRuntimeError),
+    #[error("private-life Recall actor is invalid: {0}")]
+    RecallActor(#[from] crate::ProductionRecallChannelError),
+    #[error("private-life runtime bootstrap failed: {0}")]
+    Bootstrap(#[from] crate::CorePrivateLifeBootstrapError),
     #[error("private-life session runtime failed: {0}")]
     Session(#[from] crate::CorePrivateLifeSessionError),
     #[error("private-life tick runtime failed: {0}")]
