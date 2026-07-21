@@ -324,6 +324,10 @@ impl CorePrivateCaldusRuntime {
         self.step_inner(input, Some(friendly_inputs)).await
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the staged boss frame keeps route, reward, terminal, and presentation ordering auditable"
+    )]
     async fn step_inner(
         &mut self,
         input: CorePrivateCaldusRuntimeInput,
@@ -434,6 +438,10 @@ impl CorePrivateCaldusRuntime {
         })
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the single-owner boss simulation transaction keeps exact stage ordering auditable"
+    )]
     fn stage_frame(
         &self,
         input: CorePrivateCaldusRuntimeInput,

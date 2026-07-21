@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use protocol::{
     ENTITY_STATE_ALIVE, EntityKind, EntitySnapshot, MAX_SNAPSHOT_CHUNKS,
-    MAX_SNAPSHOT_ENTITIES_PER_CHUNK,
+    MAX_SNAPSHOT_ENTITIES_PER_CHUNK, SnapshotChunk,
 };
 use sim_core::{CombatStep, EntityId, FriendlyProjectile, HostileProjectile, SimulationVector};
 use thiserror::Error;
@@ -60,6 +60,41 @@ impl CorePrivateGameplayObservation {
             acknowledged_input_sequence,
             entities,
         })
+    }
+
+    pub(crate) fn snapshot_chunks(
+        &self,
+        sequence: u32,
+    ) -> Result<Vec<SnapshotChunk>, CorePrivateGameplayObservationError> {
+        if sequence == 0 {
+            return Err(CorePrivateGameplayObservationError::InvalidSnapshotSequence);
+        }
+        let chunk_count = self
+            .entities
+            .len()
+            .div_ceil(MAX_SNAPSHOT_ENTITIES_PER_CHUNK);
+        let chunk_count = u16::try_from(chunk_count)
+            .map_err(|_| CorePrivateGameplayObservationError::EntityOverflow)?;
+        self.entities
+            .chunks(MAX_SNAPSHOT_ENTITIES_PER_CHUNK)
+            .enumerate()
+            .map(|(index, entities)| {
+                let chunk = SnapshotChunk {
+                    sequence,
+                    server_tick: self.tick,
+                    state_version: self.route_state_version,
+                    acknowledged_input_sequence: self.acknowledged_input_sequence,
+                    chunk_index: u16::try_from(index)
+                        .map_err(|_| CorePrivateGameplayObservationError::EntityOverflow)?,
+                    chunk_count,
+                    entities: entities.to_vec(),
+                };
+                chunk
+                    .validate()
+                    .map_err(|_| CorePrivateGameplayObservationError::InvalidSnapshotChunk)?;
+                Ok(chunk)
+            })
+            .collect()
     }
 }
 
@@ -270,12 +305,16 @@ pub enum CorePrivateGameplayObservationError {
     InvalidAuthority,
     #[error("private gameplay input acknowledgement overflowed")]
     InputSequenceOverflow,
+    #[error("private gameplay snapshot sequence is invalid")]
+    InvalidSnapshotSequence,
     #[error("private gameplay observation exceeds its entity bound")]
     EntityOverflow,
     #[error("private gameplay observation contains an invalid entity")]
     InvalidEntity,
     #[error("private gameplay observation contains duplicate entities")]
     DuplicateEntity,
+    #[error("private gameplay observation produced an invalid snapshot chunk")]
+    InvalidSnapshotChunk,
     #[error("private gameplay projectile ordinal overflowed")]
     ProjectileOrdinalOverflow,
     #[error("private gameplay projectile is missing input provenance")]

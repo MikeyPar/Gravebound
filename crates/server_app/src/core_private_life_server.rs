@@ -15,6 +15,9 @@ use protocol::{
 };
 use thiserror::Error;
 
+use crate::core_private_gameplay_observation::{
+    CorePrivateGameplayObservation, CorePrivateGameplayObservationError,
+};
 use crate::core_private_life_process::{
     CorePrivateLifeProcess, CorePrivateLifeProcessDisposition, CorePrivateLifeProcessError,
 };
@@ -25,7 +28,7 @@ use crate::{
     CorePrivateMicrorealmDriverObserver, CorePrivateMicrorealmDriverState,
     CorePrivateRouteActorLease, CoreRecallIntentAuthority, CoreRecallTerminalAuthority,
     CoreReliableWriter, CoreReliableWriterError, CoreWorldFlowAuthority, HandshakePolicy,
-    dispatch_core_reliable_message,
+    dispatch_core_reliable_message, send_gameplay_snapshots,
 };
 
 #[derive(Debug)]
@@ -74,6 +77,54 @@ struct DriverObservation {
     observer: CorePrivateMicrorealmDriverObserver,
 }
 
+#[derive(Debug, Default)]
+struct SnapshotPublisher {
+    sequence: u32,
+    actor_generation: Option<u64>,
+    last_observed_tick: u64,
+    last_published_bucket: Option<u64>,
+    terminal_publication: Option<(u64, u64)>,
+}
+
+impl SnapshotPublisher {
+    fn prepare(
+        &mut self,
+        observation: &CorePrivateGameplayObservation,
+        terminal: bool,
+    ) -> Result<Option<Vec<protocol::SnapshotChunk>>, CorePrivateLifeServerError> {
+        let generation_changed = self.actor_generation != Some(observation.actor_generation);
+        if !generation_changed && observation.tick < self.last_observed_tick {
+            return Err(CorePrivateLifeServerError::SnapshotTickRegressed);
+        }
+        if generation_changed {
+            self.actor_generation = Some(observation.actor_generation);
+            self.last_observed_tick = 0;
+            self.last_published_bucket = None;
+            self.terminal_publication = None;
+        }
+        self.last_observed_tick = observation.tick;
+        let bucket = observation.tick / 2;
+        let terminal_key = (observation.actor_generation, observation.tick);
+        let publish = self
+            .last_published_bucket
+            .is_none_or(|published| bucket > published)
+            || (terminal && self.terminal_publication != Some(terminal_key));
+        if !publish {
+            return Ok(None);
+        }
+        self.sequence = self
+            .sequence
+            .checked_add(1)
+            .ok_or(CorePrivateLifeServerError::SnapshotSequenceExhausted)?;
+        let chunks = observation.snapshot_chunks(self.sequence)?;
+        self.last_published_bucket = Some(bucket);
+        if terminal {
+            self.terminal_publication = Some(terminal_key);
+        }
+        Ok(Some(chunks))
+    }
+}
+
 pub(crate) async fn serve_core_private_life_connection(
     incoming: quinn::Incoming,
     policy: HandshakePolicy,
@@ -113,7 +164,9 @@ pub(crate) async fn serve_core_private_life_connection(
     let writer = attached.writer;
     let mut route = ConnectionRoute::from_disposition(attached.disposition);
     let mut driver = route.driver_observation();
+    let mut snapshot_publisher = SnapshotPublisher::default();
     publish_route(&process, &writer, &route, 0).await?;
+    publish_latest_driver_snapshot(&connection, driver.as_ref(), &mut snapshot_publisher)?;
 
     let result = run_connection_loop(
         &connection,
@@ -123,6 +176,7 @@ pub(crate) async fn serve_core_private_life_connection(
         &writer,
         &mut route,
         &mut driver,
+        &mut snapshot_publisher,
     )
     .await;
     let detached = process.detach_transport(transport, unix_millis()?).await;
@@ -133,6 +187,10 @@ pub(crate) async fn serve_core_private_life_connection(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the connection loop keeps transport, route, and snapshot custody explicit"
+)]
 async fn run_connection_loop(
     connection: &quinn::Connection,
     process: &Arc<CorePrivateLifeProcess>,
@@ -141,6 +199,7 @@ async fn run_connection_loop(
     writer: &Arc<CoreReliableWriter>,
     route: &mut ConnectionRoute,
     driver: &mut Option<DriverObservation>,
+    snapshot_publisher: &mut SnapshotPublisher,
 ) -> Result<(), CorePrivateLifeServerError> {
     loop {
         tokio::select! {
@@ -149,6 +208,7 @@ async fn run_connection_loop(
                 if observation_allows_route_publication(&observation) {
                     publish_route(process, writer, route, observation_tick(&observation)).await?;
                 }
+                publish_observation_snapshot(connection, snapshot_publisher, &observation)?;
             }
             datagram = connection.read_datagram() => {
                 let Ok(bytes) = datagram else { break };
@@ -181,10 +241,66 @@ async fn run_connection_loop(
                     route,
                 ).await?;
                 sync_driver_observation(route, driver);
+                publish_latest_driver_snapshot(connection, driver.as_ref(), snapshot_publisher)?;
             }
         }
     }
     Ok(())
+}
+
+fn publish_latest_driver_snapshot(
+    connection: &quinn::Connection,
+    driver: Option<&DriverObservation>,
+    publisher: &mut SnapshotPublisher,
+) -> Result<(), CorePrivateLifeServerError> {
+    if let Some(driver) = driver {
+        publish_observation_snapshot(connection, publisher, &driver.observer.latest())?;
+    }
+    Ok(())
+}
+
+fn publish_observation_snapshot(
+    connection: &quinn::Connection,
+    publisher: &mut SnapshotPublisher,
+    state: &CorePrivateMicrorealmDriverState,
+) -> Result<(), CorePrivateLifeServerError> {
+    let Some((observation, terminal)) = gameplay_observation(state) else {
+        return Ok(());
+    };
+    if let Some(chunks) = publisher.prepare(observation, terminal)? {
+        send_gameplay_snapshots(connection, chunks)?;
+    }
+    Ok(())
+}
+
+fn gameplay_observation(
+    state: &CorePrivateMicrorealmDriverState,
+) -> Option<(&CorePrivateGameplayObservation, bool)> {
+    match state {
+        CorePrivateMicrorealmDriverState::Running { step, .. } => Some((&step.observation, false)),
+        CorePrivateMicrorealmDriverState::TerminalPending { lethal_step, .. } => {
+            Some((&lethal_step.observation, true))
+        }
+        CorePrivateMicrorealmDriverState::FixedDungeonRunning { frame, .. }
+        | CorePrivateMicrorealmDriverState::FixedDungeonRewardPending { frame, .. } => {
+            Some((&frame.observation, false))
+        }
+        CorePrivateMicrorealmDriverState::FixedDungeonTerminalPending { lethal_frame, .. } => {
+            Some((&lethal_frame.observation, true))
+        }
+        CorePrivateMicrorealmDriverState::CaldusRunning { frame, .. }
+        | CorePrivateMicrorealmDriverState::CaldusRewardPending { frame, .. } => {
+            Some((&frame.observation, false))
+        }
+        CorePrivateMicrorealmDriverState::CaldusTerminalPending { lethal_frame, .. } => {
+            Some((&lethal_frame.observation, true))
+        }
+        CorePrivateMicrorealmDriverState::Starting
+        | CorePrivateMicrorealmDriverState::BellResolutionPending { .. }
+        | CorePrivateMicrorealmDriverState::FixedDungeonReady { .. }
+        | CorePrivateMicrorealmDriverState::CaldusExitReady { .. }
+        | CorePrivateMicrorealmDriverState::Faulted { .. } => None,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -509,6 +625,10 @@ pub(crate) enum CorePrivateLifeServerError {
     ControlUnavailable,
     #[error("private-life server clock is outside the supported range")]
     Clock,
+    #[error("private-life snapshot tick regressed within one actor generation")]
+    SnapshotTickRegressed,
+    #[error("private-life snapshot sequence exhausted")]
+    SnapshotSequenceExhausted,
     #[error(transparent)]
     Process(#[from] CorePrivateLifeProcessError),
     #[error(transparent)]
@@ -519,6 +639,8 @@ pub(crate) enum CorePrivateLifeServerError {
     Reliable(#[from] CoreReliableWriterError),
     #[error(transparent)]
     Observation(#[from] crate::CorePrivateMicrorealmObservationError),
+    #[error(transparent)]
+    GameplayObservation(#[from] CorePrivateGameplayObservationError),
     #[error(transparent)]
     Transport(#[from] crate::ServerTransportError),
     #[error(transparent)]
@@ -533,4 +655,62 @@ pub(crate) enum CorePrivateLifeServerError {
     Write(#[from] quinn::WriteError),
     #[error(transparent)]
     ClosedStream(#[from] quinn::ClosedStream),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core_private_gameplay_observation::core_private_gameplay_observation_test_fixture;
+
+    #[test]
+    fn snapshot_publisher_is_15_hz_generation_bound_and_terminal_complete() {
+        let mut publisher = SnapshotPublisher::default();
+        let observation = |tick, generation| {
+            core_private_gameplay_observation_test_fixture(tick, generation, 7, 5)
+        };
+
+        let first = publisher
+            .prepare(&observation(1, 1), false)
+            .expect("first snapshot")
+            .expect("first committed frame publishes");
+        assert_eq!(first[0].sequence, 1);
+        assert_eq!(first[0].server_tick, 1);
+
+        let second = publisher
+            .prepare(&observation(2, 1), false)
+            .expect("next snapshot")
+            .expect("next 15 Hz bucket publishes");
+        assert_eq!(second[0].sequence, 2);
+        assert!(
+            publisher
+                .prepare(&observation(3, 1), false)
+                .expect("coalesced snapshot")
+                .is_none()
+        );
+        assert!(
+            publisher
+                .prepare(&observation(4, 1), false)
+                .expect("second bucket")
+                .is_some()
+        );
+
+        let lethal = publisher
+            .prepare(&observation(4, 1), true)
+            .expect("terminal snapshot")
+            .expect("same-tick terminal state must publish");
+        assert_eq!(lethal[0].sequence, 4);
+        assert!(
+            publisher
+                .prepare(&observation(4, 1), true)
+                .expect("terminal replay")
+                .is_none()
+        );
+
+        let reconnect_generation = publisher
+            .prepare(&observation(1, 2), false)
+            .expect("next generation")
+            .expect("new generation publishes immediately");
+        assert_eq!(reconnect_generation[0].sequence, 5);
+        assert_eq!(reconnect_generation[0].server_tick, 1);
+    }
 }

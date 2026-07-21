@@ -397,6 +397,10 @@ impl CorePrivateFixedDungeonRuntime {
     /// Generates one complete room frame from retained player intent. Movement, player attacks,
     /// hostile room simulation, lifecycle, route CAS, and local state commit share one staged
     /// transaction; client input cannot author combat results or room authority.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the fixed-room transaction keeps movement, combat, route, and presentation ordering auditable"
+    )]
     pub async fn step_live_room(
         &mut self,
         input: CorePrivateMicrorealmInput,
