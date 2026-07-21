@@ -17,20 +17,29 @@ use std::{
 use anyhow::{Context, Result, bail};
 use bevy::{app::AppExit, camera::ScalingMode, prelude::*, window::WindowResolution};
 use protocol::{
-    AccountBootstrapResult, AccountSnapshot, AuthTicket, CORE_WORLD_FLOW_FEATURE_FLAG,
-    CharacterLocation, CharacterLocationSnapshot, CharacterMutationFrame, CharacterMutationPayload,
-    CharacterMutationResult, ClientHello, Compression, CorePrivateRouteContentRevisionV1,
-    CorePrivateRouteSceneV1, M02_LOCAL_SERVER_NAME, M03_CORE_DEV_BUILD_ID, ManifestHash, Platform,
-    ProtocolVersion, ReliableEvent, ReliableEventFrame, ServerHello, WireMessage, WireText,
-    WorldFlowContentRevisionV1, WorldFlowFrame, WorldFlowRequest, WorldFlowResult,
-    WorldTransferCommand, WorldTransferMutation, WorldTransferPayload, WorldTransferResultCode,
+    AccountBootstrapFrame, AccountBootstrapRequest, AccountBootstrapResult, AccountSnapshot,
+    AuthTicket, CORE_WORLD_FLOW_FEATURE_FLAG, CharacterLocation, CharacterLocationSnapshot,
+    CharacterMutationFrame, CharacterMutationPayload, CharacterMutationResult, ClientHello,
+    Compression, CorePrivateRouteContentRevisionV1, CorePrivateRouteSceneV1, M02_LOCAL_SERVER_NAME,
+    M03_CORE_DEV_BUILD_ID, ManifestHash, Platform, ProtocolVersion, ReliableEvent,
+    ReliableEventFrame, ServerHello, WireMessage, WireText, WorldFlowContentRevisionV1,
+    WorldFlowFrame, WorldFlowRequest, WorldFlowResult, WorldTransferCommand, WorldTransferMutation,
+    WorldTransferPayload, WorldTransferResultCode,
 };
-use sim_content::{load_and_validate, load_core_private_life_content};
+use sim_content::{
+    CoreSuccessorRecoveryContent, load_and_validate, load_core_development_death_view,
+    load_core_private_life_content, load_core_successor_recovery,
+};
 use thiserror::Error;
 
 use crate::{
     CorePrivateRouteClientError, CorePrivateRouteClientModel, CorePrivateRouteClientPhase,
-    CorePrivateSceneReadiness, CoreSceneReadiness,
+    CorePrivateSceneReadiness, CoreSceneReadiness, DeathSummaryAction, DeathUiAction,
+    DeathUiCommand, DeathUiConfig, DeathUiSnapshot, DeathViewClientModel, NativeDeathView,
+    NativeDeathViewPlugin, NativeSuccessorRecoveryPlugin, NativeSuccessorRecoveryView,
+    SuccessorRecoveryClientModel, SuccessorRecoveryPhase, SuccessorRecoveryUiAction,
+    SuccessorRecoveryUiCommand, SuccessorRecoveryUiConfig, SuccessorRecoveryUiSnapshot,
+    TerminalDeathPhase,
     accessibility::AccessibilitySettings,
     bargain_ui::BargainUiAction,
     network_prediction::{CompleteSnapshot, SnapshotAssembler},
@@ -93,6 +102,69 @@ struct CorePrivateBargainState {
     open: bool,
     loaded: bool,
     may_advance_rest: bool,
+}
+
+#[derive(Debug, Resource)]
+struct CorePrivateTerminalUi {
+    death: DeathViewClientModel,
+    successor: Option<SuccessorRecoveryClientModel>,
+    successor_content: CoreSuccessorRecoveryContent,
+    content_manifest_hash: ManifestHash,
+    death_config: DeathUiConfig,
+    successor_config: SuccessorRecoveryUiConfig,
+    retry_timer: Timer,
+    view_signature: Option<String>,
+    terminal_complete: bool,
+}
+
+impl CorePrivateTerminalUi {
+    fn new(
+        death: DeathViewClientModel,
+        successor_content: CoreSuccessorRecoveryContent,
+        content_manifest_hash: ManifestHash,
+    ) -> Self {
+        Self {
+            death,
+            successor: None,
+            successor_content,
+            content_manifest_hash,
+            death_config: DeathUiConfig::default(),
+            successor_config: SuccessorRecoveryUiConfig::default(),
+            retry_timer: Timer::from_seconds(0.1, TimerMode::Once),
+            view_signature: None,
+            terminal_complete: false,
+        }
+    }
+
+    fn accept_server_hello(
+        &mut self,
+        hello: &ServerHello,
+    ) -> Result<(), CorePrivateLifeClientError> {
+        let revision = WireText::new(self.successor_content.item_content_revision().to_owned())
+            .map_err(|_| CorePrivateLifeClientError::InvalidSnapshotAuthority)?;
+        self.successor = Some(SuccessorRecoveryClientModel::new(hello, revision));
+        Ok(())
+    }
+
+    fn observe_summary_authority(&mut self) -> Result<(), CorePrivateLifeClientError> {
+        let Some(authority) = self.death.terminal_successor_authority() else {
+            return Ok(());
+        };
+        let successor = self
+            .successor
+            .as_mut()
+            .ok_or(CorePrivateLifeClientError::InvalidSnapshotAuthority)?;
+        if successor.phase() == SuccessorRecoveryPhase::AwaitingTerminalSummary {
+            successor
+                .observe_terminal_summary(authority)
+                .map_err(|_| CorePrivateLifeClientError::InvalidSnapshotAuthority)?;
+        }
+        Ok(())
+    }
+
+    fn death_surface_open(&self) -> bool {
+        !self.terminal_complete && self.death.terminal().phase() != TerminalDeathPhase::Inactive
+    }
 }
 
 impl CorePrivateBargainState {
@@ -933,6 +1005,24 @@ struct PrivateGameplayFloor {
     room: Option<protocol::CorePrivateRouteRoomV1>,
 }
 
+type NormalPrivateUiVisibility<'w, 's> = Query<
+    'w,
+    's,
+    &'static mut Visibility,
+    Or<(
+        With<StatusText>,
+        With<RosterText>,
+        With<RouteText>,
+        With<ActionButton>,
+    )>,
+>;
+type PrivateGameplayVisibility<'w, 's> = Query<
+    'w,
+    's,
+    &'static mut Visibility,
+    Or<(With<PrivateGameplayFloor>, With<PrivateGameplayEntity>)>,
+>;
+
 /// Opens the real negotiated private-life route without enabling any local gameplay authority.
 pub fn run_core_private_life(config: CorePrivateLifeConfig) -> Result<()> {
     if config.test_token.trim().is_empty() {
@@ -965,23 +1055,14 @@ pub fn run_core_private_life(config: CorePrivateLifeConfig) -> Result<()> {
         assets_blake3: ManifestHash::new(content.revision().assets_blake3.clone())?,
         localization_blake3: ManifestHash::new(content.revision().localization_blake3.clone())?,
     };
-    let hello = ClientHello {
-        protocol_major: ProtocolVersion::current().major,
-        protocol_minor: ProtocolVersion::current().minor,
-        client_build_id: WireText::new(M03_CORE_DEV_BUILD_ID)?,
-        platform: Platform::WindowsNative,
-        supported_compression: vec![Compression::None],
-        content_manifest_hash: manifest_hash.clone(),
-        auth_ticket: AuthTicket::new(config.test_token.into_bytes())?,
-        locale: WireText::new("en-US")?,
-    };
+    let hello = private_life_hello(manifest_hash.clone(), config.test_token)?;
     let worker = NetworkWorkerHandle::spawn(NetworkTransportConfig {
         server_address: config.server_address,
         server_name: M02_LOCAL_SERVER_NAME.to_owned(),
         certificate_der,
         hello,
         startup: NetworkStartup::CoreIdentity {
-            content_manifest_hash: manifest_hash,
+            content_manifest_hash: manifest_hash.clone(),
         },
     })?;
     let (width, height) = crate::configured_window_size()?;
@@ -992,6 +1073,10 @@ pub fn run_core_private_life(config: CorePrivateLifeConfig) -> Result<()> {
         .insert_resource(CorePrivatePresentationContent(content))
         .insert_resource(CorePrivateBargainCopy(bargain_copy))
         .insert_resource(CorePrivateBargainState::default())
+        .insert_resource(load_terminal_ui(
+            &config.content_root,
+            manifest_hash.clone(),
+        )?)
         .insert_resource(CorePrivateLifeClient::new(world_revision, route_revision))
         .insert_resource(CorePrivateSnapshotClient::default())
         .insert_resource(InputSequencer::default())
@@ -1010,11 +1095,16 @@ pub fn run_core_private_life(config: CorePrivateLifeConfig) -> Result<()> {
                     ..default()
                 }),
         )
+        .add_plugins((NativeDeathViewPlugin, NativeSuccessorRecoveryPlugin))
         .add_systems(Startup, spawn_ui)
         .add_systems(
             Update,
             (
                 poll_transport,
+                drive_terminal_death_lookup,
+                handle_terminal_death_commands,
+                handle_successor_recovery_commands,
+                sync_terminal_views,
                 request_location,
                 handle_keyboard,
                 handle_recall_keyboard,
@@ -1032,12 +1122,44 @@ pub fn run_core_private_life(config: CorePrivateLifeConfig) -> Result<()> {
     Ok(())
 }
 
+fn private_life_hello(manifest_hash: ManifestHash, test_token: String) -> Result<ClientHello> {
+    Ok(ClientHello {
+        protocol_major: ProtocolVersion::current().major,
+        protocol_minor: ProtocolVersion::current().minor,
+        client_build_id: WireText::new(M03_CORE_DEV_BUILD_ID)?,
+        platform: Platform::WindowsNative,
+        supported_compression: vec![Compression::None],
+        content_manifest_hash: manifest_hash,
+        auth_ticket: AuthTicket::new(test_token.into_bytes())?,
+        locale: WireText::new("en-US")?,
+    })
+}
+
+fn load_terminal_ui(
+    content_root: &std::path::Path,
+    content_manifest_hash: ManifestHash,
+) -> Result<CorePrivateTerminalUi> {
+    let death = DeathViewClientModel::new(
+        load_core_development_death_view(content_root)
+            .context("normal Core death presentation failed validation")?,
+    )
+    .context("normal Core death projection failed validation")?;
+    let successor = load_core_successor_recovery(content_root)
+        .context("normal Core successor presentation failed validation")?;
+    Ok(CorePrivateTerminalUi::new(
+        death,
+        successor,
+        content_manifest_hash,
+    ))
+}
+
 #[allow(clippy::needless_pass_by_value)] // Bevy system parameters are wrapper values.
 fn poll_transport(
     bridge: Res<CorePrivateLifeBridge>,
     mut client: ResMut<CorePrivateLifeClient>,
     mut snapshots: ResMut<CorePrivateSnapshotClient>,
     mut bargain: ResMut<CorePrivateBargainState>,
+    mut terminal: ResMut<CorePrivateTerminalUi>,
 ) {
     let mut discard_snapshot_queue = false;
     for event in bridge.0.drain_events() {
@@ -1048,10 +1170,12 @@ fn poll_transport(
             }
             TransportEvent::HandshakeAccepted(hello) => {
                 snapshots.reset_transport();
-                client.accept_server_hello(&hello)
+                client
+                    .accept_server_hello(&hello)
+                    .and_then(|()| terminal.accept_server_hello(&hello))
             }
             TransportEvent::Reliable(frame) => {
-                apply_private_reliable(&frame, &mut client, &mut bargain)
+                apply_private_reliable(&frame, &bridge, &mut client, &mut bargain, &mut terminal)
             }
             TransportEvent::LinkLost
             | TransportEvent::Reconnecting { .. }
@@ -1107,15 +1231,31 @@ fn poll_transport(
 
 fn apply_private_reliable(
     frame: &ReliableEventFrame,
+    bridge: &CorePrivateLifeBridge,
     client: &mut CorePrivateLifeClient,
     bargain: &mut CorePrivateBargainState,
+    terminal: &mut CorePrivateTerminalUi,
 ) -> Result<(), CorePrivateLifeClientError> {
     match &frame.event {
         ReliableEvent::AccountBootstrapResult(result) => client.apply_bootstrap(result.clone()),
         ReliableEvent::CharacterMutationResult(result) => {
             client.apply_character_mutation(result.clone())
         }
-        ReliableEvent::WorldFlowResult(result) => client.apply_world_flow(result.clone()),
+        ReliableEvent::WorldFlowResult(result) => {
+            if terminal
+                .successor
+                .as_ref()
+                .is_some_and(|successor| successor.phase() == SuccessorRecoveryPhase::EnteringHall)
+            {
+                terminal
+                    .successor
+                    .as_mut()
+                    .expect("checked successor recovery")
+                    .apply_hall_result(result)
+                    .map_err(|_| CorePrivateLifeClientError::InvalidSnapshotAuthority)?;
+            }
+            client.apply_world_flow(result.clone())
+        }
         ReliableEvent::CorePrivateRouteState(_) => client.apply_route(frame),
         ReliableEvent::RecallResult(result) => client.apply_recall((**result).clone()),
         ReliableEvent::BargainViewResult(result) => {
@@ -1148,8 +1288,323 @@ fn apply_private_reliable(
         ReliableEvent::ExtractionCommitResult(result) => {
             client.apply_extraction((**result).clone())
         }
+        ReliableEvent::DeathViewResult(result) => {
+            let outcome = terminal
+                .death
+                .handle_result(result)
+                .map_err(|_| CorePrivateLifeClientError::InvalidSnapshotAuthority)?;
+            if let Some(follow_up) = outcome.follow_up {
+                bridge
+                    .0
+                    .queue_reliable(WireMessage::DeathViewFrame(follow_up))
+                    .map_err(|_| CorePrivateLifeClientError::ActionUnavailable)?;
+            }
+            terminal.observe_summary_authority()?;
+            terminal.retry_timer.reset();
+            terminal.view_signature = None;
+            Ok(())
+        }
+        ReliableEvent::SuccessorCreateResult(result) => {
+            terminal
+                .successor
+                .as_mut()
+                .ok_or(CorePrivateLifeClientError::InvalidSnapshotAuthority)?
+                .apply_create_result(result)
+                .map_err(|_| CorePrivateLifeClientError::InvalidSnapshotAuthority)?;
+            if matches!(
+                result.as_ref(),
+                protocol::SuccessorCreateResultV1::Stored { .. }
+            ) {
+                let sequence = client.take_request_sequence()?;
+                bridge
+                    .0
+                    .queue_reliable(WireMessage::AccountBootstrapFrame(AccountBootstrapFrame {
+                        sequence,
+                        request: AccountBootstrapRequest::Refresh,
+                        content_manifest_hash: terminal.content_manifest_hash.clone(),
+                    }))
+                    .map_err(|_| CorePrivateLifeClientError::ActionUnavailable)?;
+            }
+            terminal.view_signature = None;
+            Ok(())
+        }
         _ => Ok(()),
     }
+}
+
+#[allow(clippy::needless_pass_by_value)] // Bevy system parameters are wrapper values.
+fn drive_terminal_death_lookup(
+    time: Res<Time>,
+    bridge: Res<CorePrivateLifeBridge>,
+    client: Res<CorePrivateLifeClient>,
+    snapshots: Res<CorePrivateSnapshotClient>,
+    mut terminal: ResMut<CorePrivateTerminalUi>,
+) {
+    if terminal.terminal_complete {
+        return;
+    }
+    let lethal_observed = client.phase == CorePrivateLifePhase::TerminalPending
+        && snapshots.latest.as_ref().is_some_and(|snapshot| {
+            snapshot.entities.iter().any(|entity| {
+                entity.kind == protocol::EntityKind::Player && entity.current_health == 0
+            })
+        });
+    let request = match terminal.death.terminal().phase() {
+        TerminalDeathPhase::Inactive if lethal_observed => {
+            let Some(character_id) = client.selected_character_id() else {
+                return;
+            };
+            terminal
+                .death
+                .observe_local_health_zero(character_id)
+                .and_then(|()| terminal.death.begin_committed_death_lookup(character_id))
+                .ok()
+        }
+        TerminalDeathPhase::AwaitingDurableAcknowledgement => {
+            terminal.retry_timer.tick(time.delta());
+            terminal
+                .retry_timer
+                .is_finished()
+                .then(|| terminal.death.retry().ok())
+                .flatten()
+        }
+        _ => None,
+    };
+    if let Some(frame) = request {
+        if bridge
+            .0
+            .queue_reliable(WireMessage::DeathViewFrame(frame))
+            .is_err()
+        {
+            return;
+        }
+        terminal.retry_timer.reset();
+        terminal.view_signature = None;
+    }
+    if terminal.observe_summary_authority().is_err() {
+        terminal.terminal_complete = true;
+        return;
+    }
+    if terminal
+        .successor
+        .as_ref()
+        .is_some_and(|successor| successor.phase() == SuccessorRecoveryPhase::LoadingHall)
+        && client.phase == CorePrivateLifePhase::Hall
+    {
+        let readiness = CoreSceneReadiness {
+            location_id: WireText::new(CorePrivateRouteSceneV1::LanternHalls.location_id())
+                .expect("compiled Hall ID is bounded"),
+            character_version: client
+                .location
+                .as_ref()
+                .map_or(1, |location| location.character_version),
+            content_revision: client.world_revision.clone(),
+        };
+        if terminal
+            .successor
+            .as_mut()
+            .expect("checked successor recovery")
+            .mark_hall_content_ready(&readiness)
+            .is_ok()
+        {
+            terminal.terminal_complete = true;
+            terminal.view_signature = None;
+        }
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)] // Bevy system parameters are wrapper values.
+fn handle_terminal_death_commands(
+    bridge: Res<CorePrivateLifeBridge>,
+    mut client: ResMut<CorePrivateLifeClient>,
+    mut terminal: ResMut<CorePrivateTerminalUi>,
+    mut messages: MessageReader<DeathUiCommand>,
+    view: Option<ResMut<NativeDeathView>>,
+) {
+    let mut view = view;
+    for message in messages.read() {
+        let frame = match message.0 {
+            DeathUiAction::Summary(DeathSummaryAction::CreateSuccessor) => {
+                let Ok(mutation_id) = client.take_mutation_id() else {
+                    continue;
+                };
+                terminal.successor.as_mut().and_then(|successor| {
+                    successor
+                        .begin_create(mutation_id)
+                        .ok()
+                        .map(WireMessage::SuccessorCreateFrame)
+                })
+            }
+            DeathUiAction::Summary(DeathSummaryAction::InspectTrace) => {
+                if let Some(view) = view.as_mut() {
+                    view.set_trace_emphasis(true);
+                }
+                None
+            }
+            DeathUiAction::LoadMoreLosses => terminal
+                .death
+                .load_more_losses()
+                .ok()
+                .map(WireMessage::DeathViewFrame),
+            DeathUiAction::Retry | DeathUiAction::Summary(DeathSummaryAction::Retry) => {
+                terminal.death.retry().ok().map(WireMessage::DeathViewFrame)
+            }
+            DeathUiAction::Summary(
+                DeathSummaryAction::Memorial | DeathSummaryAction::CharacterSelect,
+            )
+            | DeathUiAction::MemorialEntry(_)
+            | DeathUiAction::LoadOlderMemorials
+            | DeathUiAction::Back => None,
+        };
+        if let Some(frame) = frame {
+            if bridge.0.queue_reliable(frame).is_err() {
+                client.phase = CorePrivateLifePhase::Error;
+            }
+            terminal.view_signature = None;
+        }
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)] // Bevy system parameters are wrapper values.
+fn handle_successor_recovery_commands(
+    bridge: Res<CorePrivateLifeBridge>,
+    mut client: ResMut<CorePrivateLifeClient>,
+    mut terminal: ResMut<CorePrivateTerminalUi>,
+    mut messages: MessageReader<SuccessorRecoveryUiCommand>,
+) {
+    for message in messages.read() {
+        let frame = match message.0 {
+            SuccessorRecoveryUiAction::Play => {
+                let Some(issued_at) = unix_millis() else {
+                    continue;
+                };
+                let Ok(normal_frame) = client.begin_transfer(
+                    WorldTransferCommand::EnterHallFromCharacterSelect,
+                    issued_at,
+                ) else {
+                    continue;
+                };
+                let WorldFlowRequest::Transfer(mutation) = &normal_frame.request else {
+                    continue;
+                };
+                let Some(successor) = terminal.successor.as_mut() else {
+                    continue;
+                };
+                match successor.begin_play(
+                    normal_frame.sequence,
+                    mutation.mutation_id,
+                    issued_at,
+                    client.world_revision.clone(),
+                ) {
+                    Ok(successor_frame) if successor_frame == normal_frame => {
+                        Some(WireMessage::WorldFlowFrame(normal_frame))
+                    }
+                    _ => {
+                        client.phase = CorePrivateLifePhase::Error;
+                        None
+                    }
+                }
+            }
+            SuccessorRecoveryUiAction::RetryCreate => terminal
+                .successor
+                .as_mut()
+                .and_then(|successor| successor.retry_create().ok())
+                .map(WireMessage::SuccessorCreateFrame),
+            SuccessorRecoveryUiAction::RetryHall
+            | SuccessorRecoveryUiAction::RefreshDeathSummary => None,
+        };
+        if let Some(frame) = frame {
+            if bridge.0.queue_reliable(frame).is_err() {
+                client.phase = CorePrivateLifePhase::Error;
+            }
+            terminal.view_signature = None;
+        }
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)] // Bevy system parameters are wrapper values.
+fn sync_terminal_views(
+    mut commands: Commands,
+    mut terminal: ResMut<CorePrivateTerminalUi>,
+    mut normal_ui: NormalPrivateUiVisibility,
+    mut gameplay: PrivateGameplayVisibility,
+    death_view: Option<ResMut<NativeDeathView>>,
+    successor_view: Option<ResMut<NativeSuccessorRecoveryView>>,
+) {
+    let open = terminal.death_surface_open();
+    let visibility = if open {
+        Visibility::Hidden
+    } else {
+        Visibility::Inherited
+    };
+    for mut current in &mut normal_ui {
+        *current = visibility;
+    }
+    for mut current in &mut gameplay {
+        *current = visibility;
+    }
+    if !open {
+        commands.remove_resource::<NativeDeathView>();
+        commands.remove_resource::<NativeSuccessorRecoveryView>();
+        terminal.view_signature = None;
+        return;
+    }
+
+    let successor_renderable = terminal.successor.as_ref().is_some_and(|successor| {
+        !matches!(
+            successor.phase(),
+            SuccessorRecoveryPhase::Disabled
+                | SuccessorRecoveryPhase::AwaitingTerminalSummary
+                | SuccessorRecoveryPhase::Ready
+        )
+    });
+    if successor_renderable {
+        let Some(successor) = terminal.successor.as_ref() else {
+            return;
+        };
+        let Ok(snapshot) =
+            SuccessorRecoveryUiSnapshot::project(successor, &terminal.successor_content)
+        else {
+            return;
+        };
+        let signature = format!("successor:{}", snapshot.semantic_signature());
+        if terminal.view_signature.as_ref() == Some(&signature) {
+            return;
+        }
+        if let Some(mut view) = successor_view {
+            view.replace_snapshot(snapshot);
+        } else if let Ok(view) =
+            NativeSuccessorRecoveryView::new(snapshot, terminal.successor_config)
+        {
+            commands.remove_resource::<NativeDeathView>();
+            commands.insert_resource(view);
+        }
+        terminal.view_signature = Some(signature);
+        return;
+    }
+
+    let snapshot = match terminal.successor.as_ref() {
+        Some(successor) if successor.phase() == SuccessorRecoveryPhase::Ready => {
+            DeathUiSnapshot::terminal_with_successor(&terminal.death, successor)
+        }
+        _ => DeathUiSnapshot::terminal(&terminal.death),
+    };
+    let Ok(snapshot) = snapshot else {
+        return;
+    };
+    let signature = format!("death:{}", snapshot.semantic_signature());
+    if terminal.view_signature.as_ref() == Some(&signature) {
+        return;
+    }
+    if let Some(mut view) = death_view {
+        if view.replace_snapshot(snapshot).is_err() {
+            return;
+        }
+    } else if let Ok(view) = NativeDeathView::new(snapshot, terminal.death_config) {
+        commands.remove_resource::<NativeSuccessorRecoveryView>();
+        commands.insert_resource(view);
+    }
+    terminal.view_signature = Some(signature);
 }
 
 #[allow(clippy::needless_pass_by_value)] // Bevy system parameters are wrapper values.
