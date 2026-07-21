@@ -27,8 +27,8 @@ use crate::{
     CoreBellPortalTransition, CoreDurableB3Resolution, CoreDurableBargainRestResolution,
     CoreDurableCaldusResolution, CorePrivateCaldusRewardCommit, CorePrivateDangerEntryAuthority,
     CorePrivateFixedDungeonB3RewardCommit, CorePrivateFixedDungeonRestCommit,
-    CorePrivatePlayerDamageFactV1, CorePrivateRouteActorLease, StoredTerminalReceipt,
-    TerminalBinding, TerminalKind,
+    CorePrivateMicrorealmFaultKind, CorePrivatePlayerDamageFactV1, CorePrivateRouteActorLease,
+    StoredTerminalReceipt, TerminalBinding, TerminalKind,
 };
 
 const FEED_CAPACITY: usize = 1;
@@ -150,10 +150,21 @@ pub struct CorePrivateTerminalRouteControlV1 {
     pub route: CorePrivateRouteStateV1,
 }
 
+/// A server-owned runtime failure observed after the preceding frame/control was acknowledged.
+/// It advances the terminal barrier by one boundary without inventing a simulation frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CorePrivateTerminalVerifiedFaultV1 {
+    pub delivery_sequence: NonZeroU64,
+    pub tick: Tick,
+    pub route: CorePrivateRouteStateV1,
+    pub kind: CorePrivateMicrorealmFaultKind,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum CorePrivateTerminalDeliveryV1 {
     Frame(Box<CorePrivateTerminalFrameV1>),
     RouteControl(Box<CorePrivateTerminalRouteControlV1>),
+    VerifiedFault(Box<CorePrivateTerminalVerifiedFaultV1>),
 }
 
 impl CorePrivateTerminalDeliveryV1 {
@@ -161,6 +172,7 @@ impl CorePrivateTerminalDeliveryV1 {
         match self {
             Self::Frame(frame) => frame.delivery_sequence,
             Self::RouteControl(control) => control.delivery_sequence,
+            Self::VerifiedFault(fault) => fault.delivery_sequence,
         }
     }
 
@@ -168,6 +180,7 @@ impl CorePrivateTerminalDeliveryV1 {
         match self {
             Self::Frame(frame) => frame.tick,
             Self::RouteControl(control) => control.simulation_tick,
+            Self::VerifiedFault(fault) => fault.tick,
         }
     }
 
@@ -175,11 +188,13 @@ impl CorePrivateTerminalDeliveryV1 {
         match self {
             Self::Frame(frame) => &frame.route,
             Self::RouteControl(control) => &control.route,
+            Self::VerifiedFault(fault) => &fault.route,
         }
     }
 
-    const fn player_died(&self) -> bool {
-        matches!(self, Self::Frame(frame) if frame.player_died)
+    const fn requires_terminal(&self) -> bool {
+        matches!(self, Self::VerifiedFault(_))
+            || matches!(self, Self::Frame(frame) if frame.player_died)
     }
 }
 
@@ -360,6 +375,47 @@ impl CorePrivateTerminalFrameSender {
         .await
     }
 
+    /// Delivers one typed, server-observed fault at the next unsealed terminal boundary.
+    /// The last acknowledged route is the only authority accepted; callers cannot provide a
+    /// replacement route, tick, character, or restore point.
+    pub async fn deliver_verified_fault(
+        &mut self,
+        kind: CorePrivateMicrorealmFaultKind,
+    ) -> Result<CorePrivateTerminalFrameDisposition, CorePrivateTerminalFeedError> {
+        if matches!(
+            kind,
+            CorePrivateMicrorealmFaultKind::TerminalAuthority
+                | CorePrivateMicrorealmFaultKind::IndeterminateAuthority
+        ) {
+            return Err(CorePrivateTerminalFeedError::InvalidVerifiedFault);
+        }
+        let Some(binding) = self.binding.as_ref() else {
+            return Ok(CorePrivateTerminalFrameDisposition::Continue);
+        };
+        let route = self
+            .cursor
+            .route
+            .clone()
+            .ok_or(CorePrivateTerminalFeedError::FaultBeforeFirstFrame)?;
+        validate_bound_route(binding, &route)?;
+        let tick = self
+            .cursor
+            .tick
+            .checked_next()
+            .ok_or(CorePrivateTerminalFeedError::SequenceExhausted)?;
+        let delivery_sequence = NonZeroU64::new(self.next_delivery_sequence)
+            .ok_or(CorePrivateTerminalFeedError::SequenceExhausted)?;
+        self.deliver_validated(CorePrivateTerminalDeliveryV1::VerifiedFault(Box::new(
+            CorePrivateTerminalVerifiedFaultV1 {
+                delivery_sequence,
+                tick,
+                route,
+                kind,
+            },
+        )))
+        .await
+    }
+
     async fn deliver_validated(
         &mut self,
         delivery: CorePrivateTerminalDeliveryV1,
@@ -367,7 +423,12 @@ impl CorePrivateTerminalFrameSender {
         let delivery_sequence = delivery.delivery_sequence();
         let tick = delivery.tick();
         let route_state_version = delivery.route().state_version;
-        let player_died = delivery.player_died();
+        let disposition_contract = match &delivery {
+            CorePrivateTerminalDeliveryV1::Frame(frame) if frame.player_died => 0_u8,
+            CorePrivateTerminalDeliveryV1::Frame(_) => 1,
+            CorePrivateTerminalDeliveryV1::RouteControl(_) => 2,
+            CorePrivateTerminalDeliveryV1::VerifiedFault(_) => 3,
+        };
         let route = delivery.route().clone();
         let equal_version_control = match &delivery {
             CorePrivateTerminalDeliveryV1::RouteControl(control)
@@ -379,6 +440,7 @@ impl CorePrivateTerminalFrameSender {
             {
                 Some(control.authority.kind())
             }
+            CorePrivateTerminalDeliveryV1::VerifiedFault(_) => self.cursor.equal_version_control,
             _ if self
                 .cursor
                 .route
@@ -410,25 +472,26 @@ impl CorePrivateTerminalFrameSender {
         {
             return Err(CorePrivateTerminalFeedError::AcknowledgementMismatch);
         }
-        match (player_died, acknowledgement.disposition) {
+        let valid_disposition = matches!(
+            (disposition_contract, acknowledgement.disposition),
             (
-                false,
-                CorePrivateTerminalFrameDisposition::Continue
-                | CorePrivateTerminalFrameDisposition::TerminalOwned {
-                    kind:
-                        TerminalKind::SuccessfulExtraction
-                        | TerminalKind::EmergencyRecall
-                        | TerminalKind::DisconnectRecovery
-                        | TerminalKind::VerifiedServerFaultRestoration,
-                },
-            )
-            | (
-                true,
+                0,
                 CorePrivateTerminalFrameDisposition::TerminalOwned {
                     kind: TerminalKind::LethalDeath,
-                },
-            ) => {}
-            _ => return Err(CorePrivateTerminalFeedError::InvalidDisposition),
+                }
+            ) | (1 | 2, CorePrivateTerminalFrameDisposition::Continue)
+                | (
+                    1 | 3,
+                    CorePrivateTerminalFrameDisposition::TerminalOwned {
+                        kind: TerminalKind::SuccessfulExtraction
+                            | TerminalKind::EmergencyRecall
+                            | TerminalKind::DisconnectRecovery
+                            | TerminalKind::VerifiedServerFaultRestoration,
+                    }
+                )
+        );
+        if !valid_disposition {
+            return Err(CorePrivateTerminalFeedError::InvalidDisposition);
         }
         self.cursor = CorePrivateTerminalFeedCursor {
             tick,
@@ -781,20 +844,31 @@ impl CorePrivateTerminalFrameDelivery {
     pub const fn frame(&self) -> Option<&CorePrivateTerminalFrameV1> {
         match &self.delivery {
             CorePrivateTerminalDeliveryV1::Frame(frame) => Some(frame),
-            CorePrivateTerminalDeliveryV1::RouteControl(_) => None,
+            CorePrivateTerminalDeliveryV1::RouteControl(_)
+            | CorePrivateTerminalDeliveryV1::VerifiedFault(_) => None,
         }
     }
 
     #[must_use]
     pub const fn route_control(&self) -> Option<&CorePrivateTerminalRouteControlV1> {
         match &self.delivery {
-            CorePrivateTerminalDeliveryV1::Frame(_) => None,
             CorePrivateTerminalDeliveryV1::RouteControl(control) => Some(control),
+            CorePrivateTerminalDeliveryV1::Frame(_)
+            | CorePrivateTerminalDeliveryV1::VerifiedFault(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn verified_fault(&self) -> Option<&CorePrivateTerminalVerifiedFaultV1> {
+        match &self.delivery {
+            CorePrivateTerminalDeliveryV1::VerifiedFault(fault) => Some(fault),
+            CorePrivateTerminalDeliveryV1::Frame(_)
+            | CorePrivateTerminalDeliveryV1::RouteControl(_) => None,
         }
     }
 
     pub fn acknowledge_continue(mut self) -> Result<(), CorePrivateTerminalAcknowledgementError> {
-        if self.delivery.player_died() {
+        if self.delivery.requires_terminal() {
             return Err(CorePrivateTerminalAcknowledgementError::InvalidDisposition);
         }
         self.send_acknowledgement(CorePrivateTerminalFrameDisposition::Continue)
@@ -807,16 +881,19 @@ impl CorePrivateTerminalFrameDelivery {
         receipt
             .validate()
             .map_err(|_| CorePrivateTerminalAcknowledgementError::InvalidReceipt)?;
-        let valid_kind = if self.delivery.player_died() {
-            receipt.kind() == TerminalKind::LethalDeath
-        } else {
-            matches!(
+        let valid_kind = match &self.delivery {
+            CorePrivateTerminalDeliveryV1::Frame(frame) if frame.player_died => {
+                receipt.kind() == TerminalKind::LethalDeath
+            }
+            CorePrivateTerminalDeliveryV1::Frame(_)
+            | CorePrivateTerminalDeliveryV1::VerifiedFault(_) => matches!(
                 receipt.kind(),
                 TerminalKind::SuccessfulExtraction
                     | TerminalKind::EmergencyRecall
                     | TerminalKind::DisconnectRecovery
                     | TerminalKind::VerifiedServerFaultRestoration
-            )
+            ),
+            CorePrivateTerminalDeliveryV1::RouteControl(_) => false,
         };
         if !valid_kind
             || receipt.binding() != self.binding
@@ -862,6 +939,10 @@ pub enum CorePrivateTerminalFeedError {
     AcknowledgementMismatch,
     #[error("private terminal-frame acknowledgement disposition is invalid")]
     InvalidDisposition,
+    #[error("verified server fault cannot precede the first acknowledged route frame")]
+    FaultBeforeFirstFrame,
+    #[error("verified server fault kind is invalid")]
+    InvalidVerifiedFault,
     #[error("private terminal-frame route authority is invalid")]
     InvalidRoute,
     #[error("private terminal-frame owner binding is invalid")]

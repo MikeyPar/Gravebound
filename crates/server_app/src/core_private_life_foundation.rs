@@ -173,12 +173,6 @@ impl CorePrivateLifePersistentFoundation {
         let death_execution = Arc::new(PostgresDurableDeathExecutionService::new(
             persistence.clone(),
         ));
-        let terminal_owner_factory = Arc::new(PostgresCorePrivateTerminalOwnerFactory::new(
-            persistence.clone(),
-            Arc::clone(&death_planner),
-            Arc::clone(&death_execution),
-            death_view,
-        ));
         let world_flow_revision = world_flow_revision(content.world_flow())?;
         let route_revision = route_revision(content.revision())?;
 
@@ -189,6 +183,13 @@ impl CorePrivateLifePersistentFoundation {
             route_revision,
             world_flow_revision.clone(),
         )?);
+        let terminal_owner_factory = Arc::new(PostgresCorePrivateTerminalOwnerFactory::new(
+            persistence.clone(),
+            Arc::clone(&death_planner),
+            Arc::clone(&death_execution),
+            death_view,
+            Arc::clone(&runtime_bootstrap),
+        ));
         let world_flow_coordinator =
             PostgresCorePrivateWorldFlowCoordinator::with_runtime_authorities(
                 persistence.clone(),

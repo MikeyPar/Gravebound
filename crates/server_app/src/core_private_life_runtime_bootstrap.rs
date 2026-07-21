@@ -12,11 +12,11 @@ use std::{
 };
 
 use persistence::{
-    PersistenceError, PostgresPersistence, ResolvedPrivateLifeProcessRestartV1,
-    StoredCommittedDeathTerminalV1, StoredCommittedExtractionTerminalV1,
-    StoredCommittedRecallTerminalV1, StoredPrivateLifeBootstrapStateV1,
-    StoredPrivateLifeBootstrapV1, StoredPrivateLifeHallV1, StoredPrivateLifeSelectedCharacterV1,
-    StoredPrivateRouteGenerationV1, StoredSafeArrival,
+    DangerCrashRestoreCode, DangerCrashRestoreReceipt, PersistenceError, PostgresPersistence,
+    ResolvedPrivateLifeProcessRestartV1, StoredCommittedDeathTerminalV1,
+    StoredCommittedExtractionTerminalV1, StoredCommittedRecallTerminalV1,
+    StoredPrivateLifeBootstrapStateV1, StoredPrivateLifeBootstrapV1, StoredPrivateLifeHallV1,
+    StoredPrivateLifeSelectedCharacterV1, StoredPrivateRouteGenerationV1, StoredSafeArrival,
 };
 use protocol::{
     CharacterLocation, CorePrivateRouteContentRevisionV1, CorePrivateRoutePhaseV1,
@@ -430,6 +430,75 @@ where
             WorldTransferCommand::UsePortal { .. }
             | WorldTransferCommand::UseCommittedExtraction { .. } => Ok(()),
         }
+    }
+
+    /// Converges the retained danger actor after the serializable TECH-023 writer has restored
+    /// Hall state. The old lease is retired before a fresh Hall actor is installed, so a live
+    /// refresh cannot observe durable Hall state paired with stale danger authority.
+    pub(crate) async fn reconcile_verified_fault_restoration(
+        &self,
+        authenticated: AuthenticatedAccount,
+        lease: CorePrivateRouteActorLease,
+        expected_character_version: u64,
+        receipt: &DangerCrashRestoreReceipt,
+    ) -> Result<CorePrivateRouteActorLease, CorePrivateLifeBootstrapError> {
+        receipt
+            .validate()
+            .map_err(CorePrivateLifeBootstrapError::Persistence)?;
+        let versions = receipt
+            .versions
+            .as_ref()
+            .ok_or(CorePrivateLifeBootstrapError::RetainedActorMismatch)?;
+        let account_id = authenticated.account_id.as_bytes();
+        if authenticated.namespace != AuthenticatedNamespace::WipeableTest
+            || receipt.code != DangerCrashRestoreCode::Restored
+            || receipt.account_id != account_id
+            || receipt.character_id != lease.character_id()
+            || lease.account_id() != account_id
+            || expected_character_version.checked_add(1) != Some(versions.character)
+        {
+            return Err(CorePrivateLifeBootstrapError::InvalidBinding);
+        }
+        let account_lock = {
+            let mut locks = lock(&self.account_locks);
+            Arc::clone(
+                locks
+                    .entry(account_id)
+                    .or_insert_with(|| Arc::new(AsyncMutex::new(()))),
+            )
+        };
+        let _guard = account_lock.lock_owned().await;
+        if !*lock(&self.accepting) {
+            return Err(CorePrivateLifeBootstrapError::Retired);
+        }
+        if self.retained_route(account_id) != Some(lease) {
+            return Err(CorePrivateLifeBootstrapError::RetainedActorMismatch);
+        }
+        let route = self.route_directory.snapshot(lease)?;
+        if route.character_version != expected_character_version
+            || route.scene != CorePrivateRouteSceneV1::CoreMicrorealm
+                && route.scene != CorePrivateRouteSceneV1::BellSepulcher
+            || route.instance_lineage_id.is_none()
+        {
+            return Err(CorePrivateLifeBootstrapError::RetainedActorMismatch);
+        }
+        self.route_directory.retire_actor(lease).await?;
+        lock(&self.retained_routes).remove(&account_id);
+        lock(&self.retired_routes).insert(account_id, lease);
+
+        let bootstrap = self
+            .repository
+            .load(account_id)
+            .await
+            .map_err(CorePrivateLifeBootstrapError::Persistence)?;
+        let StoredPrivateLifeBootstrapStateV1::HallReady(hall) = bootstrap.state else {
+            return Err(CorePrivateLifeBootstrapError::RetainedActorMismatch);
+        };
+        if hall.character.versions.character != versions.character {
+            return Err(CorePrivateLifeBootstrapError::RetainedActorMismatch);
+        }
+        let hall_lease = self.ensure_hall_actor(authenticated, &hall).await?;
+        Ok(hall_lease)
     }
 
     async fn begin<Clock, TickSource>(

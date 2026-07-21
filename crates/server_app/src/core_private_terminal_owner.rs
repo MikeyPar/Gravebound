@@ -20,10 +20,11 @@ use std::{
 };
 
 use persistence::{
-    LifeClockCheckpointCommandV1, LifeClockCheckpointRequestV1, LifeClockContentAuthorityV1,
-    LifeClockStateV1, LifeDeedCompletionCommandV2, LifeDeedCompletionRequestV2,
-    LifeDeedContentAuthorityV2, PersistenceError, PostgresPersistence,
-    StoredActiveDangerAuthorityV1, StoredLifeClockHeadV1, StoredWorldFlowRevisionV1,
+    DangerCrashRestoreCode, DangerCrashRestoreTransaction, LifeClockCheckpointCommandV1,
+    LifeClockCheckpointRequestV1, LifeClockContentAuthorityV1, LifeClockStateV1,
+    LifeDeedCompletionCommandV2, LifeDeedCompletionRequestV2, LifeDeedContentAuthorityV2,
+    PersistenceError, PostgresPersistence, StoredActiveDangerAuthorityV1, StoredLifeClockHeadV1,
+    StoredWorldFlowRevisionV1,
 };
 use sim_core::{DamageTraceObservation, DeathTraceNetworkState};
 use thiserror::Error;
@@ -32,14 +33,16 @@ use tokio::task::JoinHandle;
 use crate::{
     AuthenticatedAccount, CoreExtractionActorDirectory, CoreExtractionActorLease,
     CoreExtractionAuthoritativeTick, CoreExtractionRuntimeError, CorePrivateDangerEntryAuthority,
+    CorePrivateLifeBootstrapError, CorePrivateLifeRuntimeBootstrapAdapter,
     CorePrivatePlayerDamageFactV1, CorePrivateRouteActorLease,
     CorePrivateTerminalAcknowledgementError, CorePrivateTerminalDeliveryV1,
     CorePrivateTerminalFrameDelivery, CorePrivateTerminalFrameReceiver, CorePrivateTerminalFrameV1,
     CorePrivateTerminalOwner, CorePrivateTerminalOwnerError, CorePrivateTerminalOwnerFactory,
     CorePrivateTerminalRouteControlAuthorityV1, CorePrivateTerminalRouteControlV1,
-    CoreRecallTerminalDriverError, CoreRecallTerminalTickOutcome, CoreTerminalCoordinator,
-    CoreTerminalCoordinatorError, CoreTerminalEvaluation, CoreTerminalOtherEvaluationsV1,
-    CoreTerminalProducer, DeathEntityIdentityAuthority, DurableDeathExecutionError, IdentityClock,
+    CorePrivateTerminalVerifiedFaultV1, CoreRecallTerminalDriverError,
+    CoreRecallTerminalTickOutcome, CoreTerminalCoordinator, CoreTerminalCoordinatorError,
+    CoreTerminalEvaluation, CoreTerminalOtherEvaluationsV1, CoreTerminalProducer,
+    DeathEntityIdentityAuthority, DurableDeathExecutionError, IdentityClock,
     LiveDamageTraceIngestOutcome, LiveDamageTraceMutationAuthority, LiveDamageTraceService,
     LiveDamageTraceServiceError, PostgresDurableDeathExecutionService,
     PostgresPrivateDeathContextPlanner, PostgresProductionExtractionExecutionService,
@@ -49,8 +52,13 @@ use crate::{
     ProductionExtractionPublicationProof, ProductionRecallClock,
     ProductionRecallCompletionAuthorityV1, ProductionRecallIntentActor,
     ProductionRecallPendingAuthorityV1, StoredTerminalReceipt, SystemDurableDeathIdentitySource,
-    drive_recall_terminal_tick, durable_death_terminal_candidate,
+    TerminalKind, drive_recall_terminal_tick, durable_death_terminal_candidate,
     private_route_damage_entity_identities, production_extraction_terminal_candidate,
+};
+
+use crate::verified_fault_restoration::{
+    PreparedVerifiedFaultRestoration, VerifiedFaultRestorationError,
+    prepare_verified_fault_restoration, validate_fault_winner,
 };
 
 type PersistentDeathPlanner =
@@ -65,6 +73,7 @@ pub struct PostgresCorePrivateTerminalOwnerFactory {
     death_execution: Arc<PostgresDurableDeathExecutionService>,
     extraction_execution: Arc<PostgresProductionExtractionExecutionService>,
     recall_execution: Arc<PostgresProductionRecallExecutionService>,
+    route_reconciler: Arc<CorePrivateLifeRuntimeBootstrapAdapter<PostgresPersistence>>,
     death_view: Arc<sim_content::CoreDevelopmentDeathView>,
 }
 
@@ -83,6 +92,7 @@ impl PostgresCorePrivateTerminalOwnerFactory {
         planner: Arc<PersistentDeathPlanner>,
         death_execution: Arc<PostgresDurableDeathExecutionService>,
         death_view: Arc<sim_content::CoreDevelopmentDeathView>,
+        route_reconciler: Arc<CorePrivateLifeRuntimeBootstrapAdapter<PostgresPersistence>>,
     ) -> Self {
         Self {
             extraction_execution: Arc::new(PostgresProductionExtractionExecutionService::new(
@@ -91,6 +101,7 @@ impl PostgresCorePrivateTerminalOwnerFactory {
             recall_execution: Arc::new(PostgresProductionRecallExecutionService::new(
                 persistence.clone(),
             )),
+            route_reconciler,
             persistence,
             planner,
             death_execution,
@@ -119,6 +130,7 @@ impl CorePrivateTerminalOwnerFactory for PostgresCorePrivateTerminalOwnerFactory
             death_execution: Arc::clone(&self.death_execution),
             extraction_execution: Arc::clone(&self.extraction_execution),
             recall_execution: Arc::clone(&self.recall_execution),
+            route_reconciler: Arc::clone(&self.route_reconciler),
             death_view: Arc::clone(&self.death_view),
             authenticated,
             authority,
@@ -462,6 +474,10 @@ enum ProductionTerminalOwnerError {
     Coordinator(#[from] CoreTerminalCoordinatorError),
     #[error("terminal owner Recall/disconnect coordination failed")]
     Recall(#[from] CoreRecallTerminalDriverError),
+    #[error("terminal owner verified-fault restoration failed")]
+    FaultRestoration(#[from] VerifiedFaultRestorationError),
+    #[error("terminal owner route reconciliation failed")]
+    RouteReconciliation(#[from] CorePrivateLifeBootstrapError),
     #[error("terminal owner acknowledgement failed")]
     Acknowledgement(#[from] CorePrivateTerminalAcknowledgementError),
     #[error("terminal owner received incoherent authority")]
@@ -476,6 +492,7 @@ struct ProductionTerminalOwnerRuntime {
     death_execution: Arc<PostgresDurableDeathExecutionService>,
     extraction_execution: Arc<PostgresProductionExtractionExecutionService>,
     recall_execution: Arc<PostgresProductionRecallExecutionService>,
+    route_reconciler: Arc<CorePrivateLifeRuntimeBootstrapAdapter<PostgresPersistence>>,
     death_view: Arc<sim_content::CoreDevelopmentDeathView>,
     authenticated: AuthenticatedAccount,
     authority: CorePrivateDangerEntryAuthority,
@@ -517,6 +534,15 @@ impl ProductionTerminalOwnerRuntime {
                 CorePrivateTerminalDeliveryV1::RouteControl(control) => {
                     self.process_control(delivery, *control, &mut clock, &mut trace)
                         .await?;
+                }
+                CorePrivateTerminalDeliveryV1::VerifiedFault(fault) => {
+                    Box::pin(self.process_verified_fault(
+                        delivery,
+                        *fault,
+                        &mut clock,
+                        &mut coordinator,
+                    ))
+                    .await?;
                 }
             }
         }
@@ -745,6 +771,149 @@ impl ProductionTerminalOwnerRuntime {
         Ok(())
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the verified-fault boundary composes all five terminal producers before one durable restore"
+    )]
+    async fn process_verified_fault(
+        &self,
+        delivery: CorePrivateTerminalFrameDelivery,
+        fault: CorePrivateTerminalVerifiedFaultV1,
+        clock: &mut StoredLifeClockHeadV1,
+        coordinator: &mut CoreTerminalCoordinator,
+    ) -> Result<(), ProductionTerminalOwnerError> {
+        self.refresh_clock_character_version(clock, fault.route.character_version)
+            .await?;
+        self.persist_clock(fault.tick.0, DeathTraceNetworkState::Connected, clock)
+            .await?;
+        let snapshot = self
+            .persistence
+            .load_current_danger_terminal_snapshot_v1(
+                stored_danger_authority(&self.authority),
+                &stored_world_revision(self.authority.world_flow_revision()),
+            )
+            .await?;
+        if snapshot.clock.authoritative_tick != fault.tick.0
+            || snapshot.extraction.expected_versions.character != fault.route.character_version
+            || snapshot.clock.life_metrics_version != clock.life_metrics_version
+        {
+            return Err(ProductionTerminalOwnerError::InvalidAuthority);
+        }
+
+        let terminal = self.authority.terminal();
+        let tick = fault.tick.0;
+        let version = fault.route.character_version;
+        let restoration = prepare_verified_fault_restoration(terminal, version, tick, fault.kind)?;
+        let completion = ProductionRecallCompletionAuthorityV1 {
+            account_id: *terminal.account_id(),
+            character_id: *terminal.character_id(),
+            instance_lineage_id: *terminal.lineage_id(),
+            entry_restore_point_id: *terminal.restore_point_id(),
+            expected_versions: snapshot.recall_expected_versions,
+            content_revision: snapshot.extraction.content_revision.clone(),
+            server_tick: tick,
+            final_lifetime_ticks: snapshot.clock.lifetime_ticks,
+            final_permadeath_combat_ticks: snapshot.clock.permadeath_combat_ticks,
+        };
+        let pending_material_stack_count = u8::try_from(snapshot.pending_material_stack_count)
+            .map_err(|_| ProductionTerminalOwnerError::InvalidAuthority)?;
+        let extraction = match &self.extraction {
+            Some(source) => source.prepare().await?,
+            None => None,
+        };
+        let extraction_evaluation = match extraction.as_ref() {
+            Some(extraction) if extraction.intent.server_tick() < tick => {
+                return Err(ProductionTerminalOwnerError::InvalidAuthority);
+            }
+            Some(extraction) if extraction.intent.server_tick() == tick => {
+                let prepared = extraction
+                    .intent
+                    .prepared()
+                    .ok_or(ProductionTerminalOwnerError::InvalidAuthority)?;
+                CoreTerminalEvaluation::candidate(
+                    CoreTerminalProducer::SuccessfulExtraction,
+                    terminal,
+                    tick,
+                    version,
+                    production_extraction_terminal_candidate(prepared)?,
+                )
+            }
+            Some(_) | None => CoreTerminalEvaluation::absent(
+                CoreTerminalProducer::SuccessfulExtraction,
+                terminal,
+                tick,
+                version,
+            ),
+        };
+        let outcome = self
+            .recall
+            .drive_tick(
+                coordinator,
+                &self.persistence,
+                &self.recall_execution,
+                &completion,
+                ProductionRecallPendingAuthorityV1 {
+                    pending_item_count: snapshot.pending_item_count,
+                    pending_material_stack_count,
+                },
+                CoreTerminalOtherEvaluationsV1 {
+                    lethal: CoreTerminalEvaluation::absent(
+                        CoreTerminalProducer::LethalHealth,
+                        terminal,
+                        tick,
+                        version,
+                    ),
+                    extraction: extraction_evaluation,
+                    fault_restore: CoreTerminalEvaluation::candidate(
+                        CoreTerminalProducer::VerifiedFaultRestoration,
+                        terminal,
+                        tick,
+                        version,
+                        restoration.candidate.clone(),
+                    ),
+                },
+            )
+            .await?;
+
+        let receipt = match outcome {
+            CoreRecallTerminalTickOutcome::OtherTerminalPrepared(prepared)
+                if prepared.winner().kind() == TerminalKind::VerifiedServerFaultRestoration =>
+            {
+                if let Some(extraction) = &self.extraction {
+                    extraction.retire_after_other(coordinator).await?;
+                }
+                self.execute_fault_restoration_exact(coordinator, &prepared, &restoration)
+                    .await?
+            }
+            CoreRecallTerminalTickOutcome::OtherTerminalPrepared(prepared)
+                if prepared.winner().kind() == TerminalKind::SuccessfulExtraction =>
+            {
+                let extraction = extraction
+                    .as_ref()
+                    .filter(|value| value.intent.server_tick() == tick)
+                    .ok_or(ProductionTerminalOwnerError::InvalidAuthority)?;
+                self.execute_extraction_exact(coordinator, &prepared, extraction)
+                    .await?
+            }
+            CoreRecallTerminalTickOutcome::RecallStored(_)
+            | CoreRecallTerminalTickOutcome::RecallReplayed(_) => {
+                if let Some(extraction) = &self.extraction {
+                    extraction.retire_after_other(coordinator).await?;
+                }
+                coordinator
+                    .committed_receipt()
+                    .cloned()
+                    .ok_or(ProductionTerminalOwnerError::InvalidAuthority)?
+            }
+            CoreRecallTerminalTickOutcome::NoTerminal
+            | CoreRecallTerminalTickOutcome::OtherTerminalPrepared(_) => {
+                return Err(ProductionTerminalOwnerError::InvalidAuthority);
+            }
+        };
+        delivery.acknowledge_terminal_owned(&receipt)?;
+        Ok(())
+    }
+
     async fn refresh_clock_character_version(
         &self,
         clock: &mut StoredLifeClockHeadV1,
@@ -968,6 +1137,61 @@ impl ProductionTerminalOwnerRuntime {
                 Err(ProductionExtractionExecutionError::Persistence(error))
                     if error.may_have_ambiguous_commit_outcome() =>
                 {
+                    tokio::time::sleep(RETRY_DELAY).await;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+
+    async fn execute_fault_restoration_exact(
+        &self,
+        coordinator: &mut CoreTerminalCoordinator,
+        prepared: &crate::PreparedTerminal,
+        restoration: &PreparedVerifiedFaultRestoration,
+    ) -> Result<StoredTerminalReceipt, ProductionTerminalOwnerError> {
+        validate_fault_winner(prepared, restoration)?;
+        loop {
+            match self
+                .persistence
+                .transact_danger_crash_restore(&restoration.request)
+                .await
+            {
+                Ok(
+                    DangerCrashRestoreTransaction::Fresh(receipt)
+                    | DangerCrashRestoreTransaction::Replayed(receipt),
+                ) => {
+                    receipt.validate()?;
+                    if receipt.code != DangerCrashRestoreCode::Restored
+                        || receipt.account_id != restoration.request.account_id
+                        || receipt.character_id != restoration.request.character_id
+                        || receipt.restore_point_id != restoration.request.restore_point_id
+                        || receipt.request_mutation_id != restoration.request.mutation_id
+                        || receipt.request_hash != restoration.request.request_hash
+                    {
+                        return Err(ProductionTerminalOwnerError::InvalidAuthority);
+                    }
+                    let stored = StoredTerminalReceipt::from_prepared(
+                        prepared,
+                        prepared.sealed_through_tick(),
+                        receipt.digest(),
+                    )
+                    .map_err(|_| ProductionTerminalOwnerError::InvalidAuthority)?;
+                    self.route_reconciler
+                        .reconcile_verified_fault_restoration(
+                            self.authenticated,
+                            self.authority.route_lease(),
+                            stored.expected_state_version(),
+                            &receipt,
+                        )
+                        .await?;
+                    coordinator.record_commit(stored.clone())?;
+                    return Ok(stored);
+                }
+                Ok(DangerCrashRestoreTransaction::Conflict { .. }) => {
+                    return Err(ProductionTerminalOwnerError::InvalidAuthority);
+                }
+                Err(error) if error.may_have_ambiguous_commit_outcome() => {
                     tokio::time::sleep(RETRY_DELAY).await;
                 }
                 Err(error) => return Err(error.into()),

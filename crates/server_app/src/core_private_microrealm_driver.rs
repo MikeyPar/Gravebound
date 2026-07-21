@@ -544,6 +544,9 @@ pub enum CorePrivateMicrorealmFaultKind {
     TickExhausted,
     Simulation,
     TerminalAuthority,
+    /// A durable control may have committed before its in-memory acknowledgement failed. Only
+    /// process-restart reconciliation may resolve this state.
+    IndeterminateAuthority,
 }
 
 /// Stable fault projection; the underlying non-cloneable runtime error never crosses owners.
@@ -1006,6 +1009,7 @@ where
     });
     let (observation_tx, observation_rx) =
         watch::channel(CorePrivateMicrorealmDriverState::Starting);
+    let fault_observer = observation_rx.clone();
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let recall_bridge = recall.map(|mut recall| {
         ingress.apply_recall_projection(*recall.borrow_and_update());
@@ -1037,7 +1041,7 @@ where
         let _task_guard = ActiveDriverTaskGuard {
             ingress: Arc::clone(&task_ingress),
         };
-        run_driver(
+        let (exit, mut terminal_feed) = run_driver(
             runtime,
             terminal_feed,
             task_ingress,
@@ -1047,7 +1051,34 @@ where
             handoff_rx,
             fixed_advance_rx,
         )
-        .await
+        .await;
+        let verified_fault = match &*fault_observer.borrow() {
+            CorePrivateMicrorealmDriverState::Faulted { fault, .. }
+                if matches!(
+                    fault.kind,
+                    CorePrivateMicrorealmFaultKind::RouteAuthority
+                        | CorePrivateMicrorealmFaultKind::TickExhausted
+                        | CorePrivateMicrorealmFaultKind::Simulation
+                ) =>
+            {
+                Some(fault.kind)
+            }
+            _ => None,
+        };
+        if let Some(fault_kind) = verified_fault {
+            match terminal_feed.deliver_verified_fault(fault_kind).await {
+                Ok(
+                    CorePrivateTerminalFrameDisposition::TerminalOwned { .. }
+                    | CorePrivateTerminalFrameDisposition::Continue,
+                ) => {}
+                Err(error) => tracing::error!(
+                    %error,
+                    ?fault_kind,
+                    "verified private-route fault could not reach the terminal owner"
+                ),
+            }
+        }
+        exit
     });
     CorePrivateMicrorealmDriver {
         handle: CorePrivateMicrorealmDriverHandle {
@@ -1087,7 +1118,10 @@ async fn run_driver<R>(
     mut shutdown_rx: watch::Receiver<bool>,
     mut handoff_rx: mpsc::Receiver<CorePrivateMicrorealmHandoffRequest>,
     mut fixed_advance_rx: mpsc::Receiver<CorePrivateFixedDungeonControlRequest>,
-) -> CorePrivateMicrorealmDriverTaskExit
+) -> (
+    CorePrivateMicrorealmDriverTaskExit,
+    CorePrivateTerminalFrameSender,
+)
 where
     R: MicrorealmFrameRuntime,
 {
@@ -1122,7 +1156,7 @@ where
                 ).await {
                     HandoffControlOutcome::Continue => continue,
                     HandoffControlOutcome::Convert(request) => {
-                        return convert_runtime_and_wait(
+                        let exit = convert_runtime_and_wait(
                             runtime,
                             request,
                             &mut terminal_feed,
@@ -1135,6 +1169,7 @@ where
                             &mut handoff_rx,
                             &mut fixed_advance_rx,
                         ).await;
+                        return (exit, terminal_feed);
                     }
                     HandoffControlOutcome::Indeterminate => {
                         outcome = CorePrivateMicrorealmDriverOutcome::BellResolutionPending;
@@ -1244,24 +1279,20 @@ where
                     committed_frames,
                     fault: runtime_fault(&error, final_tick),
                 });
-                wait_for_shutdown(
-                    &mut shutdown_rx,
-                    &mut handoff_rx,
-                    &mut fixed_advance_rx,
-                    "fixed dungeon cannot advance after a driver fault",
-                )
-                .await;
                 break;
             }
         }
     }
     ingress.stop_accepting();
-    driver_task_exit(
-        &ingress,
-        committed_frames,
-        final_tick,
-        skipped_deadlines,
-        outcome,
+    (
+        driver_task_exit(
+            &ingress,
+            committed_frames,
+            final_tick,
+            skipped_deadlines,
+            outcome,
+        ),
+        terminal_feed,
     )
 }
 
@@ -1323,7 +1354,7 @@ where
                     let message = error.to_string();
                     observation_tx.send_replace(CorePrivateMicrorealmDriverState::Faulted {
                         committed_frames,
-                        fault: fixed_runtime_fault(&error, final_tick),
+                        fault: indeterminate_runtime_fault(&error, final_tick),
                     });
                     let _ = result_tx.send(Err(message));
                     wait_for_shutdown(
@@ -1404,7 +1435,7 @@ where
             observation_tx.send_replace(CorePrivateMicrorealmDriverState::Faulted {
                 committed_frames,
                 fault: CorePrivateMicrorealmDriverFault {
-                    kind: CorePrivateMicrorealmFaultKind::RouteAuthority,
+                    kind: CorePrivateMicrorealmFaultKind::IndeterminateAuthority,
                     message: Arc::from(message.clone()),
                     last_committed_tick: final_tick,
                 },
@@ -1560,8 +1591,7 @@ async fn run_fixed_dungeon(
                                         CorePrivateMicrorealmDriverState::Faulted {
                                             committed_frames,
                                             fault: CorePrivateMicrorealmDriverFault {
-                                                kind:
-                                                    CorePrivateMicrorealmFaultKind::RouteAuthority,
+                                                kind: CorePrivateMicrorealmFaultKind::IndeterminateAuthority,
                                                 message: Arc::from(message.clone()),
                                                 last_committed_tick: final_tick,
                                             },
@@ -1608,7 +1638,7 @@ async fn run_fixed_dungeon(
                             observation_tx.send_replace(
                                 CorePrivateMicrorealmDriverState::Faulted {
                                     committed_frames,
-                                    fault: fixed_runtime_fault(&error, final_tick),
+                                    fault: indeterminate_runtime_fault(&error, final_tick),
                                 },
                             );
                             wait_for_shutdown(
@@ -1678,7 +1708,7 @@ async fn run_fixed_dungeon(
                         ingress.stop_accepting();
                         observation_tx.send_replace(CorePrivateMicrorealmDriverState::Faulted {
                             committed_frames,
-                            fault: fixed_runtime_fault(&error, final_tick),
+                            fault: indeterminate_runtime_fault(&error, final_tick),
                         });
                         wait_for_shutdown(
                             shutdown_rx,
@@ -1756,7 +1786,7 @@ async fn run_fixed_dungeon(
                         ingress.stop_accepting();
                         observation_tx.send_replace(CorePrivateMicrorealmDriverState::Faulted {
                             committed_frames,
-                            fault: fixed_runtime_fault(&error, final_tick),
+                            fault: indeterminate_runtime_fault(&error, final_tick),
                         });
                         wait_for_shutdown(
                             shutdown_rx,
@@ -1880,13 +1910,6 @@ async fn run_fixed_dungeon(
                             committed_frames,
                             fault: fixed_runtime_fault(&error, final_tick),
                         });
-                        wait_for_shutdown(
-                            shutdown_rx,
-                            handoff_rx,
-                            fixed_advance_rx,
-                            "fixed dungeon cannot advance after a driver fault",
-                        )
-                        .await;
                         break;
                     }
                 }
@@ -2011,7 +2034,7 @@ async fn run_caldus(
                         ingress.stop_accepting();
                         observation_tx.send_replace(CorePrivateMicrorealmDriverState::Faulted {
                             committed_frames,
-                            fault: caldus_runtime_fault(&error, final_tick),
+                            fault: indeterminate_runtime_fault(&error, final_tick),
                         });
                         wait_for_shutdown(
                             shutdown_rx,
@@ -2045,13 +2068,6 @@ async fn run_caldus(
                                     fault: caldus_runtime_fault(&error, final_tick),
                                 },
                             );
-                            wait_for_shutdown(
-                                shutdown_rx,
-                                handoff_rx,
-                                fixed_advance_rx,
-                                "Caldus exit-ready heartbeat failed",
-                            )
-                            .await;
                             break;
                         }
                     };
@@ -2221,13 +2237,6 @@ async fn run_caldus(
                             committed_frames,
                             fault: caldus_runtime_fault(&error, final_tick),
                         });
-                        wait_for_shutdown(
-                            shutdown_rx,
-                            handoff_rx,
-                            fixed_advance_rx,
-                            "Caldus cannot advance after a driver fault",
-                        )
-                        .await;
                         break;
                     }
                 }
@@ -2507,6 +2516,17 @@ fn terminal_feed_fault(
 ) -> CorePrivateMicrorealmDriverFault {
     CorePrivateMicrorealmDriverFault {
         kind: CorePrivateMicrorealmFaultKind::TerminalAuthority,
+        message: Arc::from(error.to_string()),
+        last_committed_tick: final_tick,
+    }
+}
+
+fn indeterminate_runtime_fault(
+    error: &impl std::fmt::Display,
+    final_tick: Tick,
+) -> CorePrivateMicrorealmDriverFault {
+    CorePrivateMicrorealmDriverFault {
+        kind: CorePrivateMicrorealmFaultKind::IndeterminateAuthority,
         message: Arc::from(error.to_string()),
         last_committed_tick: final_tick,
     }
@@ -3904,6 +3924,53 @@ mod tests {
                 .await,
             Err(CorePrivateTerminalFeedError::DuplicateRouteControl)
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn staged_runtime_fault_reaches_next_terminal_boundary_and_requires_durable_owner() {
+        let received = Arc::new(StdMutex::new(Vec::new()));
+        let mut runtime = ScriptedRuntime::ordinary(received);
+        runtime.fault_at = Some(2);
+        let (terminal_sender, mut terminal_receiver) = terminal_frame_channel();
+        let terminal_owner = tokio::spawn(async move {
+            let frame = terminal_receiver.receive().await.expect("first frame");
+            assert_eq!(frame.frame().expect("simulation frame").tick, Tick(1));
+            frame.acknowledge_continue().expect("frame acknowledgement");
+
+            let fault = terminal_receiver.receive().await.expect("verified fault");
+            let verified = fault.verified_fault().expect("typed fault delivery");
+            assert_eq!(verified.tick, Tick(2));
+            assert_eq!(
+                verified.kind,
+                CorePrivateMicrorealmFaultKind::RouteAuthority
+            );
+            fault
+                .acknowledge_terminal_owned(&terminal_receipt(
+                    Tick(2),
+                    TerminalKind::VerifiedServerFaultRestoration,
+                ))
+                .expect("fault restoration ownership");
+        });
+        let driver = spawn_driver_with_terminal_feed(runtime, terminal_sender, None);
+        let mut observer = driver.handle().observe();
+        tokio::task::yield_now().await;
+        advance_one_frame(&mut observer).await;
+        advance_one_frame(&mut observer).await;
+        assert!(matches!(
+            observer.latest(),
+            CorePrivateMicrorealmDriverState::Faulted {
+                committed_frames: 1,
+                fault: CorePrivateMicrorealmDriverFault {
+                    kind: CorePrivateMicrorealmFaultKind::RouteAuthority,
+                    last_committed_tick: Tick(1),
+                    ..
+                }
+            }
+        ));
+        terminal_owner.await.expect("terminal owner");
+        let report = driver.shutdown().await.expect("driver shutdown");
+        assert_eq!(report.outcome, CorePrivateMicrorealmDriverOutcome::Faulted);
+        assert_eq!(report.final_tick, Tick(1));
     }
 
     #[tokio::test(start_paused = true)]

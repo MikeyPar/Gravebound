@@ -70,6 +70,7 @@ mod session;
 mod starter_items;
 mod successor_service;
 mod terminal_arbiter;
+mod verified_fault_restoration;
 mod world_flow_coordinator;
 mod world_flow_gate;
 
@@ -200,7 +201,7 @@ pub use core_private_terminal_feed::{
     CorePrivateTerminalFrameSender, CorePrivateTerminalFrameV1,
     CorePrivateTerminalRouteControlAuthorityV1, CorePrivateTerminalRouteControlKindV1,
     CorePrivateTerminalRouteControlV1, CorePrivateTerminalSceneV1,
-    CorePrivateTerminalTickContextV1,
+    CorePrivateTerminalTickContextV1, CorePrivateTerminalVerifiedFaultV1,
 };
 pub use core_private_terminal_owner::{
     CorePrivateExtractionTerminalHandle, CorePrivateRecallTerminalHandle,
