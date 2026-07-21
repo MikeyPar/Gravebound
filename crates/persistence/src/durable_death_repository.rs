@@ -189,6 +189,8 @@ struct ItemLock {
     item_uid: [u8; 16],
     template_id: String,
     content_revision: String,
+    item_level: Option<u8>,
+    rarity: Option<u8>,
     item_version: u64,
     security_state: i16,
     location_kind: i16,
@@ -202,6 +204,15 @@ struct MaterialLock {
     material_id: String,
     quantity: u32,
     version: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DeathCustodyValidation<'a> {
+    destruction: &'a [DurableDestructionEntryV1],
+    death_id: [u8; 16],
+    mutation_id: [u8; 16],
+    character_level: u8,
+    echo: Option<&'a DurableEchoEnvelopeV1>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -422,10 +433,13 @@ impl PostgresPersistence {
         validate_destruction_sources(
             &items,
             &materials,
-            &plan.destruction,
-            event.death_id,
-            event.mutation_id,
-            plan.echo.as_ref(),
+            DeathCustodyValidation {
+                destruction: &plan.destruction,
+                death_id: event.death_id,
+                mutation_id: event.mutation_id,
+                character_level: character.level,
+                echo: plan.echo.as_ref(),
+            },
             content,
         )?;
         validate_deeds(transaction.connection(), plan).await?;
@@ -864,7 +878,7 @@ async fn lock_terminal_custody_items(
     event: &crate::DurableDeathEventV1,
 ) -> Result<BTreeMap<[u8; 16], ItemLock>, PersistenceError> {
     let rows = sqlx::query(
-        "SELECT item_uid, template_id, content_revision, item_version, security_state, \
+        "SELECT item_uid, template_id, content_revision, item_level, rarity, item_version, security_state, \
                 location_kind, slot_index, instance_id, pickup_id \
          FROM item_instances WHERE namespace_id=$1 \
            AND account_id=$2 AND character_id=$3 AND location_kind IN (0,1,2,3,5) \
@@ -881,6 +895,8 @@ async fn lock_terminal_custody_items(
             item_uid: exact_id(row.try_get("item_uid")?)?,
             template_id: row.try_get("template_id")?,
             content_revision: row.try_get("content_revision")?,
+            item_level: optional_u8(row.try_get("item_level")?)?,
+            rarity: optional_u8(row.try_get("rarity")?)?,
             item_version: positive(row.try_get("item_version")?)?,
             security_state: row.try_get("security_state")?,
             location_kind: row.try_get("location_kind")?,
@@ -1023,24 +1039,27 @@ async fn cleanup_and_validate_bargains(
 fn validate_destruction_sources(
     items: &BTreeMap<[u8; 16], ItemLock>,
     materials: &BTreeMap<String, MaterialLock>,
-    destruction: &[DurableDestructionEntryV1],
-    death_id: [u8; 16],
-    mutation_id: [u8; 16],
-    echo: Option<&DurableEchoEnvelopeV1>,
+    validation: DeathCustodyValidation<'_>,
     content: &DurableDeathContentAuthorityV1,
 ) -> Result<(), PersistenceError> {
     let destructive_item_count = validate_terminal_item_custody(items, content)?;
     let (weapon_signature_tag, relic_signature_tag) = expected_echo_signatures(items, content)?;
-    if echo.is_some_and(|envelope| {
+    if validation.echo.is_some_and(|envelope| {
         envelope.created.weapon_signature_tag != weapon_signature_tag
             || envelope.created.relic_signature_tag != relic_signature_tag
     }) {
         return Err(PersistenceError::DurableDeathContentMismatch);
     }
+    if let Some(envelope) = validation.echo
+        && envelope.created.power_band
+            != expected_echo_power_band(validation.character_level, items)?
+    {
+        return Err(PersistenceError::DurableDeathBindingMismatch);
+    }
 
     let mut expected_items = BTreeSet::new();
     let mut expected_materials = BTreeSet::new();
-    for entry in destruction {
+    for entry in validation.destruction {
         match entry {
             DurableDestructionEntryV1::Item {
                 content_id,
@@ -1063,8 +1082,8 @@ fn validate_destruction_sources(
                     || item.pickup_id != binding.pickup_id
                     || *ledger_event_id
                         != derive_durable_death_item_ledger_event_id(
-                            death_id,
-                            mutation_id,
+                            validation.death_id,
+                            validation.mutation_id,
                             *item_uid,
                         )
                     || !expected_items.insert(*item_uid)
@@ -1095,6 +1114,72 @@ fn validate_destruction_sources(
         return Err(PersistenceError::DurableDeathBindingMismatch);
     }
     Ok(())
+}
+
+/// Recomputes `CONT-ECHO-001` from the equipment rows locked by the death transaction. This is
+/// deliberately separate from the planner: permanent loss cannot trust a power band calculated
+/// before the transaction acquired custody locks.
+fn expected_echo_power_band(
+    character_level: u8,
+    items: &BTreeMap<[u8; 16], ItemLock>,
+) -> Result<u8, PersistenceError> {
+    let mut effective_by_slot = [None; 4];
+    for item in items.values().filter(|item| item.location_kind == 0) {
+        let slot = usize::try_from(
+            item.slot_index
+                .ok_or(PersistenceError::CorruptStoredDurableDeath)?,
+        )
+        .ok()
+        .filter(|slot| *slot < effective_by_slot.len())
+        .ok_or(PersistenceError::CorruptStoredDurableDeath)?;
+        let level = item
+            .item_level
+            .ok_or(PersistenceError::CorruptStoredDurableDeath)?;
+        let rarity_bonus = match item
+            .rarity
+            .ok_or(PersistenceError::CorruptStoredDurableDeath)?
+        {
+            0 => 0_u32,
+            1 => 5,
+            2 => 10,
+            3 => 20,
+            4 | 5 => 30,
+            _ => return Err(PersistenceError::CorruptStoredDurableDeath),
+        };
+        let effective = u32::from(level)
+            .checked_mul(10)
+            .and_then(|value| value.checked_add(rarity_bonus))
+            .ok_or(PersistenceError::CorruptStoredDurableDeath)?;
+        if effective_by_slot[slot].replace(effective).is_some() {
+            return Err(PersistenceError::CorruptStoredDurableDeath);
+        }
+    }
+    let weighted_sum = [35_u32, 25, 25, 15]
+        .into_iter()
+        .zip(effective_by_slot)
+        .try_fold(0_u32, |sum, (weight, effective)| {
+            weight
+                .checked_mul(effective.unwrap_or(0))
+                .and_then(|value| sum.checked_add(value))
+                .ok_or(PersistenceError::CorruptStoredDurableDeath)
+        })?;
+    let functional_tenths = weighted_sum
+        .checked_add(50)
+        .ok_or(PersistenceError::CorruptStoredDurableDeath)?
+        / 100;
+    let power_index_tenths = u32::from(character_level)
+        .checked_mul(10)
+        .and_then(|value| value.checked_add(functional_tenths))
+        .and_then(|value| value.checked_add(1))
+        .ok_or(PersistenceError::CorruptStoredDurableDeath)?
+        / 2;
+    Ok(match power_index_tenths {
+        0..=89 => 1,
+        90..=119 => 2,
+        120..=149 => 3,
+        150..=179 => 4,
+        _ => 5,
+    })
 }
 
 fn validate_terminal_item_custody(
@@ -3269,6 +3354,10 @@ fn u8_value(value: i16) -> Result<u8, PersistenceError> {
     u8::try_from(value).map_err(|_| PersistenceError::CorruptStoredDurableDeath)
 }
 
+fn optional_u8(value: Option<i16>) -> Result<Option<u8>, PersistenceError> {
+    value.map(u8_value).transpose()
+}
+
 fn u32_value(value: i32) -> Result<u32, PersistenceError> {
     u32::try_from(value).map_err(|_| PersistenceError::CorruptStoredDurableDeath)
 }
@@ -3420,6 +3509,55 @@ mod tests {
         assert!(i32_value(u32::MAX).is_err());
         assert!(exact_id(vec![0; 15]).is_err());
         assert!(exact_hash(vec![0; 31]).is_err());
+    }
+
+    fn equipped_power_items(item_level: u8, rarity: u8) -> BTreeMap<[u8; 16], ItemLock> {
+        (0_i16..4)
+            .map(|slot| {
+                let item_uid = [u8::try_from(slot + 1).unwrap(); 16];
+                (
+                    item_uid,
+                    ItemLock {
+                        item_uid,
+                        template_id: format!("item.core.power_slot_{slot}"),
+                        content_revision: "core-dev.blake3.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+                        item_level: Some(item_level),
+                        rarity: Some(rarity),
+                        item_version: 1,
+                        security_state: SECURITY_AT_RISK_EQUIPPED,
+                        location_kind: 0,
+                        slot_index: Some(slot),
+                        instance_id: None,
+                        pickup_id: None,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn echo_power_is_recomputed_from_locked_equipment_at_exact_band_boundaries() {
+        assert_eq!(expected_echo_power_band(10, &BTreeMap::new()).unwrap(), 1);
+        assert_eq!(
+            expected_echo_power_band(10, &equipped_power_items(8, 0)).unwrap(),
+            2
+        );
+        assert_eq!(
+            expected_echo_power_band(10, &equipped_power_items(14, 0)).unwrap(),
+            3
+        );
+        assert_eq!(
+            expected_echo_power_band(10, &equipped_power_items(20, 0)).unwrap(),
+            4
+        );
+        assert_eq!(
+            expected_echo_power_band(20, &equipped_power_items(16, 0)).unwrap(),
+            5
+        );
+
+        let mut invalid = equipped_power_items(10, 0);
+        invalid.get_mut(&[1; 16]).unwrap().rarity = Some(6);
+        assert!(expected_echo_power_band(10, &invalid).is_err());
     }
 
     fn stored_trace_link(
@@ -3641,6 +3779,8 @@ mod tests {
                 item_uid,
                 template_id: "item.core.test".into(),
                 content_revision: "core-dev.blake3.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+                item_level: Some(10),
+                rarity: Some(1),
                 item_version: 4,
                 security_state: SECURITY_AT_RISK_EQUIPPED,
                 location_kind: 0,
@@ -3705,10 +3845,13 @@ mod tests {
             validate_destruction_sources(
                 &items,
                 &materials,
-                &destruction,
-                death_id,
-                mutation_id,
-                None,
+                DeathCustodyValidation {
+                    destruction: &destruction,
+                    death_id,
+                    mutation_id,
+                    character_level: 10,
+                    echo: None,
+                },
                 &content,
             )
             .is_ok()
@@ -3719,6 +3862,8 @@ mod tests {
                 item_uid: [4; 16],
                 template_id: "item.core.safe".into(),
                 content_revision: "core-dev.blake3.dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd".into(),
+                item_level: Some(1),
+                rarity: Some(0),
                 item_version: 7,
                 security_state: 0,
                 location_kind: 5,
@@ -3731,10 +3876,13 @@ mod tests {
             validate_destruction_sources(
                 &items,
                 &materials,
-                &destruction,
-                death_id,
-                mutation_id,
-                None,
+                DeathCustodyValidation {
+                    destruction: &destruction,
+                    death_id,
+                    mutation_id,
+                    character_level: 10,
+                    echo: None,
+                },
                 &content,
             )
             .is_ok(),
@@ -3748,10 +3896,13 @@ mod tests {
                 validate_destruction_sources(
                     &items,
                     &materials,
-                    &destruction,
-                    death_id,
-                    mutation_id,
-                    None,
+                    DeathCustodyValidation {
+                        destruction: &destruction,
+                        death_id,
+                        mutation_id,
+                        character_level: 10,
+                        echo: None,
+                    },
                     &content,
                 ),
                 Err(PersistenceError::CorruptStoredDurableDeath)
@@ -3767,6 +3918,8 @@ mod tests {
                 item_uid: [3; 16],
                 template_id: "item.core.unplanned".into(),
                 content_revision: revision.into(),
+                item_level: Some(1),
+                rarity: Some(0),
                 item_version: 1,
                 security_state: SECURITY_AT_RISK_PENDING,
                 location_kind: 2,
@@ -3779,10 +3932,13 @@ mod tests {
             validate_destruction_sources(
                 &items,
                 &materials,
-                &destruction,
-                death_id,
-                mutation_id,
-                None,
+                DeathCustodyValidation {
+                    destruction: &destruction,
+                    death_id,
+                    mutation_id,
+                    character_level: 10,
+                    echo: None,
+                },
                 &content,
             )
             .is_err()
