@@ -28,7 +28,7 @@ use sim_core::{
 };
 use thiserror::Error;
 
-use crate::DeathEntityIdentityAuthority;
+use crate::{DeathEntityIdentityAuthority, TerminalBinding};
 
 /// Exact authenticated and server-journaled aggregate binding for one active danger root.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -359,13 +359,50 @@ impl<Repository> LiveDamageTraceService<Repository>
 where
     Repository: LiveDamageTraceRepository,
 {
+    /// Opens the currently committed danger trace without requiring callers to reconstruct the
+    /// database-owned checkpoint tick or latest character version. The opaque terminal binding
+    /// still pins account, character, lineage, and restore point, while the repository supplies
+    /// the remaining current authority under one read transaction.
+    pub async fn start_or_resume_current(
+        repository: Repository,
+        terminal: TerminalBinding,
+        minimum_character_version: u64,
+        identities: DeathEntityIdentityAuthority,
+        presentation: Arc<CoreDevelopmentDeathView>,
+    ) -> Result<Self, LiveDamageTraceServiceError> {
+        if minimum_character_version == 0 {
+            return Err(LiveDamageTraceServiceError::InvalidBinding);
+        }
+        validate_identity_authority(&identities)?;
+        validate_presentation_authority(&presentation)?;
+        let snapshot = repository
+            .load_snapshot(*terminal.account_id(), *terminal.character_id())
+            .await
+            .map_err(LiveDamageTraceServiceError::Persistence)?;
+        if snapshot.character_version < minimum_character_version
+            || snapshot.danger.lineage_id != *terminal.lineage_id()
+            || snapshot.danger.restore_point_id != *terminal.restore_point_id()
+            || snapshot.content != LiveDamageTraceContentAuthorityV1::core()
+        {
+            return Err(LiveDamageTraceServiceError::InvalidBinding);
+        }
+        let binding = LiveDamageTraceBinding::new(
+            *terminal.account_id(),
+            *terminal.character_id(),
+            snapshot.character_version,
+            snapshot.danger.clone(),
+            snapshot.content.clone(),
+        )?;
+        Self::from_snapshot(repository, binding, identities, presentation, snapshot)
+    }
+
     /// Opens the one authoritative trace state for this danger root. The repository returns the
     /// locked empty state for a fresh root or the complete retained window for a resumed root;
     /// callers cannot accidentally start a second empty aggregate over existing evidence.
     pub async fn start_or_resume(
         repository: Repository,
         binding: LiveDamageTraceBinding,
-        mut identities: DeathEntityIdentityAuthority,
+        identities: DeathEntityIdentityAuthority,
         presentation: Arc<CoreDevelopmentDeathView>,
     ) -> Result<Self, LiveDamageTraceServiceError> {
         binding.validate()?;
@@ -375,6 +412,16 @@ where
             .load_snapshot(binding.account_id, binding.character_id)
             .await
             .map_err(LiveDamageTraceServiceError::Persistence)?;
+        Self::from_snapshot(repository, binding, identities, presentation, snapshot)
+    }
+
+    fn from_snapshot(
+        repository: Repository,
+        binding: LiveDamageTraceBinding,
+        mut identities: DeathEntityIdentityAuthority,
+        presentation: Arc<CoreDevelopmentDeathView>,
+        snapshot: StoredLiveDamageTraceSnapshotV1,
+    ) -> Result<Self, LiveDamageTraceServiceError> {
         let aggregate = reconstruct_snapshot(&snapshot, &binding, &mut identities, &presentation)?;
         Ok(Self {
             repository,
@@ -1065,6 +1112,39 @@ mod tests {
             },
             content: LiveDamageTraceContentAuthorityV1::core(),
         }
+    }
+
+    fn terminal_binding() -> TerminalBinding {
+        TerminalBinding::new([1; 16], [2; 16], [3; 16], [4; 16]).unwrap()
+    }
+
+    #[tokio::test]
+    async fn current_danger_open_uses_repository_checkpoint_and_rejects_foreign_root() {
+        let repository = FakeRepository::default();
+        let service = LiveDamageTraceService::start_or_resume_current(
+            repository.clone(),
+            terminal_binding(),
+            6,
+            identities(),
+            presentation(),
+        )
+        .await
+        .expect("current durable checkpoint opens");
+        assert_eq!(service.binding.character_version, 7);
+        assert_eq!(service.binding.danger.checkpoint_tick, 50);
+
+        let foreign = TerminalBinding::new([1; 16], [2; 16], [3; 16], [9; 16]).unwrap();
+        assert!(matches!(
+            LiveDamageTraceService::start_or_resume_current(
+                repository,
+                foreign,
+                6,
+                identities(),
+                presentation(),
+            )
+            .await,
+            Err(LiveDamageTraceServiceError::InvalidBinding)
+        ));
     }
 
     fn mutation(id: u8) -> LiveDamageTraceMutationAuthority {

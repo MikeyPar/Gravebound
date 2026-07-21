@@ -37,6 +37,7 @@ mod core_recall_runtime;
 mod core_reliable_writer;
 mod core_terminal_coordinator;
 mod core_terminal_recovery_delivery;
+mod death_entity_identity;
 mod death_view_service;
 mod durable_death_execution;
 mod durable_death_service;
@@ -227,6 +228,10 @@ pub use core_terminal_recovery_delivery::{
     RecoveredExtractionDeliveryProof, RecoveredExtractionTerminalRepository,
     RecoveredRecallDeliveryProof, RecoveredTerminalDeliveryError,
     recover_and_send_extraction_retry, send_recovered_recall_terminal,
+};
+pub use death_entity_identity::{
+    CorePrivateDeathEntityIdentityError, derive_private_route_death_entity_id,
+    private_route_damage_entity_identities,
 };
 pub use death_view_service::{
     DeathViewRepository, DeathViewRepositoryError, DeathViewService, DisabledDeathViewRepository,
