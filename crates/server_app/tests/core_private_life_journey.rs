@@ -1231,7 +1231,7 @@ async fn production_root_extracts_then_recovers_a_successor_and_cleans_up() {
     let character_id = created_account.characters[0].character_id;
 
     let select_payload = CharacterMutationPayload::Select { character_id };
-    let (_, selected) = tokio::time::timeout(
+    let selected_response = tokio::time::timeout(
         OPERATION_TIMEOUT,
         bot_client::perform_character_mutation(
             &connection,
@@ -1245,8 +1245,17 @@ async fn production_root_extracts_then_recovers_a_successor_and_cleans_up() {
         ),
     )
     .await
-    .expect("character selection timed out")
-    .unwrap();
+    .expect("character selection timed out");
+    let (_, selected) = match selected_response {
+        Ok(response) => response,
+        Err(error) => {
+            // Give the independently owned connection worker time to publish its server-side
+            // failure before this client assertion tears down the Tokio runtime. Without this
+            // yield, hosted failures collapse to an unactionable QUIC `connection lost` message.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            panic!("character selection response failed after server admission: {error}");
+        }
+    };
     assert!(selected.accepted);
     assert_eq!(
         selected
