@@ -109,6 +109,7 @@ jobs:
         run: |
           cargo test --locked -p persistence --test postgres_foundation -- --ignored --test-threads=1
           cargo test --locked -p persistence --test postgres_telemetry_sources -- --ignored --test-threads=1 --nocapture
+          cargo test --locked -p persistence --test postgres_terminal_telemetry_origins -- --ignored --test-threads=1 --nocapture
           cargo test --locked -p persistence --test postgres_production_extraction_intent -- --ignored --test-threads=1 --nocapture
           cargo test --locked -p persistence --test postgres_extraction_terminal -- --ignored --test-threads=1 --nocapture
           cargo test --locked -p persistence --test postgres_recall_terminal -- --ignored --test-threads=1 --nocapture
