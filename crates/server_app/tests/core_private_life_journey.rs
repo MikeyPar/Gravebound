@@ -17,11 +17,12 @@ use protocol::{
     BargainViewFrame, CharacterLocation, CharacterMutationFrame, CharacterMutationPayload,
     ClientHello, Compression, CorePrivateRouteContentRevisionV1, CorePrivateRoutePhaseV1,
     CorePrivateRouteRoomV1, CorePrivateRouteSceneV1, CorePrivateRouteStateV1, EntityKind,
-    EntitySnapshot, HALL_INTERACTION_SCHEMA_VERSION, HallInteractionFrameV1,
-    HallInteractionIntentV1, HallInteractionResultCodeV1, HallStationV1, HandshakeResponse,
-    InputFrame, ManifestHash, Platform, ProtocolVersion, ReliableEvent, ReliableEventFrame,
-    SafeArrival, WireMessage, WireText, WorldFlowContentRevisionV1, WorldFlowFrame,
-    WorldFlowRequest, WorldFlowResult, WorldTransferCommand, WorldTransferMutation,
+    EntitySnapshot, ExtractionCommitFrameV1, ExtractionCommitPayloadV1, ExtractionCommitResultV1,
+    HALL_INTERACTION_SCHEMA_VERSION, HallInteractionFrameV1, HallInteractionIntentV1,
+    HallInteractionResultCodeV1, HallStationV1, HandshakeResponse, InputFrame, ManifestHash,
+    Platform, ProtocolVersion, ReliableEvent, ReliableEventFrame, SafeArrival,
+    TERMINAL_INVENTORY_SCHEMA_VERSION, WireMessage, WireText, WorldFlowContentRevisionV1,
+    WorldFlowFrame, WorldFlowRequest, WorldFlowResult, WorldTransferCommand, WorldTransferMutation,
     WorldTransferPayload, WorldTransferResultCode,
 };
 use server_app::{
@@ -460,23 +461,64 @@ fn nearest_hostile<'a>(
         })
 }
 
-fn spawn_route_event_pump(
+struct ServerInitiatedEventReceivers {
+    route: watch::Receiver<Option<ReliableEventFrame>>,
+    pending_inventory: watch::Receiver<Option<ReliableEventFrame>>,
+    extraction_ready: watch::Receiver<Option<ReliableEventFrame>>,
+    extraction_result: watch::Receiver<Option<ReliableEventFrame>>,
+}
+
+fn spawn_server_event_pump(
     connection: quinn::Connection,
-) -> (
-    watch::Receiver<Option<ReliableEventFrame>>,
-    tokio::task::JoinHandle<()>,
-) {
+) -> (ServerInitiatedEventReceivers, tokio::task::JoinHandle<()>) {
     let (route_send, route_receive) = watch::channel(None);
+    let (pending_inventory_send, pending_inventory_receive) = watch::channel(None);
+    let (extraction_ready_send, extraction_ready_receive) = watch::channel(None);
+    let (extraction_result_send, extraction_result_receive) = watch::channel(None);
     let task = tokio::spawn(async move {
         while let Ok(frame) = bot_client::receive_server_reliable(&connection).await {
-            if matches!(frame.event, ReliableEvent::CorePrivateRouteState(_))
-                && route_send.send(Some(frame)).is_err()
-            {
+            let publisher = match &frame.event {
+                ReliableEvent::CorePrivateRouteState(_) => Some(&route_send),
+                ReliableEvent::CorePendingInventoryState(_) => Some(&pending_inventory_send),
+                ReliableEvent::CoreExtractionReadyState(_) => Some(&extraction_ready_send),
+                ReliableEvent::ExtractionCommitResult(_) => Some(&extraction_result_send),
+                _ => None,
+            };
+            if publisher.is_some_and(|publisher| publisher.send(Some(frame)).is_err()) {
                 break;
             }
         }
     });
-    (route_receive, task)
+    let receivers = ServerInitiatedEventReceivers {
+        route: route_receive,
+        pending_inventory: pending_inventory_receive,
+        extraction_ready: extraction_ready_receive,
+        extraction_result: extraction_result_receive,
+    };
+    (receivers, task)
+}
+
+async fn wait_for_server_event<Matches>(
+    receive: &mut watch::Receiver<Option<ReliableEventFrame>>,
+    matches: Matches,
+    timeout_message: &'static str,
+) -> ReliableEventFrame
+where
+    Matches: Fn(&ReliableEventFrame) -> bool,
+{
+    tokio::time::timeout(OPERATION_TIMEOUT, async {
+        loop {
+            if let Some(frame) = receive.borrow().as_ref().filter(|frame| matches(frame)) {
+                return frame.clone();
+            }
+            receive
+                .changed()
+                .await
+                .expect("server-initiated event pump must remain attached");
+        }
+    })
+    .await
+    .expect(timeout_message)
 }
 
 fn matching_route<Matches>(
@@ -890,7 +932,7 @@ fn start_server(
     clippy::too_many_lines,
     reason = "the production-root route proof stays contiguous so no direct state-writing seam can be hidden"
 )]
-async fn production_root_reaches_caldus_exit_ready_and_cleans_up() {
+async fn production_root_extracts_after_caldus_and_cleans_up() {
     let _ = tracing_subscriber::fmt().with_test_writer().try_init();
     assert_eq!(
         std::env::var(TELEMETRY_ENVIRONMENT_VARIABLE).as_deref(),
@@ -1344,7 +1386,13 @@ async fn production_root_reaches_caldus_exit_ready_and_cleans_up() {
     // From this point onward one task exclusively owns server-initiated reliable streams. Direct
     // request/response frames continue to use their bidirectional streams, so route transitions
     // cannot be lost when snapshot traffic is busy or a response is in flight.
-    let (mut route_receive, route_pump) = spawn_route_event_pump(connection.clone());
+    let (server_events, server_event_pump) = spawn_server_event_pump(connection.clone());
+    let ServerInitiatedEventReceivers {
+        route: mut route_receive,
+        pending_inventory: mut pending_inventory_receive,
+        extraction_ready: mut extraction_ready_receive,
+        extraction_result: mut extraction_result_receive,
+    } = server_events;
     let cleared_route_frame = drive_microrealm_until_cleared(
         &connection,
         &mut assembler,
@@ -1764,14 +1812,291 @@ async fn production_root_reaches_caldus_exit_ready_and_cleans_up() {
     assert!(exit_ready.readiness.boss_encounter_ready.is_available());
     assert!(exit_ready.readiness.extraction_available.is_available());
 
+    // DTH-011 and LOOT-002 make the terminal request an authority echo: the client receives the
+    // immutable exit identity and coherent aggregate versions, but never authors placements.
+    let extraction_ready_frame = wait_for_server_event(
+        &mut extraction_ready_receive,
+        |frame| {
+            matches!(
+                &frame.event,
+                ReliableEvent::CoreExtractionReadyState(state)
+                    if state.character_id == character_id
+                        && state.instance_lineage_id == *instance_lineage_id
+            )
+        },
+        "Caldus extraction-ready authority timed out",
+    )
+    .await;
+    let ReliableEvent::CoreExtractionReadyState(extraction_ready) = &extraction_ready_frame.event
+    else {
+        unreachable!("the event waiter returns extraction-ready authority");
+    };
+    extraction_ready.validate().unwrap();
+    assert_eq!(extraction_ready.character_id, exit_ready.character_id);
+    assert_eq!(
+        extraction_ready.expected_versions.character,
+        exit_ready.character_version
+    );
+    assert_eq!(extraction_ready.content_revision, world_revision);
+
+    let pending_inventory_frame = wait_for_server_event(
+        &mut pending_inventory_receive,
+        |frame| {
+            matches!(
+                &frame.event,
+                ReliableEvent::CorePendingInventoryState(state)
+                    if state.character_id == character_id
+                        && state.instance_lineage_id == *instance_lineage_id
+            )
+        },
+        "Caldus pending-inventory authority timed out",
+    )
+    .await;
+    let ReliableEvent::CorePendingInventoryState(pending_inventory) =
+        &pending_inventory_frame.event
+    else {
+        unreachable!("the event waiter returns pending-inventory authority");
+    };
+    pending_inventory.validate().unwrap();
+    assert_eq!(
+        pending_inventory.entry_restore_point_id,
+        extraction_ready.entry_restore_point_id
+    );
+    assert_eq!(
+        pending_inventory.expected_extraction_versions,
+        extraction_ready.expected_versions
+    );
+    assert_eq!(pending_inventory.content_revision, world_revision);
+    assert!(
+        !pending_inventory.items.is_empty(),
+        "the ordinary Caldus reward must exercise real pending-item placement"
+    );
+
+    let extraction_payload = ExtractionCommitPayloadV1 {
+        extraction_request_id: extraction_ready.extraction_request_id,
+        expected_versions: extraction_ready.expected_versions,
+        content_revision: extraction_ready.content_revision.clone(),
+    };
+    let extraction_frame = ExtractionCommitFrameV1 {
+        schema_version: TERMINAL_INVENTORY_SCHEMA_VERSION,
+        sequence: 1,
+        mutation_id: [0x36; 16],
+        character_id,
+        issued_at_unix_millis: current_unix_millis(),
+        payload_hash: extraction_payload.canonical_hash(),
+        payload: extraction_payload,
+    };
+    extraction_frame.validate().unwrap();
+    let initial_extraction_reply = tokio::time::timeout(
+        OPERATION_TIMEOUT,
+        bot_client::perform_reliable_gameplay(
+            &connection,
+            WireMessage::ExtractionCommitFrame(extraction_frame.clone()),
+        ),
+    )
+    .await
+    .expect("ordinary Caldus extraction request timed out")
+    .unwrap();
+    let ReliableEvent::ExtractionCommitResult(initial_extraction_result) =
+        &initial_extraction_reply.event
+    else {
+        panic!("the extraction request must return a typed terminal result");
+    };
+    initial_extraction_result.validate().unwrap();
+    let immediately_stored = match initial_extraction_result.as_ref() {
+        ExtractionCommitResultV1::Pending {
+            request_sequence,
+            mutation_id,
+            character_id: pending_character_id,
+            extraction_request_id,
+            ..
+        } => {
+            assert_eq!(*request_sequence, extraction_frame.sequence);
+            assert_eq!(*mutation_id, extraction_frame.mutation_id);
+            assert_eq!(*pending_character_id, character_id);
+            assert_eq!(
+                *extraction_request_id,
+                extraction_ready.extraction_request_id
+            );
+            None
+        }
+        ExtractionCommitResultV1::Stored {
+            request_sequence,
+            replayed,
+            result,
+            ..
+        } => {
+            assert_eq!(*request_sequence, extraction_frame.sequence);
+            Some((*replayed, result.as_ref().clone()))
+        }
+        ExtractionCommitResultV1::Rejected { code, .. } => {
+            panic!("ordinary Caldus extraction was rejected: {code:?}");
+        }
+    };
+    let (replayed, stored_extraction) = if let Some(stored) = immediately_stored {
+        stored
+    } else {
+        let stored_frame = wait_for_server_event(
+            &mut extraction_result_receive,
+            |frame| {
+                matches!(
+                    &frame.event,
+                    ReliableEvent::ExtractionCommitResult(result)
+                        if matches!(
+                            result.as_ref(),
+                            ExtractionCommitResultV1::Stored { result, .. }
+                                if result.mutation_id == extraction_frame.mutation_id
+                        )
+                )
+            },
+            "durable Caldus extraction result timed out",
+        )
+        .await;
+        let ReliableEvent::ExtractionCommitResult(result) = &stored_frame.event else {
+            unreachable!("the event waiter returns an extraction result");
+        };
+        result.validate().unwrap();
+        let ExtractionCommitResultV1::Stored {
+            request_sequence,
+            replayed,
+            result,
+            ..
+        } = result.as_ref()
+        else {
+            unreachable!("the event waiter filters for stored extraction results");
+        };
+        assert_eq!(*request_sequence, extraction_frame.sequence);
+        (*replayed, result.as_ref().clone())
+    };
+    assert!(!replayed);
+    stored_extraction.validate().unwrap();
+    assert_eq!(stored_extraction.mutation_id, extraction_frame.mutation_id);
+    assert_eq!(stored_extraction.character_id, character_id);
+    assert_eq!(
+        stored_extraction.extraction_request_id,
+        extraction_ready.extraction_request_id
+    );
+    assert_eq!(
+        stored_extraction.versions.account.before,
+        extraction_ready.expected_versions.account
+    );
+    assert_eq!(
+        stored_extraction.versions.character.before,
+        extraction_ready.expected_versions.character
+    );
+    assert_eq!(
+        stored_extraction.versions.world.before,
+        extraction_ready.expected_versions.world
+    );
+    assert_eq!(
+        stored_extraction.versions.inventory.before,
+        extraction_ready.expected_versions.inventory
+    );
+    assert_eq!(
+        stored_extraction.versions.life_clock.before,
+        extraction_ready.expected_versions.life_clock
+    );
+    assert_eq!(
+        stored_extraction.destination_content_id.as_str(),
+        HALL_CONTENT_ID
+    );
+    assert!(!stored_extraction.storage_resolution_required);
+    let placed_item_uids = stored_extraction
+        .placements
+        .iter()
+        .map(|placement| placement.item_uid)
+        .collect::<BTreeSet<_>>();
+    assert!(
+        pending_inventory
+            .items
+            .iter()
+            .all(|item| placed_item_uids.contains(&item.item_uid))
+    );
+
+    // The stored terminal result is the only source of the receipt identity. The follow-up world
+    // flow request activates the already-committed Hall state and cannot replace item placement.
+    let hall_return_payload = WorldTransferPayload {
+        content_revision: world_revision.clone(),
+        command: WorldTransferCommand::UseCommittedExtraction {
+            portal_id: WireText::new("portal.exit.dungeon.bell_sepulcher").unwrap(),
+            extraction_request_id: stored_extraction.extraction_request_id,
+            extraction_receipt_id: stored_extraction.extraction_receipt_id,
+        },
+    };
+    let (_, hall_return) = tokio::time::timeout(
+        OPERATION_TIMEOUT,
+        bot_client::perform_world_flow(
+            &connection,
+            WorldFlowFrame {
+                sequence: 5,
+                request: WorldFlowRequest::Transfer(WorldTransferMutation {
+                    mutation_id: [0x37; 16],
+                    character_id,
+                    expected_character_version: stored_extraction.versions.character.before,
+                    issued_at_unix_millis: current_unix_millis(),
+                    payload_hash: hall_return_payload.canonical_hash(),
+                    payload: hall_return_payload,
+                }),
+            },
+        ),
+    )
+    .await
+    .expect("committed Caldus Hall return timed out")
+    .unwrap();
+    let WorldFlowResult::Transfer {
+        accepted: true,
+        code: WorldTransferResultCode::Accepted,
+        snapshot: Some(extracted_hall),
+        transfer_id: Some(extraction_receipt_id),
+        ..
+    } = hall_return
+    else {
+        panic!("the committed Caldus extraction receipt must return the character to Hall");
+    };
+    assert_eq!(
+        extraction_receipt_id,
+        stored_extraction.extraction_receipt_id
+    );
+    assert_eq!(
+        extracted_hall.character_version,
+        stored_extraction.versions.world.after
+    );
+    assert!(matches!(
+        &extracted_hall.location,
+        CharacterLocation::Safe {
+            location_id,
+            arrival: SafeArrival::HallDefault,
+        } if location_id.as_str() == HALL_CONTENT_ID
+    ));
+
+    let hall_route_frame = wait_for_route(
+        &mut route_receive,
+        |route| {
+            route.character_id == character_id
+                && route.scene == CorePrivateRouteSceneV1::LanternHalls
+                && route.phase == CorePrivateRoutePhaseV1::Hall
+        },
+        "post-extraction Hall route authority timed out",
+    )
+    .await;
+    let ReliableEvent::CorePrivateRouteState(hall_route) = &hall_route_frame.event else {
+        unreachable!("the route waiter returns a Hall projection");
+    };
+    assert_eq!(
+        hall_route.character_version,
+        extracted_hall.character_version
+    );
+    assert_eq!(hall_route.instance_lineage_id, None);
+    assert!(hall_route.readiness.accepts_gameplay_input.is_available());
+
     connection.close(0_u32.into(), b"native client shutdown");
     client_endpoint.close(0_u32.into(), b"native client shutdown");
     tokio::time::timeout(OPERATION_TIMEOUT, client_endpoint.wait_idle())
         .await
         .expect("client endpoint cleanup timed out");
-    tokio::time::timeout(OPERATION_TIMEOUT, route_pump)
+    tokio::time::timeout(OPERATION_TIMEOUT, server_event_pump)
         .await
-        .expect("route event pump cleanup timed out")
+        .expect("server event pump cleanup timed out")
         .unwrap();
     let cleanup = PostgresPersistence::connect(&config).await.unwrap();
     cleanup.verify_disposable_test_database().await.unwrap();

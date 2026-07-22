@@ -32,8 +32,12 @@ This evidence reads the three design authorities together:
 16. advances through the authored B5 bridge into B6 without a direct route-state write;
 17. survives the ordinary Sir Caldus encounter, waits for the durable personal reward and pending-inventory handoff, and reaches the stable `BossExitReady` projection;
 18. proves both boss and extraction readiness are available only after that committed handoff;
-19. records the exact schema-70 session/onboarding/first-combat/CleanExit sequence under explicit test attribution; and
-20. shuts down with exactly one combat admission, no worker/connection residue, no open telemetry session, and no retained disposable roots after cleanup.
+19. retains the server-initiated extraction-ready and pending-inventory authorities and verifies the ordinary Caldus reward exercises real pending-item placement;
+20. submits `ExtractionCommitFrameV1` using only the server-issued extraction identity, content revision, and aggregate versions, accepting either the typed immediate `Stored` result or the typed `Pending` result followed by its durable completion;
+21. validates the stored extraction receipt, exact before-versions, Hall destination, and server-planned placement coverage without allowing the client to author a destination;
+22. invokes `UseCommittedExtraction` with that exact receipt and proves the durable Hall snapshot plus a controllable Hall route with no retained danger lineage;
+23. records the exact schema-70 session/onboarding/first-combat/CleanExit sequence under explicit test attribution; and
+24. shuts down with exactly one combat admission, no worker/connection residue, no open telemetry session, and no retained disposable roots after cleanup.
 
 Every transport and authority transition is bounded. Hall traversal allows 15 seconds per authored waypoint; handshake, reliable mutations, route publication, and matching snapshot waits allow 10 seconds each.
 
@@ -43,8 +47,8 @@ Every transport and authority transition is bounded. Hall traversal allows 15 se
 - Rust formatting and scoped diff validation: PASS.
 - Strict target lint: PASS for the production-root journey target with warnings denied.
 - Hosted run [`29900131501`](https://github.com/MikeyPar/Gravebound/actions/runs/29900131501) at source `fbb0c01` passed the schema-70 PostgreSQL source journey and Windows release construction. Its integrated production-root journey then failed before transport admission because dormant-composition validation expected two `runtime_bootstrap` owners while the required production graph correctly retained three: the foundation, terminal reconciler, and world-flow coordinator.
-- The composition invariant now requires those exact three owners. Focused target compilation, formatting, diff validation, and strict target lint pass with the route extended through the stable post-Caldus exit. Disposable PostgreSQL plus real-QUIC execution of that correction and route extension remains pending hosted CI because no local `TEST_DATABASE_URL` is configured.
+- The composition invariant now requires those exact three owners. Focused target compilation, formatting, diff validation, and strict target lint pass with the route extended through the stable post-Caldus exit, durable extraction, and receipt-bound controllable Hall return. Disposable PostgreSQL plus real-QUIC execution of that correction and route extension remains pending hosted CI because no local `TEST_DATABASE_URL` is configured.
 
 ## Claim boundary
 
-This slice proves the source path through the complete fixed dungeon and stable post-Caldus exit, not a completed private-life loop. It does not yet prove extraction, death/successor, reconnect/restart repetition, the 25-journey matrix, current login timing, or optimized Realm Gate capture. The Current Next Step is hosted execution of this exact path, followed by extending the same public-protocol driver through ordinary extraction and death/successor. No `GB-M03-03` or M03 closure credit is awarded here.
+This slice proves the source path through the complete fixed dungeon, durable ordinary extraction, and controllable Hall return, not both terminal branches of a completed private-life loop. It does not yet prove death/successor, reconnect/restart repetition, the 25-journey matrix, current login timing, or optimized Realm Gate capture. The Current Next Step is hosted execution of this exact extraction path, followed by extending the same public-protocol driver through ordinary death/successor. No `GB-M03-03` or M03 closure credit is awarded here.
