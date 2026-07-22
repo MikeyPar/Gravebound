@@ -88,24 +88,31 @@ struct DriverObservation {
 #[derive(Debug, Default)]
 struct SnapshotPublisher {
     sequence: u32,
-    actor_generation: Option<u64>,
+    actor_generation: Option<SnapshotAuthority>,
     last_observed_tick: u64,
     last_published_bucket: Option<u64>,
     terminal_publication: Option<(u64, u64)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SnapshotAuthority {
+    Hall(u64),
+    Danger(u64),
 }
 
 impl SnapshotPublisher {
     fn prepare(
         &mut self,
         observation: &CorePrivateGameplayObservation,
+        authority: SnapshotAuthority,
         terminal: bool,
     ) -> Result<Option<Vec<protocol::SnapshotChunk>>, CorePrivateLifeServerError> {
-        let generation_changed = self.actor_generation != Some(observation.actor_generation);
+        let generation_changed = self.actor_generation != Some(authority);
         if !generation_changed && observation.tick < self.last_observed_tick {
             return Err(CorePrivateLifeServerError::SnapshotTickRegressed);
         }
         if generation_changed {
-            self.actor_generation = Some(observation.actor_generation);
+            self.actor_generation = Some(authority);
             self.last_observed_tick = 0;
             self.last_published_bucket = None;
             self.terminal_publication = None;
@@ -174,7 +181,15 @@ pub(crate) async fn serve_core_private_life_connection(
     let mut driver = route.driver_observation();
     let mut snapshot_publisher = SnapshotPublisher::default();
     publish_route(&process, &writer, &route, 0).await?;
-    publish_latest_driver_snapshot(&connection, driver.as_ref(), &mut snapshot_publisher)?;
+    publish_latest_route_snapshot(
+        &connection,
+        &process,
+        authenticated,
+        transport,
+        &route,
+        driver.as_ref(),
+        &mut snapshot_publisher,
+    )?;
 
     let result = run_connection_loop(
         &connection,
@@ -211,8 +226,26 @@ async fn run_connection_loop(
 ) -> Result<(), CorePrivateLifeServerError> {
     let mut terminal_refresh = tokio::time::interval(Duration::from_millis(50));
     terminal_refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut hall_tick = tokio::time::interval_at(
+        tokio::time::Instant::now() + Duration::from_micros(33_333),
+        Duration::from_micros(33_333),
+    );
+    hall_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
+            _ = hall_tick.tick(), if matches!(route, ConnectionRoute::Hall { .. }) => {
+                let ConnectionRoute::Hall { actor, .. } = route else { unreachable!() };
+                let tick = process.hall().advance_tick(authenticated, *actor, transport)?;
+                if let Some(result) = tick.interaction {
+                    writer
+                        .send_event(
+                            tick.observation.tick,
+                            ReliableEvent::HallInteractionResult(result),
+                        )
+                        .await?;
+                }
+                publish_hall_snapshot(connection, snapshot_publisher, &tick.observation)?;
+            }
             _ = terminal_refresh.tick(), if matches!(route, ConnectionRoute::Danger(_)) => {
                 if let Some(disposition) = process
                     .install_delivered_extraction_hall(authenticated, transport, writer)
@@ -261,20 +294,58 @@ async fn run_connection_loop(
                     route,
                 ).await?;
                 sync_driver_observation(route, driver);
-                publish_latest_driver_snapshot(connection, driver.as_ref(), snapshot_publisher)?;
+                publish_latest_route_snapshot(
+                    connection,
+                    process,
+                    authenticated,
+                    transport,
+                    route,
+                    driver.as_ref(),
+                    snapshot_publisher,
+                )?;
             }
         }
     }
     Ok(())
 }
 
-fn publish_latest_driver_snapshot(
+fn publish_latest_route_snapshot(
     connection: &quinn::Connection,
+    process: &CorePrivateLifeProcess,
+    authenticated: AuthenticatedAccount,
+    transport: CorePrivateLifeTransportLease,
+    route: &ConnectionRoute,
     driver: Option<&DriverObservation>,
     publisher: &mut SnapshotPublisher,
 ) -> Result<(), CorePrivateLifeServerError> {
-    if let Some(driver) = driver {
-        publish_observation_snapshot(connection, publisher, &driver.observer.latest())?;
+    match route {
+        ConnectionRoute::Hall { actor, .. } => {
+            let observation = process
+                .hall()
+                .observation(authenticated, *actor, transport)?;
+            publish_hall_snapshot(connection, publisher, &observation)?;
+        }
+        ConnectionRoute::Danger(_) => {
+            if let Some(driver) = driver {
+                publish_observation_snapshot(connection, publisher, &driver.observer.latest())?;
+            }
+        }
+        ConnectionRoute::Bootstrap => {}
+    }
+    Ok(())
+}
+
+fn publish_hall_snapshot(
+    connection: &quinn::Connection,
+    publisher: &mut SnapshotPublisher,
+    observation: &CorePrivateGameplayObservation,
+) -> Result<(), CorePrivateLifeServerError> {
+    if let Some(chunks) = publisher.prepare(
+        observation,
+        SnapshotAuthority::Hall(observation.actor_generation),
+        false,
+    )? {
+        send_gameplay_snapshots(connection, chunks)?;
     }
     Ok(())
 }
@@ -287,7 +358,11 @@ fn publish_observation_snapshot(
     let Some((observation, terminal)) = gameplay_observation(state) else {
         return Ok(());
     };
-    if let Some(chunks) = publisher.prepare(observation, terminal)? {
+    if let Some(chunks) = publisher.prepare(
+        observation,
+        SnapshotAuthority::Danger(observation.actor_generation),
+        terminal,
+    )? {
         send_gameplay_snapshots(connection, chunks)?;
     }
     Ok(())
@@ -334,6 +409,28 @@ async fn dispatch_reliable(
     route: &mut ConnectionRoute,
 ) -> Result<(), CorePrivateLifeServerError> {
     match message {
+        WireMessage::HallInteractionFrame(frame) => {
+            let result = match route {
+                ConnectionRoute::Hall { actor, .. } => {
+                    process
+                        .hall()
+                        .handle_interaction(authenticated, *actor, transport, &frame)?
+                }
+                ConnectionRoute::Bootstrap | ConnectionRoute::Danger(_) => {
+                    protocol::HallInteractionResultV1 {
+                        schema_version: protocol::HALL_INTERACTION_SCHEMA_VERSION,
+                        request_sequence: frame.sequence,
+                        code: protocol::HallInteractionResultCodeV1::InvalidState,
+                        station: None,
+                        held_ticks: 0,
+                        required_ticks: 0,
+                    }
+                }
+            };
+            writer
+                .send_response(send, 0, ReliableEvent::HallInteractionResult(result))
+                .await?;
+        }
         WireMessage::ActionFrame(frame) => {
             let code = dispatch_private_action(process, transport, route, &frame).await;
             writer
@@ -385,6 +482,12 @@ async fn dispatch_reliable(
             dispatch_recall(send, &frame, process, authenticated, transport, writer).await?;
         }
         message => {
+            if let Some(event) =
+                hall_panel_rejection(process, authenticated, transport, route, &message)
+            {
+                writer.send_response(send, 0, event).await?;
+                return Ok(());
+            }
             let refresh_after = matches!(
                 message,
                 WireMessage::AccountBootstrapFrame(_)
@@ -428,6 +531,72 @@ async fn dispatch_reliable(
         }
     }
     Ok(())
+}
+
+fn hall_panel_rejection(
+    process: &CorePrivateLifeProcess,
+    authenticated: AuthenticatedAccount,
+    transport: CorePrivateLifeTransportLease,
+    route: &ConnectionRoute,
+    message: &WireMessage,
+) -> Option<ReliableEvent> {
+    let ConnectionRoute::Hall { actor, .. } = route else {
+        return None;
+    };
+    let authorized = |station| {
+        process
+            .hall()
+            .panel_authorizes(authenticated, *actor, transport, station)
+    };
+    match message {
+        WireMessage::DeathViewFrame(frame)
+            if !authorized(protocol::HallStationV1::MemorialWall) =>
+        {
+            Some(ReliableEvent::DeathViewResult(Box::new(
+                protocol::DeathViewResultV1::Error {
+                    schema_version: protocol::DEATH_VIEW_SCHEMA_VERSION,
+                    request_sequence: frame.sequence,
+                    code: protocol::DeathViewResultCodeV1::FeatureDisabled,
+                },
+            )))
+        }
+        WireMessage::OathViewFrame(frame) if !authorized(protocol::HallStationV1::OathShrine) => {
+            Some(ReliableEvent::OathViewResult(protocol::OathViewResult {
+                sequence: frame.sequence,
+                code: protocol::OathResultCode::LocationRequired,
+                projection: None,
+            }))
+        }
+        WireMessage::InitialOathSelectionFrame(frame)
+            if !authorized(protocol::HallStationV1::OathShrine) =>
+        {
+            Some(ReliableEvent::InitialOathSelectionResult(
+                protocol::InitialOathSelectionResult {
+                    mutation_id: frame.mutation_id,
+                    code: protocol::OathResultCode::LocationRequired,
+                    projection: None,
+                },
+            ))
+        }
+        WireMessage::SafeInventoryTransferFrame(frame)
+            if !authorized(protocol::HallStationV1::Vault)
+                && !authorized(protocol::HallStationV1::Overflow) =>
+        {
+            Some(ReliableEvent::SafeInventoryTransferResult(
+                protocol::SafeInventoryTransferResultV1 {
+                    mutation_id: frame.mutation_id,
+                    character_id: frame.character_id,
+                    code: protocol::SafeInventoryResultCodeV1::HallBindingRequired,
+                    replayed: false,
+                    result_hash: [0; protocol::SAFE_INVENTORY_RESULT_HASH_BYTES],
+                    account_version: 0,
+                    inventory_version: 0,
+                    placements: Vec::new(),
+                },
+            ))
+        }
+        _ => None,
+    }
 }
 
 fn is_stored_successor(event: &ReliableEvent) -> bool {
@@ -1070,44 +1239,44 @@ mod tests {
         };
 
         let first = publisher
-            .prepare(&observation(1, 1), false)
+            .prepare(&observation(1, 1), SnapshotAuthority::Danger(1), false)
             .expect("first snapshot")
             .expect("first committed frame publishes");
         assert_eq!(first[0].sequence, 1);
         assert_eq!(first[0].server_tick, 1);
 
         let second = publisher
-            .prepare(&observation(2, 1), false)
+            .prepare(&observation(2, 1), SnapshotAuthority::Danger(1), false)
             .expect("next snapshot")
             .expect("next 15 Hz bucket publishes");
         assert_eq!(second[0].sequence, 2);
         assert!(
             publisher
-                .prepare(&observation(3, 1), false)
+                .prepare(&observation(3, 1), SnapshotAuthority::Danger(1), false)
                 .expect("coalesced snapshot")
                 .is_none()
         );
         assert!(
             publisher
-                .prepare(&observation(4, 1), false)
+                .prepare(&observation(4, 1), SnapshotAuthority::Danger(1), false)
                 .expect("second bucket")
                 .is_some()
         );
 
         let lethal = publisher
-            .prepare(&observation(4, 1), true)
+            .prepare(&observation(4, 1), SnapshotAuthority::Danger(1), true)
             .expect("terminal snapshot")
             .expect("same-tick terminal state must publish");
         assert_eq!(lethal[0].sequence, 4);
         assert!(
             publisher
-                .prepare(&observation(4, 1), true)
+                .prepare(&observation(4, 1), SnapshotAuthority::Danger(1), true)
                 .expect("terminal replay")
                 .is_none()
         );
 
         let reconnect_generation = publisher
-            .prepare(&observation(1, 2), false)
+            .prepare(&observation(1, 2), SnapshotAuthority::Danger(2), false)
             .expect("next generation")
             .expect("new generation publishes immediately");
         assert_eq!(reconnect_generation[0].sequence, 5);

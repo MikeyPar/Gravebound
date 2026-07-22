@@ -326,7 +326,9 @@ fn hall_rejection(
     error: CorePrivateHallError,
 ) -> WorldFlowResult {
     let code = match error {
-        CorePrivateHallError::OutOfRange => WorldTransferResultCode::OutOfRange,
+        CorePrivateHallError::OutOfRange | CorePrivateHallError::PanelRequired => {
+            WorldTransferResultCode::OutOfRange
+        }
         CorePrivateHallError::VersionMismatch => WorldTransferResultCode::StateVersionMismatch,
         CorePrivateHallError::TransferInProgress => WorldTransferResultCode::TransferInProgress,
         CorePrivateHallError::Retired | CorePrivateHallError::ActorUnavailable => {
@@ -337,6 +339,9 @@ fn hall_rejection(
         }
         CorePrivateHallError::Content => WorldTransferResultCode::ContentDisabled,
         CorePrivateHallError::GenerationExhausted
+        | CorePrivateHallError::TickExhausted
+        | CorePrivateHallError::InvalidInteraction
+        | CorePrivateHallError::Observation
         | CorePrivateHallError::InvalidSnapshot
         | CorePrivateHallError::ForeignAuthority
         | CorePrivateHallError::StaleActor
@@ -622,6 +627,17 @@ mod tests {
             transport.generation(),
         );
         let inner = Arc::new(AcceptingRealmGate::default());
+        hall.handle_interaction(
+            authenticated(),
+            actor,
+            transport,
+            &protocol::HallInteractionFrameV1 {
+                schema_version: protocol::HALL_INTERACTION_SCHEMA_VERSION,
+                sequence: 1,
+                intent: protocol::HallInteractionIntentV1::BeginHold,
+            },
+        )
+        .unwrap();
         let authority =
             CorePrivateHallWorldFlow::new(Arc::clone(&inner), Arc::clone(&hall), actor, transport);
         let frame = realm_gate_frame();

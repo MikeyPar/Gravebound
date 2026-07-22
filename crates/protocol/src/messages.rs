@@ -8,12 +8,12 @@ use crate::{
     BargainViewFrame, BargainViewResult, CharacterMutationFrame, CharacterMutationResult,
     ClientHello, CoreExtractionReadyStateV1, CorePendingInventoryStateV1, CorePrivateRouteStateV1,
     DeathViewFrameV1, DeathViewResultV1, ExtractionCommitFrameV1, ExtractionCommitResultV1,
-    HandshakeResponse, InitialOathSelectionFrame, InitialOathSelectionResult, NetworkChannel,
-    OathViewFrame, OathViewResult, ProgressionQueryFrame, ProgressionResult, RecallFrameV1,
-    RecallResultV1, ResolutionHoldMutationFrameV1, ResolutionHoldMutationResultV1,
-    ResolutionHoldQueryFrameV1, ResolutionHoldQueryResultV1, SafeInventoryTransferFrameV1,
-    SafeInventoryTransferResultV1, SuccessorCreateFrameV1, SuccessorCreateResultV1, WireText,
-    WorldFlowFrame, WorldFlowResult,
+    HallInteractionFrameV1, HallInteractionResultV1, HandshakeResponse, InitialOathSelectionFrame,
+    InitialOathSelectionResult, NetworkChannel, OathViewFrame, OathViewResult,
+    ProgressionQueryFrame, ProgressionResult, RecallFrameV1, RecallResultV1,
+    ResolutionHoldMutationFrameV1, ResolutionHoldMutationResultV1, ResolutionHoldQueryFrameV1,
+    ResolutionHoldQueryResultV1, SafeInventoryTransferFrameV1, SafeInventoryTransferResultV1,
+    SuccessorCreateFrameV1, SuccessorCreateResultV1, WireText, WorldFlowFrame, WorldFlowResult,
 };
 
 pub const FIXED_VECTOR_SCALE: i16 = 1_000;
@@ -50,6 +50,7 @@ pub enum MessageKind {
     ResolutionHoldQueryFrame,
     ResolutionHoldMutationFrame,
     SuccessorCreateFrame,
+    HallInteractionFrame,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -465,13 +466,16 @@ pub enum ReliableEvent {
     CorePrivateRouteState(Box<CorePrivateRouteStateV1>),
     CorePendingInventoryState(Box<CorePendingInventoryStateV1>),
     CoreExtractionReadyState(Box<CoreExtractionReadyStateV1>),
+    HallInteractionResult(HallInteractionResultV1),
 }
 
 impl ReliableEvent {
     #[must_use]
     pub const fn channel(&self) -> NetworkChannel {
         match self {
-            Self::ActionResult { .. } | Self::RecallResult(_) => NetworkChannel::Action,
+            Self::ActionResult { .. } | Self::RecallResult(_) | Self::HallInteractionResult(_) => {
+                NetworkChannel::Action
+            }
             Self::PatternStarted(_) => NetworkChannel::Pattern,
             Self::MutationResult(_)
             | Self::CharacterMutationResult(_)
@@ -560,6 +564,9 @@ impl ReliableEvent {
             Self::CoreExtractionReadyState(state) => state
                 .validate()
                 .map_err(|_| MessageValidationError::CorePendingInventory),
+            Self::HallInteractionResult(result) => result
+                .validate()
+                .map_err(|_| MessageValidationError::HallInteraction),
             _ => Ok(()),
         }
     }
@@ -607,6 +614,7 @@ pub enum WireMessage {
     ResolutionHoldQueryFrame(ResolutionHoldQueryFrameV1),
     ResolutionHoldMutationFrame(ResolutionHoldMutationFrameV1),
     SuccessorCreateFrame(SuccessorCreateFrameV1),
+    HallInteractionFrame(HallInteractionFrameV1),
 }
 
 impl WireMessage {
@@ -636,6 +644,7 @@ impl WireMessage {
             Self::ResolutionHoldQueryFrame(_) => MessageKind::ResolutionHoldQueryFrame,
             Self::ResolutionHoldMutationFrame(_) => MessageKind::ResolutionHoldMutationFrame,
             Self::SuccessorCreateFrame(_) => MessageKind::SuccessorCreateFrame,
+            Self::HallInteractionFrame(_) => MessageKind::HallInteractionFrame,
         }
     }
 
@@ -653,7 +662,9 @@ impl WireMessage {
             | Self::DeathViewFrame(_)
             | Self::ResolutionHoldQueryFrame(_) => NetworkChannel::Control,
             Self::InputFrame(_) => NetworkChannel::Input,
-            Self::ActionFrame(_) | Self::RecallFrame(_) => NetworkChannel::Action,
+            Self::ActionFrame(_) | Self::RecallFrame(_) | Self::HallInteractionFrame(_) => {
+                NetworkChannel::Action
+            }
             Self::SnapshotChunk(_) => NetworkChannel::Snapshot,
             Self::ReliableEvent(frame) => frame.event.channel(),
             Self::MutationRequest(_)
@@ -731,6 +742,9 @@ impl WireMessage {
             Self::SuccessorCreateFrame(value) => value
                 .validate()
                 .map_err(|_| MessageValidationError::Successor),
+            Self::HallInteractionFrame(value) => value
+                .validate()
+                .map_err(|_| MessageValidationError::HallInteraction),
         }
     }
 }
@@ -761,6 +775,8 @@ pub enum MessageValidationError {
     CorePrivateRoute,
     #[error("Core pending-inventory projection failed semantic validation")]
     CorePendingInventory,
+    #[error("Hall interaction message failed semantic validation")]
+    HallInteraction,
     #[error("message sequence must be nonzero")]
     ZeroSequence,
     #[error("fixed-point vector component must remain within -1000..=1000")]

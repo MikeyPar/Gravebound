@@ -542,6 +542,7 @@ impl BoundCorePrivateLifeServer {
                 WireText::new(protocol::CORE_RECALL_TERMINAL_FEATURE_FLAG)?,
                 WireText::new(protocol::CORE_RESOLUTION_HOLD_FEATURE_FLAG)?,
                 WireText::new(protocol::CORE_SUCCESSOR_FEATURE_FLAG)?,
+                WireText::new(protocol::HALL_INTERACTION_FEATURE_FLAG)?,
             ],
             admission: AdmissionState::Available,
         };

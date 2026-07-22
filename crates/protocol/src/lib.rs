@@ -12,6 +12,7 @@ mod core_pending_inventory;
 mod core_private_route;
 mod death_view;
 mod field_equipment;
+mod hall_interaction;
 mod handshake;
 mod messages;
 mod oath;
@@ -45,7 +46,7 @@ pub use codec::{
     encode_frame, encode_m02_compatibility_frame, encode_protocol_1_12_compatibility_frame,
     encode_protocol_1_14_compatibility_frame, encode_protocol_1_15_compatibility_frame,
     encode_protocol_1_16_compatibility_frame, encode_protocol_1_17_compatibility_frame,
-    encode_protocol_1_18_compatibility_frame,
+    encode_protocol_1_18_compatibility_frame, encode_protocol_1_19_compatibility_frame,
 };
 pub use core_pending_inventory::{
     CORE_PENDING_BACKPACK_CAPACITY, CORE_PENDING_INVENTORY_FEATURE_FLAG,
@@ -83,6 +84,11 @@ pub use field_equipment::{
     FieldEquipmentPreviewProjectionV1, FieldEquipmentRarityV1,
     FieldEquipmentReplacementDestinationV1, FieldEquipmentResultCodeV1, FieldEquipmentSlotV1,
     FieldEquipmentSourceV1, FieldEquipmentValidationError,
+};
+pub use hall_interaction::{
+    HALL_INTERACTION_FEATURE_FLAG, HALL_INTERACTION_HOLD_TICKS, HALL_INTERACTION_SCHEMA_VERSION,
+    HallInteractionFrameV1, HallInteractionIntentV1, HallInteractionResultCodeV1,
+    HallInteractionResultV1, HallInteractionValidationError, HallStationV1,
 };
 pub use handshake::{
     ClientHello, Compression, HandshakeRejection, HandshakeResponse, Platform, ServerHello,
@@ -156,7 +162,9 @@ use thiserror::Error;
 /// First incompatible protocol generation.
 pub const PROTOCOL_MAJOR: u16 = 1;
 /// Backward-compatible feature generation within [`PROTOCOL_MAJOR`].
-pub const PROTOCOL_MINOR: u16 = CORE_PENDING_INVENTORY_PROTOCOL_MINOR;
+pub const PROTOCOL_MINOR: u16 = HALL_INTERACTION_PROTOCOL_MINOR;
+/// Exact authoritative Lantern Halls interaction generation.
+pub const HALL_INTERACTION_PROTOCOL_MINOR: u16 = 20;
 /// Exact pending-at-risk inventory projection generation.
 pub const CORE_PENDING_INVENTORY_PROTOCOL_MINOR: u16 = 19;
 /// Exact ordinary Core private-route projection generation.
@@ -420,7 +428,8 @@ mod tests {
 
     #[test]
     fn pending_inventory_appends_protocol_1_19_with_explicit_negotiation() {
-        assert_eq!(PROTOCOL_MINOR, 19);
+        assert_eq!(PROTOCOL_MINOR, 20);
+        assert_eq!(HALL_INTERACTION_PROTOCOL_MINOR, 20);
         assert_eq!(CORE_PENDING_INVENTORY_PROTOCOL_MINOR, 19);
         assert_eq!(CORE_PRIVATE_ROUTE_PROTOCOL_MINOR, 18);
         assert_eq!(SUCCESSOR_PROTOCOL_MINOR, 17);
@@ -436,6 +445,7 @@ mod tests {
             CORE_SUCCESSOR_FEATURE_FLAG,
             CORE_WORLD_FLOW_FEATURE_FLAG,
             CORE_PENDING_INVENTORY_FEATURE_FLAG,
+            HALL_INTERACTION_FEATURE_FLAG,
         ] {
             assert!(WireText::<{ crate::handshake::FEATURE_FLAG_MAX_BYTES }>::new(feature).is_ok());
         }

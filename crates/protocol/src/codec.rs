@@ -2,9 +2,10 @@ use postcard::{from_bytes, to_stdvec};
 use thiserror::Error;
 
 use crate::{
-    CORE_PRIVATE_ROUTE_PROTOCOL_MINOR, DEATH_VIEW_PROTOCOL_MINOR, M02_PROTOCOL_MINOR, MessageKind,
-    PROTOCOL_MAJOR, ProtocolVersion, RESOLUTION_HOLD_PROTOCOL_MINOR, SAFE_INVENTORY_PROTOCOL_MINOR,
-    SUCCESSOR_PROTOCOL_MINOR, TERMINAL_INVENTORY_PROTOCOL_MINOR, WireMessage,
+    CORE_PENDING_INVENTORY_PROTOCOL_MINOR, CORE_PRIVATE_ROUTE_PROTOCOL_MINOR,
+    DEATH_VIEW_PROTOCOL_MINOR, M02_PROTOCOL_MINOR, MessageKind, PROTOCOL_MAJOR, ProtocolVersion,
+    RESOLUTION_HOLD_PROTOCOL_MINOR, SAFE_INVENTORY_PROTOCOL_MINOR, SUCCESSOR_PROTOCOL_MINOR,
+    TERMINAL_INVENTORY_PROTOCOL_MINOR, WireMessage,
 };
 
 const MAGIC: [u8; 4] = *b"GBN1";
@@ -23,6 +24,7 @@ pub fn encode_m02_compatibility_frame(message: &WireMessage) -> Result<Vec<u8>, 
         || message_uses_terminal_inventory(message)
         || message_uses_successor(message)
         || message_uses_core_private_route(message)
+        || message_uses_hall_interaction(message)
         || matches!(
             message.kind(),
             MessageKind::AccountBootstrapFrame
@@ -58,6 +60,7 @@ pub fn encode_protocol_1_12_compatibility_frame(
         || message_uses_terminal_inventory(message)
         || message_uses_successor(message)
         || message_uses_core_private_route(message)
+        || message_uses_hall_interaction(message)
     {
         return Err(WireCodecError::MessageUnavailableAtVersion);
     }
@@ -78,6 +81,7 @@ pub fn encode_protocol_1_14_compatibility_frame(
     if message_uses_terminal_inventory(message)
         || message_uses_successor(message)
         || message_uses_core_private_route(message)
+        || message_uses_hall_interaction(message)
     {
         return Err(WireCodecError::MessageUnavailableAtVersion);
     }
@@ -98,6 +102,7 @@ pub fn encode_protocol_1_15_compatibility_frame(
     if message_uses_resolution_hold(message)
         || message_uses_successor(message)
         || message_uses_core_private_route(message)
+        || message_uses_hall_interaction(message)
     {
         return Err(WireCodecError::MessageUnavailableAtVersion);
     }
@@ -115,7 +120,10 @@ pub fn encode_protocol_1_15_compatibility_frame(
 pub fn encode_protocol_1_16_compatibility_frame(
     message: &WireMessage,
 ) -> Result<Vec<u8>, WireCodecError> {
-    if message_uses_successor(message) || message_uses_core_private_route(message) {
+    if message_uses_successor(message)
+        || message_uses_core_private_route(message)
+        || message_uses_hall_interaction(message)
+    {
         return Err(WireCodecError::MessageUnavailableAtVersion);
     }
     encode_frame_for_version(
@@ -132,7 +140,7 @@ pub fn encode_protocol_1_16_compatibility_frame(
 pub fn encode_protocol_1_17_compatibility_frame(
     message: &WireMessage,
 ) -> Result<Vec<u8>, WireCodecError> {
-    if message_uses_core_private_route(message) {
+    if message_uses_core_private_route(message) || message_uses_hall_interaction(message) {
         return Err(WireCodecError::MessageUnavailableAtVersion);
     }
     encode_frame_for_version(
@@ -149,7 +157,7 @@ pub fn encode_protocol_1_17_compatibility_frame(
 pub fn encode_protocol_1_18_compatibility_frame(
     message: &WireMessage,
 ) -> Result<Vec<u8>, WireCodecError> {
-    if message_uses_core_pending_inventory(message) {
+    if message_uses_core_pending_inventory(message) || message_uses_hall_interaction(message) {
         return Err(WireCodecError::MessageUnavailableAtVersion);
     }
     encode_frame_for_version(
@@ -157,6 +165,23 @@ pub fn encode_protocol_1_18_compatibility_frame(
         ProtocolVersion {
             major: PROTOCOL_MAJOR,
             minor: CORE_PRIVATE_ROUTE_PROTOCOL_MINOR,
+        },
+    )
+}
+
+/// Reproduces protocol 1.19 bytes for immutable pending-inventory and earlier fixtures.
+/// Authoritative Hall interaction was appended in 1.20.
+pub fn encode_protocol_1_19_compatibility_frame(
+    message: &WireMessage,
+) -> Result<Vec<u8>, WireCodecError> {
+    if message_uses_hall_interaction(message) {
+        return Err(WireCodecError::MessageUnavailableAtVersion);
+    }
+    encode_frame_for_version(
+        message,
+        ProtocolVersion {
+            major: PROTOCOL_MAJOR,
+            minor: CORE_PENDING_INVENTORY_PROTOCOL_MINOR,
         },
     )
 }
@@ -231,6 +256,17 @@ const fn message_uses_core_pending_inventory(message: &WireMessage) -> bool {
             event: crate::ReliableEvent::CorePendingInventoryState(_),
             ..
         })
+    )
+}
+
+const fn message_uses_hall_interaction(message: &WireMessage) -> bool {
+    matches!(
+        message,
+        WireMessage::HallInteractionFrame(_)
+            | WireMessage::ReliableEvent(crate::ReliableEventFrame {
+                event: crate::ReliableEvent::HallInteractionResult(_),
+                ..
+            })
     )
 }
 
@@ -330,6 +366,7 @@ const fn message_kind_byte(kind: MessageKind) -> u8 {
         MessageKind::ResolutionHoldQueryFrame => 21,
         MessageKind::ResolutionHoldMutationFrame => 22,
         MessageKind::SuccessorCreateFrame => 23,
+        MessageKind::HallInteractionFrame => 24,
     }
 }
 
@@ -358,6 +395,7 @@ const fn message_kind_from_byte(value: u8) -> Result<MessageKind, WireCodecError
         21 => Ok(MessageKind::ResolutionHoldQueryFrame),
         22 => Ok(MessageKind::ResolutionHoldMutationFrame),
         23 => Ok(MessageKind::SuccessorCreateFrame),
+        24 => Ok(MessageKind::HallInteractionFrame),
         other => Err(WireCodecError::UnknownMessageKind(other)),
     }
 }
@@ -913,7 +951,7 @@ mod tests {
     }
 
     #[test]
-    fn append_only_message_kind_bytes_one_through_twenty_three_are_unchanged() {
+    fn append_only_message_kind_bytes_one_through_twenty_four_are_unchanged() {
         let legacy = [
             MessageKind::ClientHello,
             MessageKind::HandshakeResponse,
@@ -948,6 +986,33 @@ mod tests {
             22
         );
         assert_eq!(message_kind_byte(MessageKind::SuccessorCreateFrame), 23);
+        assert_eq!(message_kind_byte(MessageKind::HallInteractionFrame), 24);
+    }
+
+    #[test]
+    fn protocol_1_20_appends_bounded_hall_interaction_without_rewriting_1_19() {
+        let request = WireMessage::HallInteractionFrame(crate::HallInteractionFrameV1 {
+            schema_version: crate::HALL_INTERACTION_SCHEMA_VERSION,
+            sequence: 31,
+            intent: crate::HallInteractionIntentV1::BeginHold,
+        });
+        let frame = encode_frame(&request).unwrap();
+        assert_eq!(frame[8], 24);
+        assert_eq!(decode_frame(&frame), Ok(request.clone()));
+        assert_eq!(
+            encode_protocol_1_19_compatibility_frame(&request),
+            Err(WireCodecError::MessageUnavailableAtVersion)
+        );
+
+        let event = crate::ReliableEvent::HallInteractionResult(crate::HallInteractionResultV1 {
+            schema_version: crate::HALL_INTERACTION_SCHEMA_VERSION,
+            request_sequence: 31,
+            code: crate::HallInteractionResultCodeV1::Holding,
+            station: Some(crate::HallStationV1::MemorialWall),
+            held_ticks: 7,
+            required_ticks: crate::HALL_INTERACTION_HOLD_TICKS,
+        });
+        assert_eq!(postcard::to_stdvec(&event).unwrap()[0], 23);
     }
 
     #[test]

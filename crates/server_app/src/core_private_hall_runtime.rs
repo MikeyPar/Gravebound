@@ -13,16 +13,23 @@ use std::{
     sync::{Mutex, MutexGuard},
 };
 
-use protocol::{CharacterLocation, CharacterLocationSnapshot, InputFrame, SafeArrival};
+use protocol::{
+    CharacterLocation, CharacterLocationSnapshot, ENTITY_STATE_ALIVE, EntityKind, EntitySnapshot,
+    HALL_INTERACTION_HOLD_TICKS, HALL_INTERACTION_SCHEMA_VERSION, HallInteractionFrameV1,
+    HallInteractionIntentV1, HallInteractionResultCodeV1, HallInteractionResultV1, HallStationV1,
+    InputFrame, SafeArrival,
+};
 use sim_core::{
-    SceneAccessContext, SceneDisplacement, SceneInteractionAccess, SceneObjectGeometry, TilePoint,
-    WorldSceneDefinition, WorldScenePlayer,
+    SceneAccessContext, SceneDisplacement, SceneInteractionAccess, SceneInteractionEvent,
+    SceneInteractionSession, SceneObjectGeometry, TilePoint, WorldSceneDefinition,
+    WorldScenePlayer,
 };
 use thiserror::Error;
 
 use crate::{
     AuthenticatedAccount, AuthenticatedNamespace, CorePrivateLifeTransportGeneration,
     CorePrivateLifeTransportLease,
+    core_private_gameplay_observation::CorePrivateGameplayObservation,
 };
 
 const HALL_ID: &str = "hub.lantern_halls_01";
@@ -84,9 +91,26 @@ struct HallActor {
     character_version: u64,
     transport_generation: Option<CorePrivateLifeTransportGeneration>,
     player: WorldScenePlayer,
+    simulation_tick: u64,
+    state_version: u64,
+    pending_movement: SceneDisplacement,
+    velocity_x_milli_tiles_per_second: i32,
+    velocity_y_milli_tiles_per_second: i32,
     last_input_sequence: u32,
     last_client_tick: u64,
+    interaction: SceneInteractionSession,
+    interaction_held: bool,
+    interaction_sequence: Option<u32>,
+    interaction_station: Option<HallStationV1>,
+    interaction_held_ticks: u16,
+    last_interaction_sequence: u32,
     transfer: Option<CorePrivateHallRealmGatePermit>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CorePrivateHallTick {
+    pub(crate) observation: CorePrivateGameplayObservation,
+    pub(crate) interaction: Option<HallInteractionResultV1>,
 }
 
 #[derive(Debug)]
@@ -169,8 +193,19 @@ impl CorePrivateHallDirectory {
                     HALL_MOVEMENT_MILLI_TILES_PER_TICK,
                 )
                 .map_err(|_| CorePrivateHallError::Content)?,
+                simulation_tick: 1,
+                state_version: 1,
+                pending_movement: SceneDisplacement::new(0, 0),
+                velocity_x_milli_tiles_per_second: 0,
+                velocity_y_milli_tiles_per_second: 0,
                 last_input_sequence: 0,
                 last_client_tick: 0,
+                interaction: SceneInteractionSession::default(),
+                interaction_held: false,
+                interaction_sequence: None,
+                interaction_station: None,
+                interaction_held_ticks: 0,
+                last_interaction_sequence: 0,
                 transfer: None,
             },
         );
@@ -216,6 +251,8 @@ impl CorePrivateHallDirectory {
             return Err(CorePrivateHallError::ForeignAuthority);
         }
         live.transport_generation = Some(transport.generation());
+        cancel_interaction(live);
+        live.pending_movement = SceneDisplacement::new(0, 0);
         Ok(())
     }
 
@@ -257,14 +294,111 @@ impl CorePrivateHallDirectory {
         if input.held_primary || input.primary_sequence != 0 {
             return Err(CorePrivateHallError::UnsafeAction);
         }
-        let displacement = hall_displacement(input.movement_x_milli, input.movement_y_milli)?;
-        let position = live
-            .player
-            .step_movement(&self.scene, displacement)
-            .map_err(|_| CorePrivateHallError::InvalidInput)?;
+        live.pending_movement = hall_displacement(input.movement_x_milli, input.movement_y_milli)?;
         live.last_input_sequence = input.sequence;
         live.last_client_tick = input.client_tick;
-        Ok(position)
+        Ok(live.player.position())
+    }
+
+    /// Advances exactly one authoritative 30 Hz Hall tick from the latest bounded input.
+    pub(crate) fn advance_tick(
+        &self,
+        authenticated: AuthenticatedAccount,
+        actor: CorePrivateHallActorLease,
+        transport: CorePrivateLifeTransportLease,
+    ) -> Result<CorePrivateHallTick, CorePrivateHallError> {
+        let mut state = lock(&self.state);
+        let live = exact_actor_mut(&mut state, authenticated, actor)?;
+        require_transport(live, transport)?;
+        live.simulation_tick = live
+            .simulation_tick
+            .checked_add(1)
+            .ok_or(CorePrivateHallError::TickExhausted)?;
+        live.state_version = live
+            .state_version
+            .checked_add(1)
+            .ok_or(CorePrivateHallError::TickExhausted)?;
+        let before = live.player.position();
+        let after = live
+            .player
+            .step_movement(&self.scene, live.pending_movement)
+            .map_err(|_| CorePrivateHallError::InvalidInput)?;
+        live.velocity_x_milli_tiles_per_second = after
+            .x_milli_tiles
+            .checked_sub(before.x_milli_tiles)
+            .and_then(|delta| delta.checked_mul(30))
+            .ok_or(CorePrivateHallError::TickExhausted)?;
+        live.velocity_y_milli_tiles_per_second = after
+            .y_milli_tiles
+            .checked_sub(before.y_milli_tiles)
+            .and_then(|delta| delta.checked_mul(30))
+            .ok_or(CorePrivateHallError::TickExhausted)?;
+        let interaction = advance_held_interaction(&self.scene, &self.enabled_gates, live)?;
+        Ok(CorePrivateHallTick {
+            observation: hall_observation(live)?,
+            interaction,
+        })
+    }
+
+    pub(crate) fn observation(
+        &self,
+        authenticated: AuthenticatedAccount,
+        actor: CorePrivateHallActorLease,
+        transport: CorePrivateLifeTransportLease,
+    ) -> Result<CorePrivateGameplayObservation, CorePrivateHallError> {
+        let mut state = lock(&self.state);
+        let live = exact_actor_mut(&mut state, authenticated, actor)?;
+        require_transport(live, transport)?;
+        hall_observation(live)
+    }
+
+    pub(crate) fn handle_interaction(
+        &self,
+        authenticated: AuthenticatedAccount,
+        actor: CorePrivateHallActorLease,
+        transport: CorePrivateLifeTransportLease,
+        frame: &HallInteractionFrameV1,
+    ) -> Result<HallInteractionResultV1, CorePrivateHallError> {
+        frame
+            .validate()
+            .map_err(|_| CorePrivateHallError::InvalidInteraction)?;
+        let mut state = lock(&self.state);
+        let live = exact_actor_mut(&mut state, authenticated, actor)?;
+        require_transport(live, transport)?;
+        if frame.sequence <= live.last_interaction_sequence {
+            return Ok(interaction_result(
+                frame.sequence,
+                HallInteractionResultCodeV1::StaleSequence,
+                None,
+                0,
+                0,
+            ));
+        }
+        live.last_interaction_sequence = frame.sequence;
+        match frame.intent {
+            HallInteractionIntentV1::BeginHold => {
+                begin_interaction(&self.scene, &self.enabled_gates, live, frame.sequence)
+            }
+            HallInteractionIntentV1::Release => Ok(release_interaction(live, frame.sequence)),
+            HallInteractionIntentV1::ClosePanel => close_panel(live, frame.sequence),
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn panel_authorizes(
+        &self,
+        authenticated: AuthenticatedAccount,
+        actor: CorePrivateHallActorLease,
+        transport: CorePrivateLifeTransportLease,
+        station: HallStationV1,
+    ) -> bool {
+        let mut state = lock(&self.state);
+        exact_actor_mut(&mut state, authenticated, actor)
+            .and_then(|live| {
+                require_transport(live, transport)?;
+                Ok(live.interaction.open_panel_object_id() == Some(station.content_id()))
+            })
+            .unwrap_or(false)
     }
 
     pub(crate) fn prepare_realm_gate(
@@ -286,6 +420,9 @@ impl CorePrivateHallDirectory {
         }
         if live.character_version != expected_character_version {
             return Err(CorePrivateHallError::VersionMismatch);
+        }
+        if live.interaction.open_panel_object_id() != Some(REALM_GATE_ID) {
+            return Err(CorePrivateHallError::PanelRequired);
         }
         let interaction = live
             .player
@@ -398,13 +535,325 @@ impl CorePrivateHallDirectory {
                     HALL_MOVEMENT_MILLI_TILES_PER_TICK,
                 )
                 .unwrap(),
+                simulation_tick: 1,
+                state_version: 1,
+                pending_movement: SceneDisplacement::new(0, 0),
+                velocity_x_milli_tiles_per_second: 0,
+                velocity_y_milli_tiles_per_second: 0,
                 last_input_sequence: 0,
                 last_client_tick: 0,
+                interaction: SceneInteractionSession::default(),
+                interaction_held: false,
+                interaction_sequence: None,
+                interaction_station: None,
+                interaction_held_ticks: 0,
+                last_interaction_sequence: 0,
                 transfer: None,
             },
         );
         lease
     }
+}
+
+fn begin_interaction(
+    scene: &WorldSceneDefinition,
+    enabled_gates: &BTreeSet<String>,
+    actor: &mut HallActor,
+    sequence: u32,
+) -> Result<HallInteractionResultV1, CorePrivateHallError> {
+    if actor.transfer.is_some() {
+        return Ok(interaction_result(
+            sequence,
+            HallInteractionResultCodeV1::InvalidState,
+            None,
+            0,
+            0,
+        ));
+    }
+    if let Some(open) = actor.interaction.open_panel_object_id() {
+        let station = HallStationV1::from_content_id(open).ok_or(CorePrivateHallError::Content)?;
+        return Ok(interaction_result(
+            sequence,
+            HallInteractionResultCodeV1::PanelAlreadyOpen,
+            Some(station),
+            0,
+            0,
+        ));
+    }
+    if actor.interaction_held {
+        return Ok(interaction_result(
+            sequence,
+            HallInteractionResultCodeV1::InvalidState,
+            None,
+            0,
+            0,
+        ));
+    }
+    let Some(projection) = actor
+        .player
+        .nearest_interaction(
+            scene,
+            SceneAccessContext {
+                enabled_integration_gates: enabled_gates,
+                microrealm_cleared: false,
+            },
+        )
+        .map_err(|_| CorePrivateHallError::Content)?
+    else {
+        return Ok(interaction_result(
+            sequence,
+            HallInteractionResultCodeV1::OutOfRange,
+            None,
+            0,
+            0,
+        ));
+    };
+    let station = HallStationV1::from_content_id(&projection.object_id)
+        .ok_or(CorePrivateHallError::Content)?;
+    if projection.access != SceneInteractionAccess::Available {
+        return Ok(interaction_result(
+            sequence,
+            HallInteractionResultCodeV1::InvalidState,
+            None,
+            0,
+            0,
+        ));
+    }
+    if projection.hold_ticks == 0 {
+        let events = actor
+            .interaction
+            .step(Some(&projection), true, false)
+            .map_err(|_| CorePrivateHallError::InvalidInteraction)?;
+        if !matches!(events.as_slice(), [SceneInteractionEvent::Opened { .. }]) {
+            return Err(CorePrivateHallError::InvalidInteraction);
+        }
+        actor.state_version = actor
+            .state_version
+            .checked_add(1)
+            .ok_or(CorePrivateHallError::TickExhausted)?;
+        return Ok(interaction_result(
+            sequence,
+            HallInteractionResultCodeV1::Opened,
+            Some(station),
+            0,
+            0,
+        ));
+    }
+    if projection.hold_ticks != HALL_INTERACTION_HOLD_TICKS {
+        return Err(CorePrivateHallError::Content);
+    }
+    actor.interaction_held = true;
+    actor.interaction_sequence = Some(sequence);
+    actor.interaction_station = Some(station);
+    actor.interaction_held_ticks = 0;
+    Ok(interaction_result(
+        sequence,
+        HallInteractionResultCodeV1::Holding,
+        Some(station),
+        0,
+        HALL_INTERACTION_HOLD_TICKS,
+    ))
+}
+
+fn advance_held_interaction(
+    scene: &WorldSceneDefinition,
+    enabled_gates: &BTreeSet<String>,
+    actor: &mut HallActor,
+) -> Result<Option<HallInteractionResultV1>, CorePrivateHallError> {
+    if !actor.interaction_held {
+        return Ok(None);
+    }
+    let sequence = actor
+        .interaction_sequence
+        .ok_or(CorePrivateHallError::InvalidInteraction)?;
+    let station = actor
+        .interaction_station
+        .ok_or(CorePrivateHallError::InvalidInteraction)?;
+    let projection = actor
+        .player
+        .nearest_interaction(
+            scene,
+            SceneAccessContext {
+                enabled_integration_gates: enabled_gates,
+                microrealm_cleared: false,
+            },
+        )
+        .map_err(|_| CorePrivateHallError::Content)?;
+    let Some(projection) = projection.filter(|projection| {
+        projection.object_id == station.content_id()
+            && projection.access == SceneInteractionAccess::Available
+            && projection.hold_ticks == HALL_INTERACTION_HOLD_TICKS
+    }) else {
+        let held_ticks = actor.interaction_held_ticks;
+        actor
+            .interaction
+            .step(None, false, false)
+            .map_err(|_| CorePrivateHallError::InvalidInteraction)?;
+        clear_hold(actor);
+        return Ok(Some(interaction_result(
+            sequence,
+            HallInteractionResultCodeV1::CancelledOutOfRange,
+            Some(station),
+            held_ticks,
+            HALL_INTERACTION_HOLD_TICKS,
+        )));
+    };
+    let events = actor
+        .interaction
+        .step(Some(&projection), true, false)
+        .map_err(|_| CorePrivateHallError::InvalidInteraction)?;
+    match events.as_slice() {
+        [
+            SceneInteractionEvent::Progress {
+                held_ticks,
+                required_ticks,
+                ..
+            },
+        ] if *required_ticks == HALL_INTERACTION_HOLD_TICKS => {
+            actor.interaction_held_ticks = *held_ticks;
+            Ok(Some(interaction_result(
+                sequence,
+                HallInteractionResultCodeV1::Holding,
+                Some(station),
+                *held_ticks,
+                *required_ticks,
+            )))
+        }
+        [SceneInteractionEvent::Opened { .. }] => {
+            clear_hold(actor);
+            Ok(Some(interaction_result(
+                sequence,
+                HallInteractionResultCodeV1::Opened,
+                Some(station),
+                HALL_INTERACTION_HOLD_TICKS,
+                HALL_INTERACTION_HOLD_TICKS,
+            )))
+        }
+        _ => Err(CorePrivateHallError::InvalidInteraction),
+    }
+}
+
+fn release_interaction(actor: &mut HallActor, request_sequence: u32) -> HallInteractionResultV1 {
+    if !actor.interaction_held {
+        return interaction_result(
+            request_sequence,
+            HallInteractionResultCodeV1::NoActiveHold,
+            None,
+            0,
+            0,
+        );
+    }
+    let station = actor.interaction_station;
+    let held_ticks = actor.interaction_held_ticks;
+    let _ = actor.interaction.step(None, false, false);
+    clear_hold(actor);
+    interaction_result(
+        request_sequence,
+        HallInteractionResultCodeV1::CancelledReleased,
+        station,
+        held_ticks,
+        HALL_INTERACTION_HOLD_TICKS,
+    )
+}
+
+fn close_panel(
+    actor: &mut HallActor,
+    request_sequence: u32,
+) -> Result<HallInteractionResultV1, CorePrivateHallError> {
+    let Some(station) = actor
+        .interaction
+        .open_panel_object_id()
+        .and_then(HallStationV1::from_content_id)
+    else {
+        return Ok(interaction_result(
+            request_sequence,
+            HallInteractionResultCodeV1::NoOpenPanel,
+            None,
+            0,
+            0,
+        ));
+    };
+    let events = actor
+        .interaction
+        .step(None, false, true)
+        .map_err(|_| CorePrivateHallError::InvalidInteraction)?;
+    if !matches!(events.as_slice(), [SceneInteractionEvent::Closed { .. }]) {
+        return Err(CorePrivateHallError::InvalidInteraction);
+    }
+    actor.state_version = actor
+        .state_version
+        .checked_add(1)
+        .ok_or(CorePrivateHallError::TickExhausted)?;
+    Ok(interaction_result(
+        request_sequence,
+        HallInteractionResultCodeV1::Closed,
+        Some(station),
+        0,
+        0,
+    ))
+}
+
+fn cancel_interaction(actor: &mut HallActor) {
+    let _ = actor.interaction.step(None, false, true);
+    clear_hold(actor);
+}
+
+fn clear_hold(actor: &mut HallActor) {
+    actor.interaction_held = false;
+    actor.interaction_sequence = None;
+    actor.interaction_station = None;
+    actor.interaction_held_ticks = 0;
+}
+
+const fn interaction_result(
+    request_sequence: u32,
+    code: HallInteractionResultCodeV1,
+    station: Option<HallStationV1>,
+    held_ticks: u16,
+    required_ticks: u16,
+) -> HallInteractionResultV1 {
+    HallInteractionResultV1 {
+        schema_version: HALL_INTERACTION_SCHEMA_VERSION,
+        request_sequence,
+        code,
+        station,
+        held_ticks,
+        required_ticks,
+    }
+}
+
+fn hall_observation(
+    actor: &HallActor,
+) -> Result<CorePrivateGameplayObservation, CorePrivateHallError> {
+    let entity_id = hall_player_entity_id(actor.lease.character_id);
+    let position = actor.player.position();
+    CorePrivateGameplayObservation::new(
+        actor.simulation_tick,
+        actor.lease.actor_generation,
+        actor.state_version,
+        u64::from(actor.last_input_sequence),
+        vec![EntitySnapshot {
+            entity_id,
+            kind: EntityKind::Player,
+            x_milli_tiles: position.x_milli_tiles,
+            y_milli_tiles: position.y_milli_tiles,
+            velocity_x_milli_tiles_per_second: actor.velocity_x_milli_tiles_per_second,
+            velocity_y_milli_tiles_per_second: actor.velocity_y_milli_tiles_per_second,
+            source_entity_id: 0,
+            source_input_sequence: 0,
+            source_projectile_ordinal: 0,
+            current_health: 1,
+            maximum_health: 1,
+            state_flags: ENTITY_STATE_ALIVE,
+        }],
+    )
+    .map_err(|_| CorePrivateHallError::Observation)
+}
+
+fn hall_player_entity_id(character_id: [u8; 16]) -> u64 {
+    let mut material = [0_u8; 8];
+    material.copy_from_slice(&character_id[..8]);
+    u64::from_le_bytes(material).max(1)
 }
 
 fn exact_actor_mut(
@@ -529,10 +978,18 @@ pub(crate) enum CorePrivateHallError {
     InvalidInput,
     #[error("Hall input is stale")]
     StaleInput,
+    #[error("Hall authoritative tick is exhausted")]
+    TickExhausted,
+    #[error("Hall interaction frame or state is invalid")]
+    InvalidInteraction,
+    #[error("Hall observation could not be projected")]
+    Observation,
     #[error("combat actions are forbidden in Lantern Halls")]
     UnsafeAction,
     #[error("Realm Gate interaction is out of range")]
     OutOfRange,
+    #[error("Realm Gate panel authority is required")]
+    PanelRequired,
     #[error("Realm Gate character version is stale")]
     VersionMismatch,
     #[error("Realm Gate mutation is invalid")]
@@ -567,6 +1024,14 @@ mod tests {
         CorePrivateLifeTransportLease::test_only(ACCOUNT_ID, generation)
     }
 
+    fn interaction(sequence: u32, intent: HallInteractionIntentV1) -> HallInteractionFrameV1 {
+        HallInteractionFrameV1 {
+            schema_version: HALL_INTERACTION_SCHEMA_VERSION,
+            sequence,
+            intent,
+        }
+    }
+
     #[test]
     fn realm_gate_requires_exact_range_and_reserves_the_actor() {
         let hall = CorePrivateHallDirectory::load(&content_root()).unwrap();
@@ -576,6 +1041,17 @@ mod tests {
             7,
             TilePoint::new(32_000, 4_500),
             transport(3).generation(),
+        );
+        assert_eq!(
+            hall.handle_interaction(
+                authenticated(),
+                actor,
+                transport(3),
+                &interaction(1, HallInteractionIntentV1::BeginHold),
+            )
+            .unwrap()
+            .code,
+            HallInteractionResultCodeV1::Opened
         );
         let permit = hall
             .prepare_realm_gate(authenticated(), actor, transport(3), [9; 16], 7)
@@ -598,7 +1074,7 @@ mod tests {
         );
         assert_eq!(
             hall.prepare_realm_gate(authenticated(), actor, transport(4), [7; 16], 7),
-            Err(CorePrivateHallError::OutOfRange)
+            Err(CorePrivateHallError::PanelRequired)
         );
     }
 
@@ -625,9 +1101,16 @@ mod tests {
             ability_2_sequence: 0,
         };
         let before = TilePoint::new(32_000, 42_000);
-        let after = hall
-            .apply_input(authenticated(), actor, transport(3), &input)
+        assert_eq!(
+            hall.apply_input(authenticated(), actor, transport(3), &input)
+                .unwrap(),
+            before
+        );
+        let tick = hall
+            .advance_tick(authenticated(), actor, transport(3))
             .unwrap();
+        let after = &tick.observation.entities[0];
+        let after = TilePoint::new(after.x_milli_tiles, after.y_milli_tiles);
         let dx = i64::from(after.x_milli_tiles - before.x_milli_tiles);
         let dy = i64::from(after.y_milli_tiles - before.y_milli_tiles);
         assert!(dx * dx + dy * dy <= i64::from(HALL_MOVEMENT_MILLI_TILES_PER_TICK).pow(2));
@@ -657,6 +1140,145 @@ mod tests {
         assert_eq!(
             hall.apply_input(authenticated(), actor, transport(3), &combat),
             Err(CorePrivateHallError::UnsafeAction)
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn exact_holds_cancel_on_release_range_loss_and_transport_replacement() {
+        let hall = CorePrivateHallDirectory::load(&content_root()).unwrap();
+        let actor = hall.install_at(
+            authenticated(),
+            CHARACTER_ID,
+            7,
+            TilePoint::new(10_000, 11_500),
+            transport(3).generation(),
+        );
+        let started = hall
+            .handle_interaction(
+                authenticated(),
+                actor,
+                transport(3),
+                &interaction(1, HallInteractionIntentV1::BeginHold),
+            )
+            .unwrap();
+        assert_eq!(started.code, HallInteractionResultCodeV1::Holding);
+        for held_tick in 1..HALL_INTERACTION_HOLD_TICKS {
+            let progress = hall
+                .advance_tick(authenticated(), actor, transport(3))
+                .unwrap()
+                .interaction
+                .unwrap();
+            assert_eq!(progress.code, HallInteractionResultCodeV1::Holding);
+            assert_eq!(progress.held_ticks, held_tick);
+        }
+        let opened = hall
+            .advance_tick(authenticated(), actor, transport(3))
+            .unwrap()
+            .interaction
+            .unwrap();
+        assert_eq!(opened.code, HallInteractionResultCodeV1::Opened);
+        assert!(hall.panel_authorizes(
+            authenticated(),
+            actor,
+            transport(3),
+            HallStationV1::MemorialWall
+        ));
+
+        hall.handle_interaction(
+            authenticated(),
+            actor,
+            transport(3),
+            &interaction(2, HallInteractionIntentV1::ClosePanel),
+        )
+        .unwrap();
+        hall.handle_interaction(
+            authenticated(),
+            actor,
+            transport(3),
+            &interaction(3, HallInteractionIntentV1::BeginHold),
+        )
+        .unwrap();
+        let released = hall
+            .handle_interaction(
+                authenticated(),
+                actor,
+                transport(3),
+                &interaction(4, HallInteractionIntentV1::Release),
+            )
+            .unwrap();
+        assert_eq!(
+            released.code,
+            HallInteractionResultCodeV1::CancelledReleased
+        );
+
+        hall.handle_interaction(
+            authenticated(),
+            actor,
+            transport(3),
+            &interaction(5, HallInteractionIntentV1::BeginHold),
+        )
+        .unwrap();
+        hall.apply_input(
+            authenticated(),
+            actor,
+            transport(3),
+            &InputFrame {
+                sequence: 1,
+                client_tick: 1,
+                movement_x_milli: 0,
+                movement_y_milli: 1_000,
+                aim_x_milli: 1,
+                aim_y_milli: 0,
+                held_primary: false,
+                primary_sequence: 0,
+                ability_1_sequence: 0,
+                ability_2_sequence: 0,
+            },
+        )
+        .unwrap();
+        let mut range_cancelled = false;
+        for _ in 0..4 {
+            let tick = hall
+                .advance_tick(authenticated(), actor, transport(3))
+                .unwrap();
+            if let Some(cancelled) = tick.interaction {
+                assert_eq!(
+                    cancelled.code,
+                    HallInteractionResultCodeV1::CancelledOutOfRange
+                );
+                range_cancelled = true;
+                break;
+            }
+        }
+        assert!(range_cancelled);
+
+        hall.install_at(
+            authenticated(),
+            CHARACTER_ID,
+            7,
+            TilePoint::new(10_000, 11_500),
+            transport(3).generation(),
+        );
+        hall.handle_interaction(
+            authenticated(),
+            actor,
+            transport(3),
+            &interaction(1, HallInteractionIntentV1::BeginHold),
+        )
+        .unwrap();
+        hall.attach_transport(authenticated(), actor, transport(4))
+            .unwrap();
+        assert_eq!(
+            hall.handle_interaction(
+                authenticated(),
+                actor,
+                transport(4),
+                &interaction(2, HallInteractionIntentV1::Release),
+            )
+            .unwrap()
+            .code,
+            HallInteractionResultCodeV1::NoActiveHold
         );
     }
 }
