@@ -687,7 +687,7 @@ pub struct CorePrivateLifeClient {
     extraction_result: Option<protocol::ExtractionCommitResultV1>,
     error: Option<CorePrivateLifeClientFailure>,
     next_request_sequence: u32,
-    next_mutation: u128,
+    last_mutation_id: Option<[u8; protocol::MUTATION_ID_BYTES]>,
 }
 
 impl CorePrivateLifeClient {
@@ -713,7 +713,7 @@ impl CorePrivateLifeClient {
             extraction_result: None,
             error: None,
             next_request_sequence: 1,
-            next_mutation: 1,
+            last_mutation_id: None,
         }
     }
 
@@ -1294,11 +1294,16 @@ impl CorePrivateLifeClient {
     }
 
     fn take_mutation_id(&mut self) -> Result<[u8; 16], CorePrivateLifeClientError> {
-        let mutation = self.next_mutation;
-        self.next_mutation = mutation
-            .checked_add(1)
-            .ok_or(CorePrivateLifeClientError::SequenceExhausted)?;
-        Ok(mutation.to_le_bytes())
+        for _ in 0..4 {
+            let mutation_id = uuid::Uuid::now_v7().into_bytes();
+            if mutation_id != [0; protocol::MUTATION_ID_BYTES]
+                && self.last_mutation_id != Some(mutation_id)
+            {
+                self.last_mutation_id = Some(mutation_id);
+                return Ok(mutation_id);
+            }
+        }
+        Err(CorePrivateLifeClientError::MutationIdentityUnavailable)
     }
 
     fn fail<T>(
@@ -1348,6 +1353,8 @@ pub enum CorePrivateLifeClientError {
     InvalidWorldAuthority,
     #[error("normal Core client sequence exhausted")]
     SequenceExhausted,
+    #[error("normal Core client could not allocate a unique mutation identity")]
+    MutationIdentityUnavailable,
     #[error("normal Core gameplay snapshot authority is malformed or contradictory")]
     InvalidSnapshotAuthority,
     #[error(transparent)]
@@ -5479,6 +5486,24 @@ mod tests {
             client.begin_transfer(WorldTransferCommand::EnterHallFromCharacterSelect, 1),
             Err(CorePrivateLifeClientError::ActionUnavailable)
         ));
+    }
+
+    #[test]
+    fn mutation_identity_is_restart_safe_uuid_v7_authority() {
+        let mut first_process = CorePrivateLifeClient::new(world_revision(), route_revision());
+        let mut restarted_process = CorePrivateLifeClient::new(world_revision(), route_revision());
+        let first = first_process.take_mutation_id().unwrap();
+        let second = first_process.take_mutation_id().unwrap();
+        let after_restart = restarted_process.take_mutation_id().unwrap();
+
+        assert_ne!(first, [0; protocol::MUTATION_ID_BYTES]);
+        assert_ne!(second, [0; protocol::MUTATION_ID_BYTES]);
+        assert_ne!(after_restart, [0; protocol::MUTATION_ID_BYTES]);
+        assert_ne!(first, second);
+        assert_ne!(first, after_restart);
+        assert_eq!(uuid::Uuid::from_bytes(first).get_version_num(), 7);
+        assert_eq!(uuid::Uuid::from_bytes(second).get_version_num(), 7);
+        assert_eq!(uuid::Uuid::from_bytes(after_restart).get_version_num(), 7);
     }
 
     #[test]
