@@ -329,7 +329,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 68;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 69;
 const DISPOSABLE_DATABASE_RESET_SQL: &str = "TRUNCATE TABLE accounts, caldus_victory_exits CASCADE";
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -3216,7 +3216,6 @@ mod tests {
 
     #[test]
     fn safe_storage_migration_is_append_only_bounded_and_overflow_withdrawal_only() {
-        assert_eq!(EXPECTED_SCHEMA_VERSION, 68);
         let migration = include_str!(
             "../../../migrations/0068_safe_storage_view_and_overflow_withdrawal_v1.sql"
         );
@@ -3233,6 +3232,35 @@ mod tests {
             assert!(
                 !lowercase.contains(forbidden),
                 "schema 68 introduced forbidden operation {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn item_shape_repair_admits_canonical_levels_and_black_unique_without_data_rewrite() {
+        assert_eq!(EXPECTED_SCHEMA_VERSION, 69);
+        let migration =
+            include_str!("../../../migrations/0069_item_level_and_black_unique_shape_v1.sql");
+        for required in [
+            "item_level BETWEEN 1 AND 20",
+            "rarity BETWEEN 0 AND 5",
+            "DROP CONSTRAINT reward_entry_shape",
+            "DROP CONSTRAINT item_shape",
+            "published migration history must never be rewritten",
+        ] {
+            assert!(migration.contains(required), "schema 69 omitted {required}");
+        }
+        let lowercase = migration.to_ascii_lowercase();
+        for forbidden in [
+            "drop table",
+            "truncate",
+            "delete from",
+            "update ",
+            "insert into",
+        ] {
+            assert!(
+                !lowercase.contains(forbidden),
+                "schema 69 introduced forbidden operation {forbidden}"
             );
         }
     }
