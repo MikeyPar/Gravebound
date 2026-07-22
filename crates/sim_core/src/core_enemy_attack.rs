@@ -79,6 +79,8 @@ pub enum CoreNormalAttackEvent {
     TelegraphStarted {
         lock: CoreNormalAttackLock,
         first_use: bool,
+        /// Present only for the exact alternating fan entering this telegraph.
+        fan_offsets_milli_degrees: Option<Vec<i32>>,
     },
     Released {
         tick: Tick,
@@ -245,9 +247,11 @@ impl CoreNormalAttackSimulation {
                 };
                 let lock = self.new_lock(*pattern_index, origin, target, *tick, *warning_ticks)?;
                 self.pending_lock = Some(lock.clone());
+                let fan_offsets_milli_degrees = self.scheduler.pending_acolyte_fan_offsets();
                 output.push(CoreNormalAttackEvent::TelegraphStarted {
                     lock,
                     first_use: *first_use,
+                    fan_offsets_milli_degrees,
                 });
             }
             CoreEnemyKitEvent::MireChargeDue {

@@ -231,6 +231,30 @@ pub fn encode_protocol_1_21_compatibility_frame(
     )
 }
 
+/// Reproduces protocol 1.22 bytes for immutable safe-storage and earlier fixtures. Content-bound
+/// combat presentation was appended in 1.23.
+pub fn encode_protocol_1_22_compatibility_frame(
+    message: &WireMessage,
+) -> Result<Vec<u8>, WireCodecError> {
+    encode_frame_for_version(
+        message,
+        ProtocolVersion {
+            major: PROTOCOL_MAJOR,
+            minor: crate::SAFE_STORAGE_PROTOCOL_MINOR,
+        },
+    )
+}
+
+const fn message_uses_core_combat_presentation(message: &WireMessage) -> bool {
+    matches!(
+        message,
+        WireMessage::ReliableEvent(crate::ReliableEventFrame {
+            event: crate::ReliableEvent::CoreCombatPresentationState(_),
+            ..
+        })
+    )
+}
+
 const fn message_uses_death_view(message: &WireMessage) -> bool {
     matches!(
         message,
@@ -351,6 +375,11 @@ fn encode_frame_for_version(
     message: &WireMessage,
     version: ProtocolVersion,
 ) -> Result<Vec<u8>, WireCodecError> {
+    if version.minor < crate::CORE_COMBAT_PRESENTATION_PROTOCOL_MINOR
+        && message_uses_core_combat_presentation(message)
+    {
+        return Err(WireCodecError::MessageUnavailableAtVersion);
+    }
     message
         .validate()
         .map_err(|_| WireCodecError::InvalidMessage)?;

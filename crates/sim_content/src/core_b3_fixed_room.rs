@@ -68,6 +68,7 @@ pub enum CoreB3RewardDisposition {
 #[derive(Debug, Clone, PartialEq)]
 pub struct CoreB3CombatStep {
     pub tick: Tick,
+    pub actor_id: EntityId,
     pub health: EnemyHealthStep,
     pub knight: Option<CoreKnightStep>,
     pub charge_contacts: Vec<CoreB3ChargeContact>,
@@ -343,6 +344,7 @@ impl CoreB3CombatSimulation {
         let reward_drops = self.health.collect_due_drops(combat.tick)?;
         Ok(CoreB3CombatStep {
             tick: combat.tick,
+            actor_id: self.knight.entity_id(),
             health,
             knight: knight_step,
             charge_contacts,

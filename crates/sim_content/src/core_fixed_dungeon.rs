@@ -71,9 +71,10 @@ pub enum CoreFixedDungeonRoomStep {
 }
 
 /// Renderer-neutral state from the current fixed-room combat owner.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CoreFixedDungeonEnemyPresentation {
     pub entity_id: EntityId,
+    pub content_id: String,
     pub position: sim_core::SimulationVector,
     pub current_health: u32,
     pub maximum_health: u32,
@@ -315,6 +316,15 @@ impl CoreFixedDungeonCombat {
     /// Only living hurtboxes are emitted, which avoids reconstructing unauthoritative corpse
     /// positions for authored B2/B3 enemies whose health snapshots intentionally omit position.
     pub fn presentation(&self) -> Result<CoreFixedDungeonPresentation, CoreFixedDungeonError> {
+        let plan = match self.node() {
+            CoreFixedDungeonNode::BellCrossB1 => Some(&self.plans.b1),
+            CoreFixedDungeonNode::BellNaveB2 => Some(&self.plans.b2),
+            CoreFixedDungeonNode::BellKnightB3 => Some(&self.plans.b3),
+            CoreFixedDungeonNode::BellBridgeB5 => Some(&self.plans.b5),
+            CoreFixedDungeonNode::BellVestibuleB0
+            | CoreFixedDungeonNode::BellRestB4
+            | CoreFixedDungeonNode::CaldusArenaB6 => None,
+        };
         let health = match &self.state {
             CoreFixedDungeonState::B1(room) | CoreFixedDungeonState::B5(room) => room
                 .wave()
@@ -366,6 +376,14 @@ impl CoreFixedDungeonCombat {
                     .ok_or(CoreFixedDungeonError::DefinitionDrift)?;
                 Ok(CoreFixedDungeonEnemyPresentation {
                     entity_id: hurtbox.id(),
+                    content_id: plan
+                        .and_then(|plan| {
+                            plan.assignments()
+                                .iter()
+                                .find(|assignment| assignment.entity_id == hurtbox.id())
+                        })
+                        .map(|assignment| assignment.enemy_id.to_string())
+                        .ok_or(CoreFixedDungeonError::DefinitionDrift)?,
                     position: hurtbox.center(),
                     current_health,
                     maximum_health,

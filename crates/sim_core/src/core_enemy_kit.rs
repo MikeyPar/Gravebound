@@ -182,6 +182,30 @@ impl CoreEnemyKitScheduler {
         }
     }
 
+    /// Exact fan offsets for the Acolyte cast that is currently entering telegraph.
+    #[must_use]
+    pub fn pending_acolyte_fan_offsets(&self) -> Option<Vec<i32>> {
+        let CoreEnemyKitState::BellAcolyte {
+            use_second_offsets, ..
+        } = &self.state
+        else {
+            return None;
+        };
+        let CorePatternGeometryDefinition::AlternatingFan {
+            first_offsets_milli_degrees,
+            second_offsets_milli_degrees,
+            ..
+        } = self.definition.parameters().patterns[0].geometry()
+        else {
+            return None;
+        };
+        Some(if *use_second_offsets {
+            second_offsets_milli_degrees.clone()
+        } else {
+            first_offsets_milli_degrees.clone()
+        })
+    }
+
     /// Advances one authoritative tick.
     ///
     /// `positioned_for_attack` gates a new discrete cycle. Once a telegraph has started, its

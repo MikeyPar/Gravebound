@@ -6,12 +6,12 @@ use thiserror::Error;
 use crate::{
     AccountBootstrapFrame, AccountBootstrapResult, BargainDecisionFrame, BargainDecisionResult,
     BargainViewFrame, BargainViewResult, CharacterMutationFrame, CharacterMutationResult,
-    ClientHello, CoreConsumableStateV1, CoreConsumableUseFrameV1, CoreConsumableUseResultV1,
-    CoreExtractionReadyStateV1, CorePendingInventoryStateV1, CorePrivateRouteStateV1,
-    DeathViewFrameV1, DeathViewResultV1, ExtractionCommitFrameV1, ExtractionCommitResultV1,
-    HallInteractionFrameV1, HallInteractionResultV1, HandshakeResponse, InitialOathSelectionFrame,
-    InitialOathSelectionResult, NetworkChannel, OathViewFrame, OathViewResult,
-    ProgressionQueryFrame, ProgressionResult, RecallFrameV1, RecallResultV1,
+    ClientHello, CoreCombatPresentationStateV1, CoreConsumableStateV1, CoreConsumableUseFrameV1,
+    CoreConsumableUseResultV1, CoreExtractionReadyStateV1, CorePendingInventoryStateV1,
+    CorePrivateRouteStateV1, DeathViewFrameV1, DeathViewResultV1, ExtractionCommitFrameV1,
+    ExtractionCommitResultV1, HallInteractionFrameV1, HallInteractionResultV1, HandshakeResponse,
+    InitialOathSelectionFrame, InitialOathSelectionResult, NetworkChannel, OathViewFrame,
+    OathViewResult, ProgressionQueryFrame, ProgressionResult, RecallFrameV1, RecallResultV1,
     ResolutionHoldMutationFrameV1, ResolutionHoldMutationResultV1, ResolutionHoldQueryFrameV1,
     ResolutionHoldQueryResultV1, SafeInventoryTransferFrameV1, SafeInventoryTransferResultV1,
     SafeStorageQueryFrameV1, SafeStorageQueryResultV1, SuccessorCreateFrameV1,
@@ -474,6 +474,7 @@ pub enum ReliableEvent {
     CoreConsumableUseResult(CoreConsumableUseResultV1),
     CoreConsumableState(CoreConsumableStateV1),
     SafeStorageQueryResult(Box<SafeStorageQueryResultV1>),
+    CoreCombatPresentationState(Box<CoreCombatPresentationStateV1>),
 }
 
 impl ReliableEvent {
@@ -483,7 +484,9 @@ impl ReliableEvent {
             Self::ActionResult { .. } | Self::RecallResult(_) | Self::HallInteractionResult(_) => {
                 NetworkChannel::Action
             }
-            Self::PatternStarted(_) => NetworkChannel::Pattern,
+            Self::PatternStarted(_) | Self::CoreCombatPresentationState(_) => {
+                NetworkChannel::Pattern
+            }
             Self::MutationResult(_)
             | Self::CharacterMutationResult(_)
             | Self::InitialOathSelectionResult(_)
@@ -586,6 +589,9 @@ impl ReliableEvent {
             Self::SafeStorageQueryResult(result) => result
                 .validate()
                 .map_err(|_| MessageValidationError::SafeStorage),
+            Self::CoreCombatPresentationState(state) => state
+                .validate()
+                .map_err(|_| MessageValidationError::CoreCombatPresentation),
             _ => Ok(()),
         }
     }
@@ -812,6 +818,8 @@ pub enum MessageValidationError {
     CoreConsumable,
     #[error("safe-storage message failed semantic validation")]
     SafeStorage,
+    #[error("Core combat presentation message is invalid")]
+    CoreCombatPresentation,
     #[error("message sequence must be nonzero")]
     ZeroSequence,
     #[error("fixed-point vector component must remain within -1000..=1000")]

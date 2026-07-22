@@ -8,6 +8,7 @@ mod account;
 mod bargain;
 mod bounded;
 mod codec;
+mod core_combat_presentation;
 mod core_consumable;
 mod core_pending_inventory;
 mod core_private_route;
@@ -50,6 +51,14 @@ pub use codec::{
     encode_protocol_1_16_compatibility_frame, encode_protocol_1_17_compatibility_frame,
     encode_protocol_1_18_compatibility_frame, encode_protocol_1_19_compatibility_frame,
     encode_protocol_1_20_compatibility_frame, encode_protocol_1_21_compatibility_frame,
+    encode_protocol_1_22_compatibility_frame,
+};
+pub use core_combat_presentation::{
+    CORE_COMBAT_PRESENTATION_FEATURE_FLAG, CORE_COMBAT_PRESENTATION_MAX_ACTORS,
+    CORE_COMBAT_PRESENTATION_MAX_TELEGRAPHS, CORE_COMBAT_PRESENTATION_SCHEMA_VERSION,
+    CoreCombatActorBindingV1, CoreCombatActorKindV1, CoreCombatDamageTypeV1,
+    CoreCombatPresentationStateV1, CoreCombatPresentationValidationError,
+    CoreCombatTelegraphShapeV1, CoreCombatTelegraphV1,
 };
 pub use core_consumable::{
     CORE_CONSUMABLE_BELT_CAPACITY, CORE_CONSUMABLE_FEATURE_FLAG, CORE_CONSUMABLE_HASH_BYTES,
@@ -181,7 +190,9 @@ use thiserror::Error;
 /// First incompatible protocol generation.
 pub const PROTOCOL_MAJOR: u16 = 1;
 /// Backward-compatible feature generation within [`PROTOCOL_MAJOR`].
-pub const PROTOCOL_MINOR: u16 = SAFE_STORAGE_PROTOCOL_MINOR;
+pub const PROTOCOL_MINOR: u16 = CORE_COMBAT_PRESENTATION_PROTOCOL_MINOR;
+/// Exact content-bound private-route combat presentation generation.
+pub const CORE_COMBAT_PRESENTATION_PROTOCOL_MINOR: u16 = 23;
 /// Exact bounded Vault/Overflow read projection generation.
 pub const SAFE_STORAGE_PROTOCOL_MINOR: u16 = 22;
 /// Exact durable Core Belt-consumable generation.
@@ -451,7 +462,8 @@ mod tests {
 
     #[test]
     fn pending_inventory_appends_protocol_1_19_with_explicit_negotiation() {
-        assert_eq!(PROTOCOL_MINOR, 20);
+        assert_eq!(PROTOCOL_MINOR, 23);
+        assert_eq!(CORE_COMBAT_PRESENTATION_PROTOCOL_MINOR, 23);
         assert_eq!(HALL_INTERACTION_PROTOCOL_MINOR, 20);
         assert_eq!(CORE_PENDING_INVENTORY_PROTOCOL_MINOR, 19);
         assert_eq!(CORE_PRIVATE_ROUTE_PROTOCOL_MINOR, 18);

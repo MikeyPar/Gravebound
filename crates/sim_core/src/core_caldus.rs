@@ -146,6 +146,7 @@ pub enum CoreCaldusEvent {
         target: CoreBossParticipant,
         target_x_milli_tiles: i32,
         target_y_milli_tiles: i32,
+        movement_starts_at: Tick,
     },
     ChargeDirectionLocked {
         tick: Tick,
@@ -572,18 +573,20 @@ impl CoreCaldusSimulation {
             return Ok(());
         };
         let cast_id = self.allocate_cast_id()?;
+        let movement_starts_at = add_ticks(self.tick, 30)?;
         events.push(CoreCaldusEvent::ChargeTelegraph {
             tick: self.tick,
             cast_id,
             target: target.participant,
             target_x_milli_tiles: target.position_x_milli_tiles,
             target_y_milli_tiles: target.position_y_milli_tiles,
+            movement_starts_at,
         });
         self.scheduled_charges.push(ScheduledCharge {
             cast_id,
             target: Some(target),
             direction_locks_at: add_ticks(self.tick, 21)?,
-            movement_starts_at: add_ticks(self.tick, 30)?,
+            movement_starts_at,
             ends_at: add_ticks(self.tick, 47)?,
         });
         Ok(())
