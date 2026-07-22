@@ -340,7 +340,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 73;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 74;
 const DISPOSABLE_DATABASE_RESET_SQL: &str =
     "TRUNCATE TABLE core_telemetry_sessions_v1, accounts, caldus_victory_exits CASCADE";
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
@@ -3342,7 +3342,6 @@ mod tests {
 
     #[test]
     fn terminal_telemetry_origins_are_additive_immutable_exact_and_optional() {
-        assert_eq!(EXPECTED_SCHEMA_VERSION, 73);
         let migration =
             include_str!("../../../migrations/0073_m03_terminal_telemetry_origins_v1.sql");
         for required in [
@@ -3380,6 +3379,36 @@ mod tests {
             assert!(
                 !lowercase.contains(forbidden),
                 "schema 73 introduced forbidden writer or field {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn identity_ash_wallet_invariant_is_additive_and_preserves_existing_wallets() {
+        assert_eq!(EXPECTED_SCHEMA_VERSION, 74);
+        let migration =
+            include_str!("../../../migrations/0074_m03_identity_ash_wallet_invariant_v1.sql");
+        for required in [
+            "INSERT INTO ash_wallets",
+            "SELECT account.namespace_id, account.account_id, 0, 1",
+            "account.namespace_id = 'core-dev'",
+            "NOT EXISTS",
+            "ON CONFLICT (namespace_id, account_id) DO NOTHING",
+            "schema 74 repairs",
+        ] {
+            assert!(migration.contains(required), "schema 74 omitted {required}");
+        }
+        let lowercase = migration.to_ascii_lowercase();
+        for forbidden in [
+            "drop table",
+            "truncate table",
+            "delete from",
+            "update ash_wallets",
+            "alter table",
+        ] {
+            assert!(
+                !lowercase.contains(forbidden),
+                "schema 74 introduced destructive wallet mutation {forbidden}"
             );
         }
     }

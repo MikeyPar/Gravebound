@@ -607,8 +607,18 @@ async fn typed_identity_store_round_trips_under_one_lock() {
     .fetch_one(transaction.connection())
     .await
     .unwrap();
+    let ash_wallet: (i32, i64) = sqlx::query_as(
+        "SELECT balance, wallet_version FROM ash_wallets \
+         WHERE namespace_id = $1 AND account_id = $2",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_A.as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
     transaction.rollback().await.unwrap();
     assert_eq!(initial_location, (1, 0));
+    assert_eq!(ash_wallet, (0, 1));
     persistence.close().await;
 }
 
