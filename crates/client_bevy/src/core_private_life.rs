@@ -41,8 +41,11 @@ use crate::{
     CorePrivateRouteClientError, CorePrivateRouteClientModel, CorePrivateRouteClientPhase,
     CorePrivateSceneReadiness, CoreSceneReadiness, DeathSummaryAction, DeathUiAction,
     DeathUiCommand, DeathUiConfig, DeathUiSnapshot, DeathViewClientModel, MemorialDetailPhase,
-    MemorialListPhase, NativeDeathView, NativeDeathViewPlugin, NativeSuccessorRecoveryPlugin,
-    NativeSuccessorRecoveryView, SuccessorRecoveryClientModel, SuccessorRecoveryPhase,
+    MemorialListPhase, NativeDeathView, NativeDeathViewPlugin, NativeResolutionHoldPlugin,
+    NativeResolutionHoldView, NativeSuccessorRecoveryPlugin, NativeSuccessorRecoveryView,
+    ResolutionHoldClientModel, ResolutionHoldClientPhase, ResolutionHoldRetryDirective,
+    ResolutionHoldUiAction, ResolutionHoldUiCommand, ResolutionHoldUiConfig, ResolutionHoldUiCopy,
+    ResolutionHoldUiSnapshot, SuccessorRecoveryClientModel, SuccessorRecoveryPhase,
     SuccessorRecoveryUiAction, SuccessorRecoveryUiCommand, SuccessorRecoveryUiConfig,
     SuccessorRecoveryUiSnapshot, TerminalDeathPhase,
     accessibility::AccessibilitySettings,
@@ -129,6 +132,32 @@ impl CorePrivateOathState {
 
     fn apply_selection(&mut self, result: &protocol::InitialOathSelectionResult) {
         self.model.apply_selection(result.clone());
+    }
+}
+
+#[derive(Resource)]
+struct CorePrivateResolutionHold {
+    model: ResolutionHoldClientModel,
+    catalog: sim_content::CompiledProductionItemCatalog,
+}
+
+impl CorePrivateResolutionHold {
+    fn new(catalog: sim_content::CompiledProductionItemCatalog) -> Result<Self> {
+        let revision = WireText::new(catalog.revision_label().to_owned())?;
+        Ok(Self {
+            model: ResolutionHoldClientModel::new(revision),
+            catalog,
+        })
+    }
+
+    fn reset(&mut self) {
+        let revision = WireText::new(self.catalog.revision_label().to_owned())
+            .expect("validated Core item revision remains bounded");
+        self.model = ResolutionHoldClientModel::new(revision);
+    }
+
+    fn captures_input(&self) -> bool {
+        self.model.captures_input()
     }
 }
 
@@ -1024,6 +1053,7 @@ fn private_life_features_advertised(hello: &ServerHello) -> bool {
     [
         CORE_WORLD_FLOW_FEATURE_FLAG,
         protocol::HALL_INTERACTION_FEATURE_FLAG,
+        protocol::CORE_RESOLUTION_HOLD_FEATURE_FLAG,
     ]
     .into_iter()
     .all(|required| {
@@ -1124,6 +1154,10 @@ type PrivateGameplayVisibility<'w, 's> = Query<
 >;
 
 /// Opens the real negotiated private-life route without enabling any local gameplay authority.
+#[allow(
+    clippy::too_many_lines,
+    reason = "the native entry point wires one resource or system per normal-route capability"
+)]
 pub fn run_core_private_life(config: CorePrivateLifeConfig) -> Result<()> {
     if config.test_token.trim().is_empty() {
         bail!("--identity must contain a nonempty wipeable test token");
@@ -1136,6 +1170,9 @@ pub fn run_core_private_life(config: CorePrivateLifeConfig) -> Result<()> {
     })?;
     let content = load_core_private_life_content(&config.content_root)
         .context("normal Core private-life content failed validation")?;
+    let item_catalog = sim_content::load_core_development_items(&config.content_root)
+        .context("normal Core item presentation failed validation")?;
+    let resolution_hold = CorePrivateResolutionHold::new(item_catalog)?;
     let (oath_copy, bargain_copy) = load_oath_bargain_copy(&config.content_root)?;
     let (_, source_report) =
         load_and_validate(&config.content_root).context("Core source package failed validation")?;
@@ -1170,6 +1207,7 @@ pub fn run_core_private_life(config: CorePrivateLifeConfig) -> Result<()> {
         .insert_resource(CorePrivatePresentationContent(content))
         .insert_resource(CorePrivateOathCopy(oath_copy))
         .insert_resource(CorePrivateOathState::default())
+        .insert_resource(resolution_hold)
         .insert_resource(CorePrivateBargainCopy(bargain_copy))
         .insert_resource(CorePrivateBargainState::default())
         .insert_resource(CorePrivateHallInteractionState::default())
@@ -1195,7 +1233,11 @@ pub fn run_core_private_life(config: CorePrivateLifeConfig) -> Result<()> {
                     ..default()
                 }),
         )
-        .add_plugins((NativeDeathViewPlugin, NativeSuccessorRecoveryPlugin))
+        .add_plugins((
+            NativeDeathViewPlugin,
+            NativeResolutionHoldPlugin,
+            NativeSuccessorRecoveryPlugin,
+        ))
         .add_systems(Startup, spawn_ui)
         .add_systems(
             Update,
@@ -1206,6 +1248,9 @@ pub fn run_core_private_life(config: CorePrivateLifeConfig) -> Result<()> {
                 handle_successor_recovery_commands,
                 sync_terminal_views,
                 request_location,
+                drive_resolution_hold,
+                handle_resolution_hold_commands,
+                sync_resolution_hold_view,
                 drive_hall_panels,
                 handle_keyboard,
                 handle_hall_interaction_keyboard,
@@ -1270,13 +1315,18 @@ fn load_oath_bargain_copy(
     ))
 }
 
-#[allow(clippy::needless_pass_by_value)] // Bevy system parameters are wrapper values.
+#[allow(
+    clippy::needless_pass_by_value,
+    clippy::too_many_arguments,
+    reason = "the transport projector mutates independent negotiated UI authorities"
+)]
 fn poll_transport(
     bridge: Res<CorePrivateLifeBridge>,
     mut client: ResMut<CorePrivateLifeClient>,
     mut snapshots: ResMut<CorePrivateSnapshotClient>,
     mut bargain: ResMut<CorePrivateBargainState>,
     mut oath: ResMut<CorePrivateOathState>,
+    mut resolution_hold: ResMut<CorePrivateResolutionHold>,
     mut hall: ResMut<CorePrivateHallInteractionState>,
     mut terminal: ResMut<CorePrivateTerminalUi>,
 ) {
@@ -1297,10 +1347,13 @@ fn poll_transport(
                 &frame,
                 &bridge,
                 &mut client,
-                &mut bargain,
-                &mut oath,
-                &mut hall,
-                &mut terminal,
+                CorePrivateReliableUi {
+                    bargain: &mut bargain,
+                    oath: &mut oath,
+                    resolution_hold: &mut resolution_hold,
+                    hall: &mut hall,
+                    terminal: &mut terminal,
+                },
             ),
             TransportEvent::LinkLost
             | TransportEvent::Reconnecting { .. }
@@ -1309,6 +1362,12 @@ fn poll_transport(
                 bargain.reset();
                 oath.reset();
                 hall.reset();
+                if !matches!(
+                    resolution_hold.model.phase(),
+                    ResolutionHoldClientPhase::Dormant | ResolutionHoldClientPhase::Resolved
+                ) {
+                    resolution_hold.model.transport_lost();
+                }
                 discard_snapshot_queue = true;
                 client.transport_lost();
                 Ok(())
@@ -1318,6 +1377,12 @@ fn poll_transport(
                 bargain.reset();
                 oath.reset();
                 hall.reset();
+                if !matches!(
+                    resolution_hold.model.phase(),
+                    ResolutionHoldClientPhase::Dormant | ResolutionHoldClientPhase::Resolved
+                ) {
+                    resolution_hold.model.transport_lost();
+                }
                 discard_snapshot_queue = true;
                 client.error = Some(CorePrivateLifeClientFailure::Transport);
                 client.phase = CorePrivateLifePhase::Error;
@@ -1361,6 +1426,14 @@ fn poll_transport(
     }
 }
 
+struct CorePrivateReliableUi<'a> {
+    bargain: &'a mut CorePrivateBargainState,
+    oath: &'a mut CorePrivateOathState,
+    resolution_hold: &'a mut CorePrivateResolutionHold,
+    hall: &'a mut CorePrivateHallInteractionState,
+    terminal: &'a mut CorePrivateTerminalUi,
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "the normal route handles one bounded arm per negotiated reliable event"
@@ -1369,11 +1442,15 @@ fn apply_private_reliable(
     frame: &ReliableEventFrame,
     bridge: &CorePrivateLifeBridge,
     client: &mut CorePrivateLifeClient,
-    bargain: &mut CorePrivateBargainState,
-    oath: &mut CorePrivateOathState,
-    hall: &mut CorePrivateHallInteractionState,
-    terminal: &mut CorePrivateTerminalUi,
+    ui: CorePrivateReliableUi<'_>,
 ) -> Result<(), CorePrivateLifeClientError> {
+    let CorePrivateReliableUi {
+        bargain,
+        oath,
+        resolution_hold,
+        hall,
+        terminal,
+    } = ui;
     match &frame.event {
         ReliableEvent::AccountBootstrapResult(result) => client.apply_bootstrap(result.clone()),
         ReliableEvent::CharacterMutationResult(result) => {
@@ -1425,6 +1502,16 @@ fn apply_private_reliable(
             oath.apply_selection(result);
             Ok(())
         }
+        ReliableEvent::ResolutionHoldQueryResult(result) => resolution_hold
+            .model
+            .apply_query_result(result)
+            .map(|_| ())
+            .map_err(|_| CorePrivateLifeClientError::InvalidSnapshotAuthority),
+        ReliableEvent::ResolutionHoldMutationResult(result) => resolution_hold
+            .model
+            .apply_mutation_result(result)
+            .map(|_| ())
+            .map_err(|_| CorePrivateLifeClientError::InvalidSnapshotAuthority),
         ReliableEvent::CorePendingInventoryState(state) => {
             client.apply_pending_inventory((**state).clone())
         }
@@ -1866,13 +1953,210 @@ fn request_location(bridge: Res<CorePrivateLifeBridge>, mut client: ResMut<CoreP
 }
 
 #[allow(clippy::needless_pass_by_value)] // Bevy system parameters are wrapper values.
+fn drive_resolution_hold(
+    bridge: Res<CorePrivateLifeBridge>,
+    mut client: ResMut<CorePrivateLifeClient>,
+    mut resolution: ResMut<CorePrivateResolutionHold>,
+) {
+    let hall_character = client.location.as_ref().and_then(|location| {
+        matches!(
+            &location.location,
+            CharacterLocation::Safe { location_id, .. }
+                if location_id.as_str() == protocol::TERMINAL_HALL_CONTENT_ID
+        )
+        .then_some(location.character_id)
+    });
+    let Some(character_id) = hall_character else {
+        if client.location.is_some()
+            && resolution.model.phase() != ResolutionHoldClientPhase::Dormant
+        {
+            resolution.reset();
+        }
+        return;
+    };
+    let Some(hello) = client.server_hello.clone() else {
+        return;
+    };
+    let frame = match resolution.model.phase() {
+        ResolutionHoldClientPhase::Dormant => {
+            let Ok(sequence) = client.take_request_sequence() else {
+                client.phase = CorePrivateLifePhase::Error;
+                return;
+            };
+            resolution
+                .model
+                .begin_hall_query(&hello, character_id, sequence)
+                .ok()
+        }
+        ResolutionHoldClientPhase::Refreshing => {
+            let Ok(sequence) = client.take_request_sequence() else {
+                client.phase = CorePrivateLifePhase::Error;
+                return;
+            };
+            resolution.model.begin_refresh_query(sequence).ok()
+        }
+        _ => None,
+    };
+    let Some(frame) = frame else {
+        return;
+    };
+    if bridge
+        .0
+        .queue_reliable(WireMessage::ResolutionHoldQueryFrame(frame))
+        .is_err()
+    {
+        resolution.model.transport_lost();
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)] // Bevy system parameters are wrapper values.
+fn handle_resolution_hold_commands(
+    mut commands: MessageReader<ResolutionHoldUiCommand>,
+    bridge: Res<CorePrivateLifeBridge>,
+    mut client: ResMut<CorePrivateLifeClient>,
+    mut resolution: ResMut<CorePrivateResolutionHold>,
+) {
+    for ResolutionHoldUiCommand(action) in commands.read().copied() {
+        let result = apply_resolution_hold_action(action, &bridge, &mut client, &mut resolution);
+        if result.is_err() {
+            client.phase = CorePrivateLifePhase::Error;
+            return;
+        }
+    }
+}
+
+fn apply_resolution_hold_action(
+    action: ResolutionHoldUiAction,
+    bridge: &CorePrivateLifeBridge,
+    client: &mut CorePrivateLifeClient,
+    resolution: &mut CorePrivateResolutionHold,
+) -> Result<(), CorePrivateLifeClientError> {
+    match action {
+        ResolutionHoldUiAction::Select {
+            extraction_id,
+            stack_index,
+        } => resolution
+            .model
+            .select_stack(extraction_id, stack_index)
+            .map_err(|_| CorePrivateLifeClientError::ActionUnavailable),
+        ResolutionHoldUiAction::RequestDestroy => resolution
+            .model
+            .request_destroy_confirmation()
+            .map_err(|_| CorePrivateLifeClientError::ActionUnavailable),
+        ResolutionHoldUiAction::CancelDestroy => resolution
+            .model
+            .cancel_destroy_confirmation()
+            .map_err(|_| CorePrivateLifeClientError::ActionUnavailable),
+        ResolutionHoldUiAction::Move | ResolutionHoldUiAction::ConfirmDestroy => {
+            let sequence = client.take_request_sequence()?;
+            let mutation_id = client.take_mutation_id()?;
+            let issued_at = unix_millis().ok_or(CorePrivateLifeClientError::ActionUnavailable)?;
+            let frame = if action == ResolutionHoldUiAction::Move {
+                resolution
+                    .model
+                    .begin_move(sequence, mutation_id, issued_at)
+            } else {
+                resolution
+                    .model
+                    .confirm_destroy(sequence, mutation_id, issued_at)
+            }
+            .map_err(|_| CorePrivateLifeClientError::ActionUnavailable)?;
+            bridge
+                .0
+                .queue_reliable(WireMessage::ResolutionHoldMutationFrame(frame))
+                .map_err(|_| CorePrivateLifeClientError::ActionUnavailable)
+        }
+        ResolutionHoldUiAction::Retry => retry_resolution_hold(bridge, client, resolution),
+    }
+}
+
+fn retry_resolution_hold(
+    bridge: &CorePrivateLifeBridge,
+    client: &mut CorePrivateLifeClient,
+    resolution: &mut CorePrivateResolutionHold,
+) -> Result<(), CorePrivateLifeClientError> {
+    let hello = client
+        .server_hello
+        .as_ref()
+        .ok_or(CorePrivateLifeClientError::ActionUnavailable)?;
+    resolution
+        .model
+        .accept_server_hello(hello)
+        .map_err(|_| CorePrivateLifeClientError::ActionUnavailable)?;
+    let message = match resolution.model.retry_directive() {
+        ResolutionHoldRetryDirective::RetryExactMutation => {
+            WireMessage::ResolutionHoldMutationFrame(
+                resolution
+                    .model
+                    .retry_exact_mutation()
+                    .map_err(|_| CorePrivateLifeClientError::ActionUnavailable)?,
+            )
+        }
+        ResolutionHoldRetryDirective::RefreshAuthority
+        | ResolutionHoldRetryDirective::WaitForHall
+        | ResolutionHoldRetryDirective::CorrectClock => {
+            let sequence = client.take_request_sequence()?;
+            WireMessage::ResolutionHoldQueryFrame(
+                resolution
+                    .model
+                    .begin_refresh_query(sequence)
+                    .map_err(|_| CorePrivateLifeClientError::ActionUnavailable)?,
+            )
+        }
+        ResolutionHoldRetryDirective::Unavailable => {
+            return Err(CorePrivateLifeClientError::ActionUnavailable);
+        }
+    };
+    bridge
+        .0
+        .queue_reliable(message)
+        .map_err(|_| CorePrivateLifeClientError::ActionUnavailable)
+}
+
+#[allow(clippy::needless_pass_by_value)] // Bevy system parameters are wrapper values.
+fn sync_resolution_hold_view(
+    mut commands: Commands,
+    mut client: ResMut<CorePrivateLifeClient>,
+    resolution: Res<CorePrivateResolutionHold>,
+    view: Option<ResMut<NativeResolutionHoldView>>,
+) {
+    if !resolution.captures_input() {
+        if view.is_some() {
+            commands.remove_resource::<NativeResolutionHoldView>();
+        }
+        return;
+    }
+    let Ok(snapshot) = ResolutionHoldUiSnapshot::from_model(
+        &resolution.model,
+        &resolution.catalog,
+        ResolutionHoldUiCopy::default(),
+    ) else {
+        client.phase = CorePrivateLifePhase::Error;
+        return;
+    };
+    if let Some(mut view) = view {
+        if view.snapshot() != &snapshot {
+            view.replace_snapshot(snapshot);
+        }
+    } else {
+        let Ok(view) = NativeResolutionHoldView::new(snapshot, ResolutionHoldUiConfig::default())
+        else {
+            client.phase = CorePrivateLifePhase::Error;
+            return;
+        };
+        commands.insert_resource(view);
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)] // Bevy system parameters are wrapper values.
 fn handle_keyboard(
     keyboard: Res<ButtonInput<KeyCode>>,
     bridge: Res<CorePrivateLifeBridge>,
     bargain: Res<CorePrivateBargainState>,
+    resolution: Res<CorePrivateResolutionHold>,
     mut client: ResMut<CorePrivateLifeClient>,
 ) {
-    if bargain.captures_input() {
+    if bargain.captures_input() || resolution.captures_input() {
         return;
     }
     let action = if keyboard.just_pressed(KeyCode::Digit1) {
@@ -1898,9 +2182,10 @@ fn handle_hall_interaction_keyboard(
     keyboard: Res<ButtonInput<KeyCode>>,
     bridge: Res<CorePrivateLifeBridge>,
     hall: Res<CorePrivateHallInteractionState>,
+    resolution: Res<CorePrivateResolutionHold>,
     mut client: ResMut<CorePrivateLifeClient>,
 ) {
-    if client.phase != CorePrivateLifePhase::Hall {
+    if client.phase != CorePrivateLifePhase::Hall || resolution.captures_input() {
         return;
     }
     let intent = if keyboard.just_pressed(KeyCode::Escape) && hall.open_station.is_some() {
@@ -1939,9 +2224,11 @@ fn drive_hall_panels(
     client: Res<CorePrivateLifeClient>,
     hall: Res<CorePrivateHallInteractionState>,
     copy: Res<CorePrivateOathCopy>,
+    resolution: Res<CorePrivateResolutionHold>,
     mut oath: ResMut<CorePrivateOathState>,
 ) {
     let oath_open = client.phase == CorePrivateLifePhase::Hall
+        && !resolution.captures_input()
         && hall.open_station == Some(protocol::HallStationV1::OathShrine);
     if !oath_open {
         if oath.open {
@@ -2407,10 +2694,12 @@ fn send_gameplay_input(
     content: Res<CorePrivatePresentationContent>,
     bargain: Res<CorePrivateBargainState>,
     hall: Res<CorePrivateHallInteractionState>,
+    resolution: Res<CorePrivateResolutionHold>,
     mut sequencer: ResMut<InputSequencer>,
 ) {
     if bargain.captures_input()
         || hall.open_station.is_some()
+        || resolution.captures_input()
         || !client
             .route
             .as_ref()
@@ -3478,6 +3767,7 @@ mod tests {
                 vec![
                     WireText::new(CORE_WORLD_FLOW_FEATURE_FLAG).unwrap(),
                     WireText::new(protocol::HALL_INTERACTION_FEATURE_FLAG).unwrap(),
+                    WireText::new(protocol::CORE_RESOLUTION_HOLD_FEATURE_FLAG).unwrap(),
                 ]
             } else {
                 Vec::new()
