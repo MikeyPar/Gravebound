@@ -20,6 +20,11 @@ use persistence::{
 };
 use sqlx::Row;
 
+#[path = "support/terminal_telemetry.rs"]
+mod terminal_telemetry;
+
+const TELEMETRY_SESSION_ID: [u8; 16] = [0xE2; 16];
+
 const ACCOUNT_ID: [u8; 16] = [31; 16];
 const CHARACTER_ID: [u8; 16] = [32; 16];
 const LINEAGE_ID: [u8; 16] = [33; 16];
@@ -451,6 +456,7 @@ async fn reset_fixture(persistence: &PostgresPersistence) {
 async fn explicit_recall_is_atomic_replay_safe_and_restart_durable() {
     let persistence = disposable_database().await;
     reset_fixture(&persistence).await;
+    terminal_telemetry::start_skewed_session(&persistence, ACCOUNT_ID, TELEMETRY_SESSION_ID).await;
     let request = request(ProductionRecallTriggerV1::Explicit);
     let prepared = persistence
         .prepare_production_recall_v1(&request)
@@ -690,6 +696,13 @@ async fn explicit_recall_is_atomic_replay_safe_and_restart_durable() {
             .await,
         Err(PersistenceError::CorruptStoredRecall)
     ));
+    terminal_telemetry::assert_bound_immutable_restart_poll_ack(
+        &reconnected,
+        terminal_telemetry::TerminalFamily::Recall,
+        TELEMETRY_SESSION_ID,
+        "dungeon_recalled",
+    )
+    .await;
     reconnected.close().await;
 }
 
@@ -707,6 +720,11 @@ async fn link_lost_uses_ninety_ticks_and_altered_replay_is_audited_once() {
         .commit_production_recall_v1(&request, prepared.canonical_plan_hash())
         .await
         .unwrap();
+    terminal_telemetry::assert_unbound_terminal(
+        &persistence,
+        terminal_telemetry::TerminalFamily::Recall,
+    )
+    .await;
     let result = committed.result().unwrap();
     assert_eq!(result.completion_tick, START_TICK + 90);
     assert_eq!(result.post_lifetime_ticks, 12_090);

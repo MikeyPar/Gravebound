@@ -35,16 +35,31 @@ pub const MAX_M03_TELEMETRY_POLL: usize = 256;
 
 const POLL_SQL: &str = r"
 SELECT family, account_id, character_id, event_id, event_payload,
-       created_at_millis, commit_order, related_at_millis
+       created_at_millis, commit_order, related_at_millis, session_id,
+       build_id, content_bundle_version, platform, region_id, environment,
+       cohort_tags, session_started_at_millis
 FROM (
     SELECT 0::smallint AS family, death.account_id, death.character_id,
            outbox.event_id, outbox.event_payload,
            floor(extract(epoch FROM outbox.created_at) * 1000)::bigint AS created_at_millis,
            floor(extract(epoch FROM outbox.created_at) * 1000000)::bigint AS commit_order,
-           NULL::bigint AS related_at_millis
+           NULL::bigint AS related_at_millis, session.session_id,
+           session.build_id, session.content_bundle_version, session.platform,
+           session.region_id, session.environment, session.cohort_tags,
+           floor(extract(epoch FROM started.created_at) * 1000)::bigint AS session_started_at_millis
     FROM death_outbox_events AS outbox
     JOIN death_events AS death
       ON death.namespace_id=outbox.namespace_id AND death.death_id=outbox.death_id
+     AND death.account_id=outbox.origin_account_id
+    JOIN core_telemetry_sessions_v1 AS session
+      ON session.namespace_id=outbox.namespace_id
+     AND session.account_id=outbox.origin_account_id
+     AND session.session_id=outbox.origin_session_id
+    JOIN session_outbox_events_v1 AS started
+      ON started.namespace_id=session.namespace_id
+     AND started.account_id=session.account_id
+     AND started.session_id=session.session_id
+     AND started.event_kind=0
     WHERE outbox.namespace_id=$1 AND outbox.event_type='death_committed'
       AND outbox.published_at IS NULL
     UNION ALL
@@ -52,8 +67,20 @@ FROM (
            outbox.event_id, outbox.event_payload,
            floor(extract(epoch FROM outbox.created_at) * 1000)::bigint,
            floor(extract(epoch FROM outbox.created_at) * 1000000)::bigint,
-           NULL::bigint
+           NULL::bigint, session.session_id, session.build_id,
+           session.content_bundle_version, session.platform, session.region_id,
+           session.environment, session.cohort_tags,
+           floor(extract(epoch FROM started.created_at) * 1000)::bigint
     FROM extraction_terminal_outbox_events_v1 AS outbox
+    JOIN core_telemetry_sessions_v1 AS session
+      ON session.namespace_id=outbox.namespace_id
+     AND session.account_id=outbox.account_id
+     AND session.session_id=outbox.origin_session_id
+    JOIN session_outbox_events_v1 AS started
+      ON started.namespace_id=session.namespace_id
+     AND started.account_id=session.account_id
+     AND started.session_id=session.session_id
+     AND started.event_kind=0
     WHERE outbox.namespace_id=$1 AND outbox.event_type='extraction_committed'
       AND outbox.published_at IS NULL
     UNION ALL
@@ -61,8 +88,20 @@ FROM (
            outbox.event_id, outbox.event_payload,
            floor(extract(epoch FROM outbox.created_at) * 1000)::bigint,
            floor(extract(epoch FROM outbox.created_at) * 1000000)::bigint,
-           NULL::bigint
+           NULL::bigint, session.session_id, session.build_id,
+           session.content_bundle_version, session.platform, session.region_id,
+           session.environment, session.cohort_tags,
+           floor(extract(epoch FROM started.created_at) * 1000)::bigint
     FROM recall_terminal_outbox_events_v1 AS outbox
+    JOIN core_telemetry_sessions_v1 AS session
+      ON session.namespace_id=outbox.namespace_id
+     AND session.account_id=outbox.account_id
+     AND session.session_id=outbox.origin_session_id
+    JOIN session_outbox_events_v1 AS started
+      ON started.namespace_id=session.namespace_id
+     AND started.account_id=session.account_id
+     AND started.session_id=session.session_id
+     AND started.event_kind=0
     WHERE outbox.namespace_id=$1
       AND outbox.event_type IN ('emergency_recall_committed','disconnect_recovery_committed')
       AND outbox.published_at IS NULL
@@ -71,10 +110,23 @@ FROM (
            outbox.event_id, outbox.event_payload,
            floor(extract(epoch FROM outbox.created_at) * 1000)::bigint,
            floor(extract(epoch FROM outbox.created_at) * 1000000)::bigint,
-           floor(extract(epoch FROM death.committed_at) * 1000)::bigint
+           floor(extract(epoch FROM death.committed_at) * 1000)::bigint,
+           session.session_id, session.build_id, session.content_bundle_version,
+           session.platform, session.region_id, session.environment,
+           session.cohort_tags,
+           floor(extract(epoch FROM started.created_at) * 1000)::bigint
     FROM successor_mutation_outbox_events_v1 AS outbox
     JOIN death_events AS death
       ON death.namespace_id=outbox.namespace_id AND death.death_id=outbox.death_id
+    JOIN core_telemetry_sessions_v1 AS session
+      ON session.namespace_id=outbox.namespace_id
+     AND session.account_id=outbox.account_id
+     AND session.session_id=outbox.origin_session_id
+    JOIN session_outbox_events_v1 AS started
+      ON started.namespace_id=session.namespace_id
+     AND started.account_id=session.account_id
+     AND started.session_id=session.session_id
+     AND started.event_kind=0
     WHERE outbox.namespace_id=$1 AND outbox.event_type=1 AND outbox.published_at IS NULL
 ) AS committed
 ORDER BY commit_order, event_id, family
@@ -86,6 +138,7 @@ SELECT summary.class_id, summary.level, summary.oath_id, summary.lifetime_ms,
        death.region_id, death.room_id, death.cause_kind, death.killer_content_id,
        death.killer_pattern_id, death.raw_damage, death.final_damage, death.damage_type,
        death.pre_hit_health, death.recall_state,
+       m03_death_item_power_band_v1(death.namespace_id,death.death_id) AS item_power_band,
        ARRAY(
            SELECT bargain.bargain_id FROM death_summary_bargains AS bargain
            WHERE bargain.namespace_id=death.namespace_id AND bargain.death_id=death.death_id
@@ -141,38 +194,6 @@ impl Drop for TelemetryPseudonymizationKeyV1 {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct M03TelemetryProjectionContextV1 {
-    pub session_id: TelemetryId,
-    pub build_id: StableTelemetryId,
-    pub content_bundle_version: StableTelemetryId,
-    pub platform: TelemetryPlatformV1,
-    pub region_id: StableTelemetryId,
-    pub environment: TelemetryEnvironmentV1,
-    pub cohort_tags: Vec<StableTelemetryId>,
-    pub pseudonymization_key: TelemetryPseudonymizationKeyV1,
-}
-
-impl M03TelemetryProjectionContextV1 {
-    fn for_row(
-        &self,
-        account_id: [u8; 16],
-        character_id: [u8; 16],
-    ) -> Result<TelemetryContextV1, M03TelemetryOutboxError> {
-        Ok(TelemetryContextV1 {
-            pseudonymous_account_id: self.pseudonymization_key.pseudonymize(account_id)?,
-            character_id: Some(TelemetryId::new(character_id)?),
-            session_id: self.session_id,
-            build_id: self.build_id.clone(),
-            content_bundle_version: self.content_bundle_version.clone(),
-            platform: self.platform,
-            region_id: self.region_id.clone(),
-            environment: self.environment,
-            cohort_tags: self.cohort_tags.clone(),
-        })
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum M03OutboxFamily {
     Death,
@@ -203,23 +224,36 @@ struct RawCommittedRow {
     created_at_millis: u64,
     commit_order: u64,
     related_at_millis: Option<u64>,
+    session_started_at_millis: u64,
+    context: StoredM03TelemetryContextV1,
 }
 
 #[derive(Debug)]
 pub struct PostgresM03TelemetryOutboxAdapter {
     pool: PgPool,
-    context: M03TelemetryProjectionContextV1,
+    pseudonymization_key: TelemetryPseudonymizationKeyV1,
     in_flight: BTreeMap<TelemetryId, M03OutboxFamily>,
 }
 
 impl PostgresM03TelemetryOutboxAdapter {
+    /// Creates a terminal adapter whose gameplay/session attribution is read exclusively from
+    /// schema-0073 origin bindings. The process supplies only the separated pseudonymization key.
     #[must_use]
-    pub fn new(pool: PgPool, context: M03TelemetryProjectionContextV1) -> Self {
+    pub fn new(pool: PgPool, pseudonymization_key: TelemetryPseudonymizationKeyV1) -> Self {
         Self {
             pool,
-            context,
+            pseudonymization_key,
             in_flight: BTreeMap::new(),
         }
+    }
+
+    /// Creates the adapter from the application persistence root without exposing the pool.
+    #[must_use]
+    pub fn from_persistence(
+        persistence: PostgresPersistence,
+        pseudonymization_key: TelemetryPseudonymizationKeyV1,
+    ) -> Self {
+        Self::new(persistence.pool, pseudonymization_key)
     }
 
     async fn poll(
@@ -237,15 +271,29 @@ impl PostgresM03TelemetryOutboxAdapter {
             .await?;
         let mut projected = Vec::with_capacity(rows.len());
         for row in rows {
+            let account_id = exact_id(row.try_get("account_id")?)?;
+            let character_id = exact_id(row.try_get("character_id")?)?;
             let raw = RawCommittedRow {
                 family: M03OutboxFamily::decode(row.try_get("family")?)?,
-                account_id: exact_id(row.try_get("account_id")?)?,
-                character_id: exact_id(row.try_get("character_id")?)?,
+                account_id,
+                character_id,
                 event_id: exact_id(row.try_get("event_id")?)?,
                 payload: row.try_get("event_payload")?,
                 created_at_millis: positive(row.try_get("created_at_millis")?)?,
                 commit_order: positive(row.try_get("commit_order")?)?,
                 related_at_millis: optional_positive(row.try_get("related_at_millis")?)?,
+                session_started_at_millis: positive(row.try_get("session_started_at_millis")?)?,
+                context: StoredM03TelemetryContextV1 {
+                    account_id,
+                    character_id: Some(character_id),
+                    session_id: exact_id(row.try_get("session_id")?)?,
+                    build_id: row.try_get("build_id")?,
+                    content_bundle_version: row.try_get("content_bundle_version")?,
+                    platform: decode_stored_platform(row.try_get("platform")?)?,
+                    region_id: row.try_get("region_id")?,
+                    environment: decode_stored_environment(row.try_get("environment")?)?,
+                    cohort_tags: row.try_get("cohort_tags")?,
+                },
             };
             let outbox_id = TelemetryId::new(raw.event_id)?;
             if self
@@ -333,7 +381,7 @@ impl PostgresM03TelemetryOutboxAdapter {
         let envelope = VersionedTelemetryEnvelopeV1::new(
             TelemetryId::new(row.event_id)?,
             row.created_at_millis,
-            self.context.for_row(row.account_id, row.character_id)?,
+            project_domain_context(row.context, &self.pseudonymization_key)?,
             event,
         )?;
         Ok(CommittedOutboxEventV1::from_committed_row(
@@ -392,7 +440,12 @@ impl PostgresM03TelemetryOutboxAdapter {
                 .transpose()?,
             active_bargain_ids,
             lifetime_millis: positive_or_zero(row.try_get("lifetime_ms")?)?,
-            session_duration_millis: None,
+            session_duration_millis: Some(
+                source
+                    .created_at_millis
+                    .checked_sub(source.session_started_at_millis)
+                    .ok_or(M03TelemetryOutboxError::CorruptSourceRow)?,
+            ),
             killer_content_id: StableTelemetryId::new(killer_content_id)?,
             killer_pattern_id: row
                 .try_get::<Option<String>, _>("killer_pattern_id")?
@@ -415,7 +468,10 @@ impl PostgresM03TelemetryOutboxAdapter {
             boss_phase_id: None,
             party_size: None,
             contribution_basis_points: None,
-            item_power_band: None,
+            item_power_band: Some(
+                u16::try_from(row.try_get::<i16, _>("item_power_band")?)
+                    .map_err(|_| M03TelemetryOutboxError::CorruptSourceRow)?,
+            ),
             network_health: None,
             recall_state,
             cause,
@@ -467,8 +523,8 @@ impl CommittedTelemetrySource for PostgresM03TelemetryOutboxAdapter {
 }
 
 /// Adapter for the committed onboarding, logical-session, and redacted crash sources introduced
-/// by schema 0070. Unlike the terminal adapter, every TEL-001 context field comes from the owning
-/// durable session row; only the account pseudonymization key is process configuration.
+/// by schema 0070. Every TEL-001 context field comes from the owning durable session row; only the
+/// account pseudonymization key is process configuration.
 #[derive(Debug)]
 pub struct PostgresM03TelemetryDomainAdapter {
     persistence: PostgresPersistence,
@@ -799,6 +855,30 @@ fn exact_id(value: Vec<u8>) -> Result<[u8; 16], M03TelemetryOutboxError> {
         .map_err(|_| M03TelemetryOutboxError::CorruptSourceRow)
 }
 
+fn decode_stored_platform(
+    value: i16,
+) -> Result<StoredM03TelemetryPlatformV1, M03TelemetryOutboxError> {
+    match value {
+        0 => Ok(StoredM03TelemetryPlatformV1::Windows),
+        1 => Ok(StoredM03TelemetryPlatformV1::Linux),
+        2 => Ok(StoredM03TelemetryPlatformV1::MacOs),
+        3 => Ok(StoredM03TelemetryPlatformV1::Unknown),
+        _ => Err(M03TelemetryOutboxError::CorruptSourceRow),
+    }
+}
+
+fn decode_stored_environment(
+    value: i16,
+) -> Result<StoredM03TelemetryEnvironmentV1, M03TelemetryOutboxError> {
+    match value {
+        0 => Ok(StoredM03TelemetryEnvironmentV1::Local),
+        1 => Ok(StoredM03TelemetryEnvironmentV1::Test),
+        2 => Ok(StoredM03TelemetryEnvironmentV1::Staging),
+        3 => Ok(StoredM03TelemetryEnvironmentV1::Production),
+        _ => Err(M03TelemetryOutboxError::CorruptSourceRow),
+    }
+}
+
 fn positive(value: i64) -> Result<u64, M03TelemetryOutboxError> {
     u64::try_from(value)
         .ok()
@@ -991,7 +1071,7 @@ mod tests {
     }
 
     #[test]
-    fn polling_is_bounded_to_committed_terminal_outboxes_and_unpublished_rows() {
+    fn terminal_polling_requires_immutable_origin_sessions_and_bounded_committed_rows() {
         for table in [
             "death_outbox_events",
             "extraction_terminal_outbox_events_v1",
@@ -1001,13 +1081,18 @@ mod tests {
             assert!(POLL_SQL.contains(table), "missing {table}");
         }
         assert_eq!(POLL_SQL.matches("published_at IS NULL").count(), 4);
+        assert_eq!(
+            POLL_SQL.matches("JOIN core_telemetry_sessions_v1").count(),
+            4
+        );
+        assert_eq!(POLL_SQL.matches("outbox.origin_session_id").count(), 4);
         assert!(POLL_SQL.contains("ORDER BY commit_order, event_id, family"));
         assert!(POLL_SQL.contains("LIMIT $2"));
         for live_table in [
             "character_world_locations",
             "character_inventory_heads",
             "active_instance",
-            "session",
+            "runtime_session",
         ] {
             assert!(!POLL_SQL.contains(live_table), "read live {live_table}");
         }

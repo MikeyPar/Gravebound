@@ -317,9 +317,8 @@ pub use successor::{
     derive_successor_character_id_v1, derive_successor_receipt_id_v1,
 };
 pub use telemetry_outbox::{
-    M03TelemetryOutboxError, M03TelemetryProjectionContextV1, MAX_M03_TELEMETRY_POLL,
-    PostgresM03TelemetryDomainAdapter, PostgresM03TelemetryOutboxAdapter,
-    TelemetryPseudonymizationKeyV1,
+    M03TelemetryOutboxError, MAX_M03_TELEMETRY_POLL, PostgresM03TelemetryDomainAdapter,
+    PostgresM03TelemetryOutboxAdapter, TelemetryPseudonymizationKeyV1,
 };
 pub use telemetry_sources::{
     M03CrashObservationCommandV1, M03SessionObservationCommandV1, M03SessionObservationV1,
@@ -341,7 +340,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 72;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 73;
 const DISPOSABLE_DATABASE_RESET_SQL: &str =
     "TRUNCATE TABLE core_telemetry_sessions_v1, accounts, caldus_victory_exits CASCADE";
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
@@ -3276,7 +3275,6 @@ mod tests {
 
     #[test]
     fn loot_telemetry_origin_is_atomic_immutable_bounded_and_optional() {
-        assert_eq!(EXPECTED_SCHEMA_VERSION, 72);
         let migration = include_str!("../../../migrations/0071_m03_loot_telemetry_origin_v1.sql");
         for required in [
             "CREATE TABLE item_ledger_telemetry_outbox_v1",
@@ -3338,6 +3336,50 @@ mod tests {
             assert!(
                 !lowercase.contains(forbidden),
                 "schema 72 introduced forbidden mutation {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_telemetry_origins_are_additive_immutable_exact_and_optional() {
+        assert_eq!(EXPECTED_SCHEMA_VERSION, 73);
+        let migration =
+            include_str!("../../../migrations/0073_m03_terminal_telemetry_origins_v1.sql");
+        for required in [
+            "ADD COLUMN origin_session_id BYTEA",
+            "m03_death_item_power_band_v1",
+            "resolve_m03_terminal_telemetry_session_v1",
+            "started.created_at <= target_occurred_at",
+            "target_occurred_at < ended.created_at",
+            "cardinality(eligible_sessions) IS DISTINCT FROM 1",
+            "WHEN OTHERS THEN",
+            "BEFORE INSERT ON death_outbox_events",
+            "BEFORE INSERT ON extraction_terminal_outbox_events_v1",
+            "BEFORE INSERT ON recall_terminal_outbox_events_v1",
+            "BEFORE INSERT ON successor_mutation_outbox_events_v1",
+            "terminal telemetry origin is immutable",
+            "PostgreSQL transaction_timestamp()",
+            "Pre-0073",
+            "history is deliberately not backfilled",
+        ] {
+            assert!(migration.contains(required), "schema 73 omitted {required}");
+        }
+        let lowercase = migration.to_ascii_lowercase();
+        for forbidden in [
+            "drop table",
+            "truncate table",
+            "delete from",
+            "update death_outbox_events",
+            "update extraction_terminal_outbox_events_v1",
+            "update recall_terminal_outbox_events_v1",
+            "update successor_mutation_outbox_events_v1",
+            "raw_ip",
+            "auth_ticket",
+            "stack_trace",
+        ] {
+            assert!(
+                !lowercase.contains(forbidden),
+                "schema 73 introduced forbidden writer or field {forbidden}"
             );
         }
     }

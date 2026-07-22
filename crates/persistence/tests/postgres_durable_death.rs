@@ -26,6 +26,11 @@ use persistence::{
 use serde::Serialize;
 use sqlx::Row;
 
+#[path = "support/terminal_telemetry.rs"]
+mod terminal_telemetry;
+
+const TELEMETRY_SESSION_ID: [u8; 16] = [0xE3; 16];
+
 const ACCOUNT_ID: [u8; 16] = [230; 16];
 const CHARACTER_ID: [u8; 16] = [231; 16];
 const SECOND_CHARACTER_ID: [u8; 16] = [201; 16];
@@ -3607,6 +3612,30 @@ async fn incident_and_administrative_deaths_preserve_prior_successor_authority()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires explicitly authorized disposable PostgreSQL"]
+async fn death_without_telemetry_session_commits_unbound() {
+    let persistence = disposable_database().await;
+    let content = content_authority();
+    reset_fixture(&persistence).await;
+    let request = request(RequestIds::primary());
+    let evidence = seed_hosted_death_trace(&persistence, &request).await;
+    let promotion = evidence.promotion_for(&request);
+    assert!(matches!(
+        persistence
+            .transact_durable_death(&request, &content, &promotion)
+            .await
+            .unwrap(),
+        DurableDeathTransactionV1::Fresh(_)
+    ));
+    terminal_telemetry::assert_unbound_terminal(
+        &persistence,
+        terminal_telemetry::TerminalFamily::Death,
+    )
+    .await;
+    persistence.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires explicitly authorized disposable PostgreSQL"]
 #[allow(
     clippy::too_many_lines,
     reason = "one hosted gate proves commit, replay, races, rejection, corruption, and wipe ownership"
@@ -3615,6 +3644,7 @@ async fn complete_durable_death_graph_is_atomic_replayable_terminal_and_wipeable
     let persistence = disposable_database().await;
     let content = content_authority();
     reset_fixture(&persistence).await;
+    terminal_telemetry::start_skewed_session(&persistence, ACCOUNT_ID, TELEMETRY_SESSION_ID).await;
     let primary = request(RequestIds::primary());
     let evidence = seed_hosted_death_trace(&persistence, &primary).await;
     let primary_promotion = evidence.promotion_for(&primary);
@@ -3697,6 +3727,13 @@ async fn complete_durable_death_graph_is_atomic_replayable_terminal_and_wipeable
         Err(PersistenceError::DurableDeathIdempotencyConflict)
     ));
     assert_post_death_rejection(&restarted).await;
+    terminal_telemetry::assert_bound_immutable_restart_poll_ack(
+        &restarted,
+        terminal_telemetry::TerminalFamily::Death,
+        TELEMETRY_SESSION_ID,
+        "character_died",
+    )
+    .await;
 
     reset_fixture(&restarted).await;
     let concurrent_request = request(RequestIds::primary());

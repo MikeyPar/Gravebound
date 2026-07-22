@@ -23,6 +23,11 @@ use persistence::{
 };
 use sqlx::Row;
 
+#[path = "support/terminal_telemetry.rs"]
+mod terminal_telemetry;
+
+const TELEMETRY_SESSION_ID: [u8; 16] = [0xE1; 16];
+
 const ACCOUNT_ID: [u8; 16] = [201; 16];
 const CHARACTER_ID: [u8; 16] = [202; 16];
 const LINEAGE_ID: [u8; 16] = [203; 16];
@@ -1513,6 +1518,7 @@ async fn resolution_hold_confirmed_destruction_is_atomic_and_reward_free() {
 async fn extraction_commit_restart_replay_and_conflict_are_atomic() {
     let persistence = disposable_database().await;
     reset_fixture(&persistence).await;
+    terminal_telemetry::start_skewed_session(&persistence, ACCOUNT_ID, TELEMETRY_SESSION_ID).await;
     let commit_request = request();
     let prepared = persistence
         .prepare_production_extraction_v1(&commit_request)
@@ -1777,6 +1783,38 @@ async fn extraction_commit_restart_replay_and_conflict_are_atomic() {
     assert_eq!(counts.get::<i64, _>("conflicts"), 2);
     assert_eq!(counts.get::<i64, _>("checkpoints"), 0);
     transaction.rollback().await.unwrap();
+    terminal_telemetry::assert_bound_immutable_restart_poll_ack(
+        &persistence,
+        terminal_telemetry::TerminalFamily::Extraction,
+        TELEMETRY_SESSION_ID,
+        "dungeon_extracted",
+    )
+    .await;
+    persistence.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires explicitly authorized disposable PostgreSQL"]
+async fn extraction_without_telemetry_session_commits_unbound() {
+    let persistence = disposable_database().await;
+    reset_fixture(&persistence).await;
+    let commit_request = request();
+    let prepared = persistence
+        .prepare_production_extraction_v1(&commit_request)
+        .await
+        .unwrap();
+    assert!(matches!(
+        persistence
+            .commit_production_extraction_v1(&commit_request, prepared.canonical_plan_hash())
+            .await
+            .unwrap(),
+        ProductionExtractionTransactionV1::Fresh(_)
+    ));
+    terminal_telemetry::assert_unbound_terminal(
+        &persistence,
+        terminal_telemetry::TerminalFamily::Extraction,
+    )
+    .await;
     persistence.close().await;
 }
 

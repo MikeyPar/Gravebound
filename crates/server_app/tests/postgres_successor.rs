@@ -21,8 +21,11 @@ use sqlx::Row;
 
 #[path = "support/durable_death.rs"]
 mod durable_death_fixture;
+#[path = "../../persistence/tests/support/terminal_telemetry.rs"]
+mod terminal_telemetry;
 
 const SUCCESSOR_MUTATION_ID: [u8; 16] = [71; 16];
+const TELEMETRY_SESSION_ID: [u8; 16] = [0xE4; 16];
 const ALTERED_DEATH_ID: [u8; 16] = [72; 16];
 const ORDINARY_CREATE_MUTATION_ID: [u8; 16] = [73; 16];
 const ORDINARY_CREATE_CHARACTER_ID: [u8; 16] = [74; 16];
@@ -551,6 +554,12 @@ async fn assert_bootstrap_tracks_successor_consumption(
 #[ignore = "requires explicitly authorized disposable PostgreSQL"]
 async fn successor_creation_is_atomic_concurrent_replayable_and_restart_safe() {
     let persistence = disposable_database().await;
+    terminal_telemetry::start_skewed_session(
+        &persistence,
+        durable_death_fixture::ACCOUNT_ID,
+        TELEMETRY_SESSION_ID,
+    )
+    .await;
     commit_primary_death(&persistence).await;
     assert_reserved_ordinary_create_is_typed(&persistence).await;
     let request = successor_request(
@@ -632,5 +641,34 @@ async fn successor_creation_is_atomic_concurrent_replayable_and_restart_safe() {
     transaction.rollback().await.unwrap();
     assert_complete_successor_graph(&persistence, &fresh).await;
     assert_bootstrap_tracks_successor_consumption(&persistence, &fresh).await;
+    terminal_telemetry::assert_bound_immutable_restart_poll_ack(
+        &persistence,
+        terminal_telemetry::TerminalFamily::Successor,
+        TELEMETRY_SESSION_ID,
+        "successor_created",
+    )
+    .await;
+    persistence.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires explicitly authorized disposable PostgreSQL"]
+async fn successor_without_telemetry_session_commits_unbound() {
+    let persistence = disposable_database().await;
+    commit_primary_death(&persistence).await;
+    let request = successor_request(
+        durable_death_fixture::ACCOUNT_ID,
+        durable_death_fixture::PRIMARY_IDENTITY.death_id,
+        SUCCESSOR_MUTATION_ID,
+    );
+    assert!(matches!(
+        persistence.create_successor_v1(&request).await.unwrap(),
+        SuccessorCreateTransactionV1::Fresh(_)
+    ));
+    terminal_telemetry::assert_unbound_terminal(
+        &persistence,
+        terminal_telemetry::TerminalFamily::Successor,
+    )
+    .await;
     persistence.close().await;
 }
