@@ -10,6 +10,7 @@
 //! session owner to project later. Creating a driver does not enable ordinary route admission.
 
 use std::{
+    collections::VecDeque,
     future::Future,
     sync::{
         Arc, Mutex,
@@ -21,11 +22,12 @@ use std::{
 use sim_core::{AimDirection, DeathTraceNetworkState, DeathTraceRecallState, MovementAction, Tick};
 use thiserror::Error;
 use tokio::{
-    sync::{mpsc, oneshot, watch},
+    sync::{Notify, mpsc, oneshot, watch},
     task::{JoinError, JoinHandle},
     time::{Instant, MissedTickBehavior},
 };
 
+use crate::core_private_combat_frame::CorePrivateConsumableAvailability;
 use crate::{
     CoreBellPortalTransition, CoreDurableB3Resolution, CoreDurableBargainRestResolution,
     CoreDurableCaldusResolution, CorePrivateCaldusDefeatHandoff, CorePrivateCaldusFrame,
@@ -43,6 +45,7 @@ use crate::{
 const NANOS_PER_SECOND: u64 = 1_000_000_000;
 const DRIVER_TICK_NANOS: u64 = NANOS_PER_SECOND / 30;
 const DRIVER_TICK_DURATION: Duration = Duration::from_nanos(DRIVER_TICK_NANOS);
+const CONSUMABLE_RESERVATION_TIMEOUT: Duration = Duration::from_secs(15);
 const _: () = assert!(sim_core::TICKS_PER_SECOND == 30);
 
 static ACTIVE_CORE_MICROREALM_DRIVER_TASKS: AtomicUsize = AtomicUsize::new(0);
@@ -76,6 +79,80 @@ pub enum CorePrivateMicrorealmAbility {
     Ability2,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CorePrivateConsumableSlot {
+    BeltOne,
+    BeltTwo,
+}
+
+#[derive(Debug)]
+struct CorePrivateConsumableReservationRequest {
+    slot: CorePrivateConsumableSlot,
+    response: oneshot::Sender<CorePrivateConsumablePrepareResult>,
+}
+
+#[derive(Debug)]
+enum CorePrivateConsumablePrepareResult {
+    Prepared(CorePrivateConsumableReservation),
+    Rejected(CorePrivateConsumableAvailability),
+    TerminalPending,
+    RecallBlocked,
+}
+
+#[derive(Debug)]
+enum CorePrivateConsumableReservationDecision {
+    Commit { inventory_version: u64 },
+    Abort,
+}
+
+#[derive(Debug)]
+pub(crate) struct CorePrivateConsumableReservation {
+    decision: Option<oneshot::Sender<CorePrivateConsumableReservationDecision>>,
+    completion: Option<oneshot::Receiver<Result<(), CorePrivateMicrorealmIngressError>>>,
+}
+
+impl CorePrivateConsumableReservation {
+    pub(crate) async fn commit(
+        mut self,
+        inventory_version: u64,
+    ) -> Result<(), CorePrivateMicrorealmIngressError> {
+        let decision = self
+            .decision
+            .take()
+            .ok_or(CorePrivateMicrorealmIngressError::Unavailable)?;
+        decision
+            .send(CorePrivateConsumableReservationDecision::Commit { inventory_version })
+            .map_err(|_| CorePrivateMicrorealmIngressError::DriverFrozen)?;
+        self.completion
+            .take()
+            .ok_or(CorePrivateMicrorealmIngressError::Unavailable)?
+            .await
+            .map_err(|_| CorePrivateMicrorealmIngressError::DriverFrozen)?
+    }
+
+    pub(crate) fn abort(mut self) {
+        if let Some(decision) = self.decision.take() {
+            let _ = decision.send(CorePrivateConsumableReservationDecision::Abort);
+        }
+    }
+}
+
+impl Drop for CorePrivateConsumableReservation {
+    fn drop(&mut self) {
+        if let Some(decision) = self.decision.take() {
+            let _ = decision.send(CorePrivateConsumableReservationDecision::Abort);
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum CorePrivateConsumablePreparation {
+    Prepared(CorePrivateConsumableReservation),
+    Rejected(CorePrivateConsumableAvailability),
+    TerminalPending,
+    RecallBlocked,
+}
+
 /// One already-authenticated reliable ability press.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CorePrivateMicrorealmAbilityPress {
@@ -88,6 +165,9 @@ struct RetainedFrameInput {
     continuous: CorePrivateMicrorealmRetainedInput,
     ability_1_sequence: u32,
     ability_2_sequence: u32,
+    consumable_slot_one_sequence: u32,
+    consumable_slot_two_sequence: u32,
+    consumable_inventory_version: u64,
     reward_session_active: bool,
     reward_trust_valid: bool,
     reward_activity_sequence: u64,
@@ -120,6 +200,17 @@ impl RetainedFrameInput {
             } else {
                 self.ability_2_sequence
             },
+            consumable_slot_one_sequence: if self.recall_blocks_actions {
+                0
+            } else {
+                self.consumable_slot_one_sequence
+            },
+            consumable_slot_two_sequence: if self.recall_blocks_actions {
+                0
+            } else {
+                self.consumable_slot_two_sequence
+            },
+            consumable_inventory_version: self.consumable_inventory_version,
             reward_session_active: self.reward_session_active,
             reward_trust_valid: self.reward_trust_valid,
             reward_activity_sequence: self.reward_activity_sequence,
@@ -133,6 +224,9 @@ impl Default for RetainedFrameInput {
             continuous: CorePrivateMicrorealmRetainedInput::default(),
             ability_1_sequence: 0,
             ability_2_sequence: 0,
+            consumable_slot_one_sequence: 0,
+            consumable_slot_two_sequence: 0,
+            consumable_inventory_version: 0,
             reward_session_active: true,
             reward_trust_valid: true,
             reward_activity_sequence: 1,
@@ -147,6 +241,7 @@ impl Default for RetainedFrameInput {
 #[derive(Debug)]
 struct IngressReducer {
     retained: RetainedFrameInput,
+    consumable_availability: [CorePrivateConsumableAvailability; 2],
     last_action_sequence: u32,
     accepting: bool,
 }
@@ -155,6 +250,7 @@ impl Default for IngressReducer {
     fn default() -> Self {
         Self {
             retained: RetainedFrameInput::default(),
+            consumable_availability: [CorePrivateConsumableAvailability::Available; 2],
             last_action_sequence: 0,
             accepting: true,
         }
@@ -175,12 +271,21 @@ struct SharedIngress {
     metrics: SharedMetrics,
     authoritative_tick: AtomicU64,
     task_live: AtomicBool,
+    consumable_requests: Mutex<VecDeque<CorePrivateConsumableReservationRequest>>,
+    consumable_notify: Notify,
 }
 
 impl SharedIngress {
     fn stop_accepting(&self) {
         if let Ok(mut reducer) = self.reducer.lock() {
             reducer.accepting = false;
+        }
+        if let Ok(mut requests) = self.consumable_requests.lock() {
+            for request in requests.drain(..) {
+                let _ = request
+                    .response
+                    .send(CorePrivateConsumablePrepareResult::TerminalPending);
+            }
         }
     }
 
@@ -226,6 +331,146 @@ impl SharedIngress {
             self.publish_locked(&reducer);
         }
     }
+
+    fn update_consumable_availability(&self, availability: [CorePrivateConsumableAvailability; 2]) {
+        if let Ok(mut reducer) = self.reducer.lock() {
+            reducer.consumable_availability = availability;
+        }
+    }
+
+    fn commit_reserved_consumable(
+        &self,
+        slot: CorePrivateConsumableSlot,
+        inventory_version: u64,
+    ) -> Result<RetainedFrameInput, CorePrivateMicrorealmIngressError> {
+        let mut reducer = self
+            .reducer
+            .lock()
+            .map_err(|_| CorePrivateMicrorealmIngressError::Unavailable)?;
+        ensure_accepting(&reducer)?;
+        if inventory_version == 0
+            || (reducer.retained.consumable_inventory_version != 0
+                && reducer.retained.consumable_inventory_version.checked_add(1)
+                    != Some(inventory_version))
+        {
+            return Err(CorePrivateMicrorealmIngressError::ConsumableVersionMismatch);
+        }
+        let sequence = match slot {
+            CorePrivateConsumableSlot::BeltOne => {
+                &mut reducer.retained.consumable_slot_one_sequence
+            }
+            CorePrivateConsumableSlot::BeltTwo => {
+                &mut reducer.retained.consumable_slot_two_sequence
+            }
+        };
+        *sequence = sequence
+            .checked_add(1)
+            .ok_or(CorePrivateMicrorealmIngressError::ConsumableSequenceExhausted)?;
+        reducer.retained.consumable_inventory_version = inventory_version;
+        reducer.retained.reward_activity_sequence = reducer
+            .retained
+            .reward_activity_sequence
+            .checked_add(1)
+            .ok_or(CorePrivateMicrorealmIngressError::ActivitySequenceExhausted)?;
+        reducer.consumable_availability = [
+            CorePrivateConsumableAvailability::SharedCooldown,
+            CorePrivateConsumableAvailability::SharedCooldown,
+        ];
+        let retained = reducer.retained;
+        self.publish_locked(&reducer);
+        Ok(retained)
+    }
+}
+
+#[derive(Debug)]
+enum CorePrivateConsumableReservationFrame {
+    Continue,
+    Apply {
+        retained: RetainedFrameInput,
+        completion: oneshot::Sender<Result<(), CorePrivateMicrorealmIngressError>>,
+    },
+    TimedOut,
+}
+
+async fn resolve_consumable_reservation(
+    ingress: &Arc<SharedIngress>,
+    availability: [CorePrivateConsumableAvailability; 2],
+) -> CorePrivateConsumableReservationFrame {
+    let request = ingress
+        .consumable_requests
+        .lock()
+        .ok()
+        .and_then(|mut requests| requests.pop_front());
+    let Some(request) = request else {
+        return CorePrivateConsumableReservationFrame::Continue;
+    };
+    let blocked_by_recall = ingress
+        .reducer
+        .lock()
+        .map_or(true, |reducer| reducer.retained.recall_blocks_actions);
+    if blocked_by_recall {
+        let _ = request
+            .response
+            .send(CorePrivateConsumablePrepareResult::RecallBlocked);
+        return CorePrivateConsumableReservationFrame::Continue;
+    }
+    let slot_index = match request.slot {
+        CorePrivateConsumableSlot::BeltOne => 0,
+        CorePrivateConsumableSlot::BeltTwo => 1,
+    };
+    if !matches!(
+        availability[slot_index],
+        CorePrivateConsumableAvailability::Available | CorePrivateConsumableAvailability::Empty
+    ) {
+        let _ = request
+            .response
+            .send(CorePrivateConsumablePrepareResult::Rejected(
+                availability[slot_index],
+            ));
+        return CorePrivateConsumableReservationFrame::Continue;
+    }
+    let (decision, decision_rx) = oneshot::channel();
+    let (completion, completion_rx) = oneshot::channel();
+    if request
+        .response
+        .send(CorePrivateConsumablePrepareResult::Prepared(
+            CorePrivateConsumableReservation {
+                decision: Some(decision),
+                completion: Some(completion_rx),
+            },
+        ))
+        .is_err()
+    {
+        return CorePrivateConsumableReservationFrame::Continue;
+    }
+    // A prepared reservation owns the next simulation frame. Shutdown, route
+    // replacement, Recall, extraction, and later terminal requests wait for the
+    // durable decision. A stalled writer faults the driver after a hard bound;
+    // it never resumes combat with potentially indeterminate durable authority.
+    let decision = match tokio::time::timeout(CONSUMABLE_RESERVATION_TIMEOUT, decision_rx).await {
+        Ok(decision) => decision,
+        Err(_) => {
+            let _ = completion.send(Err(CorePrivateMicrorealmIngressError::DriverFrozen));
+            return CorePrivateConsumableReservationFrame::TimedOut;
+        }
+    };
+    match decision {
+        Ok(CorePrivateConsumableReservationDecision::Commit { inventory_version }) => {
+            match ingress.commit_reserved_consumable(request.slot, inventory_version) {
+                Ok(retained) => CorePrivateConsumableReservationFrame::Apply {
+                    retained,
+                    completion,
+                },
+                Err(error) => {
+                    let _ = completion.send(Err(error));
+                    CorePrivateConsumableReservationFrame::Continue
+                }
+            }
+        }
+        Ok(CorePrivateConsumableReservationDecision::Abort) | Err(_) => {
+            CorePrivateConsumableReservationFrame::Continue
+        }
+    }
 }
 
 /// Cloneable, non-writing ingress and observation handle for the exclusive driver task.
@@ -238,6 +483,54 @@ pub struct CorePrivateMicrorealmDriverHandle {
 }
 
 impl CorePrivateMicrorealmDriverHandle {
+    pub(crate) async fn prepare_consumable_use(
+        &self,
+        slot: CorePrivateConsumableSlot,
+    ) -> Result<CorePrivateConsumablePreparation, CorePrivateMicrorealmIngressError> {
+        let (response, receiver) = oneshot::channel();
+        {
+            // Keep the accepting authority locked through queue insertion. This uses the same
+            // reducer-then-queue order as `stop_accepting`, so a terminal transition either drains
+            // this request or wins before it can be admitted; no waiter can be stranded between
+            // the two locks.
+            let reducer = self
+                .ingress
+                .reducer
+                .lock()
+                .map_err(|_| CorePrivateMicrorealmIngressError::Unavailable)?;
+            ensure_accepting(&reducer)?;
+            if reducer.retained.recall_blocks_actions {
+                return Ok(CorePrivateConsumablePreparation::RecallBlocked);
+            }
+            let mut requests = self
+                .ingress
+                .consumable_requests
+                .lock()
+                .map_err(|_| CorePrivateMicrorealmIngressError::Unavailable)?;
+            if !requests.is_empty() {
+                return Err(CorePrivateMicrorealmIngressError::ConsumableReservationBusy);
+            }
+            requests.push_back(CorePrivateConsumableReservationRequest { slot, response });
+        }
+        self.ingress.consumable_notify.notify_one();
+        match receiver
+            .await
+            .map_err(|_| CorePrivateMicrorealmIngressError::DriverFrozen)?
+        {
+            CorePrivateConsumablePrepareResult::Prepared(reservation) => {
+                Ok(CorePrivateConsumablePreparation::Prepared(reservation))
+            }
+            CorePrivateConsumablePrepareResult::Rejected(reason) => {
+                Ok(CorePrivateConsumablePreparation::Rejected(reason))
+            }
+            CorePrivateConsumablePrepareResult::TerminalPending => {
+                Ok(CorePrivateConsumablePreparation::TerminalPending)
+            }
+            CorePrivateConsumablePrepareResult::RecallBlocked => {
+                Ok(CorePrivateConsumablePreparation::RecallBlocked)
+            }
+        }
+    }
     /// Returns only the latest successfully committed frame tick. Scheduled deadlines and failed
     /// simulation/route attempts never advance this value; zero means the first frame has not
     /// committed yet.
@@ -906,6 +1199,14 @@ pub enum CorePrivateMicrorealmIngressError {
     StaleActionSequence { last: u32, received: u32 },
     #[error("server-owned ability press sequence exhausted")]
     AbilitySequenceExhausted,
+    #[error("server-owned consumable press sequence exhausted")]
+    ConsumableSequenceExhausted,
+    #[error("durable consumable inventory version is stale or skipped")]
+    ConsumableVersionMismatch,
+    #[error("another durable consumable reservation is already pending")]
+    ConsumableReservationBusy,
+    #[error("Emergency Recall blocks consumable use")]
+    RecallBlocked,
     #[error("server-owned reward activity sequence exhausted")]
     ActivitySequenceExhausted,
 }
@@ -952,6 +1253,10 @@ trait MicrorealmFrameRuntime: Send + 'static {
         false
     }
 
+    fn consumable_availability(&self) -> [CorePrivateConsumableAvailability; 2] {
+        [CorePrivateConsumableAvailability::Available; 2]
+    }
+
     fn into_live_runtime(self) -> Option<CorePrivateMicrorealmRuntime>
     where
         Self: Sized,
@@ -971,6 +1276,10 @@ impl MicrorealmFrameRuntime for CorePrivateMicrorealmRuntime {
 
     fn handoff_ready(&self) -> bool {
         self.bell_transfer_ready()
+    }
+
+    fn consumable_availability(&self) -> [CorePrivateConsumableAvailability; 2] {
+        self.consumable_availability()
     }
 
     fn into_live_runtime(self) -> Option<CorePrivateMicrorealmRuntime> {
@@ -999,13 +1308,19 @@ fn spawn_driver_with_terminal_feed<R>(
 where
     R: MicrorealmFrameRuntime,
 {
+    let initial_consumable_availability = runtime.consumable_availability();
     let (retained_tx, retained_rx) = watch::channel(RetainedFrameInput::default());
     let ingress = Arc::new(SharedIngress {
-        reducer: Mutex::new(IngressReducer::default()),
+        reducer: Mutex::new(IngressReducer {
+            consumable_availability: initial_consumable_availability,
+            ..IngressReducer::default()
+        }),
         retained_tx,
         metrics: SharedMetrics::default(),
         authoritative_tick: AtomicU64::new(0),
         task_live: AtomicBool::new(true),
+        consumable_requests: Mutex::new(VecDeque::with_capacity(1)),
+        consumable_notify: Notify::new(),
     });
     let (observation_tx, observation_rx) =
         watch::channel(CorePrivateMicrorealmDriverState::Starting);
@@ -1132,13 +1447,16 @@ where
     let mut outcome = CorePrivateMicrorealmDriverOutcome::Shutdown;
 
     loop {
-        let deadline = tokio::select! {
+        let (deadline, retained, mut consumable_completion) = tokio::select! {
             biased;
             changed = shutdown_rx.changed() => {
                 if changed.is_err() || *shutdown_rx.borrow() {
                     break;
                 }
                 continue;
+            }
+            deadline = interval.tick() => {
+                (deadline, *retained_rx.borrow_and_update(), None)
             }
             request = handoff_rx.recv() => {
                 let Some(request) = request else {
@@ -1191,16 +1509,44 @@ where
                 reject_fixed_advance(request, "fixed dungeon is not installed");
                 continue;
             }
-            deadline = interval.tick() => deadline,
+            () = ingress.consumable_notify.notified() => {
+                match resolve_consumable_reservation(
+                    &ingress,
+                    runtime.consumable_availability(),
+                ).await {
+                    CorePrivateConsumableReservationFrame::Continue => continue,
+                    CorePrivateConsumableReservationFrame::Apply { retained, completion } => {
+                        (Instant::now(), retained, Some(completion))
+                    }
+                    CorePrivateConsumableReservationFrame::TimedOut => {
+                        outcome = CorePrivateMicrorealmDriverOutcome::Faulted;
+                        ingress.stop_accepting();
+                        observation_tx.send_replace(CorePrivateMicrorealmDriverState::Faulted {
+                            committed_frames,
+                            fault: CorePrivateMicrorealmDriverFault {
+                                kind: CorePrivateMicrorealmFaultKind::IndeterminateAuthority,
+                                message: Arc::from(
+                                    "durable consumable reservation exceeded its deadline",
+                                ),
+                                last_committed_tick: final_tick,
+                            },
+                        });
+                        break;
+                    }
+                }
+            }
         };
         let lateness = Instant::now().saturating_duration_since(deadline);
         let missed = lateness.as_nanos() / u128::from(DRIVER_TICK_NANOS);
         skipped_deadlines =
             skipped_deadlines.saturating_add(u64::try_from(missed).unwrap_or(u64::MAX));
 
-        let retained = *retained_rx.borrow_and_update();
         match runtime.step_frame(retained.runtime_input()).await {
             Ok(step) => {
+                if let Some(completion) = consumable_completion.take() {
+                    let _ = completion.send(Ok(()));
+                }
+                ingress.update_consumable_availability(runtime.consumable_availability());
                 if step.player_died {
                     ingress.stop_accepting();
                 }
@@ -1273,6 +1619,9 @@ where
                 });
             }
             Err(error) => {
+                if let Some(completion) = consumable_completion.take() {
+                    let _ = completion.send(Err(CorePrivateMicrorealmIngressError::DriverFrozen));
+                }
                 outcome = CorePrivateMicrorealmDriverOutcome::Faulted;
                 ingress.stop_accepting();
                 observation_tx.send_replace(CorePrivateMicrorealmDriverState::Faulted {
@@ -1464,6 +1813,11 @@ enum FixedDungeonDriverEvent {
     Handoff(Option<CorePrivateMicrorealmHandoffRequest>),
     Control(Option<CorePrivateFixedDungeonControlRequest>),
     Frame(Instant),
+    ConsumableFrame {
+        retained: RetainedFrameInput,
+        completion: oneshot::Sender<Result<(), CorePrivateMicrorealmIngressError>>,
+    },
+    ConsumableReservationTimedOut,
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -1499,10 +1853,34 @@ async fn run_fixed_dungeon(
             deadline = interval.tick(), if runtime.room_phase().is_some() && !b3_reward_pending => {
                 FixedDungeonDriverEvent::Frame(deadline)
             }
+            () = ingress.consumable_notify.notified(), if runtime.room_phase().is_some() && !b3_reward_pending => {
+                match resolve_consumable_reservation(ingress, runtime.consumable_availability()).await {
+                    CorePrivateConsumableReservationFrame::Continue => continue,
+                    CorePrivateConsumableReservationFrame::Apply { retained, completion } => {
+                        FixedDungeonDriverEvent::ConsumableFrame { retained, completion }
+                    }
+                    CorePrivateConsumableReservationFrame::TimedOut => {
+                        FixedDungeonDriverEvent::ConsumableReservationTimedOut
+                    }
+                }
+            }
         };
 
         match event {
             FixedDungeonDriverEvent::Shutdown => break,
+            FixedDungeonDriverEvent::ConsumableReservationTimedOut => {
+                outcome = CorePrivateMicrorealmDriverOutcome::Faulted;
+                ingress.stop_accepting();
+                observation_tx.send_replace(CorePrivateMicrorealmDriverState::Faulted {
+                    committed_frames,
+                    fault: CorePrivateMicrorealmDriverFault {
+                        kind: CorePrivateMicrorealmFaultKind::IndeterminateAuthority,
+                        message: Arc::from("durable consumable reservation exceeded its deadline"),
+                        last_committed_tick: final_tick,
+                    },
+                });
+                break;
+            }
             FixedDungeonDriverEvent::Handoff(Some(request)) => {
                 let _ = request.ready_tx.send(Err(()));
             }
@@ -1804,14 +2182,28 @@ async fn run_fixed_dungeon(
             )) => {
                 let _ = result_tx.send(Err("Sir Caldus is not installed".to_owned()));
             }
-            FixedDungeonDriverEvent::Frame(deadline) => {
+            event @ (FixedDungeonDriverEvent::Frame(_)
+            | FixedDungeonDriverEvent::ConsumableFrame { .. }) => {
+                let (deadline, retained, consumable_completion) = match event {
+                    FixedDungeonDriverEvent::Frame(deadline) => {
+                        (deadline, *retained_rx.borrow_and_update(), None)
+                    }
+                    FixedDungeonDriverEvent::ConsumableFrame {
+                        retained,
+                        completion,
+                    } => (Instant::now(), retained, Some(completion)),
+                    _ => unreachable!("matched only frame events"),
+                };
                 let lateness = Instant::now().saturating_duration_since(deadline);
                 let missed = lateness.as_nanos() / u128::from(DRIVER_TICK_NANOS);
                 skipped_deadlines =
                     skipped_deadlines.saturating_add(u64::try_from(missed).unwrap_or(u64::MAX));
-                let retained = *retained_rx.borrow_and_update();
                 match runtime.step_live_room(retained.runtime_input()).await {
                     Ok(frame) => {
+                        if let Some(completion) = consumable_completion {
+                            let _ = completion.send(Ok(()));
+                        }
+                        ingress.update_consumable_availability(runtime.consumable_availability());
                         if frame.player_died {
                             ingress.stop_accepting();
                         }
@@ -1904,6 +2296,10 @@ async fn run_fixed_dungeon(
                         }
                     }
                     Err(error) => {
+                        if let Some(completion) = consumable_completion {
+                            let _ = completion
+                                .send(Err(CorePrivateMicrorealmIngressError::DriverFrozen));
+                        }
                         outcome = CorePrivateMicrorealmDriverOutcome::Faulted;
                         ingress.stop_accepting();
                         observation_tx.send_replace(CorePrivateMicrorealmDriverState::Faulted {
@@ -1960,10 +2356,34 @@ async fn run_caldus(
             deadline = interval.tick(), if !reward_pending => {
                 FixedDungeonDriverEvent::Frame(deadline)
             }
+            () = ingress.consumable_notify.notified(), if !reward_pending && !exit_ready => {
+                match resolve_consumable_reservation(ingress, runtime.consumable_availability()).await {
+                    CorePrivateConsumableReservationFrame::Continue => continue,
+                    CorePrivateConsumableReservationFrame::Apply { retained, completion } => {
+                        FixedDungeonDriverEvent::ConsumableFrame { retained, completion }
+                    }
+                    CorePrivateConsumableReservationFrame::TimedOut => {
+                        FixedDungeonDriverEvent::ConsumableReservationTimedOut
+                    }
+                }
+            }
         };
 
         match event {
             FixedDungeonDriverEvent::Shutdown => break,
+            FixedDungeonDriverEvent::ConsumableReservationTimedOut => {
+                outcome = CorePrivateMicrorealmDriverOutcome::Faulted;
+                ingress.stop_accepting();
+                observation_tx.send_replace(CorePrivateMicrorealmDriverState::Faulted {
+                    committed_frames,
+                    fault: CorePrivateMicrorealmDriverFault {
+                        kind: CorePrivateMicrorealmFaultKind::IndeterminateAuthority,
+                        message: Arc::from("durable consumable reservation exceeded its deadline"),
+                        last_committed_tick: final_tick,
+                    },
+                });
+                break;
+            }
             FixedDungeonDriverEvent::Handoff(Some(request)) => {
                 let _ = request.ready_tx.send(Err(()));
             }
@@ -2050,12 +2470,22 @@ async fn run_caldus(
             FixedDungeonDriverEvent::Control(Some(request)) => {
                 reject_fixed_advance(request, "only Caldus reward acknowledgement is available");
             }
-            FixedDungeonDriverEvent::Frame(deadline) => {
+            event @ (FixedDungeonDriverEvent::Frame(_)
+            | FixedDungeonDriverEvent::ConsumableFrame { .. }) => {
+                let (deadline, retained, consumable_completion) = match event {
+                    FixedDungeonDriverEvent::Frame(deadline) => {
+                        (deadline, *retained_rx.borrow_and_update(), None)
+                    }
+                    FixedDungeonDriverEvent::ConsumableFrame {
+                        retained,
+                        completion,
+                    } => (Instant::now(), retained, Some(completion)),
+                    _ => unreachable!("matched only frame events"),
+                };
                 let lateness = Instant::now().saturating_duration_since(deadline);
                 let missed = lateness.as_nanos() / u128::from(DRIVER_TICK_NANOS);
                 skipped_deadlines =
                     skipped_deadlines.saturating_add(u64::try_from(missed).unwrap_or(u64::MAX));
-                let retained = *retained_rx.borrow_and_update();
                 if exit_ready {
                     let heartbeat = match runtime.terminal_heartbeat() {
                         Ok(heartbeat) => heartbeat,
@@ -2142,6 +2572,10 @@ async fn run_caldus(
                 }
                 match runtime.step(caldus_runtime_input(retained)).await {
                     Ok(frame) => {
+                        if let Some(completion) = consumable_completion {
+                            let _ = completion.send(Ok(()));
+                        }
+                        ingress.update_consumable_availability(runtime.consumable_availability());
                         if frame.player_died {
                             ingress.stop_accepting();
                         }
@@ -2231,6 +2665,10 @@ async fn run_caldus(
                         }
                     }
                     Err(error) => {
+                        if let Some(completion) = consumable_completion {
+                            let _ = completion
+                                .send(Err(CorePrivateMicrorealmIngressError::DriverFrozen));
+                        }
                         outcome = CorePrivateMicrorealmDriverOutcome::Faulted;
                         ingress.stop_accepting();
                         observation_tx.send_replace(CorePrivateMicrorealmDriverState::Faulted {
@@ -2670,6 +3108,8 @@ mod tests {
             metrics: SharedMetrics::default(),
             authoritative_tick: AtomicU64::new(0),
             task_live: AtomicBool::new(true),
+            consumable_requests: Mutex::new(VecDeque::with_capacity(1)),
+            consumable_notify: Notify::new(),
         });
         let (observation_tx, observation_rx) =
             watch::channel(CorePrivateMicrorealmDriverState::Starting);
@@ -2990,6 +3430,41 @@ mod tests {
     async fn advance_one_frame(observer: &mut CorePrivateMicrorealmDriverObserver) {
         tokio::time::advance(DRIVER_TICK_DURATION).await;
         let _ = observer.changed().await.expect("driver observation");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn durable_consumable_reservation_pauses_and_owns_the_next_frame() {
+        let received = Arc::new(StdMutex::new(Vec::new()));
+        let driver = spawn_driver(ScriptedRuntime::ordinary(Arc::clone(&received)));
+        tokio::task::yield_now().await;
+
+        let preparation = driver
+            .handle()
+            .prepare_consumable_use(CorePrivateConsumableSlot::BeltOne)
+            .await
+            .expect("reservation preparation");
+        let CorePrivateConsumablePreparation::Prepared(reservation) = preparation else {
+            panic!("available consumable must reserve the next frame");
+        };
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            received.lock().expect("received").is_empty(),
+            "scheduled combat frames must pause while durable authority is unresolved"
+        );
+
+        reservation.commit(1).await.expect("matching live apply");
+        let frames = received.lock().expect("received");
+        assert!(!frames.is_empty());
+        assert_eq!(frames[0].consumable_slot_one_sequence, 1);
+        assert_eq!(frames[0].consumable_slot_two_sequence, 0);
+        assert_eq!(frames[0].consumable_inventory_version, 1);
+        drop(frames);
+
+        let report = driver.shutdown().await.expect("joined shutdown");
+        assert!(report.committed_frames >= 1);
+        assert!(report.task_joined);
     }
 
     #[tokio::test(start_paused = true)]

@@ -32,7 +32,10 @@ use crate::{
     CorePrivatePlayerDamageError, CorePrivatePlayerDamageFactV1, CorePrivateRouteActorDirectory,
     CorePrivateRouteActorLease, CorePrivateRouteRuntimeError, caldus_player_damage_facts,
     core_private_caldus_reward::CoreCaldusRewardTracker,
-    core_private_combat_frame::{core_player_movement_config, step_live_player_combat_with_bodies},
+    core_private_combat_frame::{
+        CorePrivateConsumableAvailability, consumable_availability, core_player_movement_config,
+        step_live_player_combat_with_bodies,
+    },
     core_private_gameplay_observation::{
         CorePrivateGameplayObservation, CorePrivateGameplayObservationError,
         CorePrivateProjectileProvenance, boss_snapshot, hostile_projectile_snapshot,
@@ -111,6 +114,13 @@ struct StagedCaldusFrame {
 }
 
 impl CorePrivateCaldusRuntime {
+    pub(crate) fn consumable_availability(&self) -> [CorePrivateConsumableAvailability; 2] {
+        let player = self
+            .players
+            .get(&self.participant.entity_id)
+            .expect("validated Caldus runtime retains its participant");
+        consumable_availability(&player.consumables)
+    }
     pub fn from_staging_handoff(
         mut handoff: CorePrivateCaldusStagingHandoff,
     ) -> Result<Self, CorePrivateCaldusRuntimeError> {
@@ -345,6 +355,11 @@ impl CorePrivateCaldusRuntime {
             .ok_or(CorePrivateCaldusRuntimeError::TickExhausted)?;
         let route_before = self.route_directory.snapshot(self.route_lease)?;
         self.validate_route_authority(&route_before)?;
+        if input.action.consumable_inventory_version != 0 {
+            self.combat_envelope
+                .reconcile_inventory_version(input.action.consumable_inventory_version)
+                .map_err(|_| CorePrivateCaldusRuntimeError::InvalidComposition)?;
+        }
         let staged = self.stage_frame(input, tick, friendly_inputs.as_deref())?;
         let player = staged
             .players
@@ -1013,6 +1028,9 @@ mod tests {
                 primary_sequence: 0,
                 ability_1_sequence: 0,
                 ability_2_sequence: 0,
+                consumable_slot_one_sequence: 0,
+                consumable_slot_two_sequence: 0,
+                consumable_inventory_version: 0,
                 reward_session_active: true,
                 reward_trust_valid: true,
                 reward_activity_sequence: sequence,

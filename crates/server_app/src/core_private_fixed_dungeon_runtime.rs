@@ -21,7 +21,10 @@ use crate::{
     CoreDurableBargainRestResolution, CorePrivateMicrorealmInput, CorePrivateMicrorealmRuntime,
     CorePrivateMicrorealmRuntimeError, CorePrivatePlayerDamageError, CorePrivatePlayerDamageFactV1,
     CorePrivateRouteActorDirectory, CorePrivateRouteActorLease, CorePrivateRouteRuntimeError,
-    core_private_combat_frame::{core_player_movement_config, step_live_player_combat},
+    core_private_combat_frame::{
+        CorePrivateConsumableAvailability, consumable_availability, core_player_movement_config,
+        step_live_player_combat,
+    },
     core_private_gameplay_observation::{
         CorePrivateGameplayObservation, CorePrivateGameplayObservationError,
         CorePrivateProjectileProvenance, enemy_snapshot, hostile_projectile_snapshot,
@@ -153,6 +156,15 @@ pub struct CorePrivateFixedDungeonRuntime {
 }
 
 impl CorePrivateFixedDungeonRuntime {
+    pub(crate) fn consumable_availability(&self) -> [CorePrivateConsumableAvailability; 2] {
+        consumable_availability(
+            &self
+                .combat
+                .player()
+                .expect("validated fixed dungeon retains its player")
+                .consumables,
+        )
+    }
     pub fn from_committed_bell(
         microrealm: CorePrivateMicrorealmRuntime,
         transition: &CoreBellPortalTransition,
@@ -411,6 +423,10 @@ impl CorePrivateFixedDungeonRuntime {
             .ok_or(CorePrivateFixedDungeonRuntimeError::TickExhausted)?;
         let route_before = self.route_directory.snapshot(self.route_lease)?;
         self.validate_route_authority(&route_before)?;
+        if input.consumable_inventory_version != 0 {
+            self.combat_envelope
+                .reconcile_inventory_version(input.consumable_inventory_version)?;
+        }
         let mut staged_combat = self.combat.clone();
         let mut staged_projectile_provenance = self.projectile_provenance.clone();
         let mut staged_movement = self
@@ -859,6 +875,9 @@ mod tests {
             primary_sequence: 0,
             ability_1_sequence: 0,
             ability_2_sequence: 0,
+            consumable_slot_one_sequence: 0,
+            consumable_slot_two_sequence: 0,
+            consumable_inventory_version: 0,
             reward_session_active: true,
             reward_trust_valid: true,
             reward_activity_sequence: sequence.max(1),

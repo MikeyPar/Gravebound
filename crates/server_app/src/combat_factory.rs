@@ -137,6 +137,20 @@ impl CoreCharacterCombatEnvelope {
         self.progression_version
     }
 
+    pub(crate) fn reconcile_inventory_version(
+        &mut self,
+        destination: u64,
+    ) -> Result<(), CoreCombatFactoryError> {
+        if destination == 0
+            || (self.inventory_version != destination
+                && self.inventory_version.checked_add(1) != Some(destination))
+        {
+            return Err(CoreCombatFactoryError::InvalidLiveHandoff);
+        }
+        self.inventory_version = destination;
+        Ok(())
+    }
+
     /// Rebases only the character aggregate version after an exact committed scene transfer.
     /// Mutable combat remains in the moved player allocation; skipped, repeated, or stale
     /// versions fail closed.
@@ -274,6 +288,11 @@ impl CoreCharacterCombatFactory {
             .map_err(|_| CoreCombatFactoryError::Unavailable)?
             .ok_or(CoreCombatFactoryError::Unavailable)?;
         self.compiler.build_from_snapshot(&snapshot)
+    }
+
+    #[must_use]
+    pub fn item_content_revision(&self) -> &str {
+        self.compiler.items.revision_label()
     }
 }
 

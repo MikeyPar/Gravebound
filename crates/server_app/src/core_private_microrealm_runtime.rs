@@ -19,7 +19,10 @@ use sim_core::{
 };
 use thiserror::Error;
 
-use crate::core_private_combat_frame::{core_player_movement_config, step_live_player_combat};
+use crate::core_private_combat_frame::{
+    CorePrivateConsumableAvailability, consumable_availability, core_player_movement_config,
+    step_live_player_combat,
+};
 use crate::core_private_gameplay_observation::{
     CorePrivateGameplayObservation, CorePrivateGameplayObservationError,
     CorePrivateProjectileProvenance, enemy_snapshot, hostile_projectile_snapshot, player_snapshot,
@@ -90,6 +93,10 @@ pub struct CorePrivateMicrorealmInput {
     pub primary_sequence: u32,
     pub ability_1_sequence: u32,
     pub ability_2_sequence: u32,
+    /// Server-issued sequence watermarks. They are advanced only after durable Belt consumption.
+    pub consumable_slot_one_sequence: u32,
+    pub consumable_slot_two_sequence: u32,
+    pub consumable_inventory_version: u64,
     /// Authenticated session/activity evidence carried by the sole server driver. These fields
     /// are never decoded from gameplay frames and exist only for reward-presence accounting.
     pub reward_session_active: bool,
@@ -279,6 +286,10 @@ impl CorePrivateMicrorealmRuntime {
         self.tick
     }
 
+    pub(crate) fn consumable_availability(&self) -> [CorePrivateConsumableAvailability; 2] {
+        consumable_availability(&self.combat.player().consumables)
+    }
+
     /// Reports the exact live Bell-transfer boundary from owned simulation state. The driver uses
     /// this only while pausing between frames; a client observation cannot author readiness.
     #[must_use]
@@ -358,6 +369,10 @@ impl CorePrivateMicrorealmRuntime {
             .ok_or(CorePrivateMicrorealmRuntimeError::TickExhausted)?;
         let route_before = self.route_directory.snapshot(self.route_lease)?;
         self.validate_route_authority(&route_before)?;
+        if input.consumable_inventory_version != 0 {
+            self.combat_envelope
+                .reconcile_inventory_version(input.consumable_inventory_version)?;
+        }
 
         // All fallible simulation work is staged before the shared route CAS. Local state swaps
         // only after the actor commits phase and Bell range under its one lock.
@@ -683,6 +698,9 @@ pub(crate) fn core_bell_ready_runtime_test_fixture(
                 primary_sequence: 0,
                 ability_1_sequence: 0,
                 ability_2_sequence: 0,
+                consumable_slot_one_sequence: 0,
+                consumable_slot_two_sequence: 0,
+                consumable_inventory_version: 0,
                 reward_session_active: true,
                 reward_trust_valid: true,
                 reward_activity_sequence: sequence,
@@ -806,6 +824,9 @@ mod tests {
             primary_sequence: 0,
             ability_1_sequence: 0,
             ability_2_sequence: 0,
+            consumable_slot_one_sequence: 0,
+            consumable_slot_two_sequence: 0,
+            consumable_inventory_version: 0,
             reward_session_active: true,
             reward_trust_valid: true,
             reward_activity_sequence: sequence.max(1),

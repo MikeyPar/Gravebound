@@ -181,8 +181,9 @@ pub use core_private_life_tick::{
     CorePrivateLifeTickDirectoryReport, CorePrivateLifeTickError,
 };
 pub use core_private_microrealm_driver::{
-    CorePrivateFixedDungeonConversion, CorePrivateFixedDungeonDriverReady,
-    CorePrivateMicrorealmAbility, CorePrivateMicrorealmAbilityPress, CorePrivateMicrorealmDriver,
+    CorePrivateConsumableSlot, CorePrivateFixedDungeonConversion,
+    CorePrivateFixedDungeonDriverReady, CorePrivateMicrorealmAbility,
+    CorePrivateMicrorealmAbilityPress, CorePrivateMicrorealmDriver,
     CorePrivateMicrorealmDriverError, CorePrivateMicrorealmDriverFault,
     CorePrivateMicrorealmDriverHandle, CorePrivateMicrorealmDriverObserver,
     CorePrivateMicrorealmDriverOutcome, CorePrivateMicrorealmDriverReport,

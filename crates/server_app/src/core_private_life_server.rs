@@ -181,6 +181,7 @@ pub(crate) async fn serve_core_private_life_connection(
     let mut driver = route.driver_observation();
     let mut snapshot_publisher = SnapshotPublisher::default();
     publish_route(&process, &writer, &route, 0).await?;
+    publish_consumable_state(&process, &writer, transport, &route).await?;
     publish_latest_route_snapshot(
         &connection,
         &process,
@@ -409,6 +410,33 @@ async fn dispatch_reliable(
     route: &mut ConnectionRoute,
 ) -> Result<(), CorePrivateLifeServerError> {
     match message {
+        WireMessage::CoreConsumableUseFrame(frame) => {
+            let (result, state) = match route {
+                ConnectionRoute::Danger(binding) => {
+                    process
+                        .use_consumable(transport, binding.lease.route_lease(), &frame)
+                        .await?
+                }
+                ConnectionRoute::Bootstrap | ConnectionRoute::Hall { .. } => (
+                    protocol::CoreConsumableUseResultV1 {
+                        schema_version: protocol::CORE_CONSUMABLE_SCHEMA_VERSION,
+                        mutation_id: frame.mutation_id,
+                        code: protocol::CoreConsumableResultCodeV1::AuthorityMismatch,
+                        consumed_item_uid: None,
+                        state: None,
+                    },
+                    None,
+                ),
+            };
+            writer
+                .send_response(send, 0, ReliableEvent::CoreConsumableUseResult(result))
+                .await?;
+            if let Some(state) = state {
+                writer
+                    .send_event(0, ReliableEvent::CoreConsumableState(state))
+                    .await?;
+            }
+        }
         WireMessage::HallInteractionFrame(frame) => {
             let result = match route {
                 ConnectionRoute::Hall { actor, .. } => {
@@ -514,6 +542,7 @@ async fn dispatch_reliable(
             )
             .await?;
             let stored_successor = is_stored_successor(&dispatch.event);
+            let resolved_resolution_hold = is_resolved_resolution_hold(&dispatch.event);
             if stored_successor {
                 reconcile_stored_successor(process, authenticated, transport, writer, route)
                     .await?;
@@ -523,6 +552,20 @@ async fn dispatch_reliable(
                         .refresh_transport(authenticated, transport, writer)
                         .await?,
                 );
+            }
+            if resolved_resolution_hold && matches!(route, ConnectionRoute::Bootstrap) {
+                // The durable result must reach the client before Hall is exposed. A dropped Hall
+                // publication is recovered by normal bootstrap; the stored mutation remains exact.
+                writer
+                    .send_response(send, dispatch.server_tick, dispatch.event)
+                    .await?;
+                *route = ConnectionRoute::from_disposition(
+                    process
+                        .refresh_transport(authenticated, transport, writer)
+                        .await?,
+                );
+                publish_route(process, writer, route, 0).await?;
+                return Ok(());
             }
             writer
                 .send_response(send, dispatch.server_tick, dispatch.event)
@@ -610,6 +653,38 @@ fn is_stored_successor(event: &ReliableEvent) -> bool {
     )
 }
 
+fn is_resolved_resolution_hold(event: &ReliableEvent) -> bool {
+    matches!(
+        event,
+        ReliableEvent::ResolutionHoldMutationResult(result)
+            if matches!(
+                result.as_ref(),
+                protocol::ResolutionHoldMutationResultV1::Stored {
+                    result,
+                    ..
+                } if !result.storage_resolution_required
+            )
+    )
+}
+
+async fn publish_consumable_state(
+    process: &CorePrivateLifeProcess,
+    writer: &CoreReliableWriter,
+    transport: CorePrivateLifeTransportLease,
+    route: &ConnectionRoute,
+) -> Result<(), CorePrivateLifeServerError> {
+    let ConnectionRoute::Danger(binding) = route else {
+        return Ok(());
+    };
+    let state = process
+        .consumable_state(transport, binding.lease.route_lease())
+        .await?;
+    writer
+        .send_event(0, ReliableEvent::CoreConsumableState(state))
+        .await?;
+    Ok(())
+}
+
 /// Retires the exact terminal danger task after successor persistence succeeds, then rebuilds the
 /// continuing transport from durable authority before the stored response can expose a Play
 /// action. A dropped response is harmless: retry returns the same stored successor and this
@@ -669,6 +744,9 @@ async fn dispatch_world_flow(
         .send_response(send, 0, ReliableEvent::WorldFlowResult(result))
         .await?;
     publish_route(process, writer, route, 0).await?;
+    // Route authority is always sequenced first; a client must never apply Belt authority to an
+    // older Hall generation. This also covers the ordinary Realm Gate Hall -> danger transition.
+    publish_consumable_state(process, writer, transport, route).await?;
     Ok(())
 }
 

@@ -26,9 +26,9 @@ use crate::{
     CoreCombatFactoryError, CoreExtractionActorDirectory, CorePrivateHallActorLease,
     CorePrivateLifeSessionDirectory, CorePrivateLifeSessionReport, CorePrivateLifeTickDirectory,
     CorePrivateLifeTickDirectoryReport, CorePrivateLifeTransportLease,
-    CorePrivateMicrorealmBinding, CorePrivateMicrorealmRuntime, CorePrivateRouteRuntimeReport,
-    CoreRecallActorDirectory, CoreReliableWriter, ProductionRecallIntentActor,
-    ProductionRecallPendingAuthorityV1, SecretRewardEpoch,
+    CorePrivateMicrorealmBinding, CorePrivateMicrorealmRuntime, CorePrivateRouteActorLease,
+    CorePrivateRouteRuntimeReport, CoreRecallActorDirectory, CoreReliableWriter,
+    ProductionRecallIntentActor, ProductionRecallPendingAuthorityV1, SecretRewardEpoch,
 };
 
 type PersistentRecallDirectory =
@@ -65,6 +65,7 @@ impl CorePrivateLifeAdmission {
 /// combat construction, and generation-safe transport sessions.
 pub(crate) struct CorePrivateLifeProcess {
     foundation: Arc<CorePrivateLifePersistentFoundation>,
+    persistence: PostgresPersistence,
     sessions: Arc<PersistentSessionDirectory>,
     recall: Arc<PersistentRecallDirectory>,
     extraction: Arc<PersistentExtractionDirectory>,
@@ -115,6 +116,7 @@ impl CorePrivateLifeProcess {
         )?;
         let process = Self {
             foundation,
+            persistence: persistence.clone(),
             sessions: Arc::new(sessions),
             recall,
             extraction,
@@ -225,6 +227,289 @@ impl CorePrivateLifeProcess {
         lease: crate::CorePrivateRouteActorLease,
     ) -> Result<protocol::CorePrivateRouteStateV1, CorePrivateLifeProcessError> {
         Ok(self.foundation.route_directory().snapshot(lease)?)
+    }
+
+    pub(crate) async fn consumable_state(
+        &self,
+        transport: CorePrivateLifeTransportLease,
+        route: CorePrivateRouteActorLease,
+    ) -> Result<protocol::CoreConsumableStateV1, CorePrivateLifeProcessError> {
+        let authority = self.sessions.consumable_danger_authority(transport).await?;
+        let command = self.consumable_command(authority, route, [1; 16], [1; 32], 1, 0)?;
+        let state = self.persistence.core_consumable_state_v1(&command).await?;
+        stored_consumable_state(state)
+    }
+
+    pub(crate) async fn use_consumable(
+        &self,
+        transport: CorePrivateLifeTransportLease,
+        route: CorePrivateRouteActorLease,
+        frame: &protocol::CoreConsumableUseFrameV1,
+    ) -> Result<
+        (
+            protocol::CoreConsumableUseResultV1,
+            Option<protocol::CoreConsumableStateV1>,
+        ),
+        CorePrivateLifeProcessError,
+    > {
+        frame
+            .validate()
+            .map_err(|_| CorePrivateLifeProcessError::InvalidConsumable)?;
+        if frame.payload.character_id != route.character_id()
+            || frame.payload.actor_generation != route.actor_generation()
+            || frame.payload.instance_lineage_id
+                != self
+                    .route_snapshot(route)?
+                    .instance_lineage_id
+                    .ok_or(CorePrivateLifeProcessError::InvalidConsumable)?
+        {
+            return Ok((
+                consumable_rejection(
+                    frame,
+                    protocol::CoreConsumableResultCodeV1::AuthorityMismatch,
+                ),
+                None,
+            ));
+        }
+        let authority = self.sessions.consumable_danger_authority(transport).await?;
+        let mut command = self.consumable_command(
+            authority,
+            route,
+            frame.mutation_id,
+            frame.payload_hash,
+            frame.payload.expected_inventory_version,
+            frame.payload.slot.index(),
+        )?;
+        if frame.payload.content_revision.as_str()
+            != command
+                .content_revision
+                .strip_prefix("core-dev.blake3.")
+                .ok_or(CorePrivateLifeProcessError::InvalidConsumable)?
+        {
+            return Ok((
+                consumable_rejection(frame, protocol::CoreConsumableResultCodeV1::ContentMismatch),
+                None,
+            ));
+        }
+        match self
+            .persistence
+            .load_core_consumable_replay_v1(&command)
+            .await
+        {
+            Ok(Some(stored)) => return project_stored_consumable(stored),
+            Ok(None) => {}
+            Err(persistence::PersistenceError::CoreConsumableIdempotencyConflict) => {
+                return Ok((
+                    consumable_rejection(
+                        frame,
+                        protocol::CoreConsumableResultCodeV1::IdempotencyConflict,
+                    ),
+                    None,
+                ));
+            }
+            Err(error) => return Err(error.into()),
+        }
+        let live_slot = match frame.payload.slot {
+            protocol::CoreConsumableSlotV1::BeltOne => crate::CorePrivateConsumableSlot::BeltOne,
+            protocol::CoreConsumableSlotV1::BeltTwo => crate::CorePrivateConsumableSlot::BeltTwo,
+        };
+        let preparation = match self
+            .sessions
+            .prepare_consumable_use(transport, live_slot)
+            .await
+        {
+            Ok(preparation) => preparation,
+            Err(crate::CorePrivateLifeSessionError::MicrorealmIngress(
+                crate::CorePrivateMicrorealmIngressError::RecallBlocked,
+            )) => {
+                return Ok((
+                    consumable_rejection(
+                        frame,
+                        protocol::CoreConsumableResultCodeV1::RecallBlocked,
+                    ),
+                    None,
+                ));
+            }
+            Err(crate::CorePrivateLifeSessionError::MicrorealmIngress(
+                crate::CorePrivateMicrorealmIngressError::DriverFrozen,
+            )) => {
+                return Ok((
+                    consumable_rejection(
+                        frame,
+                        protocol::CoreConsumableResultCodeV1::TerminalPending,
+                    ),
+                    None,
+                ));
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let mut reservation = None;
+        command.preflight = match preparation {
+            crate::core_private_microrealm_driver::CorePrivateConsumablePreparation::Prepared(
+                prepared,
+            ) => {
+                reservation = Some(prepared);
+                persistence::CoreConsumablePreflightV1::Attempt
+            }
+            crate::core_private_microrealm_driver::CorePrivateConsumablePreparation::Rejected(
+                availability,
+            ) => match availability {
+                crate::core_private_combat_frame::CorePrivateConsumableAvailability::Available
+                | crate::core_private_combat_frame::CorePrivateConsumableAvailability::Empty => {
+                    persistence::CoreConsumablePreflightV1::Attempt
+                }
+                crate::core_private_combat_frame::CorePrivateConsumableAvailability::FullHealth => {
+                    persistence::CoreConsumablePreflightV1::RejectFullHealth
+                }
+                crate::core_private_combat_frame::CorePrivateConsumableAvailability::SharedCooldown => {
+                    persistence::CoreConsumablePreflightV1::RejectSharedCooldown
+                }
+                crate::core_private_combat_frame::CorePrivateConsumableAvailability::Inactive => {
+                    persistence::CoreConsumablePreflightV1::RejectInactiveSlot
+                }
+            },
+            crate::core_private_microrealm_driver::CorePrivateConsumablePreparation::RecallBlocked => {
+                return Ok((
+                    consumable_rejection(
+                        frame,
+                        protocol::CoreConsumableResultCodeV1::RecallBlocked,
+                    ),
+                    None,
+                ));
+            }
+            crate::core_private_microrealm_driver::CorePrivateConsumablePreparation::TerminalPending => {
+                return Ok((
+                    consumable_rejection(
+                        frame,
+                        protocol::CoreConsumableResultCodeV1::TerminalPending,
+                    ),
+                    None,
+                ));
+            }
+        };
+        let stored = match self
+            .persistence
+            .commit_core_consumable_use_v1(&command)
+            .await
+        {
+            Ok(stored) => stored,
+            Err(persistence::PersistenceError::CoreConsumableIdempotencyConflict) => {
+                return Ok((
+                    consumable_rejection(
+                        frame,
+                        protocol::CoreConsumableResultCodeV1::IdempotencyConflict,
+                    ),
+                    None,
+                ));
+            }
+            Err(persistence::PersistenceError::CoreConsumableInventoryVersionMismatch) => {
+                return Ok((
+                    consumable_rejection(
+                        frame,
+                        protocol::CoreConsumableResultCodeV1::InventoryVersionMismatch,
+                    ),
+                    None,
+                ));
+            }
+            Err(persistence::PersistenceError::CoreConsumableContentMismatch) => {
+                return Ok((
+                    consumable_rejection(
+                        frame,
+                        protocol::CoreConsumableResultCodeV1::ContentMismatch,
+                    ),
+                    None,
+                ));
+            }
+            Err(persistence::PersistenceError::CoreConsumableAuthorityMismatch)
+            | Err(persistence::PersistenceError::ActiveDangerAuthorityBindingMismatch)
+            | Err(persistence::PersistenceError::ActiveDangerAuthoritySuperseded) => {
+                return Ok((
+                    consumable_rejection(
+                        frame,
+                        protocol::CoreConsumableResultCodeV1::AuthorityMismatch,
+                    ),
+                    None,
+                ));
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let state = stored_consumable_state(stored.state)?;
+        let code = match stored.code {
+            persistence::StoredCoreConsumableResultCodeV1::Accepted => {
+                if !stored.replayed {
+                    reservation
+                        .take()
+                        .ok_or(CorePrivateLifeProcessError::InvalidConsumable)?
+                        .commit(state.inventory_version)
+                        .await
+                        .map_err(crate::CorePrivateLifeSessionError::from)?;
+                }
+                protocol::CoreConsumableResultCodeV1::Accepted
+            }
+            persistence::StoredCoreConsumableResultCodeV1::EmptySlot => {
+                if let Some(reservation) = reservation.take() {
+                    reservation.abort();
+                }
+                protocol::CoreConsumableResultCodeV1::EmptySlot
+            }
+            persistence::StoredCoreConsumableResultCodeV1::FullHealth => {
+                if let Some(reservation) = reservation.take() {
+                    reservation.abort();
+                }
+                protocol::CoreConsumableResultCodeV1::FullHealth
+            }
+            persistence::StoredCoreConsumableResultCodeV1::SharedCooldown => {
+                if let Some(reservation) = reservation.take() {
+                    reservation.abort();
+                }
+                protocol::CoreConsumableResultCodeV1::SharedCooldown
+            }
+            persistence::StoredCoreConsumableResultCodeV1::InactiveSlot => {
+                if let Some(reservation) = reservation.take() {
+                    reservation.abort();
+                }
+                protocol::CoreConsumableResultCodeV1::InactiveSlot
+            }
+        };
+        let result = protocol::CoreConsumableUseResultV1 {
+            schema_version: protocol::CORE_CONSUMABLE_SCHEMA_VERSION,
+            mutation_id: frame.mutation_id,
+            code,
+            consumed_item_uid: stored.consumed_item_uid,
+            state: (code == protocol::CoreConsumableResultCodeV1::Accepted)
+                .then_some(state.clone()),
+        };
+        Ok((result, Some(state)))
+    }
+
+    fn consumable_command(
+        &self,
+        authority: crate::CorePrivateDangerEntryAuthority,
+        route: CorePrivateRouteActorLease,
+        mutation_id: [u8; 16],
+        payload_hash: [u8; 32],
+        expected_inventory_version: u64,
+        slot_index: u8,
+    ) -> Result<persistence::CoreConsumableUseCommandV1, CorePrivateLifeProcessError> {
+        let terminal = authority.terminal();
+        if authority.route_lease() != route {
+            return Err(CorePrivateLifeProcessError::InvalidConsumable);
+        }
+        Ok(persistence::CoreConsumableUseCommandV1 {
+            authority: persistence::StoredActiveDangerAuthorityV1 {
+                account_id: *terminal.account_id(),
+                character_id: *terminal.character_id(),
+                instance_lineage_id: *terminal.lineage_id(),
+                entry_restore_point_id: *terminal.restore_point_id(),
+            },
+            mutation_id,
+            payload_hash,
+            actor_generation: route.actor_generation(),
+            content_revision: self.combat.item_content_revision().to_owned(),
+            expected_inventory_version,
+            slot_index,
+            preflight: persistence::CoreConsumablePreflightV1::Attempt,
+        })
     }
 
     /// Attaches the winning authenticated transport and resolves terminal/restart state before
@@ -524,6 +809,77 @@ pub(crate) enum CorePrivateLifeProcessDisposition {
     Danger(CorePrivateMicrorealmBinding),
 }
 
+fn stored_consumable_state(
+    state: persistence::StoredCoreConsumableStateV1,
+) -> Result<protocol::CoreConsumableStateV1, CorePrivateLifeProcessError> {
+    let digest = state
+        .content_revision
+        .strip_prefix("core-dev.blake3.")
+        .ok_or(CorePrivateLifeProcessError::InvalidConsumable)?;
+    Ok(protocol::CoreConsumableStateV1 {
+        schema_version: protocol::CORE_CONSUMABLE_SCHEMA_VERSION,
+        character_id: state.character_id,
+        actor_generation: state.actor_generation,
+        instance_lineage_id: state.instance_lineage_id,
+        content_revision: protocol::ManifestHash::new(digest)?,
+        inventory_version: state.inventory_version,
+        belt_quantities: state.belt_quantities,
+    })
+}
+
+fn consumable_rejection(
+    frame: &protocol::CoreConsumableUseFrameV1,
+    code: protocol::CoreConsumableResultCodeV1,
+) -> protocol::CoreConsumableUseResultV1 {
+    protocol::CoreConsumableUseResultV1 {
+        schema_version: protocol::CORE_CONSUMABLE_SCHEMA_VERSION,
+        mutation_id: frame.mutation_id,
+        code,
+        consumed_item_uid: None,
+        state: None,
+    }
+}
+
+fn project_stored_consumable(
+    stored: persistence::StoredCoreConsumableUseResultV1,
+) -> Result<
+    (
+        protocol::CoreConsumableUseResultV1,
+        Option<protocol::CoreConsumableStateV1>,
+    ),
+    CorePrivateLifeProcessError,
+> {
+    let state = stored_consumable_state(stored.state)?;
+    let code = match stored.code {
+        persistence::StoredCoreConsumableResultCodeV1::Accepted => {
+            protocol::CoreConsumableResultCodeV1::Accepted
+        }
+        persistence::StoredCoreConsumableResultCodeV1::EmptySlot => {
+            protocol::CoreConsumableResultCodeV1::EmptySlot
+        }
+        persistence::StoredCoreConsumableResultCodeV1::FullHealth => {
+            protocol::CoreConsumableResultCodeV1::FullHealth
+        }
+        persistence::StoredCoreConsumableResultCodeV1::SharedCooldown => {
+            protocol::CoreConsumableResultCodeV1::SharedCooldown
+        }
+        persistence::StoredCoreConsumableResultCodeV1::InactiveSlot => {
+            protocol::CoreConsumableResultCodeV1::InactiveSlot
+        }
+    };
+    Ok((
+        protocol::CoreConsumableUseResultV1 {
+            schema_version: protocol::CORE_CONSUMABLE_SCHEMA_VERSION,
+            mutation_id: stored.mutation_id,
+            code,
+            consumed_item_uid: stored.consumed_item_uid,
+            state: (code == protocol::CoreConsumableResultCodeV1::Accepted)
+                .then_some(state.clone()),
+        },
+        Some(state),
+    ))
+}
+
 #[derive(Debug, Error)]
 pub(crate) enum CorePrivateLifeProcessError {
     #[error("private-life process admission is incomplete")]
@@ -556,6 +912,12 @@ pub(crate) enum CorePrivateLifeProcessError {
     Tick(#[from] crate::CorePrivateLifeTickError),
     #[error("private-life foundation failed: {0}")]
     Foundation(#[from] CorePrivateLifeFoundationError),
+    #[error("private-life consumable authority is invalid")]
+    InvalidConsumable,
+    #[error("private-life consumable persistence failed: {0}")]
+    Persistence(#[from] persistence::PersistenceError),
+    #[error("private-life consumable content revision is invalid: {0}")]
+    ProtocolValue(#[from] protocol::BoundedValueError),
 }
 
 #[cfg(test)]

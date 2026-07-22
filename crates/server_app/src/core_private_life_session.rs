@@ -348,6 +348,7 @@ struct SessionEntry {
 #[derive(Debug)]
 struct BoundMicrorealmDriver {
     lease: CorePrivateMicrorealmBindingLease,
+    danger_entry_authority: CorePrivateDangerEntryAuthority,
     driver: CorePrivateMicrorealmDriver,
     terminal_owner: Box<dyn CorePrivateTerminalOwner>,
     b3_rewards: Option<CorePrivateB3RewardRuntime>,
@@ -1361,7 +1362,7 @@ where
             .map(|runtime| runtime.terminal_handle(entry.authenticated, route_lease));
         let terminal_owner = terminal_owner_factory.start(
             entry.authenticated,
-            danger_entry_authority,
+            danger_entry_authority.clone(),
             recall_terminal,
             extraction_terminal,
             terminal_receiver,
@@ -1413,6 +1414,7 @@ where
         entry.next_microrealm_binding_generation = next_binding_generation;
         entry.microrealm = Some(BoundMicrorealmDriver {
             lease: binding_lease,
+            danger_entry_authority,
             driver,
             terminal_owner,
             b3_rewards,
@@ -1618,6 +1620,54 @@ where
             })
         })
         .await
+    }
+
+    /// Reserves the next live simulation frame for one authenticated Belt mutation. The session
+    /// lock is released before the driver waits for a durable decision so transport replacement
+    /// cannot create a second runtime owner or deadlock the reservation.
+    pub(crate) async fn prepare_consumable_use(
+        &self,
+        lease: CorePrivateLifeTransportLease,
+        slot: crate::CorePrivateConsumableSlot,
+    ) -> Result<
+        crate::core_private_microrealm_driver::CorePrivateConsumablePreparation,
+        CorePrivateLifeSessionError,
+    > {
+        let handle = {
+            let state = self.state.lock().await;
+            let entry = state
+                .sessions
+                .get(&lease.account_id)
+                .ok_or(CorePrivateLifeSessionError::SessionUnavailable)?;
+            if entry.active.as_ref().map(|active| active.lease) != Some(lease) {
+                return Err(CorePrivateLifeSessionError::StaleTransport);
+            }
+            entry
+                .microrealm
+                .as_ref()
+                .map(|bound| bound.driver.handle())
+                .ok_or(CorePrivateLifeSessionError::MicrorealmUnavailable)?
+        };
+        Ok(handle.prepare_consumable_use(slot).await?)
+    }
+
+    pub async fn consumable_danger_authority(
+        &self,
+        lease: CorePrivateLifeTransportLease,
+    ) -> Result<CorePrivateDangerEntryAuthority, CorePrivateLifeSessionError> {
+        let state = self.state.lock().await;
+        let entry = state
+            .sessions
+            .get(&lease.account_id)
+            .ok_or(CorePrivateLifeSessionError::SessionUnavailable)?;
+        if entry.active.as_ref().map(|active| active.lease) != Some(lease) {
+            return Err(CorePrivateLifeSessionError::StaleTransport);
+        }
+        entry
+            .microrealm
+            .as_ref()
+            .map(|bound| bound.danger_entry_authority.clone())
+            .ok_or(CorePrivateLifeSessionError::MicrorealmUnavailable)
     }
 
     async fn submit_microrealm_ingress(
