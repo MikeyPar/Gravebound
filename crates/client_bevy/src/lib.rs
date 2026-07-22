@@ -30,6 +30,7 @@ mod encounter;
 mod enemies;
 mod inventory;
 mod item_showcase;
+mod native_crash_report;
 mod network_play;
 mod network_prediction;
 mod network_session;

@@ -1465,6 +1465,7 @@ type PrivateGameplayVisibility<'w, 's> = Query<
     reason = "the native entry point wires one resource or system per normal-route capability"
 )]
 pub fn run_core_private_life(config: CorePrivateLifeConfig) -> Result<()> {
+    crate::native_crash_report::install();
     if config.test_token.trim().is_empty() {
         bail!("--identity must contain a nonempty wipeable test token");
     }
@@ -1823,6 +1824,18 @@ fn accept_private_handshake(
 ) -> Result<(), CorePrivateLifeClientError> {
     client.accept_server_hello(hello)?;
     terminal.accept_server_hello(hello)?;
+    if hello
+        .feature_flags
+        .iter()
+        .any(|flag| flag.as_str() == protocol::NATIVE_CRASH_FEATURE_FLAG)
+        && let Some(report) = crate::native_crash_report::pending()
+    {
+        // Reporting is optional and nonblocking. A full/closed queue leaves the local marker for
+        // the next launch and never changes admission, bootstrap, or gameplay state.
+        let _ = bridge
+            .0
+            .queue_reliable(WireMessage::NativeCrashReportFrame(report));
+    }
     if let Some(frame) = consumable.model.exact_retry() {
         bridge
             .0
@@ -1873,6 +1886,10 @@ fn apply_private_reliable(
     } = ui;
     match &frame.event {
         ReliableEvent::AccountBootstrapResult(result) => client.apply_bootstrap(result.clone()),
+        ReliableEvent::NativeCrashReportResult(result) => {
+            crate::native_crash_report::acknowledge(result);
+            Ok(())
+        }
         ReliableEvent::CharacterMutationResult(result) => {
             client.apply_character_mutation(result.clone())
         }

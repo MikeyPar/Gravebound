@@ -25,7 +25,10 @@ use crate::core_private_gameplay_observation::{
 use crate::core_private_life_process::{
     CorePrivateLifeProcess, CorePrivateLifeProcessDisposition, CorePrivateLifeProcessError,
 };
-use crate::core_private_telemetry_session::CorePrivateTelemetrySessionCoordinator;
+use crate::core_private_telemetry_session::{
+    CorePrivateCrashRecordOutcome, CorePrivateTelemetrySessionCoordinator,
+    CorePrivateTelemetryTransportLease,
+};
 use crate::{
     AuthenticatedAccount, AuthenticatedNamespace, CoreBellPortalBinding, CoreBellPortalTransition,
     CoreExtractionIntentAuthority, CoreExtractionTerminalAuthority, CorePrivateHallActorLease,
@@ -280,6 +283,8 @@ pub(crate) async fn serve_core_private_life_connection(
         &mut driver,
         &mut snapshot_publisher,
         &mut presentation_publisher,
+        telemetry_sessions.as_deref(),
+        telemetry_transport,
     )
     .await;
     let detached = process.detach_transport(transport, unix_millis()?).await;
@@ -316,6 +321,8 @@ async fn run_connection_loop(
     driver: &mut Option<DriverObservation>,
     snapshot_publisher: &mut SnapshotPublisher,
     presentation_publisher: &mut CombatPresentationPublisher,
+    telemetry_sessions: Option<&CorePrivateTelemetrySessionCoordinator>,
+    telemetry_transport: Option<CorePrivateTelemetryTransportLease>,
 ) -> Result<(), CorePrivateLifeServerError> {
     let mut terminal_refresh = tokio::time::interval(Duration::from_millis(50));
     terminal_refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -388,6 +395,8 @@ async fn run_connection_loop(
                     transport,
                     writer,
                     route,
+                    telemetry_sessions,
+                    telemetry_transport,
                 ).await?;
                 sync_driver_observation(route, driver);
                 publish_latest_route_snapshot(
@@ -551,8 +560,41 @@ async fn dispatch_reliable(
     transport: CorePrivateLifeTransportLease,
     writer: &Arc<CoreReliableWriter>,
     route: &mut ConnectionRoute,
+    telemetry_sessions: Option<&CorePrivateTelemetrySessionCoordinator>,
+    telemetry_transport: Option<CorePrivateTelemetryTransportLease>,
 ) -> Result<(), CorePrivateLifeServerError> {
     match message {
+        WireMessage::NativeCrashReportFrame(frame) => {
+            let code = if let Some(coordinator) = telemetry_sessions {
+                match coordinator
+                    .record_client_crash(telemetry_transport, &frame)
+                    .await
+                {
+                    CorePrivateCrashRecordOutcome::Accepted => {
+                        protocol::NativeCrashReportResultCodeV1::Accepted
+                    }
+                    CorePrivateCrashRecordOutcome::Unavailable => {
+                        protocol::NativeCrashReportResultCodeV1::Unavailable
+                    }
+                    CorePrivateCrashRecordOutcome::IdempotencyConflict => {
+                        protocol::NativeCrashReportResultCodeV1::IdempotencyConflict
+                    }
+                }
+            } else {
+                protocol::NativeCrashReportResultCodeV1::Disabled
+            };
+            writer
+                .send_response(
+                    send,
+                    0,
+                    ReliableEvent::NativeCrashReportResult(protocol::NativeCrashReportResultV1 {
+                        schema_version: protocol::NATIVE_CRASH_SCHEMA_VERSION,
+                        crash_id: frame.crash_id,
+                        code,
+                    }),
+                )
+                .await?;
+        }
         WireMessage::CoreConsumableUseFrame(frame) => {
             let (result, state) = match route {
                 ConnectionRoute::Danger(binding) => {

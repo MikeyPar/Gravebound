@@ -9,12 +9,13 @@
 use std::{collections::BTreeMap, fmt, future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use persistence::{
-    M03SessionObservationCommandV1, M03SessionObservationV1, M03TelemetrySessionStartV1,
-    M03TelemetrySourceError, PostgresPersistence, StoredM03SessionEndReasonV1,
+    M03CrashObservationCommandV1, M03SessionObservationCommandV1, M03SessionObservationV1,
+    M03TelemetrySessionStartV1, M03TelemetrySourceError, PostgresPersistence, StoredM03CrashKindV1,
+    StoredM03CrashReporterV1, StoredM03CrashSourceV1, StoredM03SessionEndReasonV1,
     StoredM03SessionEventV1, StoredM03TelemetryEnvironmentV1, StoredM03TelemetryEventV1,
     StoredM03TelemetryPlatformV1, StoredM03TelemetrySessionV1,
 };
-use protocol::Platform;
+use protocol::{NativeCrashKindV1, NativeCrashReportFrameV1, Platform};
 use tokio::sync::Mutex;
 use tracing::warn;
 
@@ -45,6 +46,11 @@ trait CorePrivateTelemetrySessionRepository: Send + Sync {
     fn observe<'a>(
         &'a self,
         command: &'a M03SessionObservationCommandV1,
+    ) -> RepositoryFuture<'a, ()>;
+
+    fn record_crash<'a>(
+        &'a self,
+        command: &'a M03CrashObservationCommandV1,
     ) -> RepositoryFuture<'a, ()>;
 }
 
@@ -85,6 +91,16 @@ impl CorePrivateTelemetrySessionRepository for PostgresPersistence {
     ) -> RepositoryFuture<'a, ()> {
         Box::pin(async move {
             self.record_m03_session_observation_v1(command).await?;
+            Ok(())
+        })
+    }
+
+    fn record_crash<'a>(
+        &'a self,
+        command: &'a M03CrashObservationCommandV1,
+    ) -> RepositoryFuture<'a, ()> {
+        Box::pin(async move {
+            self.record_m03_crash_observation_v1(command).await?;
             Ok(())
         })
     }
@@ -163,8 +179,16 @@ pub(crate) struct CorePrivateTelemetryTransportLease {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CorePrivateCrashRecordOutcome {
+    Accepted,
+    Unavailable,
+    IdempotencyConflict,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct TrackedLogicalSession {
     session_id: [u8; 16],
+    crash_report_session_id: [u8; 16],
     active_generation: u64,
     next_generation: u64,
     connected: bool,
@@ -258,11 +282,13 @@ impl CorePrivateTelemetrySessionCoordinator {
         if let Some(tracked) = state.sessions.get_mut(&account_id) {
             return self.attach_tracked(account_id, tracked).await;
         }
-        let session_id = self.begin_or_recover(account_id, platform).await?;
+        let (session_id, crash_report_session_id) =
+            self.begin_or_recover(account_id, platform).await?;
         state.sessions.insert(
             account_id,
             TrackedLogicalSession {
                 session_id,
+                crash_report_session_id,
                 active_generation: 1,
                 next_generation: 2,
                 connected: true,
@@ -304,7 +330,11 @@ impl CorePrivateTelemetrySessionCoordinator {
         })
     }
 
-    async fn begin_or_recover(&self, account_id: [u8; 16], platform: Platform) -> Option<[u8; 16]> {
+    async fn begin_or_recover(
+        &self,
+        account_id: [u8; 16],
+        platform: Platform,
+    ) -> Option<([u8; 16], [u8; 16])> {
         match self.repository.load_open(account_id).await {
             Ok(Some(stored)) => {
                 return self.recover_open(account_id, stored, platform).await;
@@ -323,7 +353,7 @@ impl CorePrivateTelemetrySessionCoordinator {
         account_id: [u8; 16],
         stored: StoredM03TelemetrySessionV1,
         platform: Platform,
-    ) -> Option<[u8; 16]> {
+    ) -> Option<([u8; 16], [u8; 16])> {
         let head = match self
             .repository
             .load_head(account_id, stored.session_id)
@@ -343,7 +373,7 @@ impl CorePrivateTelemetrySessionCoordinator {
                     M03SessionObservationV1::Reconnected,
                 )
                 .await
-                .then_some(stored.session_id),
+                .then_some((stored.session_id, stored.session_id)),
             StoredM03SessionEventV1::Started | StoredM03SessionEventV1::Reconnected { .. } => {
                 let closed = self
                     .observe(
@@ -356,7 +386,9 @@ impl CorePrivateTelemetrySessionCoordinator {
                     .await;
                 if closed {
                     match self.start_new_once(account_id, platform).await {
-                        Ok(session_id) => Some(session_id),
+                        // A panic marker was authored before this next-launch recovery. Bind it
+                        // to the just-closed origin session, never to the replacement session.
+                        Ok(session_id) => Some((session_id, stored.session_id)),
                         Err(error) => {
                             warn!(%error, "replacement telemetry session start failed; gameplay continues");
                             None
@@ -373,9 +405,13 @@ impl CorePrivateTelemetrySessionCoordinator {
         }
     }
 
-    async fn start_new(&self, account_id: [u8; 16], platform: Platform) -> Option<[u8; 16]> {
+    async fn start_new(
+        &self,
+        account_id: [u8; 16],
+        platform: Platform,
+    ) -> Option<([u8; 16], [u8; 16])> {
         match self.start_new_once(account_id, platform).await {
-            Ok(session_id) => Some(session_id),
+            Ok(session_id) => Some((session_id, session_id)),
             Err(M03TelemetrySourceError::OpenSessionConflict) => {
                 if let Ok(Some(stored)) = self.repository.load_open(account_id).await {
                     self.recover_open(account_id, stored, platform).await
@@ -494,6 +530,62 @@ impl CorePrivateTelemetrySessionCoordinator {
         }
     }
 
+    /// Durably records one redacted client crash against the currently authenticated logical
+    /// session. Client input cannot author account, character, session, source, or reporter.
+    pub(crate) async fn record_client_crash(
+        &self,
+        lease: Option<CorePrivateTelemetryTransportLease>,
+        report: &NativeCrashReportFrameV1,
+    ) -> CorePrivateCrashRecordOutcome {
+        let Some(lease) = lease else {
+            return CorePrivateCrashRecordOutcome::Unavailable;
+        };
+        let crash_report_session_id = {
+            let state = self.state.lock().await;
+            if state.shutdown_started {
+                return CorePrivateCrashRecordOutcome::Unavailable;
+            }
+            let Some(tracked) = state.sessions.get(&lease.account_id) else {
+                return CorePrivateCrashRecordOutcome::Unavailable;
+            };
+            if !tracked.connected || tracked.active_generation != lease.generation {
+                return CorePrivateCrashRecordOutcome::Unavailable;
+            }
+            tracked.crash_report_session_id
+        };
+        let command = M03CrashObservationCommandV1 {
+            crash_id: report.crash_id,
+            account_id: lease.account_id,
+            character_id: None,
+            session_id: crash_report_session_id,
+            source: StoredM03CrashSourceV1::Client,
+            kind: crash_kind(report.kind),
+            reporter: StoredM03CrashReporterV1::AuthenticatedClient,
+            signature: report.signature,
+            uptime_millis: report.uptime_millis,
+            occurred_at_utc_millis: report.occurred_at_utc_millis,
+        };
+        let result = tokio::time::timeout(
+            TELEMETRY_OPERATION_TIMEOUT,
+            self.repository.record_crash(&command),
+        )
+        .await;
+        match result {
+            Ok(Ok(())) => CorePrivateCrashRecordOutcome::Accepted,
+            Ok(Err(M03TelemetrySourceError::IdempotencyConflict)) => {
+                CorePrivateCrashRecordOutcome::IdempotencyConflict
+            }
+            Ok(Err(error)) => {
+                warn!(%error, "client crash observation failed; gameplay continues");
+                CorePrivateCrashRecordOutcome::Unavailable
+            }
+            Err(_) => {
+                warn!("client crash observation timed out; gameplay continues");
+                CorePrivateCrashRecordOutcome::Unavailable
+            }
+        }
+    }
+
     /// Records only the current generation's link loss. A replaced transport cannot disconnect
     /// the newer handoff owner when its task exits later.
     pub(crate) async fn detach(&self, lease: Option<CorePrivateTelemetryTransportLease>) {
@@ -582,6 +674,16 @@ const fn telemetry_platform(platform: Platform) -> StoredM03TelemetryPlatformV1 
     }
 }
 
+const fn crash_kind(kind: NativeCrashKindV1) -> StoredM03CrashKindV1 {
+    match kind {
+        NativeCrashKindV1::Panic => StoredM03CrashKindV1::Panic,
+        NativeCrashKindV1::AccessViolation => StoredM03CrashKindV1::AccessViolation,
+        NativeCrashKindV1::OutOfMemory => StoredM03CrashKindV1::OutOfMemory,
+        NativeCrashKindV1::Watchdog => StoredM03CrashKindV1::Watchdog,
+        NativeCrashKindV1::Unknown => StoredM03CrashKindV1::Unknown,
+    }
+}
+
 fn valid_stable_context_id(value: &str) -> bool {
     let bytes = value.as_bytes();
     !bytes.is_empty()
@@ -627,6 +729,7 @@ mod tests {
         heads: BTreeMap<[u8; 16], StoredM03SessionEventV1>,
         starts: Vec<M03TelemetrySessionStartV1>,
         observations: Vec<M03SessionObservationCommandV1>,
+        crashes: Vec<M03CrashObservationCommandV1>,
         fail_load: bool,
     }
 
@@ -735,6 +838,28 @@ mod tests {
                 Ok(())
             })
         }
+
+        fn record_crash<'a>(
+            &'a self,
+            command: &'a M03CrashObservationCommandV1,
+        ) -> RepositoryFuture<'a, ()> {
+            Box::pin(async move {
+                let mut state = self.state.lock().unwrap();
+                if let Some(stored) = state
+                    .crashes
+                    .iter()
+                    .find(|stored| stored.crash_id == command.crash_id)
+                {
+                    return if stored == command {
+                        Ok(())
+                    } else {
+                        Err(M03TelemetrySourceError::IdempotencyConflict)
+                    };
+                }
+                state.crashes.push(command.clone());
+                Ok(())
+            })
+        }
     }
 
     #[derive(Debug)]
@@ -829,6 +954,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn client_crash_uses_server_bound_authority_and_exact_replay() {
+        let repository = Arc::new(FakeRepository::default());
+        let coordinator = coordinator(Arc::clone(&repository));
+        let lease = coordinator
+            .attach([7; 16], Platform::WindowsNative)
+            .await
+            .unwrap();
+        let report = NativeCrashReportFrameV1 {
+            schema_version: protocol::NATIVE_CRASH_SCHEMA_VERSION,
+            crash_id: test_uuid_v7(77),
+            kind: NativeCrashKindV1::Panic,
+            signature: [9; 32],
+            uptime_millis: 1_200,
+            occurred_at_utc_millis: 1_100,
+        };
+
+        assert_eq!(
+            coordinator.record_client_crash(Some(lease), &report).await,
+            CorePrivateCrashRecordOutcome::Accepted
+        );
+        assert_eq!(
+            coordinator.record_client_crash(Some(lease), &report).await,
+            CorePrivateCrashRecordOutcome::Accepted
+        );
+        {
+            let state = repository.state.lock().unwrap();
+            assert_eq!(state.crashes.len(), 1);
+            let stored = &state.crashes[0];
+            assert_eq!(stored.account_id, [7; 16]);
+            assert_eq!(stored.session_id, state.starts[0].session_id);
+            assert_eq!(stored.character_id, None);
+            assert_eq!(stored.source, StoredM03CrashSourceV1::Client);
+            assert_eq!(
+                stored.reporter,
+                StoredM03CrashReporterV1::AuthenticatedClient
+            );
+            assert_eq!(stored.signature, [9; 32]);
+        }
+
+        let mut changed = report.clone();
+        changed.signature = [8; 32];
+        assert_eq!(
+            coordinator.record_client_crash(Some(lease), &changed).await,
+            CorePrivateCrashRecordOutcome::IdempotencyConflict
+        );
+        let replacement = coordinator
+            .attach([7; 16], Platform::WindowsNative)
+            .await
+            .unwrap();
+        assert_eq!(
+            coordinator.record_client_crash(Some(lease), &report).await,
+            CorePrivateCrashRecordOutcome::Unavailable
+        );
+        assert_eq!(
+            coordinator
+                .record_client_crash(Some(replacement), &report)
+                .await,
+            CorePrivateCrashRecordOutcome::Accepted
+        );
+    }
+
+    #[tokio::test]
     async fn restart_recovers_exact_open_session_context_without_starting_another() {
         let repository = Arc::new(FakeRepository::default());
         let recovered_session = StoredM03TelemetrySessionV1 {
@@ -903,10 +1090,22 @@ mod tests {
             .insert(old_session_id, StoredM03SessionEventV1::Started);
         let coordinator = coordinator(Arc::clone(&repository));
 
-        coordinator
+        let lease = coordinator
             .attach([4; 16], Platform::SteamWindows)
             .await
             .unwrap();
+        let report = NativeCrashReportFrameV1 {
+            schema_version: protocol::NATIVE_CRASH_SCHEMA_VERSION,
+            crash_id: test_uuid_v7(92),
+            kind: NativeCrashKindV1::Panic,
+            signature: [6; 32],
+            uptime_millis: 500,
+            occurred_at_utc_millis: 900,
+        };
+        assert_eq!(
+            coordinator.record_client_crash(Some(lease), &report).await,
+            CorePrivateCrashRecordOutcome::Accepted
+        );
 
         let state = repository.state.lock().unwrap();
         assert_eq!(state.observations.len(), 1);
@@ -925,6 +1124,28 @@ mod tests {
             state.starts[0].environment,
             StoredM03TelemetryEnvironmentV1::Test
         );
+        assert_eq!(state.crashes.len(), 1);
+        assert_eq!(state.crashes[0].session_id, old_session_id);
+        assert_ne!(state.crashes[0].session_id, state.starts[0].session_id);
+    }
+
+    #[tokio::test]
+    async fn crash_without_an_authenticated_unambiguous_lease_is_unavailable() {
+        let repository = Arc::new(FakeRepository::default());
+        let coordinator = coordinator(Arc::clone(&repository));
+        let report = NativeCrashReportFrameV1 {
+            schema_version: protocol::NATIVE_CRASH_SCHEMA_VERSION,
+            crash_id: test_uuid_v7(93),
+            kind: NativeCrashKindV1::Unknown,
+            signature: [7; 32],
+            uptime_millis: 1,
+            occurred_at_utc_millis: 2,
+        };
+        assert_eq!(
+            coordinator.record_client_crash(None, &report).await,
+            CorePrivateCrashRecordOutcome::Unavailable
+        );
+        assert!(repository.state.lock().unwrap().crashes.is_empty());
     }
 
     #[tokio::test]

@@ -10,8 +10,9 @@ use crate::{
     CoreConsumableUseResultV1, CoreExtractionReadyStateV1, CorePendingInventoryStateV1,
     CorePrivateRouteStateV1, DeathViewFrameV1, DeathViewResultV1, ExtractionCommitFrameV1,
     ExtractionCommitResultV1, HallInteractionFrameV1, HallInteractionResultV1, HandshakeResponse,
-    InitialOathSelectionFrame, InitialOathSelectionResult, NetworkChannel, OathViewFrame,
-    OathViewResult, ProgressionQueryFrame, ProgressionResult, RecallFrameV1, RecallResultV1,
+    InitialOathSelectionFrame, InitialOathSelectionResult, NativeCrashReportFrameV1,
+    NativeCrashReportResultV1, NetworkChannel, OathViewFrame, OathViewResult,
+    ProgressionQueryFrame, ProgressionResult, RecallFrameV1, RecallResultV1,
     ResolutionHoldMutationFrameV1, ResolutionHoldMutationResultV1, ResolutionHoldQueryFrameV1,
     ResolutionHoldQueryResultV1, SafeInventoryTransferFrameV1, SafeInventoryTransferResultV1,
     SafeStorageQueryFrameV1, SafeStorageQueryResultV1, SuccessorCreateFrameV1,
@@ -55,6 +56,7 @@ pub enum MessageKind {
     HallInteractionFrame,
     CoreConsumableUseFrame,
     SafeStorageQueryFrame,
+    NativeCrashReportFrame,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -475,6 +477,7 @@ pub enum ReliableEvent {
     CoreConsumableState(CoreConsumableStateV1),
     SafeStorageQueryResult(Box<SafeStorageQueryResultV1>),
     CoreCombatPresentationState(Box<CoreCombatPresentationStateV1>),
+    NativeCrashReportResult(NativeCrashReportResultV1),
 }
 
 impl ReliableEvent {
@@ -508,7 +511,8 @@ impl ReliableEvent {
             | Self::CorePendingInventoryState(_)
             | Self::CoreExtractionReadyState(_)
             | Self::CoreConsumableState(_)
-            | Self::SafeStorageQueryResult(_) => NetworkChannel::Control,
+            | Self::SafeStorageQueryResult(_)
+            | Self::NativeCrashReportResult(_) => NetworkChannel::Control,
             Self::SocialPing { .. } => NetworkChannel::Social,
         }
     }
@@ -592,6 +596,9 @@ impl ReliableEvent {
             Self::CoreCombatPresentationState(state) => state
                 .validate()
                 .map_err(|_| MessageValidationError::CoreCombatPresentation),
+            Self::NativeCrashReportResult(result) => result
+                .validate()
+                .map_err(|_| MessageValidationError::NativeCrash),
             _ => Ok(()),
         }
     }
@@ -642,6 +649,7 @@ pub enum WireMessage {
     HallInteractionFrame(HallInteractionFrameV1),
     CoreConsumableUseFrame(CoreConsumableUseFrameV1),
     SafeStorageQueryFrame(SafeStorageQueryFrameV1),
+    NativeCrashReportFrame(NativeCrashReportFrameV1),
 }
 
 impl WireMessage {
@@ -674,6 +682,7 @@ impl WireMessage {
             Self::HallInteractionFrame(_) => MessageKind::HallInteractionFrame,
             Self::CoreConsumableUseFrame(_) => MessageKind::CoreConsumableUseFrame,
             Self::SafeStorageQueryFrame(_) => MessageKind::SafeStorageQueryFrame,
+            Self::NativeCrashReportFrame(_) => MessageKind::NativeCrashReportFrame,
         }
     }
 
@@ -690,7 +699,8 @@ impl WireMessage {
             | Self::BargainViewFrame(_)
             | Self::DeathViewFrame(_)
             | Self::ResolutionHoldQueryFrame(_)
-            | Self::SafeStorageQueryFrame(_) => NetworkChannel::Control,
+            | Self::SafeStorageQueryFrame(_)
+            | Self::NativeCrashReportFrame(_) => NetworkChannel::Control,
             Self::InputFrame(_) => NetworkChannel::Input,
             Self::ActionFrame(_) | Self::RecallFrame(_) | Self::HallInteractionFrame(_) => {
                 NetworkChannel::Action
@@ -782,6 +792,9 @@ impl WireMessage {
             Self::SafeStorageQueryFrame(value) => value
                 .validate()
                 .map_err(|_| MessageValidationError::SafeStorage),
+            Self::NativeCrashReportFrame(value) => value
+                .validate()
+                .map_err(|_| MessageValidationError::NativeCrash),
         }
     }
 }
@@ -820,6 +833,8 @@ pub enum MessageValidationError {
     SafeStorage,
     #[error("Core combat presentation message is invalid")]
     CoreCombatPresentation,
+    #[error("native crash report failed semantic validation")]
+    NativeCrash,
     #[error("message sequence must be nonzero")]
     ZeroSequence,
     #[error("fixed-point vector component must remain within -1000..=1000")]

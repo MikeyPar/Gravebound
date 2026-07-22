@@ -17,6 +17,7 @@ mod field_equipment;
 mod hall_interaction;
 mod handshake;
 mod messages;
+mod native_crash;
 mod oath;
 mod progression;
 mod reliable_inbox;
@@ -121,6 +122,11 @@ pub use messages::{
     SessionControlResult, SessionControlResultCode, SessionDestination, SnapshotChunk,
     SocialPingKind, WireMessage,
 };
+pub use native_crash::{
+    NATIVE_CRASH_FEATURE_FLAG, NATIVE_CRASH_ID_BYTES, NATIVE_CRASH_SCHEMA_VERSION,
+    NATIVE_CRASH_SIGNATURE_BYTES, NativeCrashKindV1, NativeCrashReportFrameV1,
+    NativeCrashReportResultCodeV1, NativeCrashReportResultV1, NativeCrashValidationError,
+};
 pub use oath::{
     InitialOathSelectionFrame, InitialOathSelectionPayload, InitialOathSelectionResult,
     LONG_VIGIL_ID, NAILKEEPER_ID, OATH_CHARACTER_ID_BYTES, OATH_ID_BYTES, OATH_MUTATION_ID_BYTES,
@@ -190,7 +196,9 @@ use thiserror::Error;
 /// First incompatible protocol generation.
 pub const PROTOCOL_MAJOR: u16 = 1;
 /// Backward-compatible feature generation within [`PROTOCOL_MAJOR`].
-pub const PROTOCOL_MINOR: u16 = CORE_COMBAT_PRESENTATION_PROTOCOL_MINOR;
+pub const PROTOCOL_MINOR: u16 = NATIVE_CRASH_PROTOCOL_MINOR;
+/// Typed privacy-safe native crash-report generation.
+pub const NATIVE_CRASH_PROTOCOL_MINOR: u16 = 24;
 /// Exact content-bound private-route combat presentation generation.
 pub const CORE_COMBAT_PRESENTATION_PROTOCOL_MINOR: u16 = 23;
 /// Exact bounded Vault/Overflow read projection generation.
@@ -462,7 +470,8 @@ mod tests {
 
     #[test]
     fn pending_inventory_appends_protocol_1_19_with_explicit_negotiation() {
-        assert_eq!(PROTOCOL_MINOR, 23);
+        assert_eq!(PROTOCOL_MINOR, 24);
+        assert_eq!(NATIVE_CRASH_PROTOCOL_MINOR, 24);
         assert_eq!(CORE_COMBAT_PRESENTATION_PROTOCOL_MINOR, 23);
         assert_eq!(HALL_INTERACTION_PROTOCOL_MINOR, 20);
         assert_eq!(CORE_PENDING_INVENTORY_PROTOCOL_MINOR, 19);

@@ -371,10 +371,24 @@ const fn message_uses_safe_storage(message: &WireMessage) -> bool {
     )
 }
 
+const fn message_uses_native_crash(message: &WireMessage) -> bool {
+    matches!(
+        message,
+        WireMessage::NativeCrashReportFrame(_)
+            | WireMessage::ReliableEvent(crate::ReliableEventFrame {
+                event: crate::ReliableEvent::NativeCrashReportResult(_),
+                ..
+            })
+    )
+}
+
 fn encode_frame_for_version(
     message: &WireMessage,
     version: ProtocolVersion,
 ) -> Result<Vec<u8>, WireCodecError> {
+    if version.minor < crate::NATIVE_CRASH_PROTOCOL_MINOR && message_uses_native_crash(message) {
+        return Err(WireCodecError::MessageUnavailableAtVersion);
+    }
     if version.minor < crate::CORE_COMBAT_PRESENTATION_PROTOCOL_MINOR
         && message_uses_core_combat_presentation(message)
     {
@@ -475,6 +489,7 @@ const fn message_kind_byte(kind: MessageKind) -> u8 {
         MessageKind::HallInteractionFrame => 24,
         MessageKind::CoreConsumableUseFrame => 25,
         MessageKind::SafeStorageQueryFrame => 26,
+        MessageKind::NativeCrashReportFrame => 27,
     }
 }
 
@@ -506,6 +521,7 @@ const fn message_kind_from_byte(value: u8) -> Result<MessageKind, WireCodecError
         24 => Ok(MessageKind::HallInteractionFrame),
         25 => Ok(MessageKind::CoreConsumableUseFrame),
         26 => Ok(MessageKind::SafeStorageQueryFrame),
+        27 => Ok(MessageKind::NativeCrashReportFrame),
         other => Err(WireCodecError::UnknownMessageKind(other)),
     }
 }
@@ -1099,6 +1115,32 @@ mod tests {
         assert_eq!(message_kind_byte(MessageKind::HallInteractionFrame), 24);
         assert_eq!(message_kind_byte(MessageKind::CoreConsumableUseFrame), 25);
         assert_eq!(message_kind_byte(MessageKind::SafeStorageQueryFrame), 26);
+        assert_eq!(message_kind_byte(MessageKind::NativeCrashReportFrame), 27);
+    }
+
+    #[test]
+    fn protocol_1_24_appends_bounded_native_crash_frames() {
+        let report = WireMessage::NativeCrashReportFrame(crate::NativeCrashReportFrameV1 {
+            schema_version: crate::NATIVE_CRASH_SCHEMA_VERSION,
+            crash_id: [1; crate::NATIVE_CRASH_ID_BYTES],
+            kind: crate::NativeCrashKindV1::Panic,
+            signature: [2; crate::NATIVE_CRASH_SIGNATURE_BYTES],
+            uptime_millis: 55,
+            occurred_at_utc_millis: 66,
+        });
+        let encoded = encode_frame(&report).unwrap();
+        assert_eq!(encoded[8], 27);
+        assert_eq!(decode_frame(&encoded), Ok(report.clone()));
+        assert_eq!(
+            encode_frame_for_version(
+                &report,
+                ProtocolVersion {
+                    major: PROTOCOL_MAJOR,
+                    minor: crate::CORE_COMBAT_PRESENTATION_PROTOCOL_MINOR,
+                },
+            ),
+            Err(WireCodecError::MessageUnavailableAtVersion)
+        );
     }
 
     #[test]
