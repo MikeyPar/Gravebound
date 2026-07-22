@@ -163,13 +163,13 @@ pub async fn assert_bound_immutable_restart_poll_ack(
     assert_eq!(origin_session_id, Some(expected_session_id));
     assert!(!published);
 
-    let altered_session_id = [0xFD; 16];
+    let altered_session_id = [0xFD_u8; 16];
     let mut transaction = persistence.begin_transaction().await.unwrap();
     let origin_mutation = match family {
         TerminalFamily::Death => {
             sqlx::query(family.mutate_origin_sql())
                 .bind(altered_session_id.as_slice())
-                .bind([0xFC; 16].as_slice())
+                .bind([0xFC_u8; 16].as_slice())
                 .bind(WIPEABLE_CORE_NAMESPACE)
                 .bind(event_id.as_slice())
                 .execute(transaction.connection())
