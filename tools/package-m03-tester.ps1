@@ -23,6 +23,7 @@ $PackageInputs = @(
     'crates\sim_core',
     'migrations',
     'tools\m03-tester-postgres.yml',
+    'tools\package-m03-tester.ps1',
     'tools\run-m03-tester.ps1'
 )
 
@@ -246,6 +247,11 @@ PLAY GAME.cmd runs the normal authenticated QUIC route implemented so far, inclu
 durable identity, Hall/danger traversal, fixed Bell rooms and Sir Caldus, extraction,
 Emergency Recall, lethal death, Memorial, successor recovery, Belt consumables, and
 authenticated Vault/Overflow custody panels with durable server-planned transfers.
+Combat presentation is server-authored: actor bindings and fan, lane, ring, and rotor
+telegraphs are content/revision/route bound, preserve Physical/Veil readability, and
+remain semantically equivalent in standard, reduced-motion, and high-contrast modes.
+The native HUD exposes health, boss health, objective, Q/E Belt quantities and status,
+Recall state, and the exact LOW HEALTH (35%) and CRITICAL (15%) warning thresholds.
 
 The other launchers expose implemented M03 surfaces for direct review: Lantern Halls,
 the Core dungeon encounters, Sir Caldus, item/Vault state, durable death/Memorial, and
@@ -258,6 +264,9 @@ Moving only the EXE will make strict content or asset validation fail at startup
 USEFUL TEST NOTES
 - Please record which launcher you used when reporting a problem.
 - Include a screenshot and the exact action immediately before the issue when possible.
+- In PLAY GAME, verify that danger actors do not appear before their matching reliable
+  binding, every warning shape matches the attack origin, and reduced motion changes
+  presentation intensity without shortening or removing the warning interval.
 - PLAY GAME uses the opaque local identity `local-m03-tester`. Delete the package-local
   .runtime folder only if its generated local secrets become corrupt.
 - The external private-cohort, Steamworks, hosting rehearsal, and user-deferred full audit
