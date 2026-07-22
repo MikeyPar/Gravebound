@@ -36,6 +36,10 @@ function Invoke-PersistenceTests {
     if ($LASTEXITCODE -ne 0) {
         throw "PostgreSQL identity tests failed with exit code $LASTEXITCODE"
     }
+    & cargo test --locked -p support_lookup --test postgres_least_privilege -- --ignored --test-threads=1 --nocapture
+    if ($LASTEXITCODE -ne 0) {
+        throw "PostgreSQL support lookup least-privilege test failed with exit code $LASTEXITCODE"
+    }
 }
 
 try {
