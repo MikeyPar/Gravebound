@@ -231,6 +231,7 @@ pub struct CorePrivateLifeSessionSnapshot {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CorePrivateLifeSessionReport {
     pub retired_account_count: usize,
+    pub combat_sessions_admitted: u64,
     pub remaining_active_transports: usize,
     pub recall: CoreRecallRuntimeReport,
     pub extraction: Option<CoreExtractionRuntimeReport>,
@@ -387,6 +388,7 @@ impl std::fmt::Debug for CaldusRewardAuthorityBinding {
 struct SessionState {
     accepting: bool,
     shutdown_started: bool,
+    combat_sessions_admitted: u64,
     microrealm_shutdown_failures: usize,
     sessions: BTreeMap<[u8; 16], SessionEntry>,
 }
@@ -729,6 +731,7 @@ where
             state: Mutex::new(SessionState {
                 accepting: true,
                 shutdown_started: false,
+                combat_sessions_admitted: 0,
                 microrealm_shutdown_failures: 0,
                 sessions: BTreeMap::new(),
             }),
@@ -1420,6 +1423,7 @@ where
             b3_rewards,
             caldus_rewards,
         });
+        state.combat_sessions_admitted = state.combat_sessions_admitted.saturating_add(1);
         Ok(binding)
     }
 
@@ -2236,6 +2240,7 @@ where
         };
         let mut state = self.state.lock().await;
         let retired_account_count = state.sessions.len();
+        let combat_sessions_admitted = state.combat_sessions_admitted;
         let remaining_active_transports = state
             .sessions
             .values()
@@ -2251,6 +2256,7 @@ where
         state.sessions.clear();
         Ok(CorePrivateLifeSessionReport {
             retired_account_count,
+            combat_sessions_admitted,
             remaining_active_transports,
             recall,
             extraction,
@@ -2935,10 +2941,14 @@ mod tests {
         let ticks = Arc::new(TickSource(AtomicU64::new(100)));
         let recall = Arc::new(CoreRecallActorDirectory::<FixedClock, _>::new(ticks));
         let sessions = Arc::new(
-            CorePrivateLifeSessionDirectory::new(recall)
+            CorePrivateLifeSessionDirectory::new(Arc::clone(&recall))
                 .with_terminal_owner_factory(Arc::new(TestTerminalOwnerFactory)),
         );
         let (routes, route_lease, runtime) = live_microrealm().await;
+        recall
+            .register_actor(authenticated(), route_lease, actor())
+            .await
+            .unwrap();
 
         let (first_server_endpoint, first_client_endpoint, first_client, first_server) =
             live_connection_pair().await;
@@ -3076,6 +3086,7 @@ mod tests {
             connection.close(0_u32.into(), b"test shutdown");
         }
         let report = sessions.finish_shutdown().await.unwrap();
+        assert_eq!(report.combat_sessions_admitted, 1);
         assert_eq!(report.remaining_microrealm_bindings, 0);
         assert!(report.zero_residue);
         routes.begin_shutdown();

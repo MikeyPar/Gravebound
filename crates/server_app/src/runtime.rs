@@ -633,7 +633,7 @@ impl BoundCorePrivateLifeServer {
         Ok(CoreIdentityServerReport {
             accepted_connections: accepted.load(Ordering::Relaxed),
             rejected_connections: rejected.load(Ordering::Relaxed),
-            combat_sessions_admitted: 0,
+            combat_sessions_admitted: process_report.sessions.combat_sessions_admitted,
             completed_connection_tasks,
             failed_connection_tasks: failed.load(Ordering::Relaxed),
             remaining_connection_tasks,
