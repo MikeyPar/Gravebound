@@ -27,8 +27,13 @@ This evidence reads the three design authorities together:
 11. commits public `UsePortal portal.dungeon.bell_sepulcher` without changing danger lineage or restore authority;
 12. proves the safe B0 vestibule contains one player and no hostile, then enters B1 with public `ActionFrame::Interact`;
 13. matches the active B1 authority and exact eight-enemy/no-boss snapshot;
-14. records the exact schema-70 session/onboarding/first-combat/CleanExit sequence under explicit test attribution; and
-15. shuts down with exactly one combat admission, no worker/connection residue, no open telemetry session, and no retained disposable roots after cleanup.
+14. clears B1, B2, B3, and B5 with bounded movement, aim, primary fire, Grave Mark, and Slipstep inputs while retaining the same character and danger lineage;
+15. waits for the committed B3 reward before entering B4 and proves the ordinary low-level life receives the authoritative `NoOffer` Bargain projection;
+16. advances through the authored B5 bridge into B6 without a direct route-state write;
+17. survives the ordinary Sir Caldus encounter, waits for the durable personal reward and pending-inventory handoff, and reaches the stable `BossExitReady` projection;
+18. proves both boss and extraction readiness are available only after that committed handoff;
+19. records the exact schema-70 session/onboarding/first-combat/CleanExit sequence under explicit test attribution; and
+20. shuts down with exactly one combat admission, no worker/connection residue, no open telemetry session, and no retained disposable roots after cleanup.
 
 Every transport and authority transition is bounded. Hall traversal allows 15 seconds per authored waypoint; handshake, reliable mutations, route publication, and matching snapshot waits allow 10 seconds each.
 
@@ -38,8 +43,8 @@ Every transport and authority transition is bounded. Hall traversal allows 15 se
 - Rust formatting and scoped diff validation: PASS.
 - Strict target lint: PASS for the production-root journey target with warnings denied.
 - Hosted run [`29900131501`](https://github.com/MikeyPar/Gravebound/actions/runs/29900131501) at source `fbb0c01` passed the schema-70 PostgreSQL source journey and Windows release construction. Its integrated production-root journey then failed before transport admission because dormant-composition validation expected two `runtime_bootstrap` owners while the required production graph correctly retained three: the foundation, terminal reconciler, and world-flow coordinator.
-- The composition invariant now requires those exact three owners. Focused target compilation, formatting, diff validation, and strict target lint pass with the route extended through B1. Disposable PostgreSQL plus real-QUIC execution of that correction remains pending hosted CI because no local `TEST_DATABASE_URL` is configured.
+- The composition invariant now requires those exact three owners. Focused target compilation, formatting, diff validation, and strict target lint pass with the route extended through the stable post-Caldus exit. Disposable PostgreSQL plus real-QUIC execution of that correction and route extension remains pending hosted CI because no local `TEST_DATABASE_URL` is configured.
 
 ## Claim boundary
 
-This slice proves the source path through active B1, not a completed dungeon. It does not yet prove B1 clear through B6, Caldus, extraction, death/successor, reconnect/restart repetition, the 25-journey matrix, current login timing, or optimized Realm Gate capture. The Current Next Step is the hosted corrected B1 journey, followed by extending the same public-protocol driver through B1-B6/Caldus and both terminal branches. No `GB-M03-03` or M03 closure credit is awarded here.
+This slice proves the source path through the complete fixed dungeon and stable post-Caldus exit, not a completed private-life loop. It does not yet prove extraction, death/successor, reconnect/restart repetition, the 25-journey matrix, current login timing, or optimized Realm Gate capture. The Current Next Step is hosted execution of this exact path, followed by extending the same public-protocol driver through ordinary extraction and death/successor. No `GB-M03-03` or M03 closure credit is awarded here.

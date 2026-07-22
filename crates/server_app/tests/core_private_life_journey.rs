@@ -13,14 +13,15 @@ use persistence::{
 };
 use protocol::{
     AccountBootstrapFrame, AccountBootstrapRequest, AccountBootstrapResult, ActionFrame,
-    ActionKind, ActionResultCode, AuthTicket, CharacterLocation, CharacterMutationFrame,
-    CharacterMutationPayload, ClientHello, Compression, CorePrivateRouteContentRevisionV1,
-    CorePrivateRoutePhaseV1, CorePrivateRouteRoomV1, CorePrivateRouteSceneV1,
-    CorePrivateRouteStateV1, EntityKind, EntitySnapshot, HALL_INTERACTION_SCHEMA_VERSION,
-    HallInteractionFrameV1, HallInteractionIntentV1, HallInteractionResultCodeV1, HallStationV1,
-    HandshakeResponse, InputFrame, ManifestHash, Platform, ProtocolVersion, ReliableEvent,
-    ReliableEventFrame, SafeArrival, WireMessage, WireText, WorldFlowContentRevisionV1,
-    WorldFlowFrame, WorldFlowRequest, WorldFlowResult, WorldTransferCommand, WorldTransferMutation,
+    ActionKind, ActionResultCode, AuthTicket, BargainContentRevisionV1, BargainResultCode,
+    BargainViewFrame, CharacterLocation, CharacterMutationFrame, CharacterMutationPayload,
+    ClientHello, Compression, CorePrivateRouteContentRevisionV1, CorePrivateRoutePhaseV1,
+    CorePrivateRouteRoomV1, CorePrivateRouteSceneV1, CorePrivateRouteStateV1, EntityKind,
+    EntitySnapshot, HALL_INTERACTION_SCHEMA_VERSION, HallInteractionFrameV1,
+    HallInteractionIntentV1, HallInteractionResultCodeV1, HallStationV1, HandshakeResponse,
+    InputFrame, ManifestHash, Platform, ProtocolVersion, ReliableEvent, ReliableEventFrame,
+    SafeArrival, WireMessage, WireText, WorldFlowContentRevisionV1, WorldFlowFrame,
+    WorldFlowRequest, WorldFlowResult, WorldTransferCommand, WorldTransferMutation,
     WorldTransferPayload, WorldTransferResultCode,
 };
 use server_app::{
@@ -32,6 +33,7 @@ use tokio::sync::{oneshot, watch};
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(10);
 const MOVEMENT_TIMEOUT: Duration = Duration::from_secs(15);
 const COMBAT_TIMEOUT: Duration = Duration::from_mins(3);
+const BOSS_TIMEOUT: Duration = Duration::from_mins(5);
 const HALL_CONTENT_ID: &str = "hub.lantern_halls_01";
 const MICROREALM_CONTENT_ID: &str = "world.core_microrealm_01";
 const BELL_DUNGEON_CONTENT_ID: &str = "dungeon.bell_sepulcher";
@@ -75,6 +77,16 @@ fn route_revision(content_root: &Path) -> CorePrivateRouteContentRevisionV1 {
         records_blake3: ManifestHash::new(content.revision().records_blake3.clone()).unwrap(),
         assets_blake3: ManifestHash::new(content.revision().assets_blake3.clone()).unwrap(),
         localization_blake3: ManifestHash::new(content.revision().localization_blake3.clone())
+            .unwrap(),
+    }
+}
+
+fn bargain_revision(content_root: &Path) -> BargainContentRevisionV1 {
+    let content = sim_content::load_core_development_oaths_bargains(content_root).unwrap();
+    BargainContentRevisionV1 {
+        records_blake3: ManifestHash::new(content.hashes().records_blake3.clone()).unwrap(),
+        assets_blake3: ManifestHash::new(content.hashes().assets_blake3.clone()).unwrap(),
+        localization_blake3: ManifestHash::new(content.hashes().localization_blake3.clone())
             .unwrap(),
     }
 }
@@ -330,6 +342,110 @@ fn combat_input(sequence: u32, player: &EntitySnapshot, target: &EntitySnapshot)
     }
 }
 
+fn fixed_room_bounds(room: CorePrivateRouteRoomV1) -> (i64, i64) {
+    match room {
+        CorePrivateRouteRoomV1::BellCrossB1 => (17_000, 17_000),
+        // B2 uses the exact clockwise-rotated 15x21 Nave template.
+        CorePrivateRouteRoomV1::BellNaveB2 => (21_000, 15_000),
+        CorePrivateRouteRoomV1::BellKnightB3 => (19_000, 15_000),
+        CorePrivateRouteRoomV1::BellBridgeB5 => (23_000, 11_000),
+        CorePrivateRouteRoomV1::CaldusArenaB6 => (18_000, 18_000),
+        CorePrivateRouteRoomV1::BellVestibuleB0 | CorePrivateRouteRoomV1::BellRestB4 => {
+            unreachable!("safe rooms never run combat")
+        }
+    }
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the deterministic public-input policy keeps pursuit, projectile avoidance, and authored-shell safety auditable together"
+)]
+fn fixed_dungeon_combat_input(
+    sequence: u32,
+    player: &EntitySnapshot,
+    target: &EntitySnapshot,
+    entities: &[EntitySnapshot],
+    room: CorePrivateRouteRoomV1,
+) -> InputFrame {
+    let delta_x = i64::from(target.x_milli_tiles - player.x_milli_tiles);
+    let delta_y = i64::from(target.y_milli_tiles - player.y_milli_tiles);
+    let longest_aim_axis = delta_x.abs().max(delta_y.abs()).max(1);
+    let horizontal_aim = i16::try_from(delta_x * 1_000 / longest_aim_axis).unwrap();
+    let vertical_aim = i16::try_from(delta_y * 1_000 / longest_aim_axis).unwrap();
+    let distance_squared = delta_x * delta_x + delta_y * delta_y;
+    let is_boss = target.kind == EntityKind::Boss;
+    let preferred_distance = if is_boss { 7_000_i64 } else { 5_500_i64 };
+    let distance_tolerance = if is_boss { 1_000_i64 } else { 750_i64 };
+
+    // Maintain the starter Crossbow's legal range while moving perpendicular to aimed attacks.
+    // A slow deterministic direction reversal prevents wall-locking without reading attack IDs.
+    let (mut movement_x, mut movement_y) =
+        if distance_squared > (preferred_distance + distance_tolerance).pow(2) {
+            (delta_x, delta_y)
+        } else if distance_squared < (preferred_distance - distance_tolerance).pow(2) {
+            (-delta_x, -delta_y)
+        } else if (sequence / 180).is_multiple_of(2) {
+            (-delta_y, delta_x)
+        } else {
+            (delta_y, -delta_x)
+        };
+
+    // Snapshots expose only authoritative positions and velocities. Predict each hostile shot
+    // 350 ms forward and steer toward the aggregate local gap; no pattern, hit, or outcome is
+    // authored by the harness. The ordinary server collision and movement caps remain final.
+    for projectile in entities
+        .iter()
+        .filter(|entity| entity.kind == EntityKind::HostileProjectile)
+    {
+        let projected_x = i64::from(projectile.x_milli_tiles)
+            + i64::from(projectile.velocity_x_milli_tiles_per_second) * 350 / 1_000;
+        let projected_y = i64::from(projectile.y_milli_tiles)
+            + i64::from(projectile.velocity_y_milli_tiles_per_second) * 350 / 1_000;
+        let away_x = i64::from(player.x_milli_tiles) - projected_x;
+        let away_y = i64::from(player.y_milli_tiles) - projected_y;
+        let distance = away_x.abs().max(away_y.abs());
+        if distance < 3_500 {
+            let weight = 3_500 - distance;
+            let divisor = distance.max(250);
+            movement_x += away_x * weight / divisor * 3;
+            movement_y += away_y * weight / divisor * 3;
+        }
+    }
+
+    // Keep the driver off authored shells and bridge water even when projectile repulsion and
+    // target pursuit cancel each other. The authoritative collision world still owns legality.
+    let (width, height) = fixed_room_bounds(room);
+    let player_x = i64::from(player.x_milli_tiles);
+    let player_y = i64::from(player.y_milli_tiles);
+    if player_x < 1_500 {
+        movement_x += 4_000;
+    } else if player_x > width - 1_500 {
+        movement_x -= 4_000;
+    }
+    if player_y < 1_500 {
+        movement_y += 4_000;
+    } else if player_y > height - 1_500 {
+        movement_y -= 4_000;
+    }
+
+    let longest_motion_axis = movement_x.abs().max(movement_y.abs()).max(1);
+    let movement_x = (movement_x * 1_000 / longest_motion_axis).clamp(-1_000, 1_000);
+    let movement_y = (movement_y * 1_000 / longest_motion_axis).clamp(-1_000, 1_000);
+
+    InputFrame {
+        sequence,
+        client_tick: u64::from(sequence),
+        movement_x_milli: i16::try_from(movement_x).unwrap(),
+        movement_y_milli: i16::try_from(movement_y).unwrap(),
+        aim_x_milli: horizontal_aim,
+        aim_y_milli: vertical_aim,
+        held_primary: true,
+        primary_sequence: 1,
+        ability_1_sequence: 0,
+        ability_2_sequence: 0,
+    }
+}
+
 fn nearest_hostile<'a>(
     player: &EntitySnapshot,
     entities: &'a [EntitySnapshot],
@@ -399,6 +515,181 @@ where
     })
     .await
     .expect(timeout_message)
+}
+
+#[derive(Debug, Default)]
+struct CombatAbilityCadence {
+    last_grave_mark_tick: u64,
+    last_slipstep_tick: u64,
+}
+
+async fn press_combat_ability(
+    connection: &quinn::Connection,
+    action_sequence: &mut u32,
+    server_tick: u64,
+    action: ActionKind,
+) {
+    *action_sequence = action_sequence.checked_add(1).unwrap();
+    let response = bot_client::perform_reliable_gameplay(
+        connection,
+        WireMessage::ActionFrame(ActionFrame {
+            sequence: *action_sequence,
+            client_tick: server_tick,
+            action,
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        response.event,
+        ReliableEvent::ActionResult {
+            action_sequence: accepted_sequence,
+            code: ActionResultCode::Accepted,
+        } if accepted_sequence == *action_sequence
+    ));
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "the bounded production journey keeps all public transport, input, route, and cadence authority explicit"
+)]
+async fn drive_fixed_dungeon_combat_until<Reached>(
+    connection: &quinn::Connection,
+    assembler: &mut bot_client::BotSnapshotAssembler,
+    route_receive: &mut watch::Receiver<Option<ReliableEventFrame>>,
+    input_sequence: &mut u32,
+    action_sequence: &mut u32,
+    ability_cadence: &mut CombatAbilityCadence,
+    room: CorePrivateRouteRoomV1,
+    timeout: Duration,
+    reached: Reached,
+    timeout_message: &'static str,
+) -> ReliableEventFrame
+where
+    Reached: Fn(&CorePrivateRouteStateV1) -> bool,
+{
+    tokio::time::timeout(timeout, async {
+        loop {
+            if let Some(frame) = matching_route(route_receive, &reached) {
+                return frame;
+            }
+
+            tokio::select! {
+                changed = route_receive.changed() => {
+                    changed.expect("route event pump must remain attached");
+                    if let Some(frame) = route_receive.borrow().as_ref() {
+                        let ReliableEvent::CorePrivateRouteState(route) = &frame.event else {
+                            unreachable!("the route event pump publishes only route projections");
+                        };
+                        assert_ne!(
+                            route.phase,
+                            CorePrivateRoutePhaseV1::TerminalPending,
+                            "ordinary fixed-route combat reached a terminal outcome before its authored boundary"
+                        );
+                    }
+                }
+                chunk = bot_client::receive_snapshot_datagram(connection) => {
+                    let Some(snapshot) = assembler.ingest(chunk.unwrap()).unwrap() else {
+                        continue;
+                    };
+                    let player = snapshot
+                        .entities
+                        .iter()
+                        .find(|entity| entity.kind == EntityKind::Player)
+                        .expect("fixed-dungeon snapshot must retain its authoritative player");
+                    assert!(
+                        player.current_health > 0,
+                        "ordinary input must reach the requested fixed-route boundary alive"
+                    );
+                    let Some(target) = nearest_hostile(player, &snapshot.entities) else {
+                        *input_sequence = input_sequence.checked_add(1).unwrap();
+                        bot_client::send_input_datagram(
+                            connection,
+                            InputFrame {
+                                primary_sequence: 1,
+                                ..input(*input_sequence, 0, 0)
+                            },
+                        )
+                        .unwrap();
+                        continue;
+                    };
+
+                    *input_sequence = input_sequence.checked_add(1).unwrap();
+                    bot_client::send_input_datagram(
+                        connection,
+                        fixed_dungeon_combat_input(
+                            *input_sequence,
+                            player,
+                            target,
+                            &snapshot.entities,
+                            room,
+                        ),
+                    )
+                    .unwrap();
+
+                    if snapshot.server_tick.saturating_sub(ability_cadence.last_grave_mark_tick)
+                        >= 150
+                    {
+                        press_combat_ability(
+                            connection,
+                            action_sequence,
+                            snapshot.server_tick,
+                            ActionKind::Ability1Press,
+                        )
+                        .await;
+                        ability_cadence.last_grave_mark_tick = snapshot.server_tick;
+                    }
+                    if snapshot.server_tick.saturating_sub(ability_cadence.last_slipstep_tick)
+                        >= 240
+                    {
+                        press_combat_ability(
+                            connection,
+                            action_sequence,
+                            snapshot.server_tick,
+                            ActionKind::Ability2Press,
+                        )
+                        .await;
+                        ability_cadence.last_slipstep_tick = snapshot.server_tick;
+                    }
+                }
+            }
+        }
+    })
+    .await
+    .expect(timeout_message)
+}
+
+async fn interact_and_wait_for_route<Reached>(
+    connection: &quinn::Connection,
+    route_receive: &mut watch::Receiver<Option<ReliableEventFrame>>,
+    action_sequence: &mut u32,
+    client_tick: u64,
+    reached: Reached,
+    timeout_message: &'static str,
+) -> ReliableEventFrame
+where
+    Reached: Fn(&CorePrivateRouteStateV1) -> bool,
+{
+    *action_sequence = action_sequence.checked_add(1).unwrap();
+    let response = bot_client::perform_reliable_gameplay(
+        connection,
+        WireMessage::ActionFrame(ActionFrame {
+            sequence: *action_sequence,
+            client_tick,
+            action: ActionKind::Interact,
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        response.event,
+        ReliableEvent::ActionResult {
+            action_sequence: accepted_sequence,
+            code: ActionResultCode::Accepted,
+        } if accepted_sequence == *action_sequence
+    ));
+    wait_for_route(route_receive, reached, timeout_message).await
 }
 
 async fn drive_microrealm_until_cleared(
@@ -599,7 +890,7 @@ fn start_server(
     clippy::too_many_lines,
     reason = "the production-root route proof stays contiguous so no direct state-writing seam can be hidden"
 )]
-async fn production_root_reaches_the_first_bell_combat_room_and_cleans_up() {
+async fn production_root_reaches_caldus_exit_ready_and_cleans_up() {
     assert_eq!(
         std::env::var(TELEMETRY_ENVIRONMENT_VARIABLE).as_deref(),
         Ok("test"),
@@ -1263,6 +1554,214 @@ async fn production_root_reaches_the_first_bell_combat_room_and_cleans_up() {
             .iter()
             .all(|entity| entity.kind != EntityKind::Boss)
     );
+
+    let mut action_sequence = 1;
+    let mut ability_cadence = CombatAbilityCadence::default();
+    let b1_cleared_frame = drive_fixed_dungeon_combat_until(
+        &connection,
+        &mut assembler,
+        &mut route_receive,
+        &mut input_sequence,
+        &mut action_sequence,
+        &mut ability_cadence,
+        CorePrivateRouteRoomV1::BellCrossB1,
+        COMBAT_TIMEOUT,
+        |route| {
+            route.room == Some(CorePrivateRouteRoomV1::BellCrossB1)
+                && route.phase == CorePrivateRoutePhaseV1::RoomCleared
+        },
+        "ordinary Bell B1 clear timed out",
+    )
+    .await;
+    let ReliableEvent::CorePrivateRouteState(b1_cleared) = &b1_cleared_frame.event else {
+        unreachable!("the combat driver returns a filtered route projection");
+    };
+    assert!(b1_cleared.readiness.room_exit_available.is_available());
+
+    let b2_active_frame = interact_and_wait_for_route(
+        &connection,
+        &mut route_receive,
+        &mut action_sequence,
+        b1_cleared_frame.server_tick,
+        |route| {
+            route.room == Some(CorePrivateRouteRoomV1::BellNaveB2)
+                && route.phase == CorePrivateRoutePhaseV1::RoomActive
+        },
+        "ordinary Bell B2 activation timed out",
+    )
+    .await;
+    let ReliableEvent::CorePrivateRouteState(b2_active) = &b2_active_frame.event else {
+        unreachable!("the route waiter returns a filtered route projection");
+    };
+    assert_eq!(b2_active.instance_lineage_id, Some(*instance_lineage_id));
+    let b2_cleared_frame = drive_fixed_dungeon_combat_until(
+        &connection,
+        &mut assembler,
+        &mut route_receive,
+        &mut input_sequence,
+        &mut action_sequence,
+        &mut ability_cadence,
+        CorePrivateRouteRoomV1::BellNaveB2,
+        COMBAT_TIMEOUT,
+        |route| {
+            route.room == Some(CorePrivateRouteRoomV1::BellNaveB2)
+                && route.phase == CorePrivateRoutePhaseV1::RoomCleared
+        },
+        "ordinary Bell B2 clear timed out",
+    )
+    .await;
+
+    let b3_active_frame = interact_and_wait_for_route(
+        &connection,
+        &mut route_receive,
+        &mut action_sequence,
+        b2_cleared_frame.server_tick,
+        |route| {
+            route.room == Some(CorePrivateRouteRoomV1::BellKnightB3)
+                && route.phase == CorePrivateRoutePhaseV1::RoomActive
+        },
+        "ordinary Bell B3 activation timed out",
+    )
+    .await;
+    let ReliableEvent::CorePrivateRouteState(b3_active) = &b3_active_frame.event else {
+        unreachable!("the route waiter returns a filtered route projection");
+    };
+    assert_eq!(b3_active.instance_lineage_id, Some(*instance_lineage_id));
+    let b3_cleared_frame = drive_fixed_dungeon_combat_until(
+        &connection,
+        &mut assembler,
+        &mut route_receive,
+        &mut input_sequence,
+        &mut action_sequence,
+        &mut ability_cadence,
+        CorePrivateRouteRoomV1::BellKnightB3,
+        COMBAT_TIMEOUT,
+        |route| {
+            route.room == Some(CorePrivateRouteRoomV1::BellKnightB3)
+                && route.phase == CorePrivateRoutePhaseV1::RoomCleared
+        },
+        "ordinary Bell B3 reward-and-clear timed out",
+    )
+    .await;
+
+    let b4_rest_frame = interact_and_wait_for_route(
+        &connection,
+        &mut route_receive,
+        &mut action_sequence,
+        b3_cleared_frame.server_tick,
+        |route| {
+            route.room == Some(CorePrivateRouteRoomV1::BellRestB4)
+                && route.phase == CorePrivateRoutePhaseV1::Rest
+        },
+        "ordinary Bell B4 rest entry timed out",
+    )
+    .await;
+    let ReliableEvent::CorePrivateRouteState(b4_rest) = &b4_rest_frame.event else {
+        unreachable!("the route waiter returns a filtered route projection");
+    };
+    assert!(b4_rest.readiness.room_exit_available.is_available());
+
+    // The exact ordinary life has not reached the temporary Core level-5 milestone. B3 therefore
+    // commits its item/XP terminal with an authoritative no-offer result, and the public B4 view
+    // must report that result rather than allowing the harness to invent or skip a Bargain.
+    let (_, bargain_view) = bot_client::perform_bargain_view(
+        &connection,
+        BargainViewFrame {
+            sequence: 1,
+            character_id,
+            content_revision: bargain_revision(&content_root),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(bargain_view.code, BargainResultCode::NoOffer);
+    let bargain_projection = bargain_view
+        .projection
+        .expect("authoritative no-offer view retains the character life projection");
+    assert_eq!(bargain_projection.character_id, character_id);
+    assert_eq!(bargain_projection.earned_bargain_slots, 0);
+    assert!(bargain_projection.active_bargain_ids.is_empty());
+    assert!(bargain_projection.offer.is_none());
+
+    let b5_active_frame = interact_and_wait_for_route(
+        &connection,
+        &mut route_receive,
+        &mut action_sequence,
+        b4_rest_frame.server_tick,
+        |route| {
+            route.room == Some(CorePrivateRouteRoomV1::BellBridgeB5)
+                && route.phase == CorePrivateRoutePhaseV1::RoomActive
+        },
+        "ordinary Bell B5 activation timed out",
+    )
+    .await;
+    let ReliableEvent::CorePrivateRouteState(b5_active) = &b5_active_frame.event else {
+        unreachable!("the route waiter returns a filtered route projection");
+    };
+    assert_eq!(b5_active.instance_lineage_id, Some(*instance_lineage_id));
+    let b5_cleared_frame = drive_fixed_dungeon_combat_until(
+        &connection,
+        &mut assembler,
+        &mut route_receive,
+        &mut input_sequence,
+        &mut action_sequence,
+        &mut ability_cadence,
+        CorePrivateRouteRoomV1::BellBridgeB5,
+        COMBAT_TIMEOUT,
+        |route| {
+            route.room == Some(CorePrivateRouteRoomV1::BellBridgeB5)
+                && route.phase == CorePrivateRoutePhaseV1::RoomCleared
+        },
+        "ordinary Bell B5 clear timed out",
+    )
+    .await;
+
+    let b6_frame = interact_and_wait_for_route(
+        &connection,
+        &mut route_receive,
+        &mut action_sequence,
+        b5_cleared_frame.server_tick,
+        |route| {
+            route.room == Some(CorePrivateRouteRoomV1::CaldusArenaB6)
+                && matches!(
+                    route.phase,
+                    CorePrivateRoutePhaseV1::BossStaging
+                        | CorePrivateRoutePhaseV1::BossReadyCountdown
+                        | CorePrivateRoutePhaseV1::BossIntroduction
+                        | CorePrivateRoutePhaseV1::BossPhaseOne
+                )
+        },
+        "ordinary Sir Caldus staging timed out",
+    )
+    .await;
+    let ReliableEvent::CorePrivateRouteState(b6_route) = &b6_frame.event else {
+        unreachable!("the route waiter returns a filtered route projection");
+    };
+    assert_eq!(b6_route.instance_lineage_id, Some(*instance_lineage_id));
+
+    let exit_ready_frame = drive_fixed_dungeon_combat_until(
+        &connection,
+        &mut assembler,
+        &mut route_receive,
+        &mut input_sequence,
+        &mut action_sequence,
+        &mut ability_cadence,
+        CorePrivateRouteRoomV1::CaldusArenaB6,
+        BOSS_TIMEOUT,
+        |route| {
+            route.room == Some(CorePrivateRouteRoomV1::CaldusArenaB6)
+                && route.phase == CorePrivateRoutePhaseV1::BossExitReady
+        },
+        "ordinary Sir Caldus defeat, durable reward, and stable exit timed out",
+    )
+    .await;
+    let ReliableEvent::CorePrivateRouteState(exit_ready) = &exit_ready_frame.event else {
+        unreachable!("the combat driver returns a filtered route projection");
+    };
+    assert_eq!(exit_ready.character_id, character_id);
+    assert_eq!(exit_ready.instance_lineage_id, Some(*instance_lineage_id));
+    assert!(exit_ready.readiness.boss_encounter_ready.is_available());
+    assert!(exit_ready.readiness.extraction_available.is_available());
 
     connection.close(0_u32.into(), b"native client shutdown");
     client_endpoint.close(0_u32.into(), b"native client shutdown");
