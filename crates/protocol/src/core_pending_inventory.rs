@@ -430,7 +430,7 @@ mod tests {
     }
 
     #[test]
-    fn reliable_event_is_append_only_at_protocol_nineteen() {
+    fn reliable_event_remains_append_only_after_protocol_nineteen() {
         let event = crate::WireMessage::ReliableEvent(crate::ReliableEventFrame {
             sequence: 1,
             server_tick: 900,
@@ -442,8 +442,11 @@ mod tests {
         })
         .expect("event bytes");
         assert_eq!(event_bytes[0], 21, "append-only reliable-event tail");
-        let encoded = crate::encode_frame(&event).expect("protocol 1.19 frame");
-        assert_eq!(u16::from_le_bytes([encoded[6], encoded[7]]), 19);
+        let encoded = crate::encode_frame(&event).expect("current protocol frame");
+        assert_eq!(
+            u16::from_le_bytes([encoded[6], encoded[7]]),
+            crate::PROTOCOL_MINOR
+        );
         assert_eq!(
             crate::encode_protocol_1_18_compatibility_frame(&event),
             Err(crate::WireCodecError::MessageUnavailableAtVersion)

@@ -1597,10 +1597,10 @@ mod tests {
         );
 
         let mut unknown_kind = valid;
-        unknown_kind[8] = 24;
+        unknown_kind[8] = u8::MAX;
         assert_eq!(
             decode_frame(&unknown_kind),
-            Err(WireCodecError::UnknownMessageKind(24))
+            Err(WireCodecError::UnknownMessageKind(u8::MAX))
         );
     }
 
