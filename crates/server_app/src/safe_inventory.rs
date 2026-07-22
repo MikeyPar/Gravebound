@@ -23,6 +23,7 @@ pub enum SafeInventoryTransferKind {
     CharacterSafeToVault,
     VaultToCharacterSafe,
     CharacterSafeToRunBackpack,
+    OverflowToCharacterSafe,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,6 +116,26 @@ impl CoreSafeInventoryAuthority {
         };
         result.unwrap_or_else(|error| rejected_wire_result(frame, error.result_code()))
     }
+
+    /// Returns only an exact committed receipt. Fresh, altered, and malformed commands return
+    /// `None` and must pass current Hall-panel authorization before ordinary dispatch.
+    pub async fn exact_replay(
+        &self,
+        authenticated: AuthenticatedAccount,
+        frame: &SafeInventoryTransferFrameV1,
+    ) -> Option<SafeInventoryTransferResultV1> {
+        let Self::Persistent(service) = self else {
+            return None;
+        };
+        if authenticated.namespace != AuthenticatedNamespace::WipeableTest {
+            return None;
+        }
+        service
+            .exact_replay_frame(authenticated.account_id.as_bytes(), frame)
+            .await
+            .ok()
+            .flatten()
+    }
 }
 
 impl PostgresSafeInventoryService {
@@ -157,6 +178,23 @@ impl PostgresSafeInventoryService {
             .wire_result(frame.character_id)
     }
 
+    async fn exact_replay_frame(
+        &self,
+        account_id: [u8; 16],
+        frame: &SafeInventoryTransferFrameV1,
+    ) -> Result<Option<SafeInventoryTransferResultV1>, SafeInventoryServiceError> {
+        frame
+            .validate()
+            .map_err(|_| SafeInventoryServiceError::InvalidCommand)?;
+        let command = command_from_frame(frame);
+        validate_command(command)?;
+        let request_hash = request_hash(account_id, frame.character_id, command);
+        self.load_validated_replay(account_id, frame.character_id, command, request_hash)
+            .await?
+            .map(|replay| replay.wire_result(frame.character_id))
+            .transpose()
+    }
+
     pub async fn transfer(
         &self,
         account_id: [u8; 16],
@@ -190,26 +228,30 @@ impl PostgresSafeInventoryService {
             }
             return Err(SafeInventoryServiceError::StaleVersion);
         }
-        let (snapshot, versions) = project_snapshot(&stored)?;
-        let planned = plan_safe_storage_transfer(&snapshot, simulation_command(command))
-            .map_err(|error| map_plan(&error))?;
-        let placements = planned
-            .placements
-            .iter()
-            .map(|placement| {
-                let item_uid = placement.item_uid.bytes();
-                let expected_item_version = versions
-                    .get(&item_uid)
-                    .copied()
-                    .ok_or(SafeInventoryServiceError::CorruptSnapshot)?;
-                Ok(StoredSafeInventoryPlacement {
-                    item_uid,
-                    source: stored_location(placement.source),
-                    destination: stored_location(placement.destination),
-                    expected_item_version,
+        let placements = if command.kind == SafeInventoryTransferKind::OverflowToCharacterSafe {
+            plan_overflow_withdrawal(&stored, command.source_slot_index)?
+        } else {
+            let (snapshot, versions) = project_snapshot(&stored)?;
+            let planned = plan_safe_storage_transfer(&snapshot, simulation_command(command))
+                .map_err(|error| map_plan(&error))?;
+            planned
+                .placements
+                .iter()
+                .map(|placement| {
+                    let item_uid = placement.item_uid.bytes();
+                    let expected_item_version = versions
+                        .get(&item_uid)
+                        .copied()
+                        .ok_or(SafeInventoryServiceError::CorruptSnapshot)?;
+                    Ok(StoredSafeInventoryPlacement {
+                        item_uid,
+                        source: stored_location(placement.source),
+                        destination: stored_location(placement.destination),
+                        expected_item_version,
+                    })
                 })
-            })
-            .collect::<Result<Vec<_>, SafeInventoryServiceError>>()?;
+                .collect::<Result<Vec<_>, SafeInventoryServiceError>>()?
+        };
         let result_hash = result_hash(request_hash, &placements);
         let stored_command = StoredSafeInventoryCommand {
             mutation_id: command.mutation_id,
@@ -307,6 +349,9 @@ const fn command_from_frame(frame: &SafeInventoryTransferFrameV1) -> SafeInvento
             SafeInventoryTransferKindV1::CharacterSafeToRunBackpack => {
                 SafeInventoryTransferKind::CharacterSafeToRunBackpack
             }
+            SafeInventoryTransferKindV1::OverflowToCharacterSafe => {
+                SafeInventoryTransferKind::OverflowToCharacterSafe
+            }
         },
         source_slot_index: frame.payload.source_slot_index,
         expected_account_version: frame.payload.expected_account_version,
@@ -325,6 +370,7 @@ fn validate_command(
         SafeInventoryTransferKind::VaultToCharacterSafe => {
             usize::from(command.source_slot_index) < VAULT_CAPACITY
         }
+        SafeInventoryTransferKind::OverflowToCharacterSafe => command.source_slot_index < 20,
     };
     if command.mutation_id == [0; 16]
         || command.expected_account_version == 0
@@ -355,6 +401,9 @@ fn simulation_command(command: SafeInventoryTransferCommand) -> SafeStorageComma
                     .expect("validated CharacterSafe slot fits u8"),
             }
         }
+        SafeInventoryTransferKind::OverflowToCharacterSafe => {
+            unreachable!("Overflow withdrawal uses the dedicated deterministic planner")
+        }
     }
 }
 
@@ -369,6 +418,9 @@ fn stored_kind(kind: SafeInventoryTransferKind) -> StoredSafeInventoryCommandKin
         SafeInventoryTransferKind::CharacterSafeToRunBackpack => {
             StoredSafeInventoryCommandKind::CharacterSafeToRunBackpack
         }
+        SafeInventoryTransferKind::OverflowToCharacterSafe => {
+            StoredSafeInventoryCommandKind::OverflowToCharacterSafe
+        }
     }
 }
 
@@ -382,7 +434,7 @@ fn stored_location(location: SafeStorageLocation) -> StoredSafeInventoryLocation
     }
 }
 
-const fn wire_destination(location: StoredSafeInventoryLocation) -> SafeInventoryDestinationV1 {
+fn wire_destination(location: StoredSafeInventoryLocation) -> SafeInventoryDestinationV1 {
     match location {
         StoredSafeInventoryLocation::RunBackpack(slot_index) => {
             SafeInventoryDestinationV1::RunBackpack { slot_index }
@@ -392,6 +444,9 @@ const fn wire_destination(location: StoredSafeInventoryLocation) -> SafeInventor
         }
         StoredSafeInventoryLocation::Vault(slot_index) => {
             SafeInventoryDestinationV1::Vault { slot_index }
+        }
+        StoredSafeInventoryLocation::Overflow(_) => {
+            unreachable!("Overflow is never a manual transfer destination")
         }
     }
 }
@@ -420,6 +475,9 @@ fn project_snapshot(
             StoredSafeInventoryLocation::RunBackpack(slot) => {
                 (&mut run_backpack, usize::from(slot))
             }
+            StoredSafeInventoryLocation::Overflow(_) => {
+                return Err(SafeInventoryServiceError::CorruptSnapshot);
+            }
         };
         project_item(slots, index, item)?;
     }
@@ -433,6 +491,104 @@ fn project_snapshot(
         },
         versions,
     ))
+}
+
+fn plan_overflow_withdrawal(
+    stored: &StoredSafeInventorySnapshot,
+    source_slot_index: u16,
+) -> Result<Vec<StoredSafeInventoryPlacement>, SafeInventoryServiceError> {
+    let source_slot = u8::try_from(source_slot_index)
+        .ok()
+        .filter(|slot| *slot < 20)
+        .ok_or(SafeInventoryServiceError::InvalidCommand)?;
+    let source = StoredSafeInventoryLocation::Overflow(source_slot);
+    let mut source_items = stored
+        .overflow
+        .iter()
+        .filter(|item| item.location == source)
+        .collect::<Vec<_>>();
+    source_items.sort_by_key(|item| item.item_uid);
+    let Some(first) = source_items.first().copied() else {
+        return Err(SafeInventoryServiceError::BindingMismatch);
+    };
+    if source_items.len() > 6
+        || source_items
+            .iter()
+            .any(|item| item.item_kind != first.item_kind || item.template_id != first.template_id)
+    {
+        return Err(SafeInventoryServiceError::CorruptSnapshot);
+    }
+    let mut occupied: BTreeMap<u8, Vec<&StoredSafeInventoryItem>> = BTreeMap::new();
+    for item in &stored.character_safe {
+        let StoredSafeInventoryLocation::CharacterSafe(slot) = item.location else {
+            return Err(SafeInventoryServiceError::CorruptSnapshot);
+        };
+        occupied.entry(slot).or_default().push(item);
+    }
+    let mut placements = Vec::with_capacity(source_items.len());
+    if first.item_kind == 0 {
+        let slot = (0..8_u8)
+            .find(|slot| !occupied.contains_key(slot))
+            .ok_or(SafeInventoryServiceError::CharacterSafeFull)?;
+        placements.push(StoredSafeInventoryPlacement {
+            item_uid: first.item_uid,
+            source,
+            destination: StoredSafeInventoryLocation::CharacterSafe(slot),
+            expected_item_version: first.item_version,
+        });
+        return Ok(placements);
+    }
+    if first.item_kind != 1 {
+        return Err(SafeInventoryServiceError::CorruptSnapshot);
+    }
+
+    let mut remaining = source_items.into_iter().peekable();
+    for slot in 0..8_u8 {
+        let Some(existing) = occupied.get_mut(&slot) else {
+            continue;
+        };
+        if existing
+            .first()
+            .is_none_or(|item| item.item_kind != 1 || item.template_id != first.template_id)
+        {
+            continue;
+        }
+        while existing.len() < 6 {
+            let Some(item) = remaining.next() else {
+                break;
+            };
+            existing.push(item);
+            placements.push(StoredSafeInventoryPlacement {
+                item_uid: item.item_uid,
+                source,
+                destination: StoredSafeInventoryLocation::CharacterSafe(slot),
+                expected_item_version: item.item_version,
+            });
+        }
+        if remaining.peek().is_none() {
+            return Ok(placements);
+        }
+    }
+    while remaining.peek().is_some() {
+        let slot = (0..8_u8)
+            .find(|slot| !occupied.contains_key(slot))
+            .ok_or(SafeInventoryServiceError::CharacterSafeFull)?;
+        let mut new_stack = Vec::new();
+        while new_stack.len() < 6 {
+            let Some(item) = remaining.next() else {
+                break;
+            };
+            new_stack.push(item);
+            placements.push(StoredSafeInventoryPlacement {
+                item_uid: item.item_uid,
+                source,
+                destination: StoredSafeInventoryLocation::CharacterSafe(slot),
+                expected_item_version: item.item_version,
+            });
+        }
+        occupied.insert(slot, new_stack);
+    }
+    Ok(placements)
 }
 
 pub(crate) fn plan_danger_entry_safe_deposit(
@@ -502,6 +658,7 @@ fn request_hash(
         SafeInventoryTransferKind::CharacterSafeToVault => 0,
         SafeInventoryTransferKind::VaultToCharacterSafe => 1,
         SafeInventoryTransferKind::CharacterSafeToRunBackpack => 2,
+        SafeInventoryTransferKind::OverflowToCharacterSafe => 3,
     });
     material.extend_from_slice(&command.source_slot_index.to_le_bytes());
     material.extend_from_slice(&command.expected_account_version.to_le_bytes());
@@ -518,6 +675,7 @@ fn result_hash(request_hash: [u8; 32], placements: &[StoredSafeInventoryPlacemen
             StoredSafeInventoryLocation::RunBackpack(slot) => (2_u8, u16::from(slot)),
             StoredSafeInventoryLocation::CharacterSafe(slot) => (5, u16::from(slot)),
             StoredSafeInventoryLocation::Vault(slot) => (6, slot),
+            StoredSafeInventoryLocation::Overflow(slot) => (8, u16::from(slot)),
         };
         material.push(kind);
         material.extend_from_slice(&slot.to_le_bytes());
@@ -542,6 +700,12 @@ fn validate_replayed_result(
         SafeInventoryTransferKind::VaultToCharacterSafe => {
             StoredSafeInventoryLocation::Vault(command.source_slot_index)
         }
+        SafeInventoryTransferKind::OverflowToCharacterSafe => {
+            StoredSafeInventoryLocation::Overflow(
+                u8::try_from(command.source_slot_index)
+                    .map_err(|_| SafeInventoryServiceError::CorruptSnapshot)?,
+            )
+        }
     };
     let placements_valid = result.placements.iter().all(|placement| {
         placement.source == source
@@ -550,6 +714,10 @@ fn validate_replayed_result(
                     matches!(placement.destination, StoredSafeInventoryLocation::Vault(_))
                 }
                 SafeInventoryTransferKind::VaultToCharacterSafe => matches!(
+                    placement.destination,
+                    StoredSafeInventoryLocation::CharacterSafe(_)
+                ),
+                SafeInventoryTransferKind::OverflowToCharacterSafe => matches!(
                     placement.destination,
                     StoredSafeInventoryLocation::CharacterSafe(_)
                 ),
@@ -587,6 +755,9 @@ fn map_persistence(
         }
         PersistenceError::SafeInventoryStorageFull => match kind {
             Some(SafeInventoryTransferKind::VaultToCharacterSafe) => {
+                SafeInventoryServiceError::CharacterSafeFull
+            }
+            Some(SafeInventoryTransferKind::OverflowToCharacterSafe) => {
                 SafeInventoryServiceError::CharacterSafeFull
             }
             Some(SafeInventoryTransferKind::CharacterSafeToRunBackpack) => {
@@ -671,6 +842,7 @@ mod tests {
                 StoredSafeInventoryLocation::Vault(159),
             )],
             run_backpack: Vec::new(),
+            overflow: Vec::new(),
         };
         let (snapshot, versions) = project_snapshot(&stored).unwrap();
         assert_eq!(
@@ -876,5 +1048,49 @@ mod tests {
             projection.placements[0].destination,
             SafeInventoryDestinationV1::Vault { slot_index: 0 }
         );
+    }
+
+    #[test]
+    fn overflow_withdrawal_uses_lowest_legal_character_safe_or_rejects_full() {
+        let overflow = item(
+            20,
+            "equipment.overflow",
+            0,
+            StoredSafeInventoryLocation::Overflow(3),
+        );
+        let mut stored = StoredSafeInventorySnapshot {
+            account_version: 4,
+            inventory_version: 7,
+            character_safe: vec![item(
+                1,
+                "equipment.safe",
+                0,
+                StoredSafeInventoryLocation::CharacterSafe(0),
+            )],
+            vault: Vec::new(),
+            run_backpack: Vec::new(),
+            overflow: vec![overflow.clone()],
+        };
+        let placement = plan_overflow_withdrawal(&stored, 3).unwrap();
+        assert_eq!(placement.len(), 1);
+        assert_eq!(
+            placement[0].destination,
+            StoredSafeInventoryLocation::CharacterSafe(1)
+        );
+
+        stored.character_safe = (0..8_u8)
+            .map(|slot| {
+                item(
+                    slot.saturating_add(1),
+                    "equipment.safe",
+                    0,
+                    StoredSafeInventoryLocation::CharacterSafe(slot),
+                )
+            })
+            .collect();
+        assert!(matches!(
+            plan_overflow_withdrawal(&stored, 3),
+            Err(SafeInventoryServiceError::CharacterSafeFull)
+        ));
     }
 }

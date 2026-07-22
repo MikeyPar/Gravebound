@@ -174,6 +174,11 @@ impl CorePrivateLifeProcess {
     }
 
     #[must_use]
+    pub(crate) fn safe_storage(&self) -> Arc<crate::CoreSafeStorageAuthority> {
+        self.foundation.safe_storage()
+    }
+
+    #[must_use]
     pub(crate) fn resolution_hold(&self) -> Arc<crate::CoreResolutionHoldAuthority> {
         self.foundation.resolution_hold()
     }

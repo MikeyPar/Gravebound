@@ -78,6 +78,7 @@ mod reward_rng;
 mod reward_service;
 mod runtime;
 mod safe_inventory;
+mod safe_storage;
 mod session;
 mod starter_items;
 mod successor_service;
@@ -395,6 +396,9 @@ pub use runtime::{
 pub use safe_inventory::{
     AuthoritativeSafeInventoryTransfer, CoreSafeInventoryAuthority, PostgresSafeInventoryService,
     SafeInventoryServiceError, SafeInventoryTransferCommand, SafeInventoryTransferKind,
+};
+pub use safe_storage::{
+    CoreSafeStorageAuthority, PostgresSafeStorageService, SafeStorageServiceError,
 };
 pub use session::{
     AuthoritativeSession, IngressAnomaly, IngressAnomalyKind, IngressDiagnostics, InputDisposition,

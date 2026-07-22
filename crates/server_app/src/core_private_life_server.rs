@@ -509,7 +509,60 @@ async fn dispatch_reliable(
         WireMessage::RecallFrame(frame) => {
             dispatch_recall(send, &frame, process, authenticated, transport, writer).await?;
         }
+        WireMessage::SafeStorageQueryFrame(frame) => {
+            let authorized = match (&*route, frame.surface) {
+                (ConnectionRoute::Hall { actor, .. }, protocol::SafeStorageSurfaceV1::Vault) => {
+                    process.hall().panel_authorizes(
+                        authenticated,
+                        *actor,
+                        transport,
+                        protocol::HallStationV1::Vault,
+                    )
+                }
+                (ConnectionRoute::Hall { actor, .. }, protocol::SafeStorageSurfaceV1::Overflow) => {
+                    process.hall().panel_authorizes(
+                        authenticated,
+                        *actor,
+                        transport,
+                        protocol::HallStationV1::Overflow,
+                    )
+                }
+                _ => false,
+            };
+            let result = if authorized {
+                process.safe_storage().query(authenticated, &frame).await
+            } else {
+                protocol::SafeStorageQueryResultV1::Rejected {
+                    schema_version: protocol::SAFE_STORAGE_SCHEMA_VERSION,
+                    sequence: frame.sequence,
+                    code: crate::safe_storage::unauthorized_panel_code(matches!(
+                        route,
+                        ConnectionRoute::Hall { .. }
+                    )),
+                }
+            };
+            writer
+                .send_response(
+                    send,
+                    0,
+                    ReliableEvent::SafeStorageQueryResult(Box::new(result)),
+                )
+                .await?;
+        }
         message => {
+            if let WireMessage::SafeInventoryTransferFrame(frame) = &message {
+                if let Some(replay) = process
+                    .safe_inventory()
+                    .exact_replay(authenticated, frame)
+                    .await
+                {
+                    writer
+                        .send_response(send, 0, ReliableEvent::SafeInventoryTransferResult(replay))
+                        .await?;
+                    publish_route(process, writer, route, 0).await?;
+                    return Ok(());
+                }
+            }
             if let Some(event) =
                 hall_panel_rejection(process, authenticated, transport, route, &message)
             {
@@ -622,8 +675,16 @@ fn hall_panel_rejection(
             ))
         }
         WireMessage::SafeInventoryTransferFrame(frame)
-            if !authorized(protocol::HallStationV1::Vault)
-                && !authorized(protocol::HallStationV1::Overflow) =>
+            if !authorized(match frame.payload.kind {
+                protocol::SafeInventoryTransferKindV1::OverflowToCharacterSafe => {
+                    protocol::HallStationV1::Overflow
+                }
+                protocol::SafeInventoryTransferKindV1::CharacterSafeToVault
+                | protocol::SafeInventoryTransferKindV1::VaultToCharacterSafe
+                | protocol::SafeInventoryTransferKindV1::CharacterSafeToRunBackpack => {
+                    protocol::HallStationV1::Vault
+                }
+            }) =>
         {
             Some(ReliableEvent::SafeInventoryTransferResult(
                 protocol::SafeInventoryTransferResultV1 {

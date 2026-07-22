@@ -26,18 +26,19 @@ use crate::{
     Blake3CharacterIds, Blake3WorldFlowIds, CoreBargainAuthority, CoreOathSelectionAuthority,
     CorePrivateLifeRuntimeBootstrapAdapter, CorePrivateRouteActorDirectory,
     CorePrivateRouteRuntimeError, CorePrivateRouteRuntimeReport, CorePrivateWorldFlowRouter,
-    CoreResolutionHoldAuthority, CoreSafeInventoryAuthority, CoreSuccessorAuthority,
-    DeathViewService, IdentityClock, IdentityService, NoopIdentityEventSink,
-    PostgresAccountRepository, PostgresBargainService, PostgresCorePrivateTerminalOwnerFactory,
-    PostgresDangerEntryAshWalletProviderV3, PostgresDangerEntryInventoryProviderV3,
-    PostgresDangerEntryLifeMetricsProviderV3, PostgresDangerEntryOathBargainProviderV3,
-    PostgresDeathViewRepository, PostgresDurableDeathExecutionService,
-    PostgresOathSelectionService, PostgresPrivateDeathContextPlanner,
-    PostgresProductionExtractionExecutionService, PostgresProductionRecallExecutionService,
-    PostgresProgressionQueryRepository, PostgresProgressionRestoreProvider,
-    PostgresSafeInventoryService, PostgresWorldFlowLocationRepository, ProgressionQueryService,
-    ResolutionHoldService, SuccessorService, SystemDurableDeathIdentitySource,
-    WorldFlowGateService, world_flow_coordinator::PostgresCorePrivateWorldFlowCoordinator,
+    CoreResolutionHoldAuthority, CoreSafeInventoryAuthority, CoreSafeStorageAuthority,
+    CoreSuccessorAuthority, DeathViewService, IdentityClock, IdentityService,
+    NoopIdentityEventSink, PostgresAccountRepository, PostgresBargainService,
+    PostgresCorePrivateTerminalOwnerFactory, PostgresDangerEntryAshWalletProviderV3,
+    PostgresDangerEntryInventoryProviderV3, PostgresDangerEntryLifeMetricsProviderV3,
+    PostgresDangerEntryOathBargainProviderV3, PostgresDeathViewRepository,
+    PostgresDurableDeathExecutionService, PostgresOathSelectionService,
+    PostgresPrivateDeathContextPlanner, PostgresProductionExtractionExecutionService,
+    PostgresProductionRecallExecutionService, PostgresProgressionQueryRepository,
+    PostgresProgressionRestoreProvider, PostgresSafeInventoryService, PostgresSafeStorageService,
+    PostgresWorldFlowLocationRepository, ProgressionQueryService, ResolutionHoldService,
+    SuccessorService, SystemDurableDeathIdentitySource, WorldFlowGateService,
+    world_flow_coordinator::PostgresCorePrivateWorldFlowCoordinator,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -129,6 +130,7 @@ pub(crate) struct CorePrivateLifePersistentFoundation {
     oath: Arc<CoreOathSelectionAuthority<SystemIdentityClock>>,
     bargain: Arc<CoreBargainAuthority<SystemIdentityClock>>,
     safe_inventory: Arc<CoreSafeInventoryAuthority>,
+    safe_storage: Arc<CoreSafeStorageAuthority>,
     resolution_hold: Arc<CoreResolutionHoldAuthority>,
     successor: Arc<CoreSuccessorAuthority>,
     extraction_execution: Arc<PostgresProductionExtractionExecutionService>,
@@ -266,6 +268,9 @@ impl CorePrivateLifePersistentFoundation {
             safe_inventory: Arc::new(CoreSafeInventoryAuthority::persistent(
                 PostgresSafeInventoryService::new(persistence.clone()),
             )),
+            safe_storage: Arc::new(CoreSafeStorageAuthority::persistent(
+                PostgresSafeStorageService::new(persistence.clone()),
+            )),
             resolution_hold: Arc::new(CoreResolutionHoldAuthority::persistent(
                 ResolutionHoldService::new(persistence.clone()),
             )),
@@ -327,6 +332,10 @@ impl CorePrivateLifePersistentFoundation {
         Arc::clone(&self.safe_inventory)
     }
 
+    pub(crate) fn safe_storage(&self) -> Arc<CoreSafeStorageAuthority> {
+        Arc::clone(&self.safe_storage)
+    }
+
     pub(crate) fn resolution_hold(&self) -> Arc<CoreResolutionHoldAuthority> {
         Arc::clone(&self.resolution_hold)
     }
@@ -382,6 +391,7 @@ impl CorePrivateLifePersistentFoundation {
             Arc::strong_count(&self.oath),
             Arc::strong_count(&self.bargain),
             Arc::strong_count(&self.safe_inventory),
+            Arc::strong_count(&self.safe_storage),
             Arc::strong_count(&self.resolution_hold),
             Arc::strong_count(&self.successor),
             Arc::strong_count(&self.extraction_execution),
