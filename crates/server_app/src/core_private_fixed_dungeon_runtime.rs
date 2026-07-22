@@ -27,8 +27,8 @@ use crate::{
     },
     core_private_gameplay_observation::{
         CorePrivateGameplayObservation, CorePrivateGameplayObservationError,
-        CorePrivateProjectileProvenance, enemy_snapshot, hostile_projectile_snapshot,
-        player_snapshot,
+        CorePrivateProjectileProvenance, combat_actor_binding, enemy_snapshot,
+        hostile_projectile_snapshot, normal_wave_telegraphs, player_snapshot,
     },
     core_private_microrealm_runtime::CorePrivateMicrorealmDungeonHandoff,
     fixed_room_player_damage_facts,
@@ -491,6 +491,7 @@ impl CorePrivateFixedDungeonRuntime {
             &route_before,
             input.input_sequence,
             &staged_combat,
+            &step,
             movement_step,
             &staged_projectile_provenance,
         )?;
@@ -577,16 +578,26 @@ impl CorePrivateFixedDungeonRuntime {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "all fixed-room entity and telegraph authority is projected from one staged frame"
+)]
 fn project_fixed_observation(
     tick: Tick,
     route: &CorePrivateRouteStateV1,
     input_sequence: u64,
     combat: &sim_content::CoreFixedDungeonCombat,
+    step: &sim_content::CoreFixedDungeonRoomStep,
     movement: sim_core::MovementStep,
     projectile_provenance: &CorePrivateProjectileProvenance,
 ) -> Result<CorePrivateGameplayObservation, CorePrivateFixedDungeonRuntimeError> {
     let player = combat.player()?;
     let player_id = player.target.entity_id;
+    let mut actors = vec![combat_actor_binding(
+        player_id,
+        protocol::CoreCombatActorKindV1::Player,
+        protocol::GRAVE_ARBALIST_CLASS_ID,
+    )?];
     let mut entities = vec![player_snapshot(
         player,
         movement.position,
@@ -597,6 +608,11 @@ fn project_fixed_observation(
     }
     let presentation = combat.presentation()?;
     for enemy in presentation.enemies {
+        actors.push(combat_actor_binding(
+            enemy.entity_id,
+            protocol::CoreCombatActorKindV1::Enemy,
+            enemy.content_id,
+        )?);
         entities.push(enemy_snapshot(
             enemy.entity_id,
             enemy.position,
@@ -608,14 +624,163 @@ fn project_fixed_observation(
     for projectile in &presentation.hostile_projectiles {
         entities.push(hostile_projectile_snapshot(projectile)?);
     }
+    let normal_step = match step {
+        sim_content::CoreFixedDungeonRoomStep::B1(step)
+        | sim_content::CoreFixedDungeonRoomStep::B5(step) => step.wave_step.as_ref(),
+        sim_content::CoreFixedDungeonRoomStep::B2(step) => {
+            step.combat.as_ref().map(|combat| &combat.immutable_wave)
+        }
+        sim_content::CoreFixedDungeonRoomStep::B3(_) => None,
+    };
+    let mut telegraphs = normal_wave_telegraphs(normal_step, &entities)?;
+    match step {
+        sim_content::CoreFixedDungeonRoomStep::B2(step) => {
+            for actor in step
+                .combat
+                .iter()
+                .flat_map(|combat| &combat.authored_actors)
+            {
+                for event in &actor.attack_events {
+                    let sim_core::CoreNormalAttackEvent::TelegraphStarted {
+                        lock,
+                        fan_offsets_milli_degrees,
+                        ..
+                    } = event
+                    else {
+                        continue;
+                    };
+                    let origin = lock.origin();
+                    let target = lock.target().map_or(origin, |target| target.position);
+                    telegraphs.push(protocol::CoreCombatTelegraphV1 {
+                        source_entity_id: actor.entity_id.get(),
+                        cast_id: lock.cast_id().get(),
+                        pattern_id: protocol::WireText::new(lock.pattern_id().to_owned())
+                            .map_err(|_| CorePrivateFixedDungeonRuntimeError::InvalidComposition)?,
+                        damage_type: fixed_telegraph_damage_type(lock.pattern_id())?,
+                        starts_at_tick: lock.telegraph_started_at().0,
+                        resolves_at_tick: lock.resolves_at().0,
+                        origin_x_milli_tiles: origin.x_milli_tiles,
+                        origin_y_milli_tiles: origin.y_milli_tiles,
+                        target_x_milli_tiles: target.x_milli_tiles,
+                        target_y_milli_tiles: target.y_milli_tiles,
+                        shape: normal_attack_telegraph_shape(
+                            lock.pattern_id(),
+                            fan_offsets_milli_degrees.as_deref(),
+                        )?,
+                    });
+                }
+            }
+        }
+        sim_content::CoreFixedDungeonRoomStep::B3(step) => {
+            for event in step
+                .combat
+                .iter()
+                .flat_map(|combat| combat.knight.iter())
+                .flat_map(|knight| &knight.events)
+            {
+                let sim_core::CoreKnightEvent::TelegraphStarted { lock, .. } = event else {
+                    continue;
+                };
+                let origin = lock.origin();
+                let target = lock.target().position;
+                telegraphs.push(protocol::CoreCombatTelegraphV1 {
+                    source_entity_id: step
+                        .combat
+                        .as_ref()
+                        .map(|combat| combat.actor_id.get())
+                        .ok_or(CorePrivateFixedDungeonRuntimeError::InvalidComposition)?,
+                    cast_id: lock.cast_id().get(),
+                    pattern_id: protocol::WireText::new(lock.pattern_id().to_owned())
+                        .map_err(|_| CorePrivateFixedDungeonRuntimeError::InvalidComposition)?,
+                    damage_type: protocol::CoreCombatDamageTypeV1::Physical,
+                    starts_at_tick: lock.telegraph_started_at().0,
+                    resolves_at_tick: lock.resolves_at().0,
+                    origin_x_milli_tiles: origin.x_milli_tiles,
+                    origin_y_milli_tiles: origin.y_milli_tiles,
+                    target_x_milli_tiles: target.x_milli_tiles,
+                    target_y_milli_tiles: target.y_milli_tiles,
+                    shape: knight_telegraph_shape(lock.pattern_id())?,
+                });
+            }
+        }
+        sim_content::CoreFixedDungeonRoomStep::B1(_)
+        | sim_content::CoreFixedDungeonRoomStep::B5(_) => {}
+    }
     CorePrivateGameplayObservation::new(
         tick.0,
         route.actor_generation,
         route.state_version,
         input_sequence,
         entities,
-    )
+    )?
+    .with_presentation(actors, telegraphs)
     .map_err(Into::into)
+}
+
+fn fixed_telegraph_damage_type(
+    pattern_id: &str,
+) -> Result<protocol::CoreCombatDamageTypeV1, CorePrivateFixedDungeonRuntimeError> {
+    match pattern_id {
+        "pattern.enemy.bell_acolyte.alternating_fan" | "pattern.enemy.choir_skull.rotor" => {
+            Ok(protocol::CoreCombatDamageTypeV1::Veil)
+        }
+        _ => Err(CorePrivateFixedDungeonRuntimeError::InvalidComposition),
+    }
+}
+
+fn normal_attack_telegraph_shape(
+    pattern_id: &str,
+    fan_offsets_milli_degrees: Option<&[i32]>,
+) -> Result<protocol::CoreCombatTelegraphShapeV1, CorePrivateFixedDungeonRuntimeError> {
+    match pattern_id {
+        "pattern.enemy.bell_acolyte.alternating_fan" => {
+            Ok(protocol::CoreCombatTelegraphShapeV1::Fan {
+                ray_count: 5,
+                ray_offsets_milli_degrees: fan_offsets(
+                    fan_offsets_milli_degrees
+                        .ok_or(CorePrivateFixedDungeonRuntimeError::InvalidComposition)?,
+                )?,
+                extent_milli_tiles: 9_000,
+                ray_width_milli_tiles: 220,
+            })
+        }
+        "pattern.enemy.choir_skull.rotor" => Ok(protocol::CoreCombatTelegraphShapeV1::Rotor {
+            arm_count: 2,
+            clockwise_milli_degrees_per_second: 35_000,
+            extent_milli_tiles: 7_000,
+            arm_width_milli_tiles: 240,
+        }),
+        _ => Err(CorePrivateFixedDungeonRuntimeError::InvalidComposition),
+    }
+}
+
+fn knight_telegraph_shape(
+    pattern_id: &str,
+) -> Result<protocol::CoreCombatTelegraphShapeV1, CorePrivateFixedDungeonRuntimeError> {
+    match pattern_id {
+        "miniboss.sepulcher_knight.charge_lane" => {
+            Ok(protocol::CoreCombatTelegraphShapeV1::AimedLane {
+                extent_milli_tiles: 5_000,
+                width_milli_tiles: 1_000,
+            })
+        }
+        "miniboss.sepulcher_knight.shield_fan" => Ok(protocol::CoreCombatTelegraphShapeV1::Fan {
+            ray_count: 5,
+            ray_offsets_milli_degrees: [-25_000, -12_500, 0, 12_500, 25_000, 0, 0, 0],
+            extent_milli_tiles: 8_000,
+            ray_width_milli_tiles: 240,
+        }),
+        _ => Err(CorePrivateFixedDungeonRuntimeError::InvalidComposition),
+    }
+}
+
+fn fan_offsets(offsets: &[i32]) -> Result<[i32; 8], CorePrivateFixedDungeonRuntimeError> {
+    if offsets.len() > 8 {
+        return Err(CorePrivateFixedDungeonRuntimeError::InvalidComposition);
+    }
+    let mut result = [0; 8];
+    result[..offsets.len()].copy_from_slice(offsets);
+    Ok(result)
 }
 
 fn movement_for_combat(

@@ -94,6 +94,60 @@ struct SnapshotPublisher {
     terminal_publication: Option<(u64, u64)>,
 }
 
+#[derive(Debug, Default)]
+struct CombatPresentationPublisher {
+    last_binding: Option<(
+        u64,
+        protocol::CorePrivateRouteSceneV1,
+        Option<protocol::CorePrivateRouteRoomV1>,
+        Vec<protocol::CoreCombatActorBindingV1>,
+    )>,
+}
+
+impl CombatPresentationPublisher {
+    async fn publish(
+        &mut self,
+        writer: &CoreReliableWriter,
+        state: &CorePrivateMicrorealmDriverState,
+    ) -> Result<(), CorePrivateLifeServerError> {
+        let Some((observation, route)) = combat_presentation_observation(state) else {
+            return Ok(());
+        };
+        let binding = (
+            route.actor_generation,
+            route.scene,
+            route.room,
+            observation.presentation_actors.clone(),
+        );
+        let bindings_changed = self.last_binding.as_ref() != Some(&binding);
+        if !bindings_changed && observation.presentation_telegraphs.is_empty() {
+            return Ok(());
+        }
+        let frame = protocol::CoreCombatPresentationStateV1 {
+            schema_version: protocol::CORE_COMBAT_PRESENTATION_SCHEMA_VERSION,
+            content_revision: route.content_revision.clone(),
+            actor_generation: route.actor_generation,
+            route_state_version: route.state_version,
+            scene: route.scene,
+            room: route.room,
+            server_tick: observation.tick,
+            actors: observation.presentation_actors.clone(),
+            telegraphs: observation.presentation_telegraphs.clone(),
+        };
+        frame
+            .validate()
+            .map_err(|_| CorePrivateLifeServerError::Presentation)?;
+        writer
+            .send_event(
+                observation.tick,
+                ReliableEvent::CoreCombatPresentationState(Box::new(frame)),
+            )
+            .await?;
+        self.last_binding = Some(binding);
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SnapshotAuthority {
     Hall(u64),
@@ -180,6 +234,7 @@ pub(crate) async fn serve_core_private_life_connection(
     let mut route = ConnectionRoute::from_disposition(attached.disposition);
     let mut driver = route.driver_observation();
     let mut snapshot_publisher = SnapshotPublisher::default();
+    let mut presentation_publisher = CombatPresentationPublisher::default();
     publish_route(&process, &writer, &route, 0).await?;
     publish_consumable_state(&process, &writer, transport, &route).await?;
     publish_latest_route_snapshot(
@@ -190,7 +245,10 @@ pub(crate) async fn serve_core_private_life_connection(
         &route,
         driver.as_ref(),
         &mut snapshot_publisher,
-    )?;
+        &writer,
+        &mut presentation_publisher,
+    )
+    .await?;
 
     let result = run_connection_loop(
         &connection,
@@ -201,6 +259,7 @@ pub(crate) async fn serve_core_private_life_connection(
         &mut route,
         &mut driver,
         &mut snapshot_publisher,
+        &mut presentation_publisher,
     )
     .await;
     let detached = process.detach_transport(transport, unix_millis()?).await;
@@ -224,6 +283,7 @@ async fn run_connection_loop(
     route: &mut ConnectionRoute,
     driver: &mut Option<DriverObservation>,
     snapshot_publisher: &mut SnapshotPublisher,
+    presentation_publisher: &mut CombatPresentationPublisher,
 ) -> Result<(), CorePrivateLifeServerError> {
     let mut terminal_refresh = tokio::time::interval(Duration::from_millis(50));
     terminal_refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -262,6 +322,9 @@ async fn run_connection_loop(
                 if observation_allows_route_publication(&observation) {
                     publish_route(process, writer, route, observation_tick(&observation)).await?;
                 }
+                // Route authority must lead presentation authority on the same reliable
+                // stream so the client never observes bindings for a future route version.
+                presentation_publisher.publish(writer, &observation).await?;
                 publish_observation_snapshot(connection, snapshot_publisher, &observation)?;
             }
             datagram = connection.read_datagram() => {
@@ -303,14 +366,20 @@ async fn run_connection_loop(
                     route,
                     driver.as_ref(),
                     snapshot_publisher,
-                )?;
+                    writer,
+                    presentation_publisher,
+                ).await?;
             }
         }
     }
     Ok(())
 }
 
-fn publish_latest_route_snapshot(
+#[allow(
+    clippy::too_many_arguments,
+    reason = "initial publication joins transport, route, snapshot, and presentation authorities"
+)]
+async fn publish_latest_route_snapshot(
     connection: &quinn::Connection,
     process: &CorePrivateLifeProcess,
     authenticated: AuthenticatedAccount,
@@ -318,6 +387,8 @@ fn publish_latest_route_snapshot(
     route: &ConnectionRoute,
     driver: Option<&DriverObservation>,
     publisher: &mut SnapshotPublisher,
+    writer: &Arc<CoreReliableWriter>,
+    presentation_publisher: &mut CombatPresentationPublisher,
 ) -> Result<(), CorePrivateLifeServerError> {
     match route {
         ConnectionRoute::Hall { actor, .. } => {
@@ -328,7 +399,12 @@ fn publish_latest_route_snapshot(
         }
         ConnectionRoute::Danger(_) => {
             if let Some(driver) = driver {
-                publish_observation_snapshot(connection, publisher, &driver.observer.latest())?;
+                let observation = driver.observer.latest();
+                // A danger snapshot is not safe to consume until the complete actor binding set
+                // for the same route context has led it on the reliable stream. This also covers
+                // the initial attach and reliable route transitions, before the first driver tick.
+                presentation_publisher.publish(writer, &observation).await?;
+                publish_observation_snapshot(connection, publisher, &observation)?;
             }
         }
         ConnectionRoute::Bootstrap => {}
@@ -399,7 +475,42 @@ fn gameplay_observation(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+fn combat_presentation_observation(
+    state: &CorePrivateMicrorealmDriverState,
+) -> Option<(
+    &CorePrivateGameplayObservation,
+    &protocol::CorePrivateRouteStateV1,
+)> {
+    match state {
+        CorePrivateMicrorealmDriverState::Running { step, .. } => {
+            Some((&step.observation, &step.route))
+        }
+        CorePrivateMicrorealmDriverState::TerminalPending { lethal_step, .. } => {
+            Some((&lethal_step.observation, &lethal_step.route))
+        }
+        CorePrivateMicrorealmDriverState::FixedDungeonRunning { frame, .. }
+        | CorePrivateMicrorealmDriverState::FixedDungeonRewardPending { frame, .. } => {
+            Some((&frame.observation, &frame.route))
+        }
+        CorePrivateMicrorealmDriverState::FixedDungeonTerminalPending { lethal_frame, .. } => {
+            Some((&lethal_frame.observation, &lethal_frame.route))
+        }
+        CorePrivateMicrorealmDriverState::CaldusRunning { frame, .. }
+        | CorePrivateMicrorealmDriverState::CaldusRewardPending { frame, .. } => {
+            Some((&frame.observation, &frame.route))
+        }
+        CorePrivateMicrorealmDriverState::CaldusTerminalPending { lethal_frame, .. } => {
+            Some((&lethal_frame.observation, &lethal_frame.route))
+        }
+        _ => None,
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "the negotiated normal-route dispatcher keeps each bounded message arm in one auditable authority match"
+)]
 async fn dispatch_reliable(
     send: quinn::SendStream,
     message: WireMessage,
@@ -550,18 +661,17 @@ async fn dispatch_reliable(
                 .await?;
         }
         message => {
-            if let WireMessage::SafeInventoryTransferFrame(frame) = &message {
-                if let Some(replay) = process
+            if let WireMessage::SafeInventoryTransferFrame(frame) = &message
+                && let Some(replay) = process
                     .safe_inventory()
                     .exact_replay(authenticated, frame)
                     .await
-                {
-                    writer
-                        .send_response(send, 0, ReliableEvent::SafeInventoryTransferResult(replay))
-                        .await?;
-                    publish_route(process, writer, route, 0).await?;
-                    return Ok(());
-                }
+            {
+                writer
+                    .send_response(send, 0, ReliableEvent::SafeInventoryTransferResult(replay))
+                    .await?;
+                publish_route(process, writer, route, 0).await?;
+                return Ok(());
             }
             if let Some(event) =
                 hall_panel_rejection(process, authenticated, transport, route, &message)
@@ -1286,6 +1396,8 @@ pub(crate) enum CorePrivateLifeServerError {
     Observation(#[from] crate::CorePrivateMicrorealmObservationError),
     #[error(transparent)]
     GameplayObservation(#[from] CorePrivateGameplayObservationError),
+    #[error("combat presentation projection was invalid")]
+    Presentation,
     #[error(transparent)]
     Transport(#[from] crate::ServerTransportError),
     #[error(transparent)]

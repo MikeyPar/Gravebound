@@ -9,14 +9,121 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use protocol::{
-    ENTITY_STATE_ALIVE, EntityKind, EntitySnapshot, MAX_SNAPSHOT_CHUNKS,
-    MAX_SNAPSHOT_ENTITIES_PER_CHUNK, SnapshotChunk,
+    CoreCombatActorBindingV1, CoreCombatActorKindV1, CoreCombatTelegraphV1, ENTITY_STATE_ALIVE,
+    EntityKind, EntitySnapshot, MAX_SNAPSHOT_CHUNKS, MAX_SNAPSHOT_ENTITIES_PER_CHUNK,
+    SnapshotChunk,
 };
 use sim_core::{CombatStep, EntityId, FriendlyProjectile, HostileProjectile, SimulationVector};
 use thiserror::Error;
 
 const MAX_PRIVATE_OBSERVATION_ENTITIES: usize =
     MAX_SNAPSHOT_ENTITIES_PER_CHUNK * MAX_SNAPSHOT_CHUNKS as usize;
+
+pub(crate) fn combat_actor_binding(
+    entity_id: EntityId,
+    kind: CoreCombatActorKindV1,
+    content_id: impl Into<String>,
+) -> Result<CoreCombatActorBindingV1, CorePrivateGameplayObservationError> {
+    Ok(CoreCombatActorBindingV1 {
+        entity_id: entity_id.get(),
+        kind,
+        content_id: protocol::WireText::new(content_id.into())
+            .map_err(|_| CorePrivateGameplayObservationError::InvalidPresentation)?,
+    })
+}
+
+pub(crate) fn normal_wave_telegraphs(
+    step: Option<&sim_core::NormalWaveStep>,
+    entities: &[EntitySnapshot],
+) -> Result<Vec<CoreCombatTelegraphV1>, CorePrivateGameplayObservationError> {
+    let Some(step) = step else {
+        return Ok(Vec::new());
+    };
+    step.timeline_events
+        .iter()
+        .filter_map(|timeline| {
+            let origin = entities
+                .iter()
+                .find(|entity| entity.entity_id == timeline.entity_id.get())?;
+            let (cast_id, resolves_at, pattern_id, damage_type, target, shape) =
+                match &timeline.event {
+                    sim_core::EnemyEvent::AimLocked {
+                        cast_id,
+                        direction,
+                        fires_at,
+                    } => (
+                        cast_id.get(),
+                        fires_at.0,
+                        "pattern.enemy.drowned_pilgrim.fan",
+                        protocol::CoreCombatDamageTypeV1::Physical,
+                        (
+                            origin.x_milli_tiles.saturating_add(direction.x),
+                            origin.y_milli_tiles.saturating_add(direction.y),
+                        ),
+                        protocol::CoreCombatTelegraphShapeV1::Fan {
+                            ray_count: 3,
+                            ray_offsets_milli_degrees: [-15_000, 0, 15_000, 0, 0, 0, 0, 0],
+                            extent_milli_tiles: 12_100,
+                            ray_width_milli_tiles: 240,
+                        },
+                    ),
+                    sim_core::EnemyEvent::RingTelegraph {
+                        cast_id,
+                        omitted_indices,
+                        fires_at,
+                    } => (
+                        cast_id.get(),
+                        fires_at.0,
+                        "pattern.enemy.bell_reed.gap_ring",
+                        protocol::CoreCombatDamageTypeV1::Veil,
+                        (origin.x_milli_tiles, origin.y_milli_tiles),
+                        protocol::CoreCombatTelegraphShapeV1::Ring {
+                            segment_count: 8,
+                            gap_start_index: omitted_indices[0],
+                            gap_count: 2,
+                            radius_milli_tiles: 2_200,
+                            segment_width_milli_tiles: 260,
+                        },
+                    ),
+                    sim_core::EnemyEvent::LaneTelegraph {
+                        cast_id,
+                        axes_degrees,
+                        impacts_at,
+                        ..
+                    } => (
+                        cast_id.get(),
+                        impacts_at.0,
+                        "pattern.enemy.chain_sentry.cross_lanes",
+                        protocol::CoreCombatDamageTypeV1::Physical,
+                        (origin.x_milli_tiles, origin.y_milli_tiles),
+                        protocol::CoreCombatTelegraphShapeV1::Lanes {
+                            axes_degrees: *axes_degrees,
+                            width_milli_tiles: 900,
+                        },
+                    ),
+                    _ => return None,
+                };
+            let Ok(pattern_id) = protocol::WireText::new(pattern_id) else {
+                return Some(Err(
+                    CorePrivateGameplayObservationError::InvalidPresentation,
+                ));
+            };
+            Some(Ok(CoreCombatTelegraphV1 {
+                source_entity_id: timeline.entity_id.get(),
+                cast_id,
+                pattern_id,
+                damage_type,
+                starts_at_tick: step.tick.0,
+                resolves_at_tick: resolves_at,
+                origin_x_milli_tiles: origin.x_milli_tiles,
+                origin_y_milli_tiles: origin.y_milli_tiles,
+                target_x_milli_tiles: target.0,
+                target_y_milli_tiles: target.1,
+                shape,
+            }))
+        })
+        .collect()
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CorePrivateGameplayObservation {
@@ -25,6 +132,8 @@ pub(crate) struct CorePrivateGameplayObservation {
     pub route_state_version: u64,
     pub acknowledged_input_sequence: u32,
     pub entities: Vec<EntitySnapshot>,
+    pub presentation_actors: Vec<CoreCombatActorBindingV1>,
+    pub presentation_telegraphs: Vec<CoreCombatTelegraphV1>,
 }
 
 impl CorePrivateGameplayObservation {
@@ -59,7 +168,69 @@ impl CorePrivateGameplayObservation {
             route_state_version,
             acknowledged_input_sequence,
             entities,
+            presentation_actors: Vec::new(),
+            presentation_telegraphs: Vec::new(),
         })
+    }
+
+    pub(crate) fn with_presentation(
+        mut self,
+        mut actors: Vec<CoreCombatActorBindingV1>,
+        mut telegraphs: Vec<CoreCombatTelegraphV1>,
+    ) -> Result<Self, CorePrivateGameplayObservationError> {
+        if actors.len() > protocol::CORE_COMBAT_PRESENTATION_MAX_ACTORS
+            || telegraphs.len() > protocol::CORE_COMBAT_PRESENTATION_MAX_TELEGRAPHS
+        {
+            return Err(CorePrivateGameplayObservationError::PresentationOverflow);
+        }
+        let entity_ids = self
+            .entities
+            .iter()
+            .map(|entity| entity.entity_id)
+            .collect::<BTreeSet<_>>();
+        let required_actor_ids = self
+            .entities
+            .iter()
+            .filter(|entity| {
+                matches!(
+                    entity.kind,
+                    EntityKind::Player | EntityKind::Enemy | EntityKind::Boss
+                )
+            })
+            .map(|entity| entity.entity_id)
+            .collect::<BTreeSet<_>>();
+        let mut actor_ids = BTreeSet::new();
+        for actor in &actors {
+            let snapshot_kind = self
+                .entities
+                .iter()
+                .find(|entity| entity.entity_id == actor.entity_id)
+                .map(|entity| entity.kind);
+            let kind_matches = matches!(
+                (actor.kind, snapshot_kind),
+                (CoreCombatActorKindV1::Player, Some(EntityKind::Player))
+                    | (CoreCombatActorKindV1::Enemy, Some(EntityKind::Enemy))
+                    | (CoreCombatActorKindV1::Boss, Some(EntityKind::Boss))
+            );
+            if !entity_ids.contains(&actor.entity_id)
+                || !kind_matches
+                || !actor_ids.insert(actor.entity_id)
+            {
+                return Err(CorePrivateGameplayObservationError::InvalidPresentation);
+            }
+        }
+        if actor_ids != required_actor_ids
+            || telegraphs
+                .iter()
+                .any(|telegraph| !actor_ids.contains(&telegraph.source_entity_id))
+        {
+            return Err(CorePrivateGameplayObservationError::InvalidPresentation);
+        }
+        actors.sort_by_key(|actor| actor.entity_id);
+        telegraphs.sort_by_key(|telegraph| (telegraph.source_entity_id, telegraph.cast_id));
+        self.presentation_actors = actors;
+        self.presentation_telegraphs = telegraphs;
+        Ok(self)
     }
 
     pub(crate) fn snapshot_chunks(
@@ -299,6 +470,54 @@ pub(crate) fn core_private_gameplay_observation_test_fixture(
     .expect("canonical private gameplay observation fixture")
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn actor(entity_id: u64, kind: EntityKind) -> EntitySnapshot {
+        EntitySnapshot {
+            entity_id,
+            kind,
+            x_milli_tiles: 1_000,
+            y_milli_tiles: 1_000,
+            velocity_x_milli_tiles_per_second: 0,
+            velocity_y_milli_tiles_per_second: 0,
+            source_entity_id: 0,
+            source_input_sequence: 0,
+            source_projectile_ordinal: 0,
+            current_health: 10,
+            maximum_health: 10,
+            state_flags: ENTITY_STATE_ALIVE,
+        }
+    }
+
+    #[test]
+    fn combat_presentation_rejects_an_incomplete_actor_binding_set() {
+        let observation = CorePrivateGameplayObservation::new(
+            1,
+            2,
+            3,
+            0,
+            vec![actor(1, EntityKind::Player), actor(2, EntityKind::Enemy)],
+        )
+        .expect("valid observation");
+        let result = observation.with_presentation(
+            vec![CoreCombatActorBindingV1 {
+                entity_id: 1,
+                kind: CoreCombatActorKindV1::Player,
+                content_id: protocol::WireText::new(protocol::GRAVE_ARBALIST_CLASS_ID)
+                    .expect("class id"),
+            }],
+            Vec::new(),
+        );
+
+        assert_eq!(
+            result,
+            Err(CorePrivateGameplayObservationError::InvalidPresentation)
+        );
+    }
+}
+
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum CorePrivateGameplayObservationError {
     #[error("private gameplay observation authority is invalid")]
@@ -323,4 +542,8 @@ pub enum CorePrivateGameplayObservationError {
     NonFinitePosition,
     #[error("private gameplay position exceeds fixed-point bounds")]
     PositionOverflow,
+    #[error("private gameplay presentation exceeds its bound")]
+    PresentationOverflow,
+    #[error("private gameplay presentation is not bound to its snapshot")]
+    InvalidPresentation,
 }

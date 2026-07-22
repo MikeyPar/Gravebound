@@ -545,6 +545,7 @@ impl BoundCorePrivateLifeServer {
                 WireText::new(protocol::HALL_INTERACTION_FEATURE_FLAG)?,
                 WireText::new(protocol::CORE_CONSUMABLE_FEATURE_FLAG)?,
                 WireText::new(protocol::SAFE_STORAGE_FEATURE_FLAG)?,
+                WireText::new(protocol::CORE_COMBAT_PRESENTATION_FEATURE_FLAG)?,
             ],
             admission: AdmissionState::Available,
         };

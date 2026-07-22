@@ -38,8 +38,8 @@ use crate::{
     },
     core_private_gameplay_observation::{
         CorePrivateGameplayObservation, CorePrivateGameplayObservationError,
-        CorePrivateProjectileProvenance, boss_snapshot, hostile_projectile_snapshot,
-        player_snapshot,
+        CorePrivateProjectileProvenance, boss_snapshot, combat_actor_binding,
+        hostile_projectile_snapshot, player_snapshot,
     },
 };
 
@@ -587,6 +587,10 @@ impl CorePrivateCaldusRuntime {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the atomic Caldus snapshot and presentation projection remain one auditable frame"
+)]
 fn project_caldus_observation(
     tick: Tick,
     route: &CorePrivateRouteStateV1,
@@ -599,6 +603,11 @@ fn project_caldus_observation(
         .players
         .get(&player_id)
         .ok_or(CorePrivateCaldusRuntimeError::InvalidComposition)?;
+    let mut actors = vec![combat_actor_binding(
+        player_id,
+        protocol::CoreCombatActorKindV1::Player,
+        protocol::GRAVE_ARBALIST_CLASS_ID,
+    )?];
     let mut entities = vec![player_snapshot(
         player,
         staged.movement.position,
@@ -612,6 +621,11 @@ fn project_caldus_observation(
         );
     }
     if let Some(encounter) = &staged.encounter_simulation {
+        actors.push(combat_actor_binding(
+            boss_entity_id,
+            protocol::CoreCombatActorKindV1::Boss,
+            "boss.sir_caldus",
+        )?);
         entities.push(boss_snapshot(
             boss_entity_id,
             encounter.body().simulation_position(),
@@ -623,13 +637,116 @@ fn project_caldus_observation(
             entities.push(hostile_projectile_snapshot(projectile)?);
         }
     }
+    let mut telegraphs = Vec::new();
+    if let (Some(encounter), Some(encounter_step)) =
+        (&staged.encounter_simulation, &staged.encounter)
+    {
+        let origin = encounter.body().simulation_position();
+        let origin_point = simulation_to_tile_point(origin)?;
+        let origin_x = origin_point.x_milli_tiles;
+        let origin_y = origin_point.y_milli_tiles;
+        for event in &encounter_step.scheduler_events {
+            let (cast_id, pattern_id, damage_type, resolves_at, target, shape) = match event {
+                sim_core::CoreCaldusEvent::ShieldTelegraph {
+                    cast_id,
+                    target_x_milli_tiles,
+                    target_y_milli_tiles,
+                    fires_at,
+                    ..
+                } => (
+                    *cast_id,
+                    "boss.caldus.shield_arc",
+                    protocol::CoreCombatDamageTypeV1::Physical,
+                    fires_at.0,
+                    (*target_x_milli_tiles, *target_y_milli_tiles),
+                    protocol::CoreCombatTelegraphShapeV1::Fan {
+                        ray_count: 5,
+                        ray_offsets_milli_degrees: [-30_000, -15_000, 0, 15_000, 30_000, 0, 0, 0],
+                        extent_milli_tiles: 17_500,
+                        ray_width_milli_tiles: 240,
+                    },
+                ),
+                sim_core::CoreCaldusEvent::BellRingTelegraph {
+                    cast_id,
+                    gap_start_index,
+                    fires_at,
+                    ..
+                } => (
+                    *cast_id,
+                    "boss.caldus.bell_ring",
+                    protocol::CoreCombatDamageTypeV1::Veil,
+                    fires_at.0,
+                    (origin_x, origin_y),
+                    protocol::CoreCombatTelegraphShapeV1::Ring {
+                        segment_count: 18,
+                        gap_start_index: *gap_start_index,
+                        gap_count: 3,
+                        radius_milli_tiles: 3_250,
+                        segment_width_milli_tiles: 260,
+                    },
+                ),
+                sim_core::CoreCaldusEvent::BellRingPreview {
+                    cast_id,
+                    gap_start_index,
+                    ends_at,
+                    ..
+                } => (
+                    *cast_id,
+                    "boss.caldus.bell_ring",
+                    protocol::CoreCombatDamageTypeV1::Veil,
+                    ends_at.0,
+                    (origin_x, origin_y),
+                    protocol::CoreCombatTelegraphShapeV1::Ring {
+                        segment_count: 18,
+                        gap_start_index: *gap_start_index,
+                        gap_count: 3,
+                        radius_milli_tiles: 3_250,
+                        segment_width_milli_tiles: 260,
+                    },
+                ),
+                sim_core::CoreCaldusEvent::ChargeTelegraph {
+                    cast_id,
+                    target_x_milli_tiles,
+                    target_y_milli_tiles,
+                    movement_starts_at,
+                    ..
+                } => (
+                    *cast_id,
+                    "boss.caldus.charge_lane",
+                    protocol::CoreCombatDamageTypeV1::Physical,
+                    movement_starts_at.0,
+                    (*target_x_milli_tiles, *target_y_milli_tiles),
+                    protocol::CoreCombatTelegraphShapeV1::AimedLane {
+                        extent_milli_tiles: 6_500,
+                        width_milli_tiles: 1_200,
+                    },
+                ),
+                _ => continue,
+            };
+            telegraphs.push(protocol::CoreCombatTelegraphV1 {
+                source_entity_id: boss_entity_id.get(),
+                cast_id,
+                pattern_id: protocol::WireText::new(pattern_id)
+                    .map_err(|_| CorePrivateCaldusRuntimeError::InvalidComposition)?,
+                damage_type,
+                starts_at_tick: tick.0,
+                resolves_at_tick: resolves_at,
+                origin_x_milli_tiles: origin_x,
+                origin_y_milli_tiles: origin_y,
+                target_x_milli_tiles: target.0,
+                target_y_milli_tiles: target.1,
+                shape,
+            });
+        }
+    }
     CorePrivateGameplayObservation::new(
         tick.0,
         route.actor_generation,
         route.state_version,
         input_sequence,
         entities,
-    )
+    )?
+    .with_presentation(actors, telegraphs)
     .map_err(Into::into)
 }
 

@@ -25,7 +25,8 @@ use crate::core_private_combat_frame::{
 };
 use crate::core_private_gameplay_observation::{
     CorePrivateGameplayObservation, CorePrivateGameplayObservationError,
-    CorePrivateProjectileProvenance, enemy_snapshot, hostile_projectile_snapshot, player_snapshot,
+    CorePrivateProjectileProvenance, combat_actor_binding, enemy_snapshot,
+    hostile_projectile_snapshot, normal_wave_telegraphs, player_snapshot,
 };
 use crate::{
     CoreBellPortalTransition, CoreCharacterCombat, CoreCharacterCombatEnvelope,
@@ -561,6 +562,11 @@ fn project_microrealm_observation(
 ) -> Result<CorePrivateGameplayObservation, CorePrivateMicrorealmRuntimeError> {
     let player = frame.combat.player();
     let player_id = player.target.entity_id;
+    let mut actors = vec![combat_actor_binding(
+        player_id,
+        protocol::CoreCombatActorKindV1::Player,
+        protocol::GRAVE_ARBALIST_CLASS_ID,
+    )?];
     let mut entities = vec![player_snapshot(
         player,
         frame.movement_step.position,
@@ -575,6 +581,16 @@ fn project_microrealm_observation(
     }
     if let Some(wave) = frame.combat.wave() {
         for enemy in wave.snapshots() {
+            let content_id = match enemy.kind {
+                sim_core::NormalWaveEnemyKind::DrownedPilgrim => "enemy.drowned_pilgrim",
+                sim_core::NormalWaveEnemyKind::BellReed => "enemy.bell_reed",
+                sim_core::NormalWaveEnemyKind::ChainSentry => "enemy.chain_sentry",
+            };
+            actors.push(combat_actor_binding(
+                enemy.entity_id,
+                protocol::CoreCombatActorKindV1::Enemy,
+                content_id,
+            )?);
             entities.push(enemy_snapshot(
                 enemy.entity_id,
                 tile_point_to_simulation(TilePoint {
@@ -590,13 +606,15 @@ fn project_microrealm_observation(
             entities.push(hostile_projectile_snapshot(projectile)?);
         }
     }
+    let telegraphs = normal_wave_telegraphs(frame.wave_step.as_ref(), &entities)?;
     CorePrivateGameplayObservation::new(
         tick.0,
         route.actor_generation,
         route.state_version,
         input_sequence,
         entities,
-    )
+    )?
+    .with_presentation(actors, telegraphs)
     .map_err(Into::into)
 }
 
