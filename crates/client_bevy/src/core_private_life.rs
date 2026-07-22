@@ -455,6 +455,14 @@ impl CorePrivateHallInteractionState {
             .as_ref()
             .is_some_and(|result| result.code == protocol::HallInteractionResultCodeV1::Holding)
     }
+
+    fn realm_gate_enter_command(&self) -> Option<WorldTransferCommand> {
+        (self.open_station == Some(protocol::HallStationV1::RealmGate)).then(|| {
+            WorldTransferCommand::UsePortal {
+                portal_id: WireText::new(REALM_GATE_ID).expect("canonical gate ID fits"),
+            }
+        })
+    }
 }
 
 #[derive(Debug, Resource)]
@@ -2066,15 +2074,6 @@ fn apply_hall_interaction_result(
         return Ok(());
     }
     match result.station {
-        Some(protocol::HallStationV1::RealmGate) => {
-            queue_transfer(
-                WorldTransferCommand::UsePortal {
-                    portal_id: WireText::new(REALM_GATE_ID).expect("canonical gate ID fits"),
-                },
-                bridge,
-                client,
-            );
-        }
         Some(protocol::HallStationV1::MemorialWall) => {
             let memorial = terminal
                 .death
@@ -2103,7 +2102,7 @@ fn apply_hall_interaction_result(
                 .queue_reliable(WireMessage::SafeStorageQueryFrame(frame))
                 .map_err(|_| CorePrivateLifeClientError::ActionUnavailable)?;
         }
-        Some(protocol::HallStationV1::OathShrine) | None => {}
+        Some(protocol::HallStationV1::RealmGate | protocol::HallStationV1::OathShrine) | None => {}
     }
     Ok(())
 }
@@ -2900,6 +2899,12 @@ fn handle_hall_interaction_keyboard(
     mut client: ResMut<CorePrivateLifeClient>,
 ) {
     if client.phase != CorePrivateLifePhase::Hall || resolution.captures_input() {
+        return;
+    }
+    if keyboard.just_pressed(KeyCode::Enter)
+        && let Some(command) = hall.realm_gate_enter_command()
+    {
+        queue_transfer(command, &bridge, &mut client);
         return;
     }
     let intent = if keyboard.just_pressed(KeyCode::Escape) && hall.open_station.is_some() {
@@ -5243,6 +5248,20 @@ fn render_hall_interaction(
         return String::new();
     }
     if let Some(station) = hall.open_station {
+        if station == protocol::HallStationV1::RealmGate {
+            let current_snapshot = snapshots
+                .latest
+                .as_ref()
+                .filter(|snapshot| snapshot.state_version == route.state_version);
+            let population = current_snapshot.map_or(0, |snapshot| {
+                snapshot
+                    .entities
+                    .iter()
+                    .filter(|entity| entity.kind == protocol::EntityKind::Player)
+                    .count()
+            });
+            return render_realm_gate_panel(population, current_snapshot.is_some());
+        }
         return format!(
             "\n{} — panel open    Esc close",
             hall_station_label(station)
@@ -5283,6 +5302,17 @@ fn render_hall_interaction(
             };
             format!("\n{instruction} — {}", hall_station_label(station))
         },
+    )
+}
+
+fn render_realm_gate_panel(population: usize, network_healthy: bool) -> String {
+    let network = if network_healthy {
+        "HEALTHY"
+    } else {
+        "SYNCHRONIZING"
+    };
+    format!(
+        "\nREALM GATE\nPermitted realm: Core Micro-realm\nPopulation: {population} / 1 (private)\nNetwork: {network}\n[Enter] Enter    [Esc] Close"
     )
 }
 
@@ -5504,6 +5534,37 @@ mod tests {
         assert_eq!(uuid::Uuid::from_bytes(first).get_version_num(), 7);
         assert_eq!(uuid::Uuid::from_bytes(second).get_version_num(), 7);
         assert_eq!(uuid::Uuid::from_bytes(after_restart).get_version_num(), 7);
+    }
+
+    #[test]
+    fn realm_gate_open_result_requires_explicit_enter_command() {
+        let mut hall = CorePrivateHallInteractionState::default();
+        assert!(hall.realm_gate_enter_command().is_none());
+
+        hall.apply(protocol::HallInteractionResultV1 {
+            schema_version: protocol::HALL_INTERACTION_SCHEMA_VERSION,
+            request_sequence: 1,
+            code: protocol::HallInteractionResultCodeV1::Opened,
+            station: Some(protocol::HallStationV1::RealmGate),
+            held_ticks: 0,
+            required_ticks: 0,
+        });
+
+        let Some(WorldTransferCommand::UsePortal { portal_id }) = hall.realm_gate_enter_command()
+        else {
+            panic!("opened Realm Gate must expose one explicit Enter command");
+        };
+        assert_eq!(portal_id.as_str(), REALM_GATE_ID);
+        let panel = render_realm_gate_panel(1, true);
+        for required in [
+            "Permitted realm: Core Micro-realm",
+            "Population: 1 / 1 (private)",
+            "Network: HEALTHY",
+            "[Enter] Enter",
+            "[Esc] Close",
+        ] {
+            assert!(panel.contains(required), "missing panel field: {required}");
+        }
     }
 
     #[test]
