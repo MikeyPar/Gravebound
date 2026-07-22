@@ -2,7 +2,7 @@ use std::{
     collections::BTreeSet,
     path::{Path, PathBuf},
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use client_bevy::{CorePrivateRouteClientModel, CorePrivateSceneReadiness, CoreSceneReadiness};
@@ -16,14 +16,17 @@ use protocol::{
     ActionKind, ActionResultCode, AuthTicket, BargainContentRevisionV1, BargainResultCode,
     BargainViewFrame, CharacterLocation, CharacterMutationFrame, CharacterMutationPayload,
     ClientHello, Compression, CorePrivateRouteContentRevisionV1, CorePrivateRoutePhaseV1,
-    CorePrivateRouteRoomV1, CorePrivateRouteSceneV1, CorePrivateRouteStateV1, EntityKind,
-    EntitySnapshot, ExtractionCommitFrameV1, ExtractionCommitPayloadV1, ExtractionCommitResultV1,
-    HALL_INTERACTION_SCHEMA_VERSION, HallInteractionFrameV1, HallInteractionIntentV1,
-    HallInteractionResultCodeV1, HallStationV1, HandshakeResponse, InputFrame, ManifestHash,
-    Platform, ProtocolVersion, ReliableEvent, ReliableEventFrame, SafeArrival,
-    TERMINAL_INVENTORY_SCHEMA_VERSION, WireMessage, WireText, WorldFlowContentRevisionV1,
-    WorldFlowFrame, WorldFlowRequest, WorldFlowResult, WorldTransferCommand, WorldTransferMutation,
-    WorldTransferPayload, WorldTransferResultCode,
+    CorePrivateRouteRoomV1, CorePrivateRouteSceneV1, CorePrivateRouteStateV1,
+    DEATH_VIEW_SCHEMA_VERSION, DeathEchoOutcomeV1, DeathSummaryProjectionKindV1,
+    DeathViewContentRevisionV1, DeathViewFrameV1, DeathViewRequestV1, DeathViewResultV1,
+    EntityKind, EntitySnapshot, ExtractionCommitFrameV1, ExtractionCommitPayloadV1,
+    ExtractionCommitResultV1, HALL_INTERACTION_SCHEMA_VERSION, HallInteractionFrameV1,
+    HallInteractionIntentV1, HallInteractionResultCodeV1, HallStationV1, HandshakeResponse,
+    InputFrame, ManifestHash, Platform, ProtocolVersion, ReliableEvent, ReliableEventFrame,
+    SUCCESSOR_SCHEMA_VERSION, SafeArrival, SuccessorCreateFrameV1, SuccessorCreatePayloadV1,
+    SuccessorCreateResultV1, TERMINAL_INVENTORY_SCHEMA_VERSION, WireMessage, WireText,
+    WorldFlowContentRevisionV1, WorldFlowFrame, WorldFlowRequest, WorldFlowResult,
+    WorldTransferCommand, WorldTransferMutation, WorldTransferPayload, WorldTransferResultCode,
 };
 use server_app::{
     BoundCorePrivateLifeServer, CORE_IDENTITY_BUILD_ID, CoreIdentityServerConfig,
@@ -85,6 +88,16 @@ fn route_revision(content_root: &Path) -> CorePrivateRouteContentRevisionV1 {
 fn bargain_revision(content_root: &Path) -> BargainContentRevisionV1 {
     let content = sim_content::load_core_development_oaths_bargains(content_root).unwrap();
     BargainContentRevisionV1 {
+        records_blake3: ManifestHash::new(content.hashes().records_blake3.clone()).unwrap(),
+        assets_blake3: ManifestHash::new(content.hashes().assets_blake3.clone()).unwrap(),
+        localization_blake3: ManifestHash::new(content.hashes().localization_blake3.clone())
+            .unwrap(),
+    }
+}
+
+fn death_view_revision(content_root: &Path) -> DeathViewContentRevisionV1 {
+    let content = sim_content::load_core_development_death_view(content_root).unwrap();
+    DeathViewContentRevisionV1 {
         records_blake3: ManifestHash::new(content.hashes().records_blake3.clone()).unwrap(),
         assets_blake3: ManifestHash::new(content.hashes().assets_blake3.clone()).unwrap(),
         localization_blake3: ManifestHash::new(content.hashes().localization_blake3.clone())
@@ -185,7 +198,10 @@ fn assert_production_route_telemetry(
     sources: &[StoredM03TelemetrySourceV1],
     character_id: [u8; 16],
 ) -> ([u8; 16], [u8; 16]) {
-    assert_eq!(sources.len(), 5);
+    // Loot sidecars and future committed-domain families are append-only additions to the five
+    // baseline route events. Keep this integration proof focused on those required cardinalities
+    // without rejecting independently versioned committed-domain telemetry.
+    assert!(sources.len() >= 5);
     let account_id = sources[0].context.account_id;
     let session_id = sources[0].context.session_id;
     assert_ne!(account_id, [0; 16]);
@@ -791,6 +807,75 @@ async fn drive_microrealm_until_cleared(
     .expect("ordinary public-input microrealm clear timed out")
 }
 
+/// Follows only public snapshots and ordinary movement input until the authored encounter wins.
+/// The harness never supplies damage, health, a lethal cause, or a terminal request: it closes
+/// distance to the nearest server-owned hostile, releases every combat action, and waits for the
+/// terminal coordinator to publish the route's immutable `TerminalPending` boundary.
+async fn yield_to_microrealm_lethal_damage(
+    connection: &quinn::Connection,
+    assembler: &mut bot_client::BotSnapshotAssembler,
+    route_receive: &mut watch::Receiver<Option<ReliableEventFrame>>,
+    input_sequence: &mut u32,
+) -> ReliableEventFrame {
+    let terminal = |route: &CorePrivateRouteStateV1| {
+        route.scene == CorePrivateRouteSceneV1::CoreMicrorealm
+            && route.phase == CorePrivateRoutePhaseV1::TerminalPending
+    };
+    tokio::time::timeout(COMBAT_TIMEOUT, async {
+        loop {
+            if let Some(frame) = matching_route(route_receive, &terminal) {
+                return frame;
+            }
+
+            tokio::select! {
+                changed = route_receive.changed() => {
+                    changed.expect("route event pump must remain attached");
+                }
+                chunk = bot_client::receive_snapshot_datagram(connection) => {
+                    let Some(snapshot) = assembler.ingest(chunk.unwrap()).unwrap() else {
+                        continue;
+                    };
+                    let player = snapshot
+                        .entities
+                        .iter()
+                        .find(|entity| entity.kind == EntityKind::Player)
+                        .expect("lethal journey snapshot must retain its authoritative player");
+                    if player.current_health == 0 {
+                        continue;
+                    }
+
+                    let movement = nearest_hostile(player, &snapshot.entities).map_or(
+                        (0, 0),
+                        |hostile| {
+                            let delta_x = hostile.x_milli_tiles - player.x_milli_tiles;
+                            let delta_y = hostile.y_milli_tiles - player.y_milli_tiles;
+                            let longest_axis = delta_x.abs().max(delta_y.abs()).max(1);
+                            if i64::from(delta_x).pow(2) + i64::from(delta_y).pow(2)
+                                <= 1_500_i64.pow(2)
+                            {
+                                (0, 0)
+                            } else {
+                                (
+                                    i16::try_from(delta_x * 1_000 / longest_axis).unwrap(),
+                                    i16::try_from(delta_y * 1_000 / longest_axis).unwrap(),
+                                )
+                            }
+                        },
+                    );
+                    *input_sequence = input_sequence.checked_add(1).unwrap();
+                    bot_client::send_input_datagram(
+                        connection,
+                        input(*input_sequence, movement.0, movement.1),
+                    )
+                    .unwrap();
+                }
+            }
+        }
+    })
+    .await
+    .expect("ordinary microrealm lethal damage did not reach the terminal coordinator")
+}
+
 async fn next_complete_snapshot(
     connection: &quinn::Connection,
     assembler: &mut bot_client::BotSnapshotAssembler,
@@ -896,6 +981,78 @@ async fn drive_player_to_waypoint(
     .expect("authoritative waypoint traversal timed out")
 }
 
+/// Walks the compiled collision path around the Hall's central Memorial fixture and opens the
+/// real Realm Gate. The caller still submits the separately versioned world-flow mutation, so
+/// this helper cannot author a destination or bypass the server's storage/restore preflight.
+async fn walk_to_and_open_realm_gate(
+    connection: &quinn::Connection,
+    assembler: &mut bot_client::BotSnapshotAssembler,
+    input_sequence: &mut u32,
+    interaction_sequence: u32,
+) {
+    let west = drive_player_until(
+        connection,
+        assembler,
+        input_sequence,
+        (-1_000, 0),
+        |player| player.x_milli_tiles <= 28_500,
+    )
+    .await;
+    assert!(west.y_milli_tiles > 26_300);
+    let north_of_fixture = drive_player_until(
+        connection,
+        assembler,
+        input_sequence,
+        (0, -1_000),
+        |player| player.y_milli_tiles <= 21_500,
+    )
+    .await;
+    assert!(north_of_fixture.x_milli_tiles < 28_700);
+    let recentered = drive_player_until(
+        connection,
+        assembler,
+        input_sequence,
+        (1_000, 0),
+        |player| player.x_milli_tiles >= 32_000,
+    )
+    .await;
+    assert!(recentered.y_milli_tiles < 21_700);
+    let at_gate = drive_player_until(
+        connection,
+        assembler,
+        input_sequence,
+        (0, -1_000),
+        |player| player.y_milli_tiles <= 4_200,
+    )
+    .await;
+    let gate_offset = (
+        i64::from(at_gate.x_milli_tiles - 32_000),
+        i64::from(at_gate.y_milli_tiles - 3_000),
+    );
+    assert!(gate_offset.0 * gate_offset.0 + gate_offset.1 * gate_offset.1 <= 1_500_i64.pow(2));
+
+    let gate_response = tokio::time::timeout(
+        OPERATION_TIMEOUT,
+        bot_client::perform_reliable_gameplay(
+            connection,
+            WireMessage::HallInteractionFrame(HallInteractionFrameV1 {
+                schema_version: HALL_INTERACTION_SCHEMA_VERSION,
+                sequence: interaction_sequence,
+                intent: HallInteractionIntentV1::BeginHold,
+            }),
+        ),
+    )
+    .await
+    .expect("Realm Gate interaction timed out")
+    .unwrap();
+    assert!(matches!(
+        gate_response.event,
+        ReliableEvent::HallInteractionResult(result)
+            if result.code == HallInteractionResultCodeV1::Opened
+                && result.station == Some(HallStationV1::RealmGate)
+    ));
+}
+
 type ServerTask =
     tokio::task::JoinHandle<Result<CoreIdentityServerReport, LocalServerRuntimeError>>;
 
@@ -926,13 +1083,61 @@ fn start_server(
     (address, certificate, shutdown_send, task)
 }
 
+fn death_view_frame(
+    sequence: u32,
+    content_revision: DeathViewContentRevisionV1,
+    request: DeathViewRequestV1,
+) -> DeathViewFrameV1 {
+    DeathViewFrameV1 {
+        schema_version: DEATH_VIEW_SCHEMA_VERSION,
+        sequence,
+        content_revision,
+        request,
+    }
+}
+
+async fn wait_for_latest_committed_death(
+    connection: &quinn::Connection,
+    content_revision: &DeathViewContentRevisionV1,
+    request_sequence: &mut u32,
+    character_id: [u8; 16],
+) -> protocol::LatestCommittedDeathV1 {
+    tokio::time::timeout(OPERATION_TIMEOUT, async {
+        loop {
+            *request_sequence = request_sequence.checked_add(1).unwrap();
+            let (_, result) = bot_client::perform_death_view(
+                connection,
+                death_view_frame(
+                    *request_sequence,
+                    content_revision.clone(),
+                    DeathViewRequestV1::LatestCommitted,
+                ),
+            )
+            .await
+            .unwrap();
+            result.validate().unwrap();
+            match result {
+                DeathViewResultV1::Latest {
+                    death: Some(death), ..
+                } if death.character_id == character_id => return death,
+                DeathViewResultV1::Latest { death: None, .. } => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                other => panic!("ordinary lethal route returned unexpected death view: {other:?}"),
+            }
+        }
+    })
+    .await
+    .expect("durable death acknowledgement did not become queryable")
+}
+
 #[tokio::test]
 #[ignore = "requires explicitly authorized disposable PostgreSQL"]
 #[allow(
     clippy::too_many_lines,
     reason = "the production-root route proof stays contiguous so no direct state-writing seam can be hidden"
 )]
-async fn production_root_extracts_after_caldus_and_cleans_up() {
+async fn production_root_extracts_then_recovers_a_successor_and_cleans_up() {
     let _ = tracing_subscriber::fmt().with_test_writer().try_init();
     assert_eq!(
         std::env::var(TELEMETRY_ENVIRONMENT_VARIABLE).as_deref(),
@@ -1185,67 +1390,7 @@ async fn production_root_extracts_after_caldus_and_cleans_up() {
     // The direct north line is obstructed by the authored central Hall fixture. Drive the
     // authoritative player around its west side, recenter above it, then approach the gate.
     let mut input_sequence = 0;
-    let west = drive_player_until(
-        &connection,
-        &mut assembler,
-        &mut input_sequence,
-        (-1_000, 0),
-        |player| player.x_milli_tiles <= 28_500,
-    )
-    .await;
-    assert!(west.y_milli_tiles > 26_300);
-    let north_of_fixture = drive_player_until(
-        &connection,
-        &mut assembler,
-        &mut input_sequence,
-        (0, -1_000),
-        |player| player.y_milli_tiles <= 21_500,
-    )
-    .await;
-    assert!(north_of_fixture.x_milli_tiles < 28_700);
-    let recentered = drive_player_until(
-        &connection,
-        &mut assembler,
-        &mut input_sequence,
-        (1_000, 0),
-        |player| player.x_milli_tiles >= 32_000,
-    )
-    .await;
-    assert!(recentered.y_milli_tiles < 21_700);
-    let at_gate = drive_player_until(
-        &connection,
-        &mut assembler,
-        &mut input_sequence,
-        (0, -1_000),
-        |player| player.y_milli_tiles <= 4_200,
-    )
-    .await;
-    let gate_offset = (
-        i64::from(at_gate.x_milli_tiles - 32_000),
-        i64::from(at_gate.y_milli_tiles - 3_000),
-    );
-    assert!(gate_offset.0 * gate_offset.0 + gate_offset.1 * gate_offset.1 <= 1_500_i64.pow(2));
-
-    let gate_response = tokio::time::timeout(
-        OPERATION_TIMEOUT,
-        bot_client::perform_reliable_gameplay(
-            &connection,
-            WireMessage::HallInteractionFrame(HallInteractionFrameV1 {
-                schema_version: HALL_INTERACTION_SCHEMA_VERSION,
-                sequence: 1,
-                intent: HallInteractionIntentV1::BeginHold,
-            }),
-        ),
-    )
-    .await
-    .expect("Realm Gate interaction timed out")
-    .unwrap();
-    assert!(matches!(
-        gate_response.event,
-        ReliableEvent::HallInteractionResult(result)
-            if result.code == HallInteractionResultCodeV1::Opened
-                && result.station == Some(HallStationV1::RealmGate)
-    ));
+    walk_to_and_open_realm_gate(&connection, &mut assembler, &mut input_sequence, 1).await;
 
     let microrealm_payload = WorldTransferPayload {
         content_revision: world_revision.clone(),
@@ -2088,6 +2233,499 @@ async fn production_root_extracts_after_caldus_and_cleans_up() {
     );
     assert_eq!(hall_route.instance_lineage_id, None);
     assert!(hall_route.readiness.accepts_gameplay_input.is_available());
+
+    // Drain any queued Caldus terminal snapshots before the Hall path helper evaluates collision
+    // waypoints for the newly installed safe actor.
+    tokio::time::timeout(OPERATION_TIMEOUT, async {
+        loop {
+            let snapshot = next_complete_snapshot(&connection, &mut assembler).await;
+            if snapshot.state_version == hall_route.state_version
+                && snapshot.entities.iter().any(|entity| {
+                    entity.kind == EntityKind::Player
+                        && entity.current_health > 0
+                        && entity.current_health == entity.maximum_health
+                })
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("post-extraction controllable Hall snapshot timed out");
+
+    // DTH-001/DTH-020/DTH-021 require the same ordinary production root to support the other
+    // terminal branch. Return through the authored Hall geometry, re-enter danger, and let the
+    // live encounter deal every point of damage; neither the harness nor the client authors a
+    // death candidate, cause, trace, destruction set, memorial, Echo result, or destination.
+    walk_to_and_open_realm_gate(&connection, &mut assembler, &mut input_sequence, 2).await;
+
+    let second_danger_payload = WorldTransferPayload {
+        content_revision: world_revision.clone(),
+        command: WorldTransferCommand::UsePortal {
+            portal_id: WireText::new(HallStationV1::RealmGate.content_id()).unwrap(),
+        },
+    };
+    let (_, second_danger_result) = tokio::time::timeout(
+        OPERATION_TIMEOUT,
+        bot_client::perform_world_flow(
+            &connection,
+            WorldFlowFrame {
+                sequence: 6,
+                request: WorldFlowRequest::Transfer(WorldTransferMutation {
+                    mutation_id: [0x38; 16],
+                    character_id,
+                    expected_character_version: extracted_hall.character_version,
+                    issued_at_unix_millis: current_unix_millis(),
+                    payload_hash: second_danger_payload.canonical_hash(),
+                    payload: second_danger_payload,
+                }),
+            },
+        ),
+    )
+    .await
+    .expect("post-extraction danger transfer timed out")
+    .unwrap();
+    let WorldFlowResult::Transfer {
+        accepted: true,
+        code: WorldTransferResultCode::Accepted,
+        snapshot: Some(second_danger),
+        transfer_id: Some(_),
+        ..
+    } = second_danger_result
+    else {
+        panic!("the ordinary extracted character must be able to begin another life route");
+    };
+    let CharacterLocation::Danger {
+        location_id,
+        instance_lineage_id: second_lineage_id,
+        entry_restore_point_id: second_restore_id,
+    } = &second_danger.location
+    else {
+        panic!("the second Realm Gate transfer must commit a danger restore root");
+    };
+    assert_eq!(location_id.as_str(), MICROREALM_CONTENT_ID);
+    assert_ne!(*second_lineage_id, [0; 16]);
+    assert_ne!(*second_restore_id, [0; 16]);
+    assert_ne!(*second_lineage_id, *instance_lineage_id);
+
+    let second_danger_route_frame = wait_for_route(
+        &mut route_receive,
+        |route| {
+            route.character_id == character_id
+                && route.character_version == second_danger.character_version
+                && route.scene == CorePrivateRouteSceneV1::CoreMicrorealm
+                && route.instance_lineage_id == Some(*second_lineage_id)
+        },
+        "second ordinary microrealm route authority timed out",
+    )
+    .await;
+    let ReliableEvent::CorePrivateRouteState(second_danger_route) =
+        &second_danger_route_frame.event
+    else {
+        unreachable!("the route waiter returns a microrealm projection");
+    };
+    assert!(
+        second_danger_route
+            .readiness
+            .accepts_gameplay_input
+            .is_available()
+    );
+
+    let terminal_pending_frame = yield_to_microrealm_lethal_damage(
+        &connection,
+        &mut assembler,
+        &mut route_receive,
+        &mut input_sequence,
+    )
+    .await;
+    let ReliableEvent::CorePrivateRouteState(terminal_pending) = &terminal_pending_frame.event
+    else {
+        unreachable!("the lethal driver returns a terminal route projection");
+    };
+    assert_eq!(terminal_pending.character_id, character_id);
+    assert_eq!(
+        terminal_pending.instance_lineage_id,
+        Some(*second_lineage_id)
+    );
+    assert!(
+        !terminal_pending
+            .readiness
+            .accepts_gameplay_input
+            .is_available()
+    );
+
+    let recovery_started = Instant::now();
+    let death_revision = death_view_revision(&content_root);
+    let mut death_view_sequence = 0;
+    let latest_death = wait_for_latest_committed_death(
+        &connection,
+        &death_revision,
+        &mut death_view_sequence,
+        character_id,
+    )
+    .await;
+    assert_eq!(
+        latest_death.content_revision.as_str(),
+        persistence::CORE_ITEM_CONTENT_REVISION
+    );
+    assert!(latest_death.trace_entry_count > 0);
+    assert!(latest_death.destruction_entry_count >= 4);
+
+    death_view_sequence = death_view_sequence.checked_add(1).unwrap();
+    let (_, summary_result) = bot_client::perform_death_view(
+        &connection,
+        death_view_frame(
+            death_view_sequence,
+            death_revision.clone(),
+            DeathViewRequestV1::Summary {
+                death_id: latest_death.death_id,
+                lost_start_ordinal: 0,
+                lost_limit: 32,
+            },
+        ),
+    )
+    .await
+    .unwrap();
+    summary_result.validate().unwrap();
+    let DeathViewResultV1::Summary { summary, .. } = summary_result else {
+        panic!("durable acknowledgement must make the immutable death summary queryable");
+    };
+    assert_eq!(summary.death_id, latest_death.death_id);
+    assert_eq!(summary.class_id.as_str(), protocol::GRAVE_ARBALIST_CLASS_ID);
+    assert_eq!(summary.death_tick, latest_death.death_tick);
+    assert_eq!(
+        summary.snapshot_digest,
+        latest_death.summary_snapshot_digest
+    );
+    assert_eq!(
+        summary.lost_total_count,
+        latest_death.destruction_entry_count
+    );
+    assert!(summary.lost.iter().all(|entry| {
+        entry.kind == DeathSummaryProjectionKindV1::LostItem && entry.item_uid.is_some()
+    }));
+    assert!(
+        summary
+            .last_five_damage
+            .last()
+            .is_some_and(|entry| entry.lethal)
+    );
+    assert_eq!(summary.preserved.len(), 5);
+    assert_eq!(summary.created.len(), 2);
+    assert_eq!(summary.echo_outcome, DeathEchoOutcomeV1::NotEligible);
+
+    death_view_sequence = death_view_sequence.checked_add(1).unwrap();
+    let (_, memorial_result) = bot_client::perform_death_view(
+        &connection,
+        death_view_frame(
+            death_view_sequence,
+            death_revision.clone(),
+            DeathViewRequestV1::MemorialPage {
+                after: None,
+                limit: 8,
+            },
+        ),
+    )
+    .await
+    .unwrap();
+    memorial_result.validate().unwrap();
+    assert!(matches!(
+        memorial_result,
+        DeathViewResultV1::MemorialPage { ref entries, .. }
+            if entries.iter().any(|entry| {
+                entry.cursor.death_id == latest_death.death_id
+                    && entry.summary_snapshot_digest == latest_death.summary_snapshot_digest
+            })
+    ));
+
+    death_view_sequence = death_view_sequence.checked_add(1).unwrap();
+    let (_, trace_result) = bot_client::perform_death_view(
+        &connection,
+        death_view_frame(
+            death_view_sequence,
+            death_revision,
+            DeathViewRequestV1::TracePage {
+                death_id: latest_death.death_id,
+                start_ordinal: 0,
+                limit: 8,
+            },
+        ),
+    )
+    .await
+    .unwrap();
+    trace_result.validate().unwrap();
+    assert!(matches!(
+        trace_result,
+        DeathViewResultV1::TracePage { ref page, .. }
+            if page.death_id == latest_death.death_id
+                && page.death_tick == latest_death.death_tick
+                && page.trace_digest == latest_death.trace_digest
+                && !page.entries.is_empty()
+    ));
+
+    // The successor mutation echoes only the committed death ID. Class, roster slot, appearance,
+    // starter identities, selection, and every aggregate version remain server planned.
+    let successor_payload = SuccessorCreatePayloadV1 {
+        death_id: latest_death.death_id,
+        content_revision: WireText::new(persistence::CORE_ITEM_CONTENT_REVISION).unwrap(),
+    };
+    let successor_frame = SuccessorCreateFrameV1 {
+        schema_version: SUCCESSOR_SCHEMA_VERSION,
+        sequence: 1,
+        mutation_id: [0x39; 16],
+        payload_hash: successor_payload.canonical_hash(),
+        payload: successor_payload,
+    };
+    successor_frame.validate().unwrap();
+    let (_, successor_result) = tokio::time::timeout(
+        OPERATION_TIMEOUT,
+        bot_client::perform_successor_create(&connection, successor_frame.clone()),
+    )
+    .await
+    .expect("ordinary successor creation timed out")
+    .unwrap();
+    successor_result.validate().unwrap();
+    let SuccessorCreateResultV1::Stored {
+        replayed: false,
+        result: stored_successor,
+        ..
+    } = successor_result
+    else {
+        panic!("the terminal death summary must authorize one fresh successor");
+    };
+    assert_eq!(stored_successor.mutation_id, successor_frame.mutation_id);
+    assert_eq!(stored_successor.death_id, latest_death.death_id);
+    assert_ne!(stored_successor.successor_id, character_id);
+    assert_eq!(
+        stored_successor.selected_character_id,
+        stored_successor.successor_id
+    );
+    assert_eq!(
+        stored_successor.class_id.as_str(),
+        protocol::GRAVE_ARBALIST_CLASS_ID
+    );
+    let starter_uids = stored_successor.starter_items.ordered_uids();
+    assert!(starter_uids.iter().all(|item_uid| *item_uid != [0; 16]));
+    assert_eq!(
+        starter_uids.into_iter().collect::<BTreeSet<_>>().len(),
+        protocol::SUCCESSOR_STARTER_ITEM_COUNT
+    );
+
+    let successor_hall_payload = WorldTransferPayload {
+        content_revision: world_revision.clone(),
+        command: WorldTransferCommand::EnterHallFromCharacterSelect,
+    };
+    let (_, successor_hall_result) = bot_client::perform_world_flow(
+        &connection,
+        WorldFlowFrame {
+            sequence: 7,
+            request: WorldFlowRequest::Transfer(WorldTransferMutation {
+                mutation_id: [0x3a; 16],
+                character_id: stored_successor.successor_id,
+                expected_character_version: stored_successor.versions.character,
+                issued_at_unix_millis: current_unix_millis(),
+                payload_hash: successor_hall_payload.canonical_hash(),
+                payload: successor_hall_payload,
+            }),
+        },
+    )
+    .await
+    .unwrap();
+    let WorldFlowResult::Transfer {
+        accepted: true,
+        code: WorldTransferResultCode::Accepted,
+        snapshot: Some(successor_hall),
+        transfer_id: Some(_),
+        ..
+    } = successor_hall_result
+    else {
+        panic!("the stored successor must enter Lantern Halls through ordinary world flow");
+    };
+    assert!(matches!(
+        &successor_hall.location,
+        CharacterLocation::Safe {
+            location_id,
+            arrival: SafeArrival::HallDefault,
+        } if location_id.as_str() == HALL_CONTENT_ID
+    ));
+
+    let successor_hall_route_frame = wait_for_route(
+        &mut route_receive,
+        |route| {
+            route.character_id == stored_successor.successor_id
+                && route.character_version == successor_hall.character_version
+                && route.scene == CorePrivateRouteSceneV1::LanternHalls
+                && route.phase == CorePrivateRoutePhaseV1::Hall
+        },
+        "successor Hall route authority timed out",
+    )
+    .await;
+    let ReliableEvent::CorePrivateRouteState(successor_hall_route) =
+        &successor_hall_route_frame.event
+    else {
+        unreachable!("the route waiter returns a successor Hall projection");
+    };
+    let mut successor_route_model = CorePrivateRouteClientModel::new(
+        stored_successor.successor_id,
+        world_revision.clone(),
+        route_revision(&content_root),
+    )
+    .unwrap();
+    assert!(
+        successor_route_model
+            .accept_server_hello(&server_hello)
+            .unwrap()
+    );
+    successor_route_model
+        .apply_location(successor_hall.clone())
+        .unwrap();
+    successor_route_model
+        .apply_reliable(&successor_hall_route_frame)
+        .unwrap();
+    successor_route_model
+        .apply_scene_readiness(CorePrivateSceneReadiness {
+            base: CoreSceneReadiness {
+                location_id: WireText::new(HALL_CONTENT_ID).unwrap(),
+                character_version: successor_hall.character_version,
+                content_revision: world_revision.clone(),
+            },
+            scene: CorePrivateRouteSceneV1::LanternHalls,
+            room: None,
+            instance_lineage_id: None,
+            actor_generation: successor_hall_route.actor_generation,
+            route_state_version: successor_hall_route.state_version,
+        })
+        .unwrap();
+    assert!(successor_route_model.can_accept_gameplay_input());
+    assert!(
+        recovery_started.elapsed() < Duration::from_secs(15),
+        "ordinary death-to-successor Hall control exceeded the DTH-021 target: {:?}",
+        recovery_started.elapsed()
+    );
+
+    // Reach a fresh authoritative Hall snapshot before movement so no queued terminal snapshot can
+    // satisfy a waypoint predicate for the newly selected life.
+    tokio::time::timeout(OPERATION_TIMEOUT, async {
+        loop {
+            let snapshot = next_complete_snapshot(&connection, &mut assembler).await;
+            if snapshot.state_version == successor_hall_route.state_version
+                && snapshot.entities.iter().any(|entity| {
+                    entity.kind == EntityKind::Player
+                        && entity.current_health > 0
+                        && entity.current_health == entity.maximum_health
+                })
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("successor controllable Hall snapshot timed out");
+
+    walk_to_and_open_realm_gate(&connection, &mut assembler, &mut input_sequence, 3).await;
+
+    let successor_danger_payload = WorldTransferPayload {
+        content_revision: world_revision.clone(),
+        command: WorldTransferCommand::UsePortal {
+            portal_id: WireText::new(HallStationV1::RealmGate.content_id()).unwrap(),
+        },
+    };
+    let (_, successor_danger_result) = bot_client::perform_world_flow(
+        &connection,
+        WorldFlowFrame {
+            sequence: 8,
+            request: WorldFlowRequest::Transfer(WorldTransferMutation {
+                mutation_id: [0x3b; 16],
+                character_id: stored_successor.successor_id,
+                expected_character_version: successor_hall.character_version,
+                issued_at_unix_millis: current_unix_millis(),
+                payload_hash: successor_danger_payload.canonical_hash(),
+                payload: successor_danger_payload,
+            }),
+        },
+    )
+    .await
+    .unwrap();
+    let WorldFlowResult::Transfer {
+        accepted: true,
+        code: WorldTransferResultCode::Accepted,
+        snapshot: Some(successor_danger),
+        transfer_id: Some(_),
+        ..
+    } = successor_danger_result
+    else {
+        panic!("the successor must return to permadeath-enabled combat through the Realm Gate");
+    };
+    let CharacterLocation::Danger {
+        location_id,
+        instance_lineage_id: successor_lineage_id,
+        entry_restore_point_id: successor_restore_id,
+    } = &successor_danger.location
+    else {
+        panic!("successor Realm Gate admission must create a new danger root");
+    };
+    assert_eq!(location_id.as_str(), MICROREALM_CONTENT_ID);
+    assert_ne!(*successor_lineage_id, [0; 16]);
+    assert_ne!(*successor_restore_id, [0; 16]);
+    assert_ne!(*successor_lineage_id, *second_lineage_id);
+
+    let successor_danger_route_frame = wait_for_route(
+        &mut route_receive,
+        |route| {
+            route.character_id == stored_successor.successor_id
+                && route.character_version == successor_danger.character_version
+                && route.scene == CorePrivateRouteSceneV1::CoreMicrorealm
+                && route.instance_lineage_id == Some(*successor_lineage_id)
+        },
+        "successor danger route authority timed out",
+    )
+    .await;
+    let ReliableEvent::CorePrivateRouteState(successor_danger_route) =
+        &successor_danger_route_frame.event
+    else {
+        unreachable!("the route waiter returns a successor danger projection");
+    };
+    successor_route_model
+        .begin_committed_transfer_refresh()
+        .unwrap();
+    successor_route_model
+        .apply_location(successor_danger.clone())
+        .unwrap();
+    successor_route_model
+        .apply_reliable(&successor_danger_route_frame)
+        .unwrap();
+    successor_route_model
+        .apply_scene_readiness(CorePrivateSceneReadiness {
+            base: CoreSceneReadiness {
+                location_id: WireText::new(MICROREALM_CONTENT_ID).unwrap(),
+                character_version: successor_danger.character_version,
+                content_revision: world_revision.clone(),
+            },
+            scene: CorePrivateRouteSceneV1::CoreMicrorealm,
+            room: None,
+            instance_lineage_id: Some(*successor_lineage_id),
+            actor_generation: successor_danger_route.actor_generation,
+            route_state_version: successor_danger_route.state_version,
+        })
+        .unwrap();
+    assert!(successor_route_model.can_accept_gameplay_input());
+    tokio::time::timeout(OPERATION_TIMEOUT, async {
+        loop {
+            let snapshot = next_complete_snapshot(&connection, &mut assembler).await;
+            if snapshot.server_tick == successor_danger_route_frame.server_tick
+                && snapshot.state_version == successor_danger_route.state_version
+                && snapshot.entities.iter().any(|entity| {
+                    entity.kind == EntityKind::Player
+                        && entity.current_health > 0
+                        && entity.current_health == entity.maximum_health
+                })
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("successor controllable danger snapshot timed out");
 
     connection.close(0_u32.into(), b"native client shutdown");
     client_endpoint.close(0_u32.into(), b"native client shutdown");
