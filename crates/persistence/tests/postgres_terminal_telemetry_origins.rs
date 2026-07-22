@@ -120,7 +120,7 @@ async fn insert_overlapping_closed_session(persistence: &PostgresPersistence, ov
                  to_timestamp($6::double precision/1000000.0))",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
-    .bind([0x61; 16].as_slice())
+    .bind([0x61_u8; 16].as_slice())
     .bind(OVERLAPPING_SESSION_ID.as_slice())
     .bind(ACCOUNT_ID.as_slice())
     .bind(i64::try_from(STARTED_AT_MILLIS).unwrap())
@@ -137,8 +137,8 @@ async fn insert_overlapping_closed_session(persistence: &PostgresPersistence, ov
                  to_timestamp($8::double precision/1000000.0))",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
-    .bind([0x62; 16].as_slice())
-    .bind([0x63; 16].as_slice())
+    .bind([0x62_u8; 16].as_slice())
+    .bind([0x63_u8; 16].as_slice())
     .bind(ACCOUNT_ID.as_slice())
     .bind(OVERLAPPING_SESSION_ID.as_slice())
     .bind(i64::try_from(BOUNDARY_MILLIS - STARTED_AT_MILLIS).unwrap())

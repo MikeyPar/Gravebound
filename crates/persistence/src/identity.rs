@@ -277,19 +277,7 @@ async fn persist_aggregate(
     account_id: &[u8; ID_BYTES],
     aggregate: &StoredIdentityAggregate,
 ) -> Result<(), PersistenceError> {
-    // A selected character is loaded as one complete private-life aggregate. Establish the
-    // account-owned wallet while the account row is already locked so identity creation can never
-    // publish a selected character whose required Ash component is absent.
-    sqlx::query(
-        "INSERT INTO ash_wallets (namespace_id, account_id, balance, wallet_version) \
-         VALUES ($1, $2, 0, 1) \
-         ON CONFLICT (namespace_id, account_id) DO NOTHING",
-    )
-    .bind(WIPEABLE_CORE_NAMESPACE)
-    .bind(account_id.as_slice())
-    .execute(transaction.connection())
-    .await
-    .map_err(PersistenceError::Database)?;
+    ensure_ash_wallet(transaction, account_id).await?;
     for character in &aggregate.characters {
         sqlx::query(
             "INSERT INTO characters \
@@ -379,6 +367,26 @@ async fn persist_aggregate(
             .selected_character_id
             .as_ref()
             .map(<[u8; ID_BYTES]>::as_slice),
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .execute(transaction.connection())
+    .await
+    .map_err(PersistenceError::Database)?;
+    Ok(())
+}
+
+async fn ensure_ash_wallet(
+    transaction: &mut PersistenceTransaction<'_>,
+    account_id: &[u8; ID_BYTES],
+) -> Result<(), PersistenceError> {
+    // A selected character is loaded as one complete private-life aggregate. Establish the
+    // account-owned wallet while the account row is already locked so identity creation can never
+    // publish a selected character whose required Ash component is absent.
+    sqlx::query(
+        "INSERT INTO ash_wallets (namespace_id, account_id, balance, wallet_version) \
+         VALUES ($1, $2, 0, 1) \
+         ON CONFLICT (namespace_id, account_id) DO NOTHING",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(account_id.as_slice())
