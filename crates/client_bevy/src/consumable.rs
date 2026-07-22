@@ -56,10 +56,10 @@ enum ConsumableSequenceError {
 struct ConsumableHud;
 
 #[derive(Debug, Resource)]
-struct TonicAudioCue(mpsc::Sender<()>);
+pub(crate) struct TonicAudioCue(mpsc::Sender<()>);
 
 impl TonicAudioCue {
-    fn start() -> Self {
+    pub(crate) fn start() -> Self {
         let (sender, receiver) = mpsc::channel();
         let wav = build_tonic_confirmation_wav();
         if thread::Builder::new()
@@ -75,7 +75,7 @@ impl TonicAudioCue {
         Self(sender)
     }
 
-    fn play(&self) -> bool {
+    pub(crate) fn play(&self) -> bool {
         self.0.send(()).is_ok()
     }
 }

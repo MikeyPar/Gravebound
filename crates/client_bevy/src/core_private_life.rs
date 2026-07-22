@@ -50,6 +50,9 @@ use crate::{
     SuccessorRecoveryUiSnapshot, TerminalDeathPhase,
     accessibility::AccessibilitySettings,
     bargain_ui::BargainUiAction,
+    core_consumable::{
+        CoreConsumableApplyOutcome, CoreConsumableClientError, CoreConsumableClientModel,
+    },
     network_prediction::{CompleteSnapshot, SnapshotAssembler},
     network_transport::{
         NetworkStartup, NetworkTransportConfig, NetworkWorkerHandle, TransportEvent,
@@ -158,6 +161,35 @@ impl CorePrivateResolutionHold {
 
     fn captures_input(&self) -> bool {
         self.model.captures_input()
+    }
+}
+
+#[derive(Debug, Resource)]
+struct CorePrivateConsumableUi {
+    model: CoreConsumableClientModel,
+    feedback_timer: Timer,
+    cooldown_timer: Timer,
+}
+
+impl CorePrivateConsumableUi {
+    fn new(expected_content_revision: ManifestHash) -> Self {
+        Self {
+            model: CoreConsumableClientModel::new(expected_content_revision),
+            feedback_timer: Timer::from_seconds(0.0, TimerMode::Once),
+            cooldown_timer: Timer::from_seconds(0.0, TimerMode::Once),
+        }
+    }
+
+    fn record(&mut self, outcome: CoreConsumableApplyOutcome) {
+        self.feedback_timer = Timer::from_seconds(2.4, TimerMode::Once);
+        if outcome == CoreConsumableApplyOutcome::Accepted {
+            self.cooldown_timer = Timer::from_seconds(2.0, TimerMode::Once);
+        }
+    }
+
+    fn tick(&mut self, delta: std::time::Duration) {
+        self.feedback_timer.tick(delta);
+        self.cooldown_timer.tick(delta);
     }
 }
 
@@ -1052,6 +1084,7 @@ impl CorePrivateLifeClient {
 fn private_life_features_advertised(hello: &ServerHello) -> bool {
     [
         CORE_WORLD_FLOW_FEATURE_FLAG,
+        protocol::CORE_CONSUMABLE_FEATURE_FLAG,
         protocol::HALL_INTERACTION_FEATURE_FLAG,
         protocol::CORE_RESOLUTION_HOLD_FEATURE_FLAG,
     ]
@@ -1172,6 +1205,14 @@ pub fn run_core_private_life(config: CorePrivateLifeConfig) -> Result<()> {
         .context("normal Core private-life content failed validation")?;
     let item_catalog = sim_content::load_core_development_items(&config.content_root)
         .context("normal Core item presentation failed validation")?;
+    let item_revision = ManifestHash::new(
+        item_catalog
+            .revision_label()
+            .strip_prefix("core-dev.blake3.")
+            .context("normal Core item revision is not a development manifest hash")?
+            .to_owned(),
+    )?;
+    let consumable_ui = CorePrivateConsumableUi::new(item_revision);
     let resolution_hold = CorePrivateResolutionHold::new(item_catalog)?;
     let (oath_copy, bargain_copy) = load_oath_bargain_copy(&config.content_root)?;
     let (_, source_report) =
@@ -1207,6 +1248,8 @@ pub fn run_core_private_life(config: CorePrivateLifeConfig) -> Result<()> {
         .insert_resource(CorePrivatePresentationContent(content))
         .insert_resource(CorePrivateOathCopy(oath_copy))
         .insert_resource(CorePrivateOathState::default())
+        .insert_resource(consumable_ui)
+        .insert_resource(crate::consumable::TonicAudioCue::start())
         .insert_resource(resolution_hold)
         .insert_resource(CorePrivateBargainCopy(bargain_copy))
         .insert_resource(CorePrivateBargainState::default())
@@ -1264,6 +1307,13 @@ pub fn run_core_private_life(config: CorePrivateLifeConfig) -> Result<()> {
                 update_ui,
             )
                 .chain(),
+        )
+        .add_systems(
+            Update,
+            (
+                handle_consumable_keyboard.after(handle_interact_keyboard),
+                tick_consumable_feedback,
+            ),
         )
         .add_systems(FixedUpdate, send_gameplay_input)
         .add_systems(Last, shutdown_transport);
@@ -1324,6 +1374,8 @@ fn poll_transport(
     bridge: Res<CorePrivateLifeBridge>,
     mut client: ResMut<CorePrivateLifeClient>,
     mut snapshots: ResMut<CorePrivateSnapshotClient>,
+    mut consumable: ResMut<CorePrivateConsumableUi>,
+    tonic_audio: Res<crate::consumable::TonicAudioCue>,
     mut bargain: ResMut<CorePrivateBargainState>,
     mut oath: ResMut<CorePrivateOathState>,
     mut resolution_hold: ResMut<CorePrivateResolutionHold>,
@@ -1339,9 +1391,7 @@ fn poll_transport(
             }
             TransportEvent::HandshakeAccepted(hello) => {
                 snapshots.reset_transport();
-                client
-                    .accept_server_hello(&hello)
-                    .and_then(|()| terminal.accept_server_hello(&hello))
+                accept_private_handshake(&hello, &bridge, &mut client, &consumable, &mut terminal)
             }
             TransportEvent::Reliable(frame) => apply_private_reliable(
                 &frame,
@@ -1349,10 +1399,12 @@ fn poll_transport(
                 &mut client,
                 CorePrivateReliableUi {
                     bargain: &mut bargain,
+                    consumable: &mut consumable,
                     oath: &mut oath,
                     resolution_hold: &mut resolution_hold,
                     hall: &mut hall,
                     terminal: &mut terminal,
+                    tonic_audio: &tonic_audio,
                 },
             ),
             TransportEvent::LinkLost
@@ -1360,6 +1412,7 @@ fn poll_transport(
             | TransportEvent::TransportClosed => {
                 snapshots.reset_transport();
                 bargain.reset();
+                consumable.model.transport_lost();
                 oath.reset();
                 hall.reset();
                 if !matches!(
@@ -1375,6 +1428,7 @@ fn poll_transport(
             TransportEvent::Fatal(_) => {
                 snapshots.reset_transport();
                 bargain.reset();
+                consumable.model.transport_lost();
                 oath.reset();
                 hall.reset();
                 if !matches!(
@@ -1393,6 +1447,24 @@ fn poll_transport(
             client.phase = CorePrivateLifePhase::Error;
         }
     }
+    finish_transport_poll(
+        &bridge,
+        &mut client,
+        &mut snapshots,
+        &mut bargain,
+        &mut hall,
+        discard_snapshot_queue,
+    );
+}
+
+fn finish_transport_poll(
+    bridge: &CorePrivateLifeBridge,
+    client: &mut CorePrivateLifeClient,
+    snapshots: &mut CorePrivateSnapshotClient,
+    bargain: &mut CorePrivateBargainState,
+    hall: &mut CorePrivateHallInteractionState,
+    discard_snapshot_queue: bool,
+) {
     if client.phase != CorePrivateLifePhase::Hall {
         hall.reset();
     }
@@ -1404,12 +1476,15 @@ fn poll_transport(
         .route
         .as_ref()
         .and_then(CorePrivateRouteClientModel::route_state);
-    let result = snapshots.bind_route(route).and_then(|()| {
-        queued
-            .into_iter()
-            .try_for_each(|chunk| snapshots.ingest(chunk))
-    });
-    if result.is_err() {
+    if snapshots
+        .bind_route(route)
+        .and_then(|()| {
+            queued
+                .into_iter()
+                .try_for_each(|chunk| snapshots.ingest(chunk))
+        })
+        .is_err()
+    {
         client.error = Some(CorePrivateLifeClientFailure::InvalidServerAuthority);
         client.phase = CorePrivateLifePhase::Error;
     }
@@ -1426,12 +1501,32 @@ fn poll_transport(
     }
 }
 
+fn accept_private_handshake(
+    hello: &ServerHello,
+    bridge: &CorePrivateLifeBridge,
+    client: &mut CorePrivateLifeClient,
+    consumable: &CorePrivateConsumableUi,
+    terminal: &mut CorePrivateTerminalUi,
+) -> Result<(), CorePrivateLifeClientError> {
+    client.accept_server_hello(hello)?;
+    terminal.accept_server_hello(hello)?;
+    if let Some(frame) = consumable.model.exact_retry() {
+        bridge
+            .0
+            .queue_reliable(WireMessage::CoreConsumableUseFrame(frame))
+            .map_err(|_| CorePrivateLifeClientError::ActionUnavailable)?;
+    }
+    Ok(())
+}
+
 struct CorePrivateReliableUi<'a> {
     bargain: &'a mut CorePrivateBargainState,
+    consumable: &'a mut CorePrivateConsumableUi,
     oath: &'a mut CorePrivateOathState,
     resolution_hold: &'a mut CorePrivateResolutionHold,
     hall: &'a mut CorePrivateHallInteractionState,
     terminal: &'a mut CorePrivateTerminalUi,
+    tonic_audio: &'a crate::consumable::TonicAudioCue,
 }
 
 #[allow(
@@ -1446,10 +1541,12 @@ fn apply_private_reliable(
 ) -> Result<(), CorePrivateLifeClientError> {
     let CorePrivateReliableUi {
         bargain,
+        consumable,
         oath,
         resolution_hold,
         hall,
         terminal,
+        tonic_audio,
     } = ui;
     match &frame.event {
         ReliableEvent::AccountBootstrapResult(result) => client.apply_bootstrap(result.clone()),
@@ -1471,7 +1568,17 @@ fn apply_private_reliable(
             }
             client.apply_world_flow(result.clone())
         }
-        ReliableEvent::CorePrivateRouteState(_) => client.apply_route(frame),
+        ReliableEvent::CorePrivateRouteState(_) => {
+            client.apply_route(frame)?;
+            consumable.model.retain_for_route(
+                client.selected_character_id(),
+                client
+                    .route
+                    .as_ref()
+                    .and_then(CorePrivateRouteClientModel::route_state),
+            );
+            Ok(())
+        }
         ReliableEvent::RecallResult(result) => client.apply_recall((**result).clone()),
         ReliableEvent::BargainViewResult(result) => {
             let result = result.clone();
@@ -1517,6 +1624,39 @@ fn apply_private_reliable(
         }
         ReliableEvent::CoreExtractionReadyState(state) => {
             client.apply_extraction_ready((**state).clone())
+        }
+        ReliableEvent::CoreConsumableState(state) => {
+            let selected_character_id = client
+                .selected_character_id()
+                .ok_or(CorePrivateLifeClientError::InvalidSnapshotAuthority)?;
+            let route = client
+                .route
+                .as_ref()
+                .and_then(CorePrivateRouteClientModel::route_state)
+                .ok_or(CorePrivateLifeClientError::InvalidSnapshotAuthority)?;
+            consumable
+                .model
+                .observe_state(state.clone(), selected_character_id, route)
+                .map_err(|_| CorePrivateLifeClientError::InvalidSnapshotAuthority)
+        }
+        ReliableEvent::CoreConsumableUseResult(result) => {
+            let selected_character_id = client
+                .selected_character_id()
+                .ok_or(CorePrivateLifeClientError::InvalidSnapshotAuthority)?;
+            let route = client
+                .route
+                .as_ref()
+                .and_then(CorePrivateRouteClientModel::route_state)
+                .ok_or(CorePrivateLifeClientError::InvalidSnapshotAuthority)?;
+            let outcome = consumable
+                .model
+                .apply_result(result.clone(), selected_character_id, route)
+                .map_err(|_| CorePrivateLifeClientError::InvalidSnapshotAuthority)?;
+            consumable.record(outcome);
+            if outcome == CoreConsumableApplyOutcome::Accepted {
+                let _ = tonic_audio.play();
+            }
+            Ok(())
         }
         ReliableEvent::HallInteractionResult(result) => {
             apply_hall_interaction_result(*result, bridge, client, hall, terminal)
@@ -2809,6 +2949,88 @@ fn send_reliable_combat_edges(
     }
 }
 
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "Bevy system parameters are wrapper values"
+)]
+fn handle_consumable_keyboard(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    bridge: Res<CorePrivateLifeBridge>,
+    bargain: Res<CorePrivateBargainState>,
+    oath: Res<CorePrivateOathState>,
+    resolution_hold: Res<CorePrivateResolutionHold>,
+    mut consumable: ResMut<CorePrivateConsumableUi>,
+    mut client: ResMut<CorePrivateLifeClient>,
+) {
+    let slot = if keyboard.just_pressed(KeyCode::KeyQ) {
+        Some(protocol::CoreConsumableSlotV1::BeltOne)
+    } else if keyboard.just_pressed(KeyCode::KeyE) {
+        Some(protocol::CoreConsumableSlotV1::BeltTwo)
+    } else {
+        None
+    };
+    let Some(slot) = slot else {
+        return;
+    };
+    if bargain.captures_input()
+        || oath.open
+        || resolution_hold.captures_input()
+        || client.phase != CorePrivateLifePhase::PrivateRoute
+        || !client
+            .route
+            .as_ref()
+            .is_some_and(CorePrivateRouteClientModel::can_accept_gameplay_input)
+    {
+        return;
+    }
+    let Some(character_id) = client.selected_character_id() else {
+        client.phase = CorePrivateLifePhase::Error;
+        return;
+    };
+    let Some(route) = client
+        .route
+        .as_ref()
+        .and_then(CorePrivateRouteClientModel::route_state)
+        .cloned()
+    else {
+        client.phase = CorePrivateLifePhase::Error;
+        return;
+    };
+    let Ok(mutation_id) = client.take_mutation_id() else {
+        client.phase = CorePrivateLifePhase::Error;
+        return;
+    };
+    let frame = match consumable
+        .model
+        .begin_use(slot, mutation_id, character_id, &route)
+    {
+        Ok(frame) => frame,
+        Err(
+            CoreConsumableClientError::AuthorityUnavailable
+            | CoreConsumableClientError::MutationPending,
+        ) => return,
+        Err(
+            CoreConsumableClientError::InvalidAuthority
+            | CoreConsumableClientError::UnexpectedResult,
+        ) => {
+            client.phase = CorePrivateLifePhase::Error;
+            return;
+        }
+    };
+    if bridge
+        .0
+        .queue_reliable(WireMessage::CoreConsumableUseFrame(frame))
+        .is_err()
+    {
+        client.phase = CorePrivateLifePhase::Error;
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn tick_consumable_feedback(time: Res<Time>, mut consumable: ResMut<CorePrivateConsumableUi>) {
+    consumable.tick(time.delta());
+}
+
 #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 fn cursor_private_aim(
     window: &Window,
@@ -3376,6 +3598,7 @@ fn spawn_button(parent: &mut ChildSpawnerCommands, action: PrivateLifeAction, la
 fn update_ui(
     client: Res<CorePrivateLifeClient>,
     snapshots: Res<CorePrivateSnapshotClient>,
+    consumable: Res<CorePrivateConsumableUi>,
     content: Res<CorePrivatePresentationContent>,
     oath: Res<CorePrivateOathState>,
     oath_copy: Res<CorePrivateOathCopy>,
@@ -3389,7 +3612,7 @@ fn update_ui(
 ) {
     **status = Text::new(phase_label(client.phase));
     **roster = Text::new(render_roster(&client));
-    let route_text = render_route(&client, &snapshots, &content.0, &hall);
+    let route_text = render_route(&client, &snapshots, &content.0, &hall, &consumable);
     **route = Text::new(if oath.open {
         format!(
             "{}\n\n{}\n\n[L] Long Vigil    [N] Nailkeeper    [Enter] Confirm    [Esc] Close",
@@ -3483,6 +3706,7 @@ fn render_route(
     snapshots: &CorePrivateSnapshotClient,
     content: &sim_content::CorePrivateLifeContent,
     hall: &CorePrivateHallInteractionState,
+    consumable: &CorePrivateConsumableUi,
 ) -> String {
     if client.phase == CorePrivateLifePhase::Disabled {
         return "Available in a later test.\nNormal route capability was not negotiated."
@@ -3547,8 +3771,9 @@ fn render_route(
     let recall = render_recall_status(client.recall_result.as_ref());
     let extraction = render_extraction_status(client.extraction_result.as_ref());
     let hall_interaction = render_hall_interaction(state, snapshots, content, hall);
+    let consumables = render_consumable_status(client, consumable);
     format!(
-        "{scene}{room}\nPhase: {:?}\nActor generation: {}    State version: {}\nControl: {}{gameplay}{hall_interaction}{recall}{extraction}{transfer}",
+        "{scene}{room}\nPhase: {:?}\nActor generation: {}    State version: {}\nControl: {}{gameplay}{consumables}{hall_interaction}{recall}{extraction}{transfer}",
         state.phase,
         state.actor_generation,
         state.state_version,
@@ -3562,6 +3787,54 @@ fn render_route(
             "WITHHELD"
         }
     )
+}
+
+fn render_consumable_status(
+    client: &CorePrivateLifeClient,
+    consumable: &CorePrivateConsumableUi,
+) -> String {
+    if client.phase != CorePrivateLifePhase::PrivateRoute {
+        return String::new();
+    }
+    let quantities = consumable.model.belt_quantities();
+    let q = quantities.map_or("--".to_owned(), |values| values[0].to_string());
+    let e = quantities.map_or("--".to_owned(), |values| values[1].to_string());
+    let state = if consumable.model.mutation_pending() {
+        "CONFIRMING".to_owned()
+    } else if !consumable.cooldown_timer.is_finished() {
+        format!(
+            "COOLDOWN {:.1}s",
+            consumable.cooldown_timer.remaining_secs().max(0.0)
+        )
+    } else if !consumable.feedback_timer.is_finished() {
+        consumable
+            .model
+            .last_result()
+            .map_or("READY", consumable_result_label)
+            .to_owned()
+    } else {
+        "READY".to_owned()
+    };
+    format!("\nBelt: [Q] Red Tonic x{q}    [E] Slot 2 x{e}    {state}")
+}
+
+const fn consumable_result_label(code: protocol::CoreConsumableResultCodeV1) -> &'static str {
+    match code {
+        protocol::CoreConsumableResultCodeV1::Accepted => "DRINK CONFIRMED",
+        protocol::CoreConsumableResultCodeV1::EmptySlot => "SLOT EMPTY",
+        protocol::CoreConsumableResultCodeV1::FullHealth => "HEALTH ALREADY FULL",
+        protocol::CoreConsumableResultCodeV1::SharedCooldown => "TONIC COOLING DOWN",
+        protocol::CoreConsumableResultCodeV1::InactiveSlot => "BELT SLOT LOCKED",
+        protocol::CoreConsumableResultCodeV1::RecallBlocked => "BLOCKED DURING RECALL",
+        protocol::CoreConsumableResultCodeV1::TerminalPending => "TERMINAL OUTCOME PENDING",
+        protocol::CoreConsumableResultCodeV1::AuthorityMismatch
+        | protocol::CoreConsumableResultCodeV1::ContentMismatch
+        | protocol::CoreConsumableResultCodeV1::InventoryVersionMismatch => {
+            "BELT AUTHORITY REFRESHING"
+        }
+        protocol::CoreConsumableResultCodeV1::IdempotencyConflict => "MUTATION CONFLICT",
+        protocol::CoreConsumableResultCodeV1::ServiceUnavailable => "RETRYING TONIC",
+    }
 }
 
 fn render_hall_interaction(
@@ -3766,6 +4039,7 @@ mod tests {
             feature_flags: if enabled {
                 vec![
                     WireText::new(CORE_WORLD_FLOW_FEATURE_FLAG).unwrap(),
+                    WireText::new(protocol::CORE_CONSUMABLE_FEATURE_FLAG).unwrap(),
                     WireText::new(protocol::HALL_INTERACTION_FEATURE_FLAG).unwrap(),
                     WireText::new(protocol::CORE_RESOLUTION_HOLD_FEATURE_FLAG).unwrap(),
                 ]

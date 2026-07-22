@@ -7,6 +7,7 @@ mod bargain_ui;
 mod combat;
 mod consumable;
 mod core_caldus_showcase;
+mod core_consumable;
 mod core_death_frame_probe;
 mod core_death_view_showcase;
 mod core_encounter_showcase;
