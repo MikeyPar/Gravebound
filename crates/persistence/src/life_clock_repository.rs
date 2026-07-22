@@ -759,7 +759,7 @@ async fn load_active_danger_authority(
         || root.try_get::<String, _>("records_blake3")? != content.records_blake3
         || root.try_get::<String, _>("assets_blake3")? != content.assets_blake3
         || root.try_get::<String, _>("localization_blake3")? != content.localization_blake3
-        || lineage.try_get::<i16, _>("lineage_state")? != 0
+        || !open_danger_lineage_state(lineage.try_get("lineage_state")?)
         || lineage.try_get::<String, _>("records_blake3")? != content.records_blake3
         || lineage.try_get::<String, _>("assets_blake3")? != content.assets_blake3
         || lineage.try_get::<String, _>("localization_blake3")? != content.localization_blake3
@@ -1308,6 +1308,10 @@ fn all_zero<const N: usize>(value: &[u8; N]) -> bool {
     value.iter().all(|byte| *byte == 0)
 }
 
+const fn open_danger_lineage_state(state: i16) -> bool {
+    matches!(state, 0 | 1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1392,6 +1396,14 @@ mod tests {
             stored(LifeClockStateV1::DangerLoading, 0).post_permadeath_combat_ticks,
             80
         );
+    }
+
+    #[test]
+    fn staged_and_active_danger_lineages_are_clock_eligible() {
+        assert!(open_danger_lineage_state(0));
+        assert!(open_danger_lineage_state(1));
+        assert!(!open_danger_lineage_state(2));
+        assert!(!open_danger_lineage_state(3));
     }
 
     #[test]
