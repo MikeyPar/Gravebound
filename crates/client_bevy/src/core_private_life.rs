@@ -57,6 +57,8 @@ use crate::{
     network_transport::{
         NetworkStartup, NetworkTransportConfig, NetworkWorkerHandle, TransportEvent,
     },
+    safe_storage::{SafeStorageApplyOutcome, SafeStorageClientModel, SafeStorageClientPhase},
+    safe_storage_ui::{NativeSafeStoragePlugin, NativeSafeStorageView, SafeStorageUiSnapshot},
 };
 
 const WINDOW_TITLE: &str = "Gravebound - Core Private Life";
@@ -142,6 +144,27 @@ impl CorePrivateOathState {
 struct CorePrivateResolutionHold {
     model: ResolutionHoldClientModel,
     catalog: sim_content::CompiledProductionItemCatalog,
+}
+
+#[derive(Resource)]
+struct CorePrivateSafeStorage {
+    model: SafeStorageClientModel,
+    catalog: sim_content::CompiledProductionItemCatalog,
+    view_revision: u64,
+}
+
+impl CorePrivateSafeStorage {
+    fn new(catalog: sim_content::CompiledProductionItemCatalog) -> Self {
+        Self {
+            model: SafeStorageClientModel::default(),
+            catalog,
+            view_revision: 1,
+        }
+    }
+
+    fn mark_changed(&mut self) {
+        self.view_revision = self.view_revision.saturating_add(1);
+    }
 }
 
 impl CorePrivateResolutionHold {
@@ -1087,6 +1110,7 @@ fn private_life_features_advertised(hello: &ServerHello) -> bool {
         protocol::CORE_CONSUMABLE_FEATURE_FLAG,
         protocol::HALL_INTERACTION_FEATURE_FLAG,
         protocol::CORE_RESOLUTION_HOLD_FEATURE_FLAG,
+        protocol::SAFE_STORAGE_FEATURE_FLAG,
     ]
     .into_iter()
     .all(|required| {
@@ -1213,6 +1237,7 @@ pub fn run_core_private_life(config: CorePrivateLifeConfig) -> Result<()> {
             .to_owned(),
     )?;
     let consumable_ui = CorePrivateConsumableUi::new(item_revision);
+    let safe_storage = CorePrivateSafeStorage::new(item_catalog.clone());
     let resolution_hold = CorePrivateResolutionHold::new(item_catalog)?;
     let (oath_copy, bargain_copy) = load_oath_bargain_copy(&config.content_root)?;
     let (_, source_report) =
@@ -1251,6 +1276,7 @@ pub fn run_core_private_life(config: CorePrivateLifeConfig) -> Result<()> {
         .insert_resource(consumable_ui)
         .insert_resource(crate::consumable::TonicAudioCue::start())
         .insert_resource(resolution_hold)
+        .insert_resource(safe_storage)
         .insert_resource(CorePrivateBargainCopy(bargain_copy))
         .insert_resource(CorePrivateBargainState::default())
         .insert_resource(CorePrivateHallInteractionState::default())
@@ -1279,6 +1305,7 @@ pub fn run_core_private_life(config: CorePrivateLifeConfig) -> Result<()> {
         .add_plugins((
             NativeDeathViewPlugin,
             NativeResolutionHoldPlugin,
+            NativeSafeStoragePlugin,
             NativeSuccessorRecoveryPlugin,
         ))
         .add_systems(Startup, spawn_ui)
@@ -1311,6 +1338,10 @@ pub fn run_core_private_life(config: CorePrivateLifeConfig) -> Result<()> {
         .add_systems(
             Update,
             (
+                handle_safe_storage_keyboard
+                    .after(drive_hall_panels)
+                    .before(handle_keyboard),
+                sync_safe_storage_view.after(handle_safe_storage_keyboard),
                 handle_consumable_keyboard.after(handle_interact_keyboard),
                 tick_consumable_feedback,
             ),
@@ -1379,6 +1410,7 @@ fn poll_transport(
     mut bargain: ResMut<CorePrivateBargainState>,
     mut oath: ResMut<CorePrivateOathState>,
     mut resolution_hold: ResMut<CorePrivateResolutionHold>,
+    mut safe_storage: ResMut<CorePrivateSafeStorage>,
     mut hall: ResMut<CorePrivateHallInteractionState>,
     mut terminal: ResMut<CorePrivateTerminalUi>,
 ) {
@@ -1391,7 +1423,14 @@ fn poll_transport(
             }
             TransportEvent::HandshakeAccepted(hello) => {
                 snapshots.reset_transport();
-                accept_private_handshake(&hello, &bridge, &mut client, &consumable, &mut terminal)
+                accept_private_handshake(
+                    &hello,
+                    &bridge,
+                    &mut client,
+                    &consumable,
+                    &safe_storage,
+                    &mut terminal,
+                )
             }
             TransportEvent::Reliable(frame) => apply_private_reliable(
                 &frame,
@@ -1402,6 +1441,7 @@ fn poll_transport(
                     consumable: &mut consumable,
                     oath: &mut oath,
                     resolution_hold: &mut resolution_hold,
+                    safe_storage: &mut safe_storage,
                     hall: &mut hall,
                     terminal: &mut terminal,
                     tonic_audio: &tonic_audio,
@@ -1415,6 +1455,8 @@ fn poll_transport(
                 consumable.model.transport_lost();
                 oath.reset();
                 hall.reset();
+                safe_storage.model.transport_lost();
+                safe_storage.mark_changed();
                 if !matches!(
                     resolution_hold.model.phase(),
                     ResolutionHoldClientPhase::Dormant | ResolutionHoldClientPhase::Resolved
@@ -1431,6 +1473,8 @@ fn poll_transport(
                 consumable.model.transport_lost();
                 oath.reset();
                 hall.reset();
+                safe_storage.model.transport_lost();
+                safe_storage.mark_changed();
                 if !matches!(
                     resolution_hold.model.phase(),
                     ResolutionHoldClientPhase::Dormant | ResolutionHoldClientPhase::Resolved
@@ -1455,6 +1499,10 @@ fn poll_transport(
         &mut hall,
         discard_snapshot_queue,
     );
+    if client.phase != CorePrivateLifePhase::Hall && safe_storage.model.captures_input() {
+        safe_storage.model.close();
+        safe_storage.mark_changed();
+    }
 }
 
 fn finish_transport_poll(
@@ -1506,6 +1554,7 @@ fn accept_private_handshake(
     bridge: &CorePrivateLifeBridge,
     client: &mut CorePrivateLifeClient,
     consumable: &CorePrivateConsumableUi,
+    safe_storage: &CorePrivateSafeStorage,
     terminal: &mut CorePrivateTerminalUi,
 ) -> Result<(), CorePrivateLifeClientError> {
     client.accept_server_hello(hello)?;
@@ -1516,6 +1565,12 @@ fn accept_private_handshake(
             .queue_reliable(WireMessage::CoreConsumableUseFrame(frame))
             .map_err(|_| CorePrivateLifeClientError::ActionUnavailable)?;
     }
+    if let Some(frame) = safe_storage.model.exact_mutation_retry() {
+        bridge
+            .0
+            .queue_reliable(WireMessage::SafeInventoryTransferFrame(frame))
+            .map_err(|_| CorePrivateLifeClientError::ActionUnavailable)?;
+    }
     Ok(())
 }
 
@@ -1524,6 +1579,7 @@ struct CorePrivateReliableUi<'a> {
     consumable: &'a mut CorePrivateConsumableUi,
     oath: &'a mut CorePrivateOathState,
     resolution_hold: &'a mut CorePrivateResolutionHold,
+    safe_storage: &'a mut CorePrivateSafeStorage,
     hall: &'a mut CorePrivateHallInteractionState,
     terminal: &'a mut CorePrivateTerminalUi,
     tonic_audio: &'a crate::consumable::TonicAudioCue,
@@ -1544,6 +1600,7 @@ fn apply_private_reliable(
         consumable,
         oath,
         resolution_hold,
+        safe_storage,
         hall,
         terminal,
         tonic_audio,
@@ -1619,6 +1676,12 @@ fn apply_private_reliable(
             .apply_mutation_result(result)
             .map(|_| ())
             .map_err(|_| CorePrivateLifeClientError::InvalidSnapshotAuthority),
+        ReliableEvent::SafeStorageQueryResult(result) => {
+            apply_safe_storage_query_result(result, bridge, client, safe_storage)
+        }
+        ReliableEvent::SafeInventoryTransferResult(result) => {
+            apply_safe_storage_transfer_result(result, bridge, client, safe_storage, hall)
+        }
         ReliableEvent::CorePendingInventoryState(state) => {
             client.apply_pending_inventory((**state).clone())
         }
@@ -1659,7 +1722,7 @@ fn apply_private_reliable(
             Ok(())
         }
         ReliableEvent::HallInteractionResult(result) => {
-            apply_hall_interaction_result(*result, bridge, client, hall, terminal)
+            apply_hall_interaction_result(*result, bridge, client, hall, safe_storage, terminal)
         }
         ReliableEvent::ExtractionCommitResult(result) => {
             client.apply_extraction((**result).clone())
@@ -1713,9 +1776,19 @@ fn apply_hall_interaction_result(
     bridge: &CorePrivateLifeBridge,
     client: &mut CorePrivateLifeClient,
     hall: &mut CorePrivateHallInteractionState,
+    safe_storage: &mut CorePrivateSafeStorage,
     terminal: &mut CorePrivateTerminalUi,
 ) -> Result<(), CorePrivateLifeClientError> {
     hall.apply(result);
+    if matches!(
+        result.code,
+        protocol::HallInteractionResultCodeV1::Closed
+            | protocol::HallInteractionResultCodeV1::InvalidState
+            | protocol::HallInteractionResultCodeV1::CancelledOutOfRange
+    ) {
+        safe_storage.model.close();
+        safe_storage.mark_changed();
+    }
     if result.code != protocol::HallInteractionResultCodeV1::Opened {
         return Ok(());
     }
@@ -1740,14 +1813,117 @@ fn apply_hall_interaction_result(
                 .map_err(|_| CorePrivateLifeClientError::ActionUnavailable)?;
             terminal.view_signature = None;
         }
-        Some(
-            protocol::HallStationV1::Vault
-            | protocol::HallStationV1::Overflow
-            | protocol::HallStationV1::OathShrine,
-        )
-        | None => {}
+        Some(protocol::HallStationV1::Vault | protocol::HallStationV1::Overflow) => {
+            let character_id = client
+                .selected_character_id()
+                .ok_or(CorePrivateLifeClientError::InvalidSnapshotAuthority)?;
+            let sequence = client.take_request_sequence()?;
+            let surface = match result.station {
+                Some(protocol::HallStationV1::Vault) => protocol::SafeStorageSurfaceV1::Vault,
+                Some(protocol::HallStationV1::Overflow) => protocol::SafeStorageSurfaceV1::Overflow,
+                _ => unreachable!("matched safe-storage Hall station"),
+            };
+            let frame = safe_storage.model.open(surface, sequence, character_id);
+            safe_storage.mark_changed();
+            bridge
+                .0
+                .queue_reliable(WireMessage::SafeStorageQueryFrame(frame))
+                .map_err(|_| CorePrivateLifeClientError::ActionUnavailable)?;
+        }
+        Some(protocol::HallStationV1::OathShrine) | None => {}
     }
     Ok(())
+}
+
+fn apply_safe_storage_query_result(
+    result: &protocol::SafeStorageQueryResultV1,
+    bridge: &CorePrivateLifeBridge,
+    client: &mut CorePrivateLifeClient,
+    safe_storage: &mut CorePrivateSafeStorage,
+) -> Result<(), CorePrivateLifeClientError> {
+    let outcome = safe_storage
+        .model
+        .apply_query_result(result, safe_storage.catalog.revision_label())
+        .map_err(|_| CorePrivateLifeClientError::InvalidSnapshotAuthority)?;
+    let follow_up = match outcome {
+        SafeStorageApplyOutcome::Continue => {
+            let sequence = client.take_request_sequence()?;
+            Some(
+                safe_storage
+                    .model
+                    .continue_query(sequence)
+                    .map_err(|_| CorePrivateLifeClientError::InvalidSnapshotAuthority)?,
+            )
+        }
+        SafeStorageApplyOutcome::Restart => {
+            let surface = safe_storage
+                .model
+                .surface()
+                .ok_or(CorePrivateLifeClientError::InvalidSnapshotAuthority)?;
+            let character_id = client
+                .selected_character_id()
+                .ok_or(CorePrivateLifeClientError::InvalidSnapshotAuthority)?;
+            let sequence = client.take_request_sequence()?;
+            Some(safe_storage.model.open(surface, sequence, character_id))
+        }
+        SafeStorageApplyOutcome::Ready
+        | SafeStorageApplyOutcome::QueryRejected(_)
+        | SafeStorageApplyOutcome::MutationStored
+        | SafeStorageApplyOutcome::MutationRejected(_) => None,
+    };
+    safe_storage.mark_changed();
+    if let Some(frame) = follow_up {
+        bridge
+            .0
+            .queue_reliable(WireMessage::SafeStorageQueryFrame(frame))
+            .map_err(|_| CorePrivateLifeClientError::ActionUnavailable)?;
+    }
+    Ok(())
+}
+
+fn apply_safe_storage_transfer_result(
+    result: &protocol::SafeInventoryTransferResultV1,
+    bridge: &CorePrivateLifeBridge,
+    client: &mut CorePrivateLifeClient,
+    safe_storage: &mut CorePrivateSafeStorage,
+    hall: &CorePrivateHallInteractionState,
+) -> Result<(), CorePrivateLifeClientError> {
+    let outcome = safe_storage
+        .model
+        .apply_transfer_result(result)
+        .map_err(|_| CorePrivateLifeClientError::InvalidSnapshotAuthority)?;
+    safe_storage.mark_changed();
+    if matches!(
+        outcome,
+        SafeStorageApplyOutcome::MutationRejected(
+            protocol::SafeInventoryResultCodeV1::ServiceUnavailable
+        )
+    ) {
+        return Ok(());
+    }
+    let expected_station = match safe_storage.model.surface() {
+        Some(protocol::SafeStorageSurfaceV1::Vault) => Some(protocol::HallStationV1::Vault),
+        Some(protocol::SafeStorageSurfaceV1::Overflow) => Some(protocol::HallStationV1::Overflow),
+        None => None,
+    };
+    if hall.open_station != expected_station || expected_station.is_none() {
+        safe_storage.model.close();
+        safe_storage.mark_changed();
+        return Ok(());
+    }
+    let surface = safe_storage
+        .model
+        .surface()
+        .ok_or(CorePrivateLifeClientError::InvalidSnapshotAuthority)?;
+    let character_id = client
+        .selected_character_id()
+        .ok_or(CorePrivateLifeClientError::InvalidSnapshotAuthority)?;
+    let sequence = client.take_request_sequence()?;
+    let frame = safe_storage.model.open(surface, sequence, character_id);
+    bridge
+        .0
+        .queue_reliable(WireMessage::SafeStorageQueryFrame(frame))
+        .map_err(|_| CorePrivateLifeClientError::ActionUnavailable)
 }
 
 #[allow(clippy::needless_pass_by_value)] // Bevy system parameters are wrapper values.
@@ -2285,6 +2461,130 @@ fn sync_resolution_hold_view(
             return;
         };
         commands.insert_resource(view);
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)] // Bevy system parameters are wrapper values.
+fn handle_safe_storage_keyboard(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    bridge: Res<CorePrivateLifeBridge>,
+    hall: Res<CorePrivateHallInteractionState>,
+    mut safe_storage: ResMut<CorePrivateSafeStorage>,
+    mut client: ResMut<CorePrivateLifeClient>,
+) {
+    let station_matches = matches!(
+        (hall.open_station, safe_storage.model.surface()),
+        (
+            Some(protocol::HallStationV1::Vault),
+            Some(protocol::SafeStorageSurfaceV1::Vault)
+        ) | (
+            Some(protocol::HallStationV1::Overflow),
+            Some(protocol::SafeStorageSurfaceV1::Overflow)
+        )
+    );
+    if !station_matches || !safe_storage.model.captures_input() {
+        return;
+    }
+    if keyboard.just_pressed(KeyCode::KeyR) {
+        if let Some(frame) = safe_storage.model.exact_mutation_retry() {
+            if bridge
+                .0
+                .queue_reliable(WireMessage::SafeInventoryTransferFrame(frame))
+                .is_err()
+            {
+                client.phase = CorePrivateLifePhase::Error;
+            }
+            return;
+        }
+        if safe_storage.model.phase() == SafeStorageClientPhase::Failed {
+            let Some(surface) = safe_storage.model.surface() else {
+                return;
+            };
+            let Some(character_id) = client.selected_character_id() else {
+                client.phase = CorePrivateLifePhase::Error;
+                return;
+            };
+            let Ok(sequence) = client.take_request_sequence() else {
+                client.phase = CorePrivateLifePhase::Error;
+                return;
+            };
+            let frame = safe_storage.model.open(surface, sequence, character_id);
+            safe_storage.mark_changed();
+            if bridge
+                .0
+                .queue_reliable(WireMessage::SafeStorageQueryFrame(frame))
+                .is_err()
+            {
+                client.phase = CorePrivateLifePhase::Error;
+            }
+        }
+    } else if keyboard.just_pressed(KeyCode::ArrowUp) {
+        safe_storage.model.select_previous();
+        safe_storage.mark_changed();
+    } else if keyboard.just_pressed(KeyCode::ArrowDown) {
+        safe_storage.model.select_next();
+        safe_storage.mark_changed();
+    } else if keyboard.just_pressed(KeyCode::Tab)
+        || keyboard.just_pressed(KeyCode::ArrowLeft)
+        || keyboard.just_pressed(KeyCode::ArrowRight)
+    {
+        safe_storage.model.toggle_pane();
+        safe_storage.mark_changed();
+    } else if keyboard.just_pressed(KeyCode::Enter) {
+        let Ok(mutation_id) = client.take_mutation_id() else {
+            client.phase = CorePrivateLifePhase::Error;
+            return;
+        };
+        let Some(issued_at_unix_millis) = unix_millis() else {
+            client.phase = CorePrivateLifePhase::Error;
+            return;
+        };
+        let Ok(frame) = safe_storage
+            .model
+            .begin_selected_transfer(mutation_id, issued_at_unix_millis)
+        else {
+            return;
+        };
+        safe_storage.mark_changed();
+        if bridge
+            .0
+            .queue_reliable(WireMessage::SafeInventoryTransferFrame(frame))
+            .is_err()
+        {
+            client.phase = CorePrivateLifePhase::Error;
+        }
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)] // Bevy system parameters are wrapper values.
+fn sync_safe_storage_view(
+    mut commands: Commands,
+    safe_storage: Res<CorePrivateSafeStorage>,
+    view: Option<ResMut<NativeSafeStorageView>>,
+    mut client: ResMut<CorePrivateLifeClient>,
+) {
+    if !safe_storage.model.captures_input() {
+        if view.is_some() {
+            commands.remove_resource::<NativeSafeStorageView>();
+        }
+        return;
+    }
+    let Ok(snapshot) =
+        SafeStorageUiSnapshot::from_model(&safe_storage.model, &safe_storage.catalog)
+    else {
+        client.phase = CorePrivateLifePhase::Error;
+        return;
+    };
+    if let Some(mut view) = view {
+        if view.revision != safe_storage.view_revision || view.snapshot != snapshot {
+            view.revision = safe_storage.view_revision;
+            view.snapshot = snapshot;
+        }
+    } else {
+        commands.insert_resource(NativeSafeStorageView {
+            revision: safe_storage.view_revision,
+            snapshot,
+        });
     }
 }
 
@@ -4042,6 +4342,7 @@ mod tests {
                     WireText::new(protocol::CORE_CONSUMABLE_FEATURE_FLAG).unwrap(),
                     WireText::new(protocol::HALL_INTERACTION_FEATURE_FLAG).unwrap(),
                     WireText::new(protocol::CORE_RESOLUTION_HOLD_FEATURE_FLAG).unwrap(),
+                    WireText::new(protocol::SAFE_STORAGE_FEATURE_FLAG).unwrap(),
                 ]
             } else {
                 Vec::new()

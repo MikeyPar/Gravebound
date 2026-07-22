@@ -40,6 +40,8 @@ mod player;
 mod progression_hud;
 mod resolution_hold;
 mod resolution_hold_ui;
+mod safe_storage;
+mod safe_storage_ui;
 mod stress_benchmark;
 mod successor_recovery;
 mod successor_recovery_ui;
