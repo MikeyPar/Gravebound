@@ -12,25 +12,30 @@ use persistence::{
     StoredM03TelemetryEventV1, StoredM03TelemetryPlatformV1, StoredM03TelemetrySourceV1,
 };
 use protocol::{
-    AccountBootstrapFrame, AccountBootstrapRequest, AccountBootstrapResult, AuthTicket,
-    CharacterLocation, CharacterMutationFrame, CharacterMutationPayload, ClientHello, Compression,
-    CorePrivateRouteContentRevisionV1, CorePrivateRoutePhaseV1, CorePrivateRouteSceneV1,
-    EntityKind, EntitySnapshot, HALL_INTERACTION_SCHEMA_VERSION, HallInteractionFrameV1,
-    HallInteractionIntentV1, HallInteractionResultCodeV1, HallStationV1, HandshakeResponse,
-    InputFrame, ManifestHash, Platform, ProtocolVersion, ReliableEvent, SafeArrival, WireMessage,
-    WireText, WorldFlowContentRevisionV1, WorldFlowFrame, WorldFlowRequest, WorldFlowResult,
-    WorldTransferCommand, WorldTransferMutation, WorldTransferPayload, WorldTransferResultCode,
+    AccountBootstrapFrame, AccountBootstrapRequest, AccountBootstrapResult, ActionFrame,
+    ActionKind, ActionResultCode, AuthTicket, CharacterLocation, CharacterMutationFrame,
+    CharacterMutationPayload, ClientHello, Compression, CorePrivateRouteContentRevisionV1,
+    CorePrivateRoutePhaseV1, CorePrivateRouteRoomV1, CorePrivateRouteSceneV1,
+    CorePrivateRouteStateV1, EntityKind, EntitySnapshot, HALL_INTERACTION_SCHEMA_VERSION,
+    HallInteractionFrameV1, HallInteractionIntentV1, HallInteractionResultCodeV1, HallStationV1,
+    HandshakeResponse, InputFrame, ManifestHash, Platform, ProtocolVersion, ReliableEvent,
+    ReliableEventFrame, SafeArrival, WireMessage, WireText, WorldFlowContentRevisionV1,
+    WorldFlowFrame, WorldFlowRequest, WorldFlowResult, WorldTransferCommand, WorldTransferMutation,
+    WorldTransferPayload, WorldTransferResultCode,
 };
 use server_app::{
     BoundCorePrivateLifeServer, CORE_IDENTITY_BUILD_ID, CoreIdentityServerConfig,
     CoreIdentityServerReport, LOCAL_SERVER_NAME, LocalServerRuntimeError, SecretRewardEpoch,
 };
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(10);
 const MOVEMENT_TIMEOUT: Duration = Duration::from_secs(15);
+const COMBAT_TIMEOUT: Duration = Duration::from_mins(3);
 const HALL_CONTENT_ID: &str = "hub.lantern_halls_01";
 const MICROREALM_CONTENT_ID: &str = "world.core_microrealm_01";
+const BELL_DUNGEON_CONTENT_ID: &str = "dungeon.bell_sepulcher";
+const BELL_DUNGEON_PORTAL_ID: &str = "portal.dungeon.bell_sepulcher";
 const TELEMETRY_ENVIRONMENT_VARIABLE: &str = "GRAVEBOUND_TELEMETRY_ENVIRONMENT";
 const TELEMETRY_REGION_VARIABLE: &str = "GRAVEBOUND_TELEMETRY_REGION_ID";
 const TELEMETRY_TEST_REGION: &str = "local-playtest";
@@ -282,6 +287,177 @@ fn input(sequence: u32, horizontal_milli: i16, vertical_milli: i16) -> InputFram
     }
 }
 
+fn combat_input(sequence: u32, player: &EntitySnapshot, target: &EntitySnapshot) -> InputFrame {
+    let delta_x = i64::from(target.x_milli_tiles - player.x_milli_tiles);
+    let delta_y = i64::from(target.y_milli_tiles - player.y_milli_tiles);
+    let longest_axis = delta_x.abs().max(delta_y.abs()).max(1);
+    let horizontal_aim = i16::try_from(delta_x * 1_000 / longest_axis).unwrap();
+    let vertical_aim = i16::try_from(delta_y * 1_000 / longest_axis).unwrap();
+    let distance_squared = delta_x * delta_x + delta_y * delta_y;
+
+    // Close distance until the starter weapon can connect, then strafe around the target. The
+    // periodic direction reversal prevents a deterministic bot from pinning itself against the
+    // authored shell while still exercising ordinary movement and hostile avoidance.
+    let (mut horizontal_motion, mut vertical_motion) = if distance_squared > 6_000_i64.pow(2) {
+        (horizontal_aim, vertical_aim)
+    } else if (sequence / 90).is_multiple_of(2) {
+        (-vertical_aim, horizontal_aim)
+    } else {
+        (vertical_aim, -horizontal_aim)
+    };
+    if player.x_milli_tiles < 2_000 {
+        horizontal_motion = 1_000;
+    } else if player.x_milli_tiles > 46_000 {
+        horizontal_motion = -1_000;
+    }
+    if player.y_milli_tiles < 2_000 {
+        vertical_motion = 1_000;
+    } else if player.y_milli_tiles > 46_000 {
+        vertical_motion = -1_000;
+    }
+
+    InputFrame {
+        sequence,
+        client_tick: u64::from(sequence),
+        movement_x_milli: horizontal_motion,
+        movement_y_milli: vertical_motion,
+        aim_x_milli: horizontal_aim,
+        aim_y_milli: vertical_aim,
+        held_primary: true,
+        primary_sequence: 1,
+        ability_1_sequence: 0,
+        ability_2_sequence: 0,
+    }
+}
+
+fn nearest_hostile<'a>(
+    player: &EntitySnapshot,
+    entities: &'a [EntitySnapshot],
+) -> Option<&'a EntitySnapshot> {
+    entities
+        .iter()
+        .filter(|entity| matches!(entity.kind, EntityKind::Enemy | EntityKind::Boss))
+        .min_by_key(|entity| {
+            let delta_x = i64::from(entity.x_milli_tiles - player.x_milli_tiles);
+            let delta_y = i64::from(entity.y_milli_tiles - player.y_milli_tiles);
+            delta_x * delta_x + delta_y * delta_y
+        })
+}
+
+fn spawn_route_event_pump(
+    connection: quinn::Connection,
+) -> (
+    watch::Receiver<Option<ReliableEventFrame>>,
+    tokio::task::JoinHandle<()>,
+) {
+    let (route_send, route_receive) = watch::channel(None);
+    let task = tokio::spawn(async move {
+        while let Ok(frame) = bot_client::receive_server_reliable(&connection).await {
+            if matches!(frame.event, ReliableEvent::CorePrivateRouteState(_))
+                && route_send.send(Some(frame)).is_err()
+            {
+                break;
+            }
+        }
+    });
+    (route_receive, task)
+}
+
+fn matching_route<Matches>(
+    route_receive: &watch::Receiver<Option<ReliableEventFrame>>,
+    matches: &Matches,
+) -> Option<ReliableEventFrame>
+where
+    Matches: Fn(&CorePrivateRouteStateV1) -> bool,
+{
+    route_receive.borrow().as_ref().and_then(|frame| {
+        let ReliableEvent::CorePrivateRouteState(route) = &frame.event else {
+            unreachable!("the route event pump publishes only route projections");
+        };
+        matches(route).then(|| frame.clone())
+    })
+}
+
+async fn wait_for_route<Matches>(
+    route_receive: &mut watch::Receiver<Option<ReliableEventFrame>>,
+    matches: Matches,
+    timeout_message: &'static str,
+) -> ReliableEventFrame
+where
+    Matches: Fn(&CorePrivateRouteStateV1) -> bool,
+{
+    tokio::time::timeout(OPERATION_TIMEOUT, async {
+        loop {
+            if let Some(frame) = matching_route(route_receive, &matches) {
+                return frame;
+            }
+            route_receive
+                .changed()
+                .await
+                .expect("route event pump must remain attached");
+        }
+    })
+    .await
+    .expect(timeout_message)
+}
+
+async fn drive_microrealm_until_cleared(
+    connection: &quinn::Connection,
+    assembler: &mut bot_client::BotSnapshotAssembler,
+    route_receive: &mut watch::Receiver<Option<ReliableEventFrame>>,
+    input_sequence: &mut u32,
+) -> ReliableEventFrame {
+    let cleared = |route: &CorePrivateRouteStateV1| {
+        route.scene == CorePrivateRouteSceneV1::CoreMicrorealm
+            && route.phase == CorePrivateRoutePhaseV1::MicrorealmCleared
+            && route.readiness.bell_portal_available.is_available()
+    };
+    tokio::time::timeout(COMBAT_TIMEOUT, async {
+        loop {
+            if let Some(frame) = matching_route(route_receive, &cleared) {
+                *input_sequence = input_sequence.checked_add(1).unwrap();
+                bot_client::send_input_datagram(
+                    connection,
+                    InputFrame {
+                        primary_sequence: 1,
+                        ..input(*input_sequence, 0, 0)
+                    },
+                )
+                .unwrap();
+                return frame;
+            }
+
+            tokio::select! {
+                changed = route_receive.changed() => {
+                    changed.expect("route event pump must remain attached");
+                }
+                chunk = bot_client::receive_snapshot_datagram(connection) => {
+                    let Some(snapshot) = assembler.ingest(chunk.unwrap()).unwrap() else {
+                        continue;
+                    };
+                    let player = snapshot
+                        .entities
+                        .iter()
+                        .find(|entity| entity.kind == EntityKind::Player)
+                        .expect("microrealm snapshot must retain its authoritative player");
+                    assert!(player.current_health > 0, "ordinary combat must reach the Bell portal alive");
+                    let Some(target) = nearest_hostile(player, &snapshot.entities) else {
+                        continue;
+                    };
+                    *input_sequence = input_sequence.checked_add(1).unwrap();
+                    bot_client::send_input_datagram(
+                        connection,
+                        combat_input(*input_sequence, player, target),
+                    )
+                    .unwrap();
+                }
+            }
+        }
+    })
+    .await
+    .expect("ordinary public-input microrealm clear timed out")
+}
+
 async fn next_complete_snapshot(
     connection: &quinn::Connection,
     assembler: &mut bot_client::BotSnapshotAssembler,
@@ -296,7 +472,7 @@ async fn next_complete_snapshot(
     }
 }
 
-async fn drive_hall_until<Reached>(
+async fn drive_player_until<Reached>(
     connection: &quinn::Connection,
     assembler: &mut bot_client::BotSnapshotAssembler,
     input_sequence: &mut u32,
@@ -316,7 +492,7 @@ where
                 .entities
                 .iter()
                 .find(|entity| entity.kind == EntityKind::Player)
-                .expect("Hall snapshot must retain its authoritative player");
+                .expect("gameplay snapshot must retain its authoritative player");
             if reached(player) {
                 break;
             }
@@ -330,12 +506,61 @@ where
                     .entities
                     .into_iter()
                     .find(|entity| entity.kind == EntityKind::Player)
-                    .expect("stopped Hall snapshot must retain its authoritative player");
+                    .expect("stopped gameplay snapshot must retain its authoritative player");
             }
         }
     })
     .await
-    .expect("authoritative Hall traversal timed out")
+    .expect("authoritative player traversal timed out")
+}
+
+async fn drive_player_to_waypoint(
+    connection: &quinn::Connection,
+    assembler: &mut bot_client::BotSnapshotAssembler,
+    input_sequence: &mut u32,
+    waypoint: (i32, i32),
+) -> EntitySnapshot {
+    tokio::time::timeout(MOVEMENT_TIMEOUT, async {
+        loop {
+            let snapshot = next_complete_snapshot(connection, assembler).await;
+            let player = snapshot
+                .entities
+                .iter()
+                .find(|entity| entity.kind == EntityKind::Player)
+                .expect("gameplay snapshot must retain its authoritative player");
+            assert!(player.current_health > 0);
+            let delta_x = waypoint.0 - player.x_milli_tiles;
+            let delta_y = waypoint.1 - player.y_milli_tiles;
+            if i64::from(delta_x).pow(2) + i64::from(delta_y).pow(2) <= 900_i64.pow(2) {
+                *input_sequence = input_sequence.checked_add(1).unwrap();
+                bot_client::send_input_datagram(
+                    connection,
+                    InputFrame {
+                        primary_sequence: 1,
+                        ..input(*input_sequence, 0, 0)
+                    },
+                )
+                .unwrap();
+                return player.clone();
+            }
+            let longest_axis = delta_x.abs().max(delta_y.abs()).max(1);
+            let horizontal_motion = i16::try_from(delta_x * 1_000 / longest_axis).unwrap();
+            let vertical_motion = i16::try_from(delta_y * 1_000 / longest_axis).unwrap();
+            *input_sequence = input_sequence.checked_add(1).unwrap();
+            bot_client::send_input_datagram(
+                connection,
+                InputFrame {
+                    movement_x_milli: horizontal_motion,
+                    movement_y_milli: vertical_motion,
+                    primary_sequence: 1,
+                    ..input(*input_sequence, 0, 0)
+                },
+            )
+            .unwrap();
+        }
+    })
+    .await
+    .expect("authoritative waypoint traversal timed out")
 }
 
 type ServerTask =
@@ -374,7 +599,7 @@ fn start_server(
     clippy::too_many_lines,
     reason = "the production-root route proof stays contiguous so no direct state-writing seam can be hidden"
 )]
-async fn production_root_admits_a_fresh_character_to_controllable_microrealm_and_cleans_up() {
+async fn production_root_reaches_the_first_bell_combat_room_and_cleans_up() {
     assert_eq!(
         std::env::var(TELEMETRY_ENVIRONMENT_VARIABLE).as_deref(),
         Ok("test"),
@@ -626,7 +851,7 @@ async fn production_root_admits_a_fresh_character_to_controllable_microrealm_and
     // The direct north line is obstructed by the authored central Hall fixture. Drive the
     // authoritative player around its west side, recenter above it, then approach the gate.
     let mut input_sequence = 0;
-    let west = drive_hall_until(
+    let west = drive_player_until(
         &connection,
         &mut assembler,
         &mut input_sequence,
@@ -635,7 +860,7 @@ async fn production_root_admits_a_fresh_character_to_controllable_microrealm_and
     )
     .await;
     assert!(west.y_milli_tiles > 26_300);
-    let north_of_fixture = drive_hall_until(
+    let north_of_fixture = drive_player_until(
         &connection,
         &mut assembler,
         &mut input_sequence,
@@ -644,7 +869,7 @@ async fn production_root_admits_a_fresh_character_to_controllable_microrealm_and
     )
     .await;
     assert!(north_of_fixture.x_milli_tiles < 28_700);
-    let recentered = drive_hall_until(
+    let recentered = drive_player_until(
         &connection,
         &mut assembler,
         &mut input_sequence,
@@ -653,7 +878,7 @@ async fn production_root_admits_a_fresh_character_to_controllable_microrealm_and
     )
     .await;
     assert!(recentered.y_milli_tiles < 21_700);
-    let at_gate = drive_hall_until(
+    let at_gate = drive_player_until(
         &connection,
         &mut assembler,
         &mut input_sequence,
@@ -813,7 +1038,7 @@ async fn production_root_admits_a_fresh_character_to_controllable_microrealm_and
             base: CoreSceneReadiness {
                 location_id: WireText::new(MICROREALM_CONTENT_ID).unwrap(),
                 character_version: microrealm_location.character_version,
-                content_revision: world_revision,
+                content_revision: world_revision.clone(),
             },
             scene: CorePrivateRouteSceneV1::CoreMicrorealm,
             room: None,
@@ -824,11 +1049,230 @@ async fn production_root_admits_a_fresh_character_to_controllable_microrealm_and
         .unwrap();
     assert!(route_model.can_accept_gameplay_input());
 
+    // From this point onward one task exclusively owns server-initiated reliable streams. Direct
+    // request/response frames continue to use their bidirectional streams, so route transitions
+    // cannot be lost when snapshot traffic is busy or a response is in flight.
+    let (mut route_receive, route_pump) = spawn_route_event_pump(connection.clone());
+    let cleared_route_frame = drive_microrealm_until_cleared(
+        &connection,
+        &mut assembler,
+        &mut route_receive,
+        &mut input_sequence,
+    )
+    .await;
+    let ReliableEvent::CorePrivateRouteState(cleared_route) = &cleared_route_frame.event else {
+        unreachable!("the combat driver returns a filtered route projection");
+    };
+    assert_eq!(cleared_route.character_id, character_id);
+    assert_eq!(
+        cleared_route.content_revision,
+        microrealm_route.content_revision
+    );
+    assert_eq!(
+        cleared_route.instance_lineage_id,
+        Some(*instance_lineage_id)
+    );
+    assert!(cleared_route.readiness.microrealm_cleared.is_available());
+
+    // Follow the authored road through Lantern Fork and its east bend. The portal authority uses
+    // the live server position, so a durable transfer cannot be substituted for this traversal.
+    drive_player_to_waypoint(
+        &connection,
+        &mut assembler,
+        &mut input_sequence,
+        (24_500, 24_500),
+    )
+    .await;
+    drive_player_to_waypoint(
+        &connection,
+        &mut assembler,
+        &mut input_sequence,
+        (40_500, 24_500),
+    )
+    .await;
+    let at_bell_portal = drive_player_to_waypoint(
+        &connection,
+        &mut assembler,
+        &mut input_sequence,
+        (40_500, 8_500),
+    )
+    .await;
+    let portal_offset = (
+        i64::from(at_bell_portal.x_milli_tiles - 40_500),
+        i64::from(at_bell_portal.y_milli_tiles - 8_500),
+    );
+    assert!(
+        portal_offset.0 * portal_offset.0 + portal_offset.1 * portal_offset.1 <= 900_i64.pow(2)
+    );
+
+    let bell_payload = WorldTransferPayload {
+        content_revision: world_revision.clone(),
+        command: WorldTransferCommand::UsePortal {
+            portal_id: WireText::new(BELL_DUNGEON_PORTAL_ID).unwrap(),
+        },
+    };
+    let (_, bell_transfer) = tokio::time::timeout(
+        OPERATION_TIMEOUT,
+        bot_client::perform_world_flow(
+            &connection,
+            WorldFlowFrame {
+                sequence: 4,
+                request: WorldFlowRequest::Transfer(WorldTransferMutation {
+                    mutation_id: [0x35; 16],
+                    character_id,
+                    expected_character_version: cleared_route.character_version,
+                    issued_at_unix_millis: current_unix_millis(),
+                    payload_hash: bell_payload.canonical_hash(),
+                    payload: bell_payload,
+                }),
+            },
+        ),
+    )
+    .await
+    .expect("Bell Sepulcher transfer timed out")
+    .unwrap();
+    let WorldFlowResult::Transfer {
+        accepted: true,
+        code: WorldTransferResultCode::Accepted,
+        snapshot: Some(bell_location),
+        transfer_id: Some(_),
+        ..
+    } = bell_transfer
+    else {
+        panic!("the live cleared Bell portal must commit its ordinary dungeon transfer");
+    };
+    let CharacterLocation::Danger {
+        location_id,
+        instance_lineage_id: bell_lineage_id,
+        entry_restore_point_id: bell_restore_point_id,
+    } = &bell_location.location
+    else {
+        panic!("the Bell Sepulcher must remain inside the durable danger lineage");
+    };
+    assert_eq!(location_id.as_str(), BELL_DUNGEON_CONTENT_ID);
+    assert_eq!(bell_lineage_id, instance_lineage_id);
+    assert_eq!(bell_restore_point_id, entry_restore_point_id);
+
+    let b0_route_frame = wait_for_route(
+        &mut route_receive,
+        |route| {
+            route.scene == CorePrivateRouteSceneV1::BellSepulcher
+                && route.room == Some(CorePrivateRouteRoomV1::BellVestibuleB0)
+                && route.phase == CorePrivateRoutePhaseV1::DungeonVestibule
+        },
+        "Bell B0 route authority timed out",
+    )
+    .await;
+    let ReliableEvent::CorePrivateRouteState(b0_route) = &b0_route_frame.event else {
+        unreachable!("the route waiter returns a filtered route projection");
+    };
+    assert_eq!(b0_route.character_version, bell_location.character_version);
+    assert!(b0_route.readiness.room_exit_available.is_available());
+
+    let b0_snapshot = tokio::time::timeout(OPERATION_TIMEOUT, async {
+        loop {
+            let snapshot = next_complete_snapshot(&connection, &mut assembler).await;
+            let Some(player) = snapshot
+                .entities
+                .iter()
+                .find(|entity| entity.kind == EntityKind::Player)
+            else {
+                continue;
+            };
+            if player.x_milli_tiles <= 13_000 && player.y_milli_tiles <= 11_000 {
+                break snapshot;
+            }
+        }
+    })
+    .await
+    .expect("Bell B0 gameplay snapshot timed out");
+    assert_eq!(
+        b0_snapshot
+            .entities
+            .iter()
+            .filter(|entity| matches!(entity.kind, EntityKind::Enemy | EntityKind::Boss))
+            .count(),
+        0,
+        "the authored B0 vestibule is safe and contains no hostile"
+    );
+
+    let enter_b1 = tokio::time::timeout(
+        OPERATION_TIMEOUT,
+        bot_client::perform_reliable_gameplay(
+            &connection,
+            WireMessage::ActionFrame(ActionFrame {
+                sequence: 1,
+                client_tick: b0_route_frame.server_tick,
+                action: ActionKind::Interact,
+            }),
+        ),
+    )
+    .await
+    .expect("public B0 exit interaction timed out")
+    .unwrap();
+    assert!(matches!(
+        enter_b1.event,
+        ReliableEvent::ActionResult {
+            action_sequence: 1,
+            code: ActionResultCode::Accepted,
+        }
+    ));
+
+    let b1_active_frame = wait_for_route(
+        &mut route_receive,
+        |route| {
+            route.scene == CorePrivateRouteSceneV1::BellSepulcher
+                && route.room == Some(CorePrivateRouteRoomV1::BellCrossB1)
+                && route.phase == CorePrivateRoutePhaseV1::RoomActive
+        },
+        "Bell B1 active authority timed out",
+    )
+    .await;
+    let ReliableEvent::CorePrivateRouteState(b1_active) = &b1_active_frame.event else {
+        unreachable!("the route waiter returns a filtered route projection");
+    };
+    assert_eq!(b1_active.instance_lineage_id, Some(*instance_lineage_id));
+    assert!(b1_active.readiness.accepts_gameplay_input.is_available());
+
+    let b1_snapshot = tokio::time::timeout(OPERATION_TIMEOUT, async {
+        loop {
+            let snapshot = next_complete_snapshot(&connection, &mut assembler).await;
+            let hostile_count = snapshot
+                .entities
+                .iter()
+                .filter(|entity| entity.kind == EntityKind::Enemy)
+                .count();
+            if hostile_count == 8 {
+                break snapshot;
+            }
+        }
+    })
+    .await
+    .expect("authored Bell B1 roster timed out");
+    assert_eq!(
+        b1_snapshot
+            .entities
+            .iter()
+            .filter(|entity| entity.kind == EntityKind::Player)
+            .count(),
+        1
+    );
+    assert!(
+        b1_snapshot
+            .entities
+            .iter()
+            .all(|entity| entity.kind != EntityKind::Boss)
+    );
+
     connection.close(0_u32.into(), b"native client shutdown");
     client_endpoint.close(0_u32.into(), b"native client shutdown");
     tokio::time::timeout(OPERATION_TIMEOUT, client_endpoint.wait_idle())
         .await
         .expect("client endpoint cleanup timed out");
+    tokio::time::timeout(OPERATION_TIMEOUT, route_pump)
+        .await
+        .expect("route event pump cleanup timed out")
+        .unwrap();
     let cleanup = PostgresPersistence::connect(&config).await.unwrap();
     cleanup.verify_disposable_test_database().await.unwrap();
     let sources = wait_for_clean_exit_telemetry(&cleanup).await;

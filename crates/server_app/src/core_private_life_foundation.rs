@@ -400,7 +400,9 @@ impl CorePrivateLifePersistentFoundation {
         if single_owner_counts.into_iter().any(|count| count != 1)
             || Arc::strong_count(&self.death_execution) != 2
             || Arc::strong_count(&self.death_planner) != 2
-            || Arc::strong_count(&self.runtime_bootstrap) != 2
+            // The bootstrap owner is retained by the foundation, the terminal reconciler, and
+            // the world-flow coordinator. All three are required before normal admission opens.
+            || Arc::strong_count(&self.runtime_bootstrap) != 3
         {
             return Err(CorePrivateLifeFoundationError::InvalidComposition);
         }
