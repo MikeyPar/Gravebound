@@ -248,8 +248,9 @@ pub enum CoreCombatPresentationValidationError {
 mod tests {
     use super::*;
     use crate::{
-        ManifestHash, NetworkChannel, ReliableEvent, ReliableEventFrame, WireCodecError,
-        WireMessage, decode_frame, encode_frame, encode_protocol_1_22_compatibility_frame,
+        ManifestHash, NetworkChannel, ProtocolVersion, ReliableEvent, ReliableEventFrame,
+        WireCodecError, WireMessage, decode_frame, encode_frame,
+        encode_protocol_1_22_compatibility_frame,
     };
 
     fn valid_state() -> CoreCombatPresentationStateV1 {
@@ -299,7 +300,7 @@ mod tests {
     }
 
     #[test]
-    fn core_combat_presentation_1_23_round_trips_on_pattern_channel_only() {
+    fn core_combat_presentation_round_trips_on_current_pattern_channel() {
         let message = WireMessage::ReliableEvent(ReliableEventFrame {
             sequence: 5,
             server_tick: 120,
@@ -308,7 +309,10 @@ mod tests {
 
         assert_eq!(message.channel(), NetworkChannel::Pattern);
         let encoded = encode_frame(&message).unwrap();
-        assert_eq!(u16::from_le_bytes([encoded[6], encoded[7]]), 23);
+        assert_eq!(
+            u16::from_le_bytes([encoded[6], encoded[7]]),
+            ProtocolVersion::current().minor
+        );
         assert_eq!(decode_frame(&encoded).unwrap(), message);
     }
 
