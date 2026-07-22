@@ -447,12 +447,10 @@ async fn resolve_consumable_reservation(
     // replacement, Recall, extraction, and later terminal requests wait for the
     // durable decision. A stalled writer faults the driver after a hard bound;
     // it never resumes combat with potentially indeterminate durable authority.
-    let decision = match tokio::time::timeout(CONSUMABLE_RESERVATION_TIMEOUT, decision_rx).await {
-        Ok(decision) => decision,
-        Err(_) => {
-            let _ = completion.send(Err(CorePrivateMicrorealmIngressError::DriverFrozen));
-            return CorePrivateConsumableReservationFrame::TimedOut;
-        }
+    let Ok(decision) = tokio::time::timeout(CONSUMABLE_RESERVATION_TIMEOUT, decision_rx).await
+    else {
+        let _ = completion.send(Err(CorePrivateMicrorealmIngressError::DriverFrozen));
+        return CorePrivateConsumableReservationFrame::TimedOut;
     };
     match decision {
         Ok(CorePrivateConsumableReservationDecision::Commit { inventory_version }) => {

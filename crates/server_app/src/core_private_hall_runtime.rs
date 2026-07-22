@@ -352,6 +352,10 @@ impl CorePrivateHallDirectory {
         hall_observation(live)
     }
 
+    #[allow(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "interaction frames follow the shared validated-frame API used by larger request types"
+    )]
     pub(crate) fn handle_interaction(
         &self,
         authenticated: AuthenticatedAccount,

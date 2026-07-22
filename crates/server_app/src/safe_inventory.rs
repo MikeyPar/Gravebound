@@ -713,11 +713,8 @@ fn validate_replayed_result(
                 SafeInventoryTransferKind::CharacterSafeToVault => {
                     matches!(placement.destination, StoredSafeInventoryLocation::Vault(_))
                 }
-                SafeInventoryTransferKind::VaultToCharacterSafe => matches!(
-                    placement.destination,
-                    StoredSafeInventoryLocation::CharacterSafe(_)
-                ),
-                SafeInventoryTransferKind::OverflowToCharacterSafe => matches!(
+                SafeInventoryTransferKind::VaultToCharacterSafe
+                | SafeInventoryTransferKind::OverflowToCharacterSafe => matches!(
                     placement.destination,
                     StoredSafeInventoryLocation::CharacterSafe(_)
                 ),
@@ -754,12 +751,10 @@ fn map_persistence(
             SafeInventoryServiceError::BindingMismatch
         }
         PersistenceError::SafeInventoryStorageFull => match kind {
-            Some(SafeInventoryTransferKind::VaultToCharacterSafe) => {
-                SafeInventoryServiceError::CharacterSafeFull
-            }
-            Some(SafeInventoryTransferKind::OverflowToCharacterSafe) => {
-                SafeInventoryServiceError::CharacterSafeFull
-            }
+            Some(
+                SafeInventoryTransferKind::VaultToCharacterSafe
+                | SafeInventoryTransferKind::OverflowToCharacterSafe,
+            ) => SafeInventoryServiceError::CharacterSafeFull,
             Some(SafeInventoryTransferKind::CharacterSafeToRunBackpack) => {
                 SafeInventoryServiceError::RunBackpackFull
             }

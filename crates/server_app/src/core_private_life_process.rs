@@ -240,11 +240,15 @@ impl CorePrivateLifeProcess {
         route: CorePrivateRouteActorLease,
     ) -> Result<protocol::CoreConsumableStateV1, CorePrivateLifeProcessError> {
         let authority = self.sessions.consumable_danger_authority(transport).await?;
-        let command = self.consumable_command(authority, route, [1; 16], [1; 32], 1, 0)?;
+        let command = self.consumable_command(&authority, route, [1; 16], [1; 32], 1, 0)?;
         let state = self.persistence.core_consumable_state_v1(&command).await?;
-        stored_consumable_state(state)
+        stored_consumable_state(&state)
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the reservation, durable commit, replay, and live-apply transaction stays visible as one ordered authority flow"
+    )]
     pub(crate) async fn use_consumable(
         &self,
         transport: CorePrivateLifeTransportLease,
@@ -278,7 +282,7 @@ impl CorePrivateLifeProcess {
         }
         let authority = self.sessions.consumable_danger_authority(transport).await?;
         let mut command = self.consumable_command(
-            authority,
+            &authority,
             route,
             frame.mutation_id,
             frame.payload_hash,
@@ -301,7 +305,7 @@ impl CorePrivateLifeProcess {
             .load_core_consumable_replay_v1(&command)
             .await
         {
-            Ok(Some(stored)) => return project_stored_consumable(stored),
+            Ok(Some(stored)) => return project_stored_consumable(&stored),
             Ok(None) => {}
             Err(persistence::PersistenceError::CoreConsumableIdempotencyConflict) => {
                 return Ok((
@@ -425,9 +429,11 @@ impl CorePrivateLifeProcess {
                     None,
                 ));
             }
-            Err(persistence::PersistenceError::CoreConsumableAuthorityMismatch)
-            | Err(persistence::PersistenceError::ActiveDangerAuthorityBindingMismatch)
-            | Err(persistence::PersistenceError::ActiveDangerAuthoritySuperseded) => {
+            Err(
+                persistence::PersistenceError::CoreConsumableAuthorityMismatch
+                | persistence::PersistenceError::ActiveDangerAuthorityBindingMismatch
+                | persistence::PersistenceError::ActiveDangerAuthoritySuperseded,
+            ) => {
                 return Ok((
                     consumable_rejection(
                         frame,
@@ -438,7 +444,7 @@ impl CorePrivateLifeProcess {
             }
             Err(error) => return Err(error.into()),
         };
-        let state = stored_consumable_state(stored.state)?;
+        let state = stored_consumable_state(&stored.state)?;
         let code = match stored.code {
             persistence::StoredCoreConsumableResultCodeV1::Accepted => {
                 if !stored.replayed {
@@ -489,7 +495,7 @@ impl CorePrivateLifeProcess {
 
     fn consumable_command(
         &self,
-        authority: crate::CorePrivateDangerEntryAuthority,
+        authority: &crate::CorePrivateDangerEntryAuthority,
         route: CorePrivateRouteActorLease,
         mutation_id: [u8; 16],
         payload_hash: [u8; 32],
@@ -815,7 +821,7 @@ pub(crate) enum CorePrivateLifeProcessDisposition {
 }
 
 fn stored_consumable_state(
-    state: persistence::StoredCoreConsumableStateV1,
+    state: &persistence::StoredCoreConsumableStateV1,
 ) -> Result<protocol::CoreConsumableStateV1, CorePrivateLifeProcessError> {
     let digest = state
         .content_revision
@@ -846,7 +852,7 @@ fn consumable_rejection(
 }
 
 fn project_stored_consumable(
-    stored: persistence::StoredCoreConsumableUseResultV1,
+    stored: &persistence::StoredCoreConsumableUseResultV1,
 ) -> Result<
     (
         protocol::CoreConsumableUseResultV1,
@@ -854,7 +860,7 @@ fn project_stored_consumable(
     ),
     CorePrivateLifeProcessError,
 > {
-    let state = stored_consumable_state(stored.state)?;
+    let state = stored_consumable_state(&stored.state)?;
     let code = match stored.code {
         persistence::StoredCoreConsumableResultCodeV1::Accepted => {
             protocol::CoreConsumableResultCodeV1::Accepted

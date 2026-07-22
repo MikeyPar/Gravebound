@@ -43,7 +43,7 @@ impl PostgresSafeStorageService {
                 expected_versions,
             )
             .await
-            .map_err(map_persistence)?;
+            .map_err(|error| map_persistence(&error))?;
         project_page(frame, page)
     }
 }
@@ -181,13 +181,15 @@ fn project_stack(
         overflow_expires_at_unix_millis,
         items: stack
             .items
-            .into_iter()
+            .iter()
             .map(project_item)
             .collect::<Result<Vec<_>, _>>()?,
     })
 }
 
-fn project_item(item: StoredSafeStorageItem) -> Result<SafeStorageItemV1, SafeStorageServiceError> {
+fn project_item(
+    item: &StoredSafeStorageItem,
+) -> Result<SafeStorageItemV1, SafeStorageServiceError> {
     Ok(SafeStorageItemV1 {
         item_uid: item.item_uid,
         item_version: item.item_version,
@@ -262,7 +264,7 @@ pub(crate) const fn unauthorized_panel_code(in_hall: bool) -> SafeStorageQueryCo
     }
 }
 
-fn map_persistence(error: PersistenceError) -> SafeStorageServiceError {
+fn map_persistence(error: &PersistenceError) -> SafeStorageServiceError {
     match error {
         PersistenceError::SafeStorageHallBindingMismatch => SafeStorageServiceError::HallBinding,
         PersistenceError::SafeStorageForeignAuthority => SafeStorageServiceError::ForeignAuthority,
@@ -289,7 +291,7 @@ mod tests {
     #[test]
     fn foreign_character_and_wrong_panel_fail_closed() {
         assert_eq!(
-            map_persistence(PersistenceError::SafeStorageForeignAuthority),
+            map_persistence(&PersistenceError::SafeStorageForeignAuthority),
             SafeStorageServiceError::ForeignAuthority
         );
         assert_eq!(
