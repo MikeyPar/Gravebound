@@ -460,20 +460,23 @@ async fn verify_loot_origin_is_atomic_replay_safe_and_immutable(persistence: &Po
     ));
 
     let pending = persistence.poll_m03_telemetry_sources_v1(16).await.unwrap();
-    let loot = pending
-        .iter()
-        .find(|source| {
-            matches!(
-                source.event,
-                StoredM03TelemetryEventV1::Loot(ref event)
-                    if event.action == StoredM03LootActionV1::Created
-                        && event.item_uid == [77; 16]
-                        && event.template_id == "item.charm.ember_tooth.t1"
-                        && event.source_content_id == "reward.normal_outer"
-                        && event.item_version == 1
-            )
-        })
-        .expect("committed reward item must project one immutable loot source");
+    let loot = pending.iter().find(|source| {
+        matches!(
+            source.event,
+            StoredM03TelemetryEventV1::Loot(ref event)
+                if event.action == StoredM03LootActionV1::Created
+                    && event.item_uid == [77; 16]
+                    && event.template_id == "item.charm.ember_tooth.t1"
+                    && event.source_content_id == "reward.normal_outer"
+                    && event.item_version == 1
+        )
+    });
+    let Some(loot) = loot else {
+        panic!(
+            "committed reward item must project one immutable loot source; {}",
+            loot_projection_diagnostic(persistence).await
+        );
+    };
     assert_eq!(loot.context.session_id, SESSION);
     assert_eq!(loot.context.build_id, "m03-core-dev-telemetry-1");
     assert_eq!(loot.context.content_bundle_version, "core-dev");
@@ -489,6 +492,72 @@ async fn verify_loot_origin_is_atomic_replay_safe_and_immutable(persistence: &Po
     .await;
     assert!(update.is_err());
     mutation.rollback().await.unwrap();
+}
+
+async fn loot_projection_diagnostic(persistence: &PostgresPersistence) -> String {
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let eligible_sessions: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM core_telemetry_sessions_v1 AS session
+         JOIN item_ledger_events AS ledger
+           ON ledger.namespace_id=session.namespace_id
+          AND ledger.account_id=session.account_id
+         WHERE ledger.namespace_id=$1 AND ledger.ledger_event_id=$2
+           AND session.started_at <= ledger.committed_at
+           AND (session.ended_at IS NULL OR session.ended_at >= ledger.committed_at)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind([78_u8; 16].as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    let immutable_sources: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM item_ledger_events AS ledger
+         JOIN item_instances AS item
+           ON item.namespace_id=ledger.namespace_id AND item.item_uid=ledger.item_uid
+         JOIN reward_requests AS reward
+           ON reward.namespace_id=item.namespace_id
+          AND reward.reward_request_id=item.creation_request_id
+         WHERE ledger.namespace_id=$1 AND ledger.ledger_event_id=$2
+           AND item.creation_kind=1",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind([78_u8; 16].as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    let manual_projection = sqlx::query(
+        "INSERT INTO item_ledger_telemetry_outbox_v1 (
+             namespace_id,event_id,ledger_event_id,account_id,character_id,
+             session_id,loot_action,item_uid,template_id,source_content_id,
+             item_version,occurred_at
+         )
+         SELECT ledger.namespace_id,
+                derive_m03_loot_telemetry_event_id_v1(0,ledger.ledger_event_id),
+                ledger.ledger_event_id,ledger.account_id,ledger.character_id,
+                session.session_id,0,item.item_uid,item.template_id,
+                reward.reward_table_id,ledger.post_item_version,ledger.committed_at
+         FROM item_ledger_events AS ledger
+         JOIN item_instances AS item
+           ON item.namespace_id=ledger.namespace_id AND item.item_uid=ledger.item_uid
+         JOIN reward_requests AS reward
+           ON reward.namespace_id=item.namespace_id
+          AND reward.reward_request_id=item.creation_request_id
+         JOIN core_telemetry_sessions_v1 AS session
+           ON session.namespace_id=ledger.namespace_id
+          AND session.account_id=ledger.account_id
+          AND session.started_at <= ledger.committed_at
+          AND (session.ended_at IS NULL OR session.ended_at >= ledger.committed_at)
+         WHERE ledger.namespace_id=$1 AND ledger.ledger_event_id=$2",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind([78_u8; 16].as_slice())
+    .execute(transaction.connection())
+    .await;
+    let diagnostic = format!(
+        "eligible_sessions={eligible_sessions}, immutable_sources={immutable_sources}, manual_projection={manual_projection:?}"
+    );
+    transaction.rollback().await.unwrap();
+    diagnostic
 }
 
 async fn verify_link_and_crash_observations(persistence: &PostgresPersistence) {
