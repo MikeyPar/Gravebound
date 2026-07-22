@@ -61,6 +61,7 @@ mod safe_storage;
 mod successor;
 mod successor_repository;
 mod telemetry_outbox;
+mod telemetry_sources;
 mod world_flow;
 
 pub use active_danger_authority::StoredActiveDangerAuthorityV1;
@@ -319,6 +320,15 @@ pub use telemetry_outbox::{
     M03TelemetryOutboxError, M03TelemetryProjectionContextV1, MAX_M03_TELEMETRY_POLL,
     PostgresM03TelemetryOutboxAdapter, TelemetryPseudonymizationKeyV1,
 };
+pub use telemetry_sources::{
+    M03CrashObservationCommandV1, M03SessionObservationCommandV1, M03SessionObservationV1,
+    M03TelemetryPublicationV1, M03TelemetrySessionStartV1, M03TelemetrySourceError,
+    M03TelemetrySourceFamilyV1, MAX_M03_TELEMETRY_SOURCE_POLL_V1, StoredM03CrashEventV1,
+    StoredM03CrashKindV1, StoredM03CrashReporterV1, StoredM03CrashSourceV1,
+    StoredM03OnboardingEventV1, StoredM03SessionEndReasonV1, StoredM03SessionEventV1,
+    StoredM03TelemetryContextV1, StoredM03TelemetryEnvironmentV1, StoredM03TelemetryEventV1,
+    StoredM03TelemetryPlatformV1, StoredM03TelemetrySessionV1, StoredM03TelemetrySourceV1,
+};
 pub use world_flow::{
     StoredDangerEntryRootV3, StoredSafeArrival, StoredWorldFlowCharacter,
     StoredWorldFlowRevisionV1, StoredWorldLocation, StoredWorldTransferReceipt, WorldFlowBegin,
@@ -329,8 +339,9 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 69;
-const DISPOSABLE_DATABASE_RESET_SQL: &str = "TRUNCATE TABLE accounts, caldus_victory_exits CASCADE";
+pub const EXPECTED_SCHEMA_VERSION: i64 = 70;
+const DISPOSABLE_DATABASE_RESET_SQL: &str =
+    "TRUNCATE TABLE core_telemetry_sessions_v1, accounts, caldus_victory_exits CASCADE";
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -3202,7 +3213,6 @@ mod tests {
 
     #[test]
     fn item_shape_repair_admits_canonical_levels_and_black_unique_without_data_rewrite() {
-        assert_eq!(EXPECTED_SCHEMA_VERSION, 69);
         let migration =
             include_str!("../../../migrations/0069_item_level_and_black_unique_shape_v1.sql");
         for required in [
@@ -3225,6 +3235,40 @@ mod tests {
             assert!(
                 !lowercase.contains(forbidden),
                 "schema 69 introduced forbidden operation {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn telemetry_domain_sources_are_additive_typed_and_append_only() {
+        assert_eq!(EXPECTED_SCHEMA_VERSION, 70);
+        let migration =
+            include_str!("../../../migrations/0070_m03_telemetry_domain_sources_v1.sql");
+        for required in [
+            "CREATE TABLE core_telemetry_sessions_v1",
+            "CREATE TABLE onboarding_outbox_events_v1",
+            "CREATE TABLE session_outbox_events_v1",
+            "CREATE TABLE crash_outbox_events_v1",
+            "project_account_created_telemetry_v1",
+            "project_character_created_telemetry_v1",
+            "project_character_entered_combat_telemetry_v1",
+            "published_at IS NULL",
+            "M03 telemetry source history is immutable",
+            "raw diagnostics are structurally absent",
+        ] {
+            assert!(migration.contains(required), "schema 70 omitted {required}");
+        }
+        let lowercase = migration.to_ascii_lowercase();
+        for forbidden in [
+            "drop table",
+            "truncate table",
+            "delete from",
+            "raw_ip",
+            "stack_trace",
+        ] {
+            assert!(
+                !lowercase.contains(forbidden),
+                "schema 70 introduced forbidden operation or field {forbidden}"
             );
         }
     }
