@@ -1,4 +1,5 @@
 use persistence::{
+    CORE_WORLD_ASSETS_BLAKE3, CORE_WORLD_LOCALIZATION_BLAKE3, CORE_WORLD_RECORDS_BLAKE3,
     M03CrashObservationCommandV1, M03SessionObservationCommandV1, M03SessionObservationV1,
     M03TelemetryPublicationV1, M03TelemetrySessionStartV1, M03TelemetrySourceError,
     M03TelemetrySourceFamilyV1, PersistenceConfig, PostgresPersistence, StoredM03CrashKindV1,
@@ -11,6 +12,8 @@ use persistence::{
 const ACCOUNT: [u8; 16] = [11; 16];
 const CHARACTER: [u8; 16] = [12; 16];
 const SESSION: [u8; 16] = [13; 16];
+const LINEAGE: [u8; 16] = [14; 16];
+const RESTORE_POINT: [u8; 16] = [15; 16];
 const STARTED_AT: u64 = 1_750_000_000_000;
 
 async fn disposable_database() -> PostgresPersistence {
@@ -188,6 +191,45 @@ async fn verify_first_combat_projection_is_transactional(persistence: &PostgresP
 async fn write_first_combat_location(persistence: &PostgresPersistence, commit: bool) {
     let mut transaction = persistence.begin_transaction().await.unwrap();
     sqlx::query(
+        "INSERT INTO character_instance_lineages
+         (namespace_id,account_id,character_id,lineage_id,content_id,layout_id,
+          lineage_state,records_blake3,assets_blake3,localization_blake3)
+         VALUES ($1,$2,$3,$4,'world.core_microrealm_01',
+          'layout.core_private_life_01',0,$5,$6,$7)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT.as_slice())
+    .bind(CHARACTER.as_slice())
+    .bind(LINEAGE.as_slice())
+    .bind(CORE_WORLD_RECORDS_BLAKE3)
+    .bind(CORE_WORLD_ASSETS_BLAKE3)
+    .bind(CORE_WORLD_LOCALIZATION_BLAKE3)
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO character_entry_restore_points
+         (namespace_id,account_id,character_id,restore_point_id,lineage_id,
+          source_location_id,restore_location_id,snapshot_contract_version,
+          account_version,character_version,progression_version,inventory_version,
+          oath_bargain_version,life_metrics_version,ash_wallet_version,component_mask,
+          composite_digest,restore_state,records_blake3,assets_blake3,localization_blake3)
+         VALUES ($1,$2,$3,$4,$5,'hub.lantern_halls_01','hub.lantern_halls_01',
+          3,1,1,1,1,1,1,1,31,$6,0,$7,$8,$9)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT.as_slice())
+    .bind(CHARACTER.as_slice())
+    .bind(RESTORE_POINT.as_slice())
+    .bind(LINEAGE.as_slice())
+    .bind([16_u8; 32].as_slice())
+    .bind(CORE_WORLD_RECORDS_BLAKE3)
+    .bind(CORE_WORLD_ASSETS_BLAKE3)
+    .bind(CORE_WORLD_LOCALIZATION_BLAKE3)
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query(
         "UPDATE character_world_locations
          SET character_version=2,location_kind=2,
              location_content_id='world.core_microrealm_01',safe_arrival_kind=NULL,
@@ -198,8 +240,8 @@ async fn write_first_combat_location(persistence: &PostgresPersistence, commit: 
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(ACCOUNT.as_slice())
     .bind(CHARACTER.as_slice())
-    .bind([14_u8; 16].as_slice())
-    .bind([15_u8; 16].as_slice())
+    .bind(LINEAGE.as_slice())
+    .bind(RESTORE_POINT.as_slice())
     .execute(transaction.connection())
     .await
     .unwrap();
