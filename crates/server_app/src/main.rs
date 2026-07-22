@@ -145,6 +145,7 @@ async fn serve_core_private_life(
         persistence.clone(),
         reward_epoch,
     )?;
+    let telemetry_worker = server.telemetry_worker_status();
     write_certificate(
         &certificate_out,
         server.certificate_der(),
@@ -161,6 +162,10 @@ async fn serve_core_private_life(
         schema_version = readiness.schema_version,
         namespace = readiness.namespace,
         wipeable = readiness.wipeable,
+        telemetry_worker_mode = ?telemetry_worker.mode,
+        telemetry_worker_attachments = ?telemetry_worker.attachments,
+        telemetry_worker_lifecycle = ?telemetry_worker.lifecycle,
+        telemetry_spawned_tasks = telemetry_worker.spawned_tasks,
         "GB-M03 terminal-first private-life server is ready"
     );
     let report = server.serve_until(shutdown_signal()).await;
@@ -168,12 +173,22 @@ async fn serve_core_private_life(
         let _ = std::fs::remove_file(path);
     }
     let report = report?;
+    let telemetry_worker = report
+        .telemetry_worker
+        .context("private-life server omitted its owned telemetry worker report")?;
     info!(
         accepted_connections = report.accepted_connections,
         rejected_connections = report.rejected_connections,
         completed_connection_tasks = report.completed_connection_tasks,
         failed_connection_tasks = report.failed_connection_tasks,
         zero_residue = report.zero_residue,
+        telemetry_worker_mode = ?telemetry_worker.mode,
+        telemetry_source_poll_attempts = telemetry_worker.source_poll_attempts,
+        telemetry_source_acknowledgement_attempts = telemetry_worker.source_acknowledgement_attempts,
+        telemetry_export_attempts = telemetry_worker.export_attempts,
+        telemetry_remaining_tasks = telemetry_worker.remaining_tasks,
+        telemetry_worker_lifecycle = ?telemetry_worker.lifecycle,
+        telemetry_zero_residue = telemetry_worker.zero_residue,
         "GB-M03 terminal-first private-life server stopped cleanly"
     );
     persistence.close().await;

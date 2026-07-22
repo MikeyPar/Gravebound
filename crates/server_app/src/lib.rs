@@ -43,6 +43,7 @@ mod core_private_microrealm_runtime;
 mod core_private_player_damage;
 mod core_private_route_actor;
 mod core_private_telemetry_session;
+mod core_private_telemetry_worker;
 mod core_private_terminal_feed;
 mod core_private_terminal_owner;
 mod core_private_world_flow;
@@ -293,6 +294,11 @@ pub use instance::{
     TickTimingReport,
 };
 
+pub use core_private_telemetry_worker::{
+    CORE_PRIVATE_TELEMETRY_QUEUE_CAPACITY_V1, CorePrivateTelemetryWorkerAttachmentsV1,
+    CorePrivateTelemetryWorkerLifecycleV1, CorePrivateTelemetryWorkerModeV1,
+    CorePrivateTelemetryWorkerReportV1, CorePrivateTelemetryWorkerStatusV1,
+};
 pub use lifecycle::{
     DirectoryTickOutput, LINK_LOST_TICKS, LifecycleError, LifecycleResponse, LogicalSessionId,
     ManagedSession, SessionDirectory, SessionOwnerId, SessionPhase, TransportId,

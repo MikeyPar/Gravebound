@@ -49,6 +49,10 @@ use crate::{
     core_private_life_process::{CorePrivateLifeProcess, CorePrivateLifeProcessError},
     core_private_life_server::{CorePrivateLifeServerError, serve_core_private_life_connection},
     core_private_telemetry_session::CorePrivateTelemetrySessionCoordinator,
+    core_private_telemetry_worker::{
+        CorePrivateTelemetryWorkerReportV1, CorePrivateTelemetryWorkerRuntime,
+        CorePrivateTelemetryWorkerStatusV1,
+    },
     serve_core_reliable,
 };
 
@@ -478,6 +482,7 @@ pub struct CoreIdentityServerReport {
     pub remaining_open_connections: usize,
     pub zero_residue: bool,
     pub persistence_enabled: bool,
+    pub telemetry_worker: Option<CorePrivateTelemetryWorkerReportV1>,
 }
 
 /// Persistent normal-route endpoint. Construction owns the entire private-life process graph and
@@ -489,6 +494,7 @@ pub struct BoundCorePrivateLifeServer {
     policy: HandshakePolicy,
     process: Arc<CorePrivateLifeProcess>,
     telemetry_sessions: Option<Arc<CorePrivateTelemetrySessionCoordinator>>,
+    telemetry_worker: CorePrivateTelemetryWorkerRuntime,
 }
 
 impl fmt::Debug for BoundCorePrivateLifeServer {
@@ -498,6 +504,7 @@ impl fmt::Debug for BoundCorePrivateLifeServer {
             .field("local_address", &self.local_address)
             .field("policy", &self.policy)
             .field("admission_ready", &self.process.admission_ready())
+            .field("telemetry_worker", &self.telemetry_worker.status())
             .finish_non_exhaustive()
     }
 }
@@ -523,6 +530,8 @@ impl BoundCorePrivateLifeServer {
         )?);
         let telemetry_sessions =
             CorePrivateTelemetrySessionCoordinator::persistent(persistence).map(Arc::new);
+        let telemetry_worker = CorePrivateTelemetryWorkerRuntime::bind_disabled()
+            .map_err(|error| LocalServerRuntimeError::PrivateLifeTelemetry(error.to_string()))?;
         let CertifiedKey { cert, signing_key } =
             generate_simple_self_signed(vec![LOCAL_SERVER_NAME.to_owned()])?;
         let certificate = cert.der().clone();
@@ -561,6 +570,7 @@ impl BoundCorePrivateLifeServer {
             policy,
             process,
             telemetry_sessions,
+            telemetry_worker,
         })
     }
 
@@ -574,8 +584,13 @@ impl BoundCorePrivateLifeServer {
         self.certificate.as_ref()
     }
 
+    #[must_use]
+    pub fn telemetry_worker_status(&self) -> CorePrivateTelemetryWorkerStatusV1 {
+        self.telemetry_worker.status()
+    }
+
     pub async fn serve_until<F>(
-        self,
+        mut self,
         shutdown: F,
     ) -> Result<CoreIdentityServerReport, LocalServerRuntimeError>
     where
@@ -626,6 +641,7 @@ impl BoundCorePrivateLifeServer {
                 }
             }
         }
+        self.telemetry_worker.begin_shutdown();
         if let Some(telemetry_sessions) = &self.telemetry_sessions {
             telemetry_sessions.begin_shutdown().await;
         }
@@ -648,6 +664,7 @@ impl BoundCorePrivateLifeServer {
         if let Some(telemetry_sessions) = &self.telemetry_sessions {
             telemetry_sessions.finish_shutdown().await;
         }
+        let telemetry_worker = self.telemetry_worker.finish_shutdown();
         let process_report = process_report?;
         Ok(CoreIdentityServerReport {
             accepted_connections: accepted.load(Ordering::Relaxed),
@@ -659,8 +676,10 @@ impl BoundCorePrivateLifeServer {
             remaining_open_connections,
             zero_residue: process_report.zero_residue
                 && remaining_connection_tasks == 0
-                && remaining_open_connections == 0,
+                && remaining_open_connections == 0
+                && telemetry_worker.zero_residue,
             persistence_enabled: true,
+            telemetry_worker: Some(telemetry_worker),
         })
     }
 }
@@ -1029,6 +1048,7 @@ where
             remaining_open_connections,
             zero_residue: remaining_connection_tasks == 0 && remaining_open_connections == 0,
             persistence_enabled: self.persistence_enabled,
+            telemetry_worker: None,
         })
     }
 }
@@ -1253,6 +1273,8 @@ pub enum LocalServerRuntimeError {
     PrivateLifeProcess(String),
     #[error("private-life server failed: {0}")]
     PrivateLifeServer(String),
+    #[error("private-life telemetry worker failed: {0}")]
+    PrivateLifeTelemetry(String),
     #[error(transparent)]
     Codec(#[from] protocol::WireCodecError),
     #[error(transparent)]

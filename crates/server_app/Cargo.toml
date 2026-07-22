@@ -23,6 +23,7 @@ rustls.workspace = true
 serde.workspace = true
 sim_core = { path = "../sim_core" }
 sim_content = { path = "../sim_content" }
+telemetry = { path = "../telemetry" }
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
