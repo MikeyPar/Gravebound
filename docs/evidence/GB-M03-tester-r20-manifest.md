@@ -1,6 +1,6 @@
 # GB-M03 Optimized Tester r20 Manifest
 
-**Result:** PASS for the user-authorized production-blocking packaging gate.
+**Result:** PASS for its historical packaging gate; superseded by optimized tester r22.
 
 ## Design authorities
 
@@ -46,4 +46,4 @@ The user-owned untracked Grave Arbalist seed under `assets/core/player/grave_arb
 
 ## Current Next Step
 
-Run the owner-deferred formal M03 acceptance sweep from r20: exhaustive adverse/restart and 25 complete journeys, nonduplication and timing checks, optimized live visual/performance capture, backup/restore rehearsal, private-cohort comprehension, and external Steam/platform evidence. This step remains governed by `Gravebound_Production_GDD_v1_Canonical.md`, `Gravebound_Content_Production_Spec_v1.md`, and `Gravebound_Development_Roadmap_v1.md`. Implementation reopens only for production blockers found by that sweep.
+Use the current r22 package and manifest. Run the final production-server/PostgreSQL/real-QUIC ordinary-route and 25-journey evidence there, followed by the cohort, backup/restore, and external Steam/platform gates. This step remains governed by `Gravebound_Production_GDD_v1_Canonical.md`, `Gravebound_Content_Production_Spec_v1.md`, and `Gravebound_Development_Roadmap_v1.md`.

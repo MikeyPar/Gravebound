@@ -1,6 +1,6 @@
 # GB-M03-03G Combat Presentation Integration Evidence
 
-**Result:** Implementation gate PASS and packaged in optimized tester r20; exhaustive milestone evidence remains owner-deferred.
+**Result:** Implementation gate PASS and packaged in optimized tester r22; final milestone evidence remains open.
 
 ## Design authorities
 
@@ -52,4 +52,4 @@ These are the production-blocking checks authorized for the implementation phase
 
 ## Current Next Step
 
-Run the owner-deferred formal acceptance sweep from optimized tester r20: exhaustive adverse/restart and 25-journey proof, live visual/performance evidence, backup/restore rehearsal, private-cohort comprehension, and external Steam/platform evidence. This next step remains governed by `Gravebound_Production_GDD_v1_Canonical.md`, `Gravebound_Content_Production_Spec_v1.md`, and `Gravebound_Development_Roadmap_v1.md`.
+Run the final production-server/PostgreSQL/real-QUIC ordinary-route harness from optimized tester r22, including 25 complete journeys and current live visual/performance evidence. Then complete the private-cohort, backup/restore, and external Steam/platform gates. This next step remains governed by `Gravebound_Production_GDD_v1_Canonical.md`, `Gravebound_Content_Production_Spec_v1.md`, and `Gravebound_Development_Roadmap_v1.md`.
