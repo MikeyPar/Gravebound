@@ -25,6 +25,7 @@ use crate::core_private_gameplay_observation::{
 use crate::core_private_life_process::{
     CorePrivateLifeProcess, CorePrivateLifeProcessDisposition, CorePrivateLifeProcessError,
 };
+use crate::core_private_telemetry_session::CorePrivateTelemetrySessionCoordinator;
 use crate::{
     AuthenticatedAccount, AuthenticatedNamespace, CoreBellPortalBinding, CoreBellPortalTransition,
     CoreExtractionIntentAuthority, CoreExtractionTerminalAuthority, CorePrivateHallActorLease,
@@ -198,6 +199,7 @@ pub(crate) async fn serve_core_private_life_connection(
     incoming: quinn::Incoming,
     policy: HandshakePolicy,
     process: Arc<CorePrivateLifeProcess>,
+    telemetry_sessions: Option<Arc<CorePrivateTelemetrySessionCoordinator>>,
 ) -> Result<bool, CorePrivateLifeServerError> {
     let connection = incoming.await?;
     let (mut send, mut receive) = connection.accept_bi().await?;
@@ -226,9 +228,27 @@ pub(crate) async fn serve_core_private_life_connection(
         namespace: AuthenticatedNamespace::WipeableTest,
     };
     let issued_at_unix_ms = unix_millis()?;
-    let attached = process
+    // Telemetry sees only the derived account identity. Its optional durable session begins or
+    // recovers before identity/bootstrap can write, but failure produces no gameplay error.
+    let telemetry_transport = if let Some(coordinator) = &telemetry_sessions {
+        coordinator
+            .attach(account_id.as_bytes(), hello.platform)
+            .await
+    } else {
+        None
+    };
+    let attached = match process
         .attach_transport(authenticated, connection.clone(), issued_at_unix_ms)
-        .await?;
+        .await
+    {
+        Ok(attached) => attached,
+        Err(error) => {
+            if let Some(coordinator) = &telemetry_sessions {
+                coordinator.detach(telemetry_transport).await;
+            }
+            return Err(error.into());
+        }
+    };
     let transport = attached.transport;
     let writer = attached.writer;
     let mut route = ConnectionRoute::from_disposition(attached.disposition);
@@ -263,6 +283,18 @@ pub(crate) async fn serve_core_private_life_connection(
     )
     .await;
     let detached = process.detach_transport(transport, unix_millis()?).await;
+    if let Some(coordinator) = &telemetry_sessions {
+        if clean_client_exit(&connection) {
+            coordinator
+                .end(
+                    telemetry_transport,
+                    persistence::StoredM03SessionEndReasonV1::CleanExit,
+                )
+                .await;
+        } else {
+            coordinator.detach(telemetry_transport).await;
+        }
+    }
     match (result, detached) {
         (Err(error), _) => Err(error),
         (Ok(()), Err(error)) => Err(error.into()),
@@ -1357,6 +1389,15 @@ fn observation_allows_route_publication(observation: &CorePrivateMicrorealmDrive
         CorePrivateMicrorealmDriverState::FixedDungeonRewardPending { .. }
             | CorePrivateMicrorealmDriverState::CaldusRewardPending { .. }
             | CorePrivateMicrorealmDriverState::CaldusExitReady { .. }
+    )
+}
+
+fn clean_client_exit(connection: &quinn::Connection) -> bool {
+    matches!(
+        connection.close_reason(),
+        Some(quinn::ConnectionError::ApplicationClosed(close))
+            if close.error_code == quinn::VarInt::from_u32(0)
+                && close.reason.as_ref() == b"native client shutdown"
     )
 }
 

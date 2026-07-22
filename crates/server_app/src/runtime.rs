@@ -48,6 +48,7 @@ use crate::{
     },
     core_private_life_process::{CorePrivateLifeProcess, CorePrivateLifeProcessError},
     core_private_life_server::{CorePrivateLifeServerError, serve_core_private_life_connection},
+    core_private_telemetry_session::CorePrivateTelemetrySessionCoordinator,
     serve_core_reliable,
 };
 
@@ -487,6 +488,7 @@ pub struct BoundCorePrivateLifeServer {
     local_address: SocketAddr,
     policy: HandshakePolicy,
     process: Arc<CorePrivateLifeProcess>,
+    telemetry_sessions: Option<Arc<CorePrivateTelemetrySessionCoordinator>>,
 }
 
 impl fmt::Debug for BoundCorePrivateLifeServer {
@@ -515,10 +517,12 @@ impl BoundCorePrivateLifeServer {
         );
         let process = Arc::new(CorePrivateLifeProcess::compose_normal_route(
             foundation,
-            persistence,
+            persistence.clone(),
             &config.content_root,
             reward_epoch,
         )?);
+        let telemetry_sessions =
+            CorePrivateTelemetrySessionCoordinator::persistent(persistence).map(Arc::new);
         let CertifiedKey { cert, signing_key } =
             generate_simple_self_signed(vec![LOCAL_SERVER_NAME.to_owned()])?;
         let certificate = cert.der().clone();
@@ -555,6 +559,7 @@ impl BoundCorePrivateLifeServer {
             local_address,
             policy,
             process,
+            telemetry_sessions,
         })
     }
 
@@ -589,11 +594,17 @@ impl BoundCorePrivateLifeServer {
                     let Some(incoming) = incoming else { break };
                     let policy = self.policy.clone();
                     let process = Arc::clone(&self.process);
+                    let telemetry_sessions = self.telemetry_sessions.clone();
                     let accepted = Arc::clone(&accepted);
                     let rejected = Arc::clone(&rejected);
                     let failed = Arc::clone(&failed);
                     workers.spawn(async move {
-                        match serve_core_private_life_connection(incoming, policy, process).await {
+                        match serve_core_private_life_connection(
+                            incoming,
+                            policy,
+                            process,
+                            telemetry_sessions,
+                        ).await {
                             Ok(true) => { accepted.fetch_add(1, Ordering::Relaxed); }
                             Ok(false) => { rejected.fetch_add(1, Ordering::Relaxed); }
                             Err(error) => {
@@ -614,6 +625,9 @@ impl BoundCorePrivateLifeServer {
                 }
             }
         }
+        if let Some(telemetry_sessions) = &self.telemetry_sessions {
+            telemetry_sessions.begin_shutdown().await;
+        }
         self.process.begin_shutdown().await;
         self.endpoint.close(
             SERVER_SHUTDOWN_CLOSE_CODE.into(),
@@ -629,7 +643,11 @@ impl BoundCorePrivateLifeServer {
         let remaining_connection_tasks = workers.len();
         self.endpoint.wait_idle().await;
         let remaining_open_connections = self.endpoint.open_connections();
-        let process_report = self.process.finish_shutdown().await?;
+        let process_report = self.process.finish_shutdown().await;
+        if let Some(telemetry_sessions) = &self.telemetry_sessions {
+            telemetry_sessions.finish_shutdown().await;
+        }
+        let process_report = process_report?;
         Ok(CoreIdentityServerReport {
             accepted_connections: accepted.load(Ordering::Relaxed),
             rejected_connections: rejected.load(Ordering::Relaxed),

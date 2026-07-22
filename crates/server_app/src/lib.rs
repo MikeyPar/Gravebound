@@ -42,6 +42,7 @@ mod core_private_microrealm_driver;
 mod core_private_microrealm_runtime;
 mod core_private_player_damage;
 mod core_private_route_actor;
+mod core_private_telemetry_session;
 mod core_private_terminal_feed;
 mod core_private_terminal_owner;
 mod core_private_world_flow;

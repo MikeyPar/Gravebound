@@ -538,6 +538,29 @@ impl PostgresPersistence {
         Ok(result)
     }
 
+    /// Loads the exact durable head for one logical session. Runtime recovery uses this instead
+    /// of guessing whether an open root was connected or disconnected before process loss.
+    pub async fn load_m03_telemetry_session_head_v1(
+        &self,
+        account_id: [u8; 16],
+        session_id: [u8; 16],
+    ) -> Result<StoredM03TelemetrySourceV1, M03TelemetrySourceError> {
+        validate_id(account_id)?;
+        validate_id(session_id)?;
+        let mut transaction = self.begin_read_transaction().await?;
+        let session = load_session_by_id(transaction.connection(), session_id)
+            .await?
+            .ok_or(M03TelemetrySourceError::SessionNotFound)?;
+        if session.account_id != account_id {
+            return Err(M03TelemetrySourceError::SessionAuthorityMismatch);
+        }
+        let source = load_latest_session_source(transaction.connection(), session_id)
+            .await?
+            .ok_or(M03TelemetrySourceError::CorruptStoredSource)?;
+        transaction.rollback().await?;
+        Ok(source)
+    }
+
     pub async fn record_m03_session_observation_v1(
         &self,
         command: &M03SessionObservationCommandV1,
