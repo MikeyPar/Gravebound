@@ -1,7 +1,9 @@
 use std::path::{Path, PathBuf};
 
 use persistence::{
-    CaldusExtractionCommit, CaldusExtractionRequest, CaldusVictoryExitCommit, PersistenceConfig,
+    CaldusExtractionCommit, CaldusExtractionRequest, CaldusVictoryExitCommit,
+    LifeClockCheckpointCommandV1, LifeClockCheckpointRequestV1, LifeClockCheckpointTransactionV1,
+    LifeClockContentAuthorityV1, LifeClockDangerAuthorityV1, LifeClockStateV1, PersistenceConfig,
     PersistenceError, PostgresPersistence, ProductionExtractionExpectedVersionsV1,
     StoredCaldusVictoryOwner, StoredExtractionAuthority, StoredExtractionState,
     StoredWorldFlowRevisionV1, WIPEABLE_CORE_NAMESPACE,
@@ -508,6 +510,33 @@ async fn stage_danger_binding(
     .await
     .unwrap();
     transaction.commit().await.unwrap();
+
+    let clock_checkpoint = LifeClockCheckpointRequestV1::seal(LifeClockCheckpointCommandV1 {
+        account_id,
+        character_id,
+        checkpoint_id: [87; 16],
+        expected_character_version: 2,
+        expected_life_metrics_version: 1,
+        authoritative_tick: 30,
+        state: LifeClockStateV1::DangerControllable,
+        advanced_ticks: 30,
+        danger: Some(LifeClockDangerAuthorityV1 {
+            lineage_id,
+            restore_point_id: restore_id,
+            entry_life_metrics_version: 1,
+            entry_permadeath_combat_ticks: 0,
+        }),
+        content: LifeClockContentAuthorityV1::core(),
+        issued_at_unix_ms: 10_000,
+    })
+    .unwrap();
+    assert!(matches!(
+        persistence
+            .transact_life_clock_checkpoint_v1(&clock_checkpoint)
+            .await
+            .unwrap(),
+        LifeClockCheckpointTransactionV1::Committed(_)
+    ));
 }
 
 async fn close_danger_authority(
