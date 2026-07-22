@@ -242,6 +242,21 @@ LOCAL LAB CONTROLS
 - Inventory: I
 - Accessibility panel: F6
 
+PERSISTENT PLAY GAME CONTROLS
+- Character Select: N creates a Grave Arbalist; 1/2 selects a roster slot; Enter plays.
+- Move in Hall and danger: WASD. Aim with the mouse and hold left mouse for primary fire.
+- Grave Mark: right mouse. Slipstep: Space. Belt Tonics: Q/E.
+- Hall stations: approach the authored station, then hold F until its panel opens; Escape closes.
+- Oath Shrine: L Long Vigil, N Nailkeeper, Enter confirms the selected Oath.
+- Veil Bargain: 1/2/3 selects an offer, F refuses, Enter confirms, Escape cancels review.
+- Vault/Overflow: arrow keys move focus, Tab changes focus group, Enter activates, R retries.
+- Emergency Recall: hold R for the complete authoritative channel; releasing R cancels.
+- Stable Bell Sepulcher exit: F commits extraction when the HUD reports it available.
+- Death, Memorial, Resolution Hold, and successor recovery use their labeled native buttons.
+- Accessibility: F6 opens settings; 1 high contrast, 2 reduced motion, 3 shake,
+  4 flash, 5 friendly FX opacity, and 6 hostile theme. Number-key gameplay actions are
+  suppressed while this panel is open.
+
 CURRENT M03 ROUTE AND PREVIEWS
 PLAY GAME.cmd runs the normal authenticated QUIC route implemented so far, including
 durable identity, Hall/danger traversal, fixed Bell rooms and Sir Caldus, extraction,

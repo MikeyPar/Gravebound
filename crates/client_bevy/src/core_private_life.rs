@@ -1502,7 +1502,6 @@ pub fn run_core_private_life(config: CorePrivateLifeConfig) -> Result<()> {
     let (width, height) = crate::configured_window_size()?;
     let mut app = App::new();
     app.insert_resource(ClearColor(Color::srgb_u8(5, 8, 11)))
-        .insert_resource(AccessibilitySettings::default())
         .insert_resource(CorePrivateLifeBridge(worker))
         .insert_resource(CorePrivatePresentationContent(content))
         .insert_resource(CorePrivateOathCopy(oath_copy))
@@ -1588,6 +1587,7 @@ pub fn run_core_private_life(config: CorePrivateLifeConfig) -> Result<()> {
         )
         .add_systems(FixedUpdate, send_gameplay_input)
         .add_systems(Last, shutdown_transport);
+    crate::accessibility::configure(&mut app);
     app.run();
     Ok(())
 }
@@ -2860,9 +2860,10 @@ fn handle_keyboard(
     bridge: Res<CorePrivateLifeBridge>,
     bargain: Res<CorePrivateBargainState>,
     resolution: Res<CorePrivateResolutionHold>,
+    accessibility: Res<crate::accessibility::AccessibilityMenuState>,
     mut client: ResMut<CorePrivateLifeClient>,
 ) {
-    if bargain.captures_input() || resolution.captures_input() {
+    if bargain.captures_input() || resolution.captures_input() || accessibility.open {
         return;
     }
     let action = if keyboard.just_pressed(KeyCode::Digit1) {
@@ -3083,10 +3084,11 @@ fn handle_bargain_keyboard(
     keyboard: Res<ButtonInput<KeyCode>>,
     bridge: Res<CorePrivateLifeBridge>,
     copy: Res<CorePrivateBargainCopy>,
+    accessibility: Res<crate::accessibility::AccessibilityMenuState>,
     mut bargain: ResMut<CorePrivateBargainState>,
     mut client: ResMut<CorePrivateLifeClient>,
 ) {
-    if !bargain.open {
+    if !bargain.open || accessibility.open {
         return;
     }
     let action = if keyboard.just_pressed(KeyCode::Digit1) {

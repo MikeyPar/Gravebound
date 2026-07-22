@@ -99,12 +99,18 @@ pub(crate) struct HostileOutlineBaseSize(pub(crate) Vec2);
 #[derive(Resource)]
 struct AccessibilityEvidence(bool);
 
+#[derive(Resource, Debug, Clone, Copy, Default)]
+pub(crate) struct AccessibilityMenuState {
+    pub(crate) open: bool,
+}
+
 pub(crate) fn configure(app: &mut App) {
     let evidence_preset = env::var(ACCESSIBILITY_EVIDENCE_ENV).ok();
     let evidence = evidence_preset.is_some();
     let settings = settings_for_evidence_preset(evidence_preset.as_deref());
     app.insert_resource(settings)
         .insert_resource(AccessibilityEvidence(evidence))
+        .insert_resource(AccessibilityMenuState { open: evidence })
         .add_systems(Startup, spawn_overlay)
         .add_systems(
             Update,
@@ -169,6 +175,7 @@ fn spawn_overlay(mut commands: Commands, evidence: Res<AccessibilityEvidence>) {
 fn update_controls(
     keyboard: Res<ButtonInput<KeyCode>>,
     mut settings: ResMut<AccessibilitySettings>,
+    mut menu: ResMut<AccessibilityMenuState>,
     mut overlay: Single<&mut Visibility, With<AccessibilityOverlay>>,
 ) {
     if keyboard.just_pressed(OVERLAY_TOGGLE) {
@@ -176,6 +183,7 @@ fn update_controls(
             Visibility::Hidden => Visibility::Inherited,
             _ => Visibility::Hidden,
         };
+        menu.open = **overlay != Visibility::Hidden;
     }
     if **overlay == Visibility::Hidden {
         return;
