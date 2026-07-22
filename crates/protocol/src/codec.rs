@@ -186,6 +186,23 @@ pub fn encode_protocol_1_19_compatibility_frame(
     )
 }
 
+/// Reproduces protocol 1.20 bytes for immutable Hall-interaction and earlier fixtures.
+/// Durable Belt consumable use was appended in 1.21.
+pub fn encode_protocol_1_20_compatibility_frame(
+    message: &WireMessage,
+) -> Result<Vec<u8>, WireCodecError> {
+    if message_uses_core_consumable(message) {
+        return Err(WireCodecError::MessageUnavailableAtVersion);
+    }
+    encode_frame_for_version(
+        message,
+        ProtocolVersion {
+            major: PROTOCOL_MAJOR,
+            minor: crate::HALL_INTERACTION_PROTOCOL_MINOR,
+        },
+    )
+}
+
 const fn message_uses_death_view(message: &WireMessage) -> bool {
     matches!(
         message,
@@ -263,8 +280,23 @@ const fn message_uses_hall_interaction(message: &WireMessage) -> bool {
     matches!(
         message,
         WireMessage::HallInteractionFrame(_)
+            | WireMessage::CoreConsumableUseFrame(_)
             | WireMessage::ReliableEvent(crate::ReliableEventFrame {
-                event: crate::ReliableEvent::HallInteractionResult(_),
+                event: crate::ReliableEvent::HallInteractionResult(_)
+                    | crate::ReliableEvent::CoreConsumableUseResult(_)
+                    | crate::ReliableEvent::CoreConsumableState(_),
+                ..
+            })
+    )
+}
+
+const fn message_uses_core_consumable(message: &WireMessage) -> bool {
+    matches!(
+        message,
+        WireMessage::CoreConsumableUseFrame(_)
+            | WireMessage::ReliableEvent(crate::ReliableEventFrame {
+                event: crate::ReliableEvent::CoreConsumableUseResult(_)
+                    | crate::ReliableEvent::CoreConsumableState(_),
                 ..
             })
     )
@@ -367,6 +399,7 @@ const fn message_kind_byte(kind: MessageKind) -> u8 {
         MessageKind::ResolutionHoldMutationFrame => 22,
         MessageKind::SuccessorCreateFrame => 23,
         MessageKind::HallInteractionFrame => 24,
+        MessageKind::CoreConsumableUseFrame => 25,
     }
 }
 
@@ -396,6 +429,7 @@ const fn message_kind_from_byte(value: u8) -> Result<MessageKind, WireCodecError
         22 => Ok(MessageKind::ResolutionHoldMutationFrame),
         23 => Ok(MessageKind::SuccessorCreateFrame),
         24 => Ok(MessageKind::HallInteractionFrame),
+        25 => Ok(MessageKind::CoreConsumableUseFrame),
         other => Err(WireCodecError::UnknownMessageKind(other)),
     }
 }

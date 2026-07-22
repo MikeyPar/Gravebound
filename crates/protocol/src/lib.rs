@@ -8,6 +8,7 @@ mod account;
 mod bargain;
 mod bounded;
 mod codec;
+mod core_consumable;
 mod core_pending_inventory;
 mod core_private_route;
 mod death_view;
@@ -47,6 +48,14 @@ pub use codec::{
     encode_protocol_1_14_compatibility_frame, encode_protocol_1_15_compatibility_frame,
     encode_protocol_1_16_compatibility_frame, encode_protocol_1_17_compatibility_frame,
     encode_protocol_1_18_compatibility_frame, encode_protocol_1_19_compatibility_frame,
+    encode_protocol_1_20_compatibility_frame,
+};
+pub use core_consumable::{
+    CORE_CONSUMABLE_BELT_CAPACITY, CORE_CONSUMABLE_FEATURE_FLAG, CORE_CONSUMABLE_HASH_BYTES,
+    CORE_CONSUMABLE_ID_BYTES, CORE_CONSUMABLE_SCHEMA_VERSION, CORE_RED_TONIC_COOLDOWN_TICKS,
+    CORE_RED_TONIC_RESTORE_TICKS, CoreConsumableResultCodeV1, CoreConsumableSlotV1,
+    CoreConsumableStateV1, CoreConsumableUseFrameV1, CoreConsumableUsePayloadV1,
+    CoreConsumableUseResultV1, CoreConsumableValidationError,
 };
 pub use core_pending_inventory::{
     CORE_PENDING_BACKPACK_CAPACITY, CORE_PENDING_INVENTORY_FEATURE_FLAG,
@@ -162,7 +171,9 @@ use thiserror::Error;
 /// First incompatible protocol generation.
 pub const PROTOCOL_MAJOR: u16 = 1;
 /// Backward-compatible feature generation within [`PROTOCOL_MAJOR`].
-pub const PROTOCOL_MINOR: u16 = HALL_INTERACTION_PROTOCOL_MINOR;
+pub const PROTOCOL_MINOR: u16 = CORE_CONSUMABLE_PROTOCOL_MINOR;
+/// Exact durable Core Belt-consumable generation.
+pub const CORE_CONSUMABLE_PROTOCOL_MINOR: u16 = 21;
 /// Exact authoritative Lantern Halls interaction generation.
 pub const HALL_INTERACTION_PROTOCOL_MINOR: u16 = 20;
 /// Exact pending-at-risk inventory projection generation.

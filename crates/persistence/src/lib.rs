@@ -19,6 +19,7 @@ mod bargain_events;
 mod bargain_milestone;
 mod caldus_victory;
 mod combat_loadout;
+mod core_consumable;
 mod danger_checkpoint;
 mod danger_crash_restore;
 mod danger_crash_restore_repository;
@@ -89,6 +90,10 @@ pub use caldus_victory::{
 };
 pub use combat_loadout::{
     StoredCombatBargain, StoredCombatBeltStack, StoredCoreCombatLoadout, StoredEquippedWeapon,
+};
+pub use core_consumable::{
+    CoreConsumablePreflightV1, CoreConsumableUseCommandV1, StoredCoreConsumableResultCodeV1,
+    StoredCoreConsumableStateV1, StoredCoreConsumableUseResultV1,
 };
 pub use danger_checkpoint::{
     DangerCheckpointDelete, DangerCheckpointWrite, StoredDangerCheckpoint,
@@ -320,7 +325,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 66;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 67;
 const DISPOSABLE_DATABASE_RESET_SQL: &str = "TRUNCATE TABLE accounts, caldus_victory_exits CASCADE";
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -495,6 +500,16 @@ pub enum PersistenceError {
     ItemCharacterNotFound,
     #[error("stored item state violates the approved durable item contract")]
     CorruptStoredItems,
+    #[error("stored Core consumable state violates the durable Belt contract")]
+    CorruptStoredCoreConsumable,
+    #[error("Core consumable mutation identity was reused with changed canonical material")]
+    CoreConsumableIdempotencyConflict,
+    #[error("Core consumable request does not match the selected active danger authority")]
+    CoreConsumableAuthorityMismatch,
+    #[error("Core consumable request content does not match the durable Belt unit")]
+    CoreConsumableContentMismatch,
+    #[error("Core consumable request expected a different inventory aggregate version")]
+    CoreConsumableInventoryVersionMismatch,
     #[error("stored successor authority violates the approved durable recovery contract")]
     CorruptStoredSuccessor,
     #[error("successor request reused a stored mutation identity with changed material")]

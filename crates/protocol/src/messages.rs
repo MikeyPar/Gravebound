@@ -6,7 +6,8 @@ use thiserror::Error;
 use crate::{
     AccountBootstrapFrame, AccountBootstrapResult, BargainDecisionFrame, BargainDecisionResult,
     BargainViewFrame, BargainViewResult, CharacterMutationFrame, CharacterMutationResult,
-    ClientHello, CoreExtractionReadyStateV1, CorePendingInventoryStateV1, CorePrivateRouteStateV1,
+    ClientHello, CoreConsumableStateV1, CoreConsumableUseFrameV1, CoreConsumableUseResultV1,
+    CoreExtractionReadyStateV1, CorePendingInventoryStateV1, CorePrivateRouteStateV1,
     DeathViewFrameV1, DeathViewResultV1, ExtractionCommitFrameV1, ExtractionCommitResultV1,
     HallInteractionFrameV1, HallInteractionResultV1, HandshakeResponse, InitialOathSelectionFrame,
     InitialOathSelectionResult, NetworkChannel, OathViewFrame, OathViewResult,
@@ -51,6 +52,7 @@ pub enum MessageKind {
     ResolutionHoldMutationFrame,
     SuccessorCreateFrame,
     HallInteractionFrame,
+    CoreConsumableUseFrame,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -467,6 +469,8 @@ pub enum ReliableEvent {
     CorePendingInventoryState(Box<CorePendingInventoryStateV1>),
     CoreExtractionReadyState(Box<CoreExtractionReadyStateV1>),
     HallInteractionResult(HallInteractionResultV1),
+    CoreConsumableUseResult(CoreConsumableUseResultV1),
+    CoreConsumableState(CoreConsumableStateV1),
 }
 
 impl ReliableEvent {
@@ -484,7 +488,8 @@ impl ReliableEvent {
             | Self::SafeInventoryTransferResult(_)
             | Self::ExtractionCommitResult(_)
             | Self::ResolutionHoldMutationResult(_)
-            | Self::SuccessorCreateResult(_) => NetworkChannel::Mutation,
+            | Self::SuccessorCreateResult(_)
+            | Self::CoreConsumableUseResult(_) => NetworkChannel::Mutation,
             Self::Control(_)
             | Self::AccountBootstrapResult(_)
             | Self::WorldFlowResult(_)
@@ -495,7 +500,8 @@ impl ReliableEvent {
             | Self::ResolutionHoldQueryResult(_)
             | Self::CorePrivateRouteState(_)
             | Self::CorePendingInventoryState(_)
-            | Self::CoreExtractionReadyState(_) => NetworkChannel::Control,
+            | Self::CoreExtractionReadyState(_)
+            | Self::CoreConsumableState(_) => NetworkChannel::Control,
             Self::SocialPing { .. } => NetworkChannel::Social,
         }
     }
@@ -567,6 +573,12 @@ impl ReliableEvent {
             Self::HallInteractionResult(result) => result
                 .validate()
                 .map_err(|_| MessageValidationError::HallInteraction),
+            Self::CoreConsumableUseResult(result) => result
+                .validate()
+                .map_err(|_| MessageValidationError::CoreConsumable),
+            Self::CoreConsumableState(state) => state
+                .validate()
+                .map_err(|_| MessageValidationError::CoreConsumable),
             _ => Ok(()),
         }
     }
@@ -615,6 +627,7 @@ pub enum WireMessage {
     ResolutionHoldMutationFrame(ResolutionHoldMutationFrameV1),
     SuccessorCreateFrame(SuccessorCreateFrameV1),
     HallInteractionFrame(HallInteractionFrameV1),
+    CoreConsumableUseFrame(CoreConsumableUseFrameV1),
 }
 
 impl WireMessage {
@@ -645,6 +658,7 @@ impl WireMessage {
             Self::ResolutionHoldMutationFrame(_) => MessageKind::ResolutionHoldMutationFrame,
             Self::SuccessorCreateFrame(_) => MessageKind::SuccessorCreateFrame,
             Self::HallInteractionFrame(_) => MessageKind::HallInteractionFrame,
+            Self::CoreConsumableUseFrame(_) => MessageKind::CoreConsumableUseFrame,
         }
     }
 
@@ -674,7 +688,8 @@ impl WireMessage {
             | Self::SafeInventoryTransferFrame(_)
             | Self::ExtractionCommitFrame(_)
             | Self::ResolutionHoldMutationFrame(_)
-            | Self::SuccessorCreateFrame(_) => NetworkChannel::Mutation,
+            | Self::SuccessorCreateFrame(_)
+            | Self::CoreConsumableUseFrame(_) => NetworkChannel::Mutation,
         }
     }
 
@@ -745,6 +760,9 @@ impl WireMessage {
             Self::HallInteractionFrame(value) => value
                 .validate()
                 .map_err(|_| MessageValidationError::HallInteraction),
+            Self::CoreConsumableUseFrame(value) => value
+                .validate()
+                .map_err(|_| MessageValidationError::CoreConsumable),
         }
     }
 }
@@ -777,6 +795,8 @@ pub enum MessageValidationError {
     CorePendingInventory,
     #[error("Hall interaction message failed semantic validation")]
     HallInteraction,
+    #[error("Core consumable message failed semantic validation")]
+    CoreConsumable,
     #[error("message sequence must be nonzero")]
     ZeroSequence,
     #[error("fixed-point vector component must remain within -1000..=1000")]
