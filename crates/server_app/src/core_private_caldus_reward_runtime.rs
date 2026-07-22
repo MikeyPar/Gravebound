@@ -1570,8 +1570,13 @@ mod tests {
             )
         })
         .await;
+        let second_extraction = receive_reliable_event(&client_2).await;
         let second_pending = receive_reliable_event(&client_2).await;
         let second_route = receive_reliable_event(&client_2).await;
+        assert!(matches!(
+            second_extraction.event,
+            ReliableEvent::CoreExtractionReadyState(_)
+        ));
         assert!(matches!(
             second_pending.event,
             ReliableEvent::CorePendingInventoryState(_)
@@ -1580,6 +1585,7 @@ mod tests {
             second_route.event,
             ReliableEvent::CorePrivateRouteState(_)
         ));
+        assert_eq!(second_extraction.server_tick, handoff.defeat_tick().0);
         assert_eq!(second_pending.server_tick, handoff.defeat_tick().0);
         assert_eq!(second_route.server_tick, handoff.defeat_tick().0);
 
@@ -1600,8 +1606,10 @@ mod tests {
             )
         })
         .await;
+        let third_extraction = receive_reliable_event(&client_3).await;
         let third_pending = receive_reliable_event(&client_3).await;
         let third_route = receive_reliable_event(&client_3).await;
+        assert_eq!(third_extraction.event, second_extraction.event);
         assert_eq!(third_pending.event, second_pending.event);
         assert_eq!(third_route.event, second_route.event);
 

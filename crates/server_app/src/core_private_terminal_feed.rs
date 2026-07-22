@@ -287,6 +287,15 @@ impl CorePrivateTerminalFrameSender {
     }
 
     #[cfg(test)]
+    pub(crate) fn resume_cursor_for_test(&mut self, tick: Tick, route: CorePrivateRouteStateV1) {
+        self.cursor = CorePrivateTerminalFeedCursor {
+            tick,
+            route: Some(route),
+            equal_version_control: None,
+        };
+    }
+
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub async fn deliver(
         &mut self,

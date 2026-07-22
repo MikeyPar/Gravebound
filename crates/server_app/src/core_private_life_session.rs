@@ -416,6 +416,8 @@ pub struct CorePrivateLifeSessionDirectory<Clock, TickSource> {
     caldus_rewards: Option<CaldusRewardAuthorityBinding>,
     authoritative_ticks: Option<Arc<CorePrivateLifeTickDirectory>>,
     terminal_owner_factory: Option<Arc<dyn CorePrivateTerminalOwnerFactory>>,
+    #[cfg(test)]
+    terminal_feed_resume_tick: Option<sim_core::Tick>,
     state: Mutex<SessionState>,
 }
 
@@ -728,6 +730,8 @@ where
             caldus_rewards: None,
             authoritative_ticks: None,
             terminal_owner_factory: None,
+            #[cfg(test)]
+            terminal_feed_resume_tick: None,
             state: Mutex::new(SessionState {
                 accepting: true,
                 shutdown_started: false,
@@ -852,6 +856,13 @@ where
         factory: Arc<dyn CorePrivateTerminalOwnerFactory>,
     ) -> Self {
         self.terminal_owner_factory = Some(factory);
+        self
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    fn with_terminal_feed_resume_tick_for_test(mut self, tick: sim_core::Tick) -> Self {
+        self.terminal_feed_resume_tick = Some(tick);
         self
     }
 
@@ -1355,6 +1366,17 @@ where
             CorePrivateTerminalFeedBinding::from_danger_entry(&danger_entry_authority);
         let (terminal_sender, terminal_receiver) =
             CorePrivateTerminalFrameReceiver::channel(terminal_feed);
+        #[cfg(test)]
+        let mut terminal_sender = terminal_sender;
+        #[cfg(test)]
+        if let Some(tick) = self.terminal_feed_resume_tick {
+            terminal_sender.resume_cursor_for_test(
+                tick,
+                route_directory
+                    .snapshot(route_lease)
+                    .expect("explicit test cursor requires its live route"),
+            );
+        }
         let (recall_terminal, recall_projection) = self
             .recall
             .terminal_authorities(entry.authenticated, route_lease)
@@ -2625,10 +2647,10 @@ mod tests {
         (routes, route_lease, handoff, commit)
     }
 
-    async fn commit_bell_route(
+    async fn prepare_bell_route(
         routes: &CorePrivateRouteActorDirectory,
         route_lease: CorePrivateRouteActorLease,
-    ) -> CoreBellPortalTransition {
+    ) {
         for advance in [
             CorePrivateRouteActorAdvance::MicrorealmWaiting,
             CorePrivateRouteActorAdvance::MicrorealmActive,
@@ -2640,12 +2662,17 @@ mod tests {
             .set_bell_portal_in_range(route_lease, true)
             .await
             .unwrap();
+    }
+
+    async fn commit_bell_route(
+        routes: &CorePrivateRouteActorDirectory,
+    ) -> CoreBellPortalTransition {
         let binding = CoreBellPortalBinding {
             account_id: ACCOUNT_ID,
             character_id: CHARACTER_ID,
             mutation_id: [74; 16],
             instance_lineage_id: LINEAGE_ID,
-            entry_restore_point_id: [75; 16],
+            entry_restore_point_id: [0x55; 16],
             character_version: 2,
             content_revision: world_revision(),
         };
@@ -3113,10 +3140,14 @@ mod tests {
         let ticks = Arc::new(TickSource(AtomicU64::new(100)));
         let recall = Arc::new(CoreRecallActorDirectory::<FixedClock, _>::new(ticks));
         let sessions = Arc::new(
-            CorePrivateLifeSessionDirectory::new(recall)
+            CorePrivateLifeSessionDirectory::new(Arc::clone(&recall))
                 .with_terminal_owner_factory(Arc::new(TestTerminalOwnerFactory)),
         );
-        let (routes, _route_lease, runtime) = live_microrealm().await;
+        let (routes, route_lease, runtime) = live_microrealm().await;
+        recall
+            .register_actor(authenticated(), route_lease, actor())
+            .await
+            .unwrap();
         let (first_server_endpoint, first_client_endpoint, first_client, first_server) =
             live_connection_pair().await;
         let first = sessions
@@ -3206,14 +3237,18 @@ mod tests {
         let (boss_routes, boss_lease, handoff, commit) = boss_exit_fixture();
         let sessions = Arc::new(
             CorePrivateLifeSessionDirectory::with_caldus_extraction_runtime(
-                recall,
+                Arc::clone(&recall),
                 Arc::clone(&extraction),
                 UnusedExtractionPlanner,
                 ExtractionClock,
             )
             .with_terminal_owner_factory(Arc::new(TestTerminalOwnerFactory)),
         );
-        let (dummy_routes, _dummy_lease, runtime) = live_microrealm().await;
+        let (dummy_routes, dummy_lease, runtime) = live_microrealm().await;
+        recall
+            .register_actor(authenticated(), dummy_lease, actor())
+            .await
+            .unwrap();
         let (first_server_endpoint, first_client_endpoint, first_client, first_server) =
             live_connection_pair().await;
         let attached = sessions
@@ -3509,14 +3544,24 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one real-QUIC regression keeps Bell conversion, reconnect, observer, and task ownership visible end to end"
+    )]
     async fn bell_conversion_keeps_one_session_task_and_observer_across_reconnect() {
         let ticks = Arc::new(TickSource(AtomicU64::new(100)));
         let recall = Arc::new(CoreRecallActorDirectory::<FixedClock, _>::new(ticks));
         let sessions = Arc::new(
-            CorePrivateLifeSessionDirectory::new(recall)
-                .with_terminal_owner_factory(Arc::new(TestTerminalOwnerFactory)),
+            CorePrivateLifeSessionDirectory::new(Arc::clone(&recall))
+                .with_terminal_owner_factory(Arc::new(TestTerminalOwnerFactory))
+                .with_terminal_feed_resume_tick_for_test(Tick(32)),
         );
         let (routes, route_lease, runtime) = live_microrealm().await;
+        recall
+            .register_actor(authenticated(), route_lease, actor())
+            .await
+            .unwrap();
+        prepare_bell_route(&routes, route_lease).await;
         let runtime =
             crate::core_private_microrealm_runtime::core_bell_ready_runtime_test_fixture(runtime);
         let (first_server_endpoint, first_client_endpoint, first_client, first_server) =
@@ -3541,7 +3586,7 @@ mod tests {
         assert_eq!(first_binding.lease, second_binding.lease);
         assert_eq!(prepared.binding_lease, second_binding.lease);
 
-        let transition = commit_bell_route(&routes, route_lease).await;
+        let transition = commit_bell_route(&routes).await;
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content");
         let encounters = sim_content::load_core_development_encounter_rooms(&root).unwrap();
         let caldus = Arc::new(sim_content::load_core_development_caldus(&root).unwrap());
