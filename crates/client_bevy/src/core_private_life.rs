@@ -88,8 +88,6 @@ enum PrivateLifeAction {
     Create,
     Select(u8),
     Play,
-    RealmGate,
-    Memorial,
     Retry,
 }
 
@@ -108,6 +106,40 @@ struct CorePrivateBargainState {
     open: bool,
     loaded: bool,
     may_advance_rest: bool,
+}
+
+#[derive(Debug, Resource, Default)]
+struct CorePrivateHallInteractionState {
+    latest: Option<protocol::HallInteractionResultV1>,
+    open_station: Option<protocol::HallStationV1>,
+}
+
+impl CorePrivateHallInteractionState {
+    fn reset(&mut self) {
+        self.latest = None;
+        self.open_station = None;
+    }
+
+    fn apply(&mut self, result: protocol::HallInteractionResultV1) {
+        match result.code {
+            protocol::HallInteractionResultCodeV1::Opened => {
+                self.open_station = result.station;
+            }
+            protocol::HallInteractionResultCodeV1::Closed
+            | protocol::HallInteractionResultCodeV1::InvalidState
+            | protocol::HallInteractionResultCodeV1::CancelledOutOfRange => {
+                self.open_station = None;
+            }
+            _ => {}
+        }
+        self.latest = Some(result);
+    }
+
+    fn is_holding(&self) -> bool {
+        self.latest
+            .as_ref()
+            .is_some_and(|result| result.code == protocol::HallInteractionResultCodeV1::Holding)
+    }
 }
 
 #[derive(Debug, Resource)]
@@ -386,11 +418,7 @@ impl CorePrivateLifeClient {
         }
         self.server_hello = Some(hello.clone());
         self.error = None;
-        if !hello
-            .feature_flags
-            .iter()
-            .any(|flag| flag.as_str() == CORE_WORLD_FLOW_FEATURE_FLAG)
-        {
+        if !private_life_features_advertised(hello) {
             self.route = None;
             self.phase = CorePrivateLifePhase::Disabled;
             return Ok(());
@@ -448,11 +476,7 @@ impl CorePrivateLifeClient {
         let Some(hello) = self.server_hello.as_ref() else {
             return Ok(());
         };
-        if !hello
-            .feature_flags
-            .iter()
-            .any(|flag| flag.as_str() == CORE_WORLD_FLOW_FEATURE_FLAG)
-        {
+        if !private_life_features_advertised(hello) {
             self.route = None;
             return Ok(());
         }
@@ -957,6 +981,20 @@ impl CorePrivateLifeClient {
     }
 }
 
+fn private_life_features_advertised(hello: &ServerHello) -> bool {
+    [
+        CORE_WORLD_FLOW_FEATURE_FLAG,
+        protocol::HALL_INTERACTION_FEATURE_FLAG,
+    ]
+    .into_iter()
+    .all(|required| {
+        hello
+            .feature_flags
+            .iter()
+            .any(|flag| flag.as_str() == required)
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CorePrivateLifeClientFailure {
     Identity,
@@ -1096,6 +1134,7 @@ pub fn run_core_private_life(config: CorePrivateLifeConfig) -> Result<()> {
         .insert_resource(CorePrivatePresentationContent(content))
         .insert_resource(CorePrivateBargainCopy(bargain_copy))
         .insert_resource(CorePrivateBargainState::default())
+        .insert_resource(CorePrivateHallInteractionState::default())
         .insert_resource(load_terminal_ui(
             &config.content_root,
             manifest_hash.clone(),
@@ -1130,6 +1169,7 @@ pub fn run_core_private_life(config: CorePrivateLifeConfig) -> Result<()> {
                 sync_terminal_views,
                 request_location,
                 handle_keyboard,
+                handle_hall_interaction_keyboard,
                 handle_recall_keyboard,
                 handle_bargain_keyboard,
                 handle_interact_keyboard,
@@ -1183,6 +1223,7 @@ fn poll_transport(
     mut client: ResMut<CorePrivateLifeClient>,
     mut snapshots: ResMut<CorePrivateSnapshotClient>,
     mut bargain: ResMut<CorePrivateBargainState>,
+    mut hall: ResMut<CorePrivateHallInteractionState>,
     mut terminal: ResMut<CorePrivateTerminalUi>,
 ) {
     let mut discard_snapshot_queue = false;
@@ -1198,14 +1239,20 @@ fn poll_transport(
                     .accept_server_hello(&hello)
                     .and_then(|()| terminal.accept_server_hello(&hello))
             }
-            TransportEvent::Reliable(frame) => {
-                apply_private_reliable(&frame, &bridge, &mut client, &mut bargain, &mut terminal)
-            }
+            TransportEvent::Reliable(frame) => apply_private_reliable(
+                &frame,
+                &bridge,
+                &mut client,
+                &mut bargain,
+                &mut hall,
+                &mut terminal,
+            ),
             TransportEvent::LinkLost
             | TransportEvent::Reconnecting { .. }
             | TransportEvent::TransportClosed => {
                 snapshots.reset_transport();
                 bargain.reset();
+                hall.reset();
                 discard_snapshot_queue = true;
                 client.transport_lost();
                 Ok(())
@@ -1213,6 +1260,7 @@ fn poll_transport(
             TransportEvent::Fatal(_) => {
                 snapshots.reset_transport();
                 bargain.reset();
+                hall.reset();
                 discard_snapshot_queue = true;
                 client.error = Some(CorePrivateLifeClientFailure::Transport);
                 client.phase = CorePrivateLifePhase::Error;
@@ -1222,6 +1270,9 @@ fn poll_transport(
         if result.is_err() {
             client.phase = CorePrivateLifePhase::Error;
         }
+    }
+    if client.phase != CorePrivateLifePhase::Hall {
+        hall.reset();
     }
     let queued = bridge.0.drain_snapshots();
     if discard_snapshot_queue {
@@ -1258,6 +1309,7 @@ fn apply_private_reliable(
     bridge: &CorePrivateLifeBridge,
     client: &mut CorePrivateLifeClient,
     bargain: &mut CorePrivateBargainState,
+    hall: &mut CorePrivateHallInteractionState,
     terminal: &mut CorePrivateTerminalUi,
 ) -> Result<(), CorePrivateLifeClientError> {
     match &frame.event {
@@ -1309,6 +1361,9 @@ fn apply_private_reliable(
         ReliableEvent::CoreExtractionReadyState(state) => {
             client.apply_extraction_ready((**state).clone())
         }
+        ReliableEvent::HallInteractionResult(result) => {
+            apply_hall_interaction_result(*result, bridge, client, hall, terminal)
+        }
         ReliableEvent::ExtractionCommitResult(result) => {
             client.apply_extraction((**result).clone())
         }
@@ -1354,6 +1409,48 @@ fn apply_private_reliable(
         }
         _ => Ok(()),
     }
+}
+
+fn apply_hall_interaction_result(
+    result: protocol::HallInteractionResultV1,
+    bridge: &CorePrivateLifeBridge,
+    client: &mut CorePrivateLifeClient,
+    hall: &mut CorePrivateHallInteractionState,
+    terminal: &mut CorePrivateTerminalUi,
+) -> Result<(), CorePrivateLifeClientError> {
+    hall.apply(result);
+    if result.code != protocol::HallInteractionResultCodeV1::Opened {
+        return Ok(());
+    }
+    match result.station {
+        Some(protocol::HallStationV1::RealmGate) => {
+            queue_transfer(
+                WorldTransferCommand::UsePortal {
+                    portal_id: WireText::new(REALM_GATE_ID).expect("canonical gate ID fits"),
+                },
+                bridge,
+                client,
+            );
+        }
+        Some(protocol::HallStationV1::MemorialWall) => {
+            let memorial = terminal
+                .death
+                .open_memorial_wall()
+                .map_err(|_| CorePrivateLifeClientError::ActionUnavailable)?;
+            bridge
+                .0
+                .queue_reliable(WireMessage::DeathViewFrame(memorial))
+                .map_err(|_| CorePrivateLifeClientError::ActionUnavailable)?;
+            terminal.view_signature = None;
+        }
+        Some(
+            protocol::HallStationV1::Vault
+            | protocol::HallStationV1::Overflow
+            | protocol::HallStationV1::OathShrine,
+        )
+        | None => {}
+    }
+    Ok(())
 }
 
 #[allow(clippy::needless_pass_by_value)] // Bevy system parameters are wrapper values.
@@ -1704,7 +1801,6 @@ fn handle_keyboard(
     bridge: Res<CorePrivateLifeBridge>,
     bargain: Res<CorePrivateBargainState>,
     mut client: ResMut<CorePrivateLifeClient>,
-    mut terminal: ResMut<CorePrivateTerminalUi>,
 ) {
     if bargain.captures_input() {
         return;
@@ -1717,17 +1813,53 @@ fn handle_keyboard(
         Some(PrivateLifeAction::Create)
     } else if keyboard.just_pressed(KeyCode::Enter) {
         Some(PrivateLifeAction::Play)
-    } else if keyboard.just_pressed(KeyCode::KeyG) {
-        Some(PrivateLifeAction::RealmGate)
-    } else if keyboard.just_pressed(KeyCode::KeyM) {
-        Some(PrivateLifeAction::Memorial)
     } else if keyboard.just_pressed(KeyCode::KeyR) {
         Some(PrivateLifeAction::Retry)
     } else {
         None
     };
     if let Some(action) = action {
-        submit_action(action, &bridge, &mut client, &mut terminal);
+        submit_action(action, &bridge, &mut client);
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)] // Bevy system parameters are wrapper values.
+fn handle_hall_interaction_keyboard(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    bridge: Res<CorePrivateLifeBridge>,
+    hall: Res<CorePrivateHallInteractionState>,
+    mut client: ResMut<CorePrivateLifeClient>,
+) {
+    if client.phase != CorePrivateLifePhase::Hall {
+        return;
+    }
+    let intent = if keyboard.just_pressed(KeyCode::Escape) && hall.open_station.is_some() {
+        Some(protocol::HallInteractionIntentV1::ClosePanel)
+    } else if keyboard.just_pressed(KeyCode::KeyF) && hall.open_station.is_none() {
+        Some(protocol::HallInteractionIntentV1::BeginHold)
+    } else if keyboard.just_released(KeyCode::KeyF) && hall.is_holding() {
+        Some(protocol::HallInteractionIntentV1::Release)
+    } else {
+        None
+    };
+    let Some(intent) = intent else {
+        return;
+    };
+    let Ok(sequence) = client.take_request_sequence() else {
+        client.phase = CorePrivateLifePhase::Error;
+        return;
+    };
+    let frame = protocol::HallInteractionFrameV1 {
+        schema_version: protocol::HALL_INTERACTION_SCHEMA_VERSION,
+        sequence,
+        intent,
+    };
+    if bridge
+        .0
+        .queue_reliable(WireMessage::HallInteractionFrame(frame))
+        .is_err()
+    {
+        client.phase = CorePrivateLifePhase::Error;
     }
 }
 
@@ -1972,11 +2104,10 @@ fn handle_buttons(
     interactions: Query<(&Interaction, &ActionButton), Changed<Interaction>>,
     bridge: Res<CorePrivateLifeBridge>,
     mut client: ResMut<CorePrivateLifeClient>,
-    mut terminal: ResMut<CorePrivateTerminalUi>,
 ) {
     for (interaction, action) in &interactions {
         if *interaction == Interaction::Pressed {
-            submit_action(action.0, &bridge, &mut client, &mut terminal);
+            submit_action(action.0, &bridge, &mut client);
         }
     }
 }
@@ -1985,7 +2116,6 @@ fn submit_action(
     action: PrivateLifeAction,
     bridge: &CorePrivateLifeBridge,
     client: &mut CorePrivateLifeClient,
-    terminal: &mut CorePrivateTerminalUi,
 ) {
     if !action_available(action, client) {
         return;
@@ -2025,26 +2155,6 @@ fn submit_action(
             bridge,
             client,
         ),
-        PrivateLifeAction::RealmGate => queue_transfer(
-            WorldTransferCommand::UsePortal {
-                portal_id: WireText::new(REALM_GATE_ID).expect("canonical gate ID fits"),
-            },
-            bridge,
-            client,
-        ),
-        PrivateLifeAction::Memorial => {
-            let Ok(frame) = terminal.death.open_memorial_wall() else {
-                return;
-            };
-            if bridge
-                .0
-                .queue_reliable(WireMessage::DeathViewFrame(frame))
-                .is_err()
-            {
-                client.phase = CorePrivateLifePhase::Error;
-            }
-            terminal.view_signature = None;
-        }
         PrivateLifeAction::Retry => {
             client.location = None;
             client.pending_location_character = None;
@@ -2430,148 +2540,175 @@ fn spawn_private_geometry(
             } else {
                 content.microrealm_scene()
             };
-            let shell = scene.shell_thickness_milli_tiles;
-            for rectangle in [
-                sim_core::TileRectangle::new(0, 0, scene.width_milli_tiles, shell),
-                sim_core::TileRectangle::new(
-                    0,
-                    scene.height_milli_tiles - shell,
-                    scene.width_milli_tiles,
-                    shell,
-                ),
-                sim_core::TileRectangle::new(0, shell, shell, scene.height_milli_tiles - shell * 2),
-                sim_core::TileRectangle::new(
-                    scene.width_milli_tiles - shell,
-                    shell,
-                    shell,
-                    scene.height_milli_tiles - shell * 2,
-                ),
-            ]
-            .into_iter()
-            .chain(scene.solid_rectangles.iter().copied())
-            {
-                spawn_private_rectangle(
-                    commands,
-                    rectangle,
-                    width,
-                    height,
-                    Color::srgb_u8(42, 48, 49),
-                    0.0,
-                );
-            }
-            for object in &scene.objects {
-                let (center, size) = match object.geometry {
-                    sim_core::SceneObjectGeometry::Point(point)
-                    | sim_core::SceneObjectGeometry::PointInteractable { point, .. } => (
-                        authored_private_point(point, width, height),
-                        Vec2::splat(if object.id == REALM_GATE_ID {
-                            1.25
-                        } else {
-                            0.72
-                        }),
-                    ),
-                    sim_core::SceneObjectGeometry::Circle {
-                        center,
-                        radius_milli_tiles,
-                    } => (
-                        authored_private_point(center, width, height),
-                        Vec2::splat(radius_milli_tiles as f32 / 500.0),
-                    ),
-                    sim_core::SceneObjectGeometry::Rectangle(rectangle) => {
-                        let (center, size) = authored_private_rectangle(rectangle, width, height);
-                        (center, size)
-                    }
-                };
-                let enabled_core_station = matches!(
-                    object.id.as_str(),
-                    "station.realm_gate"
-                        | "station.vault"
-                        | "station.overflow"
-                        | "station.memorial_wall"
-                        | "station.oath_shrine"
-                );
-                let color = if object.id.starts_with("station.") && !enabled_core_station {
-                    Color::srgb_u8(72, 74, 73)
-                } else if object.id == "station.memorial_wall" {
-                    Color::srgb_u8(172, 151, 111)
-                } else if object.id == "station.oath_shrine" {
-                    Color::srgb_u8(126, 101, 156)
-                } else if object.id.starts_with("station.") {
-                    Color::srgb_u8(114, 151, 143)
-                } else {
-                    Color::srgb_u8(103, 119, 115)
-                };
-                commands.spawn((
-                    Name::new(format!("Authoritative {}", object.id)),
-                    PrivateGameplayGeometry,
-                    Sprite::from_color(color, size.max(Vec2::splat(0.24))),
-                    Transform::from_xyz(center.x, center.y, 1.0),
-                ));
-            }
+            spawn_world_scene_geometry(commands, scene, width, height);
         }
         CorePrivateRouteSceneV1::BellSepulcher => {
-            let Some(room) = route.room.and_then(|room| {
-                content
-                    .fixed_layout()
-                    .rooms
-                    .iter()
-                    .find(|candidate| candidate.node_id == room.node_id())
-            }) else {
-                return;
-            };
-            let border = 500;
-            let room_width = i32::try_from(room.room.width_milli_tiles).unwrap_or(i32::MAX);
-            let room_height = i32::try_from(room.room.height_milli_tiles).unwrap_or(i32::MAX);
-            for rectangle in [
-                sim_core::TileRectangle::new(0, 0, room_width, border),
-                sim_core::TileRectangle::new(0, room_height - border, room_width, border),
-                sim_core::TileRectangle::new(0, border, border, room_height - border * 2),
-                sim_core::TileRectangle::new(
-                    room_width - border,
-                    border,
-                    border,
-                    room_height - border * 2,
-                ),
-            ] {
-                spawn_private_rectangle(
-                    commands,
-                    rectangle,
-                    width,
-                    height,
-                    Color::srgb_u8(50, 45, 44),
-                    0.0,
-                );
-            }
-            for volume in room
-                .room
-                .volumes
-                .iter()
-                .filter(|volume| volume.kind == sim_core::DungeonRoomVolumeKind::Solid)
-            {
-                if let sim_core::DungeonRoomVolumeGeometry::Rectangle {
-                    x,
-                    y,
-                    width: rectangle_width,
-                    height: rectangle_height,
-                } = volume.geometry
-                {
-                    let Ok(rectangle_width) = i32::try_from(rectangle_width) else {
-                        continue;
-                    };
-                    let Ok(rectangle_height) = i32::try_from(rectangle_height) else {
-                        continue;
-                    };
-                    spawn_private_rectangle(
-                        commands,
-                        sim_core::TileRectangle::new(x, y, rectangle_width, rectangle_height),
-                        width,
-                        height,
-                        Color::srgb_u8(55, 49, 47),
-                        0.1,
-                    );
-                }
-            }
+            spawn_bell_geometry(commands, content, route, width, height);
         }
+    }
+}
+
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "compiled Core scene dimensions are bounded well inside exact f32 integer range"
+)]
+fn spawn_world_scene_geometry(
+    commands: &mut Commands,
+    scene: &sim_core::WorldSceneDefinition,
+    width: f32,
+    height: f32,
+) {
+    let shell = scene.shell_thickness_milli_tiles;
+    for rectangle in [
+        sim_core::TileRectangle::new(0, 0, scene.width_milli_tiles, shell),
+        sim_core::TileRectangle::new(
+            0,
+            scene.height_milli_tiles - shell,
+            scene.width_milli_tiles,
+            shell,
+        ),
+        sim_core::TileRectangle::new(0, shell, shell, scene.height_milli_tiles - shell * 2),
+        sim_core::TileRectangle::new(
+            scene.width_milli_tiles - shell,
+            shell,
+            shell,
+            scene.height_milli_tiles - shell * 2,
+        ),
+    ]
+    .into_iter()
+    .chain(scene.solid_rectangles.iter().copied())
+    {
+        spawn_private_rectangle(
+            commands,
+            rectangle,
+            width,
+            height,
+            Color::srgb_u8(42, 48, 49),
+            0.0,
+        );
+    }
+    for object in &scene.objects {
+        let (center, size) = match object.geometry {
+            sim_core::SceneObjectGeometry::Point(point)
+            | sim_core::SceneObjectGeometry::PointInteractable { point, .. } => (
+                authored_private_point(point, width, height),
+                Vec2::splat(if object.id == REALM_GATE_ID {
+                    1.25
+                } else {
+                    0.72
+                }),
+            ),
+            sim_core::SceneObjectGeometry::Circle {
+                center,
+                radius_milli_tiles,
+            } => (
+                authored_private_point(center, width, height),
+                Vec2::splat(radius_milli_tiles as f32 / 500.0),
+            ),
+            sim_core::SceneObjectGeometry::Rectangle(rectangle) => {
+                authored_private_rectangle(rectangle, width, height)
+            }
+        };
+        let color = private_scene_object_color(&object.id);
+        commands.spawn((
+            Name::new(format!("Authoritative {}", object.id)),
+            PrivateGameplayGeometry,
+            Sprite::from_color(color, size.max(Vec2::splat(0.24))),
+            Transform::from_xyz(center.x, center.y, 1.0),
+        ));
+    }
+}
+
+fn private_scene_object_color(object_id: &str) -> Color {
+    let enabled_core_station = matches!(
+        object_id,
+        "station.realm_gate"
+            | "station.vault"
+            | "station.overflow"
+            | "station.memorial_wall"
+            | "station.oath_shrine"
+    );
+    if object_id.starts_with("station.") && !enabled_core_station {
+        Color::srgb_u8(72, 74, 73)
+    } else if object_id == "station.memorial_wall" {
+        Color::srgb_u8(172, 151, 111)
+    } else if object_id == "station.oath_shrine" {
+        Color::srgb_u8(126, 101, 156)
+    } else if object_id.starts_with("station.") {
+        Color::srgb_u8(114, 151, 143)
+    } else {
+        Color::srgb_u8(103, 119, 115)
+    }
+}
+
+fn spawn_bell_geometry(
+    commands: &mut Commands,
+    content: &sim_content::CorePrivateLifeContent,
+    route: &protocol::CorePrivateRouteStateV1,
+    width: f32,
+    height: f32,
+) {
+    let Some(room) = route.room.and_then(|room| {
+        content
+            .fixed_layout()
+            .rooms
+            .iter()
+            .find(|candidate| candidate.node_id == room.node_id())
+    }) else {
+        return;
+    };
+    let border = 500;
+    let room_width = i32::try_from(room.room.width_milli_tiles).unwrap_or(i32::MAX);
+    let room_height = i32::try_from(room.room.height_milli_tiles).unwrap_or(i32::MAX);
+    for rectangle in [
+        sim_core::TileRectangle::new(0, 0, room_width, border),
+        sim_core::TileRectangle::new(0, room_height - border, room_width, border),
+        sim_core::TileRectangle::new(0, border, border, room_height - border * 2),
+        sim_core::TileRectangle::new(
+            room_width - border,
+            border,
+            border,
+            room_height - border * 2,
+        ),
+    ] {
+        spawn_private_rectangle(
+            commands,
+            rectangle,
+            width,
+            height,
+            Color::srgb_u8(50, 45, 44),
+            0.0,
+        );
+    }
+    for volume in room
+        .room
+        .volumes
+        .iter()
+        .filter(|volume| volume.kind == sim_core::DungeonRoomVolumeKind::Solid)
+    {
+        let sim_core::DungeonRoomVolumeGeometry::Rectangle {
+            x,
+            y,
+            width: rectangle_width,
+            height: rectangle_height,
+        } = volume.geometry
+        else {
+            continue;
+        };
+        let (Ok(rectangle_width), Ok(rectangle_height)) = (
+            i32::try_from(rectangle_width),
+            i32::try_from(rectangle_height),
+        ) else {
+            continue;
+        };
+        spawn_private_rectangle(
+            commands,
+            sim_core::TileRectangle::new(x, y, rectangle_width, rectangle_height),
+            width,
+            height,
+            Color::srgb_u8(55, 49, 47),
+            0.1,
+        );
     }
 }
 
@@ -2748,13 +2885,11 @@ fn spawn_ui(mut commands: Commands) {
                     spawn_button(row, PrivateLifeAction::Select(1), "Select 1 [1]");
                     spawn_button(row, PrivateLifeAction::Select(2), "Select 2 [2]");
                     spawn_button(row, PrivateLifeAction::Play, "Play [Enter]");
-                    spawn_button(row, PrivateLifeAction::RealmGate, "Realm Gate — Enter [G]");
-                    spawn_button(row, PrivateLifeAction::Memorial, "Memorial Wall [M]");
                     spawn_button(row, PrivateLifeAction::Retry, "Retry [R]");
                 });
             root.spawn((
                 Text::new(
-                    "MOVE  WASD    FIRE  LEFT MOUSE    RECALL  HOLD R    HALL GATE  G    MEMORIAL  M",
+                    "MOVE WASD  AIM MOUSE  FIRE LMB  ABILITY RMB / SPACE  USE Q / E  INTERACT F  RECALL HOLD R",
                 ),
                 TextFont::from_font_size(13.0),
                 TextColor(Color::srgb_u8(130, 144, 145)),
@@ -2791,8 +2926,10 @@ fn spawn_button(parent: &mut ChildSpawnerCommands, action: PrivateLifeAction, la
 fn update_ui(
     client: Res<CorePrivateLifeClient>,
     snapshots: Res<CorePrivateSnapshotClient>,
+    content: Res<CorePrivatePresentationContent>,
     bargain: Res<CorePrivateBargainState>,
     bargain_copy: Res<CorePrivateBargainCopy>,
+    hall: Res<CorePrivateHallInteractionState>,
     mut status: Single<&mut Text, With<StatusText>>,
     mut roster: Single<&mut Text, (With<RosterText>, Without<StatusText>)>,
     mut route: Single<&mut Text, (With<RouteText>, Without<StatusText>, Without<RosterText>)>,
@@ -2800,19 +2937,17 @@ fn update_ui(
 ) {
     **status = Text::new(phase_label(client.phase));
     **roster = Text::new(render_roster(&client));
+    let route_text = render_route(&client, &snapshots, &content.0, &hall);
     **route = Text::new(if bargain.open {
         format!(
             "{}\n\n{}",
-            render_route(&client, &snapshots),
+            route_text,
             bargain.model.render(&bargain_copy.0)
         )
     } else if bargain.may_advance_rest {
-        format!(
-            "{}\n\nBargain resolved. Press E to continue.",
-            render_route(&client, &snapshots)
-        )
+        format!("{route_text}\n\nBargain resolved. Press F to continue.")
     } else {
-        render_route(&client, &snapshots)
+        route_text
     });
     for (action, mut background, mut border) in &mut actions {
         let available = action_available(action.0, &client);
@@ -2847,13 +2982,6 @@ fn action_available(action: PrivateLifeAction, client: &CorePrivateLifeClient) -
                 client.location.as_ref().map(|snapshot| &snapshot.location),
                 Some(CharacterLocation::CharacterSelect { .. })
             ) && client.phase == CorePrivateLifePhase::CharacterSelect
-        }
-        PrivateLifeAction::RealmGate | PrivateLifeAction::Memorial => {
-            client.phase == CorePrivateLifePhase::Hall
-                && client
-                    .route
-                    .as_ref()
-                    .is_some_and(CorePrivateRouteClientModel::can_accept_gameplay_input)
         }
         PrivateLifeAction::Retry => matches!(
             client.phase,
@@ -2892,7 +3020,12 @@ fn render_roster(client: &CorePrivateLifeClient) -> String {
     rows.join("\n")
 }
 
-fn render_route(client: &CorePrivateLifeClient, snapshots: &CorePrivateSnapshotClient) -> String {
+fn render_route(
+    client: &CorePrivateLifeClient,
+    snapshots: &CorePrivateSnapshotClient,
+    content: &sim_content::CorePrivateLifeContent,
+    hall: &CorePrivateHallInteractionState,
+) -> String {
     if client.phase == CorePrivateLifePhase::Disabled {
         return "Available in a later test.\nNormal route capability was not negotiated."
             .to_owned();
@@ -2955,8 +3088,9 @@ fn render_route(client: &CorePrivateLifeClient, snapshots: &CorePrivateSnapshotC
     );
     let recall = render_recall_status(client.recall_result.as_ref());
     let extraction = render_extraction_status(client.extraction_result.as_ref());
+    let hall_interaction = render_hall_interaction(state, snapshots, content, hall);
     format!(
-        "{scene}{room}\nPhase: {:?}\nActor generation: {}    State version: {}\nControl: {}{gameplay}{recall}{extraction}{transfer}",
+        "{scene}{room}\nPhase: {:?}\nActor generation: {}    State version: {}\nControl: {}{gameplay}{hall_interaction}{recall}{extraction}{transfer}",
         state.phase,
         state.actor_generation,
         state.state_version,
@@ -2970,6 +3104,103 @@ fn render_route(client: &CorePrivateLifeClient, snapshots: &CorePrivateSnapshotC
             "WITHHELD"
         }
     )
+}
+
+fn render_hall_interaction(
+    route: &protocol::CorePrivateRouteStateV1,
+    snapshots: &CorePrivateSnapshotClient,
+    content: &sim_content::CorePrivateLifeContent,
+    hall: &CorePrivateHallInteractionState,
+) -> String {
+    if route.scene != CorePrivateRouteSceneV1::LanternHalls {
+        return String::new();
+    }
+    if let Some(station) = hall.open_station {
+        return format!(
+            "\n{} — panel open    Esc close",
+            hall_station_label(station)
+        );
+    }
+    if let Some(result) = hall.latest.as_ref() {
+        match result.code {
+            protocol::HallInteractionResultCodeV1::Holding => {
+                return format!(
+                    "\nHold F — {}    {}/{}",
+                    result.station.map_or("Station", hall_station_label),
+                    result.held_ticks,
+                    result.required_ticks
+                );
+            }
+            protocol::HallInteractionResultCodeV1::CancelledOutOfRange
+            | protocol::HallInteractionResultCodeV1::OutOfRange => {
+                return "\nMove within 1.5 tiles of an active Hall station.".to_owned();
+            }
+            protocol::HallInteractionResultCodeV1::CancelledReleased => {
+                return "\nInteraction cancelled — hold F until complete.".to_owned();
+            }
+            _ => {}
+        }
+    }
+    nearest_hall_station(content, snapshots.latest.as_ref()).map_or_else(
+        || "\nExplore the Hall — active stations glow in color.".to_owned(),
+        |station| {
+            let instruction = if matches!(
+                station,
+                protocol::HallStationV1::RealmGate
+                    | protocol::HallStationV1::Vault
+                    | protocol::HallStationV1::Overflow
+            ) {
+                "Press F"
+            } else {
+                "Hold F"
+            };
+            format!("\n{instruction} — {}", hall_station_label(station))
+        },
+    )
+}
+
+fn nearest_hall_station(
+    content: &sim_content::CorePrivateLifeContent,
+    snapshot: Option<&CompleteSnapshot>,
+) -> Option<protocol::HallStationV1> {
+    let player = snapshot?
+        .entities
+        .iter()
+        .find(|entity| entity.kind == protocol::EntityKind::Player)?;
+    content
+        .hall_scene()
+        .objects
+        .iter()
+        .filter_map(|object| {
+            let station = protocol::HallStationV1::from_content_id(&object.id)?;
+            let interaction = object.interaction?;
+            let point = match object.geometry {
+                sim_core::SceneObjectGeometry::Point(point)
+                | sim_core::SceneObjectGeometry::PointInteractable { point, .. } => point,
+                sim_core::SceneObjectGeometry::Circle { center, .. } => center,
+                sim_core::SceneObjectGeometry::Rectangle(rectangle) => sim_core::TilePoint::new(
+                    rectangle.x_milli_tiles + rectangle.width_milli_tiles / 2,
+                    rectangle.y_milli_tiles + rectangle.height_milli_tiles / 2,
+                ),
+            };
+            let dx = i64::from(player.x_milli_tiles) - i64::from(point.x_milli_tiles);
+            let dy = i64::from(player.y_milli_tiles) - i64::from(point.y_milli_tiles);
+            let distance_squared = dx * dx + dy * dy;
+            let range = i64::from(interaction.range_milli_tiles);
+            (distance_squared <= range * range).then_some((distance_squared, station))
+        })
+        .min_by_key(|(distance_squared, _)| *distance_squared)
+        .map(|(_, station)| station)
+}
+
+const fn hall_station_label(station: protocol::HallStationV1) -> &'static str {
+    match station {
+        protocol::HallStationV1::RealmGate => "Realm Gate",
+        protocol::HallStationV1::Vault => "Vault",
+        protocol::HallStationV1::Overflow => "Overflow",
+        protocol::HallStationV1::MemorialWall => "Memorial Wall",
+        protocol::HallStationV1::OathShrine => "Oath Shrine",
+    }
 }
 
 fn render_recall_status(result: Option<&protocol::RecallResultV1>) -> String {
@@ -3074,10 +3305,14 @@ mod tests {
             server_tick_rate: SIMULATION_HZ,
             snapshot_rate: SNAPSHOT_HZ,
             region_id: WireText::new("local").unwrap(),
-            feature_flags: enabled
-                .then(|| WireText::new(CORE_WORLD_FLOW_FEATURE_FLAG).unwrap())
-                .into_iter()
-                .collect(),
+            feature_flags: if enabled {
+                vec![
+                    WireText::new(CORE_WORLD_FLOW_FEATURE_FLAG).unwrap(),
+                    WireText::new(protocol::HALL_INTERACTION_FEATURE_FLAG).unwrap(),
+                ]
+            } else {
+                Vec::new()
+            },
         }
     }
 
