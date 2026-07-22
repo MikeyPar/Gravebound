@@ -1057,7 +1057,7 @@ mod tests {
     fn disposable_reset_is_whole_graph_and_never_disables_production_triggers() {
         assert_eq!(
             DISPOSABLE_DATABASE_RESET_SQL,
-            "TRUNCATE TABLE accounts, caldus_victory_exits CASCADE"
+            "TRUNCATE TABLE core_telemetry_sessions_v1, accounts, caldus_victory_exits CASCADE"
         );
         for prohibited in [
             "DELETE FROM",
