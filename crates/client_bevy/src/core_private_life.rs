@@ -270,7 +270,9 @@ impl CorePrivateSnapshotClient {
         let Some(route) = route.filter(|state| {
             matches!(
                 state.scene,
-                CorePrivateRouteSceneV1::CoreMicrorealm | CorePrivateRouteSceneV1::BellSepulcher
+                CorePrivateRouteSceneV1::LanternHalls
+                    | CorePrivateRouteSceneV1::CoreMicrorealm
+                    | CorePrivateRouteSceneV1::BellSepulcher
             )
         }) else {
             self.actor_generation = None;
@@ -281,10 +283,17 @@ impl CorePrivateSnapshotClient {
             self.latest = None;
             return Ok(());
         };
-        let generation_changed = self.actor_generation != Some(route.actor_generation);
-        if generation_changed {
+        let local_entity_id = match route.scene {
+            CorePrivateRouteSceneV1::LanternHalls => hall_player_entity_id(route.character_id),
+            CorePrivateRouteSceneV1::CoreMicrorealm | CorePrivateRouteSceneV1::BellSepulcher => {
+                private_player_entity_id(route.actor_generation)?
+            }
+        };
+        let binding_changed = self.actor_generation != Some(route.actor_generation)
+            || self.local_entity_id != Some(local_entity_id);
+        if binding_changed {
             self.actor_generation = Some(route.actor_generation);
-            self.local_entity_id = Some(private_player_entity_id(route.actor_generation)?);
+            self.local_entity_id = Some(local_entity_id);
             self.assembler = SnapshotAssembler::default();
             self.latest = None;
         }
@@ -360,6 +369,12 @@ fn private_player_entity_id(actor_generation: u64) -> Result<u64, CorePrivateLif
         .and_then(|base| base.checked_add(PLAYER_ENTITY_ID_OFFSET))
         .filter(|entity_id| *entity_id != 0)
         .ok_or(CorePrivateLifeClientError::InvalidSnapshotAuthority)
+}
+
+fn hall_player_entity_id(character_id: [u8; protocol::CHARACTER_ID_BYTES]) -> u64 {
+    let mut material = [0_u8; 8];
+    material.copy_from_slice(&character_id[..8]);
+    u64::from_le_bytes(material).max(1)
 }
 
 #[derive(Debug, Resource)]
