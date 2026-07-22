@@ -2250,7 +2250,9 @@ mod tests {
         let telegraphs = acolyte_events
             .iter()
             .filter_map(|event| match event {
-                CoreNormalAttackEvent::TelegraphStarted { lock, first_use } => Some((
+                CoreNormalAttackEvent::TelegraphStarted {
+                    lock, first_use, ..
+                } => Some((
                     lock.telegraph_started_at(),
                     lock.resolves_at(),
                     lock.target().expect("target lock").position,
@@ -2320,8 +2322,9 @@ mod tests {
             skull_events
                 .iter()
                 .filter_map(|event| match event {
-                    CoreNormalAttackEvent::TelegraphStarted { lock, first_use } =>
-                        Some((lock.telegraph_started_at(), lock.resolves_at(), *first_use,)),
+                    CoreNormalAttackEvent::TelegraphStarted {
+                        lock, first_use, ..
+                    } => Some((lock.telegraph_started_at(), lock.resolves_at(), *first_use,)),
                     _ => None,
                 })
                 .collect::<Vec<_>>(),

@@ -3453,12 +3453,13 @@ mod tests {
         );
 
         reservation.commit(1).await.expect("matching live apply");
-        let frames = received.lock().expect("received");
-        assert!(!frames.is_empty());
-        assert_eq!(frames[0].consumable_slot_one_sequence, 1);
-        assert_eq!(frames[0].consumable_slot_two_sequence, 0);
-        assert_eq!(frames[0].consumable_inventory_version, 1);
-        drop(frames);
+        {
+            let frames = received.lock().expect("received");
+            assert!(!frames.is_empty());
+            assert_eq!(frames[0].consumable_slot_one_sequence, 1);
+            assert_eq!(frames[0].consumable_slot_two_sequence, 0);
+            assert_eq!(frames[0].consumable_inventory_version, 1);
+        }
 
         let report = driver.shutdown().await.expect("joined shutdown");
         assert!(report.committed_frames >= 1);
@@ -4013,12 +4014,13 @@ mod tests {
         let mut observer = handle.observe();
         observer.changed().await.expect("published frame");
 
-        let inputs = received.lock().expect("received inputs");
-        let input = inputs.first().expect("first input");
-        assert!((input.movement.normalized_vector().x - 0.75).abs() < f32::EPSILON);
-        assert!(!input.primary_held);
-        assert_eq!(input.ability_1_sequence, 0);
-        drop(inputs);
+        {
+            let inputs = received.lock().expect("received inputs");
+            let input = inputs.first().expect("first input");
+            assert!((input.movement.normalized_vector().x - 0.75).abs() < f32::EPSILON);
+            assert!(!input.primary_held);
+            assert_eq!(input.ability_1_sequence, 0);
+        }
         driver.shutdown().await.expect("shutdown");
     }
 

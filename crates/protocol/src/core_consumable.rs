@@ -261,7 +261,8 @@ mod tests {
         .into_iter()
         .enumerate()
         {
-            assert_eq!(postcard::to_stdvec(&code).unwrap(), vec![ordinal as u8]);
+            let ordinal = u8::try_from(ordinal).expect("consumable result ordinal fits u8");
+            assert_eq!(postcard::to_stdvec(&code).unwrap(), vec![ordinal]);
         }
     }
 }

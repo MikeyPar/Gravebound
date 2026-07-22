@@ -1785,6 +1785,8 @@ mod tests {
         assert_eq!(planner.calls(), 1);
     }
 
+    // One end-to-end actor trace is clearer than splitting the snapshot-binding invariant.
+    #[allow(clippy::too_many_lines)]
     #[tokio::test]
     async fn intent_actor_binds_transport_to_one_server_owned_character_snapshot() {
         let actor = ProductionRecallIntentActor::new(

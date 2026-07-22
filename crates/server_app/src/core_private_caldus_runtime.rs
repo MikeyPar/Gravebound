@@ -1490,6 +1490,8 @@ mod tests {
         );
     }
 
+    // The scenario intentionally keeps the complete defeat-to-exit invariant in one trace.
+    #[allow(clippy::too_many_lines)]
     #[tokio::test]
     async fn defeat_freezes_evidence_and_only_exact_durable_result_unlocks_exit() {
         let (directory, lease, mut runtime) = drive_to_defeat().await;
