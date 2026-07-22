@@ -244,7 +244,8 @@ LOCAL LAB CONTROLS
 CURRENT M03 ROUTE AND PREVIEWS
 PLAY GAME.cmd runs the normal authenticated QUIC route implemented so far, including
 durable identity, Hall/danger traversal, fixed Bell rooms and Sir Caldus, extraction,
-Emergency Recall, lethal death, Memorial, and successor recovery.
+Emergency Recall, lethal death, Memorial, successor recovery, Belt consumables, and
+authenticated Vault/Overflow custody panels with durable server-planned transfers.
 
 The other launchers expose implemented M03 surfaces for direct review: Lantern Halls,
 the Core dungeon encounters, Sir Caldus, item/Vault state, durable death/Memorial, and
