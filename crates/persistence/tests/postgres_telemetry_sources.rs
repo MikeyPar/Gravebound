@@ -198,8 +198,8 @@ async fn write_first_combat_location(persistence: &PostgresPersistence, commit: 
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(ACCOUNT.as_slice())
     .bind(CHARACTER.as_slice())
-    .bind([14; 16].as_slice())
-    .bind([15; 16].as_slice())
+    .bind([14_u8; 16].as_slice())
+    .bind([15_u8; 16].as_slice())
     .execute(transaction.connection())
     .await
     .unwrap();
