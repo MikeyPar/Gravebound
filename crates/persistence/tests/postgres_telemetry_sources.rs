@@ -1,12 +1,16 @@
 use persistence::{
     CORE_WORLD_ASSETS_BLAKE3, CORE_WORLD_LOCALIZATION_BLAKE3, CORE_WORLD_RECORDS_BLAKE3,
     M03CrashObservationCommandV1, M03SessionObservationCommandV1, M03SessionObservationV1,
-    M03TelemetryPublicationV1, M03TelemetrySessionStartV1, M03TelemetrySourceError,
-    M03TelemetrySourceFamilyV1, PersistenceConfig, PostgresPersistence, StoredM03CrashKindV1,
-    StoredM03CrashReporterV1, StoredM03CrashSourceV1, StoredM03OnboardingEventV1,
-    StoredM03SessionEndReasonV1, StoredM03SessionEventV1, StoredM03TelemetryEnvironmentV1,
-    StoredM03TelemetryEventV1, StoredM03TelemetryPlatformV1, StoredM03TelemetrySourceV1,
-    WIPEABLE_CORE_NAMESPACE,
+    M03TelemetryOutboxError, M03TelemetrySessionStartV1, M03TelemetrySourceError,
+    PersistenceConfig, PostgresM03TelemetryDomainAdapter, PostgresPersistence,
+    StoredM03CrashKindV1, StoredM03CrashReporterV1, StoredM03CrashSourceV1,
+    StoredM03OnboardingEventV1, StoredM03SessionEndReasonV1, StoredM03SessionEventV1,
+    StoredM03TelemetryEnvironmentV1, StoredM03TelemetryEventV1, StoredM03TelemetryPlatformV1,
+    TelemetryPseudonymizationKeyV1, WIPEABLE_CORE_NAMESPACE,
+};
+use telemetry::{
+    CommittedTelemetrySource, TelemetryConnectivity, TelemetryIngestOutcome, TelemetryPipeline,
+    TelemetryPipelineMode,
 };
 
 const ACCOUNT: [u8; 16] = [11; 16];
@@ -36,18 +40,6 @@ fn start_command() -> M03TelemetrySessionStartV1 {
         environment: StoredM03TelemetryEnvironmentV1::Test,
         cohort_tags: vec!["cohort.private".into(), "staff".into()],
         started_at_utc_millis: STARTED_AT,
-    }
-}
-
-fn publication(source: &StoredM03TelemetrySourceV1) -> M03TelemetryPublicationV1 {
-    let family = match source.event {
-        StoredM03TelemetryEventV1::Onboarding(_) => M03TelemetrySourceFamilyV1::Onboarding,
-        StoredM03TelemetryEventV1::Session(_) => M03TelemetrySourceFamilyV1::Session,
-        StoredM03TelemetryEventV1::Crash(_) => M03TelemetrySourceFamilyV1::Crash,
-    };
-    M03TelemetryPublicationV1 {
-        family,
-        event_id: source.event_id,
     }
 }
 
@@ -460,19 +452,79 @@ async fn verify_restart_end_and_publication(restarted: &PostgresPersistence) {
             .is_none()
     );
 
-    let pending = restarted.poll_m03_telemetry_sources_v1(16).await.unwrap();
+    verify_adapter_projection_and_publication(restarted).await;
+}
+
+async fn verify_adapter_projection_and_publication(restarted: &PostgresPersistence) {
+    let mut adapter = PostgresM03TelemetryDomainAdapter::new(
+        restarted.clone(),
+        TelemetryPseudonymizationKeyV1::new([51; 32]).unwrap(),
+    );
+    let pending = adapter.poll_unpublished(16).await.unwrap();
     assert_eq!(pending.len(), 8);
-    let accepted: Vec<_> = pending.iter().map(publication).collect();
+    let mut names = pending
+        .iter()
+        .map(|source| source.envelope().event_name())
+        .collect::<Vec<_>>();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        vec![
+            "account_created",
+            "character_created",
+            "character_entered_combat",
+            "client_crash",
+            "disconnect",
+            "reconnect",
+            "session_ended",
+            "session_started",
+        ]
+    );
+    let mut pipeline = TelemetryPipeline::new(
+        TelemetryPipelineMode::Enabled,
+        TelemetryConnectivity::Online,
+        16,
+    )
+    .unwrap();
+    for source in pending.iter().cloned() {
+        assert_eq!(
+            pipeline.ingest_committed(source),
+            TelemetryIngestOutcome::Queued
+        );
+    }
+    let documents = pipeline.prepare_redacted_batch(16).unwrap();
+    assert_eq!(documents.len(), 8);
+    assert!(documents.iter().all(|document| {
+        document.json.contains("m03-core-dev-telemetry-1")
+            && document.json.contains("\"platform\":\"windows\"")
+            && document.json.contains("\"environment\":\"test\"")
+            && !document.json.contains(&"0b".repeat(16))
+            && !document.json.contains("auth_ticket")
+    }));
+
+    let first = [pending[0].outbox_id()];
+    assert_eq!(adapter.acknowledge_published(&first).await.unwrap(), first);
+    assert!(matches!(
+        adapter.acknowledge_published(&first).await,
+        Err(M03TelemetryOutboxError::UnknownAcknowledgement)
+    ));
     assert_eq!(
         restarted
-            .acknowledge_m03_telemetry_sources_v1(&accepted)
+            .poll_m03_telemetry_sources_v1(16)
             .await
-            .unwrap(),
-        {
-            let mut canonical = accepted.clone();
-            canonical.sort_unstable_by_key(|source| (source.event_id, source.family));
-            canonical
-        }
+            .unwrap()
+            .len(),
+        7
+    );
+    let remaining = pending[1..]
+        .iter()
+        .map(telemetry::CommittedOutboxEventV1::outbox_id)
+        .collect::<Vec<_>>();
+    let mut canonical_remaining = remaining.clone();
+    canonical_remaining.sort_unstable();
+    assert_eq!(
+        adapter.acknowledge_published(&remaining).await.unwrap(),
+        canonical_remaining
     );
     assert!(
         restarted
@@ -482,9 +534,7 @@ async fn verify_restart_end_and_publication(restarted: &PostgresPersistence) {
             .is_empty()
     );
     assert!(matches!(
-        restarted
-            .acknowledge_m03_telemetry_sources_v1(&accepted[..1])
-            .await,
-        Err(M03TelemetrySourceError::PublicationConflict)
+        adapter.acknowledge_published(&[remaining[0]]).await,
+        Err(M03TelemetryOutboxError::UnknownAcknowledgement)
     ));
 }

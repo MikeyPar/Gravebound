@@ -318,7 +318,8 @@ pub use successor::{
 };
 pub use telemetry_outbox::{
     M03TelemetryOutboxError, M03TelemetryProjectionContextV1, MAX_M03_TELEMETRY_POLL,
-    PostgresM03TelemetryOutboxAdapter, TelemetryPseudonymizationKeyV1,
+    PostgresM03TelemetryDomainAdapter, PostgresM03TelemetryOutboxAdapter,
+    TelemetryPseudonymizationKeyV1,
 };
 pub use telemetry_sources::{
     M03CrashObservationCommandV1, M03SessionObservationCommandV1, M03SessionObservationV1,

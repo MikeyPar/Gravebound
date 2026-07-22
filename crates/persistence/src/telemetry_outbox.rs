@@ -10,18 +10,23 @@ use std::{collections::BTreeMap, fmt};
 
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use telemetry::{
-    CommittedOutboxError, CommittedOutboxEventV1, CommittedTelemetrySource, DamageTypeV1,
-    DeathCauseV1, DeathEventV1, ExtractionEventV1, PseudonymousAccountId, RecallEventV1,
-    RecallStateV1, RecallTriggerV1, StableTelemetryId, SuccessorEventV1, TelemetryContextV1,
+    CommittedOutboxError, CommittedOutboxEventV1, CommittedTelemetrySource, CrashEventV1,
+    CrashKindV1, CrashSourceV1, DamageTypeV1, DeathCauseV1, DeathEventV1, ExtractionEventV1,
+    OnboardingEventV1, PseudonymousAccountId, RecallEventV1, RecallStateV1, RecallTriggerV1,
+    SessionEndReasonV1, SessionEventV1, StableTelemetryId, SuccessorEventV1, TelemetryContextV1,
     TelemetryEnvironmentV1, TelemetryEventError, TelemetryEventV1, TelemetryId,
     TelemetryIdentifierError, TelemetryPlatformV1, VersionedTelemetryEnvelopeV1,
 };
 use thiserror::Error;
 
 use crate::{
-    PersistenceError, ProductionRecallTriggerV1, StoredExtractionLocationV1,
-    StoredProductionExtractionResultV1, StoredProductionRecallResultV1, StoredRecallLocationV1,
-    StoredSuccessorResultV1, WIPEABLE_CORE_NAMESPACE,
+    M03TelemetryPublicationV1, M03TelemetrySourceError, M03TelemetrySourceFamilyV1,
+    PersistenceError, PostgresPersistence, ProductionRecallTriggerV1, StoredExtractionLocationV1,
+    StoredM03CrashKindV1, StoredM03CrashSourceV1, StoredM03OnboardingEventV1,
+    StoredM03SessionEndReasonV1, StoredM03SessionEventV1, StoredM03TelemetryContextV1,
+    StoredM03TelemetryEnvironmentV1, StoredM03TelemetryEventV1, StoredM03TelemetryPlatformV1,
+    StoredM03TelemetrySourceV1, StoredProductionExtractionResultV1, StoredProductionRecallResultV1,
+    StoredRecallLocationV1, StoredSuccessorResultV1, WIPEABLE_CORE_NAMESPACE,
 };
 
 pub const MAX_M03_TELEMETRY_POLL: usize = 256;
@@ -459,6 +464,273 @@ impl CommittedTelemetrySource for PostgresM03TelemetryOutboxAdapter {
     }
 }
 
+/// Adapter for the committed onboarding, logical-session, and redacted crash sources introduced
+/// by schema 0070. Unlike the terminal adapter, every TEL-001 context field comes from the owning
+/// durable session row; only the account pseudonymization key is process configuration.
+#[derive(Debug)]
+pub struct PostgresM03TelemetryDomainAdapter {
+    persistence: PostgresPersistence,
+    pseudonymization_key: TelemetryPseudonymizationKeyV1,
+    in_flight: BTreeMap<TelemetryId, M03TelemetrySourceFamilyV1>,
+}
+
+impl PostgresM03TelemetryDomainAdapter {
+    #[must_use]
+    pub fn new(
+        persistence: PostgresPersistence,
+        pseudonymization_key: TelemetryPseudonymizationKeyV1,
+    ) -> Self {
+        Self {
+            persistence,
+            pseudonymization_key,
+            in_flight: BTreeMap::new(),
+        }
+    }
+
+    async fn poll_domain(
+        &mut self,
+        limit: usize,
+    ) -> Result<Vec<CommittedOutboxEventV1>, M03TelemetryOutboxError> {
+        if limit == 0 || limit > crate::MAX_M03_TELEMETRY_SOURCE_POLL_V1 {
+            return Err(M03TelemetryOutboxError::InvalidPollLimit);
+        }
+        let sources = self
+            .persistence
+            .poll_m03_telemetry_sources_v1(limit)
+            .await?;
+        let mut next_in_flight = self.in_flight.clone();
+        let mut projected = Vec::with_capacity(sources.len());
+        for source in sources {
+            let family = domain_family(&source.event);
+            let outbox_id = TelemetryId::new(source.event_id)?;
+            if next_in_flight
+                .insert(outbox_id, family)
+                .is_some_and(|existing| existing != family)
+            {
+                return Err(M03TelemetryOutboxError::DuplicateCrossFamilyEventId);
+            }
+            projected.push(project_domain_source(source, &self.pseudonymization_key)?);
+        }
+        self.in_flight = next_in_flight;
+        Ok(projected)
+    }
+
+    async fn acknowledge_domain(
+        &mut self,
+        accepted: &[TelemetryId],
+    ) -> Result<Vec<TelemetryId>, M03TelemetryOutboxError> {
+        let mut canonical = accepted.to_vec();
+        canonical.sort_unstable();
+        if canonical.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(M03TelemetryOutboxError::InvalidAcknowledgement);
+        }
+        let publications = canonical
+            .iter()
+            .map(|event_id| {
+                let family = self
+                    .in_flight
+                    .get(event_id)
+                    .copied()
+                    .ok_or(M03TelemetryOutboxError::UnknownAcknowledgement)?;
+                Ok(M03TelemetryPublicationV1 {
+                    family,
+                    event_id: event_id.as_bytes(),
+                })
+            })
+            .collect::<Result<Vec<_>, M03TelemetryOutboxError>>()?;
+        let published = self
+            .persistence
+            .acknowledge_m03_telemetry_sources_v1(&publications)
+            .await?;
+        let published_ids = published
+            .into_iter()
+            .map(|publication| TelemetryId::new(publication.event_id))
+            .collect::<Result<Vec<_>, _>>()?;
+        if published_ids != canonical {
+            return Err(M03TelemetryOutboxError::PublicationConflict);
+        }
+        for event_id in &canonical {
+            self.in_flight.remove(event_id);
+        }
+        Ok(canonical)
+    }
+}
+
+impl CommittedTelemetrySource for PostgresM03TelemetryDomainAdapter {
+    type Error = M03TelemetryOutboxError;
+
+    async fn poll_unpublished(
+        &mut self,
+        limit: usize,
+    ) -> Result<Vec<CommittedOutboxEventV1>, Self::Error> {
+        self.poll_domain(limit).await
+    }
+
+    async fn acknowledge_published(
+        &mut self,
+        accepted: &[TelemetryId],
+    ) -> Result<Vec<TelemetryId>, Self::Error> {
+        self.acknowledge_domain(accepted).await
+    }
+}
+
+fn project_domain_source(
+    source: StoredM03TelemetrySourceV1,
+    pseudonymization_key: &TelemetryPseudonymizationKeyV1,
+) -> Result<CommittedOutboxEventV1, M03TelemetryOutboxError> {
+    let outbox_id = TelemetryId::new(source.event_id)?;
+    let _source_id = TelemetryId::new(source.source_id)?;
+    validate_domain_source_binding(&source)?;
+    let event = project_domain_event(source.event)?;
+    let context = project_domain_context(source.context, pseudonymization_key)?;
+    let envelope = VersionedTelemetryEnvelopeV1::new(
+        outbox_id,
+        source.occurred_at_utc_millis,
+        context,
+        event,
+    )?;
+    let committed_at_utc_millis = source.commit_sequence / 1_000;
+    if committed_at_utc_millis == 0 {
+        return Err(M03TelemetryOutboxError::CorruptSourceRow);
+    }
+    Ok(CommittedOutboxEventV1::from_committed_row(
+        outbox_id,
+        source.commit_sequence,
+        committed_at_utc_millis,
+        envelope,
+    )?)
+}
+
+fn project_domain_context(
+    source: StoredM03TelemetryContextV1,
+    pseudonymization_key: &TelemetryPseudonymizationKeyV1,
+) -> Result<TelemetryContextV1, M03TelemetryOutboxError> {
+    Ok(TelemetryContextV1 {
+        pseudonymous_account_id: pseudonymization_key.pseudonymize(source.account_id)?,
+        character_id: source.character_id.map(TelemetryId::new).transpose()?,
+        session_id: TelemetryId::new(source.session_id)?,
+        build_id: StableTelemetryId::new(source.build_id)?,
+        content_bundle_version: StableTelemetryId::new(source.content_bundle_version)?,
+        platform: match source.platform {
+            StoredM03TelemetryPlatformV1::Windows => TelemetryPlatformV1::Windows,
+            StoredM03TelemetryPlatformV1::Linux => TelemetryPlatformV1::Linux,
+            StoredM03TelemetryPlatformV1::MacOs => TelemetryPlatformV1::MacOs,
+            StoredM03TelemetryPlatformV1::Unknown => TelemetryPlatformV1::Unknown,
+        },
+        region_id: StableTelemetryId::new(source.region_id)?,
+        environment: match source.environment {
+            StoredM03TelemetryEnvironmentV1::Local => TelemetryEnvironmentV1::Local,
+            StoredM03TelemetryEnvironmentV1::Test => TelemetryEnvironmentV1::Test,
+            StoredM03TelemetryEnvironmentV1::Staging => TelemetryEnvironmentV1::Staging,
+            StoredM03TelemetryEnvironmentV1::Production => TelemetryEnvironmentV1::Production,
+        },
+        cohort_tags: source
+            .cohort_tags
+            .into_iter()
+            .map(StableTelemetryId::new)
+            .collect::<Result<Vec<_>, _>>()?,
+    })
+}
+
+fn project_domain_event(
+    source: StoredM03TelemetryEventV1,
+) -> Result<TelemetryEventV1, M03TelemetryOutboxError> {
+    Ok(match source {
+        StoredM03TelemetryEventV1::Onboarding(event) => {
+            TelemetryEventV1::Onboarding(match event {
+                StoredM03OnboardingEventV1::AccountCreated => OnboardingEventV1::AccountCreated,
+                StoredM03OnboardingEventV1::CharacterCreated { class_id } => {
+                    OnboardingEventV1::CharacterCreated {
+                        class_id: StableTelemetryId::new(class_id)?,
+                    }
+                }
+                StoredM03OnboardingEventV1::CharacterEnteredCombat {
+                    class_id,
+                    source_content_id,
+                } => {
+                    // The v1 envelope has no content-source payload field. Validate the durable
+                    // stable ID before projecting the exact required TEL-002 event.
+                    let _source_content_id = StableTelemetryId::new(source_content_id)?;
+                    OnboardingEventV1::CharacterEnteredCombat {
+                        class_id: StableTelemetryId::new(class_id)?,
+                    }
+                }
+            })
+        }
+        StoredM03TelemetryEventV1::Session(event) => TelemetryEventV1::Session(match event {
+            StoredM03SessionEventV1::Started => SessionEventV1::Started,
+            StoredM03SessionEventV1::Ended {
+                duration_millis,
+                reason,
+            } => SessionEventV1::Ended {
+                duration_millis,
+                reason: match reason {
+                    StoredM03SessionEndReasonV1::CleanExit => SessionEndReasonV1::CleanExit,
+                    StoredM03SessionEndReasonV1::LinkLost => SessionEndReasonV1::LinkLost,
+                    StoredM03SessionEndReasonV1::TransportClosed => {
+                        SessionEndReasonV1::TransportClosed
+                    }
+                    StoredM03SessionEndReasonV1::ClientCrash => SessionEndReasonV1::ClientCrash,
+                    StoredM03SessionEndReasonV1::ServerShutdown => {
+                        SessionEndReasonV1::ServerShutdown
+                    }
+                },
+            },
+            StoredM03SessionEventV1::Disconnected => SessionEventV1::Disconnected,
+            StoredM03SessionEventV1::Reconnected { link_lost_millis } => {
+                SessionEventV1::Reconnected { link_lost_millis }
+            }
+        }),
+        StoredM03TelemetryEventV1::Crash(event) => TelemetryEventV1::Crash(CrashEventV1 {
+            crash_id: TelemetryId::new(event.crash_id)?,
+            source: match event.source {
+                StoredM03CrashSourceV1::Client => CrashSourceV1::Client,
+                StoredM03CrashSourceV1::Server => CrashSourceV1::Server,
+            },
+            kind: match event.kind {
+                StoredM03CrashKindV1::Panic => CrashKindV1::Panic,
+                StoredM03CrashKindV1::AccessViolation => CrashKindV1::AccessViolation,
+                StoredM03CrashKindV1::OutOfMemory => CrashKindV1::OutOfMemory,
+                StoredM03CrashKindV1::Watchdog => CrashKindV1::Watchdog,
+                StoredM03CrashKindV1::Unknown => CrashKindV1::Unknown,
+            },
+            signature: event.signature,
+            uptime_millis: event.uptime_millis,
+        }),
+    })
+}
+
+fn validate_domain_source_binding(
+    source: &StoredM03TelemetrySourceV1,
+) -> Result<(), M03TelemetryOutboxError> {
+    let valid = match &source.event {
+        StoredM03TelemetryEventV1::Onboarding(StoredM03OnboardingEventV1::AccountCreated) => {
+            source.context.character_id.is_none() && source.source_id == source.context.account_id
+        }
+        StoredM03TelemetryEventV1::Onboarding(
+            StoredM03OnboardingEventV1::CharacterCreated { .. }
+            | StoredM03OnboardingEventV1::CharacterEnteredCombat { .. },
+        ) => source.context.character_id == Some(source.source_id),
+        StoredM03TelemetryEventV1::Session(StoredM03SessionEventV1::Started) => {
+            source.context.character_id.is_none() && source.source_id == source.context.session_id
+        }
+        StoredM03TelemetryEventV1::Session(_) => source.context.character_id.is_none(),
+        StoredM03TelemetryEventV1::Crash(event) => source.source_id == event.crash_id,
+    };
+    if !valid {
+        return Err(M03TelemetryOutboxError::CorruptSourceRow);
+    }
+    Ok(())
+}
+
+const fn domain_family(event: &StoredM03TelemetryEventV1) -> M03TelemetrySourceFamilyV1 {
+    match event {
+        StoredM03TelemetryEventV1::Onboarding(_) => M03TelemetrySourceFamilyV1::Onboarding,
+        StoredM03TelemetryEventV1::Session(_) => M03TelemetrySourceFamilyV1::Session,
+        StoredM03TelemetryEventV1::Crash(_) => M03TelemetrySourceFamilyV1::Crash,
+    }
+}
+
 async fn acknowledge_one(
     transaction: &mut Transaction<'_, Postgres>,
     family: M03OutboxFamily,
@@ -551,11 +823,45 @@ pub enum M03TelemetryOutboxError {
     Event(#[from] TelemetryEventError),
     #[error(transparent)]
     Outbox(#[from] CommittedOutboxError),
+    #[error(transparent)]
+    DomainSource(#[from] M03TelemetrySourceError),
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use telemetry::{
+        TelemetryConnectivity, TelemetryIngestOutcome, TelemetryPipeline, TelemetryPipelineMode,
+    };
+
+    const DOMAIN_ACCOUNT: [u8; 16] = [0x41; 16];
+    const DOMAIN_CHARACTER: [u8; 16] = [0x42; 16];
+    const DOMAIN_SESSION: [u8; 16] = [0x43; 16];
+
+    fn domain_source(
+        source_id: [u8; 16],
+        character_id: Option<[u8; 16]>,
+        event: StoredM03TelemetryEventV1,
+    ) -> StoredM03TelemetrySourceV1 {
+        StoredM03TelemetrySourceV1 {
+            event_id: [0x51; 16],
+            source_id,
+            commit_sequence: 1_750_000_000_100_000,
+            occurred_at_utc_millis: 1_750_000_000_000,
+            context: StoredM03TelemetryContextV1 {
+                account_id: DOMAIN_ACCOUNT,
+                character_id,
+                session_id: DOMAIN_SESSION,
+                build_id: "m03-core-dev-telemetry-1".into(),
+                content_bundle_version: "core-dev".into(),
+                platform: StoredM03TelemetryPlatformV1::Windows,
+                region_id: "local".into(),
+                environment: StoredM03TelemetryEnvironmentV1::Test,
+                cohort_tags: vec!["cohort.private".into(), "staff".into()],
+            },
+            event,
+        }
+    }
 
     #[test]
     fn pseudonyms_are_deterministic_domain_separated_and_debug_redacted() {
@@ -597,5 +903,158 @@ mod tests {
         ] {
             assert!(!POLL_SQL.contains(live_table), "read live {live_table}");
         }
+    }
+
+    #[test]
+    fn schema_0070_projection_uses_durable_context_and_redacts_the_account() {
+        let crash_id = [0x61; 16];
+        let source = domain_source(
+            crash_id,
+            Some(DOMAIN_CHARACTER),
+            StoredM03TelemetryEventV1::Crash(crate::StoredM03CrashEventV1 {
+                crash_id,
+                source: StoredM03CrashSourceV1::Client,
+                kind: StoredM03CrashKindV1::Panic,
+                reporter: crate::StoredM03CrashReporterV1::AuthenticatedClient,
+                signature: [0x71; 32],
+                uptime_millis: 900,
+            }),
+        );
+        let projected = project_domain_source(
+            source,
+            &TelemetryPseudonymizationKeyV1::new([0x81; 32]).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(projected.envelope().event_name(), "client_crash");
+        assert_eq!(projected.commit_sequence(), 1_750_000_000_100_000);
+        assert_eq!(projected.committed_at_utc_millis(), 1_750_000_000_100);
+
+        let mut pipeline = TelemetryPipeline::new(
+            TelemetryPipelineMode::Enabled,
+            TelemetryConnectivity::Online,
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            pipeline.ingest_committed(projected),
+            TelemetryIngestOutcome::Queued
+        );
+        let document = pipeline.prepare_redacted_batch(1).unwrap().remove(0);
+        for exact_context in [
+            "m03-core-dev-telemetry-1",
+            "core-dev",
+            "\"platform\":\"windows\"",
+            "\"region_id\":\"local\"",
+            "\"environment\":\"test\"",
+            "\"cohort_tags\":[\"cohort.private\",\"staff\"]",
+        ] {
+            assert!(
+                document.json.contains(exact_context),
+                "missing {exact_context}"
+            );
+        }
+        assert!(!document.json.contains(&"41".repeat(16)));
+        for forbidden in ["reporter", "stack", "message", "auth_ticket", "ip_address"] {
+            assert!(!document.json.contains(forbidden));
+        }
+    }
+
+    #[test]
+    fn schema_0070_event_mapping_and_source_bindings_are_closed() {
+        let cases = [
+            (
+                domain_source(
+                    DOMAIN_ACCOUNT,
+                    None,
+                    StoredM03TelemetryEventV1::Onboarding(
+                        StoredM03OnboardingEventV1::AccountCreated,
+                    ),
+                ),
+                "account_created",
+            ),
+            (
+                domain_source(
+                    DOMAIN_CHARACTER,
+                    Some(DOMAIN_CHARACTER),
+                    StoredM03TelemetryEventV1::Onboarding(
+                        StoredM03OnboardingEventV1::CharacterCreated {
+                            class_id: "class.grave_arbalist".into(),
+                        },
+                    ),
+                ),
+                "character_created",
+            ),
+            (
+                domain_source(
+                    DOMAIN_CHARACTER,
+                    Some(DOMAIN_CHARACTER),
+                    StoredM03TelemetryEventV1::Onboarding(
+                        StoredM03OnboardingEventV1::CharacterEnteredCombat {
+                            class_id: "class.grave_arbalist".into(),
+                            source_content_id: "world.core_microrealm_01".into(),
+                        },
+                    ),
+                ),
+                "character_entered_combat",
+            ),
+            (
+                domain_source(
+                    DOMAIN_SESSION,
+                    None,
+                    StoredM03TelemetryEventV1::Session(StoredM03SessionEventV1::Started),
+                ),
+                "session_started",
+            ),
+            (
+                domain_source(
+                    [0x44; 16],
+                    None,
+                    StoredM03TelemetryEventV1::Session(StoredM03SessionEventV1::Ended {
+                        duration_millis: 100,
+                        reason: StoredM03SessionEndReasonV1::ServerShutdown,
+                    }),
+                ),
+                "session_ended",
+            ),
+            (
+                domain_source(
+                    [0x45; 16],
+                    None,
+                    StoredM03TelemetryEventV1::Session(StoredM03SessionEventV1::Disconnected),
+                ),
+                "disconnect",
+            ),
+            (
+                domain_source(
+                    [0x46; 16],
+                    None,
+                    StoredM03TelemetryEventV1::Session(StoredM03SessionEventV1::Reconnected {
+                        link_lost_millis: 50,
+                    }),
+                ),
+                "reconnect",
+            ),
+        ];
+        let key = TelemetryPseudonymizationKeyV1::new([0x91; 32]).unwrap();
+        for (index, (mut source, expected_name)) in cases.into_iter().enumerate() {
+            source.event_id[0] = u8::try_from(index + 1).unwrap();
+            let projected = project_domain_source(source, &key).unwrap();
+            assert_eq!(projected.envelope().event_name(), expected_name);
+        }
+
+        let mut mismatched = domain_source(
+            [0xa1; 16],
+            None,
+            StoredM03TelemetryEventV1::Onboarding(StoredM03OnboardingEventV1::AccountCreated),
+        );
+        assert!(matches!(
+            project_domain_source(mismatched.clone(), &key),
+            Err(M03TelemetryOutboxError::CorruptSourceRow)
+        ));
+        mismatched.context.character_id = Some(DOMAIN_CHARACTER);
+        assert!(matches!(
+            project_domain_source(mismatched, &key),
+            Err(M03TelemetryOutboxError::CorruptSourceRow)
+        ));
     }
 }
