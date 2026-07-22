@@ -119,6 +119,7 @@ const EXPECTED_PUBLIC_TABLES: &[&str] = &[
     "gravebound_namespaces",
     "item_instances",
     "item_ledger_events",
+    "item_ledger_telemetry_outbox_v1",
     "memorial_records",
     "onboarding_outbox_events_v1",
     "private_route_generation_allocations_v1",

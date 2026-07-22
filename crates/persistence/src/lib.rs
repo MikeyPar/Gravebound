@@ -325,10 +325,11 @@ pub use telemetry_sources::{
     M03CrashObservationCommandV1, M03SessionObservationCommandV1, M03SessionObservationV1,
     M03TelemetryPublicationV1, M03TelemetrySessionStartV1, M03TelemetrySourceError,
     M03TelemetrySourceFamilyV1, MAX_M03_TELEMETRY_SOURCE_POLL_V1, StoredM03CrashEventV1,
-    StoredM03CrashKindV1, StoredM03CrashReporterV1, StoredM03CrashSourceV1,
-    StoredM03OnboardingEventV1, StoredM03SessionEndReasonV1, StoredM03SessionEventV1,
-    StoredM03TelemetryContextV1, StoredM03TelemetryEnvironmentV1, StoredM03TelemetryEventV1,
-    StoredM03TelemetryPlatformV1, StoredM03TelemetrySessionV1, StoredM03TelemetrySourceV1,
+    StoredM03CrashKindV1, StoredM03CrashReporterV1, StoredM03CrashSourceV1, StoredM03LootActionV1,
+    StoredM03LootEventV1, StoredM03OnboardingEventV1, StoredM03SessionEndReasonV1,
+    StoredM03SessionEventV1, StoredM03TelemetryContextV1, StoredM03TelemetryEnvironmentV1,
+    StoredM03TelemetryEventV1, StoredM03TelemetryPlatformV1, StoredM03TelemetrySessionV1,
+    StoredM03TelemetrySourceV1,
 };
 pub use world_flow::{
     StoredDangerEntryRootV3, StoredSafeArrival, StoredWorldFlowCharacter,
@@ -340,7 +341,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 70;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 71;
 const DISPOSABLE_DATABASE_RESET_SQL: &str =
     "TRUNCATE TABLE core_telemetry_sessions_v1, accounts, caldus_victory_exits CASCADE";
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
@@ -3242,7 +3243,6 @@ mod tests {
 
     #[test]
     fn telemetry_domain_sources_are_additive_typed_and_append_only() {
-        assert_eq!(EXPECTED_SCHEMA_VERSION, 70);
         let migration =
             include_str!("../../../migrations/0070_m03_telemetry_domain_sources_v1.sql");
         for required in [
@@ -3270,6 +3270,42 @@ mod tests {
             assert!(
                 !lowercase.contains(forbidden),
                 "schema 70 introduced forbidden operation or field {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn loot_telemetry_origin_is_atomic_immutable_bounded_and_optional() {
+        assert_eq!(EXPECTED_SCHEMA_VERSION, 71);
+        let migration = include_str!("../../../migrations/0071_m03_loot_telemetry_origin_v1.sql");
+        for required in [
+            "CREATE TABLE item_ledger_telemetry_outbox_v1",
+            "AFTER INSERT ON item_ledger_events",
+            "project_item_ledger_telemetry_v1",
+            "reward.reward_table_id",
+            "cardinality(eligible_sessions) IS DISTINCT FROM 1",
+            "WHEN OTHERS THEN",
+            "item-ledger telemetry source history is immutable",
+            "item-ledger telemetry publication may advance exactly once",
+            "published_at IS NULL",
+        ] {
+            assert!(migration.contains(required), "schema 71 omitted {required}");
+        }
+        let lowercase = migration.to_ascii_lowercase();
+        for forbidden in [
+            "drop table",
+            "truncate table",
+            "delete from",
+            "update item_instances",
+            "update item_ledger_events",
+            "raw_ip",
+            "auth_ticket",
+            "stack_trace",
+            "json",
+        ] {
+            assert!(
+                !lowercase.contains(forbidden),
+                "schema 71 introduced forbidden writer or field {forbidden}"
             );
         }
     }

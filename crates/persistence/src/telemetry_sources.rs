@@ -3,8 +3,8 @@
 //! The three authorities are `Gravebound_Production_GDD_v1_Canonical.md` (`TECH-123`,
 //! `TEL-001`-`005`), `Gravebound_Content_Production_Spec_v1.md` (`CONT-002` and Core stable
 //! IDs), and `Gravebound_Development_Roadmap_v1.md` (`ADR-005`, `GB-M03-09`). Session and crash
-//! facts are written through typed commands. Onboarding facts are read here but are inserted only
-//! by schema-70 triggers inside the owning account, character, or world-flow transaction.
+//! facts are written through typed commands. Onboarding and loot facts are read here but are
+//! inserted only by schema-70/71 projectors inside the owning gameplay transaction.
 
 use std::future::Future;
 
@@ -22,7 +22,8 @@ SELECT family,event_id,account_id,character_id,session_id,build_id,
        content_bundle_version,platform,region_id,environment,cohort_tags,
        occurred_at_millis,commit_order,event_kind,source_id,class_id,source_content_id,
        event_sequence,duration_millis,end_reason,link_lost_millis,crash_id,
-       crash_source,crash_kind,reporter_kind,signature,uptime_millis
+       crash_source,crash_kind,reporter_kind,signature,uptime_millis,
+       loot_action,item_uid,template_id,loot_source_content_id,item_version
 FROM (
     SELECT 0::smallint AS family,onboarding.event_id,onboarding.account_id,
            onboarding.character_id,onboarding.session_id,session.build_id,
@@ -36,7 +37,9 @@ FROM (
            NULL::bigint AS link_lost_millis,NULL::bytea AS crash_id,
            NULL::smallint AS crash_source,NULL::smallint AS crash_kind,
            NULL::smallint AS reporter_kind,NULL::bytea AS signature,
-           NULL::bigint AS uptime_millis
+           NULL::bigint AS uptime_millis,NULL::smallint AS loot_action,
+           NULL::bytea AS item_uid,NULL::text AS template_id,
+           NULL::text AS loot_source_content_id,NULL::bigint AS item_version
     FROM onboarding_outbox_events_v1 AS onboarding
     JOIN core_telemetry_sessions_v1 AS session
       ON session.namespace_id=onboarding.namespace_id
@@ -52,7 +55,8 @@ FROM (
            session_event.event_kind,session_event.source_id,NULL::text,NULL::text,
            session_event.event_sequence,session_event.duration_millis,
            session_event.end_reason,session_event.link_lost_millis,NULL::bytea,
-           NULL::smallint,NULL::smallint,NULL::smallint,NULL::bytea,NULL::bigint
+           NULL::smallint,NULL::smallint,NULL::smallint,NULL::bytea,NULL::bigint,
+           NULL::smallint,NULL::bytea,NULL::text,NULL::text,NULL::bigint
     FROM session_outbox_events_v1 AS session_event
     JOIN core_telemetry_sessions_v1 AS session
       ON session.namespace_id=session_event.namespace_id
@@ -68,13 +72,30 @@ FROM (
            NULL::smallint,crash.crash_id,NULL::text,NULL::text,NULL::bigint,
            NULL::bigint,NULL::smallint,NULL::bigint,crash.crash_id,
            crash.crash_source,crash.crash_kind,crash.reporter_kind,crash.signature,
-           crash.uptime_millis
+           crash.uptime_millis,NULL::smallint,NULL::bytea,NULL::text,NULL::text,
+           NULL::bigint
     FROM crash_outbox_events_v1 AS crash
     JOIN core_telemetry_sessions_v1 AS session
       ON session.namespace_id=crash.namespace_id
      AND session.account_id=crash.account_id
      AND session.session_id=crash.session_id
     WHERE crash.namespace_id=$1 AND crash.published_at IS NULL
+    UNION ALL
+    SELECT 3::smallint,loot.event_id,loot.account_id,loot.character_id,
+           loot.session_id,session.build_id,session.content_bundle_version,
+           session.platform,session.region_id,session.environment,session.cohort_tags,
+           floor(extract(epoch FROM loot.occurred_at)*1000)::bigint,
+           floor(extract(epoch FROM loot.created_at)*1000000)::bigint,
+           NULL::smallint,loot.ledger_event_id,NULL::text,NULL::text,NULL::bigint,
+           NULL::bigint,NULL::smallint,NULL::bigint,NULL::bytea,NULL::smallint,
+           NULL::smallint,NULL::smallint,NULL::bytea,NULL::bigint,loot.loot_action,
+           loot.item_uid,loot.template_id,loot.source_content_id,loot.item_version
+    FROM item_ledger_telemetry_outbox_v1 AS loot
+    JOIN core_telemetry_sessions_v1 AS session
+      ON session.namespace_id=loot.namespace_id
+     AND session.account_id=loot.account_id
+     AND session.session_id=loot.session_id
+    WHERE loot.namespace_id=$1 AND loot.published_at IS NULL
 ) AS committed
 ORDER BY commit_order,event_id,family
 LIMIT $2
@@ -404,11 +425,43 @@ pub struct StoredM03CrashEventV1 {
     pub uptime_millis: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoredM03LootActionV1 {
+    Created,
+    PickedUp,
+    Equipped,
+    Extracted,
+    Destroyed,
+}
+
+impl StoredM03LootActionV1 {
+    fn decode(value: i16) -> Result<Self, M03TelemetrySourceError> {
+        match value {
+            0 => Ok(Self::Created),
+            1 => Ok(Self::PickedUp),
+            2 => Ok(Self::Equipped),
+            3 => Ok(Self::Extracted),
+            4 => Ok(Self::Destroyed),
+            _ => Err(M03TelemetrySourceError::CorruptStoredSource),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredM03LootEventV1 {
+    pub action: StoredM03LootActionV1,
+    pub item_uid: [u8; 16],
+    pub template_id: String,
+    pub source_content_id: String,
+    pub item_version: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoredM03TelemetryEventV1 {
     Onboarding(StoredM03OnboardingEventV1),
     Session(StoredM03SessionEventV1),
     Crash(StoredM03CrashEventV1),
+    Loot(StoredM03LootEventV1),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -426,6 +479,7 @@ pub enum M03TelemetrySourceFamilyV1 {
     Onboarding,
     Session,
     Crash,
+    Loot,
 }
 
 impl M03TelemetrySourceFamilyV1 {
@@ -434,6 +488,7 @@ impl M03TelemetrySourceFamilyV1 {
             0 => Ok(Self::Onboarding),
             1 => Ok(Self::Session),
             2 => Ok(Self::Crash),
+            3 => Ok(Self::Loot),
             _ => Err(M03TelemetrySourceError::CorruptStoredSource),
         }
     }
@@ -773,6 +828,16 @@ impl PostgresPersistence {
                 .rows_affected(),
                 M03TelemetrySourceFamilyV1::Crash => sqlx::query(
                     "UPDATE crash_outbox_events_v1
+                     SET published_at=transaction_timestamp()
+                     WHERE namespace_id=$1 AND event_id=$2 AND published_at IS NULL",
+                )
+                .bind(WIPEABLE_CORE_NAMESPACE)
+                .bind(source.event_id.as_slice())
+                .execute(&mut *transaction.connection())
+                .await?
+                .rows_affected(),
+                M03TelemetrySourceFamilyV1::Loot => sqlx::query(
+                    "UPDATE item_ledger_telemetry_outbox_v1
                      SET published_at=transaction_timestamp()
                      WHERE namespace_id=$1 AND event_id=$2 AND published_at IS NULL",
                 )
@@ -1132,6 +1197,9 @@ fn decode_source_event(
         M03TelemetrySourceFamilyV1::Crash => {
             decode_crash_event(row).map(StoredM03TelemetryEventV1::Crash)
         }
+        M03TelemetrySourceFamilyV1::Loot => {
+            decode_loot_event(row).map(StoredM03TelemetryEventV1::Loot)
+        }
     }
 }
 
@@ -1188,6 +1256,22 @@ fn decode_crash_event(
         reporter: StoredM03CrashReporterV1::decode(required_column(row, "reporter_kind")?)?,
         signature: fixed(required_column(row, "signature")?)?,
         uptime_millis: nonnegative(required_column(row, "uptime_millis")?)?,
+    })
+}
+
+fn decode_loot_event(
+    row: &sqlx::postgres::PgRow,
+) -> Result<StoredM03LootEventV1, M03TelemetrySourceError> {
+    let template_id: String = required_column(row, "template_id")?;
+    let source_content_id: String = required_column(row, "loot_source_content_id")?;
+    validate_stable(&template_id)?;
+    validate_stable(&source_content_id)?;
+    Ok(StoredM03LootEventV1 {
+        action: StoredM03LootActionV1::decode(required_column(row, "loot_action")?)?,
+        item_uid: fixed(required_column(row, "item_uid")?)?,
+        template_id,
+        source_content_id,
+        item_version: positive(required_column(row, "item_version")?)?,
     })
 }
 
@@ -1405,6 +1489,7 @@ mod tests {
             "onboarding_outbox_events_v1",
             "session_outbox_events_v1",
             "crash_outbox_events_v1",
+            "item_ledger_telemetry_outbox_v1",
             "core_telemetry_sessions_v1",
             "published_at IS NULL",
             "ORDER BY commit_order,event_id,family",
@@ -1412,7 +1497,13 @@ mod tests {
         ] {
             assert!(POLL_DOMAIN_SOURCES_SQL.contains(required));
         }
-        for forbidden in ["item_instances", "character_world_locations", "auth_ticket"] {
+        for forbidden in [
+            "item_instances",
+            "FROM item_ledger_events",
+            "reward_requests",
+            "character_world_locations",
+            "auth_ticket",
+        ] {
             assert!(!POLL_DOMAIN_SOURCES_SQL.contains(forbidden));
         }
     }

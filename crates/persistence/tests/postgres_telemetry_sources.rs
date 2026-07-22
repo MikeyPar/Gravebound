@@ -1,11 +1,13 @@
 use persistence::{
-    CORE_WORLD_ASSETS_BLAKE3, CORE_WORLD_LOCALIZATION_BLAKE3, CORE_WORLD_RECORDS_BLAKE3,
-    M03CrashObservationCommandV1, M03SessionObservationCommandV1, M03SessionObservationV1,
-    M03TelemetryOutboxError, M03TelemetrySessionStartV1, M03TelemetrySourceError,
-    PersistenceConfig, PostgresM03TelemetryDomainAdapter, PostgresPersistence,
-    StoredM03CrashKindV1, StoredM03CrashReporterV1, StoredM03CrashSourceV1,
+    CORE_ITEM_CONTENT_REVISION, CORE_WORLD_ASSETS_BLAKE3, CORE_WORLD_LOCALIZATION_BLAKE3,
+    CORE_WORLD_RECORDS_BLAKE3, M03CrashObservationCommandV1, M03SessionObservationCommandV1,
+    M03SessionObservationV1, M03TelemetryOutboxError, M03TelemetrySessionStartV1,
+    M03TelemetrySourceError, PersistenceConfig, PersistenceError,
+    PostgresM03TelemetryDomainAdapter, PostgresPersistence, RewardTransaction,
+    StoredM03CrashKindV1, StoredM03CrashReporterV1, StoredM03CrashSourceV1, StoredM03LootActionV1,
     StoredM03OnboardingEventV1, StoredM03SessionEndReasonV1, StoredM03SessionEventV1,
     StoredM03TelemetryEnvironmentV1, StoredM03TelemetryEventV1, StoredM03TelemetryPlatformV1,
+    StoredRewardCommit, StoredRewardEntry, StoredRewardItem, StoredRewardRequest,
     TelemetryPseudonymizationKeyV1, WIPEABLE_CORE_NAMESPACE,
 };
 use telemetry::{
@@ -53,6 +55,7 @@ async fn telemetry_sources_are_transactional_replay_safe_restart_safe_and_one_wa
     insert_account_and_character(&persistence).await;
     verify_onboarding_context(&persistence, &start).await;
     verify_first_combat_projection_is_transactional(&persistence).await;
+    verify_loot_origin_is_atomic_replay_safe_and_immutable(&persistence).await;
     verify_link_and_crash_observations(&persistence).await;
 
     persistence.close().await;
@@ -60,6 +63,42 @@ async fn telemetry_sources_are_transactional_replay_safe_restart_safe_and_one_wa
     verify_restart_end_and_publication(&restarted).await;
     restarted.reset_disposable_identity_data().await.unwrap();
     restarted.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires explicitly opted-in disposable PostgreSQL"]
+async fn item_writes_succeed_without_a_telemetry_session_or_loot_sidecar() {
+    let persistence = disposable_database().await;
+    persistence.reset_disposable_identity_data().await.unwrap();
+    insert_account_and_character(&persistence).await;
+    let request = reward_request();
+    let commit = reward_commit();
+    assert!(matches!(
+        persistence
+            .transact_reward(request, |_| Ok(((), commit)))
+            .await
+            .unwrap(),
+        RewardTransaction::Fresh { .. }
+    ));
+    let mut inspection = persistence.begin_transaction().await.unwrap();
+    let ledger_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM item_ledger_events WHERE namespace_id=$1")
+            .bind(WIPEABLE_CORE_NAMESPACE)
+            .fetch_one(inspection.connection())
+            .await
+            .unwrap();
+    let telemetry_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM item_ledger_telemetry_outbox_v1 WHERE namespace_id=$1",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .fetch_one(inspection.connection())
+    .await
+    .unwrap();
+    assert_eq!(ledger_count, 1);
+    assert_eq!(telemetry_count, 0);
+    inspection.rollback().await.unwrap();
+    persistence.reset_disposable_identity_data().await.unwrap();
+    persistence.close().await;
 }
 
 async fn verify_session_start_replay(
@@ -337,6 +376,121 @@ async fn write_first_combat_location(persistence: &PostgresPersistence, commit: 
     }
 }
 
+fn reward_request() -> StoredRewardRequest {
+    StoredRewardRequest {
+        reward_request_id: [71; 16],
+        account_id: ACCOUNT,
+        character_id: CHARACTER,
+        source_instance_id: [72; 16],
+        reward_table_id: "reward.normal_outer".into(),
+        content_revision: CORE_ITEM_CONTENT_REVISION.into(),
+        epoch_id: "core".into(),
+        canonical_request_hash: [73; 32],
+    }
+}
+
+fn reward_commit() -> StoredRewardCommit {
+    StoredRewardCommit {
+        plan_hash: [74; 32],
+        result_hash: [75; 32],
+        audit_digest: [76; 32],
+        entries: vec![StoredRewardEntry {
+            roll_index: 0,
+            template_id: "item.charm.ember_tooth.t1".into(),
+            item_kind: 0,
+            quantity: 1,
+            item_level: Some(1),
+            rarity: Some(0),
+        }],
+        items: vec![StoredRewardItem {
+            item_uid: [77; 16],
+            ledger_event_id: [78; 16],
+            roll_index: 0,
+            unit_ordinal: 0,
+            template_id: "item.charm.ember_tooth.t1".into(),
+            item_kind: 0,
+            item_level: Some(1),
+            rarity: Some(0),
+            location_kind: 2,
+            slot_index: Some(0),
+            instance_id: None,
+            pickup_id: None,
+            expires_at_tick: None,
+            provenance_kind: 1,
+            salvage_band: 0,
+            salvage_value: 0,
+        }],
+    }
+}
+
+async fn verify_loot_origin_is_atomic_replay_safe_and_immutable(persistence: &PostgresPersistence) {
+    let request = reward_request();
+    let commit = reward_commit();
+    assert!(matches!(
+        persistence
+            .transact_reward(request.clone(), |_| Ok(((), commit.clone())))
+            .await
+            .unwrap(),
+        RewardTransaction::Fresh { .. }
+    ));
+    assert!(matches!(
+        persistence
+            .transact_reward(
+                request.clone(),
+                |_| -> Result<((), StoredRewardCommit), PersistenceError> {
+                    panic!("exact replay must not replan")
+                },
+            )
+            .await
+            .unwrap(),
+        RewardTransaction::Replay(_)
+    ));
+    let mut changed = request;
+    changed.reward_table_id = "reward.elite_outer".into();
+    assert!(matches!(
+        persistence
+            .transact_reward(
+                changed,
+                |_| -> Result<((), StoredRewardCommit), PersistenceError> {
+                    panic!("changed replay must fail before planning")
+                },
+            )
+            .await,
+        Err(PersistenceError::ItemIdempotencyConflict)
+    ));
+
+    let pending = persistence.poll_m03_telemetry_sources_v1(16).await.unwrap();
+    let loot = pending
+        .iter()
+        .find(|source| {
+            matches!(
+                source.event,
+                StoredM03TelemetryEventV1::Loot(ref event)
+                    if event.action == StoredM03LootActionV1::Created
+                        && event.item_uid == [77; 16]
+                        && event.template_id == "item.charm.ember_tooth.t1"
+                        && event.source_content_id == "reward.normal_outer"
+                        && event.item_version == 1
+            )
+        })
+        .expect("committed reward item must project one immutable loot source");
+    assert_eq!(loot.context.session_id, SESSION);
+    assert_eq!(loot.context.build_id, "m03-core-dev-telemetry-1");
+    assert_eq!(loot.context.content_bundle_version, "core-dev");
+
+    let mut mutation = persistence.begin_transaction().await.unwrap();
+    let update = sqlx::query(
+        "UPDATE item_ledger_telemetry_outbox_v1 SET template_id='item.invalid' \
+         WHERE namespace_id=$1 AND event_id=$2",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(loot.event_id.as_slice())
+    .execute(mutation.connection())
+    .await;
+    assert!(update.is_err());
+    mutation.rollback().await.unwrap();
+}
+
 async fn verify_link_and_crash_observations(persistence: &PostgresPersistence) {
     let disconnect = M03SessionObservationCommandV1 {
         session_id: SESSION,
@@ -461,7 +615,7 @@ async fn verify_adapter_projection_and_publication(restarted: &PostgresPersisten
         TelemetryPseudonymizationKeyV1::new([51; 32]).unwrap(),
     );
     let pending = adapter.poll_unpublished(16).await.unwrap();
-    assert_eq!(pending.len(), 8);
+    assert_eq!(pending.len(), 9);
     let mut names = pending
         .iter()
         .map(|source| source.envelope().event_name())
@@ -475,6 +629,7 @@ async fn verify_adapter_projection_and_publication(restarted: &PostgresPersisten
             "character_entered_combat",
             "client_crash",
             "disconnect",
+            "item_created",
             "reconnect",
             "session_ended",
             "session_started",
@@ -493,7 +648,7 @@ async fn verify_adapter_projection_and_publication(restarted: &PostgresPersisten
         );
     }
     let documents = pipeline.prepare_redacted_batch(16).unwrap();
-    assert_eq!(documents.len(), 8);
+    assert_eq!(documents.len(), 9);
     assert!(documents.iter().all(|document| {
         document.json.contains("m03-core-dev-telemetry-1")
             && document.json.contains("\"platform\":\"windows\"")
@@ -514,7 +669,7 @@ async fn verify_adapter_projection_and_publication(restarted: &PostgresPersisten
             .await
             .unwrap()
             .len(),
-        7
+        8
     );
     let remaining = pending[1..]
         .iter()

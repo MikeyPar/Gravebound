@@ -17,8 +17,8 @@ The percentage uses a stable denominator: the Roadmap's 14 named `GB-M03` work p
 | Package | Verdict | Evidence boundary |
 | --- | --- | --- |
 | `01`, `02`, `04`, `05`, `06`, `07`, `08`, `10`, `11`, `12`, `13` | Proven | Published task evidence and three-authority package audits close their owned contracts. |
-| `03` | Open | The assembled ordinary route is packaged, but final no-command PostgreSQL/real-QUIC full-loop and 25-journey evidence are not yet published. |
-| `09` | Open | Terminal telemetry is committed-source backed; onboarding, session, loot, and crash still need committed producer paths and hosted accuracy/redaction proof. |
+| `03` | Open | The assembled ordinary route is packaged and its production-root source reaches the stable post-Caldus exit, but terminal branches and final no-command PostgreSQL/real-QUIC 25-journey evidence are not yet published. |
+| `09` | Open | Terminal/onboarding/session/crash telemetry is committed-source backed and schema 71 adds immutable loot origin; durable terminal origins, disabled-worker integration, and hosted accuracy/redaction proof remain open. |
 | `14` | Open | Provider-pinned hosting, backup/restore, rollback, and owner-supplied Steamworks evidence remain external gates. |
 
 ## Exit-gate closure (`4 / 9`)
@@ -41,4 +41,4 @@ The optimized tester assembles the implemented player route and its server into 
 
 ## Current Next Step
 
-`GB-M03-10` is now proven by its schema-correct hosted PostgreSQL least-privilege gate and [three-authority audit](GB-M03-10-audit.md). Next, finish committed onboarding/session/loot/crash telemetry runtime sources and run the final production-root PostgreSQL/real-QUIC route through B0–B6, Caldus, extraction, death/successor, 25 loops, and current login timing. After those engineering gates pass, publish the `03`, `03G`, and `09` audits. The owner/operations gates for the 10–20-person cohort, comprehension metrics, provider backup/restore, deployment rollback, and Steamworks evidence remain required for `14` and final M03 closure. Every action continues to be governed by `Gravebound_Production_GDD_v1_Canonical.md`, `Gravebound_Content_Production_Spec_v1.md`, and `Gravebound_Development_Roadmap_v1.md`.
+`GB-M03-10` remains proven by its schema-correct hosted PostgreSQL least-privilege gate and [three-authority audit](GB-M03-10-audit.md). The production-root source now reaches the stable post-Caldus exit; negotiated next-launch panic collection is committed; and schema 71 adds immutable, session-bound loot facts without becoming a gameplay writer. The Current Next Step is hosted execution of the full Bell/schema-71 paths, then extraction, death/successor, 25 loops, current login timing, durable terminal telemetry origins, and disabled-worker integration. After those engineering gates pass, publish the `03`, `03G`, and `09` audits. The owner/operations gates for the 10–20-person cohort, comprehension metrics, provider backup/restore, deployment rollback, and Steamworks evidence remain required for `14` and final M03 closure. Every action continues to be governed by `Gravebound_Production_GDD_v1_Canonical.md`, `Gravebound_Content_Production_Spec_v1.md`, and `Gravebound_Development_Roadmap_v1.md`.

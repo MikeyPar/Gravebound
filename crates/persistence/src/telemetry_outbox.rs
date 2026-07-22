@@ -12,21 +12,23 @@ use sqlx::{PgPool, Postgres, Row, Transaction};
 use telemetry::{
     CommittedOutboxError, CommittedOutboxEventV1, CommittedTelemetrySource, CrashEventV1,
     CrashKindV1, CrashSourceV1, DamageTypeV1, DeathCauseV1, DeathEventV1, ExtractionEventV1,
-    OnboardingEventV1, PseudonymousAccountId, RecallEventV1, RecallStateV1, RecallTriggerV1,
-    SessionEndReasonV1, SessionEventV1, StableTelemetryId, SuccessorEventV1, TelemetryContextV1,
-    TelemetryEnvironmentV1, TelemetryEventError, TelemetryEventV1, TelemetryId,
-    TelemetryIdentifierError, TelemetryPlatformV1, VersionedTelemetryEnvelopeV1,
+    LootActionV1, LootEventV1, OnboardingEventV1, PseudonymousAccountId, RecallEventV1,
+    RecallStateV1, RecallTriggerV1, SessionEndReasonV1, SessionEventV1, StableTelemetryId,
+    SuccessorEventV1, TelemetryContextV1, TelemetryEnvironmentV1, TelemetryEventError,
+    TelemetryEventV1, TelemetryId, TelemetryIdentifierError, TelemetryPlatformV1,
+    VersionedTelemetryEnvelopeV1,
 };
 use thiserror::Error;
 
 use crate::{
     M03TelemetryPublicationV1, M03TelemetrySourceError, M03TelemetrySourceFamilyV1,
     PersistenceError, PostgresPersistence, ProductionRecallTriggerV1, StoredExtractionLocationV1,
-    StoredM03CrashKindV1, StoredM03CrashSourceV1, StoredM03OnboardingEventV1,
-    StoredM03SessionEndReasonV1, StoredM03SessionEventV1, StoredM03TelemetryContextV1,
-    StoredM03TelemetryEnvironmentV1, StoredM03TelemetryEventV1, StoredM03TelemetryPlatformV1,
-    StoredM03TelemetrySourceV1, StoredProductionExtractionResultV1, StoredProductionRecallResultV1,
-    StoredRecallLocationV1, StoredSuccessorResultV1, WIPEABLE_CORE_NAMESPACE,
+    StoredM03CrashKindV1, StoredM03CrashSourceV1, StoredM03LootActionV1,
+    StoredM03OnboardingEventV1, StoredM03SessionEndReasonV1, StoredM03SessionEventV1,
+    StoredM03TelemetryContextV1, StoredM03TelemetryEnvironmentV1, StoredM03TelemetryEventV1,
+    StoredM03TelemetryPlatformV1, StoredM03TelemetrySourceV1, StoredProductionExtractionResultV1,
+    StoredProductionRecallResultV1, StoredRecallLocationV1, StoredSuccessorResultV1,
+    WIPEABLE_CORE_NAMESPACE,
 };
 
 pub const MAX_M03_TELEMETRY_POLL: usize = 256;
@@ -697,6 +699,19 @@ fn project_domain_event(
             signature: event.signature,
             uptime_millis: event.uptime_millis,
         }),
+        StoredM03TelemetryEventV1::Loot(event) => TelemetryEventV1::Loot(LootEventV1 {
+            action: match event.action {
+                StoredM03LootActionV1::Created => LootActionV1::Created,
+                StoredM03LootActionV1::PickedUp => LootActionV1::PickedUp,
+                StoredM03LootActionV1::Equipped => LootActionV1::Equipped,
+                StoredM03LootActionV1::Extracted => LootActionV1::Extracted,
+                StoredM03LootActionV1::Destroyed => LootActionV1::Destroyed,
+            },
+            item_id: TelemetryId::new(event.item_uid)?,
+            template_id: StableTelemetryId::new(event.template_id)?,
+            source_content_id: StableTelemetryId::new(event.source_content_id)?,
+            item_version: event.item_version,
+        }),
     })
 }
 
@@ -716,6 +731,7 @@ fn validate_domain_source_binding(
         }
         StoredM03TelemetryEventV1::Session(_) => source.context.character_id.is_none(),
         StoredM03TelemetryEventV1::Crash(event) => source.source_id == event.crash_id,
+        StoredM03TelemetryEventV1::Loot(_) => source.context.character_id.is_some(),
     };
     if !valid {
         return Err(M03TelemetryOutboxError::CorruptSourceRow);
@@ -728,6 +744,7 @@ const fn domain_family(event: &StoredM03TelemetryEventV1) -> M03TelemetrySourceF
         StoredM03TelemetryEventV1::Onboarding(_) => M03TelemetrySourceFamilyV1::Onboarding,
         StoredM03TelemetryEventV1::Session(_) => M03TelemetrySourceFamilyV1::Session,
         StoredM03TelemetryEventV1::Crash(_) => M03TelemetrySourceFamilyV1::Crash,
+        StoredM03TelemetryEventV1::Loot(_) => M03TelemetrySourceFamilyV1::Loot,
     }
 }
 
@@ -863,6 +880,97 @@ mod tests {
         }
     }
 
+    fn schema_0070_0071_mapping_cases() -> Vec<(StoredM03TelemetrySourceV1, &'static str)> {
+        vec![
+            (
+                domain_source(
+                    DOMAIN_ACCOUNT,
+                    None,
+                    StoredM03TelemetryEventV1::Onboarding(
+                        StoredM03OnboardingEventV1::AccountCreated,
+                    ),
+                ),
+                "account_created",
+            ),
+            (
+                domain_source(
+                    DOMAIN_CHARACTER,
+                    Some(DOMAIN_CHARACTER),
+                    StoredM03TelemetryEventV1::Onboarding(
+                        StoredM03OnboardingEventV1::CharacterCreated {
+                            class_id: "class.grave_arbalist".into(),
+                        },
+                    ),
+                ),
+                "character_created",
+            ),
+            (
+                domain_source(
+                    DOMAIN_CHARACTER,
+                    Some(DOMAIN_CHARACTER),
+                    StoredM03TelemetryEventV1::Onboarding(
+                        StoredM03OnboardingEventV1::CharacterEnteredCombat {
+                            class_id: "class.grave_arbalist".into(),
+                            source_content_id: "world.core_microrealm_01".into(),
+                        },
+                    ),
+                ),
+                "character_entered_combat",
+            ),
+            (
+                domain_source(
+                    DOMAIN_SESSION,
+                    None,
+                    StoredM03TelemetryEventV1::Session(StoredM03SessionEventV1::Started),
+                ),
+                "session_started",
+            ),
+            (
+                domain_source(
+                    [0x44; 16],
+                    None,
+                    StoredM03TelemetryEventV1::Session(StoredM03SessionEventV1::Ended {
+                        duration_millis: 100,
+                        reason: StoredM03SessionEndReasonV1::ServerShutdown,
+                    }),
+                ),
+                "session_ended",
+            ),
+            (
+                domain_source(
+                    [0x45; 16],
+                    None,
+                    StoredM03TelemetryEventV1::Session(StoredM03SessionEventV1::Disconnected),
+                ),
+                "disconnect",
+            ),
+            (
+                domain_source(
+                    [0x46; 16],
+                    None,
+                    StoredM03TelemetryEventV1::Session(StoredM03SessionEventV1::Reconnected {
+                        link_lost_millis: 50,
+                    }),
+                ),
+                "reconnect",
+            ),
+            (
+                domain_source(
+                    [0x47; 16],
+                    Some(DOMAIN_CHARACTER),
+                    StoredM03TelemetryEventV1::Loot(crate::StoredM03LootEventV1 {
+                        action: StoredM03LootActionV1::Created,
+                        item_uid: [0x48; 16],
+                        template_id: "item.weapon.crossbow.pine.t1".into(),
+                        source_content_id: "reward.normal_outer".into(),
+                        item_version: 1,
+                    }),
+                ),
+                "item_created",
+            ),
+        ]
+    }
+
     #[test]
     fn pseudonyms_are_deterministic_domain_separated_and_debug_redacted() {
         let first_key = TelemetryPseudonymizationKeyV1::new([0x31; 32]).unwrap();
@@ -960,83 +1068,11 @@ mod tests {
     }
 
     #[test]
-    fn schema_0070_event_mapping_and_source_bindings_are_closed() {
-        let cases = [
-            (
-                domain_source(
-                    DOMAIN_ACCOUNT,
-                    None,
-                    StoredM03TelemetryEventV1::Onboarding(
-                        StoredM03OnboardingEventV1::AccountCreated,
-                    ),
-                ),
-                "account_created",
-            ),
-            (
-                domain_source(
-                    DOMAIN_CHARACTER,
-                    Some(DOMAIN_CHARACTER),
-                    StoredM03TelemetryEventV1::Onboarding(
-                        StoredM03OnboardingEventV1::CharacterCreated {
-                            class_id: "class.grave_arbalist".into(),
-                        },
-                    ),
-                ),
-                "character_created",
-            ),
-            (
-                domain_source(
-                    DOMAIN_CHARACTER,
-                    Some(DOMAIN_CHARACTER),
-                    StoredM03TelemetryEventV1::Onboarding(
-                        StoredM03OnboardingEventV1::CharacterEnteredCombat {
-                            class_id: "class.grave_arbalist".into(),
-                            source_content_id: "world.core_microrealm_01".into(),
-                        },
-                    ),
-                ),
-                "character_entered_combat",
-            ),
-            (
-                domain_source(
-                    DOMAIN_SESSION,
-                    None,
-                    StoredM03TelemetryEventV1::Session(StoredM03SessionEventV1::Started),
-                ),
-                "session_started",
-            ),
-            (
-                domain_source(
-                    [0x44; 16],
-                    None,
-                    StoredM03TelemetryEventV1::Session(StoredM03SessionEventV1::Ended {
-                        duration_millis: 100,
-                        reason: StoredM03SessionEndReasonV1::ServerShutdown,
-                    }),
-                ),
-                "session_ended",
-            ),
-            (
-                domain_source(
-                    [0x45; 16],
-                    None,
-                    StoredM03TelemetryEventV1::Session(StoredM03SessionEventV1::Disconnected),
-                ),
-                "disconnect",
-            ),
-            (
-                domain_source(
-                    [0x46; 16],
-                    None,
-                    StoredM03TelemetryEventV1::Session(StoredM03SessionEventV1::Reconnected {
-                        link_lost_millis: 50,
-                    }),
-                ),
-                "reconnect",
-            ),
-        ];
+    fn schema_0070_0071_event_mapping_and_source_bindings_are_closed() {
         let key = TelemetryPseudonymizationKeyV1::new([0x91; 32]).unwrap();
-        for (index, (mut source, expected_name)) in cases.into_iter().enumerate() {
+        for (index, (mut source, expected_name)) in
+            schema_0070_0071_mapping_cases().into_iter().enumerate()
+        {
             source.event_id[0] = u8::try_from(index + 1).unwrap();
             let projected = project_domain_source(source, &key).unwrap();
             assert_eq!(projected.envelope().event_name(), expected_name);
