@@ -341,7 +341,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 71;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 72;
 const DISPOSABLE_DATABASE_RESET_SQL: &str =
     "TRUNCATE TABLE core_telemetry_sessions_v1, accounts, caldus_victory_exits CASCADE";
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
@@ -3276,7 +3276,7 @@ mod tests {
 
     #[test]
     fn loot_telemetry_origin_is_atomic_immutable_bounded_and_optional() {
-        assert_eq!(EXPECTED_SCHEMA_VERSION, 71);
+        assert_eq!(EXPECTED_SCHEMA_VERSION, 72);
         let migration = include_str!("../../../migrations/0071_m03_loot_telemetry_origin_v1.sql");
         for required in [
             "CREATE TABLE item_ledger_telemetry_outbox_v1",
@@ -3306,6 +3306,38 @@ mod tests {
             assert!(
                 !lowercase.contains(forbidden),
                 "schema 71 introduced forbidden writer or field {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn loot_telemetry_integer_literal_compatibility_is_additive_and_exact() {
+        let migration = include_str!(
+            "../../../migrations/0072_m03_loot_telemetry_literal_compatibility_v1.sql"
+        );
+        for required in [
+            "loot_action INTEGER",
+            "LANGUAGE SQL",
+            "IMMUTABLE",
+            "STRICT",
+            "loot_action::SMALLINT",
+            "derive_m03_loot_telemetry_event_id_v1(INTEGER, BYTEA)",
+        ] {
+            assert!(migration.contains(required), "schema 72 omitted {required}");
+        }
+        let lowercase = migration.to_ascii_lowercase();
+        for forbidden in [
+            "drop function",
+            "create or replace",
+            "alter table",
+            "insert into",
+            "update ",
+            "delete from",
+            "truncate table",
+        ] {
+            assert!(
+                !lowercase.contains(forbidden),
+                "schema 72 introduced forbidden mutation {forbidden}"
             );
         }
     }

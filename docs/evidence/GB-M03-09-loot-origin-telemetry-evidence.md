@@ -24,6 +24,8 @@ A direct ground-to-equipment transition produces both picked-up and equipped fac
 
 The projector performs a nonlocking MVCC lookup capped at two candidates and emits only when exactly one durable session interval covers the ledger transaction timestamp. This binds an in-flight mutation to its original session even if that session closes and a replacement starts concurrently. No eligible session, corrupt overlap, or any telemetry-side projection error cleanly produces no sidecar row; the item/reward write remains authoritative and successful. Existing pre-schema-71 item history is not backfilled because its origin session cannot be proven.
 
+Hosted run [`29906346469`](https://github.com/MikeyPar/Gravebound/actions/runs/29906346469) proved that the reward, ledger, eligible session, and immutable source identities were present, then exposed one exact schema-71 projection defect: PostgreSQL resolves the trigger's numeric literals as `INTEGER`, while the immutable event-ID function originally accepted only `SMALLINT`. The trigger's fail-open handler correctly preserved gameplay but emitted no sidecar. Additive schema `0072_m03_loot_telemetry_literal_compatibility_v1.sql` adds only an immutable, strict `INTEGER` overload that casts and delegates to the original `SMALLINT` authority. It does not replace schema 71, mutate a table, rewrite history, or weaken gameplay availability.
+
 The persistence poll is statically bounded to 256 rows, reads only the immutable sidecar plus its bound session context, and never consults mutable `item_instances`, live world/session state, or raw authentication/network data. The export adapter converts account IDs to keyed pseudonyms and maps only typed `LootEventV1` fields. Acknowledgement accepts only exact IDs returned by the adapter's in-flight ledger and atomically advances only `published_at`; failed, absent, or lost responses leave rows restart-eligible.
 
 ## Focused verification
@@ -34,6 +36,7 @@ Local production-blocking checks for this slice:
 - `cargo clippy --locked -p persistence --lib --tests --no-deps -- -D warnings`: pass.
 - `cargo test --locked -p persistence --test postgres_foundation --test postgres_telemetry_sources --no-run`: pass, including the exact schema-71 table manifest.
 - Focused schema contract, committed-source polling boundary, and event-mapping unit tests: `3 / 3` pass.
+- Schema-72 additive compatibility contract plus the retained schema-71 contract: `2 / 2` pass.
 - `git diff --check`: pass before commit.
 
 The ignored disposable-PostgreSQL test target now includes:
@@ -46,8 +49,8 @@ The ignored disposable-PostgreSQL test target now includes:
 - redacted adapter serialization and exact one-way acknowledgement; and
 - a separate no-session fixture proving that the reward and ledger commit while no loot sidecar is emitted.
 
-The PostgreSQL journey remains ignored by default; its target compilation passes, while disposable-database execution is pending the next hosted run before operational credit. Remote export remains disabled; no destination, processor, or retention claim is made here.
+The PostgreSQL journey remains ignored by default; its target compilation passes. Run `29906346469` supplied the exact failing PostgreSQL signature, while execution of the additive schema-72 repair is pending the next hosted run before operational credit. Remote export remains disabled; no destination, processor, or retention claim is made here.
 
 ## Current Next Step
 
-Following `Gravebound_Production_GDD_v1_Canonical.md`, `Gravebound_Content_Production_Spec_v1.md`, and `Gravebound_Development_Roadmap_v1.md`, run both schema-71 disposable-PostgreSQL telemetry journeys in hosted CI and record the exact source commit/run. Then instantiate the disabled-by-default worker across committed onboarding/session/crash/loot sources, add bounded lag/queue observability, and complete terminal-family durable origin binding. Do not enable remote export until the `ADR-039` destination, region, access, encryption, retention, deletion, backup-expiry, and privacy-notice review passes.
+Following `Gravebound_Production_GDD_v1_Canonical.md`, `Gravebound_Content_Production_Spec_v1.md`, and `Gravebound_Development_Roadmap_v1.md`, execute both schema-71/72 disposable-PostgreSQL telemetry journeys in hosted CI and record the exact source commit/run. Then commit terminal-family durable origin binding and prove bounded lag/restart behavior through the already-owned disabled production worker. Do not enable remote export until the `ADR-039` destination, region, access, encryption, retention, deletion, backup-expiry, and privacy-notice review passes.
