@@ -123,7 +123,7 @@ jobs:
           cargo test --locked -p server_app --test postgres_caldus_victory -- --ignored --test-threads=1
           cargo test --locked -p server_app --test postgres_field_equipment -- --ignored --test-threads=1
           cargo test --locked -p server_app --test postgres_safe_inventory -- --ignored --test-threads=1 --nocapture
-          cargo test --locked -p server_app --test core_private_life_journey -- --ignored --test-threads=1 --nocapture
+          GRAVEBOUND_TELEMETRY_ENVIRONMENT=test GRAVEBOUND_TELEMETRY_REGION_ID=local-playtest cargo test --locked -p server_app --test core_private_life_journey -- --ignored --test-threads=1 --nocapture
           cargo test --locked -p support_lookup --test postgres_least_privilege -- --ignored --test-threads=1 --nocapture
           cargo test --locked -p server_app --test death_post_terminal_rejection -- --ignored --test-threads=1 --nocapture
           cargo test --locked -p server_app --test core_route_quic -- --ignored --test-threads=1 --nocapture

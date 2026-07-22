@@ -23,7 +23,8 @@ This evidence reads the three design authorities together:
 7. verifies the committed danger location, nonzero lineage and restore-point authority;
 8. matches the live Core-microrealm route and gameplay snapshot by tick and state version;
 9. proves the native client model accepts microrealm control; and
-10. shuts down with exactly one combat admission, no worker/connection residue, and no retained disposable gameplay roots after cleanup.
+10. records the exact schema-70 session/onboarding/first-combat/CleanExit sequence under explicit test attribution; and
+11. shuts down with exactly one combat admission, no worker/connection residue, no open telemetry session, and no retained disposable roots after cleanup.
 
 Every transport and authority transition is bounded. Hall traversal allows 15 seconds per authored waypoint; handshake, reliable mutations, route publication, and matching snapshot waits allow 10 seconds each.
 
@@ -31,8 +32,8 @@ Every transport and authority transition is bounded. Hall traversal allows 15 se
 
 - Focused test-target compilation: PASS.
 - Rust formatting and scoped diff validation: PASS.
-- Strict target lint: pending completion of the concurrently developed telemetry-session module; no remaining finding originates in the journey target.
-- Disposable PostgreSQL plus real-QUIC execution: pending hosted CI because no local `TEST_DATABASE_URL` is configured.
+- Strict target lint: PASS for the production-root journey target with warnings denied.
+- Disposable PostgreSQL plus real-QUIC execution: pending hosted CI because no local `TEST_DATABASE_URL` is configured. The hosted command alone opts into `environment=test` and `region=local-playtest`; all other commands retain disabled-by-default telemetry.
 
 ## Claim boundary
 

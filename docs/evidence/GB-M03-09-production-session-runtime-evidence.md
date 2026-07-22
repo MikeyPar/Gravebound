@@ -29,6 +29,10 @@ The persistent production-root server now owns an optional schema-70 logical-ses
 - Strict persistence library Clippy for durable-head inspection: PASS.
 - Formatting and scoped diff validation: PASS.
 
+## Integrated production-root gate
+
+The ignored hosted journey now opts into `environment=test` and `region=local-playtest` for its command only. Around the actual real-QUIC handshake, account creation, character creation, Hall traversal, and committed microrealm admission, it requires exactly five unpublished schema-70 facts with one immutable account/session context: SessionStarted, AccountCreated, CharacterCreated, CharacterEnteredCombat, and CleanExit. It asserts Windows attribution from `ClientHello`, UUIDv7 session identity, exact Core build/content, `cohort.private` only, no crash event, no remaining open session, and post-reset cleanup.
+
 ## Claim boundary and Current Next Step
 
-This slice wires logical sessions only. It does not claim crash collection, item-ledger loot/session binding, schema-70 worker publication, destination privacy approval, or hosted PostgreSQL/restart evidence. The Current Next Step is to enable `test` attribution in the disposable production-root journey, assert the committed session/onboarding/first-combat/end sequence around real QUIC, then add redacted crash collection and immutable loot origin binding.
+This slice wires logical sessions only. It does not claim crash collection, item-ledger loot/session binding, schema-70 worker publication, destination privacy approval, or a passing hosted PostgreSQL result until the integrated command completes. The Current Next Step is that exact hosted rerun, followed by redacted crash collection and immutable loot origin binding.

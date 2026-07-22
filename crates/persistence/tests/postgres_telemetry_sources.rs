@@ -122,6 +122,34 @@ async fn insert_account_and_character(persistence: &PostgresPersistence) {
     .execute(owning_transaction.connection())
     .await
     .unwrap();
+    for statement in [
+        "INSERT INTO character_progression
+         (namespace_id,account_id,character_id,total_xp,level,current_health,progression_version)
+         VALUES ($1,$2,$3,0,1,120,1)",
+        "INSERT INTO character_inventories
+         (namespace_id,account_id,character_id,inventory_version)
+         VALUES ($1,$2,$3,1)",
+        "INSERT INTO character_oath_bargain_state
+         (namespace_id,account_id,character_id,earned_bargain_slots,oath_bargain_version)
+         VALUES ($1,$2,$3,0,1)",
+    ] {
+        sqlx::query(statement)
+            .bind(WIPEABLE_CORE_NAMESPACE)
+            .bind(ACCOUNT.as_slice())
+            .bind(CHARACTER.as_slice())
+            .execute(owning_transaction.connection())
+            .await
+            .unwrap();
+    }
+    sqlx::query(
+        "INSERT INTO ash_wallets (namespace_id,account_id,balance,wallet_version)
+         VALUES ($1,$2,0,1)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT.as_slice())
+    .execute(owning_transaction.connection())
+    .await
+    .unwrap();
     sqlx::query(
         "INSERT INTO character_world_locations
          (namespace_id,account_id,character_id,character_version,location_kind,
@@ -188,6 +216,10 @@ async fn verify_first_combat_projection_is_transactional(persistence: &PostgresP
     )));
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the component-complete first-combat root stays contiguous for atomic rollback audit"
+)]
 async fn write_first_combat_location(persistence: &PostgresPersistence, commit: bool) {
     let mut transaction = persistence.begin_transaction().await.unwrap();
     sqlx::query(
@@ -205,6 +237,67 @@ async fn write_first_combat_location(persistence: &PostgresPersistence, commit: 
     .bind(CORE_WORLD_ASSETS_BLAKE3)
     .bind(CORE_WORLD_LOCALIZATION_BLAKE3)
     .execute(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO entry_restore_progression_v3
+         (namespace_id,account_id,character_id,restore_point_id,level,total_xp,
+          current_health,progression_version,component_digest)
+         VALUES ($1,$2,$3,$4,1,0,120,1,$5)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT.as_slice())
+    .bind(CHARACTER.as_slice())
+    .bind(RESTORE_POINT.as_slice())
+    .bind([18_u8; 32].as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO entry_restore_progression_v1
+         (namespace_id,account_id,character_id,restore_point_id,level,total_xp,
+          current_health,progression_version)
+         VALUES ($1,$2,$3,$4,1,0,120,1)",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT.as_slice())
+    .bind(CHARACTER.as_slice())
+    .bind(RESTORE_POINT.as_slice())
+    .execute(transaction.connection())
+    .await
+    .unwrap();
+    persistence::stage_danger_entry_inventory_restore_v3(
+        &mut transaction,
+        ACCOUNT,
+        CHARACTER,
+        RESTORE_POINT,
+        [17_u8; 16],
+        0,
+    )
+    .await
+    .unwrap();
+    persistence::stage_danger_entry_oath_bargain_restore_v3(
+        &mut transaction,
+        ACCOUNT,
+        CHARACTER,
+        RESTORE_POINT,
+    )
+    .await
+    .unwrap();
+    persistence::stage_danger_entry_life_metrics_restore_v3(
+        &mut transaction,
+        ACCOUNT,
+        CHARACTER,
+        RESTORE_POINT,
+    )
+    .await
+    .unwrap();
+    persistence::stage_danger_entry_ash_wallet_restore_v3(
+        &mut transaction,
+        ACCOUNT,
+        CHARACTER,
+        RESTORE_POINT,
+    )
     .await
     .unwrap();
     sqlx::query(

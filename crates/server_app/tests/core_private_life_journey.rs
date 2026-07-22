@@ -6,7 +6,11 @@ use std::{
 };
 
 use client_bevy::{CorePrivateRouteClientModel, CorePrivateSceneReadiness, CoreSceneReadiness};
-use persistence::{PersistenceConfig, PostgresPersistence};
+use persistence::{
+    PersistenceConfig, PostgresPersistence, StoredM03OnboardingEventV1,
+    StoredM03SessionEndReasonV1, StoredM03SessionEventV1, StoredM03TelemetryEnvironmentV1,
+    StoredM03TelemetryEventV1, StoredM03TelemetryPlatformV1, StoredM03TelemetrySourceV1,
+};
 use protocol::{
     AccountBootstrapFrame, AccountBootstrapRequest, AccountBootstrapResult, AuthTicket,
     CharacterLocation, CharacterMutationFrame, CharacterMutationPayload, ClientHello, Compression,
@@ -27,6 +31,9 @@ const OPERATION_TIMEOUT: Duration = Duration::from_secs(10);
 const MOVEMENT_TIMEOUT: Duration = Duration::from_secs(15);
 const HALL_CONTENT_ID: &str = "hub.lantern_halls_01";
 const MICROREALM_CONTENT_ID: &str = "world.core_microrealm_01";
+const TELEMETRY_ENVIRONMENT_VARIABLE: &str = "GRAVEBOUND_TELEMETRY_ENVIRONMENT";
+const TELEMETRY_REGION_VARIABLE: &str = "GRAVEBOUND_TELEMETRY_REGION_ID";
+const TELEMETRY_TEST_REGION: &str = "local-playtest";
 
 fn content_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content")
@@ -130,6 +137,134 @@ fn assert_clean_microrealm_shutdown(report: CoreIdentityServerReport) {
     assert_eq!(report.remaining_open_connections, 0);
     assert!(report.zero_residue);
     assert!(report.persistence_enabled);
+}
+
+async fn wait_for_clean_exit_telemetry(
+    persistence: &PostgresPersistence,
+) -> Vec<StoredM03TelemetrySourceV1> {
+    tokio::time::timeout(OPERATION_TIMEOUT, async {
+        loop {
+            let sources = persistence.poll_m03_telemetry_sources_v1(16).await.unwrap();
+            if sources.iter().any(|source| {
+                matches!(
+                    source.event,
+                    StoredM03TelemetryEventV1::Session(StoredM03SessionEventV1::Ended {
+                        reason: StoredM03SessionEndReasonV1::CleanExit,
+                        ..
+                    })
+                )
+            }) {
+                return sources;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("native clean-exit telemetry timed out")
+}
+
+fn assert_production_route_telemetry(
+    sources: &[StoredM03TelemetrySourceV1],
+    character_id: [u8; 16],
+) -> ([u8; 16], [u8; 16]) {
+    assert_eq!(sources.len(), 5);
+    let account_id = sources[0].context.account_id;
+    let session_id = sources[0].context.session_id;
+    assert_ne!(account_id, [0; 16]);
+    assert_eq!(session_id[6] >> 4, 7);
+    assert_eq!(session_id[8] >> 6, 2);
+    assert!(sources.iter().all(|source| {
+        source.context.account_id == account_id
+            && source.context.session_id == session_id
+            && source.context.build_id == CORE_IDENTITY_BUILD_ID
+            && source.context.content_bundle_version == protocol::M03_CORE_DEV_CONTENT_TARGET
+            && source.context.platform == StoredM03TelemetryPlatformV1::Windows
+            && source.context.region_id == TELEMETRY_TEST_REGION
+            && source.context.environment == StoredM03TelemetryEnvironmentV1::Test
+            && source.context.cohort_tags == ["cohort.private"]
+            && source.event_id != [0; 16]
+    }));
+    assert_eq!(
+        sources
+            .iter()
+            .filter(|source| {
+                matches!(
+                    source.event,
+                    StoredM03TelemetryEventV1::Session(StoredM03SessionEventV1::Started)
+                )
+            })
+            .count(),
+        1
+    );
+    assert_eq!(
+        sources
+            .iter()
+            .filter(|source| {
+                matches!(
+                    source.event,
+                    StoredM03TelemetryEventV1::Session(StoredM03SessionEventV1::Ended {
+                        reason: StoredM03SessionEndReasonV1::CleanExit,
+                        ..
+                    })
+                )
+            })
+            .count(),
+        1
+    );
+    assert_eq!(
+        sources
+            .iter()
+            .filter(|source| {
+                matches!(
+                    source.event,
+                    StoredM03TelemetryEventV1::Onboarding(
+                        StoredM03OnboardingEventV1::AccountCreated
+                    )
+                )
+            })
+            .count(),
+        1
+    );
+    assert_eq!(
+        sources
+            .iter()
+            .filter(|source| {
+                source.context.character_id == Some(character_id)
+                    && matches!(
+                        source.event,
+                        StoredM03TelemetryEventV1::Onboarding(
+                            StoredM03OnboardingEventV1::CharacterCreated { ref class_id }
+                        ) if class_id == "class.grave_arbalist"
+                    )
+            })
+            .count(),
+        1
+    );
+    assert_eq!(
+        sources
+            .iter()
+            .filter(|source| {
+                source.context.character_id == Some(character_id)
+                    && matches!(
+                        source.event,
+                        StoredM03TelemetryEventV1::Onboarding(
+                            StoredM03OnboardingEventV1::CharacterEnteredCombat {
+                                ref class_id,
+                                ref source_content_id,
+                            }
+                        ) if class_id == "class.grave_arbalist"
+                            && source_content_id == MICROREALM_CONTENT_ID
+                    )
+            })
+            .count(),
+        1
+    );
+    assert!(
+        sources
+            .iter()
+            .all(|source| { !matches!(source.event, StoredM03TelemetryEventV1::Crash(_)) })
+    );
+    (account_id, session_id)
 }
 
 fn input(sequence: u32, horizontal_milli: i16, vertical_milli: i16) -> InputFrame {
@@ -240,6 +375,16 @@ fn start_server(
     reason = "the production-root route proof stays contiguous so no direct state-writing seam can be hidden"
 )]
 async fn production_root_admits_a_fresh_character_to_controllable_microrealm_and_cleans_up() {
+    assert_eq!(
+        std::env::var(TELEMETRY_ENVIRONMENT_VARIABLE).as_deref(),
+        Ok("test"),
+        "the hosted route command must opt into test-attributed telemetry"
+    );
+    assert_eq!(
+        std::env::var(TELEMETRY_REGION_VARIABLE).as_deref(),
+        Ok(TELEMETRY_TEST_REGION),
+        "the hosted route command must bind one explicit telemetry region"
+    );
     let config = PersistenceConfig::from_test_environment()
         .expect("TEST_DATABASE_URL must identify dedicated disposable PostgreSQL");
     let persistence = PostgresPersistence::connect(&config).await.unwrap();
@@ -679,11 +824,22 @@ async fn production_root_admits_a_fresh_character_to_controllable_microrealm_and
         .unwrap();
     assert!(route_model.can_accept_gameplay_input());
 
-    connection.close(0_u32.into(), b"production-root microrealm proof complete");
-    client_endpoint.close(0_u32.into(), b"production-root microrealm proof complete");
+    connection.close(0_u32.into(), b"native client shutdown");
+    client_endpoint.close(0_u32.into(), b"native client shutdown");
     tokio::time::timeout(OPERATION_TIMEOUT, client_endpoint.wait_idle())
         .await
         .expect("client endpoint cleanup timed out");
+    let cleanup = PostgresPersistence::connect(&config).await.unwrap();
+    cleanup.verify_disposable_test_database().await.unwrap();
+    let sources = wait_for_clean_exit_telemetry(&cleanup).await;
+    let (telemetry_account_id, _) = assert_production_route_telemetry(&sources, character_id);
+    assert!(
+        cleanup
+            .load_open_m03_telemetry_session_v1(telemetry_account_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
     shutdown_send.send(()).unwrap();
     let report = tokio::time::timeout(OPERATION_TIMEOUT, server_task)
         .await
@@ -692,8 +848,6 @@ async fn production_root_admits_a_fresh_character_to_controllable_microrealm_and
         .unwrap();
     assert_clean_microrealm_shutdown(report);
 
-    let cleanup = PostgresPersistence::connect(&config).await.unwrap();
-    cleanup.verify_disposable_test_database().await.unwrap();
     cleanup.reset_disposable_identity_data().await.unwrap();
     let mut verification = cleanup.begin_transaction().await.unwrap();
     let remaining_gameplay_roots: i64 = sqlx::query_scalar(
