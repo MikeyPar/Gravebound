@@ -57,6 +57,7 @@ mod resolution_hold;
 mod resolution_hold_repository;
 mod reward;
 mod safe_inventory;
+mod safe_storage;
 mod successor;
 mod successor_repository;
 mod telemetry_outbox;
@@ -303,6 +304,9 @@ pub use safe_inventory::{
     StoredSafeInventoryResult, StoredSafeInventorySnapshot, load_world_flow_safe_inventory,
     stage_world_flow_safe_inventory_preflight,
 };
+pub use safe_storage::{
+    StoredSafeStorageItem, StoredSafeStoragePage, StoredSafeStorageStack, StoredSafeStorageSurface,
+};
 pub use successor::{
     CORE_SUCCESSOR_BASE_SILHOUETTE_ID, CORE_SUCCESSOR_CLASS_ID, DurableSuccessorPresetV1,
     SUCCESSOR_APPEARANCE_KIND_CORE_BASE_SILHOUETTE, SUCCESSOR_CONTRACT_VERSION_V1,
@@ -325,7 +329,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 67;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 68;
 const DISPOSABLE_DATABASE_RESET_SQL: &str = "TRUNCATE TABLE accounts, caldus_victory_exits CASCADE";
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -556,6 +560,14 @@ pub enum PersistenceError {
     SafeInventoryBindingMismatch,
     #[error("safe-inventory destination lacks capacity for the complete transfer")]
     SafeInventoryStorageFull,
+    #[error("stored safe-storage projection violates the bounded authority contract")]
+    CorruptStoredSafeStorage,
+    #[error("safe-storage query requires the selected living character in Lantern Halls")]
+    SafeStorageHallBindingMismatch,
+    #[error("safe-storage character is not the authenticated account's selected character")]
+    SafeStorageForeignAuthority,
+    #[error("safe-storage continuation aggregate versions are stale")]
+    SafeStorageVersionMismatch,
     #[error("stored Ash wallet or currency ledger violates the approved contract")]
     CorruptStoredAsh,
     #[error("Ash wallet account does not exist")]
@@ -3198,6 +3210,29 @@ mod tests {
             assert!(
                 !lowercase.contains(forbidden),
                 "schema 30 leaked {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn safe_storage_migration_is_append_only_bounded_and_overflow_withdrawal_only() {
+        assert_eq!(EXPECTED_SCHEMA_VERSION, 68);
+        let migration = include_str!(
+            "../../../migrations/0068_safe_storage_view_and_overflow_withdrawal_v1.sql"
+        );
+        for required in [
+            "command_kind BETWEEN 0 AND 3",
+            "command_kind = 3 AND source_slot_index BETWEEN 0 AND 19",
+            "location_kind IN (5, 6, 8)",
+            "CREATE INDEX safe_storage_page_v1",
+        ] {
+            assert!(migration.contains(required), "schema 68 omitted {required}");
+        }
+        let lowercase = migration.to_ascii_lowercase();
+        for forbidden in ["drop table", "truncate", "delete from", "automatic salvage"] {
+            assert!(
+                !lowercase.contains(forbidden),
+                "schema 68 introduced forbidden operation {forbidden}"
             );
         }
     }

@@ -14,7 +14,8 @@ use crate::{
     ProgressionQueryFrame, ProgressionResult, RecallFrameV1, RecallResultV1,
     ResolutionHoldMutationFrameV1, ResolutionHoldMutationResultV1, ResolutionHoldQueryFrameV1,
     ResolutionHoldQueryResultV1, SafeInventoryTransferFrameV1, SafeInventoryTransferResultV1,
-    SuccessorCreateFrameV1, SuccessorCreateResultV1, WireText, WorldFlowFrame, WorldFlowResult,
+    SafeStorageQueryFrameV1, SafeStorageQueryResultV1, SuccessorCreateFrameV1,
+    SuccessorCreateResultV1, WireText, WorldFlowFrame, WorldFlowResult,
 };
 
 pub const FIXED_VECTOR_SCALE: i16 = 1_000;
@@ -53,6 +54,7 @@ pub enum MessageKind {
     SuccessorCreateFrame,
     HallInteractionFrame,
     CoreConsumableUseFrame,
+    SafeStorageQueryFrame,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -471,6 +473,7 @@ pub enum ReliableEvent {
     HallInteractionResult(HallInteractionResultV1),
     CoreConsumableUseResult(CoreConsumableUseResultV1),
     CoreConsumableState(CoreConsumableStateV1),
+    SafeStorageQueryResult(Box<SafeStorageQueryResultV1>),
 }
 
 impl ReliableEvent {
@@ -501,7 +504,8 @@ impl ReliableEvent {
             | Self::CorePrivateRouteState(_)
             | Self::CorePendingInventoryState(_)
             | Self::CoreExtractionReadyState(_)
-            | Self::CoreConsumableState(_) => NetworkChannel::Control,
+            | Self::CoreConsumableState(_)
+            | Self::SafeStorageQueryResult(_) => NetworkChannel::Control,
             Self::SocialPing { .. } => NetworkChannel::Social,
         }
     }
@@ -579,6 +583,9 @@ impl ReliableEvent {
             Self::CoreConsumableState(state) => state
                 .validate()
                 .map_err(|_| MessageValidationError::CoreConsumable),
+            Self::SafeStorageQueryResult(result) => result
+                .validate()
+                .map_err(|_| MessageValidationError::SafeStorage),
             _ => Ok(()),
         }
     }
@@ -628,6 +635,7 @@ pub enum WireMessage {
     SuccessorCreateFrame(SuccessorCreateFrameV1),
     HallInteractionFrame(HallInteractionFrameV1),
     CoreConsumableUseFrame(CoreConsumableUseFrameV1),
+    SafeStorageQueryFrame(SafeStorageQueryFrameV1),
 }
 
 impl WireMessage {
@@ -659,6 +667,7 @@ impl WireMessage {
             Self::SuccessorCreateFrame(_) => MessageKind::SuccessorCreateFrame,
             Self::HallInteractionFrame(_) => MessageKind::HallInteractionFrame,
             Self::CoreConsumableUseFrame(_) => MessageKind::CoreConsumableUseFrame,
+            Self::SafeStorageQueryFrame(_) => MessageKind::SafeStorageQueryFrame,
         }
     }
 
@@ -674,7 +683,8 @@ impl WireMessage {
             | Self::OathViewFrame(_)
             | Self::BargainViewFrame(_)
             | Self::DeathViewFrame(_)
-            | Self::ResolutionHoldQueryFrame(_) => NetworkChannel::Control,
+            | Self::ResolutionHoldQueryFrame(_)
+            | Self::SafeStorageQueryFrame(_) => NetworkChannel::Control,
             Self::InputFrame(_) => NetworkChannel::Input,
             Self::ActionFrame(_) | Self::RecallFrame(_) | Self::HallInteractionFrame(_) => {
                 NetworkChannel::Action
@@ -763,6 +773,9 @@ impl WireMessage {
             Self::CoreConsumableUseFrame(value) => value
                 .validate()
                 .map_err(|_| MessageValidationError::CoreConsumable),
+            Self::SafeStorageQueryFrame(value) => value
+                .validate()
+                .map_err(|_| MessageValidationError::SafeStorage),
         }
     }
 }
@@ -797,6 +810,8 @@ pub enum MessageValidationError {
     HallInteraction,
     #[error("Core consumable message failed semantic validation")]
     CoreConsumable,
+    #[error("safe-storage message failed semantic validation")]
+    SafeStorage,
     #[error("message sequence must be nonzero")]
     ZeroSequence,
     #[error("fixed-point vector component must remain within -1000..=1000")]

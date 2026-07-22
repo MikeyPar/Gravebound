@@ -9,6 +9,7 @@ pub const SAFE_INVENTORY_PLACEMENT_CAPACITY: usize = 6;
 
 const CHARACTER_SAFE_CAPACITY: u16 = 8;
 const VAULT_CAPACITY: u16 = 160;
+const OVERFLOW_CAPACITY: u16 = 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -16,6 +17,7 @@ pub enum SafeInventoryTransferKindV1 {
     CharacterSafeToVault,
     VaultToCharacterSafe,
     CharacterSafeToRunBackpack,
+    OverflowToCharacterSafe,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,6 +41,7 @@ impl SafeInventoryTransferPayloadV1 {
         }
         let source_capacity = match self.kind {
             SafeInventoryTransferKindV1::VaultToCharacterSafe => VAULT_CAPACITY,
+            SafeInventoryTransferKindV1::OverflowToCharacterSafe => OVERFLOW_CAPACITY,
             SafeInventoryTransferKindV1::CharacterSafeToVault
             | SafeInventoryTransferKindV1::CharacterSafeToRunBackpack => CHARACTER_SAFE_CAPACITY,
         };
@@ -249,6 +252,13 @@ mod tests {
             .unwrap();
         assert_eq!(
             frame(SafeInventoryTransferKindV1::VaultToCharacterSafe, 160).validate(),
+            Err(SafeInventoryValidationError::SourceIndex)
+        );
+        frame(SafeInventoryTransferKindV1::OverflowToCharacterSafe, 19)
+            .validate()
+            .unwrap();
+        assert_eq!(
+            frame(SafeInventoryTransferKindV1::OverflowToCharacterSafe, 20).validate(),
             Err(SafeInventoryValidationError::SourceIndex)
         );
         assert_eq!(

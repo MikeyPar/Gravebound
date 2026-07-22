@@ -9,6 +9,7 @@ use crate::{
 
 const CHARACTER_SAFE_CAPACITY: u16 = 8;
 const VAULT_CAPACITY: u16 = 160;
+const OVERFLOW_CAPACITY: u16 = 20;
 const RUN_BACKPACK_CAPACITY: u16 = 8;
 const CONSUMABLE_STACK_CAPACITY: usize = 6;
 const MAX_TRANSACTION_ATTEMPTS: u8 = 3;
@@ -18,6 +19,7 @@ pub enum StoredSafeInventoryCommandKind {
     CharacterSafeToVault,
     VaultToCharacterSafe,
     CharacterSafeToRunBackpack,
+    OverflowToCharacterSafe,
 }
 
 impl StoredSafeInventoryCommandKind {
@@ -26,6 +28,7 @@ impl StoredSafeInventoryCommandKind {
             Self::CharacterSafeToVault => 0,
             Self::VaultToCharacterSafe => 1,
             Self::CharacterSafeToRunBackpack => 2,
+            Self::OverflowToCharacterSafe => 3,
         }
     }
 
@@ -38,6 +41,7 @@ impl StoredSafeInventoryCommandKind {
             0 => Ok(Self::CharacterSafeToVault),
             1 => Ok(Self::VaultToCharacterSafe),
             2 => Ok(Self::CharacterSafeToRunBackpack),
+            3 => Ok(Self::OverflowToCharacterSafe),
             _ => Err(PersistenceError::CorruptStoredSafeInventory),
         }
     }
@@ -48,6 +52,7 @@ pub enum StoredSafeInventoryLocation {
     RunBackpack(u8),
     CharacterSafe(u8),
     Vault(u16),
+    Overflow(u8),
 }
 
 impl StoredSafeInventoryLocation {
@@ -59,6 +64,7 @@ impl StoredSafeInventoryLocation {
                 6,
                 i16::try_from(slot).map_err(|_| PersistenceError::CorruptStoredSafeInventory)?,
             )),
+            Self::Overflow(slot) => Ok((8, i16::from(slot))),
         }
     }
 
@@ -76,6 +82,10 @@ impl StoredSafeInventoryLocation {
                 .ok()
                 .filter(|slot| *slot < VAULT_CAPACITY)
                 .map(Self::Vault),
+            8 => u8::try_from(slot)
+                .ok()
+                .filter(|slot| u16::from(*slot) < OVERFLOW_CAPACITY)
+                .map(Self::Overflow),
             _ => None,
         }
         .ok_or(PersistenceError::CorruptStoredSafeInventory)
@@ -99,6 +109,7 @@ pub struct StoredSafeInventorySnapshot {
     pub character_safe: Vec<StoredSafeInventoryItem>,
     pub vault: Vec<StoredSafeInventoryItem>,
     pub run_backpack: Vec<StoredSafeInventoryItem>,
+    pub overflow: Vec<StoredSafeInventoryItem>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -534,7 +545,7 @@ async fn lock_storage_items(
         "SELECT item_uid, template_id, content_revision, item_kind, item_version, security_state, \
          location_kind, slot_index, character_id FROM item_instances WHERE namespace_id = $1 AND account_id = $2 \
          AND ((character_id = $3 AND location_kind IN (2, 5)) OR \
-         (character_id IS NULL AND location_kind = 6)) ORDER BY item_uid FOR UPDATE",
+         (character_id IS NULL AND location_kind IN (6, 8))) ORDER BY item_uid FOR UPDATE",
     )
     .bind(WIPEABLE_CORE_NAMESPACE)
     .bind(account_id.as_slice())
@@ -558,6 +569,7 @@ fn decode_snapshot(
         character_safe: Vec::new(),
         vault: Vec::new(),
         run_backpack: Vec::new(),
+        overflow: Vec::new(),
     };
     let mut identities = BTreeSet::new();
     for row in rows {
@@ -573,7 +585,10 @@ fn decode_snapshot(
         )?;
         let character_custody = row.try_get::<Option<Vec<u8>>, _>("character_id")?;
         let security_state = row.try_get("security_state")?;
-        if matches!(location, StoredSafeInventoryLocation::Vault(_)) != character_custody.is_none()
+        if matches!(
+            location,
+            StoredSafeInventoryLocation::Vault(_) | StoredSafeInventoryLocation::Overflow(_)
+        ) != character_custody.is_none()
             || (matches!(location, StoredSafeInventoryLocation::RunBackpack(_))
                 && security_state != 2)
             || (!matches!(location, StoredSafeInventoryLocation::RunBackpack(_))
@@ -593,6 +608,7 @@ fn decode_snapshot(
             StoredSafeInventoryLocation::RunBackpack(_) => snapshot.run_backpack.push(item),
             StoredSafeInventoryLocation::CharacterSafe(_) => snapshot.character_safe.push(item),
             StoredSafeInventoryLocation::Vault(_) => snapshot.vault.push(item),
+            StoredSafeInventoryLocation::Overflow(_) => snapshot.overflow.push(item),
         }
     }
     validate_stored_slots(&snapshot)?;
@@ -614,6 +630,7 @@ fn validate_stored_slots(snapshot: &StoredSafeInventorySnapshot) -> Result<(), P
         .iter()
         .chain(&snapshot.vault)
         .chain(&snapshot.run_backpack)
+        .chain(&snapshot.overflow)
     {
         if item.template_id.is_empty() || !matches!(item.item_kind, 0 | 1) {
             return Err(PersistenceError::CorruptStoredSafeInventory);
@@ -648,6 +665,9 @@ fn validate_command(command: &StoredSafeInventoryCommand) -> Result<(), Persiste
         StoredSafeInventoryCommandKind::VaultToCharacterSafe => {
             command.source_slot_index < VAULT_CAPACITY
         }
+        StoredSafeInventoryCommandKind::OverflowToCharacterSafe => {
+            command.source_slot_index < OVERFLOW_CAPACITY
+        }
     };
     if command.mutation_id == [0; 16]
         || command.canonical_request_hash == [0; 32]
@@ -678,6 +698,7 @@ const fn location_in_bounds(location: StoredSafeInventoryLocation) -> bool {
         StoredSafeInventoryLocation::RunBackpack(slot) => (slot as u16) < RUN_BACKPACK_CAPACITY,
         StoredSafeInventoryLocation::CharacterSafe(slot) => (slot as u16) < CHARACTER_SAFE_CAPACITY,
         StoredSafeInventoryLocation::Vault(slot) => slot < VAULT_CAPACITY,
+        StoredSafeInventoryLocation::Overflow(slot) => (slot as u16) < OVERFLOW_CAPACITY,
     }
 }
 
@@ -701,11 +722,18 @@ fn validate_placements(
         StoredSafeInventoryCommandKind::VaultToCharacterSafe => {
             StoredSafeInventoryLocation::Vault(command.source_slot_index)
         }
+        StoredSafeInventoryCommandKind::OverflowToCharacterSafe => {
+            StoredSafeInventoryLocation::Overflow(
+                u8::try_from(command.source_slot_index)
+                    .map_err(|_| PersistenceError::SafeInventoryBindingMismatch)?,
+            )
+        }
     };
     let destination_kind = match command.kind {
         StoredSafeInventoryCommandKind::CharacterSafeToVault => 6,
         StoredSafeInventoryCommandKind::VaultToCharacterSafe => 5,
         StoredSafeInventoryCommandKind::CharacterSafeToRunBackpack => 2,
+        StoredSafeInventoryCommandKind::OverflowToCharacterSafe => 5,
     };
     let mut source_items = items_at(snapshot, source);
     if source_items.is_empty() {
@@ -846,6 +874,7 @@ fn items_at(
         .iter()
         .chain(&snapshot.vault)
         .chain(&snapshot.run_backpack)
+        .chain(&snapshot.overflow)
         .filter(|item| item.location == location)
         .collect()
 }
@@ -855,6 +884,7 @@ const fn location_slot(location: StoredSafeInventoryLocation) -> u16 {
         StoredSafeInventoryLocation::RunBackpack(slot)
         | StoredSafeInventoryLocation::CharacterSafe(slot) => slot as u16,
         StoredSafeInventoryLocation::Vault(slot) => slot,
+        StoredSafeInventoryLocation::Overflow(slot) => slot as u16,
     }
 }
 
@@ -887,7 +917,8 @@ async fn transition_item(
     let changed = sqlx::query(
         "UPDATE item_instances SET character_id = $1, item_version = $2, security_state = $3, \
          location_kind = $4, slot_index = $5, instance_id = NULL, pickup_id = NULL, \
-         expires_at_tick = NULL, destruction_reason = NULL, updated_at = transaction_timestamp() \
+         expires_at_tick = NULL, destruction_reason = NULL, overflow_expires_at = NULL, \
+         updated_at = transaction_timestamp() \
          WHERE namespace_id = $6 AND account_id = $7 AND item_uid = $8 AND item_version = $9 \
          AND location_kind = $10 AND slot_index = $11",
     )
@@ -1127,6 +1158,12 @@ async fn load_replay(
         StoredSafeInventoryCommandKind::VaultToCharacterSafe => {
             StoredSafeInventoryLocation::Vault(source_slot)
         }
+        StoredSafeInventoryCommandKind::OverflowToCharacterSafe => {
+            StoredSafeInventoryLocation::Overflow(
+                u8::try_from(source_slot)
+                    .map_err(|_| PersistenceError::CorruptStoredSafeInventory)?,
+            )
+        }
     };
     let placement_rows = sqlx::query(
         "SELECT item_uid, destination_kind, destination_slot_index, pre_item_version, \
@@ -1268,6 +1305,11 @@ mod tests {
             vault: items
                 .iter()
                 .filter(|item| matches!(item.location, StoredSafeInventoryLocation::Vault(_)))
+                .cloned()
+                .collect(),
+            overflow: items
+                .iter()
+                .filter(|item| matches!(item.location, StoredSafeInventoryLocation::Overflow(_)))
                 .cloned()
                 .collect(),
             run_backpack: items
@@ -1609,6 +1651,7 @@ mod tests {
             ],
             vault: Vec::new(),
             run_backpack: Vec::new(),
+            overflow: Vec::new(),
         };
         assert!(matches!(
             validate_stored_slots(&mixed),

@@ -21,6 +21,7 @@ mod progression;
 mod reliable_inbox;
 mod resolution_hold;
 mod safe_inventory;
+mod safe_storage;
 mod successor;
 mod terminal_inventory;
 mod world_flow;
@@ -48,7 +49,7 @@ pub use codec::{
     encode_protocol_1_14_compatibility_frame, encode_protocol_1_15_compatibility_frame,
     encode_protocol_1_16_compatibility_frame, encode_protocol_1_17_compatibility_frame,
     encode_protocol_1_18_compatibility_frame, encode_protocol_1_19_compatibility_frame,
-    encode_protocol_1_20_compatibility_frame,
+    encode_protocol_1_20_compatibility_frame, encode_protocol_1_21_compatibility_frame,
 };
 pub use core_consumable::{
     CORE_CONSUMABLE_BELT_CAPACITY, CORE_CONSUMABLE_FEATURE_FLAG, CORE_CONSUMABLE_HASH_BYTES,
@@ -140,6 +141,15 @@ pub use safe_inventory::{
     SafeInventoryResultCodeV1, SafeInventoryTransferFrameV1, SafeInventoryTransferKindV1,
     SafeInventoryTransferPayloadV1, SafeInventoryTransferResultV1, SafeInventoryValidationError,
 };
+pub use safe_storage::{
+    SAFE_STORAGE_CONTENT_ID_MAX_BYTES, SAFE_STORAGE_CONTENT_REVISION_MAX_BYTES,
+    SAFE_STORAGE_FEATURE_FLAG, SAFE_STORAGE_ITEM_UID_BYTES, SAFE_STORAGE_MAX_CHARACTER_SAFE_STACKS,
+    SAFE_STORAGE_MAX_ITEMS_PER_STACK, SAFE_STORAGE_MAX_STACKS_PER_PAGE,
+    SAFE_STORAGE_SCHEMA_VERSION, SafeStorageItemKindV1, SafeStorageItemV1, SafeStorageLocationV1,
+    SafeStorageProvenanceV1, SafeStorageQueryCodeV1, SafeStorageQueryFrameV1,
+    SafeStorageQueryResultV1, SafeStorageRarityV1, SafeStorageSecurityV1, SafeStorageStackV1,
+    SafeStorageSurfaceV1, SafeStorageValidationError,
+};
 pub use successor::{
     CORE_SUCCESSOR_BASE_SILHOUETTE_ID, SUCCESSOR_CONTENT_ID_MAX_BYTES, SUCCESSOR_ID_BYTES,
     SUCCESSOR_RESULT_HASH_BYTES, SUCCESSOR_SCHEMA_VERSION, SUCCESSOR_STARTER_ITEM_COUNT,
@@ -171,7 +181,9 @@ use thiserror::Error;
 /// First incompatible protocol generation.
 pub const PROTOCOL_MAJOR: u16 = 1;
 /// Backward-compatible feature generation within [`PROTOCOL_MAJOR`].
-pub const PROTOCOL_MINOR: u16 = CORE_CONSUMABLE_PROTOCOL_MINOR;
+pub const PROTOCOL_MINOR: u16 = SAFE_STORAGE_PROTOCOL_MINOR;
+/// Exact bounded Vault/Overflow read projection generation.
+pub const SAFE_STORAGE_PROTOCOL_MINOR: u16 = 22;
 /// Exact durable Core Belt-consumable generation.
 pub const CORE_CONSUMABLE_PROTOCOL_MINOR: u16 = 21;
 /// Exact authoritative Lantern Halls interaction generation.

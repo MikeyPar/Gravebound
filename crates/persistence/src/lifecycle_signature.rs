@@ -1088,7 +1088,7 @@ fn invalid_equipment_receipt(receipt: &StoredLifecycleEquipmentReceiptV1) -> boo
 
 fn invalid_safe_inventory_receipt(receipt: &StoredLifecycleSafeInventoryReceiptV1) -> bool {
     let account_version_valid = match receipt.command_kind {
-        0 | 1 => receipt.post_account_version == receipt.pre_account_version.saturating_add(1),
+        0 | 1 | 3 => receipt.post_account_version == receipt.pre_account_version.saturating_add(1),
         2 => receipt.post_account_version == receipt.pre_account_version,
         _ => false,
     };

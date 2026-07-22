@@ -20,7 +20,8 @@ pub fn encode_frame(message: &WireMessage) -> Result<Vec<u8>, WireCodecError> {
 /// Reproduces canonical M02 bytes for immutable fixtures and package verification. These frames
 /// are not accepted by the current exact-minor live decoder.
 pub fn encode_m02_compatibility_frame(message: &WireMessage) -> Result<Vec<u8>, WireCodecError> {
-    if message_uses_death_view(message)
+    if message_uses_safe_storage(message)
+        || message_uses_death_view(message)
         || message_uses_terminal_inventory(message)
         || message_uses_successor(message)
         || message_uses_core_private_route(message)
@@ -56,7 +57,8 @@ pub fn encode_m02_compatibility_frame(message: &WireMessage) -> Result<Vec<u8>, 
 pub fn encode_protocol_1_12_compatibility_frame(
     message: &WireMessage,
 ) -> Result<Vec<u8>, WireCodecError> {
-    if message_uses_death_view(message)
+    if message_uses_safe_storage(message)
+        || message_uses_death_view(message)
         || message_uses_terminal_inventory(message)
         || message_uses_successor(message)
         || message_uses_core_private_route(message)
@@ -78,7 +80,8 @@ pub fn encode_protocol_1_12_compatibility_frame(
 pub fn encode_protocol_1_14_compatibility_frame(
     message: &WireMessage,
 ) -> Result<Vec<u8>, WireCodecError> {
-    if message_uses_terminal_inventory(message)
+    if message_uses_safe_storage(message)
+        || message_uses_terminal_inventory(message)
         || message_uses_successor(message)
         || message_uses_core_private_route(message)
         || message_uses_hall_interaction(message)
@@ -99,7 +102,8 @@ pub fn encode_protocol_1_14_compatibility_frame(
 pub fn encode_protocol_1_15_compatibility_frame(
     message: &WireMessage,
 ) -> Result<Vec<u8>, WireCodecError> {
-    if message_uses_resolution_hold(message)
+    if message_uses_safe_storage(message)
+        || message_uses_resolution_hold(message)
         || message_uses_successor(message)
         || message_uses_core_private_route(message)
         || message_uses_hall_interaction(message)
@@ -120,7 +124,8 @@ pub fn encode_protocol_1_15_compatibility_frame(
 pub fn encode_protocol_1_16_compatibility_frame(
     message: &WireMessage,
 ) -> Result<Vec<u8>, WireCodecError> {
-    if message_uses_successor(message)
+    if message_uses_safe_storage(message)
+        || message_uses_successor(message)
         || message_uses_core_private_route(message)
         || message_uses_hall_interaction(message)
     {
@@ -140,7 +145,10 @@ pub fn encode_protocol_1_16_compatibility_frame(
 pub fn encode_protocol_1_17_compatibility_frame(
     message: &WireMessage,
 ) -> Result<Vec<u8>, WireCodecError> {
-    if message_uses_core_private_route(message) || message_uses_hall_interaction(message) {
+    if message_uses_safe_storage(message)
+        || message_uses_core_private_route(message)
+        || message_uses_hall_interaction(message)
+    {
         return Err(WireCodecError::MessageUnavailableAtVersion);
     }
     encode_frame_for_version(
@@ -157,7 +165,10 @@ pub fn encode_protocol_1_17_compatibility_frame(
 pub fn encode_protocol_1_18_compatibility_frame(
     message: &WireMessage,
 ) -> Result<Vec<u8>, WireCodecError> {
-    if message_uses_core_pending_inventory(message) || message_uses_hall_interaction(message) {
+    if message_uses_safe_storage(message)
+        || message_uses_core_pending_inventory(message)
+        || message_uses_hall_interaction(message)
+    {
         return Err(WireCodecError::MessageUnavailableAtVersion);
     }
     encode_frame_for_version(
@@ -174,7 +185,7 @@ pub fn encode_protocol_1_18_compatibility_frame(
 pub fn encode_protocol_1_19_compatibility_frame(
     message: &WireMessage,
 ) -> Result<Vec<u8>, WireCodecError> {
-    if message_uses_hall_interaction(message) {
+    if message_uses_safe_storage(message) || message_uses_hall_interaction(message) {
         return Err(WireCodecError::MessageUnavailableAtVersion);
     }
     encode_frame_for_version(
@@ -191,7 +202,7 @@ pub fn encode_protocol_1_19_compatibility_frame(
 pub fn encode_protocol_1_20_compatibility_frame(
     message: &WireMessage,
 ) -> Result<Vec<u8>, WireCodecError> {
-    if message_uses_core_consumable(message) {
+    if message_uses_safe_storage(message) || message_uses_core_consumable(message) {
         return Err(WireCodecError::MessageUnavailableAtVersion);
     }
     encode_frame_for_version(
@@ -199,6 +210,23 @@ pub fn encode_protocol_1_20_compatibility_frame(
         ProtocolVersion {
             major: PROTOCOL_MAJOR,
             minor: crate::HALL_INTERACTION_PROTOCOL_MINOR,
+        },
+    )
+}
+
+/// Reproduces protocol 1.21 bytes for immutable Core-consumable and earlier fixtures.
+/// Bounded Vault/Overflow projection was appended in 1.22.
+pub fn encode_protocol_1_21_compatibility_frame(
+    message: &WireMessage,
+) -> Result<Vec<u8>, WireCodecError> {
+    if message_uses_safe_storage(message) {
+        return Err(WireCodecError::MessageUnavailableAtVersion);
+    }
+    encode_frame_for_version(
+        message,
+        ProtocolVersion {
+            major: PROTOCOL_MAJOR,
+            minor: crate::CORE_CONSUMABLE_PROTOCOL_MINOR,
         },
     )
 }
@@ -302,6 +330,23 @@ const fn message_uses_core_consumable(message: &WireMessage) -> bool {
     )
 }
 
+const fn message_uses_safe_storage(message: &WireMessage) -> bool {
+    matches!(
+        message,
+        WireMessage::SafeInventoryTransferFrame(crate::SafeInventoryTransferFrameV1 {
+            payload: crate::SafeInventoryTransferPayloadV1 {
+                kind: crate::SafeInventoryTransferKindV1::OverflowToCharacterSafe,
+                ..
+            },
+            ..
+        }) | WireMessage::SafeStorageQueryFrame(_)
+            | WireMessage::ReliableEvent(crate::ReliableEventFrame {
+                event: crate::ReliableEvent::SafeStorageQueryResult(_),
+                ..
+            })
+    )
+}
+
 fn encode_frame_for_version(
     message: &WireMessage,
     version: ProtocolVersion,
@@ -400,6 +445,7 @@ const fn message_kind_byte(kind: MessageKind) -> u8 {
         MessageKind::SuccessorCreateFrame => 23,
         MessageKind::HallInteractionFrame => 24,
         MessageKind::CoreConsumableUseFrame => 25,
+        MessageKind::SafeStorageQueryFrame => 26,
     }
 }
 
@@ -430,6 +476,7 @@ const fn message_kind_from_byte(value: u8) -> Result<MessageKind, WireCodecError
         23 => Ok(MessageKind::SuccessorCreateFrame),
         24 => Ok(MessageKind::HallInteractionFrame),
         25 => Ok(MessageKind::CoreConsumableUseFrame),
+        26 => Ok(MessageKind::SafeStorageQueryFrame),
         other => Err(WireCodecError::UnknownMessageKind(other)),
     }
 }
@@ -985,7 +1032,7 @@ mod tests {
     }
 
     #[test]
-    fn append_only_message_kind_bytes_one_through_twenty_four_are_unchanged() {
+    fn append_only_message_kind_bytes_one_through_twenty_six_are_unchanged() {
         let legacy = [
             MessageKind::ClientHello,
             MessageKind::HandshakeResponse,
@@ -1021,6 +1068,47 @@ mod tests {
         );
         assert_eq!(message_kind_byte(MessageKind::SuccessorCreateFrame), 23);
         assert_eq!(message_kind_byte(MessageKind::HallInteractionFrame), 24);
+        assert_eq!(message_kind_byte(MessageKind::CoreConsumableUseFrame), 25);
+        assert_eq!(message_kind_byte(MessageKind::SafeStorageQueryFrame), 26);
+    }
+
+    #[test]
+    fn protocol_1_22_storage_messages_are_unavailable_at_1_21() {
+        let query = WireMessage::SafeStorageQueryFrame(crate::SafeStorageQueryFrameV1 {
+            schema_version: crate::SAFE_STORAGE_SCHEMA_VERSION,
+            sequence: 1,
+            character_id: [1; crate::CHARACTER_ID_BYTES],
+            surface: crate::SafeStorageSurfaceV1::Vault,
+            after_slot: None,
+            expected_account_version: None,
+            expected_inventory_version: None,
+        });
+        let encoded = encode_frame(&query).unwrap();
+        assert_eq!(encoded[8], 26);
+        assert_eq!(decode_frame(&encoded), Ok(query.clone()));
+        assert_eq!(
+            encode_protocol_1_21_compatibility_frame(&query),
+            Err(WireCodecError::MessageUnavailableAtVersion)
+        );
+
+        let payload = crate::SafeInventoryTransferPayloadV1 {
+            kind: crate::SafeInventoryTransferKindV1::OverflowToCharacterSafe,
+            source_slot_index: 19,
+            expected_account_version: 4,
+            expected_inventory_version: 7,
+        };
+        let withdrawal =
+            WireMessage::SafeInventoryTransferFrame(crate::SafeInventoryTransferFrameV1 {
+                mutation_id: [2; crate::MUTATION_ID_BYTES],
+                character_id: [1; crate::CHARACTER_ID_BYTES],
+                issued_at_unix_millis: 1,
+                payload_hash: payload.canonical_hash(),
+                payload,
+            });
+        assert_eq!(
+            encode_protocol_1_21_compatibility_frame(&withdrawal),
+            Err(WireCodecError::MessageUnavailableAtVersion)
+        );
     }
 
     #[test]
