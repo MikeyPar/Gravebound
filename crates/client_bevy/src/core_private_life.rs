@@ -19,6 +19,7 @@ use bevy::{
     app::AppExit,
     camera::ScalingMode,
     prelude::*,
+    sprite::Anchor,
     window::{PrimaryWindow, WindowResolution},
 };
 use protocol::{
@@ -104,6 +105,212 @@ struct CorePrivateLifeBridge(NetworkWorkerHandle);
 
 #[derive(Debug, Resource)]
 struct CorePrivatePresentationContent(sim_content::CorePrivateLifeContent);
+
+#[derive(Resource)]
+struct CorePrivateActorAssets {
+    player: Handle<Image>,
+    caldus: Handle<Image>,
+    enemies: BTreeMap<&'static str, Handle<Image>>,
+    telegraph_physical: [Handle<Image>; 2],
+    telegraph_veil: [Handle<Image>; 2],
+}
+
+impl FromWorld for CorePrivateActorAssets {
+    fn from_world(world: &mut World) -> Self {
+        let assets = world.resource::<AssetServer>();
+        let enemies = [
+            (
+                "enemy.drowned_pilgrim",
+                "core/enemies/core_bell_encounter_trio/v1/runtime/drowned-pilgrim.48.png",
+            ),
+            (
+                "enemy.bell_reed",
+                "core/enemies/core_bell_encounter_trio/v1/runtime/bell-reed.48.png",
+            ),
+            (
+                "enemy.chain_sentry",
+                "core/enemies/core_bell_encounter_trio/v1/runtime/chain-sentry.48.png",
+            ),
+            (
+                "enemy.mire_leech",
+                "core/enemies/core_bell_secondary_trio/v1/runtime/mire-leech.48.png",
+            ),
+            (
+                "enemy.bell_acolyte",
+                "core/enemies/core_bell_secondary_trio/v1/runtime/bell-acolyte.48.png",
+            ),
+            (
+                "enemy.choir_skull",
+                "core/enemies/core_bell_secondary_trio/v1/runtime/choir-skull.48.png",
+            ),
+            (
+                "miniboss.sepulcher_knight",
+                "core/enemies/sepulcher_knight/v1/runtime/sepulcher-knight.96.png",
+            ),
+        ]
+        .into_iter()
+        .map(|(content_id, path)| (content_id, assets.load(path)))
+        .collect();
+        Self {
+            player: assets.load("core/player/grave_arbalist_anchor_v1.png"),
+            caldus: assets.load("core/bosses/sir_caldus/review/v3/frames/idle/01.png"),
+            enemies,
+            telegraph_physical: [
+                assets.load(
+                    "core/bosses/sir_caldus/combat_presentation/v1/runtime/telegraph-physical-major.standard.32.png",
+                ),
+                assets.load(
+                    "core/bosses/sir_caldus/combat_presentation/v1/runtime/telegraph-physical-major.reduced.32.png",
+                ),
+            ],
+            telegraph_veil: [
+                assets.load(
+                    "core/bosses/sir_caldus/combat_presentation/v1/runtime/telegraph-veil-major.standard.32.png",
+                ),
+                assets.load(
+                    "core/bosses/sir_caldus/combat_presentation/v1/runtime/telegraph-veil-major.reduced.32.png",
+                ),
+            ],
+        }
+    }
+}
+
+#[derive(Debug, Resource, Default)]
+struct CorePrivateCombatPresentation {
+    actor_generation: Option<u64>,
+    scene: Option<CorePrivateRouteSceneV1>,
+    room: Option<protocol::CorePrivateRouteRoomV1>,
+    binding_state_version: u64,
+    actors: BTreeMap<u64, protocol::CoreCombatActorBindingV1>,
+    telegraphs: BTreeMap<(u64, u64), protocol::CoreCombatTelegraphV1>,
+}
+
+impl CorePrivateCombatPresentation {
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    fn apply(
+        &mut self,
+        state: &protocol::CoreCombatPresentationStateV1,
+        route: &protocol::CorePrivateRouteStateV1,
+    ) -> Result<(), CorePrivateLifeClientError> {
+        state
+            .validate()
+            .map_err(|_| CorePrivateLifeClientError::InvalidSnapshotAuthority)?;
+        if state.content_revision != route.content_revision
+            || state.actor_generation != route.actor_generation
+            || state.scene != route.scene
+            || state.room != route.room
+            || state.route_state_version > route.state_version
+            || state
+                .actors
+                .iter()
+                .any(|actor| !core_private_actor_content_supported(actor))
+        {
+            return Err(CorePrivateLifeClientError::InvalidSnapshotAuthority);
+        }
+        let context_changed = self.actor_generation != Some(state.actor_generation)
+            || self.scene != Some(state.scene)
+            || self.room != state.room;
+        if context_changed {
+            self.telegraphs.clear();
+        }
+        self.actor_generation = Some(state.actor_generation);
+        self.scene = Some(state.scene);
+        self.room = state.room;
+        self.binding_state_version = state.route_state_version;
+        self.actors = state
+            .actors
+            .iter()
+            .cloned()
+            .map(|actor| (actor.entity_id, actor))
+            .collect();
+        for telegraph in &state.telegraphs {
+            self.telegraphs.insert(
+                (telegraph.source_entity_id, telegraph.cast_id),
+                telegraph.clone(),
+            );
+        }
+        self.telegraphs.retain(|_, telegraph| {
+            telegraph.resolves_at_tick >= state.server_tick
+                && self.actors.contains_key(&telegraph.source_entity_id)
+        });
+        Ok(())
+    }
+
+    fn retain_for_route(&mut self, route: &protocol::CorePrivateRouteStateV1) {
+        if self.actor_generation != Some(route.actor_generation)
+            || self.scene != Some(route.scene)
+            || self.room != route.room
+        {
+            self.reset();
+        }
+    }
+
+    fn binding_for_snapshot(
+        &self,
+        snapshot: &CompleteSnapshot,
+        route: &protocol::CorePrivateRouteStateV1,
+    ) -> Option<&BTreeMap<u64, protocol::CoreCombatActorBindingV1>> {
+        if self.actor_generation != Some(route.actor_generation)
+            || self.scene != Some(route.scene)
+            || self.room != route.room
+            || self.binding_state_version > snapshot.state_version
+        {
+            return None;
+        }
+        let snapshots = snapshot.entities.iter().filter(|entity| {
+            matches!(
+                entity.kind,
+                protocol::EntityKind::Player
+                    | protocol::EntityKind::Enemy
+                    | protocol::EntityKind::Boss
+            )
+        });
+        let mut count = 0_usize;
+        for entity in snapshots {
+            count += 1;
+            let binding = self.actors.get(&entity.entity_id)?;
+            let matches = matches!(
+                (entity.kind, binding.kind),
+                (
+                    protocol::EntityKind::Player,
+                    protocol::CoreCombatActorKindV1::Player
+                ) | (
+                    protocol::EntityKind::Enemy,
+                    protocol::CoreCombatActorKindV1::Enemy
+                ) | (
+                    protocol::EntityKind::Boss,
+                    protocol::CoreCombatActorKindV1::Boss
+                )
+            );
+            if !matches {
+                return None;
+            }
+        }
+        (count == self.actors.len()).then_some(&self.actors)
+    }
+}
+
+fn core_private_actor_content_supported(actor: &protocol::CoreCombatActorBindingV1) -> bool {
+    match actor.kind {
+        protocol::CoreCombatActorKindV1::Player => {
+            actor.content_id.as_str() == protocol::GRAVE_ARBALIST_CLASS_ID
+        }
+        protocol::CoreCombatActorKindV1::Enemy => matches!(
+            actor.content_id.as_str(),
+            "enemy.drowned_pilgrim"
+                | "enemy.bell_reed"
+                | "enemy.chain_sentry"
+                | "enemy.mire_leech"
+                | "enemy.bell_acolyte"
+                | "enemy.choir_skull"
+                | "miniboss.sepulcher_knight"
+        ),
+        protocol::CoreCombatActorKindV1::Boss => actor.content_id.as_str() == "boss.sir_caldus",
+    }
+}
 
 #[derive(Debug, Resource)]
 struct CorePrivateBargainCopy(crate::bargain_ui::BargainUiCopy);
@@ -1111,6 +1318,7 @@ fn private_life_features_advertised(hello: &ServerHello) -> bool {
         protocol::HALL_INTERACTION_FEATURE_FLAG,
         protocol::CORE_RESOLUTION_HOLD_FEATURE_FLAG,
         protocol::SAFE_STORAGE_FEATURE_FLAG,
+        protocol::CORE_COMBAT_PRESENTATION_FEATURE_FLAG,
     ]
     .into_iter()
     .all(|required| {
@@ -1179,6 +1387,12 @@ struct PrivateGameplayCamera;
 struct PrivateGameplayEntity {
     entity_id: u64,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Component)]
+struct PrivateGameplayTelegraph {
+    source_entity_id: u64,
+    cast_id: u64,
+    segment: u8,
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Component)]
 struct PrivateGameplayFloor {
     actor_generation: u64,
@@ -1187,6 +1401,26 @@ struct PrivateGameplayFloor {
 }
 #[derive(Component)]
 struct PrivateGameplayGeometry;
+#[derive(Component)]
+struct PrivateControlPanel;
+#[derive(Component)]
+struct PrivateCombatHud;
+#[derive(Component)]
+struct PrivateHealthText;
+#[derive(Component)]
+struct PrivateHealthFill;
+#[derive(Component)]
+struct PrivateHealthPanel;
+#[derive(Component)]
+struct PrivateObjectiveText;
+#[derive(Component)]
+struct PrivateActionText;
+#[derive(Component)]
+struct PrivateBossPanel;
+#[derive(Component)]
+struct PrivateBossText;
+#[derive(Component)]
+struct PrivateBossFill;
 
 type NormalPrivateUiVisibility<'w, 's> = Query<
     'w,
@@ -1286,6 +1520,7 @@ pub fn run_core_private_life(config: CorePrivateLifeConfig) -> Result<()> {
         )?)
         .insert_resource(CorePrivateLifeClient::new(world_revision, route_revision))
         .insert_resource(CorePrivateSnapshotClient::default())
+        .insert_resource(CorePrivateCombatPresentation::default())
         .insert_resource(InputSequencer::default())
         .insert_resource(Time::<Fixed>::from_hz(f64::from(
             sim_core::TICKS_PER_SECOND,
@@ -1308,6 +1543,7 @@ pub fn run_core_private_life(config: CorePrivateLifeConfig) -> Result<()> {
             NativeSafeStoragePlugin,
             NativeSuccessorRecoveryPlugin,
         ))
+        .init_resource::<CorePrivateActorAssets>()
         .add_systems(Startup, spawn_ui)
         .add_systems(
             Update,
@@ -1330,10 +1566,14 @@ pub fn run_core_private_life(config: CorePrivateLifeConfig) -> Result<()> {
                 handle_interact_keyboard,
                 send_reliable_combat_edges,
                 handle_buttons,
-                present_private_gameplay,
-                update_ui,
             )
                 .chain(),
+        )
+        .add_systems(
+            Update,
+            (present_private_gameplay, update_combat_hud, update_ui)
+                .chain()
+                .after(handle_buttons),
         )
         .add_systems(
             Update,
@@ -1413,6 +1653,7 @@ fn poll_transport(
     mut safe_storage: ResMut<CorePrivateSafeStorage>,
     mut hall: ResMut<CorePrivateHallInteractionState>,
     mut terminal: ResMut<CorePrivateTerminalUi>,
+    mut presentation: ResMut<CorePrivateCombatPresentation>,
 ) {
     let mut discard_snapshot_queue = false;
     for event in bridge.0.drain_events() {
@@ -1445,12 +1686,14 @@ fn poll_transport(
                     hall: &mut hall,
                     terminal: &mut terminal,
                     tonic_audio: &tonic_audio,
+                    presentation: &mut presentation,
                 },
             ),
             TransportEvent::LinkLost
             | TransportEvent::Reconnecting { .. }
             | TransportEvent::TransportClosed => {
                 snapshots.reset_transport();
+                presentation.reset();
                 bargain.reset();
                 consumable.model.transport_lost();
                 oath.reset();
@@ -1469,6 +1712,7 @@ fn poll_transport(
             }
             TransportEvent::Fatal(_) => {
                 snapshots.reset_transport();
+                presentation.reset();
                 bargain.reset();
                 consumable.model.transport_lost();
                 oath.reset();
@@ -1536,6 +1780,11 @@ fn finish_transport_poll(
         client.error = Some(CorePrivateLifeClientFailure::InvalidServerAuthority);
         client.phase = CorePrivateLifePhase::Error;
     }
+    // Reliable presentation and datagram snapshots use independent QUIC delivery paths. A
+    // snapshot may therefore arrive first even though the server published its binding first.
+    // Retain that authoritative snapshot; the renderer withholds danger actors until the exact
+    // context-matching binding arrives instead of converting harmless reordering into a fatal
+    // authority error.
     let at_b4 = client
         .route
         .as_ref()
@@ -1583,6 +1832,7 @@ struct CorePrivateReliableUi<'a> {
     hall: &'a mut CorePrivateHallInteractionState,
     terminal: &'a mut CorePrivateTerminalUi,
     tonic_audio: &'a crate::consumable::TonicAudioCue,
+    presentation: &'a mut CorePrivateCombatPresentation,
 }
 
 #[allow(
@@ -1604,6 +1854,7 @@ fn apply_private_reliable(
         hall,
         terminal,
         tonic_audio,
+        presentation,
     } = ui;
     match &frame.event {
         ReliableEvent::AccountBootstrapResult(result) => client.apply_bootstrap(result.clone()),
@@ -1627,6 +1878,13 @@ fn apply_private_reliable(
         }
         ReliableEvent::CorePrivateRouteState(_) => {
             client.apply_route(frame)?;
+            if let Some(route) = client
+                .route
+                .as_ref()
+                .and_then(CorePrivateRouteClientModel::route_state)
+            {
+                presentation.retain_for_route(route);
+            }
             consumable.model.retain_for_route(
                 client.selected_character_id(),
                 client
@@ -1635,6 +1893,14 @@ fn apply_private_reliable(
                     .and_then(CorePrivateRouteClientModel::route_state),
             );
             Ok(())
+        }
+        ReliableEvent::CoreCombatPresentationState(state) => {
+            let route = client
+                .route
+                .as_ref()
+                .and_then(CorePrivateRouteClientModel::route_state)
+                .ok_or(CorePrivateLifeClientError::InvalidSnapshotAuthority)?;
+            presentation.apply(state, route)
         }
         ReliableEvent::RecallResult(result) => client.apply_recall((**result).clone()),
         ReliableEvent::BargainViewResult(result) => {
@@ -3371,6 +3637,7 @@ fn normalized_input(x: i8, y: i8) -> (i16, i16) {
 #[allow(
     clippy::needless_pass_by_value,
     clippy::too_many_arguments,
+    clippy::too_many_lines,
     reason = "Bevy presentation owns disjoint entity, floor, and camera queries"
 )]
 fn present_private_gameplay(
@@ -3378,8 +3645,23 @@ fn present_private_gameplay(
     client: Res<CorePrivateLifeClient>,
     snapshots: Res<CorePrivateSnapshotClient>,
     content: Res<CorePrivatePresentationContent>,
+    presentation: Res<CorePrivateCombatPresentation>,
+    assets: Res<CorePrivateActorAssets>,
+    accessibility: Res<AccessibilitySettings>,
     mut camera: Single<&mut Transform, With<PrivateGameplayCamera>>,
-    mut entities: Query<(Entity, &PrivateGameplayEntity, &mut Transform, &mut Sprite)>,
+    mut entities: Query<(
+        Entity,
+        &PrivateGameplayEntity,
+        &mut Transform,
+        &mut Sprite,
+        &mut Anchor,
+    )>,
+    mut telegraph_entities: Query<(
+        Entity,
+        &PrivateGameplayTelegraph,
+        &mut Transform,
+        &mut Sprite,
+    )>,
     floors: Query<(Entity, &PrivateGameplayFloor)>,
     geometry: Query<Entity, With<PrivateGameplayGeometry>>,
 ) {
@@ -3396,17 +3678,46 @@ fn present_private_gameplay(
             )
         })
     else {
-        despawn_private_gameplay(&mut commands, &entities, &floors, &geometry);
+        despawn_private_gameplay(
+            &mut commands,
+            &entities,
+            &telegraph_entities,
+            &floors,
+            &geometry,
+        );
         return;
     };
     let Some(snapshot) = snapshots.latest.as_ref() else {
-        despawn_private_gameplay(&mut commands, &entities, &floors, &geometry);
+        despawn_private_gameplay(
+            &mut commands,
+            &entities,
+            &telegraph_entities,
+            &floors,
+            &geometry,
+        );
         return;
     };
     let Some((width, height)) = private_scene_dimensions(&content.0, route) else {
-        despawn_private_gameplay(&mut commands, &entities, &floors, &geometry);
+        despawn_private_gameplay(
+            &mut commands,
+            &entities,
+            &telegraph_entities,
+            &floors,
+            &geometry,
+        );
         return;
     };
+    let bindings = presentation.binding_for_snapshot(snapshot, route);
+    if route.scene != CorePrivateRouteSceneV1::LanternHalls && bindings.is_none() {
+        despawn_private_gameplay(
+            &mut commands,
+            &entities,
+            &telegraph_entities,
+            &floors,
+            &geometry,
+        );
+        return;
+    }
     let floor_binding = PrivateGameplayFloor {
         actor_generation: route.actor_generation,
         scene: route.scene,
@@ -3434,7 +3745,7 @@ fn present_private_gameplay(
         .iter()
         .map(|entity| (entity.entity_id, entity))
         .collect::<BTreeMap<_, _>>();
-    for (entity, visual, mut transform, mut sprite) in &mut entities {
+    for (entity, visual, mut transform, mut sprite, mut anchor) in &mut entities {
         let Some(snapshot) = desired.get(&visual.entity_id) else {
             commands.entity(entity).despawn();
             continue;
@@ -3442,21 +3753,31 @@ fn present_private_gameplay(
         let render = private_snapshot_position(snapshot, width, height);
         transform.translation.x = render.x;
         transform.translation.y = render.y;
-        let (color, size, z) = private_entity_style(snapshot.kind);
-        sprite.color = color;
-        sprite.custom_size = Some(Vec2::splat(size));
-        transform.translation.z = z;
+        let plan = private_entity_visual(
+            snapshot,
+            bindings.and_then(|actors| actors.get(&snapshot.entity_id)),
+            &assets,
+        );
+        sprite.image = plan.image.unwrap_or_default();
+        sprite.color = plan.color;
+        sprite.custom_size = Some(plan.size);
+        *anchor = plan.anchor;
+        transform.translation.z = plan.z;
     }
     let existing = entities
         .iter()
-        .map(|(_, visual, _, _)| visual.entity_id)
+        .map(|(_, visual, _, _, _)| visual.entity_id)
         .collect::<std::collections::BTreeSet<_>>();
     for snapshot in snapshot
         .entities
         .iter()
         .filter(|snapshot| !existing.contains(&snapshot.entity_id))
     {
-        let (color, size, z) = private_entity_style(snapshot.kind);
+        let plan = private_entity_visual(
+            snapshot,
+            bindings.and_then(|actors| actors.get(&snapshot.entity_id)),
+            &assets,
+        );
         let render = private_snapshot_position(snapshot, width, height);
         commands.spawn((
             Name::new(format!(
@@ -3466,10 +3787,27 @@ fn present_private_gameplay(
             PrivateGameplayEntity {
                 entity_id: snapshot.entity_id,
             },
-            Sprite::from_color(color, Vec2::splat(size)),
-            Transform::from_xyz(render.x, render.y, z),
+            Sprite {
+                image: plan.image.unwrap_or_default(),
+                color: plan.color,
+                custom_size: Some(plan.size),
+                ..default()
+            },
+            plan.anchor,
+            Transform::from_xyz(render.x, render.y, plan.z),
         ));
     }
+    present_private_telegraphs(
+        &mut commands,
+        &mut telegraph_entities,
+        bindings,
+        &presentation,
+        snapshot.server_tick,
+        width,
+        height,
+        &assets,
+        *accessibility,
+    );
     if let Some(player) = snapshot
         .entities
         .iter()
@@ -3483,11 +3821,26 @@ fn present_private_gameplay(
 
 fn despawn_private_gameplay(
     commands: &mut Commands,
-    entities: &Query<(Entity, &PrivateGameplayEntity, &mut Transform, &mut Sprite)>,
+    entities: &Query<(
+        Entity,
+        &PrivateGameplayEntity,
+        &mut Transform,
+        &mut Sprite,
+        &mut Anchor,
+    )>,
+    telegraphs: &Query<(
+        Entity,
+        &PrivateGameplayTelegraph,
+        &mut Transform,
+        &mut Sprite,
+    )>,
     floors: &Query<(Entity, &PrivateGameplayFloor)>,
     geometry: &Query<Entity, With<PrivateGameplayGeometry>>,
 ) {
-    for (entity, _, _, _) in entities {
+    for (entity, _, _, _, _) in entities {
+        commands.entity(entity).despawn();
+    }
+    for (entity, _, _, _) in telegraphs {
         commands.entity(entity).despawn();
     }
     for (entity, _) in floors {
@@ -3765,6 +4118,377 @@ fn private_snapshot_position(snapshot: &protocol::EntitySnapshot, width: f32, he
     )
 }
 
+#[derive(Clone)]
+struct PrivateEntityVisual {
+    image: Option<Handle<Image>>,
+    color: Color,
+    size: Vec2,
+    anchor: Anchor,
+    z: f32,
+}
+
+fn private_entity_visual(
+    snapshot: &protocol::EntitySnapshot,
+    binding: Option<&protocol::CoreCombatActorBindingV1>,
+    assets: &CorePrivateActorAssets,
+) -> PrivateEntityVisual {
+    let authored = match snapshot.kind {
+        protocol::EntityKind::Player => {
+            Some((assets.player.clone(), Vec2::new(1.65, 2.48), Anchor::CENTER))
+        }
+        protocol::EntityKind::Enemy => binding
+            .and_then(|binding| assets.enemies.get(binding.content_id.as_str()))
+            .map(|image| {
+                let size = if binding.is_some_and(|binding| {
+                    binding.content_id.as_str() == "miniboss.sepulcher_knight"
+                }) {
+                    1.75
+                } else {
+                    1.05
+                };
+                (image.clone(), Vec2::splat(size), Anchor::BOTTOM_CENTER)
+            }),
+        protocol::EntityKind::Boss => binding
+            .filter(|binding| binding.content_id.as_str() == "boss.sir_caldus")
+            .map(|_| {
+                (
+                    assets.caldus.clone(),
+                    Vec2::splat(2.15),
+                    Anchor::BOTTOM_CENTER,
+                )
+            }),
+        _ => None,
+    };
+    let (fallback_color, fallback_size, z) = private_entity_style(snapshot.kind);
+    authored.map_or(
+        PrivateEntityVisual {
+            image: None,
+            color: fallback_color,
+            size: Vec2::splat(fallback_size),
+            anchor: Anchor::CENTER,
+            z,
+        },
+        |(image, size, anchor)| PrivateEntityVisual {
+            image: Some(image),
+            color: Color::srgb_u8(255, 255, 255),
+            size,
+            anchor,
+            z,
+        },
+    )
+}
+
+#[derive(Clone)]
+struct PrivateTelegraphVisual {
+    position: Vec2,
+    size: Vec2,
+    rotation: f32,
+    color: Color,
+    image: Handle<Image>,
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the renderer consumes complete route, snapshot, asset, and accessibility authority"
+)]
+fn present_private_telegraphs(
+    commands: &mut Commands,
+    telegraph_entities: &mut Query<(
+        Entity,
+        &PrivateGameplayTelegraph,
+        &mut Transform,
+        &mut Sprite,
+    )>,
+    bindings: Option<&BTreeMap<u64, protocol::CoreCombatActorBindingV1>>,
+    presentation: &CorePrivateCombatPresentation,
+    snapshot_tick: u64,
+    width: f32,
+    height: f32,
+    assets: &CorePrivateActorAssets,
+    accessibility: AccessibilitySettings,
+) {
+    let mut desired = BTreeMap::new();
+    if bindings.is_some() {
+        for telegraph in presentation
+            .telegraphs
+            .values()
+            .filter(|telegraph| telegraph.resolves_at_tick >= snapshot_tick)
+        {
+            for (segment, visual) in private_telegraph_visuals(
+                telegraph,
+                snapshot_tick,
+                width,
+                height,
+                assets,
+                accessibility,
+            )
+            .into_iter()
+            .enumerate()
+            {
+                let Ok(segment) = u8::try_from(segment) else {
+                    continue;
+                };
+                desired.insert(
+                    PrivateGameplayTelegraph {
+                        source_entity_id: telegraph.source_entity_id,
+                        cast_id: telegraph.cast_id,
+                        segment,
+                    },
+                    visual,
+                );
+            }
+        }
+    }
+    for (entity, key, mut transform, mut sprite) in telegraph_entities.iter_mut() {
+        let Some(visual) = desired.get(key) else {
+            commands.entity(entity).despawn();
+            continue;
+        };
+        transform.translation = visual.position.extend(4.8);
+        transform.rotation = Quat::from_rotation_z(visual.rotation);
+        sprite.image = visual.image.clone();
+        sprite.color = visual.color;
+        sprite.custom_size = Some(visual.size);
+    }
+    let existing = telegraph_entities
+        .iter()
+        .map(|(_, key, _, _)| *key)
+        .collect::<std::collections::BTreeSet<_>>();
+    for (key, visual) in desired
+        .into_iter()
+        .filter(|(key, _)| !existing.contains(key))
+    {
+        commands.spawn((
+            Name::new(format!(
+                "Telegraph {}:{}:{}",
+                key.source_entity_id, key.cast_id, key.segment
+            )),
+            key,
+            Sprite {
+                image: visual.image,
+                color: visual.color,
+                custom_size: Some(visual.size),
+                ..default()
+            },
+            Transform::from_xyz(visual.position.x, visual.position.y, 4.8)
+                .with_rotation(Quat::from_rotation_z(visual.rotation)),
+        ));
+    }
+}
+
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::too_many_lines,
+    reason = "the exhaustive bounded shape grammar stays visible beside its renderer"
+)]
+fn private_telegraph_visuals(
+    telegraph: &protocol::CoreCombatTelegraphV1,
+    snapshot_tick: u64,
+    width: f32,
+    height: f32,
+    assets: &CorePrivateActorAssets,
+    accessibility: AccessibilitySettings,
+) -> Vec<PrivateTelegraphVisual> {
+    let origin = private_milli_position(
+        telegraph.origin_x_milli_tiles,
+        telegraph.origin_y_milli_tiles,
+        width,
+        height,
+    );
+    let target = private_milli_position(
+        telegraph.target_x_milli_tiles,
+        telegraph.target_y_milli_tiles,
+        width,
+        height,
+    );
+    let elapsed = snapshot_tick.saturating_sub(telegraph.starts_at_tick) as f32;
+    let duration = telegraph
+        .resolves_at_tick
+        .saturating_sub(telegraph.starts_at_tick)
+        .max(1) as f32;
+    let progress = (elapsed / duration).clamp(0.0, 1.0);
+    let alpha = if accessibility.reduced_motion {
+        0.78
+    } else {
+        0.40 + progress * 0.38
+    };
+    let reduced_index = usize::from(accessibility.reduced_motion);
+    let physical = telegraph.damage_type == protocol::CoreCombatDamageTypeV1::Physical;
+    let image = if physical {
+        assets.telegraph_physical[reduced_index].clone()
+    } else {
+        assets.telegraph_veil[reduced_index].clone()
+    };
+    let color = if accessibility.high_contrast_telegraphs {
+        Color::srgba(1.0, 0.95, 0.58, alpha.max(0.72))
+    } else if physical {
+        Color::srgba(1.0, 0.34, 0.18, alpha)
+    } else {
+        Color::srgba(0.78, 0.36, 1.0, alpha)
+    };
+    let line = |angle: f32, length: f32, width: f32, center: Vec2| PrivateTelegraphVisual {
+        position: center,
+        size: Vec2::new(length, width),
+        rotation: angle,
+        color,
+        image: image.clone(),
+    };
+    match telegraph.shape {
+        protocol::CoreCombatTelegraphShapeV1::Fan {
+            ray_count,
+            ray_offsets_milli_degrees,
+            extent_milli_tiles,
+            ray_width_milli_tiles,
+        } => {
+            let delta = target - origin;
+            let base_angle = if delta.length_squared() <= f32::EPSILON {
+                0.0
+            } else {
+                delta.y.atan2(delta.x)
+            };
+            let length = extent_milli_tiles as f32 / 1_000.0;
+            let ray_width = f32::from(ray_width_milli_tiles) / 1_000.0;
+            ray_offsets_milli_degrees[..usize::from(ray_count)]
+                .iter()
+                .map(|offset| {
+                    let angle = base_angle + (*offset as f32 / 1_000.0).to_radians();
+                    let center = origin + Vec2::from_angle(angle) * length * 0.5;
+                    line(angle, length, ray_width, center)
+                })
+                .collect()
+        }
+        protocol::CoreCombatTelegraphShapeV1::AimedLane {
+            extent_milli_tiles,
+            width_milli_tiles,
+        } => {
+            let delta = target - origin;
+            let angle = if delta.length_squared() <= f32::EPSILON {
+                0.0
+            } else {
+                delta.y.atan2(delta.x)
+            };
+            let length = extent_milli_tiles as f32 / 1_000.0;
+            let center = origin + Vec2::from_angle(angle) * length * 0.5;
+            vec![line(
+                angle,
+                length,
+                f32::from(width_milli_tiles) / 1_000.0,
+                center,
+            )]
+        }
+        protocol::CoreCombatTelegraphShapeV1::Lanes {
+            axes_degrees,
+            width_milli_tiles,
+        } => axes_degrees
+            .into_iter()
+            .map(|degrees| {
+                let angle = f32::from(degrees).to_radians();
+                let direction = Vec2::from_angle(angle);
+                let (center, length) = private_line_to_arena(origin, direction, width, height);
+                line(
+                    angle,
+                    length,
+                    f32::from(width_milli_tiles) / 1_000.0,
+                    center,
+                )
+            })
+            .collect(),
+        protocol::CoreCombatTelegraphShapeV1::Rotor {
+            arm_count,
+            clockwise_milli_degrees_per_second,
+            extent_milli_tiles,
+            arm_width_milli_tiles,
+        } => {
+            let delta = target - origin;
+            let base_angle = if delta.length_squared() <= f32::EPSILON {
+                0.0
+            } else {
+                delta.y.atan2(delta.x)
+            };
+            let rotation = if accessibility.reduced_motion {
+                0.0
+            } else {
+                let elapsed_seconds = elapsed / sim_core::TICKS_PER_SECOND as f32;
+                (clockwise_milli_degrees_per_second as f32 / 1_000.0 * elapsed_seconds).to_radians()
+            };
+            let extent = extent_milli_tiles as f32 / 1_000.0;
+            let arm_width = f32::from(arm_width_milli_tiles) / 1_000.0;
+            (0..arm_count)
+                .map(|index| {
+                    let angle = base_angle
+                        + rotation
+                        + f32::from(index) * std::f32::consts::TAU / f32::from(arm_count);
+                    line(
+                        angle,
+                        extent,
+                        arm_width,
+                        origin + Vec2::from_angle(angle) * extent * 0.5,
+                    )
+                })
+                .collect()
+        }
+        protocol::CoreCombatTelegraphShapeV1::Ring {
+            segment_count,
+            gap_start_index,
+            gap_count,
+            radius_milli_tiles,
+            segment_width_milli_tiles,
+        } => {
+            let radius = f32::from(radius_milli_tiles) / 1_000.0;
+            let segment_width = f32::from(segment_width_milli_tiles) / 1_000.0;
+            (0..segment_count)
+                .filter(|index| {
+                    !(0..gap_count)
+                        .any(|gap_offset| *index == (gap_start_index + gap_offset) % segment_count)
+                })
+                .map(|index| {
+                    let angle = f32::from(index) * std::f32::consts::TAU / f32::from(segment_count);
+                    PrivateTelegraphVisual {
+                        position: origin + Vec2::from_angle(angle) * radius,
+                        size: Vec2::new(segment_width * 2.4, segment_width),
+                        rotation: angle + std::f32::consts::FRAC_PI_2,
+                        color,
+                        image: image.clone(),
+                    }
+                })
+                .collect()
+        }
+    }
+}
+
+fn private_line_to_arena(origin: Vec2, direction: Vec2, width: f32, height: f32) -> (Vec2, f32) {
+    let half = Vec2::new(width * 0.5, height * 0.5);
+    let positive = private_ray_to_bounds(origin, direction, half);
+    let negative = private_ray_to_bounds(origin, -direction, half);
+    (
+        origin + direction * (positive - negative) * 0.5,
+        positive + negative,
+    )
+}
+
+fn private_ray_to_bounds(origin: Vec2, direction: Vec2, half: Vec2) -> f32 {
+    let mut distance = f32::INFINITY;
+    if direction.x > f32::EPSILON {
+        distance = distance.min((half.x - origin.x) / direction.x);
+    } else if direction.x < -f32::EPSILON {
+        distance = distance.min((-half.x - origin.x) / direction.x);
+    }
+    if direction.y > f32::EPSILON {
+        distance = distance.min((half.y - origin.y) / direction.y);
+    } else if direction.y < -f32::EPSILON {
+        distance = distance.min((-half.y - origin.y) / direction.y);
+    }
+    distance.max(0.0)
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn private_milli_position(x: i32, y: i32, width: f32, height: f32) -> Vec2 {
+    Vec2::new(
+        x as f32 / 1_000.0 - width * 0.5,
+        height * 0.5 - y as f32 / 1_000.0,
+    )
+}
+
 fn private_entity_style(kind: protocol::EntityKind) -> (Color, f32, f32) {
     match kind {
         protocol::EntityKind::Player => (Color::srgb_u8(99, 225, 197), 0.64, 8.0),
@@ -3779,6 +4503,10 @@ fn private_entity_style(kind: protocol::EntityKind) -> (Color, f32, f32) {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the one-time compact normal-route UI hierarchy remains auditable in one builder"
+)]
 fn spawn_ui(mut commands: Commands) {
     commands.spawn((
         Camera2d,
@@ -3804,6 +4532,7 @@ fn spawn_ui(mut commands: Commands) {
                 ..default()
             },
             BackgroundColor(Color::srgba_u8(5, 8, 11, 238)),
+            PrivateControlPanel,
         ))
         .with_children(|root| {
             root.spawn((
@@ -3867,6 +4596,143 @@ fn spawn_ui(mut commands: Commands) {
                 TextColor(Color::srgb_u8(130, 144, 145)),
             ));
         });
+    commands
+        .spawn((
+            Name::new("Private combat HUD"),
+            PrivateCombatHud,
+            Visibility::Hidden,
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(0),
+                top: px(0),
+                width: percent(100),
+                height: percent(100),
+                ..default()
+            },
+        ))
+        .with_children(|hud| {
+            hud.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: px(20),
+                    top: px(18),
+                    width: px(270),
+                    padding: UiRect::all(px(10)),
+                    flex_direction: FlexDirection::Column,
+                    row_gap: px(7),
+                    border: UiRect::all(px(2)),
+                    ..default()
+                },
+                BackgroundColor(Color::srgba_u8(6, 10, 13, 224)),
+                BorderColor::all(Color::srgba_u8(123, 173, 154, 220)),
+                PrivateHealthPanel,
+            ))
+            .with_children(|panel| {
+                panel.spawn((
+                    Text::new("HEALTH -- / --"),
+                    TextFont::from_font_size(18.0),
+                    TextColor(Color::srgb_u8(235, 232, 210)),
+                    PrivateHealthText,
+                ));
+                panel
+                    .spawn((
+                        Node {
+                            width: percent(100),
+                            height: px(10),
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgba_u8(35, 42, 43, 230)),
+                    ))
+                    .with_child((
+                        Node {
+                            width: percent(100),
+                            height: percent(100),
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgb_u8(83, 194, 145)),
+                        PrivateHealthFill,
+                    ));
+            });
+            hud.spawn((
+                Text::new("OBJECTIVE\nAwaiting authority"),
+                TextFont::from_font_size(17.0),
+                TextColor(Color::srgb_u8(235, 225, 194)),
+                TextLayout::justify(Justify::Right),
+                Node {
+                    position_type: PositionType::Absolute,
+                    right: px(20),
+                    top: px(18),
+                    width: px(330),
+                    padding: UiRect::all(px(12)),
+                    border: UiRect::all(px(2)),
+                    ..default()
+                },
+                BackgroundColor(Color::srgba_u8(6, 10, 13, 218)),
+                BorderColor::all(Color::srgba_u8(180, 149, 88, 220)),
+                PrivateObjectiveText,
+            ));
+            hud.spawn((
+                Text::new("RMB GRAVE MARK  ·  SPACE SLIPSTEP\nQ/E BELT  ·  HOLD R RECALL"),
+                TextFont::from_font_size(15.0),
+                TextColor(Color::srgb_u8(219, 220, 202)),
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: px(20),
+                    bottom: px(18),
+                    width: px(430),
+                    padding: UiRect::all(px(10)),
+                    border: UiRect::all(px(2)),
+                    ..default()
+                },
+                BackgroundColor(Color::srgba_u8(6, 10, 13, 218)),
+                BorderColor::all(Color::srgba_u8(91, 119, 123, 220)),
+                PrivateActionText,
+            ));
+            hud.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: percent(32),
+                    top: px(18),
+                    width: percent(36),
+                    padding: UiRect::all(px(9)),
+                    flex_direction: FlexDirection::Column,
+                    row_gap: px(6),
+                    border: UiRect::all(px(2)),
+                    ..default()
+                },
+                BackgroundColor(Color::srgba_u8(10, 7, 9, 228)),
+                BorderColor::all(Color::srgba_u8(184, 91, 75, 230)),
+                Visibility::Hidden,
+                PrivateBossPanel,
+            ))
+            .with_children(|panel| {
+                panel.spawn((
+                    Text::new("SIR CALDUS"),
+                    TextFont::from_font_size(19.0),
+                    TextColor(Color::srgb_u8(239, 210, 177)),
+                    TextLayout::justify(Justify::Center),
+                    PrivateBossText,
+                ));
+                panel
+                    .spawn((
+                        Node {
+                            width: percent(100),
+                            height: px(9),
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgba_u8(48, 29, 30, 240)),
+                    ))
+                    .with_child((
+                        Node {
+                            width: percent(100),
+                            height: percent(100),
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgb_u8(207, 72, 66)),
+                        PrivateBossFill,
+                    ));
+            });
+        });
 }
 
 fn spawn_button(parent: &mut ChildSpawnerCommands, action: PrivateLifeAction, label: &str) {
@@ -3890,6 +4756,216 @@ fn spawn_button(parent: &mut ChildSpawnerCommands, action: PrivateLifeAction, la
 }
 
 #[allow(
+    clippy::cast_precision_loss,
+    clippy::needless_pass_by_value,
+    clippy::too_many_arguments,
+    clippy::type_complexity,
+    reason = "the compact HUD updates independent player, boss, and objective widgets"
+)]
+fn update_combat_hud(
+    client: Res<CorePrivateLifeClient>,
+    snapshots: Res<CorePrivateSnapshotClient>,
+    consumable: Res<CorePrivateConsumableUi>,
+    mut hud: Single<&mut Visibility, (With<PrivateCombatHud>, Without<PrivateBossPanel>)>,
+    mut health_text: Single<
+        &mut Text,
+        (
+            With<PrivateHealthText>,
+            Without<PrivateObjectiveText>,
+            Without<PrivateBossText>,
+        ),
+    >,
+    mut health_fill: Single<
+        (&mut Node, &mut BackgroundColor),
+        (With<PrivateHealthFill>, Without<PrivateBossFill>),
+    >,
+    mut health_panel: Single<
+        (&mut Node, &mut BorderColor),
+        (
+            With<PrivateHealthPanel>,
+            Without<PrivateHealthFill>,
+            Without<PrivateBossFill>,
+        ),
+    >,
+    mut objective_text: Single<
+        &mut Text,
+        (
+            With<PrivateObjectiveText>,
+            Without<PrivateHealthText>,
+            Without<PrivateBossText>,
+        ),
+    >,
+    mut action_text: Single<
+        &mut Text,
+        (
+            With<PrivateActionText>,
+            Without<PrivateHealthText>,
+            Without<PrivateObjectiveText>,
+            Without<PrivateBossText>,
+        ),
+    >,
+    mut boss_panel: Single<&mut Visibility, (With<PrivateBossPanel>, Without<PrivateCombatHud>)>,
+    mut boss_text: Single<
+        &mut Text,
+        (
+            With<PrivateBossText>,
+            Without<PrivateHealthText>,
+            Without<PrivateObjectiveText>,
+        ),
+    >,
+    mut boss_fill: Single<&mut Node, (With<PrivateBossFill>, Without<PrivateHealthFill>)>,
+) {
+    let route = client
+        .route
+        .as_ref()
+        .and_then(CorePrivateRouteClientModel::route_state);
+    let visible = client.phase == CorePrivateLifePhase::PrivateRoute
+        && route.is_some_and(|route| route.scene != CorePrivateRouteSceneV1::LanternHalls);
+    **hud = if visible {
+        Visibility::Inherited
+    } else {
+        Visibility::Hidden
+    };
+    let (Some(route), Some(snapshot)) = (route, snapshots.latest.as_ref()) else {
+        **boss_panel = Visibility::Hidden;
+        return;
+    };
+    let player = snapshot
+        .entities
+        .iter()
+        .find(|entity| entity.kind == protocol::EntityKind::Player);
+    if let Some(player) = player {
+        let health_percent =
+            u64::from(player.current_health) * 100 / u64::from(player.maximum_health.max(1));
+        let (status, health_color, border_color, border_width) = if health_percent <= 15 {
+            (
+                "  ◆ CRITICAL",
+                Color::srgb_u8(214, 71, 66),
+                Color::srgb_u8(255, 105, 92),
+                4.0,
+            )
+        } else if health_percent <= 35 {
+            (
+                "  ◇ LOW HEALTH",
+                Color::srgb_u8(213, 160, 68),
+                Color::srgb_u8(239, 190, 86),
+                3.0,
+            )
+        } else {
+            (
+                "",
+                Color::srgb_u8(83, 194, 145),
+                Color::srgba_u8(123, 173, 154, 220),
+                2.0,
+            )
+        };
+        **health_text = Text::new(format!(
+            "HEALTH  {} / {}{status}",
+            player.current_health, player.maximum_health,
+        ));
+        let ratio = player.current_health as f32 / player.maximum_health.max(1) as f32;
+        health_fill.0.width = percent((ratio * 100.0).clamp(0.0, 100.0));
+        *health_fill.1 = BackgroundColor(health_color);
+        health_panel.0.border = UiRect::all(px(border_width));
+        *health_panel.1 = BorderColor::all(border_color);
+    }
+    let hostile_count = snapshot
+        .entities
+        .iter()
+        .filter(|entity| {
+            matches!(
+                entity.kind,
+                protocol::EntityKind::Enemy | protocol::EntityKind::Boss
+            ) && entity.state_flags & protocol::ENTITY_STATE_ALIVE != 0
+        })
+        .count();
+    **objective_text = Text::new(format!(
+        "OBJECTIVE\n{}\n{} hostile{} remain\nWASD · MOUSE · LMB · RMB/SPACE · Q/E · HOLD R",
+        private_route_objective(route),
+        hostile_count,
+        if hostile_count == 1 { "" } else { "s" }
+    ));
+    **action_text = Text::new(private_combat_action_text(&client, &consumable));
+    if let Some(boss) = snapshot
+        .entities
+        .iter()
+        .find(|entity| entity.kind == protocol::EntityKind::Boss)
+    {
+        **boss_panel = Visibility::Inherited;
+        **boss_text = Text::new(format!(
+            "SIR CALDUS   {} / {}",
+            boss.current_health, boss.maximum_health
+        ));
+        let ratio = boss.current_health as f32 / boss.maximum_health.max(1) as f32;
+        boss_fill.width = percent((ratio * 100.0).clamp(0.0, 100.0));
+    } else {
+        **boss_panel = Visibility::Hidden;
+    }
+}
+
+fn private_combat_action_text(
+    client: &CorePrivateLifeClient,
+    consumable: &CorePrivateConsumableUi,
+) -> String {
+    let quantities = consumable.model.belt_quantities();
+    let q = quantities.map_or("--".to_owned(), |values| values[0].to_string());
+    let e = quantities.map_or("--".to_owned(), |values| values[1].to_string());
+    let belt_state = if consumable.model.mutation_pending() {
+        "CONFIRMING"
+    } else if !consumable.cooldown_timer.is_finished() {
+        "COOLDOWN"
+    } else if !consumable.feedback_timer.is_finished() {
+        consumable
+            .model
+            .last_result()
+            .map_or("READY", consumable_result_label)
+    } else {
+        "READY"
+    };
+    let recall = match client.recall_result.as_ref() {
+        Some(protocol::RecallResultV1::Pending { .. }) => "CHANNELING",
+        Some(protocol::RecallResultV1::Cancelled { .. }) => "CANCELLED",
+        Some(protocol::RecallResultV1::Stored { .. }) => "COMMITTED",
+        Some(protocol::RecallResultV1::Rejected { .. }) => "UNAVAILABLE",
+        None => "HOLD R",
+    };
+    format!(
+        "RMB GRAVE MARK  ·  SPACE SLIPSTEP\n[Q] TONIC ×{q}  [E] SLOT 2 ×{e}  {belt_state}  ·  RECALL {recall}"
+    )
+}
+
+fn private_route_objective(route: &protocol::CorePrivateRouteStateV1) -> &'static str {
+    match (route.scene, route.room) {
+        (CorePrivateRouteSceneV1::CoreMicrorealm, None) => "Reach and silence the Realm Bell",
+        (
+            CorePrivateRouteSceneV1::BellSepulcher,
+            Some(protocol::CorePrivateRouteRoomV1::BellVestibuleB0),
+        ) => "Cross the Bell Threshold",
+        (
+            CorePrivateRouteSceneV1::BellSepulcher,
+            Some(protocol::CorePrivateRouteRoomV1::BellRestB4),
+        ) => "Resolve the Veil Bargain",
+        (
+            CorePrivateRouteSceneV1::BellSepulcher,
+            Some(protocol::CorePrivateRouteRoomV1::CaldusArenaB6),
+        ) if matches!(
+            route.phase,
+            protocol::CorePrivateRoutePhaseV1::BossDefeated
+                | protocol::CorePrivateRoutePhaseV1::BossExitReady
+        ) =>
+        {
+            "Claim the Bell and extract"
+        }
+        (
+            CorePrivateRouteSceneV1::BellSepulcher,
+            Some(protocol::CorePrivateRouteRoomV1::CaldusArenaB6),
+        ) => "Defeat Sir Caldus",
+        (CorePrivateRouteSceneV1::BellSepulcher, Some(_)) => "Break the room's resistance",
+        _ => "Await authoritative route",
+    }
+}
+
+#[allow(
     clippy::needless_pass_by_value,
     clippy::too_many_arguments,
     clippy::type_complexity,
@@ -3909,6 +4985,7 @@ fn update_ui(
     mut roster: Single<&mut Text, (With<RosterText>, Without<StatusText>)>,
     mut route: Single<&mut Text, (With<RouteText>, Without<StatusText>, Without<RosterText>)>,
     mut actions: Query<(&ActionButton, &mut BackgroundColor, &mut BorderColor)>,
+    mut control_panel: Single<&mut Visibility, With<PrivateControlPanel>>,
 ) {
     **status = Text::new(phase_label(client.phase));
     **roster = Text::new(render_roster(&client));
@@ -3930,6 +5007,16 @@ fn update_ui(
     } else {
         route_text
     });
+    let danger = client
+        .route
+        .as_ref()
+        .and_then(CorePrivateRouteClientModel::route_state)
+        .is_some_and(|route| route.scene != CorePrivateRouteSceneV1::LanternHalls);
+    **control_panel = if danger && !oath.open && !bargain.open && !bargain.may_advance_rest {
+        Visibility::Hidden
+    } else {
+        Visibility::Inherited
+    };
     for (action, mut background, mut border) in &mut actions {
         let available = action_available(action.0, &client);
         *background = BackgroundColor(if available {
@@ -4343,6 +5430,7 @@ mod tests {
                     WireText::new(protocol::HALL_INTERACTION_FEATURE_FLAG).unwrap(),
                     WireText::new(protocol::CORE_RESOLUTION_HOLD_FEATURE_FLAG).unwrap(),
                     WireText::new(protocol::SAFE_STORAGE_FEATURE_FLAG).unwrap(),
+                    WireText::new(protocol::CORE_COMBAT_PRESENTATION_FEATURE_FLAG).unwrap(),
                 ]
             } else {
                 Vec::new()
@@ -4529,6 +5617,52 @@ mod tests {
         client.bind_route(Some(&danger_route(2, 7))).unwrap();
         assert!(matches!(
             client.ingest(snapshot(1, 7, 10_000)),
+            Err(CorePrivateLifeClientError::InvalidSnapshotAuthority)
+        ));
+    }
+
+    #[test]
+    fn danger_snapshot_waits_for_its_reliably_delivered_actor_binding() {
+        let route = danger_route(1, 6);
+        let mut snapshots = CorePrivateSnapshotClient::default();
+        snapshots.bind_route(Some(&route)).unwrap();
+        snapshots.ingest(snapshot(1, 6, 10_000)).unwrap();
+        let snapshot = snapshots.latest.as_ref().expect("complete snapshot");
+        let mut presentation = CorePrivateCombatPresentation::default();
+
+        assert!(
+            presentation
+                .binding_for_snapshot(snapshot, &route)
+                .is_none()
+        );
+
+        let state = protocol::CoreCombatPresentationStateV1 {
+            schema_version: protocol::CORE_COMBAT_PRESENTATION_SCHEMA_VERSION,
+            content_revision: route_revision(),
+            actor_generation: 1,
+            route_state_version: 6,
+            scene: CorePrivateRouteSceneV1::CoreMicrorealm,
+            room: None,
+            server_tick: 1,
+            actors: vec![protocol::CoreCombatActorBindingV1 {
+                entity_id: 10_000,
+                kind: protocol::CoreCombatActorKindV1::Player,
+                content_id: WireText::new(protocol::GRAVE_ARBALIST_CLASS_ID).unwrap(),
+            }],
+            telegraphs: Vec::new(),
+        };
+        presentation.apply(&state, &route).unwrap();
+
+        assert!(
+            presentation
+                .binding_for_snapshot(snapshot, &route)
+                .is_some()
+        );
+
+        let mut unknown_content = state;
+        unknown_content.actors[0].content_id = WireText::new("class.unknown").unwrap();
+        assert!(matches!(
+            presentation.apply(&unknown_content, &route),
             Err(CorePrivateLifeClientError::InvalidSnapshotAuthority)
         ));
     }
