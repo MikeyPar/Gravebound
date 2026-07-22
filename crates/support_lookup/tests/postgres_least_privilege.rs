@@ -459,7 +459,7 @@ async fn seed_lookup_fixture(admin_pool: &PgPool, death_id: [u8; 16]) -> TestRes
     sqlx::query(
         "INSERT INTO characters (namespace_id, account_id, character_id, roster_ordinal, \
          class_id, level, oath_id, life_state, security_state) \
-         VALUES ($1, $2, $3, 1, 'class.grave_arbalist', 6, \
+         VALUES ($1, $2, $3, 1, 'class.grave_arbalist', 10, \
          'oath.arbalist.long_vigil', 0, 0)",
     )
     .bind(NAMESPACE)
