@@ -891,6 +891,7 @@ fn start_server(
     reason = "the production-root route proof stays contiguous so no direct state-writing seam can be hidden"
 )]
 async fn production_root_reaches_caldus_exit_ready_and_cleans_up() {
+    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
     assert_eq!(
         std::env::var(TELEMETRY_ENVIRONMENT_VARIABLE).as_deref(),
         Ok("test"),
