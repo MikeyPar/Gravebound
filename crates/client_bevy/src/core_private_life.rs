@@ -100,12 +100,36 @@ struct CorePrivatePresentationContent(sim_content::CorePrivateLifeContent);
 #[derive(Debug, Resource)]
 struct CorePrivateBargainCopy(crate::bargain_ui::BargainUiCopy);
 
+#[derive(Debug, Resource)]
+struct CorePrivateOathCopy(crate::oath_ui::OathUiCopy);
+
 #[derive(Debug, Resource, Default)]
 struct CorePrivateBargainState {
     model: crate::bargain_ui::BargainUiModel,
     open: bool,
     loaded: bool,
     may_advance_rest: bool,
+}
+
+#[derive(Debug, Resource, Default)]
+struct CorePrivateOathState {
+    model: crate::oath_ui::OathUiModel,
+    open: bool,
+}
+
+impl CorePrivateOathState {
+    fn reset(&mut self) {
+        self.model = crate::oath_ui::OathUiModel::default();
+        self.open = false;
+    }
+
+    fn apply_view(&mut self, result: &protocol::OathViewResult) {
+        self.model.apply_view(result.clone());
+    }
+
+    fn apply_selection(&mut self, result: &protocol::InitialOathSelectionResult) {
+        self.model.apply_selection(result.clone());
+    }
 }
 
 #[derive(Debug, Resource, Default)]
@@ -1097,10 +1121,7 @@ pub fn run_core_private_life(config: CorePrivateLifeConfig) -> Result<()> {
     })?;
     let content = load_core_private_life_content(&config.content_root)
         .context("normal Core private-life content failed validation")?;
-    let bargain_catalog = sim_content::load_core_development_oaths_bargains(&config.content_root)
-        .context("normal Core Bargain content failed validation")?;
-    let bargain_copy = crate::bargain_ui::BargainUiCopy::from_catalog(&bargain_catalog)
-        .context("normal Core Bargain presentation failed validation")?;
+    let (oath_copy, bargain_copy) = load_oath_bargain_copy(&config.content_root)?;
     let (_, source_report) =
         load_and_validate(&config.content_root).context("Core source package failed validation")?;
     let manifest_hash = ManifestHash::new(source_report.package_hash_blake3)?;
@@ -1132,6 +1153,8 @@ pub fn run_core_private_life(config: CorePrivateLifeConfig) -> Result<()> {
         .insert_resource(AccessibilitySettings::default())
         .insert_resource(CorePrivateLifeBridge(worker))
         .insert_resource(CorePrivatePresentationContent(content))
+        .insert_resource(CorePrivateOathCopy(oath_copy))
+        .insert_resource(CorePrivateOathState::default())
         .insert_resource(CorePrivateBargainCopy(bargain_copy))
         .insert_resource(CorePrivateBargainState::default())
         .insert_resource(CorePrivateHallInteractionState::default())
@@ -1168,8 +1191,10 @@ pub fn run_core_private_life(config: CorePrivateLifeConfig) -> Result<()> {
                 handle_successor_recovery_commands,
                 sync_terminal_views,
                 request_location,
+                drive_hall_panels,
                 handle_keyboard,
                 handle_hall_interaction_keyboard,
+                handle_oath_keyboard,
                 handle_recall_keyboard,
                 handle_bargain_keyboard,
                 handle_interact_keyboard,
@@ -1217,12 +1242,26 @@ fn load_terminal_ui(
     ))
 }
 
+fn load_oath_bargain_copy(
+    content_root: &std::path::Path,
+) -> Result<(crate::oath_ui::OathUiCopy, crate::bargain_ui::BargainUiCopy)> {
+    let catalog = sim_content::load_core_development_oaths_bargains(content_root)
+        .context("normal Core Oath/Bargain content failed validation")?;
+    Ok((
+        crate::oath_ui::OathUiCopy::from_catalog(&catalog)
+            .context("normal Core Oath presentation failed validation")?,
+        crate::bargain_ui::BargainUiCopy::from_catalog(&catalog)
+            .context("normal Core Bargain presentation failed validation")?,
+    ))
+}
+
 #[allow(clippy::needless_pass_by_value)] // Bevy system parameters are wrapper values.
 fn poll_transport(
     bridge: Res<CorePrivateLifeBridge>,
     mut client: ResMut<CorePrivateLifeClient>,
     mut snapshots: ResMut<CorePrivateSnapshotClient>,
     mut bargain: ResMut<CorePrivateBargainState>,
+    mut oath: ResMut<CorePrivateOathState>,
     mut hall: ResMut<CorePrivateHallInteractionState>,
     mut terminal: ResMut<CorePrivateTerminalUi>,
 ) {
@@ -1244,6 +1283,7 @@ fn poll_transport(
                 &bridge,
                 &mut client,
                 &mut bargain,
+                &mut oath,
                 &mut hall,
                 &mut terminal,
             ),
@@ -1252,6 +1292,7 @@ fn poll_transport(
             | TransportEvent::TransportClosed => {
                 snapshots.reset_transport();
                 bargain.reset();
+                oath.reset();
                 hall.reset();
                 discard_snapshot_queue = true;
                 client.transport_lost();
@@ -1260,6 +1301,7 @@ fn poll_transport(
             TransportEvent::Fatal(_) => {
                 snapshots.reset_transport();
                 bargain.reset();
+                oath.reset();
                 hall.reset();
                 discard_snapshot_queue = true;
                 client.error = Some(CorePrivateLifeClientFailure::Transport);
@@ -1304,11 +1346,16 @@ fn poll_transport(
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the normal route handles one bounded arm per negotiated reliable event"
+)]
 fn apply_private_reliable(
     frame: &ReliableEventFrame,
     bridge: &CorePrivateLifeBridge,
     client: &mut CorePrivateLifeClient,
     bargain: &mut CorePrivateBargainState,
+    oath: &mut CorePrivateOathState,
     hall: &mut CorePrivateHallInteractionState,
     terminal: &mut CorePrivateTerminalUi,
 ) -> Result<(), CorePrivateLifeClientError> {
@@ -1353,6 +1400,14 @@ fn apply_private_reliable(
             );
             bargain.open = !bargain.may_advance_rest;
             bargain.model.apply_decision(result);
+            Ok(())
+        }
+        ReliableEvent::OathViewResult(result) => {
+            oath.apply_view(result);
+            Ok(())
+        }
+        ReliableEvent::InitialOathSelectionResult(result) => {
+            oath.apply_selection(result);
             Ok(())
         }
         ReliableEvent::CorePendingInventoryState(state) => {
@@ -1864,6 +1919,95 @@ fn handle_hall_interaction_keyboard(
 }
 
 #[allow(clippy::needless_pass_by_value)] // Bevy system parameters are wrapper values.
+fn drive_hall_panels(
+    bridge: Res<CorePrivateLifeBridge>,
+    client: Res<CorePrivateLifeClient>,
+    hall: Res<CorePrivateHallInteractionState>,
+    copy: Res<CorePrivateOathCopy>,
+    mut oath: ResMut<CorePrivateOathState>,
+) {
+    let oath_open = client.phase == CorePrivateLifePhase::Hall
+        && hall.open_station == Some(protocol::HallStationV1::OathShrine);
+    if !oath_open {
+        if oath.open {
+            oath.reset();
+        }
+        return;
+    }
+    if oath.open {
+        return;
+    }
+    oath.open = true;
+    let Some(frame) = oath
+        .model
+        .request_for_selected(client.selected_character_id(), copy.0.revision.clone())
+    else {
+        return;
+    };
+    if bridge
+        .0
+        .queue_reliable(WireMessage::OathViewFrame(frame))
+        .is_err()
+    {
+        oath.model.request_failed();
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)] // Bevy system parameters are wrapper values.
+fn handle_oath_keyboard(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    bridge: Res<CorePrivateLifeBridge>,
+    copy: Res<CorePrivateOathCopy>,
+    mut oath: ResMut<CorePrivateOathState>,
+    mut client: ResMut<CorePrivateLifeClient>,
+) {
+    if !oath.open {
+        return;
+    }
+    let action = if keyboard.just_pressed(KeyCode::KeyL) {
+        Some(crate::oath_ui::OathUiAction::LongVigil)
+    } else if keyboard.just_pressed(KeyCode::KeyN) {
+        Some(crate::oath_ui::OathUiAction::Nailkeeper)
+    } else if keyboard.just_pressed(KeyCode::Enter) {
+        Some(crate::oath_ui::OathUiAction::Confirm)
+    } else {
+        None
+    };
+    let Some(action) = action else {
+        return;
+    };
+    match action {
+        crate::oath_ui::OathUiAction::LongVigil | crate::oath_ui::OathUiAction::Nailkeeper => {
+            oath.model.choose(action);
+        }
+        crate::oath_ui::OathUiAction::Confirm => {
+            let Ok(mutation_id) = client.take_mutation_id() else {
+                oath.model.mutation_failed();
+                return;
+            };
+            let Some(issued_at) = unix_millis() else {
+                oath.model.mutation_failed();
+                return;
+            };
+            let Some(frame) = oath
+                .model
+                .confirm(mutation_id, issued_at, copy.0.revision.clone())
+            else {
+                return;
+            };
+            if bridge
+                .0
+                .queue_reliable(WireMessage::InitialOathSelectionFrame(frame))
+                .is_err()
+            {
+                oath.model.mutation_failed();
+            }
+        }
+        crate::oath_ui::OathUiAction::Cancel => {}
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)] // Bevy system parameters are wrapper values.
 fn handle_recall_keyboard(
     keyboard: Res<ButtonInput<KeyCode>>,
     bridge: Res<CorePrivateLifeBridge>,
@@ -2247,9 +2391,11 @@ fn send_gameplay_input(
     snapshots: Res<CorePrivateSnapshotClient>,
     content: Res<CorePrivatePresentationContent>,
     bargain: Res<CorePrivateBargainState>,
+    hall: Res<CorePrivateHallInteractionState>,
     mut sequencer: ResMut<InputSequencer>,
 ) {
     if bargain.captures_input()
+        || hall.open_station.is_some()
         || !client
             .route
             .as_ref()
@@ -2927,6 +3073,8 @@ fn update_ui(
     client: Res<CorePrivateLifeClient>,
     snapshots: Res<CorePrivateSnapshotClient>,
     content: Res<CorePrivatePresentationContent>,
+    oath: Res<CorePrivateOathState>,
+    oath_copy: Res<CorePrivateOathCopy>,
     bargain: Res<CorePrivateBargainState>,
     bargain_copy: Res<CorePrivateBargainCopy>,
     hall: Res<CorePrivateHallInteractionState>,
@@ -2938,7 +3086,13 @@ fn update_ui(
     **status = Text::new(phase_label(client.phase));
     **roster = Text::new(render_roster(&client));
     let route_text = render_route(&client, &snapshots, &content.0, &hall);
-    **route = Text::new(if bargain.open {
+    **route = Text::new(if oath.open {
+        format!(
+            "{}\n\n{}\n\n[L] Long Vigil    [N] Nailkeeper    [Enter] Confirm    [Esc] Close",
+            route_text,
+            oath.model.render(&oath_copy.0)
+        )
+    } else if bargain.open {
         format!(
             "{}\n\n{}",
             route_text,
