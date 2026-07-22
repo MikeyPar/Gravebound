@@ -1745,8 +1745,10 @@ mod tests {
                 life_metrics_version: extraction.expected_versions.life_metrics,
                 authoritative_tick: 120,
             },
-            pending_item_count: extraction.pending_items.len() as u16,
-            pending_material_stack_count: extraction.pending_materials.len() as u16,
+            pending_item_count: u16::try_from(extraction.pending_items.len())
+                .expect("fixture pending item count fits u16"),
+            pending_material_stack_count: u16::try_from(extraction.pending_materials.len())
+                .expect("fixture pending material count fits u16"),
             extraction,
         }
     }

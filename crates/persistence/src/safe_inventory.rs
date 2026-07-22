@@ -731,9 +731,9 @@ fn validate_placements(
     };
     let destination_kind = match command.kind {
         StoredSafeInventoryCommandKind::CharacterSafeToVault => 6,
-        StoredSafeInventoryCommandKind::VaultToCharacterSafe => 5,
         StoredSafeInventoryCommandKind::CharacterSafeToRunBackpack => 2,
-        StoredSafeInventoryCommandKind::OverflowToCharacterSafe => 5,
+        StoredSafeInventoryCommandKind::VaultToCharacterSafe
+        | StoredSafeInventoryCommandKind::OverflowToCharacterSafe => 5,
     };
     let mut source_items = items_at(snapshot, source);
     if source_items.is_empty() {
@@ -882,9 +882,9 @@ fn items_at(
 const fn location_slot(location: StoredSafeInventoryLocation) -> u16 {
     match location {
         StoredSafeInventoryLocation::RunBackpack(slot)
-        | StoredSafeInventoryLocation::CharacterSafe(slot) => slot as u16,
+        | StoredSafeInventoryLocation::CharacterSafe(slot)
+        | StoredSafeInventoryLocation::Overflow(slot) => slot as u16,
         StoredSafeInventoryLocation::Vault(slot) => slot,
-        StoredSafeInventoryLocation::Overflow(slot) => slot as u16,
     }
 }
 

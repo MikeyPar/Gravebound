@@ -66,7 +66,7 @@ pub struct StoredSafeStoragePage {
 }
 
 impl PostgresPersistence {
-    /// Reads one bounded safe-storage page plus the complete eight-slot CharacterSafe companion.
+    /// Reads one bounded safe-storage page plus the complete eight-slot `CharacterSafe` companion.
     /// The exact selected living Hall binding and both version roots are checked before and after
     /// the page query so a concurrent mutation forces the caller to restart pagination.
     pub async fn load_safe_storage_page(
@@ -184,10 +184,7 @@ async fn load_authority_versions(
     .fetch_optional(&mut *connection)
     .await?
     .ok_or(PersistenceError::SafeStorageHallBindingMismatch)?;
-    if selected
-        .map(|value| value.as_slice() != character_id)
-        .unwrap_or(true)
-    {
+    if selected.is_none_or(|value| value.as_slice() != character_id) {
         return Err(PersistenceError::SafeStorageForeignAuthority);
     }
     let row = sqlx::query(

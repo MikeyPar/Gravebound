@@ -66,6 +66,7 @@ const EXPECTED_PUBLIC_TABLES: &[&str] = &[
     "character_world_transfer_results",
     "character_xp_award_results",
     "characters",
+    "core_consumable_use_receipts_v1",
     "currency_ledger_events",
     "danger_crash_restore_ash_changes",
     "danger_crash_restore_bargain_changes",
@@ -142,6 +143,13 @@ const EXPECTED_PUBLIC_TABLES: &[&str] = &[
     "successor_mutation_outbox_events_v1",
     "successor_mutation_results_v1",
     "successor_roster_reservations_v1",
+    "support_character_lookup_v1",
+    "support_character_transition_lookup_v1",
+    "support_death_lookup_v1",
+    "support_death_transition_lookup_v1",
+    "support_item_lookup_v1",
+    "support_item_transition_lookup_v1",
+    "support_lookup_audit_events_v1",
 ];
 
 async fn disposable_database() -> PostgresPersistence {
