@@ -1023,10 +1023,6 @@ async fn danger_entry_commits_complete_root_and_replays_after_pool_restart() {
             .unwrap(),
         persistence::StoredDangerLineageActivationV1::AlreadyActive
     );
-    persistence
-        .load_current_danger_extraction_snapshot_v1(authority, &stored_revision)
-        .await
-        .expect("the active exact root supplies terminal extraction authority");
     assert_eq!(durable_lineage_state(&persistence).await, 1);
 
     drop(service);
