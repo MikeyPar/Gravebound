@@ -28,6 +28,7 @@ use tokio::{
 };
 
 use crate::core_private_combat_frame::CorePrivateConsumableAvailability;
+use crate::core_private_gameplay_observation::CorePrivateGameplayObservation;
 use crate::{
     CoreBellPortalTransition, CoreDurableB3Resolution, CoreDurableBargainRestResolution,
     CoreDurableCaldusResolution, CorePrivateCaldusDefeatHandoff, CorePrivateCaldusFrame,
@@ -906,6 +907,7 @@ pub enum CorePrivateMicrorealmDriverState {
     },
     FixedDungeonReady {
         ready: CorePrivateFixedDungeonDriverReady,
+        observation: Option<Arc<CorePrivateFixedDungeonBoundaryObservation>>,
     },
     FixedDungeonRunning {
         committed_frames: u64,
@@ -995,6 +997,16 @@ pub struct CorePrivateFixedDungeonDriverReady {
     pub transfer_id: [u8; 16],
     pub route_lease: crate::CorePrivateRouteActorLease,
     pub node: sim_content::CoreFixedDungeonNode,
+}
+
+/// Safe, presentation-only state emitted at a fixed-dungeon boundary where no combat frame exists.
+///
+/// The private gameplay projection remains server-owned; public callers can observe only its
+/// committed tick. This prevents a noncombat boundary from becoming an alternate simulation API.
+#[derive(Debug, Clone)]
+pub struct CorePrivateFixedDungeonBoundaryObservation {
+    pub tick: Tick,
+    pub(crate) gameplay: Arc<CorePrivateGameplayObservation>,
 }
 
 /// Awaitable acknowledgement for an irreversible in-task conversion. Dropping this value only
@@ -1736,6 +1748,39 @@ where
         });
     match converted {
         Ok(fixed_dungeon) => {
+            let final_microrealm_tick = fixed_dungeon.tick();
+            let acknowledged_input_sequence = ingress.reducer.lock().map_or_else(
+                |poisoned| poisoned.into_inner().retained.continuous.input_sequence,
+                |state| state.retained.continuous.input_sequence,
+            );
+            let b0_observation = match fixed_dungeon.b0_observation(acknowledged_input_sequence) {
+                Ok(gameplay) => Arc::new(CorePrivateFixedDungeonBoundaryObservation {
+                    tick: Tick(gameplay.tick),
+                    gameplay: Arc::new(gameplay),
+                }),
+                Err(error) => {
+                    let message = error.to_string();
+                    observation_tx.send_replace(CorePrivateMicrorealmDriverState::Faulted {
+                        committed_frames,
+                        fault: indeterminate_runtime_fault(&error, final_microrealm_tick),
+                    });
+                    let _ = result_tx.send(Err(message));
+                    wait_for_shutdown(
+                        shutdown_rx,
+                        handoff_rx,
+                        fixed_advance_rx,
+                        "Bell B0 observation failed after committed conversion",
+                    )
+                    .await;
+                    return driver_task_exit(
+                        ingress,
+                        committed_frames,
+                        final_microrealm_tick,
+                        skipped_deadlines,
+                        CorePrivateMicrorealmDriverOutcome::Faulted,
+                    );
+                }
+            };
             let final_tick = fixed_dungeon.tick();
             let route = match fixed_dungeon.route_snapshot() {
                 Ok(route) => route,
@@ -1796,13 +1841,15 @@ where
             }
             let ready = CorePrivateFixedDungeonDriverReady {
                 committed_microrealm_frames: committed_frames,
-                final_microrealm_tick: final_tick,
+                final_microrealm_tick,
                 transfer_id,
                 route_lease: fixed_dungeon.route_lease(),
                 node: fixed_dungeon.node(),
             };
-            observation_tx
-                .send_replace(CorePrivateMicrorealmDriverState::FixedDungeonReady { ready });
+            observation_tx.send_replace(CorePrivateMicrorealmDriverState::FixedDungeonReady {
+                ready,
+                observation: Some(b0_observation),
+            });
             let _ = result_tx.send(Ok(ready));
             Box::pin(run_fixed_dungeon(
                 fixed_dungeon,
@@ -1985,6 +2032,7 @@ async fn run_fixed_dungeon(
                                     observation_tx.send_replace(
                                         CorePrivateMicrorealmDriverState::FixedDungeonReady {
                                             ready,
+                                            observation: None,
                                         },
                                     );
                                     let _ = result_tx.send(Ok(advance));
@@ -2041,7 +2089,10 @@ async fn run_fixed_dungeon(
                             ingress.stop_accepting();
                         }
                         observation_tx.send_replace(
-                            CorePrivateMicrorealmDriverState::FixedDungeonReady { ready },
+                            CorePrivateMicrorealmDriverState::FixedDungeonReady {
+                                ready,
+                                observation: None,
+                            },
                         );
                         outcome = CorePrivateMicrorealmDriverOutcome::Shutdown;
                         let _ = result_tx.send(Ok(advance));
@@ -2113,7 +2164,10 @@ async fn run_fixed_dungeon(
                         );
                     }
                     observation_tx.send_replace(
-                        CorePrivateMicrorealmDriverState::FixedDungeonReady { ready },
+                        CorePrivateMicrorealmDriverState::FixedDungeonReady {
+                            ready,
+                            observation: None,
+                        },
                     );
                     let _ = result_tx.send(Ok(commit));
                 }

@@ -3,8 +3,8 @@
 use std::collections::BTreeMap;
 
 use sim_core::{
-    ArenaGeometry, CoreBargainKind, EnemyLabPlayer, EntityId, EntityIdAllocator, FixedRoomPhase,
-    NormalWaveHandoff, Tick, TilePoint, tile_point_to_simulation,
+    ArenaGeometry, CoreBargainKind, DungeonAnchorKind, EnemyLabPlayer, EntityId, EntityIdAllocator,
+    FixedRoomPhase, NormalWaveHandoff, Tick, TilePoint, tile_point_to_simulation,
 };
 use thiserror::Error;
 
@@ -110,6 +110,7 @@ impl CoreFixedDungeonRoomStep {
 
 #[derive(Debug, Clone)]
 struct CoreFixedDungeonPlans {
+    b0_safe_spawn: TilePoint,
     b1: CoreFixedRoomEncounterPlan,
     b2: CoreFixedRoomEncounterPlan,
     b3: CoreFixedRoomEncounterPlan,
@@ -137,10 +138,38 @@ impl CoreFixedDungeonPlans {
         {
             return Err(CoreFixedDungeonError::DefinitionDrift);
         }
+        let rooms = content
+            .compile_room_definitions()
+            .map_err(|_| CoreFixedDungeonError::DefinitionDrift)?;
+        let b0 = rooms
+            .iter()
+            .find(|room| room.id == "room.bell.vestibule_01")
+            .filter(|room| {
+                room.safe_noncombat
+                    && room.width_milli_tiles == 13_000
+                    && room.height_milli_tiles == 11_000
+            })
+            .ok_or(CoreFixedDungeonError::DefinitionDrift)?;
+        let mut safe_entries = b0
+            .anchors
+            .iter()
+            .filter(|anchor| anchor.kind == DungeonAnchorKind::SafeEntry);
+        let safe_entry = safe_entries
+            .next()
+            .filter(|_| safe_entries.next().is_none())
+            .ok_or(CoreFixedDungeonError::DefinitionDrift)?;
+        let b0_safe_spawn = TilePoint::new(safe_entry.x_milli_tiles, safe_entry.y_milli_tiles);
         let b6 = content
             .compile_caldus_arena()
             .map_err(|_| CoreFixedDungeonError::DefinitionDrift)?;
-        Ok(Self { b1, b2, b3, b5, b6 })
+        Ok(Self {
+            b0_safe_spawn,
+            b1,
+            b2,
+            b3,
+            b5,
+            b6,
+        })
     }
 
     const fn arena(&self, node: CoreFixedDungeonNode) -> Option<&ArenaGeometry> {
@@ -199,13 +228,17 @@ impl CoreFixedDungeonCombat {
         hostile_projectile_ids: EntityIdAllocator,
     ) -> Result<Self, CoreFixedDungeonError> {
         let plans = CoreFixedDungeonPlans::compile(&content, run_ordinal, first_spawn_ordinal)?;
+        let player = relocate_participant(
+            NormalWaveHandoff {
+                player,
+                hostile_projectile_ids,
+            },
+            plans.b0_safe_spawn,
+        );
         Ok(Self {
             content,
             plans,
-            state: CoreFixedDungeonState::Vestibule(NormalWaveHandoff {
-                player,
-                hostile_projectile_ids,
-            }),
+            state: CoreFixedDungeonState::Vestibule(player),
         })
     }
 
@@ -1054,6 +1087,11 @@ mod tests {
     #[test]
     fn construction_rejects_zero_run_ordinal_and_boss_handoff_is_phase_bound() {
         let dungeon = fixture();
+        assert_eq!(
+            dungeon.player().expect("B0 player").target.position,
+            tile_point_to_simulation(TilePoint::new(3_000, 5_500)),
+            "compiled B0 construction must relocate to its sole authored safe-entry anchor"
+        );
         assert!(matches!(
             dungeon.clone().into_boss_handoff(),
             Err(CoreFixedDungeonError::BossHandoffUnavailable)

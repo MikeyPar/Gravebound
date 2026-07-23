@@ -286,6 +286,7 @@ impl SnapshotPublisher {
         observation: &CorePrivateGameplayObservation,
         authority: SnapshotAuthority,
         terminal: bool,
+        force: bool,
     ) -> Result<Option<Vec<protocol::SnapshotChunk>>, CorePrivateLifeServerError> {
         let generation_changed = self.actor_generation != Some(authority);
         if !generation_changed && observation.tick < self.last_observed_tick {
@@ -303,7 +304,8 @@ impl SnapshotPublisher {
         let publish = self
             .last_published_bucket
             .is_none_or(|published| bucket > published)
-            || (terminal && self.terminal_publication != Some(terminal_key));
+            || (terminal && self.terminal_publication != Some(terminal_key))
+            || force;
         if !publish {
             return Ok(None);
         }
@@ -609,6 +611,7 @@ fn publish_hall_snapshot(
         observation,
         SnapshotAuthority::Hall(observation.actor_generation),
         false,
+        false,
     )? {
         send_gameplay_snapshots(connection, chunks)?;
     }
@@ -620,13 +623,14 @@ fn publish_observation_snapshot(
     publisher: &mut SnapshotPublisher,
     state: &CorePrivateMicrorealmDriverState,
 ) -> Result<(), CorePrivateLifeServerError> {
-    let Some((observation, terminal)) = gameplay_observation(state) else {
+    let Some((observation, terminal, force)) = gameplay_observation(state) else {
         return Ok(());
     };
     if let Some(chunks) = publisher.prepare(
         observation,
         SnapshotAuthority::Danger(observation.actor_generation),
         terminal,
+        force,
     )? {
         send_gameplay_snapshots(connection, chunks)?;
     }
@@ -635,29 +639,37 @@ fn publish_observation_snapshot(
 
 fn gameplay_observation(
     state: &CorePrivateMicrorealmDriverState,
-) -> Option<(&CorePrivateGameplayObservation, bool)> {
+) -> Option<(&CorePrivateGameplayObservation, bool, bool)> {
     match state {
-        CorePrivateMicrorealmDriverState::Running { step, .. } => Some((&step.observation, false)),
+        CorePrivateMicrorealmDriverState::Running { step, .. } => {
+            Some((&step.observation, false, false))
+        }
         CorePrivateMicrorealmDriverState::TerminalPending { lethal_step, .. } => {
-            Some((&lethal_step.observation, true))
+            Some((&lethal_step.observation, true, false))
         }
         CorePrivateMicrorealmDriverState::FixedDungeonRunning { frame, .. }
         | CorePrivateMicrorealmDriverState::FixedDungeonRewardPending { frame, .. } => {
-            Some((&frame.observation, false))
+            Some((&frame.observation, false, false))
         }
         CorePrivateMicrorealmDriverState::FixedDungeonTerminalPending { lethal_frame, .. } => {
-            Some((&lethal_frame.observation, true))
+            Some((&lethal_frame.observation, true, false))
         }
         CorePrivateMicrorealmDriverState::CaldusRunning { frame, .. }
         | CorePrivateMicrorealmDriverState::CaldusRewardPending { frame, .. } => {
-            Some((&frame.observation, false))
+            Some((&frame.observation, false, false))
         }
         CorePrivateMicrorealmDriverState::CaldusTerminalPending { lethal_frame, .. } => {
-            Some((&lethal_frame.observation, true))
+            Some((&lethal_frame.observation, true, false))
         }
+        CorePrivateMicrorealmDriverState::FixedDungeonReady {
+            observation: Some(observation),
+            ..
+        } => Some((&observation.gameplay, false, true)),
         CorePrivateMicrorealmDriverState::Starting
         | CorePrivateMicrorealmDriverState::BellResolutionPending { .. }
-        | CorePrivateMicrorealmDriverState::FixedDungeonReady { .. }
+        | CorePrivateMicrorealmDriverState::FixedDungeonReady {
+            observation: None, ..
+        }
         | CorePrivateMicrorealmDriverState::CaldusExitReady { .. }
         | CorePrivateMicrorealmDriverState::Faulted { .. } => None,
     }
@@ -1598,9 +1610,14 @@ fn observation_tick(observation: &CorePrivateMicrorealmDriverState) -> u64 {
         CorePrivateMicrorealmDriverState::Running { step, .. } => step.tick.0,
         CorePrivateMicrorealmDriverState::TerminalPending { lethal_step, .. } => lethal_step.tick.0,
         CorePrivateMicrorealmDriverState::BellResolutionPending { final_tick, .. } => final_tick.0,
-        CorePrivateMicrorealmDriverState::FixedDungeonReady { ready } => {
-            ready.final_microrealm_tick.0
-        }
+        CorePrivateMicrorealmDriverState::FixedDungeonReady {
+            observation: Some(observation),
+            ..
+        } => observation.tick.0,
+        CorePrivateMicrorealmDriverState::FixedDungeonReady {
+            ready,
+            observation: None,
+        } => ready.final_microrealm_tick.0,
         CorePrivateMicrorealmDriverState::FixedDungeonRunning { frame, .. }
         | CorePrivateMicrorealmDriverState::FixedDungeonRewardPending { frame, .. } => frame.tick.0,
         CorePrivateMicrorealmDriverState::FixedDungeonTerminalPending { lethal_frame, .. } => {
@@ -1765,48 +1782,95 @@ mod tests {
         };
 
         let first = publisher
-            .prepare(&observation(1, 1), SnapshotAuthority::Danger(1), false)
+            .prepare(
+                &observation(1, 1),
+                SnapshotAuthority::Danger(1),
+                false,
+                false,
+            )
             .expect("first snapshot")
             .expect("first committed frame publishes");
         assert_eq!(first[0].sequence, 1);
         assert_eq!(first[0].server_tick, 1);
 
         let second = publisher
-            .prepare(&observation(2, 1), SnapshotAuthority::Danger(1), false)
+            .prepare(
+                &observation(2, 1),
+                SnapshotAuthority::Danger(1),
+                false,
+                false,
+            )
             .expect("next snapshot")
             .expect("next 15 Hz bucket publishes");
         assert_eq!(second[0].sequence, 2);
         assert!(
             publisher
-                .prepare(&observation(3, 1), SnapshotAuthority::Danger(1), false)
+                .prepare(
+                    &observation(3, 1),
+                    SnapshotAuthority::Danger(1),
+                    false,
+                    false,
+                )
                 .expect("coalesced snapshot")
                 .is_none()
         );
         assert!(
             publisher
-                .prepare(&observation(4, 1), SnapshotAuthority::Danger(1), false)
+                .prepare(
+                    &observation(4, 1),
+                    SnapshotAuthority::Danger(1),
+                    false,
+                    false,
+                )
                 .expect("second bucket")
                 .is_some()
         );
 
         let lethal = publisher
-            .prepare(&observation(4, 1), SnapshotAuthority::Danger(1), true)
+            .prepare(
+                &observation(4, 1),
+                SnapshotAuthority::Danger(1),
+                true,
+                false,
+            )
             .expect("terminal snapshot")
             .expect("same-tick terminal state must publish");
         assert_eq!(lethal[0].sequence, 4);
         assert!(
             publisher
-                .prepare(&observation(4, 1), SnapshotAuthority::Danger(1), true)
+                .prepare(
+                    &observation(4, 1),
+                    SnapshotAuthority::Danger(1),
+                    true,
+                    false,
+                )
                 .expect("terminal replay")
                 .is_none()
         );
 
         let reconnect_generation = publisher
-            .prepare(&observation(1, 2), SnapshotAuthority::Danger(2), false)
+            .prepare(
+                &observation(1, 2),
+                SnapshotAuthority::Danger(2),
+                false,
+                false,
+            )
             .expect("next generation")
             .expect("new generation publishes immediately");
         assert_eq!(reconnect_generation[0].sequence, 5);
         assert_eq!(reconnect_generation[0].server_tick, 1);
+
+        let forced_boundary = publisher
+            .prepare(
+                &observation(1, 2),
+                SnapshotAuthority::Danger(2),
+                false,
+                true,
+            )
+            .expect("forced safe boundary")
+            .expect("same-tick scene boundary must publish");
+        assert_eq!(forced_boundary[0].sequence, 6);
+        assert_eq!(forced_boundary[0].server_tick, 1);
     }
 
     #[test]

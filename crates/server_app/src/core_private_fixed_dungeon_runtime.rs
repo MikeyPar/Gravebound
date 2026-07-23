@@ -247,6 +247,36 @@ impl CorePrivateFixedDungeonRuntime {
         Ok(route)
     }
 
+    /// Publishes the content-authored B0 safe-entry boundary before any combat-room frame exists.
+    ///
+    /// The Bell transfer consumes the microrealm between simulation frames. B0 is intentionally
+    /// noncombat, so the ordinary room scheduler cannot manufacture this projection later.
+    pub(crate) fn b0_observation(
+        &self,
+        acknowledged_input_sequence: u64,
+    ) -> Result<CorePrivateGameplayObservation, CorePrivateFixedDungeonRuntimeError> {
+        if self.combat.node() != sim_content::CoreFixedDungeonNode::BellVestibuleB0
+            || self.movement.is_some()
+        {
+            return Err(CorePrivateFixedDungeonRuntimeError::InvalidComposition);
+        }
+        let route = self.route_directory.snapshot(self.route_lease)?;
+        self.validate_route_authority(&route)?;
+        let player = self.combat.player()?;
+        CorePrivateGameplayObservation::new(
+            self.tick.0,
+            route.actor_generation,
+            route.state_version,
+            acknowledged_input_sequence,
+            vec![player_snapshot(
+                player,
+                player.target.position,
+                sim_core::SimulationVector::default(),
+            )?],
+        )
+        .map_err(Into::into)
+    }
+
     #[must_use]
     pub fn room_phase(&self) -> Option<FixedRoomPhase> {
         self.combat.room_phase()

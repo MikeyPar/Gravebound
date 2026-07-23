@@ -1765,7 +1765,11 @@ async fn production_root_extracts_then_recovers_a_successor_and_cleans_up() {
             else {
                 continue;
             };
-            if player.x_milli_tiles <= 13_000 && player.y_milli_tiles <= 11_000 {
+            if snapshot.server_tick == b0_route_frame.server_tick
+                && snapshot.state_version == b0_route.state_version
+                && player.x_milli_tiles == 3_000
+                && player.y_milli_tiles == 5_500
+            {
                 break snapshot;
             }
         }

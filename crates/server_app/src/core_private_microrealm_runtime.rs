@@ -1272,7 +1272,8 @@ mod tests {
             .changed()
             .await
             .expect("fixed-dungeon observation");
-        let crate::CorePrivateMicrorealmDriverState::FixedDungeonReady { ready } = published_state
+        let crate::CorePrivateMicrorealmDriverState::FixedDungeonReady { ready, observation } =
+            published_state
         else {
             panic!("same observer must publish fixed-dungeon ownership");
         };
@@ -1283,9 +1284,23 @@ mod tests {
         );
         assert_eq!(ready.route_lease, lease);
         assert_eq!(ready.final_microrealm_tick, Tick(32));
+        let b0 = directory.snapshot(lease).expect("B0 route snapshot");
+        let observation = observation.expect("B0 safe-entry observation");
+        assert_eq!(observation.tick, Tick(32));
+        assert_eq!(observation.gameplay.route_state_version, b0.state_version);
+        assert_eq!(observation.gameplay.acknowledged_input_sequence, 41);
+        assert_eq!(observation.gameplay.entities.len(), 1);
+        assert_eq!(
+            observation.gameplay.entities[0].kind,
+            protocol::EntityKind::Player
+        );
+        assert_eq!(observation.gameplay.entities[0].x_milli_tiles, 3_000);
+        assert_eq!(observation.gameplay.entities[0].y_milli_tiles, 5_500);
         assert!(matches!(
             state_reader.latest(),
-            crate::CorePrivateMicrorealmDriverState::FixedDungeonReady { ready: installed }
+            crate::CorePrivateMicrorealmDriverState::FixedDungeonReady {
+                ready: installed, ..
+            }
                 if installed == ready
         ));
         assert!(matches!(
@@ -1304,7 +1319,9 @@ mod tests {
         );
         assert!(matches!(
             state_reader.changed().await.expect("B1 boundary observation"),
-            crate::CorePrivateMicrorealmDriverState::FixedDungeonReady { ready: entered }
+            crate::CorePrivateMicrorealmDriverState::FixedDungeonReady {
+                ready: entered, ..
+            }
                 if entered.node == sim_content::CoreFixedDungeonNode::BellCrossB1
         ));
         let neutral = handle.latest_retained_input();

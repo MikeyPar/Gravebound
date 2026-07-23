@@ -3667,12 +3667,16 @@ mod tests {
         assert_eq!(ready.route_lease, route_lease);
         assert!(matches!(
             first_binding.observer.changed().await.unwrap(),
-            CorePrivateMicrorealmDriverState::FixedDungeonReady { ready: published }
+            CorePrivateMicrorealmDriverState::FixedDungeonReady {
+                ready: published, ..
+            }
                 if published == ready
         ));
         assert!(matches!(
             second_binding.observer.changed().await.unwrap(),
-            CorePrivateMicrorealmDriverState::FixedDungeonReady { ready: published }
+            CorePrivateMicrorealmDriverState::FixedDungeonReady {
+                ready: published, ..
+            }
                 if published == ready
         ));
         assert!(matches!(
@@ -3689,7 +3693,9 @@ mod tests {
         );
         assert!(matches!(
             second_binding.observer.changed().await.unwrap(),
-            CorePrivateMicrorealmDriverState::FixedDungeonReady { ready: published }
+            CorePrivateMicrorealmDriverState::FixedDungeonReady {
+                ready: published, ..
+            }
                 if published.node == sim_content::CoreFixedDungeonNode::BellCrossB1
         ));
         let running = tokio::time::timeout(
