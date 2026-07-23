@@ -36,5 +36,7 @@ Additive schema 0073 binds only newly committed `death_committed`, `extraction_c
 
 - No hosted PostgreSQL execution for schema 73 exists yet. Local static/compile proof does not substitute for applying schemas 72/73 and executing the ignored test plus ordinary death/extraction/Recall/successor transactions.
 - Pre-0073 terminal rows remain without telemetry attribution by design; assigning a later session would fabricate TEL-001 context.
-- `TEL-003` boss phase, party size/contribution, and detailed ping/jitter/loss/correction inputs are not present in the authoritative durable death graph. They remain unavailable rather than fabricated; the atomic death source and projection must add them before `GB-M03-09` closes.
+- This evidence predates schema 78. Commit `1f1d0fd` now supplies the formerly missing `TEL-003`
+  boss, contribution, and network-health facts; the current boundary is recorded in
+  [`GB-M03-09-death-context-telemetry-evidence.md`](GB-M03-09-death-context-telemetry-evidence.md).
 - The worker remains disabled and has no attached source/exporter until hosted origin, queue-lag/restart, destination, retention, deletion, and privacy-review evidence passes.

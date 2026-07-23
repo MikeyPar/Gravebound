@@ -74,15 +74,18 @@ Commit `c4f44e7` publishes a bound danger route at its already committed driver 
 changing Hall control-plane publication. Hosted run
 [`30028182217`](https://github.com/MikeyPar/Gravebound/actions/runs/30028182217) proved live
 microrealm activation and isolated a test-driver target-selection defect. Commit `2e8d2f4`
-corrects that test-only policy; r31 remains the latest runtime package.
+corrects that test-only policy. Run
+[`30047477525`](https://github.com/MikeyPar/Gravebound/actions/runs/30047477525) proved the exact
+entry route/snapshot and exposed a no-initial-input harness wait; commit `1ad117e` removes that
+test-only dependency. r31 remains the latest runtime package.
 
 The untracked Grave Arbalist asset seed under `assets/core/player/grave_arbalist/` was preserved and
 was not included in the Git source archive or modified during release construction.
 
 ## Current Next Step
 
-Under all three design authorities, an exact-source hosted rerun from commit `2e8d2f4` must verify
+Under all three design authorities, an exact-source hosted rerun including commit `1ad117e` must verify
 the complete extraction/death/successor route. After one full route is green, run 25 complete
-ordinary loops with current aggregate timing and optimized Realm Gate captures. Independently complete the
-remaining `TEL-003` boss-phase, party/contribution, and network-health facts. The private cohort,
+ordinary loops with current aggregate timing and optimized Realm Gate captures. Independently run
+the hosted schema-78 proof for commit `1f1d0fd`'s TEL-003 facts. The private cohort,
 comprehension metrics, backup/restore, hosting, and Steamworks evidence remain separate final gates.
