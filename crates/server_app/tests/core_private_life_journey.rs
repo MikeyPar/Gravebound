@@ -752,6 +752,10 @@ where
     wait_for_route(route_receive, reached, timeout_message).await
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the bounded public-input loop keeps its route, snapshot, diagnostics, and input authority together for auditability"
+)]
 async fn drive_microrealm_until_cleared(
     connection: &quinn::Connection,
     assembler: &mut bot_client::BotSnapshotAssembler,
@@ -846,28 +850,25 @@ async fn drive_microrealm_until_cleared(
         }
     })
     .await;
-    match result {
-        Ok(frame) => frame,
-        Err(_) => {
-            let latest_route = route_receive.borrow().as_ref().and_then(|frame| {
-                let ReliableEvent::CorePrivateRouteState(route) = &frame.event else {
-                    return None;
-                };
-                Some((
-                    route.state_version,
-                    route.phase,
-                    route.readiness.microrealm_cleared,
-                ))
-            });
-            panic!(
-                "ordinary public-input microrealm clear timed out: \
-                 route={latest_route:?}, snapshots={snapshot_count}, \
-                 last_tick={last_snapshot_tick}, player={last_player:?}, \
-                 hostiles={last_hostile_count}, projectiles={last_projectile_count}, \
-                 input_sequence={input_sequence}"
-            );
-        }
-    }
+    result.unwrap_or_else(|_| {
+        let latest_route = route_receive.borrow().as_ref().and_then(|frame| {
+            let ReliableEvent::CorePrivateRouteState(route) = &frame.event else {
+                return None;
+            };
+            Some((
+                route.state_version,
+                route.phase,
+                route.readiness.microrealm_cleared,
+            ))
+        });
+        panic!(
+            "ordinary public-input microrealm clear timed out: \
+             route={latest_route:?}, snapshots={snapshot_count}, \
+             last_tick={last_snapshot_tick}, player={last_player:?}, \
+             hostiles={last_hostile_count}, projectiles={last_projectile_count}, \
+             input_sequence={input_sequence}"
+        );
+    })
 }
 
 /// Follows only public snapshots and ordinary movement input until the authored encounter wins.
