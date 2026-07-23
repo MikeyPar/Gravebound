@@ -340,7 +340,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 76;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 77;
 const DISPOSABLE_DATABASE_RESET_SQL: &str =
     "TRUNCATE TABLE core_telemetry_sessions_v1, accounts, caldus_victory_exits CASCADE";
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
@@ -3414,7 +3414,7 @@ mod tests {
 
     #[test]
     fn identity_ash_wallet_namespace_repair_is_additive_and_exact() {
-        assert_eq!(EXPECTED_SCHEMA_VERSION, 76);
+        assert_eq!(EXPECTED_SCHEMA_VERSION, 77);
         let migration = include_str!(
             "../../../migrations/0075_m03_identity_ash_wallet_namespace_repair_v1.sql"
         );
@@ -3474,6 +3474,38 @@ mod tests {
             assert!(
                 !lowercase.contains(forbidden),
                 "schema 76 introduced destructive telemetry mutation {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn loot_telemetry_strict_immutability_repair_is_forward_only_and_exact() {
+        let migration =
+            include_str!("../../../migrations/0077_m03_loot_telemetry_strict_immutability_v1.sql");
+        for required in [
+            "Published schema 0076",
+            "CREATE OR REPLACE FUNCTION enforce_item_ledger_telemetry_immutability_v1()",
+            "IF TG_OP = 'DELETE' THEN",
+            "item-ledger telemetry source history is immutable",
+            "item-ledger telemetry publication may advance exactly once",
+            "item-ledger telemetry source payload is immutable",
+            "schema 0077 is the safe production state",
+            "guarded disposable-database reset",
+        ] {
+            assert!(migration.contains(required), "schema 77 omitted {required}");
+        }
+        let lowercase = migration.to_ascii_lowercase();
+        for forbidden in [
+            "drop table",
+            "truncate table",
+            "delete from",
+            "update item_instances",
+            "update item_ledger_events",
+            "alter table",
+        ] {
+            assert!(
+                !lowercase.contains(forbidden),
+                "schema 77 introduced destructive telemetry mutation {forbidden}"
             );
         }
     }

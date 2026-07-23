@@ -183,13 +183,8 @@ async fn reset_zero_custody_fixture(persistence: &PostgresPersistence) {
     reason = "the hosted fixture keeps the complete V3 danger root explicit and auditable"
 )]
 async fn reset_fixture_with_custody(persistence: &PostgresPersistence, custody: FixtureCustody) {
+    persistence.reset_disposable_identity_data().await.unwrap();
     let mut transaction = persistence.begin_transaction().await.unwrap();
-    sqlx::query("DELETE FROM accounts WHERE namespace_id=$1 AND account_id=$2")
-        .bind(WIPEABLE_CORE_NAMESPACE)
-        .bind(ACCOUNT_ID.as_slice())
-        .execute(transaction.connection())
-        .await
-        .unwrap();
     sqlx::query(
         "INSERT INTO accounts (namespace_id,account_id,state_version,slot_capacity) \
          VALUES ($1,$2,1,2)",
@@ -3101,17 +3096,8 @@ async fn assert_cross_account_promotion_guards(persistence: &PostgresPersistence
     }
 }
 
-async fn wipe_account(persistence: &PostgresPersistence) {
-    let mut transaction = persistence.begin_transaction().await.unwrap();
-    let deleted = sqlx::query("DELETE FROM accounts WHERE namespace_id=$1 AND account_id=$2")
-        .bind(WIPEABLE_CORE_NAMESPACE)
-        .bind(ACCOUNT_ID.as_slice())
-        .execute(transaction.connection())
-        .await
-        .unwrap()
-        .rows_affected();
-    assert_eq!(deleted, 1);
-    transaction.commit().await.unwrap();
+async fn wipe_disposable_database(persistence: &PostgresPersistence) {
+    persistence.reset_disposable_identity_data().await.unwrap();
     for table in [
         "accounts",
         "characters",
@@ -3125,6 +3111,8 @@ async fn wipe_account(persistence: &PostgresPersistence) {
         "echo_records",
         "echo_state_transitions",
         "death_outbox_events",
+        "onboarding_outbox_events_v1",
+        "item_ledger_telemetry_outbox_v1",
     ] {
         assert_eq!(count(persistence, table).await, 0, "{table}");
     }
@@ -3951,6 +3939,6 @@ async fn complete_durable_death_graph_is_atomic_replayable_terminal_and_wipeable
         Err(PersistenceError::CorruptStoredDurableDeath)
     ));
     assert_complete_graph(&restarted, RequestIds::primary()).await;
-    wipe_account(&restarted).await;
+    wipe_disposable_database(&restarted).await;
     restarted.close().await;
 }
