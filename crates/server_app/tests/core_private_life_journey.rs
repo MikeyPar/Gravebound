@@ -761,7 +761,12 @@ async fn drive_microrealm_until_cleared(
             && route.phase == CorePrivateRoutePhaseV1::MicrorealmCleared
             && route.readiness.bell_portal_available.is_available()
     };
-    tokio::time::timeout(COMBAT_TIMEOUT, async {
+    let mut snapshot_count = 0_u64;
+    let mut last_snapshot_tick = 0_u64;
+    let mut last_player = (0_i32, 0_i32, 0_u32);
+    let mut last_hostile_count = 0_usize;
+    let mut last_projectile_count = 0_usize;
+    let result = tokio::time::timeout(COMBAT_TIMEOUT, async {
         loop {
             if let Some(frame) = matching_route(route_receive, &cleared) {
                 *input_sequence = input_sequence.checked_add(1).unwrap();
@@ -790,6 +795,31 @@ async fn drive_microrealm_until_cleared(
                         .find(|entity| entity.kind == EntityKind::Player)
                         .expect("microrealm snapshot must retain its authoritative player");
                     assert!(player.current_health > 0, "ordinary combat must reach the Bell portal alive");
+                    snapshot_count = snapshot_count.checked_add(1).unwrap();
+                    last_snapshot_tick = snapshot.server_tick;
+                    last_player = (
+                        player.x_milli_tiles,
+                        player.y_milli_tiles,
+                        player.current_health,
+                    );
+                    last_hostile_count = snapshot
+                        .entities
+                        .iter()
+                        .filter(|entity| {
+                            matches!(entity.kind, EntityKind::Enemy | EntityKind::Boss)
+                        })
+                        .count();
+                    last_projectile_count = snapshot
+                        .entities
+                        .iter()
+                        .filter(|entity| {
+                            matches!(
+                                entity.kind,
+                                EntityKind::FriendlyProjectile
+                                    | EntityKind::HostileProjectile
+                            )
+                        })
+                        .count();
                     *input_sequence = input_sequence.checked_add(1).unwrap();
                     let Some(target) = nearest_hostile(player, &snapshot.entities) else {
                         // The authored pack is dormant until the entrant moves beyond one tile or
@@ -812,8 +842,29 @@ async fn drive_microrealm_until_cleared(
             }
         }
     })
-    .await
-    .expect("ordinary public-input microrealm clear timed out")
+    .await;
+    match result {
+        Ok(frame) => frame,
+        Err(_) => {
+            let latest_route = route_receive.borrow().as_ref().and_then(|frame| {
+                let ReliableEvent::CorePrivateRouteState(route) = &frame.event else {
+                    return None;
+                };
+                Some((
+                    route.state_version,
+                    route.phase,
+                    route.readiness.microrealm_cleared,
+                ))
+            });
+            panic!(
+                "ordinary public-input microrealm clear timed out: \
+                 route={latest_route:?}, snapshots={snapshot_count}, \
+                 last_tick={last_snapshot_tick}, player={last_player:?}, \
+                 hostiles={last_hostile_count}, projectiles={last_projectile_count}, \
+                 input_sequence={input_sequence}"
+            );
+        }
+    }
 }
 
 /// Follows only public snapshots and ordinary movement input until the authored encounter wins.
