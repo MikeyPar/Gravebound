@@ -769,7 +769,7 @@ pub(crate) fn core_bell_ready_runtime_test_fixture(
 mod tests {
     use std::sync::Arc;
 
-    use protocol::{CorePrivateRouteRoomV1, ManifestHash, WorldFlowContentRevisionV1};
+    use protocol::{CorePrivateRouteRoomV1, EntityKind, ManifestHash, WorldFlowContentRevisionV1};
 
     use super::*;
     use crate::{
@@ -981,6 +981,95 @@ mod tests {
                 .iter()
                 .all(|enemy| enemy.health.alive)
         );
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "public snapshots use bounded authored milli-tile coordinates, and aim normalization does not require integer precision"
+    )]
+    async fn ordinary_public_input_policy_clears_the_live_microrealm_pack() {
+        let directory = CorePrivateRouteActorDirectory::new();
+        let lease = directory
+            .register_actor(authenticated(), seed(), 8)
+            .expect("actor");
+        let mut runtime = runtime(&directory, lease).await;
+        let mut observation = None;
+
+        for sequence in 1..=5_400 {
+            let mut action = input(sequence);
+            let target =
+                observation
+                    .as_ref()
+                    .and_then(|entities: &Vec<protocol::EntitySnapshot>| {
+                        let player = entities
+                            .iter()
+                            .find(|entity| entity.kind == EntityKind::Player)?;
+                        entities
+                            .iter()
+                            .filter(|entity| {
+                                entity.current_health > 0
+                                    && matches!(entity.kind, EntityKind::Enemy | EntityKind::Boss)
+                            })
+                            .min_by_key(|entity| {
+                                let dx = i64::from(entity.x_milli_tiles - player.x_milli_tiles);
+                                let dy = i64::from(entity.y_milli_tiles - player.y_milli_tiles);
+                                dx * dx + dy * dy
+                            })
+                            .map(|target| (player, target))
+                    });
+            if let Some((player, target)) = target {
+                let dx = target.x_milli_tiles - player.x_milli_tiles;
+                let dy = target.y_milli_tiles - player.y_milli_tiles;
+                action.aim =
+                    AimDirection::new(sim_core::SimulationVector::new(dx as f32, dy as f32))
+                        .unwrap();
+                action.primary_held = true;
+                action.primary_sequence = 1;
+                let distance_squared = i64::from(dx).pow(2) + i64::from(dy).pow(2);
+                let (horizontal, vertical) = if distance_squared > 6_000_i64.pow(2) {
+                    (dx.signum(), dy.signum())
+                } else if (sequence / 90).is_multiple_of(2) {
+                    (-dy.signum(), dx.signum())
+                } else {
+                    (dy.signum(), -dx.signum())
+                };
+                action.movement = MovementAction::new(
+                    i8::try_from(horizontal).unwrap(),
+                    i8::try_from(vertical).unwrap(),
+                );
+            } else {
+                action.movement = MovementAction::new(1, 0);
+            }
+
+            let frame = runtime.step(action).await.expect("ordinary public frame");
+            assert!(
+                !frame.player_died,
+                "ordinary clear policy must remain alive"
+            );
+            observation = Some(frame.observation.entities.clone());
+            if frame.phase == CoreMicrorealmPhase::Cleared {
+                assert!(frame.pack_clear.is_some());
+                return;
+            }
+        }
+        let entities = observation.expect("final observation");
+        let hostiles = entities
+            .iter()
+            .filter(|entity| {
+                entity.current_health > 0
+                    && matches!(entity.kind, EntityKind::Enemy | EntityKind::Boss)
+            })
+            .map(|entity| {
+                (
+                    entity.entity_id,
+                    entity.x_milli_tiles,
+                    entity.y_milli_tiles,
+                    entity.current_health,
+                )
+            })
+            .collect::<Vec<_>>();
+        panic!("ordinary policy did not clear; hostiles={hostiles:?}");
     }
 
     #[tokio::test]

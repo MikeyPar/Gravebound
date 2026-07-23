@@ -469,7 +469,9 @@ fn nearest_hostile<'a>(
 ) -> Option<&'a EntitySnapshot> {
     entities
         .iter()
-        .filter(|entity| matches!(entity.kind, EntityKind::Enemy | EntityKind::Boss))
+        .filter(|entity| {
+            entity.current_health > 0 && matches!(entity.kind, EntityKind::Enemy | EntityKind::Boss)
+        })
         .min_by_key(|entity| {
             let delta_x = i64::from(entity.x_milli_tiles - player.x_milli_tiles);
             let delta_y = i64::from(entity.y_milli_tiles - player.y_milli_tiles);
@@ -806,7 +808,8 @@ async fn drive_microrealm_until_cleared(
                         .entities
                         .iter()
                         .filter(|entity| {
-                            matches!(entity.kind, EntityKind::Enemy | EntityKind::Boss)
+                            entity.current_health > 0
+                                && matches!(entity.kind, EntityKind::Enemy | EntityKind::Boss)
                         })
                         .count();
                     last_projectile_count = snapshot
