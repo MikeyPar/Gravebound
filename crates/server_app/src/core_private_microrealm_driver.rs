@@ -38,8 +38,9 @@ use crate::{
     CorePrivateFixedDungeonRuntimeError, CorePrivateMicrorealmInput, CorePrivateMicrorealmRuntime,
     CorePrivateMicrorealmRuntimeError, CorePrivateMicrorealmStep, CorePrivatePlayerDamageFactV1,
     CorePrivateTerminalFeedError, CorePrivateTerminalFrameDisposition,
-    CorePrivateTerminalFrameSender, CorePrivateTerminalRouteControlAuthorityV1,
-    CorePrivateTerminalSceneV1, CorePrivateTerminalTickContextV1, ProductionRecallLiveProjectionV1,
+    CorePrivateTerminalFrameSender, CorePrivateTerminalNetworkHealthV1,
+    CorePrivateTerminalRouteControlAuthorityV1, CorePrivateTerminalSceneV1,
+    CorePrivateTerminalTickContextV1, ProductionRecallLiveProjectionV1,
 };
 
 const NANOS_PER_SECOND: u64 = 1_000_000_000;
@@ -172,6 +173,7 @@ struct RetainedFrameInput {
     reward_trust_valid: bool,
     reward_activity_sequence: u64,
     network_state: DeathTraceNetworkState,
+    network_health: Option<CorePrivateTerminalNetworkHealthV1>,
     recall_state: DeathTraceRecallState,
     recall_movement_basis_points: u16,
     recall_blocks_actions: bool,
@@ -231,6 +233,7 @@ impl Default for RetainedFrameInput {
             reward_trust_valid: true,
             reward_activity_sequence: 1,
             network_state: DeathTraceNetworkState::Connected,
+            network_health: None,
             recall_state: DeathTraceRecallState::Inactive,
             recall_movement_basis_points: 10_000,
             recall_blocks_actions: false,
@@ -693,6 +696,34 @@ impl CorePrivateMicrorealmDriverHandle {
         Ok(())
     }
 
+    /// Retains the newest transport-owned QUIC health sample. The server supplies RTT/jitter/loss;
+    /// the optional correction count is analytics-only client observation and never affects play.
+    pub fn submit_network_health(
+        &self,
+        sample: CorePrivateTerminalNetworkHealthV1,
+    ) -> Result<(), CorePrivateMicrorealmIngressError> {
+        let mut reducer = self
+            .ingress
+            .reducer
+            .lock()
+            .map_err(|_| CorePrivateMicrorealmIngressError::Unavailable)?;
+        ensure_accepting(&reducer)?;
+        if sample.transport_generation == 0
+            || sample.sampled_at_unix_ms == 0
+            || sample.loss_basis_points > 10_000
+            || reducer.retained.network_health.is_some_and(|previous| {
+                previous.transport_generation > sample.transport_generation
+                    || (previous.transport_generation == sample.transport_generation
+                        && previous.sampled_at_unix_ms > sample.sampled_at_unix_ms)
+            })
+        {
+            return Err(CorePrivateMicrorealmIngressError::InvalidNetworkHealth);
+        }
+        reducer.retained.network_health = Some(sample);
+        self.ingress.publish_locked(&reducer);
+        Ok(())
+    }
+
     /// Accepts a reliable action sequence and advances exactly one server-owned ability sequence.
     pub fn submit_ability_press(
         &self,
@@ -761,15 +792,24 @@ impl CorePrivateMicrorealmDriverHandle {
 
     /// Records a newly authenticated winning transport before its retained danger owner becomes
     /// visible. Reconnect itself is a fresh activity edge; gameplay sequence watermarks remain.
-    pub(crate) fn mark_reward_session_active(&self) {
+    pub(crate) fn mark_reward_session_active(
+        &self,
+        network_health: CorePrivateTerminalNetworkHealthV1,
+    ) {
         let mut reducer = self
             .ingress
             .reducer
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        debug_assert!(network_health.transport_generation > 0);
+        debug_assert!(network_health.sampled_at_unix_ms > 0);
+        debug_assert!(network_health.loss_basis_points <= 10_000);
         reducer.retained.reward_session_active = true;
         reducer.retained.reward_trust_valid = true;
         reducer.retained.network_state = DeathTraceNetworkState::Reattached;
+        // Attach publishes the replacement generation's first server observation under this same
+        // reducer lock, so a concurrent lethal frame cannot inherit stale data or observe a gap.
+        reducer.retained.network_health = Some(network_health);
         reducer.retained.reward_activity_sequence =
             reducer.retained.reward_activity_sequence.saturating_add(1);
         self.ingress.publish_locked(&reducer);
@@ -1207,6 +1247,8 @@ pub enum CorePrivateMicrorealmIngressError {
     RecallBlocked,
     #[error("server-owned reward activity sequence exhausted")]
     ActivitySequenceExhausted,
+    #[error("transport network-health authority is invalid or regressed")]
+    InvalidNetworkHealth,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -2584,7 +2626,10 @@ async fn run_caldus(
                                 route: &frame.route,
                                 tick: frame.tick,
                                 player_position: frame.player_position,
-                                context: terminal_tick_context(retained),
+                                context: CorePrivateTerminalTickContextV1 {
+                                    encounter: frame.terminal_encounter,
+                                    ..terminal_tick_context(retained)
+                                },
                                 player_died: frame.player_died,
                                 facts: &frame.player_damage,
                             },
@@ -2917,6 +2962,8 @@ async fn acknowledge_terminal_frame(
 fn terminal_tick_context(retained: RetainedFrameInput) -> CorePrivateTerminalTickContextV1 {
     CorePrivateTerminalTickContextV1 {
         network_state: retained.network_state,
+        network_health: retained.network_health,
+        encounter: None,
         recall_state: retained.recall_state,
         statuses: Arc::from([]),
     }
@@ -3093,6 +3140,17 @@ mod tests {
 
     fn hash(byte: char) -> ManifestHash {
         ManifestHash::new(byte.to_string().repeat(64)).expect("valid hash")
+    }
+
+    const fn reattach_network_health() -> CorePrivateTerminalNetworkHealthV1 {
+        CorePrivateTerminalNetworkHealthV1 {
+            transport_generation: 2,
+            sampled_at_unix_ms: 5_100,
+            ping_millis: 40,
+            jitter_millis: 0,
+            loss_basis_points: 0,
+            correction_count: None,
+        }
     }
 
     fn spawn_caldus_test_driver(
@@ -3696,7 +3754,7 @@ mod tests {
         for _ in 0..5 {
             advance_one_frame(&mut observer).await;
         }
-        handle.mark_reward_session_active();
+        handle.mark_reward_session_active(reattach_network_health());
         advance_one_frame(&mut observer).await;
 
         {
@@ -4047,13 +4105,22 @@ mod tests {
                 DeathTraceNetworkState::LinkLost => handle
                     .neutralize_for_link_lost()
                     .expect("LinkLost transition"),
-                DeathTraceNetworkState::Reattached => handle.mark_reward_session_active(),
+                DeathTraceNetworkState::Reattached => {
+                    handle.mark_reward_session_active(reattach_network_health());
+                }
                 _ => {}
             }
             tokio::time::advance(DRIVER_TICK_DURATION).await;
             let delivery = terminal_receiver.receive().await.expect("terminal frame");
             let frame = delivery.frame().expect("frame delivery");
             assert_eq!(frame.context.network_state, expected);
+            if expected == DeathTraceNetworkState::Reattached {
+                assert_eq!(
+                    frame.context.network_health,
+                    Some(reattach_network_health()),
+                    "the first reattached lethal-capable frame must already own new-generation health"
+                );
+            }
             assert_eq!(frame.context.recall_state, DeathTraceRecallState::Inactive);
             assert!(frame.context.statuses.is_empty());
             delivery

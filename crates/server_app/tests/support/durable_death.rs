@@ -11,12 +11,14 @@ use std::{collections::BTreeMap, path::Path, sync::Arc};
 use persistence::{
     CORE_DEATH_VIEW_ASSETS_BLAKE3, CORE_DEATH_VIEW_LOCALIZATION_BLAKE3,
     CORE_DEATH_VIEW_RECORDS_BLAKE3, CORE_ITEM_CONTENT_REVISION, CORE_WORLD_ASSETS_BLAKE3,
-    CORE_WORLD_LOCALIZATION_BLAKE3, CORE_WORLD_RECORDS_BLAKE3, DeathAggregateVersionsV1,
+    CORE_WORLD_LOCALIZATION_BLAKE3, CORE_WORLD_RECORDS_BLAKE3,
+    DURABLE_DEATH_TELEMETRY_CONTEXT_SCHEMA_VERSION, DeathAggregateVersionsV1,
     DeathVersionAdvanceV1, DurableDeathContentAuthorityV1, DurableDeathItemContentAuthorityV1,
-    DurableDestructionLocationV1, DurableEquipmentSlotV1, LiveDamageTraceContentAuthorityV1,
-    LiveDamageTraceDangerAuthorityV1, PostgresPersistence, WIPEABLE_CORE_NAMESPACE,
-    stage_danger_entry_ash_wallet_restore_v3, stage_danger_entry_inventory_restore_v3,
-    stage_danger_entry_life_metrics_restore_v3, stage_danger_entry_oath_bargain_restore_v3,
+    DurableDeathNetworkHealthV1, DurableDeathTelemetryContextV1, DurableDestructionLocationV1,
+    DurableEquipmentSlotV1, LiveDamageTraceContentAuthorityV1, LiveDamageTraceDangerAuthorityV1,
+    PostgresPersistence, WIPEABLE_CORE_NAMESPACE, stage_danger_entry_ash_wallet_restore_v3,
+    stage_danger_entry_inventory_restore_v3, stage_danger_entry_life_metrics_restore_v3,
+    stage_danger_entry_oath_bargain_restore_v3,
 };
 use protocol::{DeathViewContentRevisionV1, ManifestHash};
 use server_app::{
@@ -959,6 +961,20 @@ pub async fn prepare_death_for_with_custody(
             memorial_presentation_key: "memorial.presentation.core_default".into(),
         },
         terminal_trace: terminal_trace.as_ref().clone(),
+        telemetry: DurableDeathTelemetryContextV1::Observed {
+            schema_version: DURABLE_DEATH_TELEMETRY_CONTEXT_SCHEMA_VERSION,
+            party_size: 1,
+            boss_phase_id: None,
+            contribution: None,
+            network_health: DurableDeathNetworkHealthV1 {
+                transport_generation: 1,
+                sampled_at_unix_ms: ISSUED_AT_UNIX_MS,
+                ping_millis: 80,
+                jitter_millis: 12,
+                loss_basis_points: 100,
+                correction_count: None,
+            },
+        },
         echo: build_echo_projection(scenario, server_computed_echo_power_band),
     };
     build_durable_death_commit(&inputs, &server_context, &presentation).unwrap()

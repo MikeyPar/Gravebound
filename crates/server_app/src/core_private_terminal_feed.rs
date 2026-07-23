@@ -59,14 +59,59 @@ pub struct CorePrivateTerminalFrameV1 {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CorePrivateTerminalTickContextV1 {
     pub network_state: DeathTraceNetworkState,
+    /// Latest server-observed QUIC health for this authenticated transport generation. It remains
+    /// optional when no live sample exists; unavailable client correction authority is explicit.
+    pub network_health: Option<CorePrivateTerminalNetworkHealthV1>,
+    /// Present only while the capacity-one Core Caldus encounter owns exact SOC-010 evidence.
+    pub encounter: Option<CorePrivateTerminalEncounterTelemetryV1>,
     pub recall_state: DeathTraceRecallState,
     pub statuses: Arc<[DeathTraceStatus]>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CorePrivateTerminalNetworkHealthV1 {
+    pub transport_generation: u64,
+    pub sampled_at_unix_ms: u64,
+    pub ping_millis: u16,
+    pub jitter_millis: u16,
+    pub loss_basis_points: u16,
+    pub correction_count: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CorePrivateCaldusPhaseTelemetryV1 {
+    PhaseOne,
+    PhaseTwo,
+    PhaseThree,
+}
+
+impl CorePrivateCaldusPhaseTelemetryV1 {
+    #[must_use]
+    pub const fn stable_id(self) -> &'static str {
+        match self {
+            Self::PhaseOne => "boss.caldus.phase_1",
+            Self::PhaseTwo => "boss.caldus.phase_2",
+            Self::PhaseThree => "boss.caldus.phase_3",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CorePrivateTerminalEncounterTelemetryV1 {
+    pub boss_phase: CorePrivateCaldusPhaseTelemetryV1,
+    /// M03 Core is intentionally capacity one. Later party work must replace this producer.
+    pub party_size: u8,
+    /// Exact SOC-010 centi-units and denominator, retained so the telemetry projection is auditable.
+    pub contribution_centi_units: u64,
+    pub contribution_reference_health: u64,
 }
 
 impl Default for CorePrivateTerminalTickContextV1 {
     fn default() -> Self {
         Self {
             network_state: DeathTraceNetworkState::Connected,
+            network_health: None,
+            encounter: None,
             recall_state: DeathTraceRecallState::Inactive,
             statuses: Arc::from([]),
         }
@@ -723,6 +768,18 @@ fn validate_frame(
 fn validate_tick_context(
     context: &CorePrivateTerminalTickContextV1,
 ) -> Result<(), CorePrivateTerminalFeedError> {
+    if context.network_health.is_some_and(|health| {
+        health.transport_generation == 0
+            || health.sampled_at_unix_ms == 0
+            || health.loss_basis_points > 10_000
+    }) || context.encounter.is_some_and(|encounter| {
+        encounter.party_size != 1
+            || encounter.contribution_reference_health == 0
+            || encounter.contribution_centi_units
+                > encounter.contribution_reference_health.saturating_mul(100)
+    }) {
+        return Err(CorePrivateTerminalFeedError::InvalidTickContext);
+    }
     if context.statuses.len() > MAX_DEATH_TRACE_STATUSES {
         return Err(CorePrivateTerminalFeedError::CapacityExceeded);
     }

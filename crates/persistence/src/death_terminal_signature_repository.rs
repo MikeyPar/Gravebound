@@ -17,16 +17,18 @@ use crate::durable_death::canonical_durable_death_destruction_digest_v1;
 use crate::durable_terminal_recovery::load_committed_death_terminal_v1_on;
 use crate::{
     AuthoritativeDeathPlanV1, DURABLE_DEATH_CONTRACT, DURABLE_DEATH_SCHEMA_VERSION,
-    DeathAggregateVersionsV1, DeathVersionAdvanceV1, DurableCombatTraceEntryV1,
-    DurableDamageTypeV1, DurableDeathCauseV1, DurableDeathEventV1,
-    DurableDeathPresentationAuthorityV1, DurableDeathProvenanceV1, DurableDestructionEntryV1,
-    DurableDestructionLocationV1, DurableEchoEnvelopeV1, DurableEchoOutcomeV1, DurableEchoRecordV1,
-    DurableEchoStateV1, DurableEchoTransitionReasonV1, DurableEchoTransitionV1,
-    DurableEquipmentSlotV1, DurableMemorialRecordV1, DurableNetworkStateV1,
-    DurableOrderedContentIdV1, DurableRecallStateV1, DurableSummaryDamageReferenceV1,
-    DurableSummaryProjectionEntryV1, DurableSummaryProjectionKindV1, DurableSummaryProjectionsV1,
-    DurableTraceStatusV1, PersistenceError, PostgresPersistence,
-    StoredCoreDeathTerminalSignatureV1, StoredDeathTerminalAggregateV1, StoredDeathTerminalAuditV1,
+    DURABLE_DEATH_TELEMETRY_CONTEXT_SCHEMA_VERSION, DeathAggregateVersionsV1,
+    DeathVersionAdvanceV1, DurableCombatTraceEntryV1, DurableDamageTypeV1, DurableDeathCauseV1,
+    DurableDeathContributionV1, DurableDeathEventV1, DurableDeathNetworkHealthV1,
+    DurableDeathPresentationAuthorityV1, DurableDeathProvenanceV1, DurableDeathTelemetryContextV1,
+    DurableDestructionEntryV1, DurableDestructionLocationV1, DurableEchoEnvelopeV1,
+    DurableEchoOutcomeV1, DurableEchoRecordV1, DurableEchoStateV1, DurableEchoTransitionReasonV1,
+    DurableEchoTransitionV1, DurableEquipmentSlotV1, DurableMemorialRecordV1,
+    DurableNetworkStateV1, DurableOrderedContentIdV1, DurableRecallStateV1,
+    DurableSummaryDamageReferenceV1, DurableSummaryProjectionEntryV1,
+    DurableSummaryProjectionKindV1, DurableSummaryProjectionsV1, DurableTraceStatusV1,
+    PersistenceError, PostgresPersistence, StoredCoreDeathTerminalSignatureV1,
+    StoredDeathTerminalAggregateV1, StoredDeathTerminalAuditV1,
     StoredDeathTerminalBargainCleanupV1, StoredDeathTerminalEchoTransitionV1,
     StoredDeathTerminalEchoV1, StoredDeathTerminalGraphCountsV1, StoredDeathTerminalGraphRootV1,
     StoredDeathTerminalItemLedgerV1, StoredDeathTerminalItemV1, StoredDeathTerminalMaterialV1,
@@ -255,6 +257,11 @@ async fn load_root_projection(
                 event.world_localization_blake3,event.presentation_records_blake3,\
                 event.presentation_assets_blake3,event.presentation_localization_blake3,\
                 event.bargain_cleanup_event_id,\
+                event.party_size,event.boss_phase_id,event.contribution_centi_units,\
+                event.contribution_reference_health,event.network_source_kind,\
+                event.network_transport_generation,event.network_sampled_at_unix_ms,\
+                event.network_ping_millis,event.network_jitter_millis,\
+                event.network_loss_basis_points,event.network_correction_count,\
                 floor(extract(epoch FROM event.committed_at)*1000)::bigint AS committed_at_ms,\
                 account.state_version AS account_version,\
                 account.selected_character_id,character.life_state,character.roster_ordinal,\
@@ -323,6 +330,66 @@ async fn load_root_projection(
             "post_life_metrics_version",
         )?,
     };
+    let contribution = match (
+        row.try_get::<Option<i64>, _>("contribution_centi_units")?,
+        row.try_get::<Option<i64>, _>("contribution_reference_health")?,
+    ) {
+        (None, None) => None,
+        (Some(units), Some(reference)) => Some(DurableDeathContributionV1 {
+            contribution_centi_units: unsigned(units)?,
+            reference_health: positive(reference)?,
+        }),
+        _ => return Err(corrupt()),
+    };
+    let network_health = match row.try_get::<Option<i16>, _>("network_source_kind")? {
+        None => None,
+        Some(1) => Some(DurableDeathNetworkHealthV1 {
+            transport_generation: positive(
+                row.try_get::<Option<i64>, _>("network_transport_generation")?
+                    .ok_or_else(corrupt)?,
+            )?,
+            sampled_at_unix_ms: positive(
+                row.try_get::<Option<i64>, _>("network_sampled_at_unix_ms")?
+                    .ok_or_else(corrupt)?,
+            )?,
+            ping_millis: u16::try_from(
+                row.try_get::<Option<i32>, _>("network_ping_millis")?
+                    .ok_or_else(corrupt)?,
+            )
+            .map_err(|_| corrupt())?,
+            jitter_millis: u16::try_from(
+                row.try_get::<Option<i32>, _>("network_jitter_millis")?
+                    .ok_or_else(corrupt)?,
+            )
+            .map_err(|_| corrupt())?,
+            loss_basis_points: u16::try_from(
+                row.try_get::<Option<i32>, _>("network_loss_basis_points")?
+                    .ok_or_else(corrupt)?,
+            )
+            .map_err(|_| corrupt())?,
+            correction_count: row
+                .try_get::<Option<i64>, _>("network_correction_count")?
+                .map(u32::try_from)
+                .transpose()
+                .map_err(|_| corrupt())?,
+        }),
+        _ => return Err(corrupt()),
+    };
+    let party_size = row.try_get::<Option<i16>, _>("party_size")?;
+    let boss_phase_id = row.try_get::<Option<String>, _>("boss_phase_id")?;
+    let telemetry = match (party_size, boss_phase_id, contribution, network_health) {
+        (None, None, None, None) => DurableDeathTelemetryContextV1::HistoricalUnavailable,
+        (Some(party_size), boss_phase_id, contribution, Some(network_health)) => {
+            DurableDeathTelemetryContextV1::Observed {
+                schema_version: DURABLE_DEATH_TELEMETRY_CONTEXT_SCHEMA_VERSION,
+                party_size: u8_value(party_size)?,
+                boss_phase_id,
+                contribution,
+                network_health,
+            }
+        }
+        _ => return Err(corrupt()),
+    };
     let event = DurableDeathEventV1 {
         schema_version: DURABLE_DEATH_SCHEMA_VERSION,
         namespace_id: WIPEABLE_CORE_NAMESPACE.to_owned(),
@@ -373,6 +440,7 @@ async fn load_root_projection(
         trace_digest: exact_hash(row.try_get("trace_digest")?)?,
         destruction_entry_count: 0,
         destruction_digest: [0; 32],
+        telemetry,
     };
     let aggregate = StoredDeathTerminalAggregateV1 {
         account_version: unsigned(row.try_get("account_version")?)?,

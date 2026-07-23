@@ -104,6 +104,59 @@ enum PrivateLifeAction {
 struct CorePrivateLifeBridge(NetworkWorkerHandle);
 
 #[derive(Debug, Resource)]
+struct CorePrivateNetworkDiagnosticsPublisher {
+    enabled: bool,
+    sample_sequence: u32,
+    timer: Timer,
+}
+
+impl Default for CorePrivateNetworkDiagnosticsPublisher {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            sample_sequence: 0,
+            timer: Timer::from_seconds(1.0, TimerMode::Repeating),
+        }
+    }
+}
+
+impl CorePrivateNetworkDiagnosticsPublisher {
+    fn accept_handshake(&mut self, hello: &ServerHello, bridge: &CorePrivateLifeBridge) {
+        self.enabled = hello
+            .feature_flags
+            .iter()
+            .any(|flag| flag.as_str() == protocol::NETWORK_DIAGNOSTICS_FEATURE_FLAG);
+        self.sample_sequence = 0;
+        self.timer.reset();
+        self.try_publish(bridge);
+    }
+
+    fn try_publish(&mut self, bridge: &CorePrivateLifeBridge) {
+        if !self.enabled {
+            return;
+        }
+        let Some(sample_sequence) = self.sample_sequence.checked_add(1) else {
+            self.enabled = false;
+            return;
+        };
+        let frame = protocol::ClientNetworkDiagnosticsFrameV1 {
+            schema_version: protocol::NETWORK_DIAGNOSTICS_SCHEMA_VERSION,
+            sample_sequence,
+            // The current Core private-life renderer does not own the M02 prediction reducer.
+            // Report that absence explicitly instead of manufacturing a zero correction count.
+            corrections: protocol::ClientCorrectionDiagnosticsV1::Unavailable,
+        };
+        if bridge
+            .0
+            .queue_reliable(WireMessage::ClientNetworkDiagnosticsFrame(frame))
+            .is_ok()
+        {
+            self.sample_sequence = sample_sequence;
+        }
+    }
+}
+
+#[derive(Debug, Resource)]
 struct CorePrivatePresentationContent(sim_content::CorePrivateLifeContent);
 
 #[derive(Resource)]
@@ -1519,6 +1572,7 @@ pub fn run_core_private_life(config: CorePrivateLifeConfig) -> Result<()> {
     let mut app = App::new();
     app.insert_resource(ClearColor(Color::srgb_u8(5, 8, 11)))
         .insert_resource(CorePrivateLifeBridge(worker))
+        .insert_resource(CorePrivateNetworkDiagnosticsPublisher::default())
         .insert_resource(CorePrivatePresentationContent(content))
         .insert_resource(CorePrivateOathCopy(oath_copy))
         .insert_resource(CorePrivateOathState::default())
@@ -1564,6 +1618,7 @@ pub fn run_core_private_life(config: CorePrivateLifeConfig) -> Result<()> {
             Update,
             (
                 poll_transport,
+                publish_network_diagnostics,
                 drive_terminal_death_lookup,
                 handle_terminal_death_commands,
                 handle_successor_recovery_commands,
@@ -1670,6 +1725,7 @@ fn poll_transport(
     mut hall: ResMut<CorePrivateHallInteractionState>,
     mut terminal: ResMut<CorePrivateTerminalUi>,
     mut presentation: ResMut<CorePrivateCombatPresentation>,
+    mut network_diagnostics: ResMut<CorePrivateNetworkDiagnosticsPublisher>,
 ) {
     let mut discard_snapshot_queue = false;
     for event in bridge.0.drain_events() {
@@ -1680,14 +1736,18 @@ fn poll_transport(
             }
             TransportEvent::HandshakeAccepted(hello) => {
                 snapshots.reset_transport();
-                accept_private_handshake(
+                let result = accept_private_handshake(
                     &hello,
                     &bridge,
                     &mut client,
                     &consumable,
                     &safe_storage,
                     &mut terminal,
-                )
+                );
+                if result.is_ok() {
+                    network_diagnostics.accept_handshake(&hello, &bridge);
+                }
+                result
             }
             TransportEvent::Reliable(frame) => apply_private_reliable(
                 &frame,
@@ -1849,6 +1909,17 @@ fn accept_private_handshake(
             .map_err(|_| CorePrivateLifeClientError::ActionUnavailable)?;
     }
     Ok(())
+}
+
+#[allow(clippy::needless_pass_by_value)] // Bevy system parameters are wrapper values.
+fn publish_network_diagnostics(
+    time: Res<Time>,
+    bridge: Res<CorePrivateLifeBridge>,
+    mut publisher: ResMut<CorePrivateNetworkDiagnosticsPublisher>,
+) {
+    if publisher.timer.tick(time.delta()).just_finished() {
+        publisher.try_publish(&bridge);
+    }
 }
 
 struct CorePrivateReliableUi<'a> {

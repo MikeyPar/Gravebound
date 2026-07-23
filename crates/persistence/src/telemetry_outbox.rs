@@ -8,15 +8,15 @@
 
 use std::{collections::BTreeMap, fmt};
 
-use sqlx::{PgPool, Postgres, Row, Transaction};
+use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow};
 use telemetry::{
     CommittedOutboxError, CommittedOutboxEventV1, CommittedTelemetrySource, CrashEventV1,
     CrashKindV1, CrashSourceV1, DamageTypeV1, DeathCauseV1, DeathEventV1, ExtractionEventV1,
-    LootActionV1, LootEventV1, OnboardingEventV1, PseudonymousAccountId, RecallEventV1,
-    RecallStateV1, RecallTriggerV1, SessionEndReasonV1, SessionEventV1, StableTelemetryId,
-    SuccessorEventV1, TelemetryContextV1, TelemetryEnvironmentV1, TelemetryEventError,
-    TelemetryEventV1, TelemetryId, TelemetryIdentifierError, TelemetryPlatformV1,
-    VersionedTelemetryEnvelopeV1,
+    LootActionV1, LootEventV1, NetworkHealthV1, OnboardingEventV1, PseudonymousAccountId,
+    RecallEventV1, RecallStateV1, RecallTriggerV1, SessionEndReasonV1, SessionEventV1,
+    StableTelemetryId, SuccessorEventV1, TelemetryContextV1, TelemetryEnvironmentV1,
+    TelemetryEventError, TelemetryEventV1, TelemetryId, TelemetryIdentifierError,
+    TelemetryPlatformV1, VersionedTelemetryEnvelopeV1,
 };
 use thiserror::Error;
 
@@ -138,6 +138,11 @@ SELECT summary.class_id, summary.level, summary.oath_id, summary.lifetime_ms,
        death.region_id, death.room_id, death.cause_kind, death.killer_content_id,
        death.killer_pattern_id, death.raw_damage, death.final_damage, death.damage_type,
        death.pre_hit_health, death.recall_state,
+       death.party_size, death.boss_phase_id, death.contribution_centi_units,
+       death.contribution_reference_health, death.network_source_kind,
+       death.network_transport_generation, death.network_sampled_at_unix_ms,
+       death.network_ping_millis, death.network_jitter_millis,
+       death.network_loss_basis_points, death.network_correction_count,
        m03_death_item_power_band_v1(death.namespace_id,death.death_id) AS item_power_band,
        ARRAY(
            SELECT bargain.bargain_id FROM death_summary_bargains AS bargain
@@ -429,6 +434,8 @@ impl PostgresM03TelemetryOutboxAdapter {
         let killer_content_id = row
             .try_get::<Option<String>, _>("killer_content_id")?
             .ok_or(M03TelemetryOutboxError::CorruptSourceRow)?;
+        let contribution_basis_points = project_death_contribution(&row)?;
+        let network_health = project_death_network_health(&row)?;
         Ok(TelemetryEventV1::Death(Box::new(DeathEventV1 {
             death_id: TelemetryId::new(stored.death_id)?,
             class_id: StableTelemetryId::new(row.try_get::<String, _>("class_id")?)?,
@@ -465,14 +472,21 @@ impl PostgresM03TelemetryOutboxAdapter {
             room_id: Some(StableTelemetryId::new(
                 row.try_get::<String, _>("room_id")?,
             )?),
-            boss_phase_id: None,
-            party_size: None,
-            contribution_basis_points: None,
+            boss_phase_id: row
+                .try_get::<Option<String>, _>("boss_phase_id")?
+                .map(StableTelemetryId::new)
+                .transpose()?,
+            party_size: row
+                .try_get::<Option<i16>, _>("party_size")?
+                .map(u8::try_from)
+                .transpose()
+                .map_err(|_| M03TelemetryOutboxError::CorruptSourceRow)?,
+            contribution_basis_points,
             item_power_band: Some(
                 u16::try_from(row.try_get::<i16, _>("item_power_band")?)
                     .map_err(|_| M03TelemetryOutboxError::CorruptSourceRow)?,
             ),
-            network_health: None,
+            network_health,
             recall_state,
             cause,
         })))
@@ -501,6 +515,96 @@ impl PostgresM03TelemetryOutboxAdapter {
             self.in_flight.remove(event_id);
         }
         Ok(sorted)
+    }
+}
+
+fn project_death_contribution(row: &PgRow) -> Result<Option<u16>, M03TelemetryOutboxError> {
+    match (
+        row.try_get::<Option<i64>, _>("contribution_centi_units")?,
+        row.try_get::<Option<i64>, _>("contribution_reference_health")?,
+    ) {
+        (None, None) => Ok(None),
+        (Some(units), Some(reference)) if units >= 0 && reference > 0 => {
+            let numerator = u128::try_from(units)
+                .map_err(|_| M03TelemetryOutboxError::CorruptSourceRow)?
+                .saturating_mul(100);
+            let denominator =
+                u128::try_from(reference).map_err(|_| M03TelemetryOutboxError::CorruptSourceRow)?;
+            let rounded = numerator
+                .saturating_add(denominator / 2)
+                .checked_div(denominator)
+                .ok_or(M03TelemetryOutboxError::CorruptSourceRow)?;
+            Ok(Some(
+                u16::try_from(rounded).map_err(|_| M03TelemetryOutboxError::CorruptSourceRow)?,
+            ))
+        }
+        _ => Err(M03TelemetryOutboxError::CorruptSourceRow),
+    }
+}
+
+fn project_death_network_health(
+    row: &PgRow,
+) -> Result<Option<NetworkHealthV1>, M03TelemetryOutboxError> {
+    match row.try_get::<Option<i16>, _>("network_source_kind")? {
+        None => {
+            let has_orphaned_fact = row
+                .try_get::<Option<i64>, _>("network_transport_generation")?
+                .is_some()
+                || row
+                    .try_get::<Option<i64>, _>("network_sampled_at_unix_ms")?
+                    .is_some()
+                || row
+                    .try_get::<Option<i32>, _>("network_ping_millis")?
+                    .is_some()
+                || row
+                    .try_get::<Option<i32>, _>("network_jitter_millis")?
+                    .is_some()
+                || row
+                    .try_get::<Option<i32>, _>("network_loss_basis_points")?
+                    .is_some()
+                || row
+                    .try_get::<Option<i64>, _>("network_correction_count")?
+                    .is_some();
+            if has_orphaned_fact {
+                Err(M03TelemetryOutboxError::CorruptSourceRow)
+            } else {
+                Ok(None)
+            }
+        }
+        Some(1) => {
+            let transport_generation = row
+                .try_get::<Option<i64>, _>("network_transport_generation")?
+                .ok_or(M03TelemetryOutboxError::CorruptSourceRow)?;
+            let sampled_at_unix_ms = row
+                .try_get::<Option<i64>, _>("network_sampled_at_unix_ms")?
+                .ok_or(M03TelemetryOutboxError::CorruptSourceRow)?;
+            if transport_generation <= 0 || sampled_at_unix_ms <= 0 {
+                return Err(M03TelemetryOutboxError::CorruptSourceRow);
+            }
+            Ok(Some(NetworkHealthV1 {
+                ping_millis: u16::try_from(
+                    row.try_get::<Option<i32>, _>("network_ping_millis")?
+                        .ok_or(M03TelemetryOutboxError::CorruptSourceRow)?,
+                )
+                .map_err(|_| M03TelemetryOutboxError::CorruptSourceRow)?,
+                jitter_millis: u16::try_from(
+                    row.try_get::<Option<i32>, _>("network_jitter_millis")?
+                        .ok_or(M03TelemetryOutboxError::CorruptSourceRow)?,
+                )
+                .map_err(|_| M03TelemetryOutboxError::CorruptSourceRow)?,
+                loss_basis_points: u16::try_from(
+                    row.try_get::<Option<i32>, _>("network_loss_basis_points")?
+                        .ok_or(M03TelemetryOutboxError::CorruptSourceRow)?,
+                )
+                .map_err(|_| M03TelemetryOutboxError::CorruptSourceRow)?,
+                correction_count: row
+                    .try_get::<Option<i64>, _>("network_correction_count")?
+                    .map(u32::try_from)
+                    .transpose()
+                    .map_err(|_| M03TelemetryOutboxError::CorruptSourceRow)?,
+            }))
+        }
+        _ => Err(M03TelemetryOutboxError::CorruptSourceRow),
     }
 }
 

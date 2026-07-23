@@ -6,7 +6,8 @@ use thiserror::Error;
 use crate::{
     AccountBootstrapFrame, AccountBootstrapResult, BargainDecisionFrame, BargainDecisionResult,
     BargainViewFrame, BargainViewResult, CharacterMutationFrame, CharacterMutationResult,
-    ClientHello, CoreCombatPresentationStateV1, CoreConsumableStateV1, CoreConsumableUseFrameV1,
+    ClientHello, ClientNetworkDiagnosticsFrameV1, ClientNetworkDiagnosticsResultV1,
+    CoreCombatPresentationStateV1, CoreConsumableStateV1, CoreConsumableUseFrameV1,
     CoreConsumableUseResultV1, CoreExtractionReadyStateV1, CorePendingInventoryStateV1,
     CorePrivateRouteStateV1, DeathViewFrameV1, DeathViewResultV1, ExtractionCommitFrameV1,
     ExtractionCommitResultV1, HallInteractionFrameV1, HallInteractionResultV1, HandshakeResponse,
@@ -57,6 +58,7 @@ pub enum MessageKind {
     CoreConsumableUseFrame,
     SafeStorageQueryFrame,
     NativeCrashReportFrame,
+    ClientNetworkDiagnosticsFrame,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -478,6 +480,7 @@ pub enum ReliableEvent {
     SafeStorageQueryResult(Box<SafeStorageQueryResultV1>),
     CoreCombatPresentationState(Box<CoreCombatPresentationStateV1>),
     NativeCrashReportResult(NativeCrashReportResultV1),
+    ClientNetworkDiagnosticsResult(ClientNetworkDiagnosticsResultV1),
 }
 
 impl ReliableEvent {
@@ -512,7 +515,8 @@ impl ReliableEvent {
             | Self::CoreExtractionReadyState(_)
             | Self::CoreConsumableState(_)
             | Self::SafeStorageQueryResult(_)
-            | Self::NativeCrashReportResult(_) => NetworkChannel::Control,
+            | Self::NativeCrashReportResult(_)
+            | Self::ClientNetworkDiagnosticsResult(_) => NetworkChannel::Control,
             Self::SocialPing { .. } => NetworkChannel::Social,
         }
     }
@@ -599,6 +603,9 @@ impl ReliableEvent {
             Self::NativeCrashReportResult(result) => result
                 .validate()
                 .map_err(|_| MessageValidationError::NativeCrash),
+            Self::ClientNetworkDiagnosticsResult(result) => result
+                .validate()
+                .map_err(|_| MessageValidationError::NetworkDiagnostics),
             _ => Ok(()),
         }
     }
@@ -650,6 +657,7 @@ pub enum WireMessage {
     CoreConsumableUseFrame(CoreConsumableUseFrameV1),
     SafeStorageQueryFrame(SafeStorageQueryFrameV1),
     NativeCrashReportFrame(NativeCrashReportFrameV1),
+    ClientNetworkDiagnosticsFrame(ClientNetworkDiagnosticsFrameV1),
 }
 
 impl WireMessage {
@@ -683,6 +691,7 @@ impl WireMessage {
             Self::CoreConsumableUseFrame(_) => MessageKind::CoreConsumableUseFrame,
             Self::SafeStorageQueryFrame(_) => MessageKind::SafeStorageQueryFrame,
             Self::NativeCrashReportFrame(_) => MessageKind::NativeCrashReportFrame,
+            Self::ClientNetworkDiagnosticsFrame(_) => MessageKind::ClientNetworkDiagnosticsFrame,
         }
     }
 
@@ -700,7 +709,8 @@ impl WireMessage {
             | Self::DeathViewFrame(_)
             | Self::ResolutionHoldQueryFrame(_)
             | Self::SafeStorageQueryFrame(_)
-            | Self::NativeCrashReportFrame(_) => NetworkChannel::Control,
+            | Self::NativeCrashReportFrame(_)
+            | Self::ClientNetworkDiagnosticsFrame(_) => NetworkChannel::Control,
             Self::InputFrame(_) => NetworkChannel::Input,
             Self::ActionFrame(_) | Self::RecallFrame(_) | Self::HallInteractionFrame(_) => {
                 NetworkChannel::Action
@@ -795,6 +805,9 @@ impl WireMessage {
             Self::NativeCrashReportFrame(value) => value
                 .validate()
                 .map_err(|_| MessageValidationError::NativeCrash),
+            Self::ClientNetworkDiagnosticsFrame(value) => value
+                .validate()
+                .map_err(|_| MessageValidationError::NetworkDiagnostics),
         }
     }
 }
@@ -835,6 +848,8 @@ pub enum MessageValidationError {
     CoreCombatPresentation,
     #[error("native crash report failed semantic validation")]
     NativeCrash,
+    #[error("network diagnostics failed semantic validation")]
+    NetworkDiagnostics,
     #[error("message sequence must be nonzero")]
     ZeroSequence,
     #[error("fixed-point vector component must remain within -1000..=1000")]

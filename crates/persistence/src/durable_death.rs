@@ -278,6 +278,83 @@ pub enum DurableRecallStateV1 {
     CompletionPending,
 }
 
+pub const DURABLE_DEATH_TELEMETRY_CONTEXT_SCHEMA_VERSION: u16 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DurableDeathContributionV1 {
+    /// Exact SOC-010 centi-units: damage*100 + healing*80 + prevention*60 + objectives.
+    pub contribution_centi_units: u64,
+    pub reference_health: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DurableDeathNetworkHealthV1 {
+    pub transport_generation: u64,
+    pub sampled_at_unix_ms: u64,
+    pub ping_millis: u16,
+    pub jitter_millis: u16,
+    pub loss_basis_points: u16,
+    /// None means the negotiated client runtime had no correction-counter authority.
+    pub correction_count: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum DurableDeathTelemetryContextV1 {
+    /// The row predates additive schema 78. No TEL-003 fact is inferred or backfilled.
+    #[default]
+    HistoricalUnavailable,
+    Observed {
+        schema_version: u16,
+        /// Capacity-one is the authored M03 private-life contract, not a client observation.
+        party_size: u8,
+        boss_phase_id: Option<String>,
+        contribution: Option<DurableDeathContributionV1>,
+        network_health: DurableDeathNetworkHealthV1,
+    },
+}
+
+impl DurableDeathTelemetryContextV1 {
+    fn validate(&self) -> Result<(), PersistenceError> {
+        match self {
+            Self::HistoricalUnavailable => Ok(()),
+            Self::Observed {
+                schema_version,
+                party_size,
+                boss_phase_id,
+                contribution,
+                network_health,
+            } => {
+                if *schema_version != DURABLE_DEATH_TELEMETRY_CONTEXT_SCHEMA_VERSION
+                    || *party_size != 1
+                    || boss_phase_id
+                        .as_deref()
+                        .is_some_and(|value| !valid_stable_id(value))
+                    || contribution.as_ref().is_some_and(|value| {
+                        value.reference_health == 0
+                            || value.contribution_centi_units
+                                > value.reference_health.saturating_mul(100)
+                    })
+                    || network_health.transport_generation == 0
+                    || network_health.sampled_at_unix_ms == 0
+                    || network_health.loss_basis_points > 10_000
+                    || contribution.is_some() != boss_phase_id.is_some()
+                {
+                    return Err(corrupt());
+                }
+                Ok(())
+            }
+        }
+    }
+
+    const fn is_historical_unavailable(&self) -> bool {
+        matches!(self, Self::HistoricalUnavailable)
+    }
+
+    const fn is_observed(&self) -> bool {
+        matches!(self, Self::Observed { .. })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DurableDeathEventV1 {
     pub schema_version: u16,
@@ -321,6 +398,12 @@ pub struct DurableDeathEventV1 {
     pub trace_digest: [u8; 32],
     pub destruction_entry_count: u16,
     pub destruction_digest: [u8; 32],
+    /// Appended to preserve the v1 canonical hash of pre-schema-78 death plans.
+    #[serde(
+        default,
+        skip_serializing_if = "DurableDeathTelemetryContextV1::is_historical_unavailable"
+    )]
+    pub telemetry: DurableDeathTelemetryContextV1,
 }
 
 impl DurableDeathEventV1 {
@@ -347,6 +430,7 @@ impl DurableDeathEventV1 {
             || !valid_lower_blake3(&self.assets_blake3)
             || !valid_lower_blake3(&self.localization_blake3)
             || self.presentation.validate().is_err()
+            || self.telemetry.validate().is_err()
             || !valid_stable_id(&self.region_id)
             || !valid_stable_id(&self.room_id)
             || self.death_tick == 0
@@ -902,9 +986,13 @@ impl AuthoritativeDeathPlanV1 {
         // PostgreSQL authors commit time inside the serializable transaction. Normalize that
         // timestamp and the two digests derived from it so intent identity remains stable when the
         // repository binds the exact transaction timestamp. The event's request back-reference is
-        // likewise excluded to avoid a hash cycle.
+        // likewise excluded to avoid a hash cycle. TEL-003 observations are committed atomically
+        // and remain covered by the restart/audit signature, but they are not gameplay mutation
+        // intent: normalization preserves pre-schema-78 hashes and makes response-loss retries
+        // return the original observation instead of conflicting on a later transport sample.
         let mut material = self.clone();
         material.event.canonical_request_hash = [0; 32];
+        material.event.telemetry = DurableDeathTelemetryContextV1::HistoricalUnavailable;
         material.clear_commit_authority();
         canonical_digest(PLAN_HASH_CONTEXT, &material)
     }
@@ -1021,6 +1109,7 @@ impl DurableDeathCommitRequestV1 {
         self.plan.validate()?;
         if self.schema_version != DURABLE_DEATH_SCHEMA_VERSION
             || self.contract != DURABLE_DEATH_CONTRACT
+            || !self.plan.event.telemetry.is_observed()
             || self.mutation_id == [0; 16]
             || self.mutation_id != self.plan.event.mutation_id
             || self.canonical_request_hash != self.plan.event.canonical_request_hash
@@ -1821,6 +1910,23 @@ pub(crate) mod tests {
             source_y_milli_tiles: -2_000,
             network_state: DurableNetworkStateV1::Connected,
             recall_state: DurableRecallStateV1::Inactive,
+            telemetry: DurableDeathTelemetryContextV1::Observed {
+                schema_version: DURABLE_DEATH_TELEMETRY_CONTEXT_SCHEMA_VERSION,
+                party_size: 1,
+                boss_phase_id: Some("boss.caldus.phase_1".into()),
+                contribution: Some(DurableDeathContributionV1 {
+                    contribution_centi_units: 250_000,
+                    reference_health: 7_200,
+                }),
+                network_health: DurableDeathNetworkHealthV1 {
+                    transport_generation: 1,
+                    sampled_at_unix_ms: 1_900,
+                    ping_millis: 80,
+                    jitter_millis: 12,
+                    loss_basis_points: 100,
+                    correction_count: None,
+                },
+            },
             lifetime_ticks: 18_000,
             permadeath_combat_ticks: 18_000,
             versions: versions(),
@@ -2032,6 +2138,63 @@ pub(crate) mod tests {
             result
         );
         assert_ne!(result.digest().unwrap(), [0; 32]);
+    }
+
+    #[test]
+    fn m03_death_telemetry_context_rejects_fabricated_or_unbounded_facts() {
+        let mut event = valid_request().plan.event;
+        let DurableDeathTelemetryContextV1::Observed { party_size, .. } = &mut event.telemetry
+        else {
+            panic!("fixture has current telemetry")
+        };
+        *party_size = 2;
+        assert!(event.validate().is_err());
+
+        let mut event = valid_request().plan.event;
+        let DurableDeathTelemetryContextV1::Observed { boss_phase_id, .. } = &mut event.telemetry
+        else {
+            panic!("fixture has current telemetry")
+        };
+        *boss_phase_id = None;
+        assert!(event.validate().is_err());
+
+        let mut event = valid_request().plan.event;
+        let DurableDeathTelemetryContextV1::Observed { network_health, .. } = &mut event.telemetry
+        else {
+            panic!("fixture has current telemetry")
+        };
+        network_health.loss_basis_points = 10_001;
+        assert!(event.validate().is_err());
+
+        let mut request = valid_request();
+        request.plan.event.telemetry = DurableDeathTelemetryContextV1::HistoricalUnavailable;
+        assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn schema_78_historical_context_preserves_pre_migration_canonical_hashes() {
+        // Frozen by running this exact deterministic fixture at source ed5f315, before the
+        // telemetry field or migration 78 existed. This protects restart reads across upgrade.
+        const PRE_0078_PLAN_HASH: [u8; 32] = [
+            124, 183, 31, 219, 59, 91, 237, 29, 222, 37, 74, 222, 221, 37, 6, 207, 31, 149, 135,
+            117, 24, 69, 18, 142, 131, 105, 52, 121, 57, 207, 64, 21,
+        ];
+        const PRE_0078_REQUEST_HASH: [u8; 32] = [
+            64, 192, 168, 199, 97, 5, 158, 178, 217, 80, 176, 81, 76, 81, 81, 205, 68, 75, 189,
+            160, 123, 106, 104, 158, 151, 17, 224, 33, 55, 235, 229, 116,
+        ];
+        let mut request = valid_request();
+        assert_eq!(request.canonical_plan_hash, PRE_0078_PLAN_HASH);
+        assert_eq!(request.canonical_request_hash, PRE_0078_REQUEST_HASH);
+        request.plan.event.telemetry = DurableDeathTelemetryContextV1::HistoricalUnavailable;
+        assert_eq!(
+            request.plan.canonical_plan_hash().unwrap(),
+            PRE_0078_PLAN_HASH
+        );
+        assert_eq!(
+            request.expected_request_hash().unwrap(),
+            PRE_0078_REQUEST_HASH
+        );
     }
 
     #[test]

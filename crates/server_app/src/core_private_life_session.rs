@@ -46,13 +46,14 @@ use crate::{
     CorePrivateMicrorealmIngressError, CorePrivateMicrorealmPreparedHandoff,
     CorePrivateMicrorealmRetainedInput, CorePrivateMicrorealmRuntime,
     CorePrivateRecallTerminalHandle, CorePrivateRouteActorLease, CorePrivateTerminalFeedBinding,
-    CorePrivateTerminalFrameReceiver, CoreRecallActorDirectory, CoreRecallActorRetirementReport,
-    CoreRecallAuthoritativeTick, CoreRecallConnectionAuthority, CoreRecallConnectionLease,
-    CoreRecallRuntimeError, CoreRecallRuntimeReport, CoreRecallTransportAttach, CoreReliableWriter,
-    IdentityClock, PostgresCaldusVictoryCoordinator, PostgresCoreB3RewardCoordinator,
-    ProductionExtractionBossExitAuthorityV1, ProductionExtractionCaldusReservationV1,
-    ProductionExtractionIntentActor, ProductionExtractionPlanner, ProductionRecallClock,
-    ProductionRecallDetachOutcome, SecretRewardEpoch, TRANSPORT_REPLACED_CLOSE_CODE,
+    CorePrivateTerminalFrameReceiver, CorePrivateTerminalNetworkHealthV1, CoreRecallActorDirectory,
+    CoreRecallActorRetirementReport, CoreRecallAuthoritativeTick, CoreRecallConnectionAuthority,
+    CoreRecallConnectionLease, CoreRecallRuntimeError, CoreRecallRuntimeReport,
+    CoreRecallTransportAttach, CoreReliableWriter, IdentityClock, PostgresCaldusVictoryCoordinator,
+    PostgresCoreB3RewardCoordinator, ProductionExtractionBossExitAuthorityV1,
+    ProductionExtractionCaldusReservationV1, ProductionExtractionIntentActor,
+    ProductionExtractionPlanner, ProductionRecallClock, ProductionRecallDetachOutcome,
+    SecretRewardEpoch, TRANSPORT_REPLACED_CLOSE_CODE,
 };
 use crate::{
     core_extraction_runtime::CoreExtractionPreparedWriterHandoff,
@@ -61,6 +62,40 @@ use crate::{
 
 const SESSION_DETACHED_CLOSE_CODE: u32 = 0x104;
 const SESSION_DETACHED_REASON: &[u8] = b"private-life transport detached";
+
+fn initial_transport_network_health(
+    connection: &quinn::Connection,
+    transport_generation: u64,
+    sampled_at_unix_ms: u64,
+) -> CorePrivateTerminalNetworkHealthV1 {
+    let path = connection.stats().path;
+    let ping_millis = u16::try_from(
+        u64::try_from(connection.rtt().as_micros())
+            .unwrap_or(u64::MAX)
+            .saturating_add(500)
+            / 1_000,
+    )
+    .unwrap_or(u16::MAX);
+    let loss_basis_points = if path.sent_packets == 0 {
+        0
+    } else {
+        let rounded = u128::from(path.lost_packets)
+            .saturating_mul(10_000)
+            .saturating_add(u128::from(path.sent_packets / 2))
+            / u128::from(path.sent_packets);
+        u16::try_from(rounded.min(10_000)).unwrap_or(10_000)
+    };
+    CorePrivateTerminalNetworkHealthV1 {
+        transport_generation,
+        sampled_at_unix_ms,
+        ping_millis,
+        // One server observation has no preceding RTT delta. Zero is the exact initial jitter,
+        // not a claim that the connection will remain jitter-free.
+        jitter_millis: 0,
+        loss_basis_points,
+        correction_count: None,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct CorePrivateLifeTransportGeneration(u64);
@@ -1243,7 +1278,15 @@ where
         entry.recall_lease = committed.recall.as_ref().map(|attached| attached.lease);
         entry.extraction_lease = committed.extraction.as_ref().map(|attached| attached.lease);
         if let Some(bound) = &entry.microrealm {
-            bound.driver.handle().mark_reward_session_active();
+            let network_health = initial_transport_network_health(
+                writer.connection(),
+                generation.get(),
+                issued_at_unix_ms,
+            );
+            bound
+                .driver
+                .handle()
+                .mark_reward_session_active(network_health);
             if let Some(b3_rewards) = &bound.b3_rewards {
                 b3_rewards.attach_writer(
                     CoreB3RewardWriterGeneration::new(generation.get())?,
@@ -1633,6 +1676,18 @@ where
             })
         })
         .await
+    }
+
+    /// Publishes one server-owned QUIC health sample into the current danger-frame reducer.
+    /// Absence of a bound danger runtime is expected in Character Select/Hall and is reported to
+    /// the caller so the analytics-only sampler can fail open without affecting gameplay.
+    pub async fn submit_microrealm_network_health(
+        &self,
+        lease: CorePrivateLifeTransportLease,
+        sample: CorePrivateTerminalNetworkHealthV1,
+    ) -> Result<(), CorePrivateLifeSessionError> {
+        self.submit_microrealm_ingress(lease, |handle| handle.submit_network_health(sample))
+            .await
     }
 
     /// Submits only reliable ability presses. Recall and interactions retain their dedicated

@@ -601,6 +601,7 @@ impl ProductionTerminalOwnerRuntime {
                         danger_entry: self.authority.clone(),
                         route: frame.route.clone(),
                         terminal_trace,
+                        terminal_context: frame.context.clone(),
                         issued_at_unix_ms: unix_millis()?,
                     })
                     .await?,

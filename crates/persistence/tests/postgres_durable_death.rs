@@ -2,11 +2,12 @@ use persistence::{
     AuthoritativeDeathPlanV1, CORE_DEATH_VIEW_ASSETS_BLAKE3, CORE_DEATH_VIEW_LOCALIZATION_BLAKE3,
     CORE_DEATH_VIEW_RECORDS_BLAKE3, CORE_ITEM_CONTENT_REVISION, CORE_WORLD_ASSETS_BLAKE3,
     CORE_WORLD_LOCALIZATION_BLAKE3, CORE_WORLD_RECORDS_BLAKE3, DURABLE_DEATH_SCHEMA_VERSION,
-    DURABLE_DEATH_SUMMARY_REVISION, DeathAggregateVersionsV1, DeathVersionAdvanceV1,
-    DeathViewReadError, DurableCombatTraceEntryV1, DurableDamageTypeV1, DurableDeathCauseV1,
-    DurableDeathCommitRequestV1, DurableDeathContentAuthorityV1, DurableDeathEventV1,
-    DurableDeathItemContentAuthorityV1, DurableDeathPresentationAuthorityV1,
-    DurableDeathProvenanceV1, DurableDeathSummaryV1, DurableDeathTracePromotionV1,
+    DURABLE_DEATH_SUMMARY_REVISION, DURABLE_DEATH_TELEMETRY_CONTEXT_SCHEMA_VERSION,
+    DeathAggregateVersionsV1, DeathVersionAdvanceV1, DeathViewReadError, DurableCombatTraceEntryV1,
+    DurableDamageTypeV1, DurableDeathCauseV1, DurableDeathCommitRequestV1,
+    DurableDeathContentAuthorityV1, DurableDeathEventV1, DurableDeathItemContentAuthorityV1,
+    DurableDeathNetworkHealthV1, DurableDeathPresentationAuthorityV1, DurableDeathProvenanceV1,
+    DurableDeathSummaryV1, DurableDeathTelemetryContextV1, DurableDeathTracePromotionV1,
     DurableDeathTransactionV1, DurableDestructionEntryV1, DurableDestructionLocationV1,
     DurableEchoEnvelopeV1, DurableEchoOutcomeV1, DurableEchoRecordV1, DurableEchoStateV1,
     DurableEchoTransitionReasonV1, DurableEchoTransitionV1, DurableEquipmentSlotV1,
@@ -17,14 +18,19 @@ use persistence::{
     LiveDamageTraceDamageTypeV1, LiveDamageTraceDangerAuthorityV1, LiveDamageTraceEntryV1,
     LiveDamageTraceNetworkStateV1, LiveDamageTraceRecallStateV1, LiveDamageTraceStatusV1,
     LiveDamageTraceTickCommandV1, LiveDamageTraceTickRequestV1, LiveDamageTraceTickTransactionV1,
-    PersistenceConfig, PersistenceError, PostgresPersistence, StoredLiveDamageTraceSnapshotEntryV1,
-    StoredPrivateLifeBootstrapStateV1, WIPEABLE_CORE_NAMESPACE,
+    PersistenceConfig, PersistenceError, PostgresM03TelemetryOutboxAdapter, PostgresPersistence,
+    StoredLiveDamageTraceSnapshotEntryV1, StoredPrivateLifeBootstrapStateV1,
+    TelemetryPseudonymizationKeyV1, WIPEABLE_CORE_NAMESPACE,
     canonical_death_terminal_payload_hash_v1, derive_durable_death_item_ledger_event_id,
     stage_danger_entry_ash_wallet_restore_v3, stage_danger_entry_inventory_restore_v3,
     stage_danger_entry_life_metrics_restore_v3, stage_danger_entry_oath_bargain_restore_v3,
 };
 use serde::Serialize;
 use sqlx::Row;
+use telemetry::{
+    CommittedTelemetrySource, TelemetryConnectivity, TelemetryIngestOutcome, TelemetryPipeline,
+    TelemetryPipelineMode,
+};
 
 #[path = "support/terminal_telemetry.rs"]
 mod terminal_telemetry;
@@ -859,6 +865,23 @@ fn request(ids: RequestIds) -> DurableDeathCommitRequestV1 {
         source_y_milli_tiles: -500,
         network_state: DurableNetworkStateV1::Connected,
         recall_state: DurableRecallStateV1::Inactive,
+        telemetry: DurableDeathTelemetryContextV1::Observed {
+            schema_version: DURABLE_DEATH_TELEMETRY_CONTEXT_SCHEMA_VERSION,
+            party_size: 1,
+            boss_phase_id: Some("boss.caldus.phase_2".into()),
+            contribution: Some(persistence::DurableDeathContributionV1 {
+                contribution_centi_units: 360_000,
+                reference_health: 7_200,
+            }),
+            network_health: DurableDeathNetworkHealthV1 {
+                transport_generation: 1,
+                sampled_at_unix_ms: ISSUED_AT_UNIX_MS,
+                ping_millis: 80,
+                jitter_millis: 12,
+                loss_basis_points: 100,
+                correction_count: None,
+            },
+        },
         lifetime_ticks: 20_000,
         permadeath_combat_ticks: 18_000,
         versions,
@@ -3232,6 +3255,93 @@ async fn assert_stored_death_authorities(persistence: &PostgresPersistence, deat
     transaction.rollback().await.unwrap();
 }
 
+async fn assert_stored_tel_003_context_and_redacted_projection(
+    persistence: &PostgresPersistence,
+    death_id: [u8; 16],
+) {
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let row = sqlx::query(
+        "SELECT party_size,boss_phase_id,contribution_centi_units,\
+                contribution_reference_health,network_source_kind,\
+                network_transport_generation,network_sampled_at_unix_ms,\
+                network_ping_millis,network_jitter_millis,\
+                network_loss_basis_points,network_correction_count \
+         FROM death_events WHERE namespace_id=$1 AND death_id=$2",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(death_id.as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    assert_eq!(row.get::<i16, _>("party_size"), 1);
+    assert_eq!(row.get::<String, _>("boss_phase_id"), "boss.caldus.phase_2");
+    assert_eq!(row.get::<i64, _>("contribution_centi_units"), 360_000);
+    assert_eq!(row.get::<i64, _>("contribution_reference_health"), 7_200);
+    assert_eq!(row.get::<i16, _>("network_source_kind"), 1);
+    assert_eq!(row.get::<i64, _>("network_transport_generation"), 1);
+    assert_eq!(
+        row.get::<i64, _>("network_sampled_at_unix_ms"),
+        i64::try_from(ISSUED_AT_UNIX_MS).unwrap()
+    );
+    assert_eq!(row.get::<i32, _>("network_ping_millis"), 80);
+    assert_eq!(row.get::<i32, _>("network_jitter_millis"), 12);
+    assert_eq!(row.get::<i32, _>("network_loss_basis_points"), 100);
+    assert_eq!(row.get::<Option<i64>, _>("network_correction_count"), None);
+    transaction.rollback().await.unwrap();
+
+    let signature = canonical_terminal_signature(persistence).await;
+    assert!(matches!(
+        signature.plan.event.telemetry,
+        DurableDeathTelemetryContextV1::Observed {
+            schema_version: DURABLE_DEATH_TELEMETRY_CONTEXT_SCHEMA_VERSION,
+            party_size: 1,
+            boss_phase_id: Some(ref phase),
+            contribution: Some(ref contribution),
+            network_health: DurableDeathNetworkHealthV1 {
+                transport_generation: 1,
+                ping_millis: 80,
+                jitter_millis: 12,
+                loss_basis_points: 100,
+                correction_count: None,
+                ..
+            },
+        } if phase == "boss.caldus.phase_2"
+            && contribution.contribution_centi_units == 360_000
+            && contribution.reference_health == 7_200
+    ));
+
+    let mut adapter = PostgresM03TelemetryOutboxAdapter::from_persistence(
+        persistence.clone(),
+        TelemetryPseudonymizationKeyV1::new([0x78; 32]).unwrap(),
+    );
+    let records = adapter.poll_unpublished(16).await.unwrap();
+    let death = records
+        .into_iter()
+        .find(|record| record.envelope().event_name() == "character_died")
+        .expect("committed death telemetry projection");
+    let mut pipeline = TelemetryPipeline::new(
+        TelemetryPipelineMode::Enabled,
+        TelemetryConnectivity::Online,
+        16,
+    )
+    .unwrap();
+    assert_eq!(
+        pipeline.ingest_committed(death),
+        TelemetryIngestOutcome::Queued
+    );
+    let documents = pipeline.prepare_redacted_batch(16).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&documents[0].json).unwrap();
+    assert_eq!(json["event_schema_version"], 2);
+    let payload = &json["event"]["payload"];
+    assert_eq!(payload["boss_phase_id"], "boss.caldus.phase_2");
+    assert_eq!(payload["party_size"], 1);
+    assert_eq!(payload["contribution_basis_points"], 5_000);
+    assert_eq!(payload["network_health"]["ping_millis"], 80);
+    assert_eq!(payload["network_health"]["jitter_millis"], 12);
+    assert_eq!(payload["network_health"]["loss_basis_points"], 100);
+    assert!(payload["network_health"]["correction_count"].is_null());
+}
+
 /// Hosted restart projection required by GDD TECH-015/021/023, Content CONT-BOSS-005 and
 /// CONT-HUB-002, and Roadmap GB-M03-06/08: the existing death graph is the only terminal writer.
 async fn assert_committed_terminal_recovery(
@@ -3301,6 +3411,43 @@ async fn canonical_terminal_signature(
     signature
 }
 
+async fn emulate_schema_78_columns_added_to_a_legacy_death(
+    persistence: &PostgresPersistence,
+    death_id: [u8; 16],
+) {
+    // ADD COLUMN leaves a schema-77 row NULL without invoking immutable-history triggers. The
+    // disposable fixture reaches that exact post-migration shape by temporarily disabling only
+    // user triggers in one transaction; rollback would restore both data and trigger state.
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    sqlx::query("ALTER TABLE death_events DISABLE TRIGGER USER")
+        .execute(transaction.connection())
+        .await
+        .unwrap();
+    assert_eq!(
+        sqlx::query(
+            "UPDATE death_events SET \
+                party_size=NULL,boss_phase_id=NULL,contribution_centi_units=NULL,\
+                contribution_reference_health=NULL,network_source_kind=NULL,\
+                network_transport_generation=NULL,network_sampled_at_unix_ms=NULL,\
+                network_ping_millis=NULL,network_jitter_millis=NULL,\
+                network_loss_basis_points=NULL,network_correction_count=NULL \
+             WHERE namespace_id=$1 AND death_id=$2",
+        )
+        .bind(WIPEABLE_CORE_NAMESPACE)
+        .bind(death_id.as_slice())
+        .execute(transaction.connection())
+        .await
+        .unwrap()
+        .rows_affected(),
+        1
+    );
+    sqlx::query("ALTER TABLE death_events ENABLE TRIGGER USER")
+        .execute(transaction.connection())
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+}
+
 #[test]
 fn hosted_fixture_request_and_content_authority_are_canonical() {
     let content = content_authority();
@@ -3308,6 +3455,80 @@ fn hosted_fixture_request_and_content_authority_are_canonical() {
     let request = request(RequestIds::primary());
     request.validate().unwrap();
     assert!(content.matches_event(&request.plan.event));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires explicitly authorized disposable PostgreSQL"]
+async fn schema_78_upgrade_preserves_legacy_death_signature_and_exact_replay() {
+    let persistence = disposable_database().await;
+    let content = content_authority();
+    reset_fixture(&persistence).await;
+    terminal_telemetry::start_skewed_session(&persistence, ACCOUNT_ID, TELEMETRY_SESSION_ID).await;
+    let death = request(RequestIds::primary());
+    let evidence = seed_hosted_death_trace(&persistence, &death).await;
+    let promotion = evidence.promotion_for(&death);
+    let fresh = persistence
+        .transact_durable_death(&death, &content, &promotion)
+        .await
+        .unwrap();
+    assert!(matches!(
+        canonical_terminal_signature(&persistence)
+            .await
+            .plan
+            .event
+            .telemetry,
+        DurableDeathTelemetryContextV1::Observed { .. }
+    ));
+
+    emulate_schema_78_columns_added_to_a_legacy_death(&persistence, death.plan.event.death_id)
+        .await;
+    persistence.close().await;
+
+    let restarted = reconnect_database().await;
+    let upgraded = canonical_terminal_signature(&restarted).await;
+    assert_eq!(
+        upgraded.plan.event.telemetry,
+        DurableDeathTelemetryContextV1::HistoricalUnavailable
+    );
+    assert_eq!(
+        upgraded.plan.canonical_plan_hash().unwrap(),
+        death.canonical_plan_hash
+    );
+    let replay = restarted
+        .transact_durable_death(&death, &content, &promotion)
+        .await
+        .unwrap();
+    assert!(replay.is_replay());
+    assert_eq!(replay.result(), fresh.result());
+
+    let mut adapter = PostgresM03TelemetryOutboxAdapter::from_persistence(
+        restarted.clone(),
+        TelemetryPseudonymizationKeyV1::new([0x78; 32]).unwrap(),
+    );
+    let historical = adapter
+        .poll_unpublished(16)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|record| record.envelope().event_name() == "character_died")
+        .expect("legacy death remains projectable");
+    let mut pipeline = TelemetryPipeline::new(
+        TelemetryPipelineMode::Enabled,
+        TelemetryConnectivity::Online,
+        16,
+    )
+    .unwrap();
+    assert_eq!(
+        pipeline.ingest_committed(historical),
+        TelemetryIngestOutcome::Queued
+    );
+    let json: serde_json::Value =
+        serde_json::from_str(&pipeline.prepare_redacted_batch(16).unwrap()[0].json).unwrap();
+    assert!(json["event"]["payload"]["party_size"].is_null());
+    assert!(json["event"]["payload"]["network_health"].is_null());
+
+    reset_fixture(&restarted).await;
+    restarted.close().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3650,6 +3871,11 @@ async fn complete_durable_death_graph_is_atomic_replayable_terminal_and_wipeable
         .unwrap();
     assert!(matches!(fresh, DurableDeathTransactionV1::Fresh(_)));
     assert_complete_graph(&persistence, RequestIds::primary()).await;
+    assert_stored_tel_003_context_and_redacted_projection(
+        &persistence,
+        RequestIds::primary().death_id,
+    )
+    .await;
     assert_committed_terminal_recovery(&persistence, fresh.result(), &primary_promotion).await;
     let before_restart_signature = canonical_terminal_signature(&persistence).await;
     assert_eq!(

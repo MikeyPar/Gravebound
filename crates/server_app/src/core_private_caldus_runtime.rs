@@ -26,11 +26,12 @@ use thiserror::Error;
 
 use crate::{
     CaldusInstancePresentation, CoreCharacterCombatEnvelope, CoreDurableCaldusResolution,
-    CorePrivateCaldusDefeatHandoff, CorePrivateCaldusRewardCommit,
-    CorePrivateCaldusRewardCommitDisposition, CorePrivateCaldusRewardError,
-    CorePrivateCaldusStagingHandoff, CorePrivateMicrorealmInput, CorePrivateMicrorealmRuntimeError,
-    CorePrivatePlayerDamageError, CorePrivatePlayerDamageFactV1, CorePrivateRouteActorDirectory,
-    CorePrivateRouteActorLease, CorePrivateRouteRuntimeError, caldus_player_damage_facts,
+    CorePrivateCaldusDefeatHandoff, CorePrivateCaldusPhaseTelemetryV1,
+    CorePrivateCaldusRewardCommit, CorePrivateCaldusRewardCommitDisposition,
+    CorePrivateCaldusRewardError, CorePrivateCaldusStagingHandoff, CorePrivateMicrorealmInput,
+    CorePrivateMicrorealmRuntimeError, CorePrivatePlayerDamageError, CorePrivatePlayerDamageFactV1,
+    CorePrivateRouteActorDirectory, CorePrivateRouteActorLease, CorePrivateRouteRuntimeError,
+    CorePrivateTerminalEncounterTelemetryV1, caldus_player_damage_facts,
     core_private_caldus_reward::CoreCaldusRewardTracker,
     core_private_combat_frame::{
         CorePrivateConsumableAvailability, consumable_availability, core_player_movement_config,
@@ -62,6 +63,7 @@ pub struct CorePrivateCaldusFrame {
     pub route: CorePrivateRouteStateV1,
     pub boss_entity_id: EntityId,
     pub boss_health: Option<(u32, u32)>,
+    pub terminal_encounter: Option<CorePrivateTerminalEncounterTelemetryV1>,
     pub player_damage: Vec<CorePrivatePlayerDamageFactV1>,
     pub player_died: bool,
 }
@@ -395,6 +397,28 @@ impl CorePrivateCaldusRuntime {
             .encounter_simulation
             .as_ref()
             .map(|boss| (boss.current_health(), boss.maximum_health()));
+        let terminal_encounter = staged
+            .encounter_simulation
+            .as_ref()
+            .and_then(|encounter| {
+                caldus_phase_telemetry(route.phase).map(|boss_phase| (encounter, boss_phase))
+            })
+            .map(|(encounter, boss_phase)| {
+                let direct_damage = encounter
+                    .contribution_damage(self.participant)
+                    .ok_or(CorePrivateCaldusRuntimeError::InvalidComposition)?;
+                let party_size = u8::try_from(encounter.participant_lock().participants.len())
+                    .map_err(|_| CorePrivateCaldusRuntimeError::InvalidComposition)?;
+                Ok::<_, CorePrivateCaldusRuntimeError>(CorePrivateTerminalEncounterTelemetryV1 {
+                    boss_phase,
+                    party_size,
+                    contribution_centi_units: direct_damage
+                        .checked_mul(100)
+                        .ok_or(CorePrivateCaldusRuntimeError::InvalidComposition)?,
+                    contribution_reference_health: u64::from(encounter.maximum_health()),
+                })
+            })
+            .transpose()?;
         let defeat_handoff = if route.phase == CorePrivateRoutePhaseV1::BossDefeated {
             let encounter = staged
                 .encounter_simulation
@@ -448,6 +472,7 @@ impl CorePrivateCaldusRuntime {
             route,
             boss_entity_id: self.boss_entity_id,
             boss_health,
+            terminal_encounter,
             player_damage,
             player_died,
         })
@@ -584,6 +609,19 @@ impl CorePrivateCaldusRuntime {
             return Err(CorePrivateCaldusRuntimeError::RouteAuthorityMismatch);
         }
         Ok(())
+    }
+}
+
+const fn caldus_phase_telemetry(
+    phase: CorePrivateRoutePhaseV1,
+) -> Option<CorePrivateCaldusPhaseTelemetryV1> {
+    match phase {
+        CorePrivateRoutePhaseV1::BossPhaseOne => Some(CorePrivateCaldusPhaseTelemetryV1::PhaseOne),
+        CorePrivateRoutePhaseV1::BossPhaseTwo => Some(CorePrivateCaldusPhaseTelemetryV1::PhaseTwo),
+        CorePrivateRoutePhaseV1::BossPhaseThree => {
+            Some(CorePrivateCaldusPhaseTelemetryV1::PhaseThree)
+        }
+        _ => None,
     }
 }
 
@@ -1452,6 +1490,60 @@ mod tests {
                 .expect("body collision frame");
         }
         assert!((runtime.player().target.position.x - 8.0).abs() < 1.0e-5);
+
+        drop(runtime);
+        directory.begin_shutdown();
+        assert!(
+            directory
+                .finish_shutdown()
+                .await
+                .expect("shutdown")
+                .zero_residue
+        );
+    }
+
+    #[tokio::test]
+    async fn phase_one_lethal_frame_retains_exact_terminal_contribution_authority() {
+        let (directory, _, mut runtime) = fixture();
+        for sequence in 1..=226 {
+            runtime.step(input(sequence)).await.expect("boss entry");
+        }
+        let current_health = runtime.player().consumables.vitals().current_health();
+        runtime
+            .players
+            .get_mut(&runtime.participant.entity_id)
+            .expect("player")
+            .consumables
+            .apply_damage(current_health - 1);
+
+        let mut lethal = None;
+        for sequence in 227..=900 {
+            let frame = runtime.step(input(sequence)).await.expect("boss frame");
+            if frame.player_died {
+                lethal = Some(frame);
+                break;
+            }
+        }
+        let lethal = lethal.expect("phase-one hostile authority must produce a lethal frame");
+        assert!(lethal.player_died);
+        assert_eq!(lethal.route.phase, CorePrivateRoutePhaseV1::BossPhaseOne);
+        assert_eq!(
+            lethal
+                .player_damage
+                .iter()
+                .filter(|fact| fact.lethal())
+                .count(),
+            1
+        );
+        assert_eq!(
+            lethal.terminal_encounter,
+            Some(CorePrivateTerminalEncounterTelemetryV1 {
+                boss_phase: CorePrivateCaldusPhaseTelemetryV1::PhaseOne,
+                party_size: 1,
+                contribution_centi_units: 0,
+                contribution_reference_health: 7_200,
+            })
+        );
 
         drop(runtime);
         directory.begin_shutdown();

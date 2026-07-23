@@ -3,7 +3,8 @@ use thiserror::Error;
 
 use crate::{PseudonymousAccountId, StableTelemetryId, TelemetryId};
 
-pub const TELEMETRY_EVENT_SCHEMA_VERSION: u16 = 1;
+/// Version 2 makes correction authority explicitly optional instead of fabricating a zero count.
+pub const TELEMETRY_EVENT_SCHEMA_VERSION: u16 = 2;
 const MAX_COHORT_TAGS: usize = 16;
 const MAX_ACTIVE_BARGAINS: usize = 16;
 const MAX_STATUSES: usize = 32;
@@ -161,7 +162,8 @@ pub struct NetworkHealthV1 {
     pub ping_millis: u16,
     pub jitter_millis: u16,
     pub loss_basis_points: u16,
-    pub correction_count: u16,
+    /// None means the negotiated client runtime had no reconciliation-counter authority.
+    pub correction_count: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

@@ -4576,6 +4576,7 @@ dependencies = [
  "blake3",
  "postcard",
  "serde",
+ "serde_json",
  "sim_core",
  "sqlx",
  "telemetry",

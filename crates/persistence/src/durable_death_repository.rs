@@ -1674,11 +1674,25 @@ async fn destroy_materials(
     Ok(())
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the immutable death-event row and all TEL-003 authority bindings remain one auditable insert"
+)]
 async fn insert_death_event(
     connection: &mut PgConnection,
     request: &DurableDeathCommitRequestV1,
 ) -> Result<(), PersistenceError> {
     let event = &request.plan.event;
+    let crate::DurableDeathTelemetryContextV1::Observed {
+        party_size,
+        boss_phase_id,
+        contribution,
+        network_health,
+        ..
+    } = &event.telemetry
+    else {
+        return Err(PersistenceError::CorruptStoredDurableDeath);
+    };
     sqlx::query(
         "INSERT INTO death_events (namespace_id, death_id, account_id, character_id, \
             contract_kind, mutation_id, canonical_request_hash, content_revision, instance_id, \
@@ -1694,10 +1708,14 @@ async fn insert_death_event(
             world_localization_blake3, presentation_records_blake3, \
             presentation_assets_blake3, presentation_localization_blake3, \
             bargain_cleanup_event_id, pre_oath_bargain_version, post_oath_bargain_version, \
-            death_provenance) \
+            death_provenance, party_size, boss_phase_id, contribution_centi_units, \
+            contribution_reference_health, network_source_kind, network_transport_generation, \
+            network_sampled_at_unix_ms, network_ping_millis, network_jitter_millis, \
+            network_loss_basis_points, network_correction_count) \
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20, \
                  $21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38, \
-                 $39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53)",
+                 $39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,$54,$55,$56, \
+                 $57,$58,$59,$60,$61,$62,$63,$64)",
     )
     .bind(&event.namespace_id)
     .bind(event.death_id.as_slice())
@@ -1766,6 +1784,27 @@ async fn insert_death_event(
     .bind(i64_value(event.versions.oath_bargain.pre)?)
     .bind(i64_value(event.versions.oath_bargain.post)?)
     .bind(death_provenance(event.provenance))
+    .bind(i16::from(*party_size))
+    .bind(boss_phase_id)
+    .bind(
+        contribution
+            .as_ref()
+            .map(|value| i64_value(value.contribution_centi_units))
+            .transpose()?,
+    )
+    .bind(
+        contribution
+            .as_ref()
+            .map(|value| i64_value(value.reference_health))
+            .transpose()?,
+    )
+    .bind(1_i16)
+    .bind(i64_value(network_health.transport_generation)?)
+    .bind(i64_value(network_health.sampled_at_unix_ms)?)
+    .bind(i32::from(network_health.ping_millis))
+    .bind(i32::from(network_health.jitter_millis))
+    .bind(i32::from(network_health.loss_basis_points))
+    .bind(network_health.correction_count.map(i64::from))
     .execute(connection)
     .await?;
     Ok(())

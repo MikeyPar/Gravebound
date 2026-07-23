@@ -17,6 +17,7 @@ telemetry = { path = "../telemetry" }
 thiserror.workspace = true
 
 [dev-dependencies]
+serde_json.workspace = true
 tokio.workspace = true
 
 [lints]

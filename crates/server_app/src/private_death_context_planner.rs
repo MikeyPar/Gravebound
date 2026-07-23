@@ -8,12 +8,17 @@
 use std::{collections::BTreeSet, future::Future, sync::Arc};
 
 use persistence::{
-    DurableDeathContentAuthorityV1, DurableDeathItemContentAuthorityV1,
-    DurableDestructionLocationV1, DurableEquipmentSlotV1, PersistenceError, PostgresPersistence,
-    PrivateDeathPlanningRequestV1, StoredPrivateDeathDeedKindV1, StoredPrivateDeathEchoQueueV1,
+    DURABLE_DEATH_TELEMETRY_CONTEXT_SCHEMA_VERSION, DurableDeathContentAuthorityV1,
+    DurableDeathContributionV1, DurableDeathItemContentAuthorityV1, DurableDeathNetworkHealthV1,
+    DurableDeathTelemetryContextV1, DurableDestructionLocationV1, DurableEquipmentSlotV1,
+    PersistenceError, PostgresPersistence, PrivateDeathPlanningRequestV1,
+    StoredPrivateDeathDeedKindV1, StoredPrivateDeathEchoQueueV1,
     StoredPrivateDeathPlanningSnapshotV1,
 };
-use protocol::{CorePrivateRouteSceneV1, CorePrivateRouteStateV1};
+use protocol::{
+    CorePrivateRoutePhaseV1, CorePrivateRouteRoomV1, CorePrivateRouteSceneV1,
+    CorePrivateRouteStateV1,
+};
 use sim_content::{
     CompiledProductionItemCatalog, CoreDevelopmentDeathView, CorePrivateLifeContent,
 };
@@ -26,7 +31,8 @@ use sim_core::{
 use thiserror::Error;
 
 use crate::{
-    AuthenticatedAccount, AuthenticatedNamespace, CorePrivateDangerEntryAuthority, DeathAtRiskItem,
+    AuthenticatedAccount, AuthenticatedNamespace, CorePrivateCaldusPhaseTelemetryV1,
+    CorePrivateDangerEntryAuthority, CorePrivateTerminalTickContextV1, DeathAtRiskItem,
     DeathAtRiskRunMaterial, DeathCustodySnapshot, DeathHeroSnapshot, DeathLineageState,
     DeathMutationAuthority, DeathProvenance, DeathWorldAuthority, DurableDeathBuildError,
     EchoAvailabilityProjection, EligibleEchoProjection, PreparedDurableDeathCommit,
@@ -48,6 +54,7 @@ pub struct PrivateDeathPlanningAuthority {
     pub danger_entry: CorePrivateDangerEntryAuthority,
     pub route: CorePrivateRouteStateV1,
     pub terminal_trace: PreparedTerminalLiveDamageTrace,
+    pub terminal_context: CorePrivateTerminalTickContextV1,
     pub issued_at_unix_ms: u64,
 }
 
@@ -266,12 +273,86 @@ where
                 bargain_ids: snapshot.active_bargain_ids.clone(),
                 memorial_presentation_key: CORE_MEMORIAL_PRESENTATION_KEY.to_owned(),
             },
+            telemetry: durable_telemetry_context_from_authority(&authority)?,
             terminal_trace: authority.terminal_trace,
             echo,
         };
         build_durable_death_commit(&inputs, &context, &self.death_view)
             .map_err(PrivateDeathPlanningError::Build)
     }
+}
+
+fn durable_telemetry_context_from_authority(
+    authority: &PrivateDeathPlanningAuthority,
+) -> Result<DurableDeathTelemetryContextV1, PrivateDeathPlanningError> {
+    durable_telemetry_context(
+        authority.route.room,
+        authority.route.phase,
+        &authority.terminal_context,
+    )
+}
+
+fn durable_telemetry_context(
+    room: Option<CorePrivateRouteRoomV1>,
+    phase: CorePrivateRoutePhaseV1,
+    terminal_context: &CorePrivateTerminalTickContextV1,
+) -> Result<DurableDeathTelemetryContextV1, PrivateDeathPlanningError> {
+    let in_caldus = room == Some(CorePrivateRouteRoomV1::CaldusArenaB6);
+    let contribution = match (in_caldus, terminal_context.encounter) {
+        (true, Some(encounter)) => {
+            let route_phase = match encounter.boss_phase {
+                CorePrivateCaldusPhaseTelemetryV1::PhaseOne => {
+                    CorePrivateRoutePhaseV1::BossPhaseOne
+                }
+                CorePrivateCaldusPhaseTelemetryV1::PhaseTwo => {
+                    CorePrivateRoutePhaseV1::BossPhaseTwo
+                }
+                CorePrivateCaldusPhaseTelemetryV1::PhaseThree => {
+                    CorePrivateRoutePhaseV1::BossPhaseThree
+                }
+            };
+            if encounter.party_size != 1
+                || phase != route_phase
+                || encounter.contribution_reference_health == 0
+                || encounter.contribution_centi_units
+                    > encounter.contribution_reference_health.saturating_mul(100)
+            {
+                return Err(PrivateDeathPlanningError::InvalidAuthority);
+            }
+            Some((
+                encounter.boss_phase.stable_id().to_owned(),
+                DurableDeathContributionV1 {
+                    contribution_centi_units: encounter.contribution_centi_units,
+                    reference_health: encounter.contribution_reference_health,
+                },
+            ))
+        }
+        (false, None) => None,
+        // A lethal Caldus frame must be in one of the three authored combat phases. Break,
+        // staging, and exit phases cannot manufacture a boss-phase/contribution label.
+        _ => return Err(PrivateDeathPlanningError::InvalidAuthority),
+    };
+    let network_health =
+        terminal_context
+            .network_health
+            .map(|health| DurableDeathNetworkHealthV1 {
+                transport_generation: health.transport_generation,
+                sampled_at_unix_ms: health.sampled_at_unix_ms,
+                ping_millis: health.ping_millis,
+                jitter_millis: health.jitter_millis,
+                loss_basis_points: health.loss_basis_points,
+                correction_count: health.correction_count,
+            });
+    let Some(network_health) = network_health else {
+        return Err(PrivateDeathPlanningError::InvalidAuthority);
+    };
+    Ok(DurableDeathTelemetryContextV1::Observed {
+        schema_version: DURABLE_DEATH_TELEMETRY_CONTEXT_SCHEMA_VERSION,
+        party_size: 1,
+        boss_phase_id: contribution.as_ref().map(|value| value.0.clone()),
+        contribution: contribution.map(|value| value.1),
+        network_health,
+    })
 }
 
 fn validate_live_authority(
@@ -567,6 +648,17 @@ fn is_uuid_v7(value: [u8; 16]) -> bool {
 mod tests {
     use super::*;
 
+    fn terminal_network_health() -> crate::CorePrivateTerminalNetworkHealthV1 {
+        crate::CorePrivateTerminalNetworkHealthV1 {
+            transport_generation: 3,
+            sampled_at_unix_ms: 4_200,
+            ping_millis: 80,
+            jitter_millis: 12,
+            loss_basis_points: 100,
+            correction_count: None,
+        }
+    }
+
     fn equipped_items(
         item_level: u8,
         rarity: u8,
@@ -620,5 +712,95 @@ mod tests {
             echo_power_band_from_items(20, &equipped_items(16, 5)).unwrap(),
             5
         );
+    }
+
+    #[test]
+    fn death_telemetry_uses_exact_same_frame_caldus_and_transport_authority() {
+        let context = CorePrivateTerminalTickContextV1 {
+            network_health: Some(terminal_network_health()),
+            encounter: Some(crate::CorePrivateTerminalEncounterTelemetryV1 {
+                boss_phase: CorePrivateCaldusPhaseTelemetryV1::PhaseTwo,
+                party_size: 1,
+                contribution_centi_units: 360_000,
+                contribution_reference_health: 7_200,
+            }),
+            ..CorePrivateTerminalTickContextV1::default()
+        };
+        assert_eq!(
+            durable_telemetry_context(
+                Some(CorePrivateRouteRoomV1::CaldusArenaB6),
+                CorePrivateRoutePhaseV1::BossPhaseTwo,
+                &context,
+            )
+            .unwrap(),
+            DurableDeathTelemetryContextV1::Observed {
+                schema_version: DURABLE_DEATH_TELEMETRY_CONTEXT_SCHEMA_VERSION,
+                party_size: 1,
+                boss_phase_id: Some("boss.caldus.phase_2".into()),
+                contribution: Some(DurableDeathContributionV1 {
+                    contribution_centi_units: 360_000,
+                    reference_health: 7_200,
+                }),
+                network_health: DurableDeathNetworkHealthV1 {
+                    transport_generation: 3,
+                    sampled_at_unix_ms: 4_200,
+                    ping_millis: 80,
+                    jitter_millis: 12,
+                    loss_basis_points: 100,
+                    correction_count: None,
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn death_telemetry_rejects_missing_or_cross_scene_authority() {
+        let normal = CorePrivateTerminalTickContextV1 {
+            network_health: Some(terminal_network_health()),
+            ..CorePrivateTerminalTickContextV1::default()
+        };
+        assert!(matches!(
+            durable_telemetry_context(None, CorePrivateRoutePhaseV1::MicrorealmActive, &normal),
+            Ok(DurableDeathTelemetryContextV1::Observed {
+                boss_phase_id: None,
+                contribution: None,
+                ..
+            })
+        ));
+
+        let mut missing_network = normal.clone();
+        missing_network.network_health = None;
+        assert!(matches!(
+            durable_telemetry_context(
+                None,
+                CorePrivateRoutePhaseV1::MicrorealmActive,
+                &missing_network
+            ),
+            Err(PrivateDeathPlanningError::InvalidAuthority)
+        ));
+
+        let mut foreign_encounter = normal;
+        foreign_encounter.encounter = Some(crate::CorePrivateTerminalEncounterTelemetryV1 {
+            boss_phase: CorePrivateCaldusPhaseTelemetryV1::PhaseOne,
+            party_size: 1,
+            contribution_centi_units: 0,
+            contribution_reference_health: 7_200,
+        });
+        assert!(matches!(
+            durable_telemetry_context(
+                None,
+                CorePrivateRoutePhaseV1::MicrorealmActive,
+                &foreign_encounter
+            ),
+            Err(PrivateDeathPlanningError::InvalidAuthority)
+        ));
+        assert!(matches!(
+            durable_telemetry_context(
+                Some(CorePrivateRouteRoomV1::CaldusArenaB6),
+                CorePrivateRoutePhaseV1::BossPhaseTwo,
+                &foreign_encounter
+            ),
+            Err(PrivateDeathPlanningError::InvalidAuthority)
+        ));
     }
 }

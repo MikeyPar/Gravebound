@@ -140,22 +140,24 @@ pub use durable_death::{
     AuthoritativeDeathPlanV1, CORE_DEATH_VIEW_ASSETS_BLAKE3, CORE_DEATH_VIEW_LOCALIZATION_BLAKE3,
     CORE_DEATH_VIEW_RECORDS_BLAKE3, CORE_ECHO_BASE_SILHOUETTE_ID,
     CORE_ECHO_PRESENTATION_PLACEHOLDER_ID, DURABLE_DEATH_CONTRACT, DURABLE_DEATH_SCHEMA_VERSION,
-    DURABLE_DEATH_SUMMARY_REVISION, DURABLE_DEATH_TRACE_WINDOW_TICKS, DeathAggregateVersionsV1,
-    DeathVersionAdvanceV1, DurableCombatTraceEntryV1, DurableDamageTypeV1, DurableDeathCauseV1,
-    DurableDeathCommitRequestV1, DurableDeathContentAuthorityV1, DurableDeathEventV1,
-    DurableDeathItemContentAuthorityV1, DurableDeathPresentationAuthorityV1,
-    DurableDeathProvenanceV1, DurableDeathResultCodeV1, DurableDeathSummaryV1,
-    DurableDestructionEntryV1, DurableDestructionLocationV1, DurableEchoEnvelopeV1,
-    DurableEchoOutcomeV1, DurableEchoRecordV1, DurableEchoStateV1, DurableEchoTransitionReasonV1,
-    DurableEchoTransitionV1, DurableEquipmentSlotV1, DurableMemorialRecordV1,
-    DurableNetworkStateV1, DurableOrderedContentIdV1, DurableRecallStateV1,
-    DurableSummaryDamageReferenceV1, DurableSummaryProjectionEntryV1,
-    DurableSummaryProjectionKindV1, DurableSummaryProjectionsV1, DurableTraceStatusV1,
-    MAX_DURABLE_DEATH_DESTRUCTION_ENTRIES, MAX_DURABLE_DEATH_PLAN_PAYLOAD_BYTES,
-    MAX_DURABLE_DEATH_RESULT_PAYLOAD_BYTES, MAX_DURABLE_DEATH_STATUSES_PER_ENTRY,
-    MAX_DURABLE_DEATH_TRACE_ENTRIES, StoredCommittedDeathResultV1,
-    compare_canonical_durable_death_destruction_v1, derive_durable_death_bargain_cleanup_event_id,
-    derive_durable_death_item_ledger_event_id, validate_durable_death_destruction_v1,
+    DURABLE_DEATH_SUMMARY_REVISION, DURABLE_DEATH_TELEMETRY_CONTEXT_SCHEMA_VERSION,
+    DURABLE_DEATH_TRACE_WINDOW_TICKS, DeathAggregateVersionsV1, DeathVersionAdvanceV1,
+    DurableCombatTraceEntryV1, DurableDamageTypeV1, DurableDeathCauseV1,
+    DurableDeathCommitRequestV1, DurableDeathContentAuthorityV1, DurableDeathContributionV1,
+    DurableDeathEventV1, DurableDeathItemContentAuthorityV1, DurableDeathNetworkHealthV1,
+    DurableDeathPresentationAuthorityV1, DurableDeathProvenanceV1, DurableDeathResultCodeV1,
+    DurableDeathSummaryV1, DurableDeathTelemetryContextV1, DurableDestructionEntryV1,
+    DurableDestructionLocationV1, DurableEchoEnvelopeV1, DurableEchoOutcomeV1, DurableEchoRecordV1,
+    DurableEchoStateV1, DurableEchoTransitionReasonV1, DurableEchoTransitionV1,
+    DurableEquipmentSlotV1, DurableMemorialRecordV1, DurableNetworkStateV1,
+    DurableOrderedContentIdV1, DurableRecallStateV1, DurableSummaryDamageReferenceV1,
+    DurableSummaryProjectionEntryV1, DurableSummaryProjectionKindV1, DurableSummaryProjectionsV1,
+    DurableTraceStatusV1, MAX_DURABLE_DEATH_DESTRUCTION_ENTRIES,
+    MAX_DURABLE_DEATH_PLAN_PAYLOAD_BYTES, MAX_DURABLE_DEATH_RESULT_PAYLOAD_BYTES,
+    MAX_DURABLE_DEATH_STATUSES_PER_ENTRY, MAX_DURABLE_DEATH_TRACE_ENTRIES,
+    StoredCommittedDeathResultV1, compare_canonical_durable_death_destruction_v1,
+    derive_durable_death_bargain_cleanup_event_id, derive_durable_death_item_ledger_event_id,
+    validate_durable_death_destruction_v1,
 };
 pub use durable_death_repository::DurableDeathTransactionV1;
 pub use durable_terminal_recovery::{
@@ -340,7 +342,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 77;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 78;
 const DISPOSABLE_DATABASE_RESET_SQL: &str =
     "TRUNCATE TABLE core_telemetry_sessions_v1, accounts, caldus_victory_exits CASCADE";
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
@@ -3414,7 +3416,7 @@ mod tests {
 
     #[test]
     fn identity_ash_wallet_namespace_repair_is_additive_and_exact() {
-        assert_eq!(EXPECTED_SCHEMA_VERSION, 77);
+        assert_eq!(EXPECTED_SCHEMA_VERSION, 78);
         let migration = include_str!(
             "../../../migrations/0075_m03_identity_ash_wallet_namespace_repair_v1.sql"
         );
@@ -3506,6 +3508,37 @@ mod tests {
             assert!(
                 !lowercase.contains(forbidden),
                 "schema 77 introduced destructive telemetry mutation {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn death_telemetry_context_migration_is_additive_explicit_and_bounded() {
+        let migration = include_str!("../../../migrations/0078_m03_death_telemetry_context_v1.sql");
+        for required in [
+            "Historical wipeable-Core rows remain nullable",
+            "ADD COLUMN party_size SMALLINT",
+            "ADD COLUMN boss_phase_id TEXT",
+            "ADD COLUMN contribution_centi_units BIGINT",
+            "ADD COLUMN network_transport_generation BIGINT",
+            "death_events_m03_telemetry_generation_check",
+            "party_size = 1",
+            "network_source_kind = 1",
+            "network_loss_basis_points BETWEEN 0 AND 10000",
+            "network_correction_count BETWEEN 0 AND 4294967295",
+        ] {
+            assert!(migration.contains(required), "schema 78 omitted {required}");
+        }
+        let lowercase = migration.to_ascii_lowercase();
+        for forbidden in [
+            "drop table",
+            "truncate table",
+            "delete from",
+            "update death_events",
+        ] {
+            assert!(
+                !lowercase.contains(forbidden),
+                "schema 78 introduced destructive death mutation {forbidden}"
             );
         }
     }

@@ -255,6 +255,17 @@ const fn message_uses_core_combat_presentation(message: &WireMessage) -> bool {
     )
 }
 
+const fn message_uses_network_diagnostics(message: &WireMessage) -> bool {
+    matches!(
+        message,
+        WireMessage::ClientNetworkDiagnosticsFrame(_)
+            | WireMessage::ReliableEvent(crate::ReliableEventFrame {
+                event: crate::ReliableEvent::ClientNetworkDiagnosticsResult(_),
+                ..
+            })
+    )
+}
+
 const fn message_uses_death_view(message: &WireMessage) -> bool {
     matches!(
         message,
@@ -386,6 +397,11 @@ fn encode_frame_for_version(
     message: &WireMessage,
     version: ProtocolVersion,
 ) -> Result<Vec<u8>, WireCodecError> {
+    if version.minor < crate::NETWORK_DIAGNOSTICS_PROTOCOL_MINOR
+        && message_uses_network_diagnostics(message)
+    {
+        return Err(WireCodecError::MessageUnavailableAtVersion);
+    }
     if version.minor < crate::NATIVE_CRASH_PROTOCOL_MINOR && message_uses_native_crash(message) {
         return Err(WireCodecError::MessageUnavailableAtVersion);
     }
@@ -490,6 +506,7 @@ const fn message_kind_byte(kind: MessageKind) -> u8 {
         MessageKind::CoreConsumableUseFrame => 25,
         MessageKind::SafeStorageQueryFrame => 26,
         MessageKind::NativeCrashReportFrame => 27,
+        MessageKind::ClientNetworkDiagnosticsFrame => 28,
     }
 }
 
@@ -522,6 +539,7 @@ const fn message_kind_from_byte(value: u8) -> Result<MessageKind, WireCodecError
         25 => Ok(MessageKind::CoreConsumableUseFrame),
         26 => Ok(MessageKind::SafeStorageQueryFrame),
         27 => Ok(MessageKind::NativeCrashReportFrame),
+        28 => Ok(MessageKind::ClientNetworkDiagnosticsFrame),
         other => Err(WireCodecError::UnknownMessageKind(other)),
     }
 }
@@ -1116,6 +1134,57 @@ mod tests {
         assert_eq!(message_kind_byte(MessageKind::CoreConsumableUseFrame), 25);
         assert_eq!(message_kind_byte(MessageKind::SafeStorageQueryFrame), 26);
         assert_eq!(message_kind_byte(MessageKind::NativeCrashReportFrame), 27);
+        assert_eq!(
+            message_kind_byte(MessageKind::ClientNetworkDiagnosticsFrame),
+            28
+        );
+    }
+
+    #[test]
+    fn protocol_1_25_appends_bounded_network_diagnostics() {
+        let diagnostics =
+            WireMessage::ClientNetworkDiagnosticsFrame(crate::ClientNetworkDiagnosticsFrameV1 {
+                schema_version: crate::NETWORK_DIAGNOSTICS_SCHEMA_VERSION,
+                sample_sequence: 1,
+                corrections: crate::ClientCorrectionDiagnosticsV1::Unavailable,
+            });
+        let encoded = encode_frame(&diagnostics).unwrap();
+        assert_eq!(encoded[8], 28);
+        assert_eq!(decode_frame(&encoded), Ok(diagnostics.clone()));
+        assert_eq!(
+            encode_frame_for_version(
+                &diagnostics,
+                ProtocolVersion {
+                    major: PROTOCOL_MAJOR,
+                    minor: crate::NATIVE_CRASH_PROTOCOL_MINOR,
+                },
+            ),
+            Err(WireCodecError::MessageUnavailableAtVersion)
+        );
+
+        let result = WireMessage::ReliableEvent(crate::ReliableEventFrame {
+            sequence: 9,
+            server_tick: 11,
+            event: crate::ReliableEvent::ClientNetworkDiagnosticsResult(
+                crate::ClientNetworkDiagnosticsResultV1 {
+                    schema_version: crate::NETWORK_DIAGNOSTICS_SCHEMA_VERSION,
+                    sample_sequence: 1,
+                    code: crate::ClientNetworkDiagnosticsResultCodeV1::Accepted,
+                },
+            ),
+        });
+        let encoded = encode_frame(&result).unwrap();
+        assert_eq!(decode_frame(&encoded), Ok(result.clone()));
+        assert_eq!(
+            encode_frame_for_version(
+                &result,
+                ProtocolVersion {
+                    major: PROTOCOL_MAJOR,
+                    minor: crate::NATIVE_CRASH_PROTOCOL_MINOR,
+                },
+            ),
+            Err(WireCodecError::MessageUnavailableAtVersion)
+        );
     }
 
     #[test]

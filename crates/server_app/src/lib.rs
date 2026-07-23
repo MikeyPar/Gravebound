@@ -213,10 +213,11 @@ pub use core_private_route_actor::{
     CorePrivateRouteRuntimeError, CorePrivateRouteRuntimeReport,
 };
 pub use core_private_terminal_feed::{
-    CorePrivateTerminalAcknowledgementError, CorePrivateTerminalDeliveryV1,
+    CorePrivateCaldusPhaseTelemetryV1, CorePrivateTerminalAcknowledgementError,
+    CorePrivateTerminalDeliveryV1, CorePrivateTerminalEncounterTelemetryV1,
     CorePrivateTerminalFeedBinding, CorePrivateTerminalFeedError, CorePrivateTerminalFrameDelivery,
     CorePrivateTerminalFrameDisposition, CorePrivateTerminalFrameReceiver,
-    CorePrivateTerminalFrameSender, CorePrivateTerminalFrameV1,
+    CorePrivateTerminalFrameSender, CorePrivateTerminalFrameV1, CorePrivateTerminalNetworkHealthV1,
     CorePrivateTerminalRouteControlAuthorityV1, CorePrivateTerminalRouteControlKindV1,
     CorePrivateTerminalRouteControlV1, CorePrivateTerminalSceneV1,
     CorePrivateTerminalTickContextV1, CorePrivateTerminalVerifiedFaultV1,

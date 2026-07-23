@@ -23,15 +23,15 @@ use persistence::{
     DeathAggregateVersionsV1, DurableCombatTraceEntryV1, DurableDamageTypeV1, DurableDeathCauseV1,
     DurableDeathCommitRequestV1, DurableDeathContentAuthorityV1, DurableDeathEventV1,
     DurableDeathPresentationAuthorityV1, DurableDeathProvenanceV1, DurableDeathSummaryV1,
-    DurableDeathTracePromotionV1, DurableDestructionEntryV1, DurableEchoEnvelopeV1,
-    DurableEchoOutcomeV1, DurableEchoRecordV1, DurableEchoStateV1, DurableEchoTransitionReasonV1,
-    DurableEchoTransitionV1, DurableMemorialRecordV1, DurableNetworkStateV1,
-    DurableOrderedContentIdV1, DurableRecallStateV1, DurableSummaryDamageReferenceV1,
-    DurableSummaryProjectionEntryV1, DurableSummaryProjectionKindV1, DurableSummaryProjectionsV1,
-    DurableTraceStatusV1, MAX_DURABLE_DEATH_DESTRUCTION_ENTRIES, PersistenceError,
-    WIPEABLE_CORE_NAMESPACE, compare_canonical_durable_death_destruction_v1,
-    derive_durable_death_bargain_cleanup_event_id, derive_durable_death_item_ledger_event_id,
-    validate_durable_death_destruction_v1,
+    DurableDeathTelemetryContextV1, DurableDeathTracePromotionV1, DurableDestructionEntryV1,
+    DurableEchoEnvelopeV1, DurableEchoOutcomeV1, DurableEchoRecordV1, DurableEchoStateV1,
+    DurableEchoTransitionReasonV1, DurableEchoTransitionV1, DurableMemorialRecordV1,
+    DurableNetworkStateV1, DurableOrderedContentIdV1, DurableRecallStateV1,
+    DurableSummaryDamageReferenceV1, DurableSummaryProjectionEntryV1,
+    DurableSummaryProjectionKindV1, DurableSummaryProjectionsV1, DurableTraceStatusV1,
+    MAX_DURABLE_DEATH_DESTRUCTION_ENTRIES, PersistenceError, WIPEABLE_CORE_NAMESPACE,
+    compare_canonical_durable_death_destruction_v1, derive_durable_death_bargain_cleanup_event_id,
+    derive_durable_death_item_ledger_event_id, validate_durable_death_destruction_v1,
 };
 use sim_content::CoreDevelopmentDeathView;
 use sim_core::{
@@ -175,6 +175,8 @@ pub struct ServerAuthoredDeathContext {
     /// Lethal evidence prepared only by the server-owned live trace service. Its private fields
     /// prevent a client or external crate from constructing an alternate terminal window.
     pub terminal_trace: PreparedTerminalLiveDamageTrace,
+    /// Same-frame TEL-003 facts produced by the private route and QUIC transport owners.
+    pub telemetry: DurableDeathTelemetryContextV1,
     /// Must be present exactly when the simulation time-and-deed predicate is eligible.
     pub echo: Option<EligibleEchoProjection>,
 }
@@ -419,6 +421,7 @@ pub fn build_durable_death_commit(
         source_y_milli_tiles: lethal.source_y_milli_tiles,
         network_state: lethal.network_state,
         recall_state: lethal.recall_state,
+        telemetry: context.telemetry.clone(),
         lifetime_ticks: inputs.clocks.lifetime_ticks,
         permadeath_combat_ticks: inputs.clocks.permadeath_combat_ticks,
         versions: context.versions.clone(),
@@ -1376,6 +1379,23 @@ pub(crate) mod tests {
                 memorial_presentation_key: "memorial.presentation.core_default".into(),
             },
             terminal_trace,
+            telemetry: persistence::DurableDeathTelemetryContextV1::Observed {
+                schema_version: persistence::DURABLE_DEATH_TELEMETRY_CONTEXT_SCHEMA_VERSION,
+                party_size: 1,
+                boss_phase_id: Some("boss.caldus.phase_1".into()),
+                contribution: Some(persistence::DurableDeathContributionV1 {
+                    contribution_centi_units: 250_000,
+                    reference_health: 7_200,
+                }),
+                network_health: persistence::DurableDeathNetworkHealthV1 {
+                    transport_generation: 1,
+                    sampled_at_unix_ms: 1_800,
+                    ping_millis: 80,
+                    jitter_millis: 12,
+                    loss_basis_points: 100,
+                    correction_count: None,
+                },
+            },
             echo: Some(EligibleEchoProjection {
                 echo_id: uuid_v7(11),
                 appearance_snapshot_id: persistence::CORE_ECHO_BASE_SILHOUETTE_ID.into(),

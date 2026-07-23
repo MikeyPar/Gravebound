@@ -35,13 +35,135 @@ use crate::{
     CorePrivateLifePreparedBellHandoff, CorePrivateLifeTransportLease,
     CorePrivateMicrorealmBinding, CorePrivateMicrorealmBindingLease,
     CorePrivateMicrorealmDriverObserver, CorePrivateMicrorealmDriverState,
-    CorePrivateRouteActorLease, CoreRecallIntentAuthority, CoreRecallTerminalAuthority,
-    CoreReliableWriter, CoreReliableWriterError, CoreWorldFlowAuthority, HandshakePolicy,
-    dispatch_core_reliable_message, send_gameplay_snapshots,
+    CorePrivateRouteActorLease, CorePrivateTerminalNetworkHealthV1, CoreRecallIntentAuthority,
+    CoreRecallTerminalAuthority, CoreReliableWriter, CoreReliableWriterError,
+    CoreWorldFlowAuthority, HandshakePolicy, dispatch_core_reliable_message,
+    send_gameplay_snapshots,
 };
 
 const BELL_DUNGEON_PORTAL_ID: &str = "portal.dungeon.bell_sepulcher";
 const BELL_DUNGEON_CONTENT_ID: &str = "dungeon.bell_sepulcher";
+const NETWORK_HEALTH_SAMPLE_INTERVAL: Duration = Duration::from_millis(250);
+
+#[derive(Debug)]
+struct TransportNetworkHealthSampler {
+    transport_generation: u64,
+    previous_rtt_micros: Option<u64>,
+    jitter_micros: u64,
+    previous_sent_packets: u64,
+    previous_lost_packets: u64,
+    loss_basis_points: u16,
+    last_client_sample: Option<protocol::ClientNetworkDiagnosticsFrameV1>,
+}
+
+impl TransportNetworkHealthSampler {
+    fn new(transport: CorePrivateLifeTransportLease) -> Self {
+        Self {
+            transport_generation: transport.generation().get(),
+            previous_rtt_micros: None,
+            jitter_micros: 0,
+            previous_sent_packets: 0,
+            previous_lost_packets: 0,
+            loss_basis_points: 0,
+            last_client_sample: None,
+        }
+    }
+
+    fn accept_client(
+        &mut self,
+        frame: protocol::ClientNetworkDiagnosticsFrameV1,
+    ) -> protocol::ClientNetworkDiagnosticsResultCodeV1 {
+        if let Some(previous) = self.last_client_sample {
+            if frame.sample_sequence < previous.sample_sequence {
+                return protocol::ClientNetworkDiagnosticsResultCodeV1::Stale;
+            }
+            if frame.sample_sequence == previous.sample_sequence {
+                return if frame == previous {
+                    protocol::ClientNetworkDiagnosticsResultCodeV1::Accepted
+                } else {
+                    protocol::ClientNetworkDiagnosticsResultCodeV1::Stale
+                };
+            }
+            match (previous.corrections, frame.corrections) {
+                (
+                    protocol::ClientCorrectionDiagnosticsV1::Observed { .. },
+                    protocol::ClientCorrectionDiagnosticsV1::Unavailable,
+                ) => return protocol::ClientNetworkDiagnosticsResultCodeV1::Stale,
+                (
+                    protocol::ClientCorrectionDiagnosticsV1::Observed {
+                        cumulative_count: previous,
+                    },
+                    protocol::ClientCorrectionDiagnosticsV1::Observed {
+                        cumulative_count: received,
+                    },
+                ) if received < previous => {
+                    return protocol::ClientNetworkDiagnosticsResultCodeV1::Stale;
+                }
+                _ => {}
+            }
+        }
+        self.last_client_sample = Some(frame);
+        protocol::ClientNetworkDiagnosticsResultCodeV1::Accepted
+    }
+
+    fn sample(
+        &mut self,
+        connection: &quinn::Connection,
+        sampled_at_unix_ms: u64,
+    ) -> CorePrivateTerminalNetworkHealthV1 {
+        let stats = connection.stats().path;
+        let rtt_micros = u64::try_from(connection.rtt().as_micros()).unwrap_or(u64::MAX);
+        if let Some(previous) = self.previous_rtt_micros {
+            let deviation = rtt_micros.abs_diff(previous);
+            if deviation >= self.jitter_micros {
+                self.jitter_micros = self
+                    .jitter_micros
+                    .saturating_add((deviation - self.jitter_micros).saturating_add(8) / 16);
+            } else {
+                self.jitter_micros = self
+                    .jitter_micros
+                    .saturating_sub((self.jitter_micros - deviation).saturating_add(8) / 16);
+            }
+        }
+        self.previous_rtt_micros = Some(rtt_micros);
+
+        let sent_delta = stats
+            .sent_packets
+            .saturating_sub(self.previous_sent_packets);
+        let lost_delta = stats
+            .lost_packets
+            .saturating_sub(self.previous_lost_packets);
+        self.previous_sent_packets = stats.sent_packets;
+        self.previous_lost_packets = stats.lost_packets;
+        if sent_delta > 0 {
+            let rounded = u128::from(lost_delta)
+                .saturating_mul(10_000)
+                .saturating_add(u128::from(sent_delta / 2))
+                / u128::from(sent_delta);
+            self.loss_basis_points = u16::try_from(rounded.min(10_000)).unwrap_or(10_000);
+        }
+
+        CorePrivateTerminalNetworkHealthV1 {
+            transport_generation: self.transport_generation,
+            sampled_at_unix_ms,
+            ping_millis: rounded_millis(rtt_micros),
+            jitter_millis: rounded_millis(self.jitter_micros),
+            loss_basis_points: self.loss_basis_points,
+            correction_count: self
+                .last_client_sample
+                .and_then(|frame| match frame.corrections {
+                    protocol::ClientCorrectionDiagnosticsV1::Unavailable => None,
+                    protocol::ClientCorrectionDiagnosticsV1::Observed { cumulative_count } => {
+                        Some(cumulative_count)
+                    }
+                }),
+        }
+    }
+}
+
+fn rounded_millis(micros: u64) -> u16 {
+    u16::try_from(micros.saturating_add(500) / 1_000).unwrap_or(u16::MAX)
+}
 
 #[derive(Debug)]
 enum ConnectionRoute {
@@ -198,6 +320,10 @@ impl SnapshotPublisher {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "handshake, authenticated transport custody, and fail-open telemetry attach form one connection lifecycle"
+)]
 pub(crate) async fn serve_core_private_life_connection(
     incoming: quinn::Incoming,
     policy: HandshakePolicy,
@@ -240,6 +366,10 @@ pub(crate) async fn serve_core_private_life_connection(
     } else {
         None
     };
+    let network_diagnostics_enabled = policy
+        .feature_flags
+        .iter()
+        .any(|flag| flag.as_str() == protocol::NETWORK_DIAGNOSTICS_FEATURE_FLAG);
     let attached = match process
         .attach_transport(authenticated, connection.clone(), issued_at_unix_ms)
         .await
@@ -285,6 +415,7 @@ pub(crate) async fn serve_core_private_life_connection(
         &mut presentation_publisher,
         telemetry_sessions.as_deref(),
         telemetry_transport,
+        network_diagnostics_enabled,
     )
     .await;
     let detached = process.detach_transport(transport, unix_millis()?).await;
@@ -309,7 +440,8 @@ pub(crate) async fn serve_core_private_life_connection(
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "the connection loop keeps transport, route, and snapshot custody explicit"
+    clippy::too_many_lines,
+    reason = "the connection loop keeps transport, route, snapshot, and diagnostics custody explicit"
 )]
 async fn run_connection_loop(
     connection: &quinn::Connection,
@@ -323,6 +455,7 @@ async fn run_connection_loop(
     presentation_publisher: &mut CombatPresentationPublisher,
     telemetry_sessions: Option<&CorePrivateTelemetrySessionCoordinator>,
     telemetry_transport: Option<CorePrivateTelemetryTransportLease>,
+    network_diagnostics_enabled: bool,
 ) -> Result<(), CorePrivateLifeServerError> {
     let mut terminal_refresh = tokio::time::interval(Duration::from_millis(50));
     terminal_refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -331,8 +464,20 @@ async fn run_connection_loop(
         Duration::from_micros(33_333),
     );
     hall_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut network_health_tick = tokio::time::interval(NETWORK_HEALTH_SAMPLE_INTERVAL);
+    network_health_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut network_health = TransportNetworkHealthSampler::new(transport);
     loop {
         tokio::select! {
+            _ = network_health_tick.tick(), if matches!(route, ConnectionRoute::Danger(_)) => {
+                let sample = network_health.sample(connection, unix_millis()?);
+                // Diagnostics are fail-open and never participate in gameplay admission. A scene
+                // transition or terminal freeze may reject the sample without affecting control.
+                let _ = process
+                    .sessions()
+                    .submit_microrealm_network_health(transport, sample)
+                    .await;
+            }
             _ = hall_tick.tick(), if matches!(route, ConnectionRoute::Hall { .. }) => {
                 let ConnectionRoute::Hall { actor, .. } = route else { unreachable!() };
                 let tick = process.hall().advance_tick(authenticated, *actor, transport)?;
@@ -397,6 +542,8 @@ async fn run_connection_loop(
                     route,
                     telemetry_sessions,
                     telemetry_transport,
+                    network_diagnostics_enabled,
+                    &mut network_health,
                 ).await?;
                 sync_driver_observation(route, driver);
                 publish_latest_route_snapshot(
@@ -562,8 +709,30 @@ async fn dispatch_reliable(
     route: &mut ConnectionRoute,
     telemetry_sessions: Option<&CorePrivateTelemetrySessionCoordinator>,
     telemetry_transport: Option<CorePrivateTelemetryTransportLease>,
+    network_diagnostics_enabled: bool,
+    network_health: &mut TransportNetworkHealthSampler,
 ) -> Result<(), CorePrivateLifeServerError> {
     match message {
+        WireMessage::ClientNetworkDiagnosticsFrame(frame) => {
+            let code = if network_diagnostics_enabled {
+                network_health.accept_client(frame)
+            } else {
+                protocol::ClientNetworkDiagnosticsResultCodeV1::Disabled
+            };
+            writer
+                .send_response(
+                    send,
+                    0,
+                    ReliableEvent::ClientNetworkDiagnosticsResult(
+                        protocol::ClientNetworkDiagnosticsResultV1 {
+                            schema_version: protocol::NETWORK_DIAGNOSTICS_SCHEMA_VERSION,
+                            sample_sequence: frame.sample_sequence,
+                            code,
+                        },
+                    ),
+                )
+                .await?;
+        }
         WireMessage::NativeCrashReportFrame(frame) => {
             let code = if let Some(coordinator) = telemetry_sessions {
                 match coordinator
@@ -1638,5 +1807,81 @@ mod tests {
             .expect("new generation publishes immediately");
         assert_eq!(reconnect_generation[0].sequence, 5);
         assert_eq!(reconnect_generation[0].server_tick, 1);
+    }
+
+    #[test]
+    fn client_correction_samples_are_monotonic_and_never_erase_observed_authority() {
+        let mut sampler = TransportNetworkHealthSampler {
+            transport_generation: 1,
+            previous_rtt_micros: None,
+            jitter_micros: 0,
+            previous_sent_packets: 0,
+            previous_lost_packets: 0,
+            loss_basis_points: 0,
+            last_client_sample: None,
+        };
+        let unavailable = protocol::ClientNetworkDiagnosticsFrameV1 {
+            schema_version: protocol::NETWORK_DIAGNOSTICS_SCHEMA_VERSION,
+            sample_sequence: 1,
+            corrections: protocol::ClientCorrectionDiagnosticsV1::Unavailable,
+        };
+        assert_eq!(
+            sampler.accept_client(unavailable),
+            protocol::ClientNetworkDiagnosticsResultCodeV1::Accepted
+        );
+        assert_eq!(
+            sampler.accept_client(unavailable),
+            protocol::ClientNetworkDiagnosticsResultCodeV1::Accepted
+        );
+
+        let observed = protocol::ClientNetworkDiagnosticsFrameV1 {
+            sample_sequence: 2,
+            corrections: protocol::ClientCorrectionDiagnosticsV1::Observed {
+                cumulative_count: 7,
+            },
+            ..unavailable
+        };
+        assert_eq!(
+            sampler.accept_client(observed),
+            protocol::ClientNetworkDiagnosticsResultCodeV1::Accepted
+        );
+        assert_eq!(
+            sampler.accept_client(protocol::ClientNetworkDiagnosticsFrameV1 {
+                sample_sequence: 3,
+                corrections: protocol::ClientCorrectionDiagnosticsV1::Unavailable,
+                ..observed
+            }),
+            protocol::ClientNetworkDiagnosticsResultCodeV1::Stale
+        );
+        assert_eq!(
+            sampler.accept_client(protocol::ClientNetworkDiagnosticsFrameV1 {
+                sample_sequence: 3,
+                corrections: protocol::ClientCorrectionDiagnosticsV1::Observed {
+                    cumulative_count: 6,
+                },
+                ..observed
+            }),
+            protocol::ClientNetworkDiagnosticsResultCodeV1::Stale
+        );
+        assert_eq!(
+            sampler.accept_client(protocol::ClientNetworkDiagnosticsFrameV1 {
+                sample_sequence: 3,
+                corrections: protocol::ClientCorrectionDiagnosticsV1::Observed {
+                    cumulative_count: 8,
+                },
+                ..observed
+            }),
+            protocol::ClientNetworkDiagnosticsResultCodeV1::Accepted
+        );
+    }
+
+    #[test]
+    fn network_health_millisecond_projection_is_half_up_and_bounded() {
+        assert_eq!(rounded_millis(0), 0);
+        assert_eq!(rounded_millis(499), 0);
+        assert_eq!(rounded_millis(500), 1);
+        assert_eq!(rounded_millis(1_499), 1);
+        assert_eq!(rounded_millis(1_500), 2);
+        assert_eq!(rounded_millis(u64::MAX), u16::MAX);
     }
 }
