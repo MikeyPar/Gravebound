@@ -34,6 +34,9 @@ use server_app::{
 };
 use tokio::sync::{oneshot, watch};
 
+#[path = "support/private_life_measurement.rs"]
+mod private_life_measurement;
+
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(10);
 const MOVEMENT_TIMEOUT: Duration = Duration::from_secs(15);
 const COMBAT_TIMEOUT: Duration = Duration::from_mins(3);
