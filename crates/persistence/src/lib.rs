@@ -342,7 +342,7 @@ pub const TEST_DATABASE_URL_ENV: &str = "TEST_DATABASE_URL";
 pub const RUNTIME_DATABASE_URL_ENV: &str = "GRAVEBOUND_DATABASE_URL";
 pub const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS";
 pub const WIPEABLE_CORE_NAMESPACE: &str = "test.core";
-pub const EXPECTED_SCHEMA_VERSION: i64 = 78;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 79;
 const DISPOSABLE_DATABASE_RESET_SQL: &str =
     "TRUNCATE TABLE core_telemetry_sessions_v1, accounts, caldus_victory_exits CASCADE";
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
@@ -3416,7 +3416,7 @@ mod tests {
 
     #[test]
     fn identity_ash_wallet_namespace_repair_is_additive_and_exact() {
-        assert_eq!(EXPECTED_SCHEMA_VERSION, 78);
+        assert_eq!(EXPECTED_SCHEMA_VERSION, 79);
         let migration = include_str!(
             "../../../migrations/0075_m03_identity_ash_wallet_namespace_repair_v1.sql"
         );
@@ -3539,6 +3539,40 @@ mod tests {
             assert!(
                 !lowercase.contains(forbidden),
                 "schema 78 introduced destructive death mutation {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn precheckpoint_live_damage_trace_repair_is_narrow_and_forward_only() {
+        assert_eq!(EXPECTED_SCHEMA_VERSION, 79);
+        let migration =
+            include_str!("../../../migrations/0079_m03_precheckpoint_live_damage_trace_v1.sql");
+        for required in [
+            "Gravebound_Production_GDD_v1_Canonical.md",
+            "Gravebound_Content_Production_Spec_v1.md",
+            "Gravebound_Development_Roadmap_v1.md",
+            "SPEC-CONFLICT-009-m03-death-memorial.md",
+            "first process-resume/debug checkpoint is written only after 30 seconds",
+            "ALTER TABLE character_live_damage_trace_ticks_v1",
+            "DROP CONSTRAINT IF EXISTS character_live_damage_trace_t_namespace_id_account_id_char_fkey",
+            "immutable entry-restore FK",
+            "retained ingest receipt ownership",
+            "Do not re-add the checkpoint FK",
+        ] {
+            assert!(migration.contains(required), "schema 79 omitted {required}");
+        }
+        let lowercase = migration.to_ascii_lowercase();
+        for forbidden in [
+            "drop table",
+            "truncate table",
+            "delete from",
+            "update character_live_damage_trace",
+            "drop constraint live_trace_payload_retained_receipt_owned_v1",
+        ] {
+            assert!(
+                !lowercase.contains(forbidden),
+                "schema 79 introduced destructive trace mutation {forbidden}"
             );
         }
     }

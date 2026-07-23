@@ -1251,7 +1251,7 @@ async fn authoritative_life_clocks_are_exact_replayable_and_restart_safe() {
     clippy::too_many_lines,
     reason = "one linear hosted fixture proves retained replay, pruning, restart, terminal, and corruption gates"
 )]
-async fn retained_live_trace_replays_after_pruning_and_restarts_exactly() {
+async fn retained_live_trace_accepts_precheckpoint_damage_then_replays_after_pruning_and_restart() {
     let persistence = disposable_database().await;
     clear_accounts(&persistence).await;
     insert_danger_checkpoint_fixture(&persistence).await;
@@ -1272,10 +1272,6 @@ async fn retained_live_trace_replays_after_pruning_and_restarts_exactly() {
         .unwrap();
     assert_eq!(pre_checkpoint.danger.checkpoint_tick, 0);
     assert_eq!(pre_checkpoint.through_tick, 0);
-    persistence
-        .write_danger_checkpoint(&danger_checkpoint(0, vec![1]))
-        .await
-        .unwrap();
 
     let empty = persistence
         .load_live_damage_trace_snapshot_v1(ACCOUNT_A, CHARACTER_A)

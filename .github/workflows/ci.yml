@@ -210,6 +210,11 @@ jobs:
           sudo apt-get install --no-install-recommends --yes clang lld libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
       - name: Install pinned Rust toolchain
         run: rustup show active-toolchain
+      - name: Prove pre-checkpoint live damage trace
+        run: >-
+          cargo test --locked -p persistence --test postgres_foundation
+          retained_live_trace_accepts_precheckpoint_damage_then_replays_after_pruning_and_restart --
+          --ignored --test-threads=1 --nocapture
       - name: Run assembled production route
         run: >-
           cargo test --locked -p server_app --test core_private_life_journey
