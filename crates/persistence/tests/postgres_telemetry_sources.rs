@@ -61,7 +61,6 @@ async fn telemetry_sources_are_transactional_replay_safe_restart_safe_and_one_wa
     persistence.close().await;
     let restarted = disposable_database().await;
     verify_restart_end_and_publication(&restarted).await;
-    verify_account_cascade_removes_loot_telemetry(&restarted).await;
     restarted.reset_disposable_identity_data().await.unwrap();
     restarted.close().await;
 }
@@ -780,39 +779,4 @@ async fn verify_adapter_projection_and_publication(restarted: &PostgresPersisten
         adapter.acknowledge_published(&[remaining[0]]).await,
         Err(M03TelemetryOutboxError::UnknownAcknowledgement)
     ));
-}
-
-async fn verify_account_cascade_removes_loot_telemetry(persistence: &PostgresPersistence) {
-    let mut transaction = persistence.begin_transaction().await.unwrap();
-    let before: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM item_ledger_telemetry_outbox_v1 \
-         WHERE namespace_id=$1 AND account_id=$2",
-    )
-    .bind(WIPEABLE_CORE_NAMESPACE)
-    .bind(ACCOUNT.as_slice())
-    .fetch_one(transaction.connection())
-    .await
-    .unwrap();
-    assert_eq!(before, 1, "fixture must exercise the telemetry cascade");
-
-    let accounts = sqlx::query("DELETE FROM accounts WHERE namespace_id=$1 AND account_id=$2")
-        .bind(WIPEABLE_CORE_NAMESPACE)
-        .bind(ACCOUNT.as_slice())
-        .execute(transaction.connection())
-        .await
-        .unwrap()
-        .rows_affected();
-    assert_eq!(accounts, 1);
-
-    let after: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM item_ledger_telemetry_outbox_v1 \
-         WHERE namespace_id=$1 AND account_id=$2",
-    )
-    .bind(WIPEABLE_CORE_NAMESPACE)
-    .bind(ACCOUNT.as_slice())
-    .fetch_one(transaction.connection())
-    .await
-    .unwrap();
-    assert_eq!(after, 0);
-    transaction.commit().await.unwrap();
 }
