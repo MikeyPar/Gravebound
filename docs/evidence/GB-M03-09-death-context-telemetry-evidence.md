@@ -60,8 +60,8 @@ never backfilled with invented solo, healthy-network, boss-phase, or contributio
 ## Current Next Step
 
 Hosted run [`30048509525`](https://github.com/MikeyPar/Gravebound/actions/runs/30048509525)
-must apply schema 78 and pass both the legacy upgrade/restart/replay journey and the complete fresh
-durable-death graph with every stored column and schema-2 redacted projection asserted. After that,
-the remaining `GB-M03-09` work is bounded outbox-lag/restart observability plus the owner-approved
-destination, processor-region, access, encryption, retention, deletion, backup-expiry, and privacy
-review required by ADR-039. Telemetry export remains disabled until those operational gates pass.
+applies schema 78 and passes both the legacy upgrade/restart/replay journey and the complete fresh
+durable-death graph with every stored column and schema-2 redacted projection asserted. The Current
+Next Step is bounded outbox-lag/restart observability plus the owner-approved destination,
+processor-region, access, encryption, retention, deletion, backup-expiry, and privacy review
+required by ADR-039. Telemetry export remains disabled until those operational gates pass.

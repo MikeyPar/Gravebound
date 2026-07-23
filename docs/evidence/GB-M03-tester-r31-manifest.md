@@ -86,6 +86,6 @@ was not included in the Git source archive or modified during release constructi
 
 Under all three design authorities, an exact-source hosted rerun including commit `1ad117e` must verify
 the complete extraction/death/successor route. After one full route is green, run 25 complete
-ordinary loops with current aggregate timing and optimized Realm Gate captures. Independently run
-the hosted schema-78 proof for commit `1f1d0fd`'s TEL-003 facts. The private cohort,
+ordinary loops with current aggregate timing and optimized Realm Gate captures. Hosted run
+`30048509525` proves commit `1f1d0fd`'s schema-78 TEL-003 facts; bounded operational export remains. The private cohort,
 comprehension metrics, backup/restore, hosting, and Steamworks evidence remain separate final gates.
