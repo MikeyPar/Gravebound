@@ -71,14 +71,12 @@ or modified during release construction.
 
 ## Current Next Step
 
-Under all three design authorities, hosted run
-[`30050712798`](https://github.com/MikeyPar/Gravebound/actions/runs/30050712798) passed the focused
-schema-79/pre-checkpoint PostgreSQL proof after this package, then exposed the independently
-corrected Bell B0 safe-entry publication boundary. Commit `79668fe` carries that source fix. The
-Current Next Step is active hosted complete-route run
-[`30052832985`](https://github.com/MikeyPar/Gravebound/actions/runs/30052832985), followed by a
-replacement schema-79 package built from the exact proven source. The package script will remove
-r32 only after the replacement passes every production-blocking build, launch, mode, CLI, root,
-and hash check. The Roadmap's 25 complete private-loop journeys, aggregate timing, optimized Realm
-Gate capture, cohort, hosting, and Steamworks evidence remain separate final gates. Formal progress
-remains `15/23 (65%)` until an entire package or exit outcome closes.
+Under all three design authorities, r32 has been superseded by
+[optimized tester r33](GB-M03-tester-r33-manifest.md). Hosted run
+[`30052832985`](https://github.com/MikeyPar/Gravebound/actions/runs/30052832985) passes schema-79
+pre-checkpoint proof and the corrected B0 snapshot, then times out at the public B1-active
+observation boundary. The Current Next Step is diagnostic run
+[`30053995319`](https://github.com/MikeyPar/Gravebound/actions/runs/30053995319). The Roadmap's 25
+complete private-loop journeys, aggregate timing, optimized Realm Gate capture, cohort, hosting,
+and Steamworks evidence remain separate final gates. Formal progress remains `15/23 (65%)` until
+an entire package or exit outcome closes.
