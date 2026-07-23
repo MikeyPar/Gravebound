@@ -72,12 +72,13 @@ or modified during release construction.
 ## Current Next Step
 
 Under all three design authorities, hosted run
-[`30049060896`](https://github.com/MikeyPar/Gravebound/actions/runs/30049060896) reached legitimate
-ordinary damage before the first optional 30-second danger checkpoint and exposed schema 43's
-contradictory trace-tick checkpoint FK. The Current Next Step is focused hosted schema-79 proof,
-which removes only that redundant key, followed by the complete extraction/death/successor route
-and an updated package. After one full route is green, run 25 complete ordinary loops with current
-aggregate timing and optimized Realm Gate captures, then close bounded operational telemetry. The
-private cohort, comprehension metrics, backup/restore, hosting, destination/privacy approval, and
-Steamworks evidence remain separate final gates. Formal progress remains `15/23 (65%)` until an
-entire package or exit outcome closes.
+[`30050712798`](https://github.com/MikeyPar/Gravebound/actions/runs/30050712798) passed the focused
+schema-79/pre-checkpoint PostgreSQL proof after this package, then exposed the independently
+corrected Bell B0 safe-entry publication boundary. Commit `79668fe` carries that source fix. The
+Current Next Step is active hosted complete-route run
+[`30052832985`](https://github.com/MikeyPar/Gravebound/actions/runs/30052832985), followed by a
+replacement schema-79 package built from the exact proven source. The package script will remove
+r32 only after the replacement passes every production-blocking build, launch, mode, CLI, root,
+and hash check. The Roadmap's 25 complete private-loop journeys, aggregate timing, optimized Realm
+Gate capture, cohort, hosting, and Steamworks evidence remain separate final gates. Formal progress
+remains `15/23 (65%)` until an entire package or exit outcome closes.
