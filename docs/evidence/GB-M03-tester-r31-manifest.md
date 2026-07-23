@@ -71,18 +71,18 @@ PostgreSQL suite passed. It then exposed a reliable-publication mismatch: the se
 new danger route at tick zero, while the production journey correctly required authority joined to
 a committed simulation tick; route deduplication suppressed the later identical projection.
 Commit `c4f44e7` publishes a bound danger route at its already committed driver tick without
-changing Hall control-plane publication. Exact-source hosted run
-[`30024816019`](https://github.com/MikeyPar/Gravebound/actions/runs/30024816019) is the current
-assembled-route gate.
+changing Hall control-plane publication. Hosted run
+[`30028182217`](https://github.com/MikeyPar/Gravebound/actions/runs/30028182217) proved live
+microrealm activation and isolated a test-driver target-selection defect. Commit `2e8d2f4`
+corrects that test-only policy; r31 remains the latest runtime package.
 
 The untracked Grave Arbalist asset seed under `assets/core/player/grave_arbalist/` was preserved and
 was not included in the Git source archive or modified during release construction.
 
 ## Current Next Step
 
-Under all three design authorities, exact-source hosted run
-[`30024816019`](https://github.com/MikeyPar/Gravebound/actions/runs/30024816019) must verify the
-complete extraction/death/successor route. After one full route is green, run 25 complete ordinary
-loops with current aggregate timing and optimized Realm Gate captures. Independently complete the
+Under all three design authorities, an exact-source hosted rerun from commit `2e8d2f4` must verify
+the complete extraction/death/successor route. After one full route is green, run 25 complete
+ordinary loops with current aggregate timing and optimized Realm Gate captures. Independently complete the
 remaining `TEL-003` boss-phase, party/contribution, and network-health facts. The private cohort,
 comprehension metrics, backup/restore, hosting, and Steamworks evidence remain separate final gates.
