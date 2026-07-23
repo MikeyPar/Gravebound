@@ -212,9 +212,8 @@ impl PrivateLifeJourneyEvidenceV1 {
         let login_to_control_latency = PrivateLifeDurationStatsV1::compile(&durations(|sample| {
             sample.login_to_control_micros
         }))?;
-        let full_loop_latency = PrivateLifeDurationStatsV1::compile(&durations(|sample| {
-            sample.full_loop_micros
-        }))?;
+        let full_loop_latency =
+            PrivateLifeDurationStatsV1::compile(&durations(|sample| sample.full_loop_micros))?;
         let death_to_successor_control_latency =
             PrivateLifeDurationStatsV1::compile(&durations(|sample| {
                 sample.death_to_successor_control_micros
@@ -240,16 +239,13 @@ impl PrivateLifeJourneyEvidenceV1 {
                 && sample.summary_to_combat_micros > 0
                 && sample.death_to_successor_control_micros
                     >= sample.summary_to_successor_control_micros
-                && sample.summary_to_combat_micros
-                    >= sample.summary_to_successor_control_micros
-                && sample.summary_to_combat_micros
-                    >= sample.successor_control_to_combat_micros
+                && sample.summary_to_combat_micros >= sample.summary_to_successor_control_micros
+                && sample.summary_to_combat_micros >= sample.successor_control_to_combat_micros
         });
         let login_to_control_median_under_thirty_seconds =
             login_to_control_latency.median_micros < LOGIN_TO_CONTROL_MEDIAN_LIMIT_MICROS;
         let death_to_successor_control_median_under_fifteen_seconds =
-            death_to_successor_control_latency.median_micros
-                < DEATH_TO_CONTROL_MEDIAN_LIMIT_MICROS;
+            death_to_successor_control_latency.median_micros < DEATH_TO_CONTROL_MEDIAN_LIMIT_MICROS;
         let death_to_successor_control_p95_under_thirty_seconds =
             death_to_successor_control_latency.p95_micros < DEATH_TO_CONTROL_P95_LIMIT_MICROS;
         let successor_combat_within_two_minutes_count = samples
@@ -339,10 +335,7 @@ impl PrivateLifeJourneyEvidenceV1 {
         Ok(report)
     }
 
-    pub fn write_json_atomically(
-        &self,
-        path: &Path,
-    ) -> Result<(), PrivateLifeMeasurementError> {
+    pub fn write_json_atomically(&self, path: &Path) -> Result<(), PrivateLifeMeasurementError> {
         if self.raw_report_hash_blake3 != report_hash(self)? {
             return Err(PrivateLifeMeasurementError::ReportHashMismatch);
         }
@@ -527,10 +520,7 @@ mod tests {
         let accepted =
             PrivateLifeJourneyEvidenceV1::compile(accepted_samples(), authority()).unwrap();
         assert!(accepted.accepted);
-        assert_eq!(
-            accepted.sample_count,
-            REQUIRED_PRIVATE_LIFE_JOURNEY_COUNT
-        );
+        assert_eq!(accepted.sample_count, REQUIRED_PRIVATE_LIFE_JOURNEY_COUNT);
         assert_eq!(accepted.successor_combat_within_two_minutes_percent, 100);
         assert_eq!(accepted.raw_report_hash_blake3.len(), 64);
         assert_eq!(
