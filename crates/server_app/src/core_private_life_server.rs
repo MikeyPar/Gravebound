@@ -1382,6 +1382,18 @@ async fn publish_route(
     let Some(lease) = route.route_lease() else {
         return Ok(());
     };
+    // A bound danger route has already committed its first simulation frame. Publish the route
+    // against that authoritative tick when a control-plane caller has no more precise tick.
+    // Publishing it at tick zero would make the shared route deduplicator suppress the identical
+    // first-frame projection, leaving clients unable to join route and snapshot authority.
+    let server_tick = if server_tick == 0 {
+        match route {
+            ConnectionRoute::Danger(binding) => observation_tick(&binding.observer.latest()),
+            ConnectionRoute::Bootstrap | ConnectionRoute::Hall { .. } => 0,
+        }
+    } else {
+        server_tick
+    };
     let snapshot = process.route_snapshot(lease)?;
     writer
         .send_route_event(
