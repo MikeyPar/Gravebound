@@ -790,10 +790,19 @@ async fn drive_microrealm_until_cleared(
                         .find(|entity| entity.kind == EntityKind::Player)
                         .expect("microrealm snapshot must retain its authoritative player");
                     assert!(player.current_health > 0, "ordinary combat must reach the Bell portal alive");
+                    *input_sequence = input_sequence.checked_add(1).unwrap();
                     let Some(target) = nearest_hostile(player, &snapshot.entities) else {
+                        // The authored pack is dormant until the entrant moves beyond one tile or
+                        // releases a primary shot. Advance east along the authored spawn road so
+                        // the public-input journey activates the encounter without inventing a
+                        // hostile, clear proof, or simulation outcome.
+                        bot_client::send_input_datagram(
+                            connection,
+                            input(*input_sequence, 1_000, 0),
+                        )
+                        .unwrap();
                         continue;
                     };
-                    *input_sequence = input_sequence.checked_add(1).unwrap();
                     bot_client::send_input_datagram(
                         connection,
                         combat_input(*input_sequence, player, target),
