@@ -458,9 +458,9 @@ impl CorePrivateTerminalOwner for PostgresCorePrivateTerminalOwner {
 
 #[derive(Debug, Error)]
 enum ProductionTerminalOwnerError {
-    #[error("terminal owner persistence failed")]
+    #[error("terminal owner persistence failed: {0}")]
     Persistence(#[from] PersistenceError),
-    #[error("terminal owner trace failed")]
+    #[error("terminal owner trace failed: {0}")]
     Trace(#[from] LiveDamageTraceServiceError),
     #[error("terminal owner death planning failed")]
     Planning(#[from] PrivateDeathPlanningError),

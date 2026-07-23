@@ -720,20 +720,6 @@ async fn load_active_danger_authority(
     .bind(lineage_id.as_slice())
     .fetch_optional(&mut *connection)
     .await?;
-    let checkpoint_tick: Option<i64> = sqlx::query_scalar(
-        "SELECT checkpoint_tick FROM character_danger_checkpoints \
-         WHERE namespace_id=$1 AND account_id=$2 AND character_id=$3 AND lineage_id=$4 \
-           AND records_blake3=$5 AND assets_blake3=$6 AND localization_blake3=$7 FOR UPDATE",
-    )
-    .bind(WIPEABLE_CORE_NAMESPACE)
-    .bind(account_id.as_slice())
-    .bind(character_id.as_slice())
-    .bind(lineage_id.as_slice())
-    .bind(&content.records_blake3)
-    .bind(&content.assets_blake3)
-    .bind(&content.localization_blake3)
-    .fetch_optional(&mut *connection)
-    .await?;
     let (Some(root), Some(lineage)) = (root, lineage) else {
         return Err(PersistenceError::LifeClockBindingMismatch);
     };
@@ -753,8 +739,11 @@ async fn load_active_danger_authority(
     let Some(entry) = entry else {
         return Err(PersistenceError::LifeClockBindingMismatch);
     };
-    if checkpoint_tick.is_none()
-        || exact_id(root.try_get("lineage_id")?)? != lineage_id
+    // `danger_checkpoint` is a periodic process-resume/debug record (TECH-023), not part of the
+    // safe-to-danger root. A newly committed danger entry is therefore authoritative before its
+    // first 30-second checkpoint exists. The immutable restore root and lineage carry the clock
+    // authority required here.
+    if exact_id(root.try_get("lineage_id")?)? != lineage_id
         || root.try_get::<i16, _>("restore_state")? != 0
         || root.try_get::<String, _>("records_blake3")? != content.records_blake3
         || root.try_get::<String, _>("assets_blake3")? != content.assets_blake3

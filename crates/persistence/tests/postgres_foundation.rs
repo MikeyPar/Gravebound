@@ -1031,6 +1031,12 @@ async fn authoritative_life_clocks_are_exact_replayable_and_restart_safe() {
     .await
     .unwrap();
     transaction.commit().await.unwrap();
+    let fresh_danger_head = persistence
+        .load_life_clock_head_v1(ACCOUNT_A, CHARACTER_A)
+        .await
+        .unwrap();
+    assert_eq!(fresh_danger_head.authoritative_tick, 0);
+    assert!(fresh_danger_head.danger.is_some());
     persistence
         .write_danger_checkpoint(&danger_checkpoint(1, vec![1]))
         .await
@@ -1208,12 +1214,13 @@ async fn authoritative_life_clocks_are_exact_replayable_and_restart_safe() {
     .await
     .unwrap();
     transaction.commit().await.unwrap();
-    assert!(matches!(
+    assert_eq!(
         persistence
             .load_life_clock_head_v1(ACCOUNT_A, CHARACTER_A)
-            .await,
-        Err(PersistenceError::CorruptStoredLifeClock)
-    ));
+            .await
+            .unwrap(),
+        danger_head
+    );
     persistence
         .write_danger_checkpoint(&danger_checkpoint(1, vec![1]))
         .await
@@ -1259,6 +1266,12 @@ async fn retained_live_trace_replays_after_pruning_and_restarts_exactly() {
     .await
     .unwrap();
     transaction.commit().await.unwrap();
+    let pre_checkpoint = persistence
+        .load_live_damage_trace_snapshot_v1(ACCOUNT_A, CHARACTER_A)
+        .await
+        .unwrap();
+    assert_eq!(pre_checkpoint.danger.checkpoint_tick, 0);
+    assert_eq!(pre_checkpoint.through_tick, 0);
     persistence
         .write_danger_checkpoint(&danger_checkpoint(0, vec![1]))
         .await

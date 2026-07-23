@@ -981,7 +981,7 @@ async fn validate_active_danger(
         || !open_lineage_state(lineage.try_get("lineage_state")?)
         || !exact_content(&root)?
         || !exact_content(&lineage)?
-        || checkpoint.and_then(|v| u64::try_from(v).ok()) != Some(danger.checkpoint_tick)
+        || !checkpoint_authority_matches(checkpoint, danger.checkpoint_tick)
     {
         return Err(PersistenceError::LiveDamageTraceBindingMismatch);
     }
@@ -1002,13 +1002,22 @@ async fn load_current_danger(
         .ok_or(PersistenceError::LiveDamageTraceBindingMismatch)?;
     let restore = optional_id(row.try_get("entry_restore_point_id")?)?
         .ok_or(PersistenceError::LiveDamageTraceBindingMismatch)?;
-    let checkpoint: i64 = sqlx::query_scalar("SELECT checkpoint_tick FROM character_danger_checkpoints WHERE namespace_id=$1 AND account_id=$2 AND character_id=$3 AND lineage_id=$4 AND records_blake3=$5 AND assets_blake3=$6 AND localization_blake3=$7 FOR UPDATE")
-        .bind(WIPEABLE_CORE_NAMESPACE).bind(account.as_slice()).bind(character.as_slice()).bind(lineage.as_slice()).bind(CORE_WORLD_RECORDS_BLAKE3).bind(CORE_WORLD_ASSETS_BLAKE3).bind(CORE_WORLD_LOCALIZATION_BLAKE3).fetch_optional(connection).await?.ok_or(PersistenceError::LiveDamageTraceBindingMismatch)?;
+    let checkpoint: Option<i64> = sqlx::query_scalar("SELECT checkpoint_tick FROM character_danger_checkpoints WHERE namespace_id=$1 AND account_id=$2 AND character_id=$3 AND lineage_id=$4 AND records_blake3=$5 AND assets_blake3=$6 AND localization_blake3=$7 FOR UPDATE")
+        .bind(WIPEABLE_CORE_NAMESPACE).bind(account.as_slice()).bind(character.as_slice()).bind(lineage.as_slice()).bind(CORE_WORLD_RECORDS_BLAKE3).bind(CORE_WORLD_ASSETS_BLAKE3).bind(CORE_WORLD_LOCALIZATION_BLAKE3).fetch_optional(connection).await?;
     Ok(LiveDamageTraceDangerAuthorityV1 {
         lineage_id: lineage,
         restore_point_id: restore,
-        checkpoint_tick: nonnegative_u64(checkpoint)?,
+        // TECH-023 schedules the first process-resume checkpoint after danger entry. Tick zero is
+        // the exact repository-owned authority until that optional record exists.
+        checkpoint_tick: checkpoint.map(nonnegative_u64).transpose()?.unwrap_or(0),
     })
+}
+
+fn checkpoint_authority_matches(stored: Option<i64>, expected: u64) -> bool {
+    match stored {
+        Some(stored) => u64::try_from(stored).ok() == Some(expected),
+        None => expected == 0,
+    }
 }
 
 async fn insert_payload(
@@ -1740,6 +1749,18 @@ mod tests {
         assert!(!open_lineage_state(2));
         assert!(!open_lineage_state(3));
         assert!(!open_lineage_state(-1));
+    }
+
+    #[test]
+    fn fresh_danger_root_uses_zero_until_the_first_periodic_checkpoint() {
+        // TECH-023 makes this record periodic. Terminal history must be available throughout the
+        // interval between the atomic danger-entry commit and its first 30-second checkpoint.
+        assert!(checkpoint_authority_matches(None, 0));
+        assert!(!checkpoint_authority_matches(None, 1));
+        assert!(checkpoint_authority_matches(Some(0), 0));
+        assert!(checkpoint_authority_matches(Some(900), 900));
+        assert!(!checkpoint_authority_matches(Some(900), 899));
+        assert!(!checkpoint_authority_matches(Some(-1), 0));
     }
 
     #[test]
