@@ -605,13 +605,14 @@ impl CorePrivateLifeProcess {
         })
     }
 
-    /// Converts one already committed Hall -> microrealm receipt into the exact live danger
-    /// graph. Exact replay returns the retained binding; every partial fresh bind is retired before
-    /// the error escapes.
+    /// Converts one already committed Hall -> microrealm receipt and its generation-pinned route
+    /// lease into the exact live danger graph. Exact replay returns the retained binding; every
+    /// partial fresh bind is retired before the error escapes.
     pub(crate) async fn enter_committed_microrealm(
         self: &Arc<Self>,
         authenticated: crate::AuthenticatedAccount,
         transport: CorePrivateLifeTransportLease,
+        route_lease: crate::CorePrivateRouteActorLease,
         character_id: [u8; 16],
     ) -> Result<CorePrivateMicrorealmBinding, CorePrivateLifeProcessError> {
         if let Ok(binding) = self.sessions.microrealm_authority(transport).await {
@@ -620,17 +621,15 @@ impl CorePrivateLifeProcess {
             }
             return Err(CorePrivateLifeProcessError::InvalidRouteBinding);
         }
-        let reattached = self
-            .foundation
-            .runtime_bootstrap()
-            .reattach_within_process(authenticated, transport, self.sessions.as_ref())
-            .await?;
-        let route_lease = reattached
-            .route
-            .ok_or(CorePrivateLifeProcessError::InvalidRouteBinding)?;
-        if route_lease.character_id() != character_id {
+        if route_lease.account_id() != authenticated.account_id.as_bytes()
+            || route_lease.account_id() != transport.account_id()
+            || route_lease.character_id() != character_id
+        {
             return Err(CorePrivateLifeProcessError::InvalidRouteBinding);
         }
+        self.foundation
+            .route_directory()
+            .danger_entry_authority(route_lease)?;
         let combat = self
             .combat
             .build(authenticated.account_id.as_bytes(), character_id)

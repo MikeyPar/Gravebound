@@ -1344,9 +1344,20 @@ async fn reconcile_transition(
 ) -> Result<(), CorePrivateLifeServerError> {
     match transition {
         TransitionKind::EnterMicrorealm { character_id } => {
+            let ConnectionRoute::Hall {
+                route: route_lease, ..
+            } = route
+            else {
+                return Err(CorePrivateLifeServerError::ControlUnavailable);
+            };
             *route = ConnectionRoute::Danger(
                 process
-                    .enter_committed_microrealm(authenticated, transport, character_id)
+                    .enter_committed_microrealm(
+                        authenticated,
+                        transport,
+                        *route_lease,
+                        character_id,
+                    )
                     .await?,
             );
         }
