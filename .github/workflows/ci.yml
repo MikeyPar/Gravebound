@@ -6,6 +6,11 @@ on:
   pull_request:
   workflow_dispatch:
     inputs:
+      run_m03_route_only:
+        description: Run only the production-blocking GB-M03 assembled PostgreSQL/real-QUIC route
+        required: false
+        default: false
+        type: boolean
       run_m03_death_soak:
         description: Run the explicit release-profile 30-minute GB-M03-06E death persistence soak
         required: false
@@ -22,6 +27,7 @@ concurrency:
 jobs:
   quality:
     name: Format, lint, and unit tests
+    if: github.event_name != 'workflow_dispatch' || !inputs.run_m03_route_only
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -62,6 +68,7 @@ jobs:
 
   windows-release:
     name: Windows release build
+    if: github.event_name != 'workflow_dispatch' || !inputs.run_m03_route_only
     runs-on: windows-latest
     timeout-minutes: 45
     steps:
@@ -73,6 +80,7 @@ jobs:
 
   postgres-persistence:
     name: PostgreSQL migrations and transactions
+    if: github.event_name != 'workflow_dispatch' || !inputs.run_m03_route_only
     runs-on: ubuntu-latest
     timeout-minutes: 45
     services:
@@ -155,6 +163,47 @@ jobs:
             ${{ runner.temp }}/gb-m03-13-concurrent-eligible-deaths.json
           if-no-files-found: error
           retention-days: 14
+
+  m03-production-route:
+    name: GB-M03 assembled production route
+    if: github.event_name == 'workflow_dispatch' && inputs.run_m03_route_only
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17.10-alpine3.23
+        env:
+          POSTGRES_DB: gravebound_test
+          POSTGRES_USER: gravebound_test
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 127.0.0.1:5432:5432
+        options: >-
+          --health-cmd "pg_isready -U gravebound_test -d gravebound_test"
+          --health-interval 1s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      RUSTFLAGS: -C link-arg=-fuse-ld=lld
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      TEST_DATABASE_URL: postgres://gravebound_test@127.0.0.1:5432/gravebound_test
+      GRAVEBOUND_ALLOW_DESTRUCTIVE_DATABASE_TESTS: "1"
+      GRAVEBOUND_TELEMETRY_ENVIRONMENT: test
+      GRAVEBOUND_TELEMETRY_REGION_ID: local-playtest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Linux integration dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes clang lld libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
+      - name: Run assembled production route
+        run: >-
+          cargo test --locked -p server_app --test core_private_life_journey
+          production_root_extracts_then_recovers_a_successor_and_cleans_up --
+          --ignored --test-threads=1 --nocapture
 
   m03-native-death-frame:
     name: GB-M03-06E optimized native death frames
