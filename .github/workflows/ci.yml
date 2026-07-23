@@ -1,8 +1,8 @@
 name: CI
 
+# GB-M03 completion uses the focused manual production gates below. The full matrix remains
+# available for pull requests and manual final audit, but direct-main commits do not launch it.
 on:
-  push:
-    branches: [main]
   pull_request:
   workflow_dispatch:
     inputs:
