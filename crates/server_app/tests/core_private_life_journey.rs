@@ -479,6 +479,37 @@ fn nearest_hostile<'a>(
         })
 }
 
+#[derive(Debug, Default)]
+struct MicrorealmDriveDiagnostics {
+    snapshot_count: u64,
+    last_snapshot_tick: u64,
+    last_player: (i32, i32, u32),
+    last_hostile_count: usize,
+    last_projectile_count: usize,
+}
+
+fn panic_microrealm_drive(
+    reason: &str,
+    route_receive: &watch::Receiver<Option<ReliableEventFrame>>,
+    diagnostics: &MicrorealmDriveDiagnostics,
+    input_sequence: u32,
+) -> ! {
+    let latest_route = route_receive.borrow().as_ref().and_then(|frame| {
+        let ReliableEvent::CorePrivateRouteState(route) = &frame.event else {
+            return None;
+        };
+        Some((
+            route.state_version,
+            route.phase,
+            route.readiness.microrealm_cleared,
+        ))
+    });
+    panic!(
+        "ordinary public-input microrealm clear failed ({reason}): \
+         route={latest_route:?}, diagnostics={diagnostics:?}, input_sequence={input_sequence}"
+    );
+}
+
 struct ServerInitiatedEventReceivers {
     route: watch::Receiver<Option<ReliableEventFrame>>,
     pending_inventory: watch::Receiver<Option<ReliableEventFrame>>,
@@ -752,10 +783,6 @@ where
     wait_for_route(route_receive, reached, timeout_message).await
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "the bounded public-input loop keeps its route, snapshot, diagnostics, and input authority together for auditability"
-)]
 async fn drive_microrealm_until_cleared(
     connection: &quinn::Connection,
     assembler: &mut bot_client::BotSnapshotAssembler,
@@ -767,11 +794,11 @@ async fn drive_microrealm_until_cleared(
             && route.phase == CorePrivateRoutePhaseV1::MicrorealmCleared
             && route.readiness.bell_portal_available.is_available()
     };
-    let mut snapshot_count = 0_u64;
-    let mut last_snapshot_tick = 0_u64;
-    let mut last_player = (0_i32, 0_i32, 0_u32);
-    let mut last_hostile_count = 0_usize;
-    let mut last_projectile_count = 0_usize;
+    let mut diagnostics = MicrorealmDriveDiagnostics::default();
+    // Begin ordinary movement immediately from the already-verified public entry snapshot. This
+    // avoids a circular wait between the dormant authored pack and the first follow-up observation.
+    *input_sequence = input_sequence.checked_add(1).unwrap();
+    bot_client::send_input_datagram(connection, input(*input_sequence, 1_000, 0)).unwrap();
     let result = tokio::time::timeout(COMBAT_TIMEOUT, async {
         loop {
             if let Some(frame) = matching_route(route_receive, &cleared) {
@@ -792,7 +819,15 @@ async fn drive_microrealm_until_cleared(
                     changed.expect("route event pump must remain attached");
                 }
                 chunk = bot_client::receive_snapshot_datagram(connection) => {
-                    let Some(snapshot) = assembler.ingest(chunk.unwrap()).unwrap() else {
+                    let chunk = chunk.unwrap_or_else(|error| {
+                        panic_microrealm_drive(
+                            &error.to_string(),
+                            route_receive,
+                            &diagnostics,
+                            *input_sequence,
+                        )
+                    });
+                    let Some(snapshot) = assembler.ingest(chunk).unwrap() else {
                         continue;
                     };
                     let player = snapshot
@@ -801,14 +836,15 @@ async fn drive_microrealm_until_cleared(
                         .find(|entity| entity.kind == EntityKind::Player)
                         .expect("microrealm snapshot must retain its authoritative player");
                     assert!(player.current_health > 0, "ordinary combat must reach the Bell portal alive");
-                    snapshot_count = snapshot_count.checked_add(1).unwrap();
-                    last_snapshot_tick = snapshot.server_tick;
-                    last_player = (
+                    diagnostics.snapshot_count =
+                        diagnostics.snapshot_count.checked_add(1).unwrap();
+                    diagnostics.last_snapshot_tick = snapshot.server_tick;
+                    diagnostics.last_player = (
                         player.x_milli_tiles,
                         player.y_milli_tiles,
                         player.current_health,
                     );
-                    last_hostile_count = snapshot
+                    diagnostics.last_hostile_count = snapshot
                         .entities
                         .iter()
                         .filter(|entity| {
@@ -816,7 +852,7 @@ async fn drive_microrealm_until_cleared(
                                 && matches!(entity.kind, EntityKind::Enemy | EntityKind::Boss)
                         })
                         .count();
-                    last_projectile_count = snapshot
+                    diagnostics.last_projectile_count = snapshot
                         .entities
                         .iter()
                         .filter(|entity| {
@@ -851,23 +887,12 @@ async fn drive_microrealm_until_cleared(
     })
     .await;
     result.unwrap_or_else(|_| {
-        let latest_route = route_receive.borrow().as_ref().and_then(|frame| {
-            let ReliableEvent::CorePrivateRouteState(route) = &frame.event else {
-                return None;
-            };
-            Some((
-                route.state_version,
-                route.phase,
-                route.readiness.microrealm_cleared,
-            ))
-        });
-        panic!(
-            "ordinary public-input microrealm clear timed out: \
-             route={latest_route:?}, snapshots={snapshot_count}, \
-             last_tick={last_snapshot_tick}, player={last_player:?}, \
-             hostiles={last_hostile_count}, projectiles={last_projectile_count}, \
-             input_sequence={input_sequence}"
-        );
+        panic_microrealm_drive(
+            "three-minute combat deadline",
+            route_receive,
+            &diagnostics,
+            *input_sequence,
+        )
     })
 }
 
