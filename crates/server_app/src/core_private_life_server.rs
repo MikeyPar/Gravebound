@@ -505,6 +505,19 @@ async fn run_connection_loop(
             }
             observation = next_driver_observation(driver) => {
                 let observation = observation?;
+                if let CorePrivateMicrorealmDriverState::Faulted {
+                    committed_frames,
+                    fault,
+                } = &observation
+                {
+                    tracing::error!(
+                        committed_frames,
+                        fault_kind = ?fault.kind,
+                        last_committed_tick = fault.last_committed_tick.0,
+                        fault_message = %fault.message,
+                        "Core private-life driver faulted before terminal recovery"
+                    );
+                }
                 if observation_allows_route_publication(&observation) {
                     publish_route(process, writer, route, observation_tick(&observation)).await?;
                 }

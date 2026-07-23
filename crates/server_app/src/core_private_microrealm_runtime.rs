@@ -1373,10 +1373,32 @@ mod tests {
                 ref frame,
             } if frame.tick == Tick(34) && frame.input_sequence == 42
         ));
+        let mut active_at = None;
+        for expected_tick in 35..=60 {
+            tokio::time::advance(std::time::Duration::from_millis(34)).await;
+            let state = state_reader
+                .changed()
+                .await
+                .expect("B1 warning progression");
+            let crate::CorePrivateMicrorealmDriverState::FixedDungeonRunning { frame, .. } = state
+            else {
+                panic!("B1 must remain a live fixed-room owner: {state:?}");
+            };
+            assert_eq!(frame.tick, Tick(expected_tick));
+            if frame.route.phase == CorePrivateRoutePhaseV1::RoomActive {
+                active_at = Some(frame.tick);
+                break;
+            }
+        }
+        assert_eq!(
+            active_at,
+            Some(Tick(60)),
+            "B1 must publish active authority at the exact 900 ms warning boundary"
+        );
         let report = driver.shutdown().await.expect("joined shutdown");
         assert_eq!(report.outcome, CorePrivateMicrorealmDriverOutcome::Shutdown);
-        assert_eq!(report.final_tick, Tick(34));
-        assert_eq!(report.committed_frames, 2);
+        assert_eq!(report.final_tick, Tick(60));
+        assert_eq!(report.committed_frames, 28);
         assert!(report.task_joined);
         assert!(!report.driver_task_live_after_join);
     }

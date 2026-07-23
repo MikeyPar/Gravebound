@@ -596,7 +596,7 @@ async fn wait_for_route<Matches>(
 where
     Matches: Fn(&CorePrivateRouteStateV1) -> bool,
 {
-    tokio::time::timeout(OPERATION_TIMEOUT, async {
+    let result = tokio::time::timeout(OPERATION_TIMEOUT, async {
         loop {
             if let Some(frame) = matching_route(route_receive, &matches) {
                 return frame;
@@ -607,8 +607,25 @@ where
                 .expect("route event pump must remain attached");
         }
     })
-    .await
-    .expect(timeout_message)
+    .await;
+    if let Ok(frame) = result {
+        frame
+    } else {
+        let latest = route_receive.borrow().as_ref().and_then(|frame| {
+            let ReliableEvent::CorePrivateRouteState(route) = &frame.event else {
+                return None;
+            };
+            Some((
+                frame.server_tick,
+                route.state_version,
+                route.scene,
+                route.room,
+                route.phase,
+                route.readiness.accepts_gameplay_input,
+            ))
+        });
+        panic!("{timeout_message}: latest_route={latest:?}");
+    }
 }
 
 #[derive(Debug, Default)]
