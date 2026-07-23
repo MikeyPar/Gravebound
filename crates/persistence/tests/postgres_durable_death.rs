@@ -1393,6 +1393,14 @@ async fn count(persistence: &PostgresPersistence, table: &str) -> i64 {
             "SELECT count(*) FROM death_live_trace_promotion_conflict_audits_v1 \
              WHERE namespace_id=$1 AND account_id=$2"
         }
+        "onboarding_outbox_events_v1" => {
+            "SELECT count(*) FROM onboarding_outbox_events_v1 \
+             WHERE namespace_id=$1 AND account_id=$2"
+        }
+        "item_ledger_telemetry_outbox_v1" => {
+            "SELECT count(*) FROM item_ledger_telemetry_outbox_v1 \
+             WHERE namespace_id=$1 AND account_id=$2"
+        }
         _ => panic!("unsupported fixture table {table}"),
     };
     let mut transaction = persistence.begin_transaction().await.unwrap();
