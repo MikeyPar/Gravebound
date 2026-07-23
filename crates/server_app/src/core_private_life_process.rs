@@ -10,7 +10,7 @@
 //! first transport dispatch, and the native route client must all be present before capability
 //! publication.
 
-use std::{path::Path, sync::Arc};
+use std::{path::Path, sync::Arc, time::Duration};
 
 use persistence::PostgresPersistence;
 use thiserror::Error;
@@ -656,17 +656,49 @@ impl CorePrivateLifeProcess {
         self.recall
             .register_actor(authenticated, route_lease, recall_actor)
             .await?;
-        if let Err(error) = self.sessions.bind_recall(transport).await {
-            let _ = self.recall.retire_actor(authenticated).await;
-            return Err(error.into());
-        }
-        match self.sessions.bind_microrealm(transport, runtime).await {
-            Ok(binding) => Ok(binding),
+        let mut binding = match self.sessions.bind_microrealm(transport, runtime).await {
+            Ok(binding) => binding,
             Err(error) => {
-                let _ = self.sessions.unbind_recall(transport).await;
-                Err(error.into())
+                let _ = self.recall.retire_actor(authenticated).await;
+                return Err(error.into());
+            }
+        };
+        match tokio::time::timeout(
+            Duration::from_secs(2),
+            await_first_committed_microrealm_frame(&mut binding),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                self.rollback_microrealm_admission(authenticated, binding.lease)
+                    .await?;
+                return Err(error.into());
+            }
+            Err(error) => {
+                self.rollback_microrealm_admission(authenticated, binding.lease)
+                    .await?;
+                return Err(error.into());
             }
         }
+        if let Err(error) = self.sessions.bind_recall(transport).await {
+            self.rollback_microrealm_admission(authenticated, binding.lease)
+                .await?;
+            return Err(error.into());
+        }
+        Ok(binding)
+    }
+
+    async fn rollback_microrealm_admission(
+        &self,
+        authenticated: crate::AuthenticatedAccount,
+        binding: crate::CorePrivateMicrorealmBindingLease,
+    ) -> Result<(), CorePrivateLifeProcessError> {
+        let session_result = self.sessions.unbind_microrealm(binding).await;
+        let recall_result = self.recall.retire_actor(authenticated).await;
+        session_result?;
+        recall_result?;
+        Ok(())
     }
 
     /// Installs one already committed Bell transfer into the same danger task that was frozen
@@ -890,6 +922,17 @@ fn project_stored_consumable(
     ))
 }
 
+async fn await_first_committed_microrealm_frame(
+    binding: &mut CorePrivateMicrorealmBinding,
+) -> Result<(), crate::CorePrivateMicrorealmObservationError> {
+    loop {
+        if binding.observer.latest().latest_step().is_some() {
+            return Ok(());
+        }
+        binding.observer.changed().await?;
+    }
+}
+
 #[derive(Debug, Error)]
 pub(crate) enum CorePrivateLifeProcessError {
     #[error("private-life process admission is incomplete")]
@@ -908,6 +951,10 @@ pub(crate) enum CorePrivateLifeProcessError {
     Route(#[from] crate::CorePrivateRouteRuntimeError),
     #[error("private-life microrealm composition failed: {0}")]
     Microrealm(#[from] crate::CorePrivateMicrorealmRuntimeError),
+    #[error("private-life microrealm did not commit its first frame before admission")]
+    MicrorealmAdmissionTimeout(#[from] tokio::time::error::Elapsed),
+    #[error("private-life microrealm observation failed: {0}")]
+    MicrorealmObservation(#[from] crate::CorePrivateMicrorealmObservationError),
     #[error("private-life Recall composition failed: {0}")]
     Recall(#[from] crate::CoreRecallRuntimeError),
     #[error("private-life Recall actor is invalid: {0}")]
