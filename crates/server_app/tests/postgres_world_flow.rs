@@ -805,10 +805,28 @@ async fn safe_aggregate_versions(persistence: &PostgresPersistence) -> (i64, i64
     versions
 }
 
+async fn durable_lineage_state(persistence: &PostgresPersistence) -> i16 {
+    let mut transaction = persistence.begin_transaction().await.unwrap();
+    let state = sqlx::query_scalar(
+        "SELECT lineage_state FROM character_instance_lineages
+          WHERE namespace_id=$1 AND account_id=$2 AND character_id=$3 AND lineage_id=$4",
+    )
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(ACCOUNT_ID.as_slice())
+    .bind(CHARACTER_ID.as_slice())
+    .bind(LINEAGE_ID.as_slice())
+    .fetch_one(transaction.connection())
+    .await
+    .unwrap();
+    transaction.rollback().await.unwrap();
+    state
+}
+
 #[derive(Debug, sqlx::FromRow)]
 struct StoredRootProjection {
     content_id: String,
     layout_id: String,
+    lineage_state: i16,
     source_location_id: String,
     records_blake3: String,
     assets_blake3: String,
@@ -828,7 +846,7 @@ struct StoredRootProjection {
 async fn assert_committed_danger_root(persistence: &PostgresPersistence) {
     let mut transaction = persistence.begin_transaction().await.unwrap();
     let root = sqlx::query_as::<_, StoredRootProjection>(
-        "SELECT l.content_id, l.layout_id, r.source_location_id, r.records_blake3, \
+        "SELECT l.content_id, l.layout_id, l.lineage_state, r.source_location_id, r.records_blake3, \
                 r.assets_blake3, r.localization_blake3, r.account_version, \
                 r.character_version, r.progression_version, r.inventory_version, \
                 r.oath_bargain_version, r.life_metrics_version, r.ash_wallet_version, \
@@ -846,6 +864,10 @@ async fn assert_committed_danger_root(persistence: &PostgresPersistence) {
     transaction.rollback().await.unwrap();
     assert_eq!(root.content_id, WORLD_ID);
     assert_eq!(root.layout_id, LAYOUT_ID);
+    assert_eq!(
+        root.lineage_state, 0,
+        "world flow must stage the lineage until the exact terminal owner accepts it"
+    );
     assert_eq!(root.source_location_id, HALL_ID);
     let required_revision = revision();
     assert_eq!(
@@ -943,6 +965,69 @@ async fn danger_entry_commits_complete_root_and_replays_after_pool_restart() {
     assert_eq!(aggregate_counts(&persistence).await, (1, 1, 1, 1));
 
     assert_committed_danger_root(&persistence).await;
+
+    let authority = persistence::StoredActiveDangerAuthorityV1 {
+        account_id: ACCOUNT_ID,
+        character_id: CHARACTER_ID,
+        instance_lineage_id: LINEAGE_ID,
+        entry_restore_point_id: RESTORE_ID,
+    };
+    let required_revision = revision();
+    let stored_revision = persistence::StoredWorldFlowRevisionV1 {
+        records_blake3: required_revision.records_blake3.as_str().to_owned(),
+        assets_blake3: required_revision.assets_blake3.as_str().to_owned(),
+        localization_blake3: required_revision.localization_blake3.as_str().to_owned(),
+    };
+    assert!(matches!(
+        persistence
+            .load_current_danger_extraction_snapshot_v1(authority, &stored_revision)
+            .await,
+        Err(persistence::PersistenceError::CurrentDangerExtractionSnapshotBindingMismatch)
+    ));
+    assert!(matches!(
+        persistence
+            .activate_current_danger_lineage_v1(authority, [99; 16], 2, &stored_revision)
+            .await,
+        Err(persistence::PersistenceError::CurrentDangerExtractionSnapshotBindingMismatch)
+    ));
+    assert!(matches!(
+        persistence
+            .activate_current_danger_lineage_v1(authority, TRANSFER_ID, 3, &stored_revision)
+            .await,
+        Err(persistence::PersistenceError::CurrentDangerExtractionSnapshotBindingMismatch)
+    ));
+    let mut wrong_revision = stored_revision.clone();
+    wrong_revision.records_blake3 = "f".repeat(64);
+    assert!(matches!(
+        persistence
+            .activate_current_danger_lineage_v1(authority, TRANSFER_ID, 2, &wrong_revision)
+            .await,
+        Err(persistence::PersistenceError::CurrentDangerExtractionSnapshotContentMismatch)
+    ));
+    assert_eq!(
+        durable_lineage_state(&persistence).await,
+        0,
+        "changed authority must leave the staged lineage untouched"
+    );
+    assert_eq!(
+        persistence
+            .activate_current_danger_lineage_v1(authority, TRANSFER_ID, 2, &stored_revision)
+            .await
+            .unwrap(),
+        persistence::StoredDangerLineageActivationV1::Activated
+    );
+    assert_eq!(
+        persistence
+            .activate_current_danger_lineage_v1(authority, TRANSFER_ID, 2, &stored_revision)
+            .await
+            .unwrap(),
+        persistence::StoredDangerLineageActivationV1::AlreadyActive
+    );
+    persistence
+        .load_current_danger_extraction_snapshot_v1(authority, &stored_revision)
+        .await
+        .expect("the active exact root supplies terminal extraction authority");
+    assert_eq!(durable_lineage_state(&persistence).await, 1);
 
     drop(service);
     persistence.close().await;

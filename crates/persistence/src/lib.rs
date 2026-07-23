@@ -238,9 +238,9 @@ pub use private_life_bootstrap::{
     StoredCurrentDangerExtractionSnapshotV1, StoredCurrentDangerPendingItemKindV1,
     StoredCurrentDangerPendingItemLocationV1, StoredCurrentDangerPendingItemV1,
     StoredCurrentDangerPendingMaterialV1, StoredCurrentDangerTerminalClockV1,
-    StoredCurrentDangerTerminalSnapshotV1, StoredPrivateLifeBootstrapStateV1,
-    StoredPrivateLifeBootstrapV1, StoredPrivateLifeDangerRootV1, StoredPrivateLifeHallV1,
-    StoredPrivateLifeLifeStateV1, StoredPrivateLifeSecurityStateV1,
+    StoredCurrentDangerTerminalSnapshotV1, StoredDangerLineageActivationV1,
+    StoredPrivateLifeBootstrapStateV1, StoredPrivateLifeBootstrapV1, StoredPrivateLifeDangerRootV1,
+    StoredPrivateLifeHallV1, StoredPrivateLifeLifeStateV1, StoredPrivateLifeSecurityStateV1,
     StoredPrivateLifeSelectedCharacterV1, StoredPrivateLifeVersionsV1,
     derive_private_life_crash_mutation_id_v1,
 };

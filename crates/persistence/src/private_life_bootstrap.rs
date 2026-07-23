@@ -64,6 +64,18 @@ const CORE_RED_TONIC_ID: &str = "consumable.red_tonic";
 const CORE_RED_TONIC_STACK_CAP: usize = 6;
 const RUN_MATERIAL_STACK_CAP: u16 = 99;
 
+/// Durable result of binding the process-owned terminal composition to the exact open danger root.
+///
+/// World flow stages the lineage in the same transaction as the complete restore graph. The
+/// terminal composition promotes it only after constructing the exact lossless frame-feed binding
+/// and before spawning the simulation driver; exact retries therefore observe `AlreadyActive`
+/// without weakening any later terminal binding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoredDangerLineageActivationV1 {
+    Activated,
+    AlreadyActive,
+}
+
 const SELECTED_CHARACTER_SQL: &str =
     "SELECT character.class_id,character.level,character.life_state,
             character.security_state,character.character_state_version,
@@ -619,6 +631,137 @@ impl PostgresPersistence {
             load_private_life_bootstrap_v1_on(transaction.connection(), account_id).await?;
         transaction.rollback().await?;
         Ok(bootstrap)
+    }
+
+    /// Promotes one exact staged Core danger lineage during production terminal-owner startup.
+    ///
+    /// The account-first serializable transaction validates the complete selected-character and
+    /// restore-root and accepted Realm Gate receipt before changing only `lineage_state`. The
+    /// caller awaits this boundary before spawning the simulation driver. A staged lineage cannot
+    /// supply extraction authority; an already-active exact lineage is an idempotent replay.
+    pub async fn activate_current_danger_lineage_v1(
+        &self,
+        authority: StoredActiveDangerAuthorityV1,
+        transfer_id: [u8; 16],
+        destination_character_version: u64,
+        expected_content_revision: &StoredWorldFlowRevisionV1,
+    ) -> Result<StoredDangerLineageActivationV1, PersistenceError> {
+        authority.validate()?;
+        if transfer_id == [0; 16] || destination_character_version == 0 {
+            return Err(PersistenceError::CurrentDangerExtractionSnapshotBindingMismatch);
+        }
+        if !valid_revision(expected_content_revision) {
+            return Err(PersistenceError::CurrentDangerExtractionSnapshotContentMismatch);
+        }
+        for attempt in 1..=MAX_TRANSACTION_ATTEMPTS {
+            match self
+                .activate_current_danger_lineage_once_v1(
+                    authority,
+                    transfer_id,
+                    destination_character_version,
+                    expected_content_revision,
+                )
+                .await
+            {
+                Err(error)
+                    if attempt < MAX_TRANSACTION_ATTEMPTS
+                        && is_retryable_transaction_failure(&error) => {}
+                result => return result,
+            }
+        }
+        unreachable!("bounded danger-lineage activation loop always returns")
+    }
+
+    async fn activate_current_danger_lineage_once_v1(
+        &self,
+        authority: StoredActiveDangerAuthorityV1,
+        transfer_id: [u8; 16],
+        destination_character_version: u64,
+        expected_content_revision: &StoredWorldFlowRevisionV1,
+    ) -> Result<StoredDangerLineageActivationV1, PersistenceError> {
+        let mut transaction = self.begin_transaction().await?;
+        let bootstrap =
+            load_private_life_bootstrap_v1_on(transaction.connection(), authority.account_id)
+                .await?;
+        let StoredPrivateLifeBootstrapStateV1::DangerRequiresCrashRestore { character, danger } =
+            bootstrap.state
+        else {
+            return Err(PersistenceError::CurrentDangerExtractionSnapshotBindingMismatch);
+        };
+        if character.character_id != authority.character_id
+            || danger.lineage_id != authority.instance_lineage_id
+            || danger.restore_point_id != authority.entry_restore_point_id
+            || character.versions.character != destination_character_version
+            || danger.entry_versions.character.checked_add(1) != Some(destination_character_version)
+        {
+            return Err(PersistenceError::CurrentDangerExtractionSnapshotBindingMismatch);
+        }
+        if danger.content_revision != *expected_content_revision {
+            return Err(PersistenceError::CurrentDangerExtractionSnapshotContentMismatch);
+        }
+        let receipts = sqlx::query(
+            "SELECT expected_character_version,pre_character_version,post_character_version,
+                    result_code,records_blake3,assets_blake3,localization_blake3
+               FROM character_world_transfer_results
+              WHERE namespace_id=$1 AND account_id=$2 AND character_id=$3 AND transfer_id=$4
+              LIMIT 2 FOR UPDATE",
+        )
+        .bind(WIPEABLE_CORE_NAMESPACE)
+        .bind(authority.account_id.as_slice())
+        .bind(authority.character_id.as_slice())
+        .bind(transfer_id.as_slice())
+        .fetch_all(transaction.connection())
+        .await
+        .map_err(PersistenceError::Database)?;
+        let [receipt] = receipts.as_slice() else {
+            return Err(PersistenceError::CurrentDangerExtractionSnapshotBindingMismatch);
+        };
+        let entry_character_version = i64_value(danger.entry_versions.character)?;
+        let destination_character_version = i64_value(destination_character_version)?;
+        if receipt.try_get::<i64, _>("expected_character_version")? != entry_character_version
+            || receipt.try_get::<i64, _>("pre_character_version")? != entry_character_version
+            || receipt.try_get::<i64, _>("post_character_version")? != destination_character_version
+            || receipt.try_get::<i16, _>("result_code")? != 0
+        {
+            return Err(PersistenceError::CurrentDangerExtractionSnapshotBindingMismatch);
+        }
+        if receipt.try_get::<String, _>("records_blake3")?
+            != expected_content_revision.records_blake3
+            || receipt.try_get::<String, _>("assets_blake3")?
+                != expected_content_revision.assets_blake3
+            || receipt.try_get::<String, _>("localization_blake3")?
+                != expected_content_revision.localization_blake3
+        {
+            return Err(PersistenceError::CurrentDangerExtractionSnapshotContentMismatch);
+        }
+        if danger.lineage_state == LINEAGE_ACTIVE_U8 {
+            transaction.rollback().await?;
+            return Ok(StoredDangerLineageActivationV1::AlreadyActive);
+        }
+        if danger.lineage_state != u8::try_from(LINEAGE_STAGED).expect("staged state fits u8") {
+            return Err(PersistenceError::CurrentDangerExtractionSnapshotBindingMismatch);
+        }
+        let updated = sqlx::query(
+            "UPDATE character_instance_lineages
+                SET lineage_state=$1
+              WHERE namespace_id=$2 AND account_id=$3 AND character_id=$4
+                AND lineage_id=$5 AND lineage_state=$6 AND closed_at IS NULL",
+        )
+        .bind(LINEAGE_ACTIVE)
+        .bind(WIPEABLE_CORE_NAMESPACE)
+        .bind(authority.account_id.as_slice())
+        .bind(authority.character_id.as_slice())
+        .bind(authority.instance_lineage_id.as_slice())
+        .bind(LINEAGE_STAGED)
+        .execute(transaction.connection())
+        .await
+        .map_err(PersistenceError::Database)?
+        .rows_affected();
+        if updated != 1 {
+            return Err(PersistenceError::CurrentDangerExtractionSnapshotBindingMismatch);
+        }
+        transaction.commit().await?;
+        Ok(StoredDangerLineageActivationV1::Activated)
     }
 
     /// Loads exact post-mutation extraction versions and pending run custody without repairing or

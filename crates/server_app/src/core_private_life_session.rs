@@ -15,7 +15,7 @@ use std::{
     sync::{Arc, Weak},
 };
 
-use persistence::{PostgresPersistence, ProductionExtractionExpectedVersionsV1};
+use persistence::{PersistenceError, PostgresPersistence, ProductionExtractionExpectedVersionsV1};
 use protocol::{
     ActionFrame, ActionKind, CorePrivateRouteContentRevisionV1, InputFrame, ManifestHash,
     WorldFlowContentRevisionV1,
@@ -302,6 +302,8 @@ pub enum CorePrivateLifeSessionError {
 pub enum CorePrivateTerminalOwnerError {
     #[error("terminal owner could not start")]
     StartFailed,
+    #[error("terminal owner could not activate exact danger authority: {0}")]
+    AuthorityActivation(#[from] PersistenceError),
     #[error("terminal owner stopped before orderly driver retirement")]
     RuntimeFailed,
 }
@@ -314,6 +316,15 @@ pub trait CorePrivateTerminalOwner: Send + std::fmt::Debug {
     ) -> Pin<Box<dyn Future<Output = Result<(), CorePrivateTerminalOwnerError>> + Send>>;
 }
 
+pub type CorePrivateTerminalOwnerStartFuture<'a> = Pin<
+    Box<
+        dyn Future<
+                Output = Result<Box<dyn CorePrivateTerminalOwner>, CorePrivateTerminalOwnerError>,
+            > + Send
+            + 'a,
+    >,
+>;
+
 /// Production composition seam for the real trace/clock/terminal owner. No default implementation
 /// exists: a missing owner must fail before the simulation driver or authoritative tick starts.
 pub trait CorePrivateTerminalOwnerFactory: Send + Sync {
@@ -324,7 +335,7 @@ pub trait CorePrivateTerminalOwnerFactory: Send + Sync {
         recall: CorePrivateRecallTerminalHandle,
         extraction: Option<CorePrivateExtractionTerminalHandle>,
         receiver: CorePrivateTerminalFrameReceiver,
-    ) -> Result<Box<dyn CorePrivateTerminalOwner>, CorePrivateTerminalOwnerError>;
+    ) -> CorePrivateTerminalOwnerStartFuture<'_>;
 }
 
 #[derive(Debug)]
@@ -1385,13 +1396,15 @@ where
             .extraction
             .as_ref()
             .map(|runtime| runtime.terminal_handle(entry.authenticated, route_lease));
-        let terminal_owner = terminal_owner_factory.start(
-            entry.authenticated,
-            danger_entry_authority.clone(),
-            recall_terminal,
-            extraction_terminal,
-            terminal_receiver,
-        )?;
+        let terminal_owner = terminal_owner_factory
+            .start(
+                entry.authenticated,
+                danger_entry_authority.clone(),
+                recall_terminal,
+                extraction_terminal,
+                terminal_receiver,
+            )
+            .await?;
         let driver = CorePrivateMicrorealmDriver::spawn_with_terminal_authorities(
             runtime,
             terminal_sender,
@@ -2389,21 +2402,23 @@ mod tests {
             _recall: CorePrivateRecallTerminalHandle,
             _extraction: Option<CorePrivateExtractionTerminalHandle>,
             mut receiver: CorePrivateTerminalFrameReceiver,
-        ) -> Result<Box<dyn CorePrivateTerminalOwner>, CorePrivateTerminalOwnerError> {
-            if authenticated.account_id.as_bytes() != *authority.terminal().account_id()
-                || receiver.binding() != authority.terminal()
-            {
-                return Err(CorePrivateTerminalOwnerError::StartFailed);
-            }
-            let task = tokio::spawn(async move {
-                while let Some(delivery) = receiver.receive().await {
-                    delivery
-                        .acknowledge_continue()
-                        .map_err(|_| CorePrivateTerminalOwnerError::RuntimeFailed)?;
+        ) -> CorePrivateTerminalOwnerStartFuture<'_> {
+            Box::pin(async move {
+                if authenticated.account_id.as_bytes() != *authority.terminal().account_id()
+                    || receiver.binding() != authority.terminal()
+                {
+                    return Err(CorePrivateTerminalOwnerError::StartFailed);
                 }
-                Ok(())
-            });
-            Ok(Box::new(TestTerminalOwner { task }))
+                let task = tokio::spawn(async move {
+                    while let Some(delivery) = receiver.receive().await {
+                        delivery
+                            .acknowledge_continue()
+                            .map_err(|_| CorePrivateTerminalOwnerError::RuntimeFailed)?;
+                    }
+                    Ok(())
+                });
+                Ok(Box::new(TestTerminalOwner { task }) as Box<dyn CorePrivateTerminalOwner>)
+            })
         }
     }
 

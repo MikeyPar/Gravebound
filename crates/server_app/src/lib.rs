@@ -178,6 +178,7 @@ pub use core_private_life_session::{
     CorePrivateLifeTransportGeneration, CorePrivateLifeTransportLease,
     CorePrivateMicrorealmBinding, CorePrivateMicrorealmBindingLease, CorePrivateTerminalOwner,
     CorePrivateTerminalOwnerError, CorePrivateTerminalOwnerFactory,
+    CorePrivateTerminalOwnerStartFuture,
 };
 pub use core_private_life_tick::{
     CorePrivateLifeAuthoritativeTick, CorePrivateLifeTickDirectory,

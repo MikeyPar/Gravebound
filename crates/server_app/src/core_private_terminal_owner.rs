@@ -38,11 +38,11 @@ use crate::{
     CorePrivateTerminalAcknowledgementError, CorePrivateTerminalDeliveryV1,
     CorePrivateTerminalFrameDelivery, CorePrivateTerminalFrameReceiver, CorePrivateTerminalFrameV1,
     CorePrivateTerminalOwner, CorePrivateTerminalOwnerError, CorePrivateTerminalOwnerFactory,
-    CorePrivateTerminalRouteControlAuthorityV1, CorePrivateTerminalRouteControlV1,
-    CorePrivateTerminalVerifiedFaultV1, CoreRecallTerminalDriverError,
-    CoreRecallTerminalTickOutcome, CoreTerminalCoordinator, CoreTerminalCoordinatorError,
-    CoreTerminalEvaluation, CoreTerminalOtherEvaluationsV1, CoreTerminalProducer,
-    DeathEntityIdentityAuthority, DurableDeathExecutionError, IdentityClock,
+    CorePrivateTerminalOwnerStartFuture, CorePrivateTerminalRouteControlAuthorityV1,
+    CorePrivateTerminalRouteControlV1, CorePrivateTerminalVerifiedFaultV1,
+    CoreRecallTerminalDriverError, CoreRecallTerminalTickOutcome, CoreTerminalCoordinator,
+    CoreTerminalCoordinatorError, CoreTerminalEvaluation, CoreTerminalOtherEvaluationsV1,
+    CoreTerminalProducer, DeathEntityIdentityAuthority, DurableDeathExecutionError, IdentityClock,
     LiveDamageTraceIngestOutcome, LiveDamageTraceMutationAuthority, LiveDamageTraceService,
     LiveDamageTraceServiceError, PostgresDurableDeathExecutionService,
     PostgresPrivateDeathContextPlanner, PostgresProductionExtractionExecutionService,
@@ -118,11 +118,11 @@ impl CorePrivateTerminalOwnerFactory for PostgresCorePrivateTerminalOwnerFactory
         recall: CorePrivateRecallTerminalHandle,
         extraction: Option<CorePrivateExtractionTerminalHandle>,
         receiver: CorePrivateTerminalFrameReceiver,
-    ) -> Result<Box<dyn CorePrivateTerminalOwner>, CorePrivateTerminalOwnerError> {
+    ) -> CorePrivateTerminalOwnerStartFuture<'_> {
         if authenticated.account_id.as_bytes() != *authority.terminal().account_id()
             || receiver.binding() != authority.terminal()
         {
-            return Err(CorePrivateTerminalOwnerError::StartFailed);
+            return Box::pin(async { Err(CorePrivateTerminalOwnerError::StartFailed) });
         }
         let runtime = ProductionTerminalOwnerRuntime {
             persistence: self.persistence.clone(),
@@ -138,9 +138,20 @@ impl CorePrivateTerminalOwnerFactory for PostgresCorePrivateTerminalOwnerFactory
             extraction,
             receiver,
         };
-        Ok(Box::new(PostgresCorePrivateTerminalOwner {
-            task: tokio::spawn(runtime.run()),
-        }))
+        Box::pin(async move {
+            runtime
+                .persistence
+                .activate_current_danger_lineage_v1(
+                    stored_danger_authority(&runtime.authority),
+                    runtime.authority.transfer_id(),
+                    runtime.authority.entry_character_version(),
+                    &stored_world_revision(runtime.authority.world_flow_revision()),
+                )
+                .await?;
+            Ok(Box::new(PostgresCorePrivateTerminalOwner {
+                task: tokio::spawn(runtime.run()),
+            }) as Box<dyn CorePrivateTerminalOwner>)
+        })
     }
 }
 
