@@ -183,15 +183,16 @@ function Test-LaunchMode {
     $SafeName = $Name -replace '[^A-Za-z0-9_-]', '-'
     $Stdout = Join-Path $LogRoot "$SafeName.stdout.log"
     $Stderr = Join-Path $LogRoot "$SafeName.stderr.log"
-    $Process = Start-Process `
-        -FilePath $Executable `
-        -ArgumentList $Arguments `
-        -WorkingDirectory $WorkingDirectory `
-        -WindowStyle Hidden `
-        -RedirectStandardOutput $Stdout `
-        -RedirectStandardError $Stderr `
-        -PassThru
+    $Process = $null
     try {
+        $Process = Start-Process `
+            -FilePath $Executable `
+            -ArgumentList $Arguments `
+            -WorkingDirectory $WorkingDirectory `
+            -WindowStyle Hidden `
+            -RedirectStandardOutput $Stdout `
+            -RedirectStandardError $Stderr `
+            -PassThru
         Start-Sleep -Seconds $HoldSeconds
         $Process.Refresh()
         if ($Process.HasExited) {
@@ -208,7 +209,7 @@ function Test-LaunchMode {
         }
     }
     finally {
-        if (-not $Process.HasExited) {
+        if ($null -ne $Process -and -not $Process.HasExited) {
             Stop-Process -Id $Process.Id -Force
             $Process.WaitForExit()
         }
