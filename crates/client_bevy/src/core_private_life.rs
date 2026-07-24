@@ -1511,6 +1511,35 @@ type PrivateGameplayVisibility<'w, 's> = Query<
         With<PrivateGameplayGeometry>,
     )>,
 >;
+type PrivateGameplayActorQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static PrivateGameplayEntity,
+        &'static mut Transform,
+        &'static mut Sprite,
+        &'static mut Anchor,
+    ),
+    (
+        Without<PrivateGameplayCamera>,
+        Without<PrivateGameplayTelegraph>,
+    ),
+>;
+type PrivateGameplayTelegraphQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static PrivateGameplayTelegraph,
+        &'static mut Transform,
+        &'static mut Sprite,
+    ),
+    (
+        Without<PrivateGameplayCamera>,
+        Without<PrivateGameplayEntity>,
+    ),
+>;
 
 /// Opens the real negotiated private-life route without enabling any local gameplay authority.
 #[allow(
@@ -3749,20 +3778,16 @@ fn present_private_gameplay(
     presentation: Res<CorePrivateCombatPresentation>,
     assets: Res<CorePrivateActorAssets>,
     accessibility: Res<AccessibilitySettings>,
-    mut camera: Single<&mut Transform, With<PrivateGameplayCamera>>,
-    mut entities: Query<(
-        Entity,
-        &PrivateGameplayEntity,
+    mut camera: Single<
         &mut Transform,
-        &mut Sprite,
-        &mut Anchor,
-    )>,
-    mut telegraph_entities: Query<(
-        Entity,
-        &PrivateGameplayTelegraph,
-        &mut Transform,
-        &mut Sprite,
-    )>,
+        (
+            With<PrivateGameplayCamera>,
+            Without<PrivateGameplayEntity>,
+            Without<PrivateGameplayTelegraph>,
+        ),
+    >,
+    mut entities: PrivateGameplayActorQuery,
+    mut telegraph_entities: PrivateGameplayTelegraphQuery,
     floors: Query<(Entity, &PrivateGameplayFloor)>,
     geometry: Query<Entity, With<PrivateGameplayGeometry>>,
 ) {
@@ -3922,19 +3947,8 @@ fn present_private_gameplay(
 
 fn despawn_private_gameplay(
     commands: &mut Commands,
-    entities: &Query<(
-        Entity,
-        &PrivateGameplayEntity,
-        &mut Transform,
-        &mut Sprite,
-        &mut Anchor,
-    )>,
-    telegraphs: &Query<(
-        Entity,
-        &PrivateGameplayTelegraph,
-        &mut Transform,
-        &mut Sprite,
-    )>,
+    entities: &PrivateGameplayActorQuery,
+    telegraphs: &PrivateGameplayTelegraphQuery,
     floors: &Query<(Entity, &PrivateGameplayFloor)>,
     geometry: &Query<Entity, With<PrivateGameplayGeometry>>,
 ) {
@@ -4294,12 +4308,7 @@ struct PrivateTelegraphVisual {
 )]
 fn present_private_telegraphs(
     commands: &mut Commands,
-    telegraph_entities: &mut Query<(
-        Entity,
-        &PrivateGameplayTelegraph,
-        &mut Transform,
-        &mut Sprite,
-    )>,
+    telegraph_entities: &mut PrivateGameplayTelegraphQuery,
     bindings: Option<&BTreeMap<u64, protocol::CoreCombatActorBindingV1>>,
     presentation: &CorePrivateCombatPresentation,
     snapshot_tick: u64,
