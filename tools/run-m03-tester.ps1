@@ -79,6 +79,34 @@ function Get-AvailableLoopbackPort {
     }
 }
 
+function Invoke-HiddenProcessAndWait {
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [Parameter(Mandatory = $true)][string[]]$Arguments
+    )
+
+    $ArgumentLine = (
+        $Arguments |
+            ForEach-Object {
+                $Value = [string]$_
+                if ($Value -match '[\s"]') {
+                    '"' + $Value.Replace('"', '\"') + '"'
+                }
+                else {
+                    $Value
+                }
+            }
+    ) -join ' '
+    $Process = Start-Process `
+        -FilePath $FilePath `
+        -ArgumentList $ArgumentLine `
+        -WorkingDirectory $PackageRoot `
+        -WindowStyle Hidden `
+        -PassThru
+    $Process.WaitForExit()
+    return $Process.ExitCode
+}
+
 function Invoke-PortablePostgres {
     param([Parameter(Mandatory = $true)]$Secrets)
 
@@ -118,14 +146,17 @@ function Invoke-PortablePostgres {
 
     $Port = Get-AvailableLoopbackPort
     Write-Host "Starting the bundled private PostgreSQL service on loopback port $Port..."
-    & $PgCtl `
-        --pgdata $PortablePostgresData `
-        --log $PortablePostgresLog `
-        --options "-h 127.0.0.1 -p $Port" `
-        --wait `
-        start *> $null
-    if ($LASTEXITCODE -ne 0) {
-        throw "Bundled PostgreSQL startup failed with exit code $LASTEXITCODE. See $PortablePostgresLog"
+    $PgCtlExitCode = Invoke-HiddenProcessAndWait `
+        -FilePath $PgCtl `
+        -Arguments @(
+            '--pgdata', $PortablePostgresData,
+            '--log', $PortablePostgresLog,
+            '--options', "-h 127.0.0.1 -p $Port",
+            '--wait',
+            'start'
+        )
+    if ($PgCtlExitCode -ne 0) {
+        throw "Bundled PostgreSQL startup failed with exit code $PgCtlExitCode. See $PortablePostgresLog"
     }
     Write-Host 'Bundled PostgreSQL is ready.'
     $script:PostgresMode = 'portable'
@@ -267,15 +298,14 @@ finally {
     }
     if ($PostgresMode -eq 'portable') {
         $PgCtl = Join-Path $PortablePostgresBin 'pg_ctl.exe'
-        $PreviousErrorActionPreference = $ErrorActionPreference
-        $ErrorActionPreference = 'Continue'
-        try {
-            & $PgCtl --pgdata $PortablePostgresData --mode fast --wait stop *> $null
-            $PgCtlExitCode = $LASTEXITCODE
-        }
-        finally {
-            $ErrorActionPreference = $PreviousErrorActionPreference
-        }
+        $PgCtlExitCode = Invoke-HiddenProcessAndWait `
+            -FilePath $PgCtl `
+            -Arguments @(
+                '--pgdata', $PortablePostgresData,
+                '--mode', 'fast',
+                '--wait',
+                'stop'
+            )
         if ($PgCtlExitCode -ne 0) {
             $CleanupFailure = "Could not stop the bundled PostgreSQL service (exit $PgCtlExitCode)."
         }
