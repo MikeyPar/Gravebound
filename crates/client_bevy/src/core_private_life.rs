@@ -2507,22 +2507,21 @@ fn handle_successor_recovery_commands(
 fn sync_terminal_views(
     mut commands: Commands,
     mut terminal: ResMut<CorePrivateTerminalUi>,
-    mut normal_ui: NormalPrivateUiVisibility,
-    mut gameplay: PrivateGameplayVisibility,
+    mut visibility_queries: ParamSet<(NormalPrivateUiVisibility, PrivateGameplayVisibility)>,
     death_view: Option<ResMut<NativeDeathView>>,
     successor_view: Option<ResMut<NativeSuccessorRecoveryView>>,
 ) {
     let open = terminal.surface_open();
-    let visibility = if open {
+    let target_visibility = if open {
         Visibility::Hidden
     } else {
         Visibility::Inherited
     };
-    for mut current in &mut normal_ui {
-        *current = visibility;
+    for mut current in &mut visibility_queries.p0() {
+        *current = target_visibility;
     }
-    for mut current in &mut gameplay {
-        *current = visibility;
+    for mut current in &mut visibility_queries.p1() {
+        *current = target_visibility;
     }
     if !open {
         commands.remove_resource::<NativeDeathView>();
