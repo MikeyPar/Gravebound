@@ -168,6 +168,14 @@ impl<'pool> WorldFlowWrite<'pool> {
             {
                 return Err(PersistenceError::CorruptStoredWorldFlow);
             }
+            persist_danger_lineage_location_transition(
+                self.transaction.connection(),
+                &self.account_id,
+                &self.character_id,
+                &self.initial_location,
+                &self.state.location,
+            )
+            .await?;
             persist_location(
                 self.transaction.connection(),
                 &self.account_id,
@@ -737,6 +745,59 @@ async fn persist_location(
     .execute(connection)
     .await
     .map_err(PersistenceError::Database)?;
+    Ok(())
+}
+
+async fn persist_danger_lineage_location_transition(
+    connection: &mut sqlx::PgConnection,
+    account_id: &[u8; ID_BYTES],
+    character_id: &[u8; ID_BYTES],
+    initial: &StoredWorldLocation,
+    destination: &StoredWorldLocation,
+) -> Result<(), PersistenceError> {
+    let (
+        StoredWorldLocation::Danger {
+            location_content_id: initial_content_id,
+            instance_lineage_id: initial_lineage_id,
+            entry_restore_point_id: initial_restore_point_id,
+            ..
+        },
+        StoredWorldLocation::Danger {
+            location_content_id: destination_content_id,
+            instance_lineage_id: destination_lineage_id,
+            entry_restore_point_id: destination_restore_point_id,
+            ..
+        },
+    ) = (initial, destination)
+    else {
+        return Ok(());
+    };
+    if initial_content_id == destination_content_id {
+        return Ok(());
+    }
+    if initial_lineage_id != destination_lineage_id
+        || initial_restore_point_id != destination_restore_point_id
+    {
+        return Err(PersistenceError::CorruptStoredWorldFlow);
+    }
+    let updated = sqlx::query(
+        "UPDATE character_instance_lineages SET content_id=$1
+          WHERE namespace_id=$2 AND account_id=$3 AND character_id=$4
+            AND lineage_id=$5 AND content_id=$6 AND lineage_state IN (0,1) AND closed_at IS NULL",
+    )
+    .bind(destination_content_id)
+    .bind(WIPEABLE_CORE_NAMESPACE)
+    .bind(account_id.as_slice())
+    .bind(character_id.as_slice())
+    .bind(destination_lineage_id.as_slice())
+    .bind(initial_content_id)
+    .execute(connection)
+    .await
+    .map_err(PersistenceError::Database)?
+    .rows_affected();
+    if updated != 1 {
+        return Err(PersistenceError::CorruptStoredWorldFlow);
+    }
     Ok(())
 }
 

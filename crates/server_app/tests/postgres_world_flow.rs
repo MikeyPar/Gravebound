@@ -753,6 +753,19 @@ async fn assert_bell_dungeon_location(
             && instance_lineage_id == lineage_id
             && entry_restore_point_id == restore_point_id
     ));
+    let bootstrap = persistence
+        .load_private_life_bootstrap_v1(ACCOUNT_ID)
+        .await
+        .unwrap();
+    assert!(matches!(
+        bootstrap.state,
+        persistence::StoredPrivateLifeBootstrapStateV1::DangerRequiresCrashRestore {
+            danger,
+            ..
+        } if danger.location_content_id == BELL_DUNGEON_ID
+            && danger.lineage_id == lineage_id
+            && danger.restore_point_id == restore_point_id
+    ));
 }
 
 async fn aggregate_counts(persistence: &PostgresPersistence) -> (i64, i64, i64, i64) {
