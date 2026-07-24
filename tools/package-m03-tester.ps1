@@ -1,5 +1,7 @@
 [CmdletBinding()]
-param()
+param(
+    [switch]$PruneObsoleteOnly
+)
 
 $ErrorActionPreference = 'Stop'
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
@@ -43,6 +45,20 @@ function Assert-ChildPath {
     if (-not $ChildPath.StartsWith($ExpectedPrefix, [StringComparison]::OrdinalIgnoreCase)) {
         throw "Refusing to modify a path outside '$ParentPath': $ChildPath"
     }
+}
+
+function Remove-ObsoleteTesterArtifacts {
+    param([Parameter(Mandatory = $true)][string]$KeepPackageName)
+
+    Get-ChildItem -LiteralPath $DistRoot -Force |
+        Where-Object {
+            $_.Name -ne $KeepPackageName -and
+            $_.Name -ne "$KeepPackageName.zip"
+        } |
+        ForEach-Object {
+            Assert-ChildPath -Parent $DistRoot -Child $_.FullName
+            Remove-Item -LiteralPath $_.FullName -Recurse -Force
+        }
 }
 
 function Invoke-Checked {
@@ -226,6 +242,30 @@ try {
     New-Item -ItemType Directory -Force -Path $DistRoot | Out-Null
     Assert-ChildPath -Parent $RepoRoot -Child $DistRoot
     Assert-ChildPath -Parent (Join-Path $RepoRoot 'tmp') -Child $StageRoot
+
+    if ($PruneObsoleteOnly) {
+        $LatestCompletePackage = Get-ChildItem -LiteralPath $DistRoot -Directory -Force |
+            ForEach-Object {
+                if (
+                    $_.Name -match "^$([regex]::Escape($PackagePrefix))-\d{4}-\d{2}-\d{2}-r(?<refresh>\d+)$" -and
+                    (Test-Path -LiteralPath (Join-Path $DistRoot "$($_.Name).zip") -PathType Leaf)
+                ) {
+                    [PSCustomObject]@{
+                        Name = $_.Name
+                        Refresh = [int]$Matches.refresh
+                    }
+                }
+            } |
+            Sort-Object -Property Refresh -Descending |
+            Select-Object -First 1
+        if ($null -eq $LatestCompletePackage) {
+            throw "No complete M03 tester package pair exists under '$DistRoot'."
+        }
+
+        Remove-ObsoleteTesterArtifacts -KeepPackageName $LatestCompletePackage.Name
+        Write-Host "Kept newest complete M03 tester package: $($LatestCompletePackage.Name)"
+        return
+    }
 
     & git diff --quiet -- @PackageInputs
     $TrackedWorktreeStatus = $LASTEXITCODE
@@ -441,15 +481,7 @@ DESIGN AUTHORITIES
     Move-Item -LiteralPath $StagePackage -Destination $DestinationPackage
     Move-Item -LiteralPath $StageZip -Destination $DestinationZip
 
-    Get-ChildItem -LiteralPath $DistRoot -Force |
-        Where-Object {
-            $_.Name -ne $PackageName -and
-            $_.Name -ne "$PackageName.zip"
-        } |
-        ForEach-Object {
-            Assert-ChildPath -Parent $DistRoot -Child $_.FullName
-            Remove-Item -LiteralPath $_.FullName -Recurse -Force
-        }
+    Remove-ObsoleteTesterArtifacts -KeepPackageName $PackageName
 
     Write-Host "M03 tester package ready: $DestinationPackage"
     Write-Host "M03 tester archive ready: $DestinationZip"
