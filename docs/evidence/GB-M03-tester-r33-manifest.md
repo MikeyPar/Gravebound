@@ -70,13 +70,15 @@ preserved and was not included in the Git source archive or modified during rele
 ## Current Next Step
 
 Under all three design authorities, hosted run
-[`30052832985`](https://github.com/MikeyPar/Gravebound/actions/runs/30052832985) passed schema-79
-pre-checkpoint proof and the corrected exact B0 snapshot, then timed out waiting for public B1
-`RoomActive` authority. The fixed-dungeon owner reaches that phase exactly at tick 60 in focused
-proof, so commit `5cfbc13` adds durable driver-fault logging and latest-public-route diagnostics
-without changing packaged gameplay. The Current Next Step is diagnostic hosted run
-[`30053995319`](https://github.com/MikeyPar/Gravebound/actions/runs/30053995319), followed by the
-smallest evidence-backed publication fix if required. The Roadmap's 25 complete private-loop
-journeys, aggregate timing, optimized Realm Gate capture, cohort, hosting, and Steamworks evidence
-remain separate final gates. Formal progress remains `15/23 (65%)` until an entire package or exit
-outcome closes.
+[`30053995319`](https://github.com/MikeyPar/Gravebound/actions/runs/30053995319) passed schema-79
+pre-checkpoint proof and the corrected exact B0 snapshot, then proved the production terminal
+owner drops B1's first frame at route version 9/tick 1243. The public route correctly remains
+`RoomSpawnWarning`; this is not a timeout to weaken. Commit `0698737` surfaces the complete
+underlying owner error immediately, and focused run
+[`30066885083`](https://github.com/MikeyPar/Gravebound/actions/runs/30066885083) is resolving the
+exact substep. r33's Docker-only primary launcher is also being replaced by a self-contained
+PostgreSQL 17.10 release. The Current Next Step is the smallest evidence-backed terminal-owner
+fix, hosted green single-route proof, and optimized r34 publication without Docker. The Roadmap's
+25 complete private-loop journeys, aggregate timing, optimized Realm Gate capture, cohort,
+hosting, and Steamworks evidence remain separate final gates. Formal progress remains
+`15/23 (65%)` until an entire package or exit outcome closes.
