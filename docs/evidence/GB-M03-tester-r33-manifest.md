@@ -67,7 +67,7 @@ The r33 runtime introduces no art change from r32, so the existing optimized REA
 current. The untracked Grave Arbalist asset seed under `assets/core/player/grave_arbalist/` was
 preserved and was not included in the Git source archive or modified during release construction.
 
-## Current Next Step
+## Historical next step at r33 publication
 
 Under all three design authorities, hosted run
 [`30053995319`](https://github.com/MikeyPar/Gravebound/actions/runs/30053995319) passed schema-79
@@ -76,9 +76,9 @@ owner drops B1's first frame at route version 9/tick 1243. The public route corr
 `RoomSpawnWarning`; this is not a timeout to weaken. Commit `0698737` surfaces the complete
 underlying owner error immediately, and focused run
 [`30066885083`](https://github.com/MikeyPar/Gravebound/actions/runs/30066885083) is resolving the
-exact substep. r33's Docker-only primary launcher is also being replaced by a self-contained
-PostgreSQL 17.10 release. The Current Next Step is the smallest evidence-backed terminal-owner
-fix, hosted green single-route proof, and optimized r34 publication without Docker. The Roadmap's
+exact substep. r33's Docker-only primary launcher was also queued for replacement by a
+self-contained PostgreSQL 17.10 release. The recorded next step was the smallest evidence-backed
+terminal-owner fix, hosted green single-route proof, and optimized publication without Docker. The Roadmap's
 25 complete private-loop journeys, aggregate timing, optimized Realm Gate capture, cohort,
 hosting, and Steamworks evidence remain separate final gates. Formal progress remains
 `15/23 (65%)` until an entire package or exit outcome closes.
