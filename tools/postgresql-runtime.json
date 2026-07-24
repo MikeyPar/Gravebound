@@ -1,0 +1,18 @@
+{
+  "product": "PostgreSQL",
+  "version": "17.10",
+  "distribution_revision": 2,
+  "platform": "windows-x86_64",
+  "archive_name": "postgresql-17.10-2-windows-x64-binaries.zip",
+  "url": "https://get.enterprisedb.com/postgresql/postgresql-17.10-2-windows-x64-binaries.zip",
+  "source_page": "https://www.enterprisedb.com/download-postgresql-binaries",
+  "sha256": "7AC798A66DF007B614D7B885E49646BF3633B13DE345FF319697C70E00F5E99B",
+  "redistributed_paths": [
+    "pgsql/bin",
+    "pgsql/lib",
+    "pgsql/share",
+    "pgsql/server_license.txt",
+    "pgsql/commandlinetools_3rd_party_licenses.txt"
+  ],
+  "purpose": "Loopback-only wipeable persistence for the self-contained GB-M03 Windows tester."
+}

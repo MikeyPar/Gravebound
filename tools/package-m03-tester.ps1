@@ -24,6 +24,7 @@ $PackageInputs = @(
     'migrations',
     'tools\m03-tester-postgres.yml',
     'tools\package-m03-tester.ps1',
+    'tools\postgresql-runtime.json',
     'tools\run-m03-tester.ps1'
 )
 
@@ -87,6 +88,86 @@ popd
 if not "%exit_code%"=="0" pause
 exit /b %exit_code%
 "@ | Set-Content -LiteralPath $Path -Encoding ascii
+}
+
+function Install-PortablePostgres {
+    param([Parameter(Mandatory = $true)][string]$DestinationRoot)
+
+    $ManifestPath = Join-Path $RepoRoot 'tools\postgresql-runtime.json'
+    $Manifest = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json
+    if (
+        $Manifest.version -notmatch '^\d+\.\d+$' -or
+        $Manifest.platform -ne 'windows-x86_64' -or
+        $Manifest.url -notmatch '^https://' -or
+        $Manifest.sha256 -notmatch '^[A-F0-9]{64}$' -or
+        $Manifest.archive_name -notmatch '^[A-Za-z0-9._-]+\.zip$'
+    ) {
+        throw "Portable PostgreSQL manifest is malformed: $ManifestPath"
+    }
+
+    $CacheRoot = Join-Path $RepoRoot 'tmp\third-party-cache'
+    $Archive = Join-Path $CacheRoot $Manifest.archive_name
+    Assert-ChildPath -Parent (Join-Path $RepoRoot 'tmp') -Child $CacheRoot
+    Assert-ChildPath -Parent $CacheRoot -Child $Archive
+    New-Item -ItemType Directory -Force -Path $CacheRoot | Out-Null
+
+    $ArchiveIsValid = (
+        (Test-Path -LiteralPath $Archive) -and
+        (Get-FileHash -LiteralPath $Archive -Algorithm SHA256).Hash -eq $Manifest.sha256
+    )
+    if (-not $ArchiveIsValid) {
+        Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
+        Write-Host "Downloading pinned PostgreSQL $($Manifest.version) portable runtime..."
+        Invoke-WebRequest -UseBasicParsing -Uri $Manifest.url -OutFile $Archive
+        $DownloadedHash = (Get-FileHash -LiteralPath $Archive -Algorithm SHA256).Hash
+        if ($DownloadedHash -ne $Manifest.sha256) {
+            Remove-Item -LiteralPath $Archive -Force
+            throw "Portable PostgreSQL archive hash mismatch: expected $($Manifest.sha256), received $DownloadedHash"
+        }
+    }
+
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $Destination = Join-Path $DestinationRoot 'runtime\postgresql'
+    New-Item -ItemType Directory -Force -Path $Destination | Out-Null
+    $Zip = [IO.Compression.ZipFile]::OpenRead($Archive)
+    try {
+        foreach ($Entry in $Zip.Entries) {
+            $Name = $Entry.FullName
+            $Include = (
+                $Name.StartsWith('pgsql/bin/', [StringComparison]::Ordinal) -or
+                $Name.StartsWith('pgsql/lib/', [StringComparison]::Ordinal) -or
+                $Name.StartsWith('pgsql/share/', [StringComparison]::Ordinal) -or
+                $Name -eq 'pgsql/server_license.txt' -or
+                $Name -eq 'pgsql/commandlinetools_3rd_party_licenses.txt'
+            )
+            if (-not $Include -or $Name.EndsWith('/', [StringComparison]::Ordinal)) {
+                continue
+            }
+
+            $Relative = $Name.Substring('pgsql/'.Length).Replace('/', [IO.Path]::DirectorySeparatorChar)
+            $Target = Join-Path $Destination $Relative
+            Assert-ChildPath -Parent $Destination -Child $Target
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Target) | Out-Null
+            [IO.Compression.ZipFileExtensions]::ExtractToFile($Entry, $Target, $true)
+        }
+    }
+    finally {
+        $Zip.Dispose()
+    }
+
+    foreach ($RequiredRuntimePath in @(
+        (Join-Path $Destination 'bin\postgres.exe'),
+        (Join-Path $Destination 'bin\initdb.exe'),
+        (Join-Path $Destination 'bin\pg_ctl.exe'),
+        (Join-Path $Destination 'share\postgresql.conf.sample'),
+        (Join-Path $Destination 'server_license.txt'),
+        (Join-Path $Destination 'commandlinetools_3rd_party_licenses.txt')
+    )) {
+        if (-not (Test-Path -LiteralPath $RequiredRuntimePath)) {
+            throw "Portable PostgreSQL extraction is incomplete: missing $RequiredRuntimePath"
+        }
+    }
+    return $Manifest
 }
 
 function Test-LaunchMode {
@@ -198,6 +279,10 @@ try {
     Expand-Archive -LiteralPath $PayloadArchive -DestinationPath $StagePackage
     Copy-Item -LiteralPath 'tools\m03-tester-postgres.yml' -Destination $StagePackage
     Copy-Item -LiteralPath 'tools\run-m03-tester.ps1' -Destination $StagePackage
+    $PostgresManifest = Install-PortablePostgres -DestinationRoot $StagePackage
+    Copy-Item `
+        -LiteralPath 'tools\postgresql-runtime.json' `
+        -Destination (Join-Path $StagePackage 'POSTGRESQL-RUNTIME.json')
 
     Write-PrivateLifeLauncher -Path (Join-Path $StagePackage 'PLAY GAME.cmd')
     Write-Launcher -Path (Join-Path $StagePackage 'PLAY LOCAL LAB.cmd') -Arguments 'local-lab'
@@ -227,8 +312,9 @@ Server executable SHA-256: $ServerExecutableHash
 START HERE
 Double-click PLAY GAME.cmd for the current persistent Character Select -> Lantern Hall ->
 private danger -> Bell Sepulcher -> extraction/death -> Hall/successor route. This requires
-Docker Desktop for the package's private local PostgreSQL service. The wipeable tester data
-survives between launches in a local Docker volume. No Steam runtime is required.
+no external database installation: the package carries pinned PostgreSQL
+$($PostgresManifest.version) and starts it on loopback only. Wipeable tester data survives
+between launches inside the package-local .runtime folder. Docker and Steam are not required.
 
 PLAY LOCAL LAB.cmd remains a dependency-free combat sandbox. Opening Gravebound.exe
 directly also launches that Local Lab.
@@ -273,8 +359,8 @@ the Core dungeon encounters, Sir Caldus, item/Vault state, durable death/Memoria
 the two-confirmation successor recovery handoff. Those launchers are isolated previews.
 
 PACKAGE RULE
-Keep both executables, the PowerShell runner, Compose file, content, and assets together.
-Moving only the EXE will make strict content or asset validation fail at startup.
+Keep both executables, runtime, PowerShell runner, content, and assets together. Moving only
+the EXE will make database, strict content, or asset validation fail at startup.
 
 USEFUL TEST NOTES
 - Please record which launcher you used when reporting a problem.
@@ -290,6 +376,7 @@ USEFUL TEST NOTES
 BUILD VERIFICATION
 - Optimized Windows client/server release compilation: PASS
 - Client/server executable CLI smoke check: PASS
+- Bundled PostgreSQL $($PostgresManifest.version) initialization and persistent-server readiness: PASS
 - Local Lab twelve-second launch/responding check: PASS
 - All seven standalone packaged launch modes remained alive and responsive: PASS
 - Strict compiled content validation: PASS
@@ -308,6 +395,20 @@ DESIGN AUTHORITIES
     & $ServerExecutable --help *> $null
     if ($LASTEXITCODE -ne 0) {
         throw "Packaged server executable CLI smoke check failed with exit code $LASTEXITCODE"
+    }
+
+    & powershell.exe `
+        -NoProfile `
+        -ExecutionPolicy Bypass `
+        -File (Join-Path $StagePackage 'run-m03-tester.ps1') `
+        -ServerSmokeOnly
+    if ($LASTEXITCODE -ne 0) {
+        throw "Packaged persistent route smoke check failed with exit code $LASTEXITCODE"
+    }
+    $SmokeRuntime = Join-Path $StagePackage '.runtime'
+    if (Test-Path -LiteralPath $SmokeRuntime) {
+        Assert-ChildPath -Parent $StagePackage -Child $SmokeRuntime
+        Remove-Item -LiteralPath $SmokeRuntime -Recurse -Force
     }
 
     $LaunchModes = @(

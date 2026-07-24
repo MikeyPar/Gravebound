@@ -1,11 +1,16 @@
 [CmdletBinding()]
 param(
-    [string]$Identity = 'local-m03-tester'
+    [string]$Identity = 'local-m03-tester',
+    [switch]$ServerSmokeOnly
 )
 
 $ErrorActionPreference = 'Stop'
 $PackageRoot = (Resolve-Path $PSScriptRoot).Path
 $RuntimeRoot = Join-Path $PackageRoot '.runtime'
+$PortablePostgresRoot = Join-Path $PackageRoot 'runtime\postgresql'
+$PortablePostgresBin = Join-Path $PortablePostgresRoot 'bin'
+$PortablePostgresData = Join-Path $RuntimeRoot 'postgres-data'
+$PortablePostgresLog = Join-Path $RuntimeRoot 'postgres.log'
 $ComposeFile = Join-Path $PackageRoot 'm03-tester-postgres.yml'
 $Client = Join-Path $PackageRoot 'Gravebound.exe'
 $Server = Join-Path $PackageRoot 'GraveboundServer.exe'
@@ -17,6 +22,7 @@ $Readiness = Join-Path $RuntimeRoot 'server-ready.txt'
 $ServerStdout = Join-Path $RuntimeRoot 'server.stdout.log'
 $ServerStderr = Join-Path $RuntimeRoot 'server.stderr.log'
 $ServerProcess = $null
+$PostgresMode = $null
 $PrimaryFailure = $null
 $CleanupFailure = $null
 
@@ -62,22 +68,132 @@ function Read-ServerFailure {
     return ''
 }
 
+function Get-AvailableLoopbackPort {
+    $Listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+    try {
+        $Listener.Start()
+        return ([Net.IPEndPoint]$Listener.LocalEndpoint).Port
+    }
+    finally {
+        $Listener.Stop()
+    }
+}
+
+function Invoke-PortablePostgres {
+    param([Parameter(Mandatory = $true)]$Secrets)
+
+    $InitDb = Join-Path $PortablePostgresBin 'initdb.exe'
+    $PgCtl = Join-Path $PortablePostgresBin 'pg_ctl.exe'
+    $Psql = Join-Path $PortablePostgresBin 'psql.exe'
+    $CreateDb = Join-Path $PortablePostgresBin 'createdb.exe'
+    foreach ($RequiredTool in @($InitDb, $PgCtl, $Psql, $CreateDb)) {
+        if (-not (Test-Path -LiteralPath $RequiredTool)) {
+            throw "The bundled PostgreSQL runtime is incomplete: missing $RequiredTool"
+        }
+    }
+
+    if (-not (Test-Path -LiteralPath (Join-Path $PortablePostgresData 'PG_VERSION'))) {
+        Write-Host 'Preparing the private PostgreSQL data directory (first launch only)...'
+        New-Item -ItemType Directory -Force -Path $PortablePostgresData | Out-Null
+        $PasswordFile = Join-Path $RuntimeRoot 'postgres-password.txt'
+        try {
+            Set-Content -LiteralPath $PasswordFile -Value $Secrets.postgres_password -Encoding ascii
+            & $InitDb `
+                --pgdata $PortablePostgresData `
+                --username gravebound_test `
+                --pwfile $PasswordFile `
+                --encoding UTF8 `
+                --auth-host scram-sha-256 `
+                --auth-local trust `
+                --no-locale |
+                ForEach-Object { Write-Host $_ }
+            if ($LASTEXITCODE -ne 0) {
+                throw "Bundled PostgreSQL initialization failed with exit code $LASTEXITCODE"
+            }
+        }
+        finally {
+            Remove-Item -LiteralPath $PasswordFile -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    $Port = Get-AvailableLoopbackPort
+    Write-Host "Starting the bundled private PostgreSQL service on loopback port $Port..."
+    & $PgCtl `
+        --pgdata $PortablePostgresData `
+        --log $PortablePostgresLog `
+        --options "-h 127.0.0.1 -p $Port" `
+        --wait `
+        start |
+        ForEach-Object { Write-Host $_ }
+    if ($LASTEXITCODE -ne 0) {
+        throw "Bundled PostgreSQL startup failed with exit code $LASTEXITCODE. See $PortablePostgresLog"
+    }
+    $script:PostgresMode = 'portable'
+    $env:PGPASSWORD = $Secrets.postgres_password
+
+    $DatabaseExistsOutput = & $Psql `
+        --host 127.0.0.1 `
+        --port $Port `
+        --username gravebound_test `
+        --dbname postgres `
+        --tuples-only `
+        --no-align `
+        --command "SELECT 1 FROM pg_database WHERE datname = 'gravebound_test'"
+    $DatabaseExists = ($DatabaseExistsOutput | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0) {
+        throw "Bundled PostgreSQL readiness check failed with exit code $LASTEXITCODE"
+    }
+    if ($DatabaseExists -ne '1') {
+        & $CreateDb `
+            --host 127.0.0.1 `
+            --port $Port `
+            --username gravebound_test `
+            gravebound_test |
+            ForEach-Object { Write-Host $_ }
+        if ($LASTEXITCODE -ne 0) {
+            throw "Bundled PostgreSQL database creation failed with exit code $LASTEXITCODE"
+        }
+    }
+
+    return "postgres://gravebound_test:$($Secrets.postgres_password)@127.0.0.1:$Port/gravebound_test"
+}
+
+function Invoke-DockerPostgres {
+    param([Parameter(Mandatory = $true)]$Secrets)
+
+    if (-not (Test-Path -LiteralPath $ComposeFile)) {
+        throw "The bundled PostgreSQL runtime and Docker Compose definition are both missing."
+    }
+    if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+        throw 'The bundled PostgreSQL runtime is missing and Docker Desktop is not installed. Re-extract the complete tester ZIP and retry.'
+    }
+    & docker info *> $null
+    if ($LASTEXITCODE -ne 0) {
+        throw 'The bundled PostgreSQL runtime is missing and Docker Desktop is not running. Re-extract the complete tester ZIP or start Docker Desktop.'
+    }
+
+    Write-Host 'Starting the Docker private PostgreSQL service...'
+    & docker compose --project-name $ProjectName --file $ComposeFile up --detach --wait |
+        ForEach-Object { Write-Host $_ }
+    if ($LASTEXITCODE -ne 0) {
+        throw "PostgreSQL startup failed with exit code $LASTEXITCODE"
+    }
+    $script:PostgresMode = 'docker'
+    $Published = (& docker compose --project-name $ProjectName --file $ComposeFile port postgres 5432).Trim()
+    if ($LASTEXITCODE -ne 0 -or $Published -notmatch ':(\d+)$') {
+        throw 'Docker Compose did not report the local PostgreSQL port.'
+    }
+    return "postgres://gravebound_test:$($Secrets.postgres_password)@127.0.0.1:$($Matches[1])/gravebound_test"
+}
+
 try {
     if ($Identity -notmatch '^[A-Za-z0-9._-]{1,64}$') {
         throw 'Tester identity must contain 1-64 letters, numbers, dots, underscores, or dashes.'
     }
-    foreach ($RequiredPath in @($ComposeFile, $Client, $Server, $ContentRoot)) {
+    foreach ($RequiredPath in @($Client, $Server, $ContentRoot)) {
         if (-not (Test-Path -LiteralPath $RequiredPath)) {
             throw "Tester package is incomplete: missing $RequiredPath"
         }
-    }
-    if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
-        throw 'PLAY GAME requires Docker Desktop for the local PostgreSQL service. Install/start Docker Desktop, then retry. PLAY LOCAL LAB.cmd remains available without Docker.'
-    }
-
-    & docker info *> $null
-    if ($LASTEXITCODE -ne 0) {
-        throw 'Docker Desktop is installed but is not running.'
     }
 
     $Secrets = Read-OrCreate-LocalSecrets
@@ -85,16 +201,12 @@ try {
     $env:GRAVEBOUND_REWARD_EPOCH_ID = 'm03-tester-v1'
     $env:GRAVEBOUND_REWARD_EPOCH_SECRET_HEX = $Secrets.reward_secret_hex
 
-    Write-Host 'Starting the private M03 PostgreSQL service...'
-    & docker compose --project-name $ProjectName --file $ComposeFile up --detach --wait
-    if ($LASTEXITCODE -ne 0) {
-        throw "PostgreSQL startup failed with exit code $LASTEXITCODE"
+    if (Test-Path -LiteralPath (Join-Path $PortablePostgresBin 'postgres.exe')) {
+        $env:GRAVEBOUND_DATABASE_URL = Invoke-PortablePostgres -Secrets $Secrets
     }
-    $Published = (& docker compose --project-name $ProjectName --file $ComposeFile port postgres 5432).Trim()
-    if ($LASTEXITCODE -ne 0 -or $Published -notmatch ':(\d+)$') {
-        throw 'Docker Compose did not report the local PostgreSQL port.'
+    else {
+        $env:GRAVEBOUND_DATABASE_URL = Invoke-DockerPostgres -Secrets $Secrets
     }
-    $env:GRAVEBOUND_DATABASE_URL = "postgres://gravebound_test:$($Secrets.postgres_password)@127.0.0.1:$($Matches[1])/gravebound_test"
 
     Remove-Item -LiteralPath $Readiness, $Certificate, $ServerStdout, $ServerStderr -Force -ErrorAction SilentlyContinue
     $ServerArguments = @(
@@ -130,10 +242,15 @@ try {
         throw 'The M03 server published an invalid local address.'
     }
 
-    Write-Host 'Launching the current persistent GB-M03 private-life route...'
-    & $Client core-private-life --server $Address --certificate $Certificate --identity $Identity --content-root $ContentRoot
-    if ($LASTEXITCODE -ne 0) {
-        throw "Gravebound exited with code $LASTEXITCODE"
+    if ($ServerSmokeOnly) {
+        Write-Host 'Bundled PostgreSQL and the persistent GB-M03 server are ready.'
+    }
+    else {
+        Write-Host 'Launching the current persistent GB-M03 private-life route...'
+        & $Client core-private-life --server $Address --certificate $Certificate --identity $Identity --content-root $ContentRoot
+        if ($LASTEXITCODE -ne 0) {
+            throw "Gravebound exited with code $LASTEXITCODE"
+        }
     }
 }
 catch {
@@ -148,7 +265,14 @@ finally {
             $ServerProcess.WaitForExit()
         }
     }
-    if (Get-Command docker -ErrorAction SilentlyContinue) {
+    if ($PostgresMode -eq 'portable') {
+        $PgCtl = Join-Path $PortablePostgresBin 'pg_ctl.exe'
+        & $PgCtl --pgdata $PortablePostgresData --mode fast --wait stop *> $null
+        if ($LASTEXITCODE -ne 0) {
+            $CleanupFailure = "Could not stop the bundled PostgreSQL service (exit $LASTEXITCODE)."
+        }
+    }
+    elseif ($PostgresMode -eq 'docker' -and (Get-Command docker -ErrorAction SilentlyContinue)) {
         & docker compose --project-name $ProjectName --file $ComposeFile stop *> $null
         if ($LASTEXITCODE -ne 0) {
             $CleanupFailure = "Could not stop the local PostgreSQL service (exit $LASTEXITCODE)."
@@ -158,6 +282,7 @@ finally {
     Remove-Item Env:GRAVEBOUND_POSTGRES_PASSWORD -ErrorAction SilentlyContinue
     Remove-Item Env:GRAVEBOUND_REWARD_EPOCH_ID -ErrorAction SilentlyContinue
     Remove-Item Env:GRAVEBOUND_REWARD_EPOCH_SECRET_HEX -ErrorAction SilentlyContinue
+    Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue
 }
 
 if ($PrimaryFailure -and $CleanupFailure) {
