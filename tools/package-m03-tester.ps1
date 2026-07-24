@@ -377,7 +377,7 @@ USEFUL TEST NOTES
 BUILD VERIFICATION
 - Optimized Windows client/server release compilation: PASS
 - Client/server executable CLI smoke check: PASS
-- Bundled PostgreSQL $($PostgresManifest.version) initialization and persistent-server readiness: PASS
+- Bundled PostgreSQL $($PostgresManifest.version), persistent server, and native client startup: PASS
 - Local Lab twelve-second launch/responding check: PASS
 - All seven standalone packaged launch modes remained alive and responsive: PASS
 - Strict compiled content validation: PASS
@@ -402,9 +402,9 @@ DESIGN AUTHORITIES
         -NoProfile `
         -ExecutionPolicy Bypass `
         -File (Join-Path $StagePackage 'run-m03-tester.ps1') `
-        -ServerSmokeOnly
+        -ClientSmokeSeconds 5
     if ($LASTEXITCODE -ne 0) {
-        throw "Packaged persistent route smoke check failed with exit code $LASTEXITCODE"
+        throw "Packaged persistent client route smoke check failed with exit code $LASTEXITCODE"
     }
     $SmokeRuntime = Join-Path $StagePackage '.runtime'
     if (Test-Path -LiteralPath $SmokeRuntime) {

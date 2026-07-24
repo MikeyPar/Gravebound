@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [string]$Identity = 'local-m03-tester',
-    [switch]$ServerSmokeOnly
+    [switch]$ServerSmokeOnly,
+    [ValidateRange(0, 30)][int]$ClientSmokeSeconds = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -22,6 +23,7 @@ $Readiness = Join-Path $RuntimeRoot 'server-ready.txt'
 $ServerStdout = Join-Path $RuntimeRoot 'server.stdout.log'
 $ServerStderr = Join-Path $RuntimeRoot 'server.stderr.log'
 $ServerProcess = $null
+$ClientProcess = $null
 $PostgresMode = $null
 $PrimaryFailure = $null
 $CleanupFailure = $null
@@ -227,6 +229,9 @@ try {
     if ($Identity -notmatch '^[A-Za-z0-9._-]{1,64}$') {
         throw 'Tester identity must contain 1-64 letters, numbers, dots, underscores, or dashes.'
     }
+    if ($ServerSmokeOnly -and $ClientSmokeSeconds -gt 0) {
+        throw 'ServerSmokeOnly and ClientSmokeSeconds cannot be used together.'
+    }
     foreach ($RequiredPath in @($Client, $Server, $ContentRoot)) {
         if (-not (Test-Path -LiteralPath $RequiredPath)) {
             throw "Tester package is incomplete: missing $RequiredPath"
@@ -283,6 +288,38 @@ try {
     if ($ServerSmokeOnly) {
         Write-Host 'Bundled PostgreSQL and the persistent GB-M03 server are ready.'
     }
+    elseif ($ClientSmokeSeconds -gt 0) {
+        $ClientStdout = Join-Path $RuntimeRoot 'client.stdout.log'
+        $ClientStderr = Join-Path $RuntimeRoot 'client.stderr.log'
+        Remove-Item -LiteralPath $ClientStdout, $ClientStderr -Force -ErrorAction SilentlyContinue
+        $ClientArguments = @(
+            'core-private-life',
+            '--server', $Address,
+            '--certificate', $Certificate,
+            '--identity', $Identity,
+            '--content-root', $ContentRoot
+        )
+        $ClientProcess = Start-Process `
+            -FilePath $Client `
+            -ArgumentList (ConvertTo-NativeArgumentLine -Arguments $ClientArguments) `
+            -WorkingDirectory $PackageRoot `
+            -WindowStyle Hidden `
+            -RedirectStandardOutput $ClientStdout `
+            -RedirectStandardError $ClientStderr `
+            -PassThru
+        Start-Sleep -Seconds $ClientSmokeSeconds
+        $ClientProcess.Refresh()
+        if ($ClientProcess.HasExited) {
+            $ClientFailure = if (Test-Path -LiteralPath $ClientStderr) {
+                (Get-Content -LiteralPath $ClientStderr -Raw).Trim()
+            }
+            else {
+                ''
+            }
+            throw "The persistent GB-M03 client exited during startup smoke (code $($ClientProcess.ExitCode)). $ClientFailure"
+        }
+        Write-Host "Bundled PostgreSQL, persistent server, and client remained ready for $ClientSmokeSeconds seconds."
+    }
     else {
         Write-Host 'Launching the current persistent GB-M03 private-life route...'
         & $Client core-private-life --server $Address --certificate $Certificate --identity $Identity --content-root $ContentRoot
@@ -295,6 +332,13 @@ catch {
     $PrimaryFailure = $_
 }
 finally {
+    if ($ClientProcess) {
+        $ClientProcess.Refresh()
+        if (-not $ClientProcess.HasExited) {
+            Stop-Process -Id $ClientProcess.Id -Force
+            $ClientProcess.WaitForExit()
+        }
+    }
     if ($ServerProcess) {
         Start-Sleep -Seconds 2
         $ServerProcess.Refresh()
