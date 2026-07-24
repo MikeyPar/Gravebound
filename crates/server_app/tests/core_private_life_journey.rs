@@ -382,6 +382,7 @@ fn fixed_room_bounds(room: CorePrivateRouteRoomV1) -> (i64, i64) {
 )]
 fn fixed_dungeon_combat_input(
     sequence: u32,
+    primary_press_sequence: u32,
     player: &EntitySnapshot,
     target: &EntitySnapshot,
     entities: &[EntitySnapshot],
@@ -460,7 +461,7 @@ fn fixed_dungeon_combat_input(
         aim_x_milli: horizontal_aim,
         aim_y_milli: vertical_aim,
         held_primary: true,
-        primary_sequence: 1,
+        primary_sequence: primary_press_sequence,
         ability_1_sequence: 0,
         ability_2_sequence: 0,
     }
@@ -630,6 +631,7 @@ where
 
 #[derive(Debug, Default)]
 struct CombatAbilityCadence {
+    primary_press_sequence: u32,
     last_grave_mark_tick: u64,
     last_slipstep_tick: u64,
 }
@@ -680,6 +682,10 @@ async fn drive_fixed_dungeon_combat_until<Reached>(
 where
     Reached: Fn(&CorePrivateRouteStateV1) -> bool,
 {
+    ability_cadence.primary_press_sequence = ability_cadence
+        .primary_press_sequence
+        .checked_add(1)
+        .unwrap();
     tokio::time::timeout(timeout, async {
         loop {
             if let Some(frame) = matching_route(route_receive, &reached) {
@@ -718,7 +724,7 @@ where
                         bot_client::send_input_datagram(
                             connection,
                             InputFrame {
-                                primary_sequence: 1,
+                                primary_sequence: ability_cadence.primary_press_sequence,
                                 ..input(*input_sequence, 0, 0)
                             },
                         )
@@ -731,6 +737,7 @@ where
                         connection,
                         fixed_dungeon_combat_input(
                             *input_sequence,
+                            ability_cadence.primary_press_sequence,
                             player,
                             target,
                             &snapshot.entities,
@@ -1872,7 +1879,12 @@ async fn production_root_extracts_then_recovers_a_successor_and_cleans_up() {
     );
 
     let mut action_sequence = 1;
-    let mut ability_cadence = CombatAbilityCadence::default();
+    let mut ability_cadence = CombatAbilityCadence {
+        // The microrealm combat driver used press identity 1 before its explicit Bell-transition
+        // release. Every fixed-room re-press must advance that connection-scoped identity.
+        primary_press_sequence: 1,
+        ..CombatAbilityCadence::default()
+    };
     let b1_cleared_frame = drive_fixed_dungeon_combat_until(
         &connection,
         &mut assembler,
