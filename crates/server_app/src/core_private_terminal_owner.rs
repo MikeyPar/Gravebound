@@ -149,7 +149,17 @@ impl CorePrivateTerminalOwnerFactory for PostgresCorePrivateTerminalOwnerFactory
                 )
                 .await?;
             Ok(Box::new(PostgresCorePrivateTerminalOwner {
-                task: tokio::spawn(runtime.run()),
+                task: tokio::spawn(async move {
+                    let result = runtime.run().await;
+                    if let Err(error) = &result {
+                        tracing::error!(
+                            error = %error,
+                            error_debug = ?error,
+                            "production private terminal owner stopped before receiver shutdown"
+                        );
+                    }
+                    result
+                }),
             }) as Box<dyn CorePrivateTerminalOwner>)
         })
     }
