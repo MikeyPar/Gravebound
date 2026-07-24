@@ -123,11 +123,11 @@ function Invoke-PortablePostgres {
         --log $PortablePostgresLog `
         --options "-h 127.0.0.1 -p $Port" `
         --wait `
-        start |
-        ForEach-Object { Write-Host $_ }
+        start *> $null
     if ($LASTEXITCODE -ne 0) {
         throw "Bundled PostgreSQL startup failed with exit code $LASTEXITCODE. See $PortablePostgresLog"
     }
+    Write-Host 'Bundled PostgreSQL is ready.'
     $script:PostgresMode = 'portable'
     $env:PGPASSWORD = $Secrets.postgres_password
 
@@ -267,9 +267,17 @@ finally {
     }
     if ($PostgresMode -eq 'portable') {
         $PgCtl = Join-Path $PortablePostgresBin 'pg_ctl.exe'
-        & $PgCtl --pgdata $PortablePostgresData --mode fast --wait stop *> $null
-        if ($LASTEXITCODE -ne 0) {
-            $CleanupFailure = "Could not stop the bundled PostgreSQL service (exit $LASTEXITCODE)."
+        $PreviousErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            & $PgCtl --pgdata $PortablePostgresData --mode fast --wait stop *> $null
+            $PgCtlExitCode = $LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $PreviousErrorActionPreference
+        }
+        if ($PgCtlExitCode -ne 0) {
+            $CleanupFailure = "Could not stop the bundled PostgreSQL service (exit $PgCtlExitCode)."
         }
     }
     elseif ($PostgresMode -eq 'docker' -and (Get-Command docker -ErrorAction SilentlyContinue)) {
