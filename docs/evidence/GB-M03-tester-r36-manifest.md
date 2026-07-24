@@ -68,13 +68,14 @@ The r36 runtime introduces no art change from r33, so the existing optimized REA
 current. The untracked Grave Arbalist asset seed under `assets/core/player/grave_arbalist/` was
 preserved and was not included in the Git source archive or modified during release construction.
 
-## Current Next Step
+## Historical publication boundary
 
 Under all three design authorities, the Docker packaging defect and the named B1 persistence defect
 are corrected. Focused hosted run
 [`30069213403`](https://github.com/MikeyPar/Gravebound/actions/runs/30069213403) passed the
-schema-79/pre-checkpoint gate at exact source `eb0c6b4` and is executing the assembled
-PostgreSQL/real-QUIC route. The Current Next Step is its green completion, followed by the
+schema-79/pre-checkpoint gate at exact source `eb0c6b4` and later stopped at route tick 1300 when
+the evidence driver reused primary-press identity `1`. Tester r38 supersedes this package and adds
+the matching native-client startup gate. At this publication, the next step was green completion followed by the
 Roadmap's 25 complete ordinary-loop journeys, current aggregate timing, optimized Realm Gate
 capture, bounded operational telemetry proof, private cohort, hosting/backup rehearsal,
 destination/privacy approval, and Steamworks evidence. Formal progress remains `15/23 (65%)`
