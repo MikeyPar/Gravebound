@@ -79,13 +79,10 @@ function Get-AvailableLoopbackPort {
     }
 }
 
-function Invoke-HiddenProcessAndWait {
-    param(
-        [Parameter(Mandatory = $true)][string]$FilePath,
-        [Parameter(Mandatory = $true)][string[]]$Arguments
-    )
+function ConvertTo-NativeArgumentLine {
+    param([Parameter(Mandatory = $true)][string[]]$Arguments)
 
-    $ArgumentLine = (
+    return (
         $Arguments |
             ForEach-Object {
                 $Value = [string]$_
@@ -97,6 +94,15 @@ function Invoke-HiddenProcessAndWait {
                 }
             }
     ) -join ' '
+}
+
+function Invoke-HiddenProcessAndWait {
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [Parameter(Mandatory = $true)][string[]]$Arguments
+    )
+
+    $ArgumentLine = ConvertTo-NativeArgumentLine -Arguments $Arguments
     $Process = Start-Process `
         -FilePath $FilePath `
         -ArgumentList $ArgumentLine `
@@ -247,9 +253,10 @@ try {
         '--certificate-out', $Certificate,
         '--readiness-out', $Readiness
     )
+    $ServerArgumentLine = ConvertTo-NativeArgumentLine -Arguments $ServerArguments
     $ServerProcess = Start-Process `
         -FilePath $Server `
-        -ArgumentList $ServerArguments `
+        -ArgumentList $ServerArgumentLine `
         -WorkingDirectory $PackageRoot `
         -WindowStyle Hidden `
         -RedirectStandardOutput $ServerStdout `
